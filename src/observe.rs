@@ -55,7 +55,8 @@ pub fn run(home: &Path, settle_ms: u64) -> Result<Stats> {
     }
     let mut stats = Stats::default();
     let providers = crate::providers_db::open(home)?;
-    let mut chain = provider::Chain::new(&cfg.providers, &providers);
+    let mut chain =
+        provider::Chain::new(&cfg.providers, &providers).paid_cap(cfg.paid_usd_per_month);
     // One part per session per round, until every session is done: a long session neither
     // stops early (nothing would start the next run) nor holds the others back.
     let mut pending = db::pending_sessions(&conn, db::now_ms(), settle_ms)?;

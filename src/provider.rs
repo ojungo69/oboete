@@ -17,6 +17,7 @@ use anyhow::{Result, anyhow};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
+use crate::budget;
 use crate::config::{self, Provider};
 use crate::providers_db::{self, Usage};
 use crate::{db, hook};
@@ -110,11 +111,24 @@ impl CallError {
 pub struct Chain<'a> {
     providers: &'a [Provider],
     db: &'a Connection,
+    paid_usd_per_month: f64,
 }
 
 impl<'a> Chain<'a> {
     pub fn new(providers: &'a [Provider], db: &'a Connection) -> Self {
-        Self { providers, db }
+        Self {
+            providers,
+            db,
+            paid_usd_per_month: 5.0,
+        }
+    }
+
+    /// What every paid entry together may spend this month (`paid_usd_per_month` in config).
+    pub fn paid_cap(self, usd: f64) -> Self {
+        Self {
+            paid_usd_per_month: usd,
+            ..self
+        }
     }
 
     /// Walk the chain for one `role` (curator, judge, digest) and one `span` (what the call is
@@ -129,6 +143,9 @@ impl<'a> Chain<'a> {
         let conn = self.db;
         let forced_fail = std::env::var("OBOETE_FAIL_PROVIDER").ok();
         let mut fallbacks = Vec::new();
+        let est = budget::estimate(prompt);
+        // A ceiling a provider refused this request at (413): its peers with it are skipped.
+        let mut ceiling_hit = None;
         for p in self.providers {
             let name = p.name().to_string();
             let record = |outcome: &str, ms: i64, detail: Option<&str>, sent: bool, usage| {
@@ -142,6 +159,7 @@ impl<'a> Chain<'a> {
                         ms,
                         detail,
                         bytes_out: if sent { prompt.len() } else { 0 },
+                        est_tokens: Some(est),
                         usage,
                     },
                 )
@@ -156,13 +174,27 @@ impl<'a> Chain<'a> {
                 fallbacks.push((name, "cooling down after an earlier failure".into()));
                 continue;
             }
-            let used = providers_db::calls_today(conn, &name)?;
-            if used >= p.daily_budget() {
-                let detail = format!("{used}/{}", p.daily_budget());
-                record("budget", 0, Some(&detail), false, Usage::default())?;
-                fallbacks.push((name, "daily budget spent".into()));
+            let tokens = f64::from(est) * budget::factor(conn, &name)?;
+            let admit = budget::admit(
+                conn,
+                p,
+                self.providers,
+                tokens,
+                self.paid_usd_per_month,
+                ceiling_hit,
+            )?;
+            if let Some(refusal) = admit {
+                record(
+                    refusal.outcome,
+                    0,
+                    Some(&refusal.detail),
+                    false,
+                    Usage::default(),
+                )?;
+                fallbacks.push((name, refusal.detail));
                 continue;
             }
+            let used = providers_db::calls_today(conn, &name)?;
             let started = Instant::now();
             let forced = forced_fail.as_deref() == Some(name.as_str());
             let mut result = if forced {
@@ -215,6 +247,9 @@ impl<'a> Chain<'a> {
                     });
                 }
                 Err(e) => {
+                    if e.status == Some(413) {
+                        ceiling_hit = p.limits().max_request_tokens;
+                    }
                     let outcome = if e.invalid() { "invalid" } else { "error" };
                     record(outcome, ms, Some(&e.message), !forced && e.sent, e.usage)?;
                     // A forced failure is a test of the fallback, not of the provider.
@@ -316,17 +351,28 @@ fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Answer, CallError>
             timeout_s,
             extra,
             headers,
+            limits,
             ..
-        } => openai_compat(
-            base_url,
-            key_file.as_deref(),
-            model,
-            *timeout_s,
-            extra,
-            headers,
-            prompt,
-            schema,
-        ),
+        } => {
+            // A paid entry's answer is bounded, so its admission can count its largest cost.
+            let mut extra = extra.clone();
+            if limits.is_paid()
+                && !extra.contains_key("max_tokens")
+                && !extra.contains_key("max_completion_tokens")
+            {
+                extra.insert("max_tokens".into(), limits.max_output_tokens.into());
+            }
+            openai_compat(
+                base_url,
+                key_file.as_deref(),
+                model,
+                *timeout_s,
+                &extra,
+                headers,
+                prompt,
+                schema,
+            )
+        }
         Provider::Cli {
             cli,
             model,
@@ -2025,6 +2071,7 @@ mod tests {
             retry_429: false,
             extra: Default::default(),
             headers: Default::default(),
+            limits: Default::default(),
         }];
         let Err(err) = Chain::new(&providers, &conn).run("curator", "s", "p", &json!({})) else {
             panic!("the stub only fails");
@@ -2052,6 +2099,7 @@ mod tests {
             retry_429: false,
             extra: Default::default(),
             headers: Default::default(),
+            limits: Default::default(),
         }
     }
 
@@ -2146,6 +2194,66 @@ mod tests {
             .unwrap();
         let want = ("invalid".to_string(), Some(100), Some(20));
         assert_eq!(rows, [want.clone(), want]);
+    }
+
+    fn capped(url: String, name: &str) -> Provider {
+        let mut p = stub(url);
+        if let Provider::Openai {
+            name: n, limits, ..
+        } = &mut p
+        {
+            *n = name.into();
+            limits.max_request_tokens = Some(8000);
+        }
+        p
+    }
+
+    #[test]
+    fn a_window_over_a_providers_ceiling_is_skipped_without_a_call() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        // 16,800 Japanese-heavy characters: about 9,700 tokens, over Groq free's 8,000.
+        let prompt = "日付の列が dd.mm.yyyy 形式の行が落ちている。".repeat(600);
+        let answer = json!({"choices": [{"message": {"content": "{}"}}]});
+        let (next, _) = serve_once(answer.to_string().into_bytes(), "");
+        // The capped entry points at a closed port: a call would be an error row, not too_big.
+        let providers = [capped("http://127.0.0.1:9".into(), "groq"), stub(next)];
+        let r = Chain::new(&providers, &conn)
+            .run("curator", "s", &prompt, &json!({"type": "object"}))
+            .unwrap();
+        assert_eq!(r.provider, "stub");
+        let rows: Vec<(String, String, i64)> = conn
+            .prepare("SELECT provider, outcome, bytes_out FROM provider_calls ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows[0], ("groq".into(), "too_big".into(), 0));
+        assert_eq!(rows[1].1, "ok");
+    }
+
+    #[test]
+    fn after_a_413_the_entries_with_the_same_ceiling_are_skipped() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let (big, _) = serve(
+            "413 Payload Too Large",
+            json!({"error": {"code": "request_too_large"}})
+                .to_string()
+                .into_bytes(),
+            "",
+        );
+        let providers = [
+            capped(big, "groq"),
+            capped("http://127.0.0.1:9".into(), "groq-20b"),
+        ];
+        assert!(
+            Chain::new(&providers, &conn)
+                .run("curator", "s", "short", &json!({}))
+                .is_err()
+        );
+        assert_eq!(outcomes(&conn), ["error", "too_big"]);
     }
 
     #[test]

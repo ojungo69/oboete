@@ -508,6 +508,7 @@ mod tests {
                     ms,
                     detail: None,
                     bytes_out: 1,
+                    est_tokens: None,
                     usage: Default::default(),
                 },
             )

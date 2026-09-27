@@ -16,6 +16,13 @@ pub struct Config {
     /// Where Gemini joins the chain; absent, it is not in it (the owner decides, free or paid).
     #[serde(default)]
     pub gemini: Option<GeminiPlace>,
+    /// What every paid entry together may spend in a calendar month (owner decision 5: USD 5).
+    #[serde(default = "default_paid_usd_per_month")]
+    pub paid_usd_per_month: f64,
+}
+
+fn default_paid_usd_per_month() -> f64 {
+    5.0
 }
 
 /// `gemini = "before-subscriptions"` puts it just before the first subscription CLI (it spares
@@ -106,6 +113,8 @@ pub enum Provider {
         /// in `key_file`.
         #[serde(default)]
         headers: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        limits: Limits,
     },
     /// A subscription CLI run headless (`agy`, `claude`, `grok`, `codex`).
     Cli {
@@ -118,7 +127,58 @@ pub enum Provider {
         daily_budget: u32,
         #[serde(default = "default_cli_timeout")]
         timeout_s: u64,
+        #[serde(default)]
+        limits: Limits,
     },
+}
+
+/// What one entry may take (docs/milestone-3-plan.md Task 4), as `limits = { ... }`. With prices
+/// it is a paid entry, inside `paid_usd_per_month` with every other paid entry.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Limits {
+    /// The provider's ceiling for one request, in tokens (Groq free: 8,000). A larger request is
+    /// skipped before it is sent.
+    #[serde(default)]
+    pub max_request_tokens: Option<u32>,
+    /// Tokens (prompt plus completion) a day.
+    #[serde(default)]
+    pub daily_tokens: Option<u64>,
+    /// USD per million tokens, in and out.
+    #[serde(default)]
+    pub usd_per_mtok_in: f64,
+    #[serde(default)]
+    pub usd_per_mtok_out: f64,
+    /// The largest answer a paid entry may send, which its request asks for as `max_tokens`
+    /// and its admission counts as spent.
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: u32,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_request_tokens: None,
+            daily_tokens: None,
+            usd_per_mtok_in: 0.0,
+            usd_per_mtok_out: 0.0,
+            max_output_tokens: default_max_output_tokens(),
+        }
+    }
+}
+
+impl Limits {
+    pub fn is_paid(&self) -> bool {
+        self.usd_per_mtok_in > 0.0 || self.usd_per_mtok_out > 0.0
+    }
+    /// USD for `prompt` tokens in and `completion` tokens out.
+    pub fn usd(&self, prompt: f64, completion: f64) -> f64 {
+        (prompt * self.usd_per_mtok_in + completion * self.usd_per_mtok_out) / 1e6
+    }
+}
+
+fn default_max_output_tokens() -> u32 {
+    4000
 }
 
 impl Provider {
@@ -132,6 +192,11 @@ impl Provider {
             Provider::Openai { daily_budget, .. } | Provider::Cli { daily_budget, .. } => {
                 *daily_budget
             }
+        }
+    }
+    pub fn limits(&self) -> &Limits {
+        match self {
+            Provider::Openai { limits, .. } | Provider::Cli { limits, .. } => limits,
         }
     }
     pub fn retry_429(&self) -> bool {
@@ -187,6 +252,7 @@ fn openai(
         retry_429,
         extra: extra.as_object().cloned().unwrap_or_default(),
         headers: Default::default(),
+        limits: Limits::default(),
     }
 }
 
@@ -195,7 +261,7 @@ fn openai(
 /// under the USD 5 a month paid-API cap: Flash-Lite costs about USD 0.005 a window (10,000
 /// tokens in, 1,500 out, USD 0.25 and 1.50 a million, checked 2026-09-27).
 fn gemini() -> Provider {
-    openai(
+    let mut p = openai(
         "gemini",
         "https://generativelanguage.googleapis.com/v1beta/openai",
         "GEMINI_API_KEY.md",
@@ -203,7 +269,14 @@ fn gemini() -> Provider {
         30,
         true,
         serde_json::json!({}),
-    )
+    );
+    // Paid prices (ai.google.dev/gemini-api/docs/pricing, checked 2026-09-27): counted even on a
+    // free key, which only makes the cap stricter.
+    if let Provider::Openai { limits, .. } = &mut p {
+        limits.usd_per_mtok_in = 0.25;
+        limits.usd_per_mtok_out = 1.50;
+    }
+    p
 }
 
 fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
@@ -213,6 +286,7 @@ fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
         model: model.map(Into::into),
         daily_budget,
         timeout_s: default_cli_timeout(),
+        limits: Limits::default(),
     }
 }
 
@@ -247,7 +321,7 @@ fn default_providers() -> Vec<Provider> {
         // (owner's store, 2026-09-22..26); a call cut off at the timeout may still be billed.
         *timeout_s = 150;
     }
-    vec![
+    let mut chain = vec![
         openai(
             "groq",
             groq,
@@ -317,7 +391,19 @@ fn default_providers() -> Vec<Provider> {
         opencode_go,
         cli("codex", Some("gpt-6-luna"), 200),
         cli("claude", Some("haiku"), 200),
-    ]
+    ];
+    // Groq free refuses a request over 8,000 tokens (its tokens-a-minute limit is also a ceiling
+    // per request; docs/research/curator-providers-2026-09-27.md section 3).
+    for p in &mut chain {
+        if let Provider::Openai {
+            base_url, limits, ..
+        } = p
+            && base_url == groq
+        {
+            limits.max_request_tokens = Some(8000);
+        }
+    }
+    chain
 }
 
 /// The `[embedding]` section for a search: a config.toml that does not load falls back to
@@ -337,6 +423,7 @@ pub fn load(home: &Path) -> Result<Config> {
             summary: Summary::default(),
             embedding: Embedding::default(),
             gemini: None,
+            paid_usd_per_month: default_paid_usd_per_month(),
         });
     }
     let text =

@@ -67,14 +67,16 @@ pub struct Call<'a> {
     pub ms: i64,
     pub detail: Option<&'a str>,
     pub bytes_out: usize,
+    /// The uncalibrated estimate of what was sent (`budget::estimate`).
+    pub est_tokens: Option<u32>,
     pub usage: Usage,
 }
 
 pub fn record(conn: &Connection, c: &Call) -> Result<()> {
     conn.execute(
         "INSERT INTO provider_calls(ts, provider, role, span, outcome, ms, detail, bytes_out,
-           prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+           est_tokens, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         params![
             now_ms(),
             c.provider,
@@ -84,6 +86,7 @@ pub fn record(conn: &Connection, c: &Call) -> Result<()> {
             c.ms,
             c.detail,
             c.bytes_out as i64,
+            c.est_tokens,
             c.usage.prompt,
             c.usage.completion,
             c.usage.cached,
@@ -181,4 +184,74 @@ pub fn last_calls(conn: &Connection, n: u32) -> Result<Vec<String>> {
         })?
         .collect::<Result<_, _>>()?;
     Ok(rows)
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+/// Tokens (prompt plus completion) `provider` reported since the last UTC midnight.
+pub fn tokens_today(conn: &Connection, provider: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), 0)
+         FROM provider_calls WHERE provider=?1 AND ts>=?2",
+        params![provider, now_ms() / DAY_MS * DAY_MS],
+        |r| r.get(0),
+    )?)
+}
+
+/// Prompt and completion tokens `provider` reported since the first of this month (UTC).
+pub fn tokens_this_month(conn: &Connection, provider: &str) -> Result<(i64, i64)> {
+    let start = chrono_free_month_start(now_ms());
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0)
+         FROM provider_calls WHERE provider=?1 AND ts>=?2",
+        params![provider, start],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
+/// Unix ms of 00:00 UTC on the first day of `ms`'s month (civil-from-days, H. Hinnant).
+fn chrono_free_month_start(ms: i64) -> i64 {
+    let days = ms.div_euclid(DAY_MS);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day_of_month = doy - (153 * mp + 2) / 5; // 0-based
+    (days - day_of_month) * DAY_MS
+}
+
+/// `prompt_tokens / est_tokens` of `provider`'s newest `n` calls that recorded both.
+pub fn token_ratios(conn: &Connection, provider: &str, n: u32) -> Result<Vec<f64>> {
+    let mut stmt = conn.prepare(
+        "SELECT CAST(prompt_tokens AS REAL) / est_tokens FROM provider_calls
+         WHERE provider=?1 AND prompt_tokens > 0 AND est_tokens > 0 ORDER BY id DESC LIMIT ?2",
+    )?;
+    let ratios = stmt
+        .query_map(params![provider, n], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(ratios)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_month_starts_on_the_first_at_midnight_utc() {
+        // 2026-09-27T02:52:53Z -> 2026-09-01T00:00:00Z; 2024-03-01 after a leap day.
+        assert_eq!(
+            chrono_free_month_start(1_790_477_573_000),
+            1_788_220_800_000
+        );
+        assert_eq!(
+            chrono_free_month_start(1_709_251_200_000),
+            1_709_251_200_000
+        );
+        assert_eq!(
+            chrono_free_month_start(1_709_251_199_999),
+            1_706_745_600_000
+        );
+    }
 }
