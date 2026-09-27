@@ -146,11 +146,16 @@ fn serve(
             None => return Ok(false),
         }
     }
+    // Taken before the open, so a request a hook makes while it runs is still seen below; put
+    // back when the open fails (no segment, a reader holding raw.lock), for the next worker,
+    // which the next hook starts.
+    let asked = crate::backup::take_restore_request(home);
     // Task 8: a damaged raw.db is restored from the backups, a damaged knowledge.db rebuilt.
-    let raw = crate::backup::open_raw(home)?;
-    // Only once raw.db opened: a restore that failed (no segment, a reader holding raw.lock)
-    // leaves the request for the next worker, which the next hook starts.
-    crate::backup::take_restore_request(home);
+    let raw = crate::backup::open_raw(home).inspect_err(|_| {
+        if asked {
+            crate::backup::request_restore(home);
+        }
+    })?;
     let mut k = crate::backup::open_knowledge(home)?;
     checkpoint::rewind(&raw, &k, consumers)?;
     crate::backup::check(home, &raw);

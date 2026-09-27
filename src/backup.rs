@@ -396,8 +396,9 @@ pub fn restore_requested(home: &Path) -> bool {
     restore_request(home).exists()
 }
 
-pub fn take_restore_request(home: &Path) {
-    let _ = std::fs::remove_file(restore_request(home));
+/// Removes the request and says whether there was one.
+pub fn take_restore_request(home: &Path) -> bool {
+    std::fs::remove_file(restore_request(home)).is_ok()
 }
 
 /// Whether an error says the database file is damaged (not busy, not missing).
