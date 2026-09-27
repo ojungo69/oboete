@@ -31,6 +31,8 @@ const MAX_COOLDOWN: Duration = Duration::from_secs(24 * 3600);
 /// uploads the whole window (groq-20b: 20 such 400s in the owner's store, 2026-09-22..26).
 const BREAKER_AFTER: u32 = 3;
 const COOLDOWN_BREAKER: Duration = Duration::from_secs(30 * 60);
+/// Longest rest a subscription's own reset can set: a weekly window resets within 7 days.
+const MAX_SUBSCRIPTION_REST: Duration = Duration::from_secs(8 * 24 * 3600);
 /// Longest cooldown of a 429 that names no reset, reached by doubling from `COOLDOWN_429`.
 const MAX_BACKOFF_429: Duration = Duration::from_secs(3600);
 
@@ -39,6 +41,16 @@ pub struct ChainResult {
     pub output: Value,
     /// Providers tried before the one that answered (name, reason).
     pub fallbacks: Vec<(String, String)>,
+}
+
+/// One provider's answer.
+#[derive(Debug)]
+struct Answer {
+    value: Value,
+    usage: Usage,
+    /// Unix ms until which the provider should rest although it answered: claude's stream said
+    /// its subscription is near a limit (spec 3.1, Claude decision C1).
+    cool_until: Option<i64>,
 }
 
 /// One failed call, with what the chain needs to decide what to do next.
@@ -155,26 +167,30 @@ impl<'a> Chain<'a> {
             }
             // Only strict-schema providers enforce the shape; valid JSON of another shape from the
             // rest would pass here and fail the window later, without trying the next provider.
-            let result = result.and_then(|(v, usage)| {
-                if fits(&v, schema) {
-                    Ok((v, usage))
+            let result = result.and_then(|a| {
+                if fits(&a.value, schema) {
+                    Ok(a)
                 } else {
                     Err(
                         CallError::other("invalid output: the answer does not match the schema")
-                            .with_usage(usage),
+                            .with_usage(a.usage),
                     )
                 }
             });
             let ms = started.elapsed().as_millis() as i64;
             match result {
-                Ok((v, usage)) => {
-                    record("ok", ms, None, true, usage)?;
-                    if state != providers_db::State::default() {
-                        providers_db::set_state(conn, &name, providers_db::State::default())?;
+                Ok(a) => {
+                    record("ok", ms, None, true, a.usage)?;
+                    let next = providers_db::State {
+                        down_until: a.cool_until.unwrap_or(0),
+                        ..Default::default()
+                    };
+                    if state != next {
+                        providers_db::set_state(conn, &name, next)?;
                     }
                     return Ok(ChainResult {
                         provider: name,
-                        output: v,
+                        output: a.value,
                         fallbacks,
                     });
                 }
@@ -269,7 +285,7 @@ fn next_state(was: providers_db::State, e: &CallError) -> providers_db::State {
     }
 }
 
-fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<(Value, Usage), CallError> {
+fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Answer, CallError> {
     match p {
         Provider::Openai {
             base_url,
@@ -318,7 +334,7 @@ fn openai_compat(
     headers: &std::collections::BTreeMap<String, String>,
     prompt: &str,
     schema: &Value,
-) -> Result<(Value, Usage), CallError> {
+) -> Result<Answer, CallError> {
     let mut body = json!({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -405,7 +421,11 @@ fn openai_compat(
     let answer = serde_json::from_str(unfence(content)).map_err(|e| {
         CallError::other(format!("invalid output: content is not JSON ({e})")).with_usage(usage)
     })?;
-    Ok((answer, usage))
+    Ok(Answer {
+        value: answer,
+        usage,
+        cool_until: None,
+    })
 }
 
 /// A token count from a provider's answer: a non-negative integer, else nothing.
@@ -428,7 +448,13 @@ fn usage_openai(v: &Value) -> Usage {
 fn usage_cli(cli: &str, stdout: &str) -> Usage {
     match cli {
         "claude" => {
-            let v: Value = serde_json::from_str(stdout).unwrap_or_default();
+            // The stream's result event (one JSON object per line), or the whole output.
+            let v: Value = stdout
+                .lines()
+                .rev()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .find(|v| v["type"] == "result" || v.get("usage").is_some())
+                .unwrap_or_default();
             let u = &v["usage"];
             let cache_read = tokens(&u["cache_read_input_tokens"]);
             Usage {
@@ -748,13 +774,11 @@ fn headless_command(
             Some(format!("{turn}\n"))
         }
         "claude" => {
-            cmd.args([
-                "-p",
-                "--output-format",
-                "json",
-                "--json-schema",
-                schema_text,
-            ]);
+            // The schema goes into the system prompt, not --json-schema: that flag gives claude a
+            // StructuredOutput tool and a second turn (2.1.278, docs/spike/curator-isolation.md),
+            // and a curator holds no tool. The answer is read from the result text instead.
+            let system = format!("{CURATOR_SYSTEM} The JSON schema: {schema_text}");
+            cmd.args(["-p", "--output-format", "stream-json", "--verbose"]);
             cmd.args([
                 "--setting-sources",
                 "",
@@ -766,12 +790,25 @@ fn headless_command(
                 "--no-session-persistence",
                 "--settings",
                 r#"{"disableAllHooks":true}"#,
-                "--system-prompt",
-                CURATOR_SYSTEM,
+            ]);
+            cmd.arg("--system-prompt-file")
+                .arg(write("system.md", &system)?);
+            // spec 6.5's extra layers; `claude_stream` checks what the init event reports.
+            cmd.args([
+                "--permission-mode",
+                "dontAsk",
+                "--permission-prompts",
+                "none",
+                "--disable-slash-commands",
+                "--max-turns",
+                "1",
+                "--effort",
+                "low",
             ]);
             if let Some(m) = model {
                 cmd.args(["--model", m]);
             }
+            cmd.args(["--disallowedTools", "Agent", "Task", "Monitor", "mcp__*"]);
             Some(prompt.to_owned())
         }
         "grok" => {
@@ -828,6 +865,144 @@ fn headless_command(
     Ok((cmd, stdin))
 }
 
+/// The only environment names a curator CLI gets (S8, spec 6.4): what finding a program, a home,
+/// a temp directory, a locale and a proxy needs, and each CLI's own config-directory variable.
+/// Windows also needs its system root to start a process and open a socket. Never an
+/// `ANTHROPIC_*` or `CLAUDE_CODE_*` name: an inherited base URL, token or effort level must not
+/// reach claude; and nothing else, so no key or credential variable leaks by its name's spelling.
+const CURATOR_ENV: [&str; 19] = [
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TMP",
+    "TEMP",
+    "TMPDIR",
+    "LANG",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+];
+const CURATOR_ENV_PREFIXES: [&str; 2] = ["LC_", "XDG_"];
+
+/// `parent`'s variables that a curator CLI may see. Names compare without case on Windows, and
+/// the proxy names everywhere (`https_proxy` is the usual spelling on Unix).
+fn curator_env(
+    parent: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    windows: bool,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    parent
+        .filter(|(k, _)| {
+            let Some(k) = k.to_str() else {
+                return false;
+            };
+            let upper = k.to_ascii_uppercase();
+            let name = if windows || upper.ends_with("_PROXY") {
+                upper.as_str()
+            } else {
+                k
+            };
+            CURATOR_ENV.contains(&name) || CURATOR_ENV_PREFIXES.iter().any(|p| name.starts_with(p))
+        })
+        .collect()
+}
+
+/// What `claude -p --output-format stream-json --verbose` reported.
+struct ClaudeRun {
+    /// The `result` event, whose `result` text holds the answer.
+    result: String,
+    cool_until: Option<i64>,
+}
+
+/// Check claude's stream (spec 6.5) and pick out its result. The `system/init` event must report
+/// no tool, MCP server or plugin and the permission mode asked for, and no turn may use a tool:
+/// otherwise the answer is discarded, since a curator that can act might have acted. A
+/// `rate_limit_event` with `allowed_warning` or `rejected` rests claude until its reset (Claude
+/// decision C1), and `credits_required` for a day, until the owner acts.
+fn claude_stream(stdout: &str) -> Result<ClaudeRun, CallError> {
+    let events: Vec<Value> = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let init = events
+        .iter()
+        .find(|e| e["type"] == "system" && e["subtype"] == "init")
+        .ok_or_else(|| CallError::other("invalid output: claude reported no init event"))?;
+    let empty = |k: &str| init[k].as_array().is_some_and(Vec::is_empty);
+    let used_tool = events.iter().any(|e| {
+        e["type"] == "assistant"
+            && e["message"]["content"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|b| b["type"] == "tool_use"))
+    });
+    if !(empty("tools") && empty("mcp_servers") && empty("plugins"))
+        || init["permissionMode"] != "dontAsk"
+        || used_tool
+    {
+        return Err(CallError::other(
+            "claude isolation: its init reported a tool, MCP server, plugin or permission mode \
+             the curator did not ask for, or a turn used a tool; the answer was discarded",
+        ));
+    }
+    let now = db::now_ms();
+    let cool_until = events
+        .iter()
+        .filter(|e| e["type"] == "rate_limit_event")
+        .filter(|e| {
+            matches!(
+                e["rate_limit_info"]["status"].as_str(),
+                Some("allowed_warning" | "rejected")
+            )
+        })
+        .filter_map(|e| e["rate_limit_info"]["resetsAt"].as_i64())
+        .map(|s| {
+            s.saturating_mul(1000)
+                .min(now + MAX_SUBSCRIPTION_REST.as_millis() as i64)
+        })
+        .max();
+    if events
+        .iter()
+        .any(|e| e["errorCode"] == "credits_required" || e["error"] == "credits_required")
+    {
+        return Err(CallError {
+            status: Some(429),
+            retry_after_s: Some(MAX_COOLDOWN.as_secs_f64()),
+            message: "claude: credits required (the owner must act)".into(),
+            usage: Usage::default(),
+            sent: true,
+        });
+    }
+    let result = events
+        .iter()
+        .rev()
+        .find(|e| e["type"] == "result")
+        .ok_or_else(|| CallError::other("invalid output: claude printed no result event"))?;
+    if result["is_error"] == true {
+        let status = result["api_error_status"]
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok());
+        return Err(CallError {
+            status,
+            retry_after_s: cool_until.map(|t| ((t - now).max(0) / 1000) as f64),
+            message: format!("claude {}", result["subtype"].as_str().unwrap_or("error")),
+            usage: Usage::default(),
+            sent: true,
+        });
+    }
+    Ok(ClaudeRun {
+        result: result.to_string(),
+        cool_until,
+    })
+}
+
 /// Run a subscription CLI headless (see `headless_command`) and return its structured answer.
 fn cli_headless(
     cli: &str,
@@ -835,12 +1010,12 @@ fn cli_headless(
     timeout_s: u64,
     prompt: &str,
     schema: &Value,
-) -> Result<(Value, Usage), CallError> {
+) -> Result<Answer, CallError> {
     let scratch = scratch_dir()?;
     let last = scratch.0.join("last.json");
     let (mut cmd, stdin) = headless_command(cli, model, &scratch.0, prompt, &schema.to_string())?;
-    // Keep the CLI out of the user's repo and away from the parent's secrets-bearing env, and
-    // make sure our own hooks ignore the summarizer's session.
+    // Keep the CLI out of the user's repo, give it only S8's environment (spec 6.4), and make
+    // sure our own hooks ignore the summarizer's session.
     cmd.current_dir(&scratch.0)
         .stdin(if stdin.is_some() {
             Stdio::piped()
@@ -849,17 +1024,9 @@ fn cli_headless(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env(hook::SKIP_ENV, "1")
-        .env_remove("CLAUDECODE");
-    for (k, _) in std::env::vars() {
-        if k.contains("TOKEN")
-            || k.contains("KEY")
-            || k.contains("SECRET")
-            || k.contains("PASSWORD")
-        {
-            cmd.env_remove(&k);
-        }
-    }
+        .env_clear()
+        .envs(curator_env(std::env::vars_os(), cfg!(windows)))
+        .env(hook::SKIP_ENV, "1");
     let out = run_cli(cmd, stdin, Duration::from_secs(timeout_s)).map_err(|e| {
         let tagged = if e.invalid() {
             format!(
@@ -876,7 +1043,13 @@ fn cli_headless(
     })?;
     let stdout = String::from_utf8_lossy(&out);
     let usage = usage_cli(cli, &stdout);
+    let mut cool_until = None;
     let text = match cli {
+        "claude" => {
+            let run = claude_stream(&stdout).map_err(|e| e.with_usage(usage))?;
+            cool_until = run.cool_until;
+            run.result
+        }
         "codex" => {
             use std::io::Read;
             let mut text = String::new();
@@ -892,7 +1065,11 @@ fn cli_headless(
         _ => stdout.into_owned(),
     };
     let answer = extract_structured(cli, &text).map_err(|e| e.with_usage(usage))?;
-    Ok((answer, usage))
+    Ok(Answer {
+        value: answer,
+        usage,
+        cool_until,
+    })
 }
 
 /// The schema-validated object out of a CLI's JSON envelope: `structured_output` (claude, agy),
@@ -996,7 +1173,7 @@ fn extract_structured(cli: &str, text: &str) -> Result<Value, CallError> {
         .iter()
         .find_map(|k| v.get(*k).and_then(Value::as_str));
     match inner {
-        Some(s) => serde_json::from_str(s).map_err(|e| {
+        Some(s) => serde_json::from_str(unfence(s)).map_err(|e| {
             CallError::other(format!("invalid output: {cli} answer is not JSON ({e})"))
         }),
         None => Err(CallError::other(format!(
@@ -1063,8 +1240,13 @@ mod tests {
                 .collect()
         };
         let claude = args("claude");
-        let at = claude.iter().position(|a| a == "--system-prompt").unwrap();
-        assert_eq!(claude[at + 1], CURATOR_SYSTEM);
+        let at = claude
+            .iter()
+            .position(|a| a == "--system-prompt-file")
+            .unwrap();
+        assert_eq!(Path::new(&claude[at + 1]), dir.join("system.md"));
+        let system = std::fs::read_to_string(&claude[at + 1]).unwrap();
+        assert_eq!(system, format!("{CURATOR_SYSTEM} The JSON schema: {{}}"));
         let codex = args("codex");
         let value = codex
             .iter()
@@ -1074,6 +1256,183 @@ mod tests {
         let file = table["model_instructions_file"].as_str().unwrap();
         assert_eq!(Path::new(file), dir.join("instructions.md"));
         assert_eq!(std::fs::read_to_string(file).unwrap(), CURATOR_SYSTEM);
+    }
+
+    #[test]
+    fn claude_runs_with_spec_6_5s_layers_and_no_schema_tool() {
+        let scratch = scratch_dir().unwrap();
+        let (cmd, _) = headless_command("claude", Some("haiku"), &scratch.0, "p", "{}").unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let has = |pair: [&str; 2]| args.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1]);
+        for pair in [
+            ["--output-format", "stream-json"],
+            ["--permission-mode", "dontAsk"],
+            ["--permission-prompts", "none"],
+            ["--tools", ""],
+            ["--max-turns", "1"],
+        ] {
+            assert!(has(pair), "{pair:?}: {args:?}");
+        }
+        for flag in [
+            "--verbose",
+            "--disable-slash-commands",
+            "--strict-mcp-config",
+        ] {
+            assert!(args.iter().any(|a| a == flag), "{flag}: {args:?}");
+        }
+        let at = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert_eq!(args[at + 1..], ["Agent", "Task", "Monitor", "mcp__*"]);
+        // --json-schema would hand claude a StructuredOutput tool.
+        assert!(!args.iter().any(|a| a == "--json-schema"), "{args:?}");
+    }
+
+    #[test]
+    fn the_curator_environment_is_the_allow_list() {
+        let os = |k: &str, v: &str| (std::ffi::OsString::from(k), std::ffi::OsString::from(v));
+        let parent = [
+            os("PATH", "/bin"),
+            os("HOME", "/h"),
+            os("LANG", "ja_JP.UTF-8"),
+            os("LC_ALL", "C"),
+            os("XDG_CONFIG_HOME", "/h/.config"),
+            os("https_proxy", "http://p:1"),
+            os("CODEX_HOME", "/h/.codex"),
+            os("ANTHROPIC_BASE_URL", "http://evil"),
+            os("ANTHROPIC_API_KEY", "k"),
+            os("CLAUDE_CODE_EFFORT_LEVEL", "max"),
+            os("AUTHORIZATION", "Bearer x"),
+            os("google_application_credentials", "/h/k.json"),
+            os("SSH_AUTH_SOCK", "/tmp/agent"),
+            os("GROQ_TOKEN", "t"),
+            os("Path", "C:\\bin"),
+        ];
+        let names = |windows| -> Vec<String> {
+            curator_env(parent.clone().into_iter(), windows)
+                .into_iter()
+                .map(|(k, _)| k.into_string().unwrap())
+                .collect()
+        };
+        let want = [
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "XDG_CONFIG_HOME",
+            "https_proxy",
+            "CODEX_HOME",
+        ];
+        assert_eq!(names(false), want);
+        // Windows compares names without case: its `Path` is PATH.
+        assert_eq!(names(true), [&want[..], &["Path"]].concat());
+    }
+
+    /// claude's stream: the init event, an answer, the rate-limit event and the result.
+    fn claude_events(init: Value, rate: &str, result: Value) -> String {
+        [
+            init,
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "{}"}]}}),
+            json!({"type": "rate_limit_event", "rate_limit_info":
+                {"status": rate, "resetsAt": 1_790_744_400_i64, "rateLimitType": "seven_day"}}),
+            result,
+        ]
+        .map(|v| v.to_string())
+        .join("\n")
+    }
+
+    fn clean_init() -> Value {
+        json!({"type": "system", "subtype": "init", "tools": [], "mcp_servers": [],
+            "plugins": [], "permissionMode": "dontAsk", "apiKeySource": "none"})
+    }
+
+    fn result_of(text: &str) -> Value {
+        json!({"type": "result", "subtype": "success", "is_error": false, "result": text,
+            "usage": {"input_tokens": 9, "cache_creation_input_tokens": 100, "output_tokens": 50}})
+    }
+
+    #[test]
+    fn claudes_answer_is_read_from_its_stream() {
+        let out = claude_events(
+            clean_init(),
+            "allowed",
+            result_of("```json\n{\"summary\": \"s\"}\n```"),
+        );
+        let run = claude_stream(&out).unwrap();
+        assert_eq!(run.cool_until, None);
+        assert_eq!(
+            extract_structured("claude", &run.result).unwrap(),
+            json!({"summary": "s"})
+        );
+        assert_eq!(usage_cli("claude", &out).prompt, Some(109));
+    }
+
+    #[test]
+    fn a_tool_in_system_init_discards_the_answer() {
+        for (k, v) in [
+            ("tools", json!(["Bash"])),
+            ("mcp_servers", json!([{"name": "github"}])),
+            ("plugins", json!([{"name": "agents-md"}])),
+            ("permissionMode", json!("bypassPermissions")),
+        ] {
+            let mut init = clean_init();
+            init[k] = v;
+            let out = claude_events(init, "allowed", result_of("{}"));
+            let e = claude_stream(&out).err().expect(k);
+            assert!(e.message.contains("isolation"), "{k}: {}", e.message);
+            assert!(!e.invalid(), "an isolation failure rests claude: {k}");
+        }
+        // A turn that used a tool, whatever init said.
+        let used = [
+            clean_init(),
+            json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}]}}),
+            result_of("{}"),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        assert!(claude_stream(&used).is_err());
+    }
+
+    #[test]
+    fn a_rate_limit_warning_cools_claude_down_until_its_reset() {
+        for status in ["allowed_warning", "rejected"] {
+            let out = claude_events(clean_init(), status, result_of("{}"));
+            let run = claude_stream(&out).unwrap();
+            // Until the weekly window's reset, days away: not capped at a day.
+            assert_eq!(run.cool_until, Some(1_790_744_400_000), "{status}");
+        }
+    }
+
+    #[test]
+    fn credits_required_stops_claude_for_a_day() {
+        let out = [
+            clean_init(),
+            json!({"type": "result", "subtype": "error_during_execution", "is_error": true,
+                "errorCode": "credits_required"}),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        let e = claude_stream(&out).err().unwrap();
+        assert_eq!(cooldown_for(&e), Some(MAX_COOLDOWN));
+    }
+
+    /// Live, with `--ignored`, in the dogfood user only (curator CLI tests run there): each
+    /// subscription CLI answers under S8's environment and claude's spec 6.5 flags.
+    #[test]
+    #[ignore]
+    fn live_subscription_curators_answer_under_the_curator_environment() {
+        let schema = json!({"type": "object", "properties": {"summary": {"type": "string"}},
+            "required": ["summary"], "additionalProperties": false});
+        let prompt = "Summarize this session in one sentence.\n--- SESSION ---\n\
+            [user] fix the date parser in src/ingest/csv_reader.py\n\
+            [assistant] added %d.%m.%Y; 21 tests pass\n--- END ---";
+        for (cli, model) in [("claude", "haiku"), ("codex", "gpt-6-luna")] {
+            let a = cli_headless(cli, Some(model), 180, prompt, &schema)
+                .unwrap_or_else(|e| panic!("{cli}: {}", e.message));
+            assert!(a.value["summary"].is_string(), "{cli}: {}", a.value);
+            eprintln!("{cli}: {:?}, rest until {:?}", a.usage, a.cool_until);
+        }
     }
 
     #[test]
@@ -1299,7 +1658,7 @@ mod tests {
         let (url, request) = serve_once(answer.to_string().into_bytes(), "");
         // OpenCode Go refuses a request without its session header (HTTP 400 MissingSessionID).
         let headers = [("x-opencode-session".to_string(), "oboete".to_string())].into();
-        let (v, _) = openai_compat(
+        let Answer { value: v, .. } = openai_compat(
             &url,
             None,
             "m",
@@ -1320,7 +1679,7 @@ mod tests {
         ] {
             let answer = json!({"choices": [{"message": {"content": content}}]});
             let (url, _) = serve_once(answer.to_string().into_bytes(), "");
-            let (v, _) = openai_compat(
+            let Answer { value: v, .. } = openai_compat(
                 &url,
                 None,
                 "m",
