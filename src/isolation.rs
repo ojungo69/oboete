@@ -6,7 +6,9 @@
 //!   permission profile directly (`codex sandbox`), then its own `codex exec` against a scripted
 //!   model (`codex_probe`), which tries a write, a read and a fetch through the exec tool, in the
 //!   sandbox and escalated, in the root and in a sub-agent. Each must be refused. The hosted tools
-//!   the profile does not govern must be off, and codex must still read `web_search`. Probing each
+//!   the profile does not govern must be off, and codex must still read `web_search`. A feature on
+//!   that was not on when the gate was proven (`provider::CODEX_ON`), or a tool offered to the
+//!   model that the gate has not reviewed (`codex_probe::OFFERED`), fails it. Probing each
 //!   time, not once per version, follows whatever else changes what codex resolves: its managed
 //!   requirements (from /etc or a workspace's cloud bundle), the user's config, an MDM profile.
 //!   `--ignore-user-config` is not probed (the MCP servers of the owner's config;
@@ -20,7 +22,9 @@ use std::process::{Command, Stdio};
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
-use crate::provider::{CODEX_OFF, CODEX_PROFILE, curator_env, scratch_dir};
+use crate::provider::{
+    CODEX_OFF, CODEX_ON, CODEX_PROFILE, curator_env, kill_tree, own_group, scratch_dir,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Gate {
@@ -89,53 +93,53 @@ fn command(exe: &Path, cwd: &Path) -> Command {
 const PROBE_LIMIT: std::time::Duration =
     std::time::Duration::from_secs(if cfg!(test) { 5 } else { 30 });
 
-/// `cmd`'s output, or an error when it did not finish within `PROBE_LIMIT` (it is killed).
+/// Most of a probe command's output kept: a codex that floods a pipe must not fill memory.
+const PROBE_OUTPUT: u64 = 1 << 20;
+
+/// `cmd`'s output, or an error when it did not finish within `PROBE_LIMIT` (it is killed, with
+/// its process group).
 fn output(cmd: &mut Command) -> Result<std::process::Output, String> {
     use std::io::Read;
-    let mut child = cmd
+    let mut child = own_group(cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| e.to_string())?;
-    // Each pipe drains on a thread that hands its bytes over a channel: a descendant that kept a
-    // pipe open after codex exited must not hold the gate past its limit.
+    // Each pipe drains on its own thread, up to the cap and then to its end, so the child never
+    // blocks on a full pipe.
     let read = |pipe: Option<Box<dyn Read + Send>>| {
-        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
             if let Some(mut p) = pipe {
-                let _ = p.read_to_end(&mut buf);
+                let _ = p.by_ref().take(PROBE_OUTPUT).read_to_end(&mut buf);
+                let _ = std::io::copy(&mut p, &mut std::io::sink());
             }
-            let _ = tx.send(buf);
-        });
-        rx
+            buf
+        })
     };
     let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
     let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
     let deadline = std::time::Instant::now() + PROBE_LIMIT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("did not finish in {} s", PROBE_LIMIT.as_secs()));
-            }
+    // The child is waited for only once its pipes have closed: until then its process group is
+    // still its own, and a descendant holding a pipe open is killed with it at the deadline.
+    loop {
+        if stdout.is_finished()
+            && stderr.is_finished()
+            && let Ok(Some(status)) = child.try_wait()
+        {
+            return Ok(std::process::Output {
+                status,
+                stdout: stdout.join().unwrap_or_default(),
+                stderr: stderr.join().unwrap_or_default(),
+            });
         }
-    };
-    let drained = |rx: std::sync::mpsc::Receiver<Vec<u8>>| {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        rx.recv_timeout(left)
-            .map_err(|_| format!("did not finish in {} s", PROBE_LIMIT.as_secs()))
-    };
-    Ok(std::process::Output {
-        status,
-        stdout: drained(stdout)?,
-        stderr: drained(stderr)?,
-    })
+        if std::time::Instant::now() >= deadline {
+            kill_tree(&mut child);
+            let _ = child.wait();
+            return Err(format!("did not finish in {} s", PROBE_LIMIT.as_secs()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 /// `<cli> --version`, first line.
@@ -183,9 +187,13 @@ fn probe_profile() -> String {
 /// end in the tool's own refusal (`touch:`, `cat:`, `curl: (`): a tool the sandbox could not start
 /// (codex exits 101, "Failed to execvp") proves nothing, and neither does a host without the tool.
 fn probe(exe: &Path, home: &Path, cwd: &Path) -> Result<(), String> {
-    // The hosted tools the profile does not govern must be off under the curator's flags.
+    // The hosted tools the profile does not govern must be off under the curator's flags, as codex
+    // resolves them for the curator, which reads no user config: `features list` has no
+    // `--ignore-user-config`, so it lists them under an empty CODEX_HOME.
+    let bare = cwd.join("codex-home");
+    std::fs::create_dir_all(&bare).map_err(|e| format!("codex features list: {e}"))?;
     let mut features = command(exe, cwd);
-    features.args(["features", "list"]);
+    features.env("CODEX_HOME", &bare).args(["features", "list"]);
     for f in CODEX_OFF {
         features.args(["--disable", f]);
     }
@@ -200,6 +208,13 @@ fn probe(exe: &Path, home: &Path, cwd: &Path) -> Result<(), String> {
         if !off {
             return Err(format!("codex feature {f} is not off"));
         }
+    }
+    let unreviewed = listed.lines().find_map(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        (w.last() == Some(&"true") && !CODEX_ON.contains(&w[0])).then(|| w[0])
+    });
+    if let Some(f) = unreviewed {
+        return Err(format!("codex feature {f} is on and has not been reviewed"));
     }
     // Hosted web search is a setting, not a feature: `web_search="disabled"` holds only while
     // this codex still reads that key. An invalid value must be refused by name, with the value
@@ -305,7 +320,9 @@ fn probe_exec(exe: &Path, cwd: &Path, canary: &Canary) -> Result<(), String> {
         .env("no_proxy", "127.0.0.1")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut child = cmd.spawn().map_err(|e| format!("codex exec: {e}"))?;
+    let mut child = own_group(&mut cmd)
+        .spawn()
+        .map_err(|e| format!("codex exec: {e}"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         match child.try_wait() {
@@ -314,7 +331,7 @@ fn probe_exec(exe: &Path, cwd: &Path, canary: &Canary) -> Result<(), String> {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             _ => {
-                let _ = child.kill();
+                kill_tree(&mut child);
                 let _ = child.wait();
                 return Err("the probe's codex exec did not finish".into());
             }
@@ -394,7 +411,8 @@ mod tests {
         echo 'Error: unknown variant `oboete-probe`, expected one of `disabled`, `cached`' >&2; \
         echo 'in `web_search`' >&2; exit 1;; esac; for f in plugins apps browser_use \
         browser_use_external in_app_browser computer_use image_generation; do \
-        echo \"$f  stable  false\"; done";
+        echo \"$f  stable  false\"; done; echo 'shell_tool  stable  true'; \
+        case \"$CODEX_HOME\" in */codex-home) ;; *) echo 'from_user_config  stable  true';; esac";
 
     /// A fake codex whose `sandbox` runs `body` with the probe's argv as "$@"; every call is
     /// appended to `calls`.
@@ -425,10 +443,11 @@ mod tests {
     const EXEC: &str = r#"for a in "$@"; do case "$a" in model_providers.oboeteprobe.base_url=*)
         url=${a#*=}; url=${url#\"}; url=${url%\"};; esac; done
         post() { curl -sS -o /dev/null -H "Authorization: Bearer $OBOETE_PROBE_KEY" --data "{\"client_metadata\":{\"x-codex-turn-metadata\":\"{\\\"agent_name\\\":\\\"$1\\\"}\"},\"input\":[$2]}" "$url/responses"; }
-        out() { printf '{"type":"custom_tool_call_output","output":"%s"}' "$1"; }
-        S=$(out "cat:1:cat: x: No such file or directory\ntouch:1:touch: cannot touch x\ncurl:${CURL:-7}:curl: (7) Failed\n")
-        E=$(out "cat:threw:rejected\ntouch:threw:rejected\ncurl:threw:rejected\n")
-        post /root "$S,$E,$(out spawned)"; post /root/probe "$S,$E""#;
+        out() { printf '{"type":"custom_tool_call_output","call_id":"call_%s","output":"%s"}' "$1" "$2"; }
+        S="cat:1:cat: x: No such file or directory\ntouch:1:touch: cannot touch x\ncurl:${CURL:-7}:curl: (7) Failed\n"
+        E="cat:threw:rejected\ntouch:threw:rejected\ncurl:threw:rejected\n"
+        post /root "$(out root_0 "$S"),$(out root_1 "$E"),$(out root_2 spawned)"
+        post /root/probe "$(out sub_0 "$S"),$(out sub_1 "$E")""#;
 
     /// The refusals codex 0.155.1 gave under the probe profile in the dogfood user.
     const REFUSES: &str = "case \"$1\" in true) exit 0;;\n\
@@ -539,12 +558,27 @@ mod tests {
     fn a_descendant_holding_the_output_open_fails_the_gate_in_bounded_time() {
         let dir = tempfile::tempdir().unwrap();
         let started = std::time::Instant::now();
-        let (_, g) = gate_with(&fake(dir.path(), "(sleep 60 &)", REFUSES), dir.path());
+        let pid = dir.path().join("pid");
+        let stalls = format!("(sleep 60 & echo $! > '{}')", pid.display());
+        let (_, g) = gate_with(&fake(dir.path(), &stalls, REFUSES), dir.path());
         assert_eq!(
             g,
             Gate::Failed("codex features list: did not finish in 5 s".into())
         );
         assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        // The descendant went with it.
+        let pid = std::fs::read_to_string(&pid).unwrap();
+        let alive = || {
+            Command::new("kill")
+                .args(["-0", pid.trim()])
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while alive() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!alive(), "the descendant {} still runs", pid.trim());
     }
 
     #[test]
@@ -555,6 +589,17 @@ mod tests {
         assert_eq!(
             g,
             Gate::Failed("codex does not refuse an invalid web_search setting".into())
+        );
+    }
+
+    #[test]
+    fn a_feature_on_that_was_not_reviewed_fails_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let features = FEATURES.to_owned() + "; echo 'new_hosted_tool  stable  true'";
+        let (_, g) = gate_with(&fake(dir.path(), &features, REFUSES), dir.path());
+        assert_eq!(
+            g,
+            Gate::Failed("codex feature new_hosted_tool is on and has not been reviewed".into())
         );
     }
 

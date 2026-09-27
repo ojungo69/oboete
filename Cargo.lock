@@ -830,6 +830,7 @@ dependencies = [
  "clap",
  "getrandom 0.4.3",
  "httparse",
+ "libc",
  "percent-encoding",
  "regex",
  "rmcp",

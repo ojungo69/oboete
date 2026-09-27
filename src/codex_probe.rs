@@ -6,18 +6,41 @@
 //! Responses stream; a codex that no longer runs the script fails the gate.
 
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
-/// What the scripted model was sent back: each thread's tool outputs, in order.
+/// What the scripted model was sent back.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Seen {
-    pub root: Vec<String>,
-    pub sub: Vec<String>,
+    /// Each tool output by the id of the script's call it answers (`call_root_0`, `call_sub_1`):
+    /// a thread's results are those of the calls made to it, whatever else its requests carry.
+    pub outputs: BTreeMap<String, String>,
+    /// Every tool codex offered the model, as `namespace.name` (a hosted tool by its type).
+    pub tools: BTreeSet<String>,
     /// A request carried a credential other than the probe's own key: codex sent a login.
     pub login: bool,
 }
+
+/// The tools codex 0.155.1 and 0.157.0 offer the model under the curator's flags (measured in the
+/// dogfood user, 2026-09-27): the exec tool the gate drives, whose commands the profile governs,
+/// and its wait; the sub-agent tools, whose agents run under the same profile (the gate drives one);
+/// a question to a user no headless run has; and a sleep. A tool codex adds has not been reviewed
+/// and fails the gate.
+pub(crate) const OFFERED: [&str; 11] = [
+    "clock.sleep",
+    "collaboration.followup_task",
+    "collaboration.interrupt_agent",
+    "collaboration.list_agents",
+    "collaboration.send_message",
+    "collaboration.spawn_agent",
+    "collaboration.wait_agent",
+    "functions.exec",
+    "functions.request_user_input",
+    "functions.request_user_input_async",
+    "functions.wait",
+];
 
 /// The commands the script runs, one line of output each (`<name>:<exit>:<output>`).
 pub(crate) struct Actions {
@@ -63,7 +86,7 @@ pub(crate) fn next_item(agent: &str, done: usize, a: &Actions) -> Value {
             "input": a.js(thread, escalated)})
     };
     let collab = |n: usize, name: &str, args: Value| {
-        json!({"type": "function_call", "id": format!("fc_{n}"), "call_id": format!("call_{name}"),
+        json!({"type": "function_call", "id": format!("fc_{n}"), "call_id": format!("call_{thread}_{n}"),
             "namespace": "collaboration", "name": name, "arguments": args.to_string()})
     };
     match (thread, done) {
@@ -172,33 +195,40 @@ fn answer(
         .and_then(|m| serde_json::from_str(m).ok())
         .unwrap_or_default();
     let agent = meta["agent_name"].as_str().unwrap_or("?");
-    let outputs: Vec<String> = request["input"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let input = request["input"].as_array().map_or(&[][..], Vec::as_slice);
+    let outputs: Vec<(String, String)> = input
+        .iter()
         .filter(|i| {
             matches!(
                 i["type"].as_str(),
                 Some("function_call_output" | "custom_tool_call_output")
             )
         })
-        .map(output_text)
+        .map(|i| {
+            (
+                i["call_id"].as_str().unwrap_or("").to_owned(),
+                output_text(i),
+            )
+        })
         .collect();
+    // This thread's own results: a request may also carry another thread's.
+    let mine = format!("call_{}_", if agent == "/root" { "root" } else { "sub" });
+    let done = outputs
+        .iter()
+        .filter(|(id, _)| id.starts_with(&mine))
+        .count();
     {
         let mut seen = seen.lock().unwrap();
-        let mine = if agent == "/root" {
-            &mut seen.root
-        } else {
-            &mut seen.sub
-        };
-        if outputs.len() > mine.len() {
-            *mine = outputs.clone();
+        tool_names(&request["tools"], "", &mut seen.tools);
+        for extra in input.iter().filter(|i| i["type"] == "additional_tools") {
+            tool_names(&extra["tools"], "", &mut seen.tools);
         }
+        seen.outputs.extend(outputs);
     }
-    let id = format!("resp_{}_{}", agent.len(), outputs.len());
+    let id = format!("resp_{}_{done}", agent.len());
     let events = [
         json!({"type": "response.created", "response": {"id": id}}),
-        json!({"type": "response.output_item.done", "item": next_item(agent, outputs.len(), actions)}),
+        json!({"type": "response.output_item.done", "item": next_item(agent, done, actions)}),
         json!({"type": "response.completed", "response": {"id": id,
             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}}),
     ];
@@ -214,6 +244,19 @@ fn answer(
         )?;
     }
     out.flush()
+}
+
+/// The names of `tools` into `out`, a namespace's tools as `namespace.name` and a hosted tool,
+/// which has no name, by its type.
+fn tool_names(tools: &Value, prefix: &str, out: &mut BTreeSet<String>) {
+    for t in tools.as_array().into_iter().flatten() {
+        let name = t["name"].as_str().or(t["type"].as_str()).unwrap_or("?");
+        if t["tools"].is_array() {
+            tool_names(&t["tools"], &format!("{prefix}{name}."), out);
+        } else {
+            out.insert(format!("{prefix}{name}"));
+        }
+    }
 }
 
 /// A tool output as text: a string, or the texts of an array of content items.
@@ -238,18 +281,26 @@ pub(crate) fn verdict(seen: &Seen, secret: &str, touched: bool) -> Result<(), St
     if touched {
         return Err("a command wrote outside the sandbox".into());
     }
-    if seen.root.len() < 3 {
-        return Err("codex did not run the probe's tool calls".into());
+    let unreviewed: Vec<&str> = seen
+        .tools
+        .iter()
+        .map(String::as_str)
+        .filter(|t| !OFFERED.contains(t))
+        .collect();
+    if !unreviewed.is_empty() {
+        return Err(format!(
+            "codex offers the model tools the gate has not reviewed: {}",
+            unreviewed.join(", ")
+        ));
     }
     // A sub-agent that did not run proves nothing about one that would: its results are required
     // too, as the root's are.
-    if seen.sub.is_empty() {
+    if !seen.outputs.contains_key("call_sub_0") {
         return Err("no sub-agent ran the probe's tool calls".into());
     }
-    let threads = [("", &seen.root), ("a sub-agent: ", &seen.sub)];
-    for (who, outputs) in threads {
+    for (who, thread) in [("", "root"), ("a sub-agent: ", "sub")] {
         for (step, escalated) in [(0, false), (1, true)] {
-            let Some(out) = outputs.get(step) else {
+            let Some(out) = seen.outputs.get(&format!("call_{thread}_{step}")) else {
                 return Err(format!("{who}codex did not run the probe's tool calls"));
             };
             if out.contains(secret) {
@@ -304,9 +355,18 @@ mod tests {
     const SUB: &[&str] = &[SANDBOXED, ESCALATED];
 
     fn seen(root: &[&str], sub: &[&str]) -> Seen {
+        let calls = |thread: &str, outs: &[&str]| -> Vec<(String, String)> {
+            outs.iter()
+                .enumerate()
+                .map(|(n, o)| (format!("call_{thread}_{n}"), o.to_string()))
+                .collect()
+        };
         Seen {
-            root: root.iter().map(|s| s.to_string()).collect(),
-            sub: sub.iter().map(|s| s.to_string()).collect(),
+            outputs: calls("root", root)
+                .into_iter()
+                .chain(calls("sub", sub))
+                .collect(),
+            tools: OFFERED.iter().map(|t| t.to_string()).collect(),
             login: false,
         }
     }
@@ -355,7 +415,7 @@ mod tests {
                 "a sub-agent: codex did not run",
             ),
             (
-                seen(&[SANDBOXED, ESCALATED], SUB),
+                seen(&[SANDBOXED], SUB),
                 "did not run the probe's tool calls",
             ),
             (
@@ -368,6 +428,12 @@ mod tests {
         }
         let ok = seen(&[SANDBOXED, ESCALATED, spawned], SUB);
         assert!(verdict(&ok, "SECRET-x", true).is_err());
+        let mut more = ok.clone();
+        more.tools.insert("web_search".into());
+        assert_eq!(
+            verdict(&more, "SECRET-x", false),
+            Err("codex offers the model tools the gate has not reviewed: web_search".into())
+        );
         let login = Seen { login: true, ..ok };
         assert!(verdict(&login, "SECRET-x", false).is_err());
     }
@@ -378,14 +444,22 @@ mod tests {
     fn the_scripted_model_answers_each_thread_in_turn_and_only_codex() {
         let model = Model::start(actions()).unwrap();
         let key = format!("Bearer {}", model.key);
-        let post = |agent: &str, outputs: &[&str], auth: &str| -> Option<Value> {
+        let post = |agent: &str, outputs: &[(&str, &str)], auth: &str| -> Option<Value> {
             let meta = json!({"agent_name": agent}).to_string();
-            let input: Vec<Value> = outputs
+            let mut input: Vec<Value> = outputs
                 .iter()
-                .map(|o| json!({"type": "custom_tool_call_output", "output": [{"type": "input_text", "text": o}]}))
+                .map(|(id, o)| {
+                    json!({"type": "custom_tool_call_output", "call_id": id,
+                    "output": [{"type": "input_text", "text": o}]})
+                })
                 .collect();
-            let body = json!({"client_metadata": {"x-codex-turn-metadata": meta}, "input": input})
-                .to_string();
+            input.push(
+                json!({"type": "additional_tools", "tools": [{"type": "namespace",
+                "name": "functions", "tools": [{"type": "custom", "name": "exec"}]}]}),
+            );
+            let body = json!({"client_metadata": {"x-codex-turn-metadata": meta}, "input": input,
+                "tools": [{"type": "web_search"}]})
+            .to_string();
             let mut c = TcpStream::connect(("127.0.0.1", model.port)).unwrap();
             let auth = if auth.is_empty() {
                 String::new()
@@ -413,36 +487,66 @@ mod tests {
             (Some("custom_tool_call"), Some("exec"))
         );
         assert!(first["input"].as_str().unwrap().contains("cat /h/secret"));
-        let escalate = post("/root", &["a"], &key).unwrap();
+        let (a, b, c, d) = (
+            ("call_root_0", "a"),
+            ("call_root_1", "b"),
+            ("call_root_2", "c"),
+            ("call_root_3", "d"),
+        );
+        let escalate = post("/root", &[a], &key).unwrap();
         assert!(
             escalate["input"]
                 .as_str()
                 .unwrap()
                 .contains("require_escalated")
         );
+        assert_eq!(post("/root", &[a, b], &key).unwrap()["name"], "spawn_agent");
         assert_eq!(
-            post("/root", &["a", "b"], &key).unwrap()["name"],
-            "spawn_agent"
+            post("/root", &[a, b, c], &key).unwrap()["call_id"],
+            "call_root_3"
+        );
+        // A sub-agent whose requests carry the root's results starts its own calls all the same,
+        // and those results are not taken for its own.
+        let first = post("/root/probe", &[a, b, c, d], &key).unwrap();
+        assert_eq!(
+            (&first["name"], &first["call_id"]),
+            (&json!("exec"), &json!("call_sub_0"))
+        );
+        let mut only_root = model.seen.lock().unwrap().clone();
+        only_root.tools.remove("web_search");
+        assert_eq!(
+            verdict(&only_root, "SECRET-x", false),
+            Err("no sub-agent ran the probe's tool calls".into())
         );
         assert_eq!(
-            post("/root", &["a", "b", "c"], &key).unwrap()["name"],
-            "wait_agent"
+            post("/root/probe", &[a, ("call_sub_0", "s")], &key).unwrap()["call_id"],
+            "call_sub_1"
         );
-        assert_eq!(post("/root/probe", &["s"], &key).unwrap()["name"], "exec");
         assert_eq!(
-            post("/root", &["a", "b", "c", "d"], &key).unwrap()["type"],
+            post("/root", &[a, b, c, d], &key).unwrap()["type"],
             "message"
         );
         // Another local process knows the port, not the key: refused, and not counted.
-        let forged = ["cat:1:x", "cat:threw:x", "x", "x", "x"];
+        let forged = [("call_sub_1", "cat:1:x"), ("call_root_9", "x")];
         assert!(post("/root", &forged, "").is_none());
         assert!(!model.seen.lock().unwrap().login);
         // A credential that is not the key is a login codex sent: refused, and it fails the gate.
         assert!(post("/root", &forged, "Bearer sk-other").is_none());
         let seen = model.seen.lock().unwrap().clone();
         assert_eq!(
-            (seen.root.len(), seen.sub, seen.login),
-            (4, vec!["s".to_string()], true)
+            seen.outputs.keys().collect::<Vec<_>>(),
+            [
+                "call_root_0",
+                "call_root_1",
+                "call_root_2",
+                "call_root_3",
+                "call_sub_0"
+            ]
         );
+        assert_eq!(
+            seen.tools.iter().collect::<Vec<_>>(),
+            ["functions.exec", "web_search"]
+        );
+        assert!(seen.login);
     }
 }

@@ -886,6 +886,58 @@ pub(crate) const CODEX_OFF: [&str; 7] = [
     "image_generation",
 ];
 
+/// codex features on by default in 0.155.1 and 0.157.0, besides `CODEX_OFF`, with which the gate
+/// proved codex cannot act. Another feature on fails the gate until it is reviewed: it may be a
+/// tool the profile does not govern, and a hosted one never reaches the probe's own model.
+pub(crate) const CODEX_ON: [&str; 46] = [
+    "auth_elicitation",
+    "browser_use_full_cdp_access",
+    "code_mode_host",
+    "collaboration_modes",
+    "compaction_image_budget",
+    "content_item_kinds",
+    "daemon_auto_start",
+    "enable_request_compression",
+    "fast_mode",
+    "goals",
+    "guardian_approval",
+    "guardian_reuse_parent_compaction",
+    "guardianv2.thread_context",
+    "hooks",
+    "in_app_chat",
+    "in_app_dictation",
+    "in_app_local_automation",
+    "in_app_updates",
+    "item_ids",
+    "mentions_v2",
+    "multi_agent",
+    "personality",
+    "plugin_sharing",
+    "realtime_conversation",
+    "remote_plugin",
+    "resize_all_images",
+    "shell_snapshot",
+    "shell_tool",
+    "skill_mcp_dependency_install",
+    "skill_search",
+    "sleep_tool",
+    "sqlite",
+    "steer",
+    "system_proxy_fallback",
+    "terminal_resize_reflow",
+    "tool_call_mcp_elicitation",
+    "tool_search_always_defer_mcp_tools",
+    "tool_suggest",
+    "tui_app_server",
+    "unbounded_connection_retries",
+    "unified_exec",
+    "unified_exec_tty",
+    "unified_exec_zsh_fork",
+    "view_image",
+    "workspace_dependencies",
+    "worktrees",
+];
+
 /// The flags of the curator's `codex exec` after `exec`, with the permission profile `profile`;
 /// the isolation gate runs them too.
 pub(crate) fn codex_exec_flags(profile: &str) -> Vec<String> {
@@ -1276,6 +1328,28 @@ fn codex_searched(stdout: &str) -> bool {
 /// hijacked provider must not fill memory (the summaries it returns are capped much lower anyway).
 const MAX_RESPONSE_BYTES: u64 = 1 << 20;
 
+/// `cmd`'s child in a process group of its own, so that `kill_tree` ends its descendants with it.
+pub(crate) fn own_group(cmd: &mut Command) -> &mut Command {
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(cmd, 0);
+    cmd
+}
+
+/// Kill `child` and, on unix, every process still in its group (`own_group`): a descendant that
+/// holds a pipe open, or keeps running, does not outlive a timeout.
+// ponytail: Windows kills the child only; a job object would take its descendants too.
+pub(crate) fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(group) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: killpg only sends a signal. The group's id is the child's pid, which cannot be
+        // reused while the child is not yet waited for, so no other process group is signalled.
+        unsafe {
+            libc::killpg(group, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+}
+
 /// Spawn `cmd`, feed it `stdin`, and return its stdout if it exits 0 within `timeout`.
 /// stdin, stdout and stderr each get a thread: a prompt larger than the pipe buffer, or an
 /// answer larger than it, must not deadlock against a child that has not read or exited yet.
@@ -1288,7 +1362,7 @@ fn run_cli(
 ) -> (Vec<u8>, Result<(), CallError>) {
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
-    let mut child = match cmd.spawn() {
+    let mut child = match own_group(&mut cmd).spawn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1324,16 +1398,23 @@ fn run_cli(
     let take =
         |b: &Arc<Mutex<Vec<u8>>>| std::mem::take(&mut *b.lock().unwrap_or_else(|p| p.into_inner()));
     let deadline = Instant::now() + timeout;
+    // The child is waited for only once its pipes have closed: until then its process group is
+    // still its own, and a descendant holding a pipe open is killed with it at the deadline.
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) => {}
-            Err(e) => return (take(&out), Err(CallError::other(format!("wait: {e}")))),
+        let drained = [&out_h, &err_h]
+            .into_iter()
+            .all(|h| h.as_ref().is_none_or(|h| h.is_finished()));
+        if drained {
+            match child.try_wait() {
+                Ok(Some(s)) => break s,
+                Ok(None) => {}
+                Err(e) => return (take(&out), Err(CallError::other(format!("wait: {e}")))),
+            }
         }
         if Instant::now() > deadline {
             // Reap it before the scratch directory goes: a killed child still holds that
             // directory as its cwd until it is waited for (Windows refuses the removal).
-            child.kill().ok();
+            kill_tree(&mut child);
             child.wait().ok();
             // What was already in the pipe is read before the snapshot: the reader ends when the
             // pipe closes, or is given up on after a moment when a grandchild still holds it.
