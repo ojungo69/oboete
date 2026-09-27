@@ -68,13 +68,16 @@ The alternate model is tried only once, even for these failures.
 - A newer run for the same PR cancels an older run. Ordinary PR comments do not
   trigger or cancel reviews.
 - Each job has a 30-minute timeout. Each attempt has two concurrent review tasks,
-  a 180-second LLM request timeout, and a 100,000-token budget. The CLI multiplies
+  a 180-second LLM request timeout, and a 500,000-token budget. The CLI multiplies
   the five-minute task setting by the two rounds of explicit `medium` review
   effort, giving each file group a ten-minute deadline. The job deadline still
   applies across all groups and both models. Fallback can consume a second budget.
-  The upstream budget is a soft stop
-  checked between LLM rounds, not a hard billing cap; a final round may exceed it,
-  and unfinished files are reported.
+  The CLI also checks an estimated file-group cost before dispatch. The initial
+  100,000-token budget rejected all nine selected files in PR #147 before review:
+  the first group was estimated at 249,216 tokens with GLM and 338,132 with Kimi.
+  The 500,000-token cap admits those groups while retaining a finite limit.
+  It is a soft stop, not a hard billing cap; an in-flight group or final round may
+  exceed it, and unfinished files are reported.
 - Findings are advisory. A successful job means the tool ran, not that the PR is
   defect-free or every file was reviewed. Inspect the summary for partial results.
 - Existing inline findings are preserved. Each run may add findings on the same

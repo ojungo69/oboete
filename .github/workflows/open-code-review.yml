@@ -85,7 +85,7 @@ jobs:
           effort: medium
           language: Japanese
           review_concurrency: '2'
-          max_tokens_budget: '100000'
+          max_tokens_budget: '500000'
           # Line overlap alone does not prove two findings describe the same problem.
           incremental: 'false'
           upload_artifacts: 'false'
@@ -116,7 +116,7 @@ jobs:
           effort: medium
           language: Japanese
           review_concurrency: '2'
-          max_tokens_budget: '100000'
+          max_tokens_budget: '500000'
           incremental: 'false'
           upload_artifacts: 'false'
           base_ref: ${{ steps.pr.outputs.base_ref }}
