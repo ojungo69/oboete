@@ -33,12 +33,18 @@ fn field_cap(v: Option<&str>) -> usize {
 /// hook kept 8,000 characters (src/hook.rs `MAX_FIELD`). (Claude; overrulable)
 pub const HEAD_TAIL_BYTES: usize = 8 * 1024;
 
+/// Set by `oboete replay` on the hooks it spawns: what they record is stamped `replay` (D9).
+pub const REPLAY_ENV: &str = "OBOETE_REPLAY";
+
 /// The user's capture settings (spec 1.5): `[redaction]` and `[capture]` in config.toml.
 #[derive(Clone)]
 pub struct Settings {
     pub rules: redact::Rules,
     pub store_prompts: bool,
     pub tool_output: crate::config::ToolOutput,
+    /// Who wrote the events: `hook`, or `replay` for a fixture (D9: only a hook says the owner is
+    /// at work).
+    pub source: &'static str,
 }
 
 impl Default for Settings {
@@ -48,6 +54,7 @@ impl Default for Settings {
             rules: redact::Rules::default(),
             store_prompts: c.store_prompts,
             tool_output: c.tool_output,
+            source: "hook",
         }
     }
 }
@@ -61,6 +68,12 @@ impl Settings {
             rules: redact::Rules::new(&c.redaction)?,
             store_prompts: c.capture.store_prompts,
             tool_output: c.capture.tool_output,
+            // `oboete replay`'s spawned samples are hooks run by the replay, not by the owner.
+            source: if std::env::var_os(REPLAY_ENV).is_some() {
+                "replay"
+            } else {
+                "hook"
+            },
         })
     }
 }
@@ -222,7 +235,7 @@ fn capture(
             head,
             gitdir,
             cwd: Some(cwd_label),
-            source: "hook".into(),
+            source: settings.source.into(),
             body,
             original_bytes: gate.cut,
         },

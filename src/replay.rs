@@ -39,7 +39,10 @@ pub fn run(
     // store.
     let mut raw: Option<crate::raw::Raw> = None;
     // Loaded once: the in-process loop measures the store; the spawned hooks below load it each.
-    let settings = crate::capture::Settings::load(home)?;
+    let settings = crate::capture::Settings {
+        source: "replay",
+        ..crate::capture::Settings::load(home)?
+    };
     let clock = rusqlite::Connection::open_in_memory()?;
 
     // 1. In-process hook path: pure store cost per event.
@@ -183,6 +186,7 @@ fn sample_spawns(
             .arg("--home")
             .arg(home)
             .args(["hook", agent, "PostToolUse"])
+            .env(crate::capture::REPLAY_ENV, "1")
             // A candidate above today's cap is measured as written under that cap (D4).
             .env(
                 crate::capture::FIELD_CAP_ENV,
@@ -266,6 +270,8 @@ mod tests {
             .collect();
         let span = ts.iter().max().unwrap() - ts.iter().min().unwrap();
         assert!(span >= 23 * 3_600_000 + 1_800_000, "{span}");
+        // D9: a replay is not the owner at work.
+        assert_eq!(raw.last_hook_ts().unwrap(), None);
         // The export ran: segments exist for what was recorded.
         assert!(
             home.path()

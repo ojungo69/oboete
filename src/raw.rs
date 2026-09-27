@@ -662,6 +662,21 @@ impl Raw {
         )?)
     }
 
+    /// D9: the time of this device's newest record a hook wrote, walking down from the top past
+    /// tombstones, imports and replays, which never say the owner is at work.
+    pub fn last_hook_ts(&self) -> Result<Option<i64>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT ts FROM records WHERE device = ?1 AND type = 'event' AND source = 'hook'
+                 ORDER BY seq DESC LIMIT 1",
+                [&self.device],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// D2: where `device`'s curation has reached, as (seq, offset): the end of its last window
     /// op that is not a recuration. An offset is where the next window starts inside an event a
     /// window split; none means after the whole event. (0, None) before the first window.

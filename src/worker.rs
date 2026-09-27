@@ -1,6 +1,7 @@
 //! Design B's worker (docs/milestone-2-plan.md D6, D10; MUST-M14): one per home, started by hooks,
 //! it runs this milestone's consumers over `raw.db` in seq order and exits when idle.
 
+use crate::curate::Phase;
 use crate::knowledge::checkpoint;
 use crate::raw::Raw;
 use anyhow::Result;
@@ -121,8 +122,11 @@ pub fn run_with(
     consumers: Vec<Box<dyn Consumer>>,
     before_exit: impl FnMut(),
 ) -> Result<()> {
-    run_holding(home, idle_ms, consumers, before_exit, None)
+    run_holding(home, idle_ms, consumers, before_exit, None, None)
 }
+
+/// The curation phase a worker runs after its consumers have drained (milestone 3 D3).
+pub type CurationPhase<'a> = dyn FnMut(&mut Raw) -> Result<Phase> + 'a;
 
 fn run_holding(
     home: &Path,
@@ -130,34 +134,42 @@ fn run_holding(
     mut consumers: Vec<Box<dyn Consumer>>,
     mut before_exit: impl FnMut(),
     taken: Option<Lock>,
+    mut phase: Option<&mut CurationPhase>,
 ) -> Result<()> {
-    let (mut held, mut last) = (None, 0);
+    let mut holding = Holding::default();
     if let Some(l) = taken {
-        take(home, l, &mut held, &mut last);
+        take(home, l, &mut holding);
     }
     let result = serve_until_done(
         home,
         idle_ms,
         &mut consumers,
         &mut before_exit,
-        &mut held,
-        &mut last,
+        &mut holding,
+        &mut phase,
     );
     // Released first: a hook that finds the lock free starts a worker for what it appended.
-    drop(held);
+    holding.lock = None;
     // A run that never took the lock did no work: another worker's outcome stands.
-    if last > 0 {
-        record(home, last, &result);
+    if holding.last > 0 {
+        record(home, holding.last, &result);
     }
     result
 }
 
 /// Every lock this run takes is noted as a run that has not ended, until `record` replaces the
 /// note: a worker killed or crashed while it holds any of them is reported (doctor).
-fn take(home: &Path, l: Lock, held: &mut Option<Lock>, last: &mut u64) {
-    *last = l.1;
+fn take(home: &Path, l: Lock, holding: &mut Holding) {
+    holding.last = l.1;
     note(home, l.1, STOPPED);
-    *held = Some(l);
+    holding.lock = Some(l);
+}
+
+/// The worker lock while this run holds it, and the number of its last taking.
+#[derive(Default)]
+struct Holding {
+    lock: Option<Lock>,
+    last: u64,
 }
 
 fn serve_until_done(
@@ -165,8 +177,8 @@ fn serve_until_done(
     idle_ms: u64,
     consumers: &mut [Box<dyn Consumer>],
     before_exit: &mut impl FnMut(),
-    held: &mut Option<Lock>,
-    last: &mut u64,
+    holding: &mut Holding,
+    phase: &mut Option<&mut CurationPhase>,
 ) -> Result<()> {
     // ponytail: D11's 30-minute deadline in memory; every idle exit backs up too, so a lost
     // deadline only brings the next backup forward. It is checked between batches and while
@@ -182,10 +194,10 @@ fn serve_until_done(
             home,
             idle_ms,
             consumers,
-            held,
+            holding,
             &mut next_backup,
             before_exit,
-            last,
+            phase,
         ) {
             Ok(true) => {}
             Ok(false) => return Ok(()),
@@ -204,14 +216,14 @@ fn serve(
     home: &Path,
     idle_ms: u64,
     consumers: &mut [Box<dyn Consumer>],
-    held: &mut Option<Lock>,
+    holding: &mut Holding,
     next_backup: &mut Instant,
     before_exit: &mut impl FnMut(),
-    last: &mut u64,
+    phase: &mut Option<&mut CurationPhase>,
 ) -> Result<bool> {
-    if held.is_none() {
+    if holding.lock.is_none() {
         match lock(home)? {
-            Some(l) => take(home, l, held, last),
+            Some(l) => take(home, l, holding),
             None => return Ok(false),
         }
     }
@@ -220,7 +232,7 @@ fn serve(
     // which the next hook starts.
     let asked = crate::backup::take_restore_request(home);
     // Task 8: a damaged raw.db is restored from the backups, a damaged knowledge.db rebuilt.
-    let raw = crate::backup::open_raw(home).inspect_err(|_| {
+    let mut raw = crate::backup::open_raw(home).inspect_err(|_| {
         if asked {
             crate::backup::request_restore(home);
         }
@@ -239,8 +251,24 @@ fn serve(
             due(&raw);
         }
         due(&raw);
+        // D3: one window once the consumers have drained. A window that waits only on time, and
+        // within D10's 30 minutes, keeps the worker up until then.
+        let mut stay = None;
+        if let Some(phase) = phase.as_mut() {
+            match phase(&mut raw)? {
+                Phase::Covered if crate::backup::restore_requested(home) => return Ok(true),
+                Phase::Covered => continue,
+                Phase::Waiting { until, up: true } => stay = Some(until),
+                Phase::Waiting { .. } | Phase::Idle => {}
+            }
+        }
         let seen = raw.max_seq()?;
-        let deadline = Instant::now() + Duration::from_millis(idle_ms);
+        // A window's time replaces the idle wait: the phase runs again then, and the idle wait
+        // starts once it has nothing left to wait for.
+        let wait = stay.map_or(idle_ms, |until| {
+            u64::try_from(until - crate::db::now_ms()).unwrap_or(0)
+        });
+        let deadline = Instant::now() + Duration::from_millis(wait);
         let mut more = false;
         while Instant::now() < deadline {
             std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
@@ -253,13 +281,13 @@ fn serve(
             }
             due(&raw);
         }
-        if more {
+        if more || stay.is_some() {
             continue;
         }
         // Under the lock: a worker started after the release cannot export the same seqs.
         crate::backup::run(home, &raw);
         crate::hookstate::prune(home, crate::hookstate::KEEP);
-        *held = None;
+        holding.lock = None;
         before_exit();
         // A hook that asked before the release saw the lock held and started nothing.
         let wanted = crate::backup::restore_requested(home);
@@ -267,7 +295,7 @@ fn serve(
             return Ok(false);
         }
         match lock(home)? {
-            Some(l) => take(home, l, held, last),
+            Some(l) => take(home, l, holding),
             // Another worker took the lock after the release: the records are its now.
             None => return Ok(false),
         }
@@ -278,15 +306,74 @@ fn serve(
 }
 
 pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
-    run_consumers(home, idle_ms, consumers(home))
-}
-
-fn run_consumers(home: &Path, idle_ms: u64, consumers: Vec<Box<dyn Consumer>>) -> Result<()> {
     // Another worker holds the lock: its run, not this one, says how the work went.
     let Some(held) = lock(home)? else {
         return Ok(());
     };
-    run_holding(home, idle_ms, consumers, || {}, Some(held))
+    let mut phase = curation(home);
+    run_holding(
+        home,
+        idle_ms,
+        consumers(home),
+        || {},
+        Some(held),
+        Some(&mut *phase),
+    )
+}
+
+#[cfg(test)]
+fn run_consumers(home: &Path, idle_ms: u64, consumers: Vec<Box<dyn Consumer>>) -> Result<()> {
+    let Some(held) = lock(home)? else {
+        return Ok(());
+    };
+    run_holding(home, idle_ms, consumers, || {}, Some(held), None)
+}
+
+/// The curation phase: it curates while `[summary] curate` asks for it, off until the cut-over
+/// (spec 7.5).
+fn curation(home: &Path) -> Box<CurationPhase<'static>> {
+    let home = home.to_owned();
+    // Opened once curation is on: a home that never asks for it gets no providers.db.
+    let mut db = None;
+    Box::new(move |raw: &mut Raw| {
+        // Read again for each window: a worker that stays up follows the owner's edits (turning
+        // curation on or off, a provider removed, a lower cap). A file that no longer loads (one
+        // the owner is still editing) stops curation until it loads again, not the worker.
+        // The rules are built only when curation is on: a worker with it off pays one read.
+        let loaded = crate::config::load(&home).and_then(|cfg| {
+            if !cfg.summary.curate {
+                return Ok(None);
+            }
+            Ok(Some((crate::capture::Settings::load(&home)?.rules, cfg)))
+        });
+        let (rules, cfg) = match loaded {
+            Ok(Some(v)) => v,
+            Ok(None) => return Ok(Phase::Idle),
+            Err(e) => {
+                eprintln!("oboete: no curation for now: {e:#}");
+                return Ok(Phase::Idle);
+            }
+        };
+        let db = match &mut db {
+            Some(db) => db,
+            None => match crate::providers_db::open(&home) {
+                Ok(opened) => db.insert(opened),
+                Err(e) => {
+                    eprintln!("oboete: no curation for now: {e:#}");
+                    return Ok(Phase::Idle);
+                }
+            },
+        };
+        let mut curator = |span: &str, prompt: &str, working: &dyn Fn() -> Option<i64>| {
+            crate::provider::Chain::new(&cfg.providers, db)
+                .paid_cap(cfg.paid_usd_per_month)
+                .idle_gate(working)
+                .run("curator", span, prompt, &crate::curate::schema())
+        };
+        // Who is asked and within what caps: a window held under other ones is tried again now.
+        let chain = format!("{:?} {}", cfg.providers, cfg.paid_usd_per_month);
+        crate::curate::run_phase(raw, db, &rules, &cfg.summary, &chain, &mut curator)
+    })
 }
 
 /// A run's outcome until it ends.
@@ -350,7 +437,7 @@ pub fn last_failure(home: &Path) -> Option<String> {
 }
 
 /// Whether a process holds the worker lock now. It takes no number: this runs nothing.
-fn running(home: &Path) -> bool {
+pub fn running(home: &Path) -> bool {
     std::fs::OpenOptions::new()
         .write(true)
         .open(home.join("state").join("worker.lock"))
@@ -369,7 +456,7 @@ pub fn run_once(home: &Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(10));
         held = lock(home)?;
     }
-    run_holding(home, 0, consumers(home), || {}, held)
+    run_holding(home, 0, consumers(home), || {}, held, None)
 }
 
 #[cfg(test)]
@@ -563,6 +650,120 @@ mod tests {
         assert!(crashed.is_err(), "A did not take the lock again");
         let why = last_failure(home.path()).expect("A's crash was not reported");
         assert!(why.starts_with("it stopped before it finished"), "{why}");
+    }
+
+    /// D10: a window that waits only on time keeps the worker up until then, and the phase runs
+    /// again; a wait beyond 30 minutes, or on the owner or a budget, does not.
+    #[test]
+    fn the_worker_sleeps_until_the_gate_opens_and_exits_when_the_wait_is_longer() {
+        let home = tempfile::tempdir().unwrap();
+        raw::open(home.path())
+            .unwrap()
+            .append(&raw::test_event("a"))
+            .unwrap();
+        let calls = std::cell::Cell::new(0);
+        let (started, again) = (Instant::now(), std::cell::Cell::new(None));
+        let until = crate::db::now_ms() + 400;
+        let mut phase = |_: &mut Raw| -> Result<Phase> {
+            calls.set(calls.get() + 1);
+            Ok(match calls.get() {
+                1 => Phase::Waiting { until, up: true },
+                2 => {
+                    again.set(Some(started.elapsed()));
+                    Phase::Covered
+                }
+                _ => Phase::Idle,
+            })
+        };
+        let p: &mut CurationPhase = &mut phase;
+        // The window's time, not the longer idle wait, says when the phase runs again.
+        run_holding(
+            home.path(),
+            1_500,
+            vec![Box::new(Seen)],
+            || {},
+            None,
+            Some(p),
+        )
+        .unwrap();
+        let again = again.get().expect("the phase did not run again");
+        assert!(again >= Duration::from_millis(350), "{again:?}");
+        assert!(again < Duration::from_millis(1_200), "{again:?}");
+        assert_eq!(calls.get(), 3);
+
+        calls.set(0);
+        let mut phase = |_: &mut Raw| -> Result<Phase> {
+            calls.set(calls.get() + 1);
+            Ok(Phase::Waiting {
+                until: crate::db::now_ms() + 3_600_000,
+                up: false,
+            })
+        };
+        let started = Instant::now();
+        let p: &mut CurationPhase = &mut phase;
+        run_holding(home.path(), 0, vec![Box::new(Seen)], || {}, None, Some(p)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// Curation runs only in a home that asks for it: by default nothing reaches providers.db.
+    /// With `[summary] curate = true` the phase runs the configured chain; here its one entry has
+    /// no budget left, so the window waits for the next day and nothing leaves the machine.
+    #[test]
+    fn a_home_curates_only_when_it_asks_to() {
+        let home = tempfile::tempdir().unwrap();
+        let device = {
+            let mut raw = raw::open(home.path()).unwrap();
+            raw.append(&raw::test_event("a")).unwrap();
+            raw.device().to_owned()
+        };
+        run(home.path(), 0).unwrap();
+        assert!(!home.path().join("providers.db").exists());
+        let config = "[summary]\ncurate = true\n[[providers]]\nkind = \"openai\"\n\
+                      name = \"spent\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\
+                      daily_budget = 0\n";
+        std::fs::write(home.path().join("config.toml"), config).unwrap();
+        raw::open(home.path())
+            .unwrap()
+            .append(&raw::test_event("b"))
+            .unwrap();
+        run(home.path(), 0).unwrap();
+        let db = crate::providers_db::open(home.path()).unwrap();
+        let p = crate::providers_db::pending_of(&db, &device)
+            .unwrap()
+            .expect("the phase did not run");
+        assert_eq!((p.hold.as_str(), p.from_seq, p.to_seq), ("budget", 1, 2));
+        assert!(p.reason.contains("spent: 0/0 calls today"), "{}", p.reason);
+    }
+
+    /// A worker that stays up reads the config again for each window: turning curation on or
+    /// off takes effect without a new worker, and a config that no longer loads turns it off.
+    #[test]
+    fn a_worker_that_stays_up_follows_the_owners_config() {
+        let home = tempfile::tempdir().unwrap();
+        let config = |curate: bool| {
+            let text = format!(
+                "[summary]\ncurate = {curate}\n[[providers]]\nkind = \"openai\"\n\
+                 name = \"spent\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\
+                 daily_budget = 0\n"
+            );
+            std::fs::write(home.path().join("config.toml"), text).unwrap();
+        };
+        config(false);
+        let mut raw = raw::open(home.path()).unwrap();
+        raw.append(&raw::test_event("a")).unwrap();
+        let mut phase = curation(home.path());
+        assert_eq!(phase(&mut raw).unwrap(), Phase::Idle);
+        config(true);
+        assert!(matches!(
+            phase(&mut raw).unwrap(),
+            Phase::Waiting { up: false, .. }
+        ));
+        config(false);
+        assert_eq!(phase(&mut raw).unwrap(), Phase::Idle);
+        // A file the owner is still editing stops curation for this run, not the worker.
+        std::fs::write(home.path().join("config.toml"), "[summary\n").unwrap();
+        assert_eq!(phase(&mut raw).unwrap(), Phase::Idle);
     }
 
     /// The Windows runner's worker stopped with "database is locked" after a restore: a search

@@ -48,6 +48,22 @@ CREATE TABLE IF NOT EXISTS isolation(
   ts INTEGER NOT NULL,
   PRIMARY KEY(cli, version)
 );
+-- The window each device's curation waits on (docs/milestone-3-plan.md D10, D11): one row per
+-- device. It counts only while raw.db's next window is still this one, start and end: the
+-- curation phase replaces a row that no longer is.
+CREATE TABLE IF NOT EXISTS pending(
+  device TEXT PRIMARY KEY,
+  from_seq INTEGER NOT NULL,
+  from_offset INTEGER,
+  to_seq INTEGER NOT NULL,
+  to_offset INTEGER,
+  reason TEXT NOT NULL,                   -- why the last attempt gave no answer
+  hold TEXT NOT NULL,                     -- time, budget or owner: what it waits for
+  attempts INTEGER NOT NULL DEFAULT 0,    -- attempts that count toward D11's three
+  next_attempt_at INTEGER NOT NULL,       -- unix ms: not tried again before then
+  since INTEGER NOT NULL,                 -- when the window first waited
+  prompt TEXT NOT NULL                    -- the SHA-256 of the request the attempts were on, with who was asked and the idle gate
+);
 ";
 
 pub fn open(home: &Path) -> Result<Connection> {
@@ -139,8 +155,13 @@ pub fn stopped(conn: &Connection) -> Result<Vec<(String, i64)>> {
 }
 
 /// Clear `provider`'s cooldown and breaker: the owner says it can be used again. Whether it had
-/// any state.
+/// any state. A window that waited on the owner is tried at the worker's next run, not an hour
+/// later.
 pub fn resume(conn: &Connection, provider: &str) -> Result<bool> {
+    conn.execute(
+        "UPDATE pending SET next_attempt_at = 0 WHERE hold = 'owner'",
+        [],
+    )?;
     Ok(conn.execute("DELETE FROM provider_state WHERE provider=?1", [provider])? > 0)
 }
 
@@ -336,9 +357,122 @@ pub fn token_ratios(conn: &Connection, provider: &str, n: u32) -> Result<Vec<f64
     Ok(ratios)
 }
 
+/// A window the curation phase waits on (D10, D11).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pending {
+    pub device: String,
+    pub from_seq: i64,
+    pub from_offset: Option<i64>,
+    pub to_seq: i64,
+    pub to_offset: Option<i64>,
+    pub reason: String,
+    pub hold: String,
+    pub attempts: i64,
+    pub next_attempt_at: i64,
+    pub since: i64,
+    /// The SHA-256 of the prompt the attempts were on.
+    pub prompt: String,
+}
+
+const PENDING_COLUMNS: &str = "device, from_seq, from_offset, to_seq, to_offset, reason, hold,
+     attempts, next_attempt_at, since, prompt";
+
+fn pending_row(r: &rusqlite::Row) -> rusqlite::Result<Pending> {
+    Ok(Pending {
+        device: r.get(0)?,
+        from_seq: r.get(1)?,
+        from_offset: r.get(2)?,
+        to_seq: r.get(3)?,
+        to_offset: r.get(4)?,
+        reason: r.get(5)?,
+        hold: r.get(6)?,
+        attempts: r.get(7)?,
+        next_attempt_at: r.get(8)?,
+        since: r.get(9)?,
+        prompt: r.get(10)?,
+    })
+}
+
+/// Every device's pending window, for doctor.
+pub fn pending(conn: &Connection) -> Result<Vec<Pending>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {PENDING_COLUMNS} FROM pending ORDER BY device"
+    ))?;
+    Ok(st
+        .query_map([], pending_row)?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn pending_of(conn: &Connection, device: &str) -> Result<Option<Pending>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {PENDING_COLUMNS} FROM pending WHERE device = ?1"),
+            [device],
+            pending_row,
+        )
+        .optional()?)
+}
+
+pub fn set_pending(conn: &Connection, p: &Pending) -> Result<()> {
+    conn.execute(
+        &format!(
+            "INSERT OR REPLACE INTO pending({PENDING_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"
+        ),
+        params![
+            p.device,
+            p.from_seq,
+            p.from_offset,
+            p.to_seq,
+            p.to_offset,
+            p.reason,
+            p.hold,
+            p.attempts,
+            p.next_attempt_at,
+            p.since,
+            p.prompt
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn clear_pending(conn: &Connection, device: &str) -> Result<()> {
+    conn.execute("DELETE FROM pending WHERE device = ?1", [device])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `oboete resume` makes a window that waited on the owner due now; one that waits on time
+    /// keeps its time.
+    #[test]
+    fn resume_makes_a_window_waiting_on_the_owner_due() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = open(home.path()).unwrap();
+        let row = |device: &str, hold: &str| Pending {
+            device: device.into(),
+            from_seq: 1,
+            from_offset: None,
+            to_seq: 2,
+            to_offset: None,
+            reason: "r".into(),
+            hold: hold.into(),
+            attempts: 0,
+            next_attempt_at: 5_000_000_000_000,
+            since: 1,
+            prompt: "p".into(),
+        };
+        set_pending(&conn, &row("a", "owner")).unwrap();
+        set_pending(&conn, &row("b", "time")).unwrap();
+        resume(&conn, "claude").unwrap();
+        let due: Vec<i64> = pending(&conn)
+            .unwrap()
+            .iter()
+            .map(|p| p.next_attempt_at)
+            .collect();
+        assert_eq!(due, [0, 5_000_000_000_000]);
+    }
 
     #[test]
     fn the_month_starts_on_the_first_at_midnight_utc() {
