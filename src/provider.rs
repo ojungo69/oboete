@@ -447,6 +447,16 @@ fn cooldown_for(e: &CallError) -> Option<Duration> {
 /// 0 requests a minute refused every request that way, and a flat 45 s re-sent each window to it
 /// (2026-09-27).
 fn next_state(was: providers_db::State, e: &CallError) -> providers_db::State {
+    // A rest its own allowance set before anything was sent (codex at its usage line) is neither
+    // an outage nor a failure: only the rest, to the millisecond.
+    if !e.sent
+        && let Some(until) = e.cool_until
+    {
+        return providers_db::State {
+            down_until: until,
+            ..was
+        };
+    }
     let (cooldown, fails, backoff) = match cooldown_for(e) {
         Some(_) if e.status == Some(429) && e.retry_after_s.is_none() => {
             let d = COOLDOWN_429.saturating_mul(1 << was.backoff.min(10));
@@ -1515,18 +1525,31 @@ fn codex_rest(read: &Value, now: i64) -> Option<i64> {
         .collect();
     let reset = |w: &Value| w["resetsAt"].as_i64().map(|s| s.saturating_mul(1000));
     let cap = |t: i64| t.min(now + MAX_SUBSCRIPTION_REST.as_millis() as i64);
-    let past = read["ordinaryUsageAllowed"] == false
-        || snapshots
+    // The latest reset of some limits' windows, if every one of those limits gives one.
+    let latest = |limits: &[&Value]| {
+        limits
             .iter()
-            .any(|s| !s["rateLimitReachedType"].is_null());
-    if past {
-        return Some(
-            windows
-                .iter()
-                .filter_map(|w| reset(w))
-                .max()
-                .map_or(providers_db::OWNER_HOLD, cap),
-        );
+            .map(|s| {
+                [&s["primary"], &s["secondary"]]
+                    .into_iter()
+                    .filter_map(reset)
+                    .max()
+            })
+            .collect::<Option<Vec<i64>>>()
+            .and_then(|each| each.into_iter().max())
+    };
+    let reached: Vec<&Value> = snapshots
+        .iter()
+        .copied()
+        .filter(|s| !s["rateLimitReachedType"].is_null())
+        .collect();
+    let past = if read["ordinaryUsageAllowed"] == false {
+        Some(snapshots.as_slice())
+    } else {
+        (!reached.is_empty()).then_some(reached.as_slice())
+    };
+    if let Some(limits) = past {
+        return Some(latest(limits).map_or(providers_db::OWNER_HOLD, cap));
     }
     let at_line = |w: &Value| {
         let Some(used) = w["usedPercent"].as_f64().map(|p| p / 100.0) else {
@@ -1960,11 +1983,33 @@ mod tests {
         assert_eq!(codex_rest(&reached, now), Some(later * 1000));
         let none_left = json!({"ordinaryUsageAllowed": false, "rateLimits": {}});
         assert_eq!(codex_rest(&none_left, now), Some(providers_db::OWNER_HOLD));
+        // A reached limit with no reset holds codex, whatever reset another limit gives.
+        let unknown = json!({"rateLimitsByLimitId": {
+            "codex": {"primary": {"usedPercent": 100}, "rateLimitReachedType": "rate_limit_reached"},
+            "other": {"primary": window(10, 300, soon)},
+        }});
+        assert_eq!(codex_rest(&unknown, now), Some(providers_db::OWNER_HOLD));
         assert_eq!(codex_rest(&json!({}), now), None);
         // At its line with no reset: an hour, then codex is read again.
         let unset = read(json!({"primary": {"usedPercent": 97, "windowDurationMins": 10080}}));
         let hour = REST_WITHOUT_RESET.as_millis() as i64;
         assert_eq!(codex_rest(&unset, now), Some(now + hour));
+    }
+
+    /// A rest codex's allowance set before a call is its own cooldown, to the millisecond: no
+    /// outage cooldown on top, and no failure counted toward the breaker.
+    #[test]
+    fn a_rest_before_the_call_is_only_the_rest() {
+        let soon = db::now_ms() + 120_000;
+        let e = CallError::other("codex is at its plan's usage line")
+            .unsent()
+            .resting(Some(soon));
+        let was = providers_db::State {
+            fails: 1,
+            ..Default::default()
+        };
+        let s = next_state(was, &e);
+        assert_eq!((s.down_until, s.fails), (soon, 1));
     }
 
     /// The app server answers only while its stdin is open: the read keeps it open until the
