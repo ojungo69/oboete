@@ -284,7 +284,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         }
         Cmd::Inject { session } => {
             let cwd = std::env::current_dir()?;
-            print!("{}", hook::inject_text(&home, &cwd, session.as_deref())?);
+            print!("{}", hook::inject_text(&home, &cwd, session.as_deref()));
             Ok(())
         }
         Cmd::Mcp => mcp::run(&home),

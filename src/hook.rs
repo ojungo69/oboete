@@ -322,20 +322,27 @@ fn checkout_manifest(
 /// `oboete inject`: what a SessionStart hook shows for the checkout at `cwd` (the recording-failure
 /// line, then the manifest in its fence). OpenCode's plugin reads its context here, since
 /// OpenCode drops a hook's output.
-pub fn inject_text(home: &Path, cwd: &Path, session: Option<&str>) -> Result<String> {
-    let settings = crate::capture::Settings::load(home)?;
-    let store = crate::raw::open(home)?;
-    let labels = json!({"session_id": session.unwrap_or("unknown"), "cwd": cwd});
+pub fn inject_text(home: &Path, cwd: &Path, session: Option<&str>) -> String {
+    // The failure line does not wait on the settings or raw.db: one that cannot be read may be
+    // the failure it reports.
+    let manifest = (|| -> Result<Option<String>> {
+        let settings = crate::capture::Settings::load(home)?;
+        let store = crate::raw::open(home)?;
+        let labels = json!({"session_id": session.unwrap_or("unknown"), "cwd": cwd});
+        Ok(checkout_manifest(home, &store, &labels, &settings))
+    })()
+    .unwrap_or_else(|e| {
+        eprintln!("oboete: manifest not read: {e:#}");
+        None
+    });
     let parts: Vec<String> = [
         crate::failure::since(home).map(crate::failure::line),
-        checkout_manifest(home, &store, &labels, &settings)
-            .as_deref()
-            .map(crate::manifest::fenced),
+        manifest.as_deref().map(crate::manifest::fenced),
     ]
     .into_iter()
     .flatten()
     .collect();
-    Ok(parts.join("\n"))
+    parts.join("\n")
 }
 
 /// An idless event's session is this device's own: a bare "unknown" would be one session on
@@ -1385,7 +1392,7 @@ mod tests {
                 .unwrap();
             assert!(text.contains("look at the cache"), "{agent}: {text}");
             // OpenCode drops the hook's output and asks `oboete inject` for the same text.
-            let asked = inject_text(home.path(), cwd.path(), Some("b")).unwrap();
+            let asked = inject_text(home.path(), cwd.path(), Some("b"));
             assert_eq!(asked, text, "{agent}");
             let resumed = json!({"session_id": "b", "cwd": c, "source": "resume"});
             assert_eq!(hook("SessionStart", resumed), "", "{agent}");
@@ -1852,6 +1859,28 @@ mod tests {
             events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
             ["prompt", "reply", "end", "end"]
         );
+    }
+
+    #[test]
+    fn inject_shows_the_failure_line_when_raw_cannot_be_opened() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("raw.db")).unwrap(); // not a database file
+        let start = json!({"session_id": "s", "cwd": cwd.path(), "source": "startup"}).to_string();
+        let mut out = Vec::new();
+        assert!(
+            run_io(
+                home.path(),
+                "opencode",
+                "SessionStart",
+                start.as_bytes(),
+                &mut out
+            )
+            .is_err()
+        );
+        let failed = crate::failure::since(home.path()).expect("marked");
+        let text = inject_text(home.path(), cwd.path(), Some("s"));
+        assert_eq!(text, crate::failure::line(failed));
     }
 
     #[test]
