@@ -8,14 +8,20 @@ It supplements the existing Rust CI and SonarCloud checks; it does not approve o
 
 ## Provider setup
 
+This repository uses NVIDIA NIM: `z-ai/glm-5.3` is the primary model and
+`moonshotai/kimi-k3` is the fallback. GLM is the starting choice for text-only
+code review, not a claim that it outperforms Kimi on every repository. Both use
+the same NIM account, OpenAI-compatible endpoint, and `high` reasoning effort.
+
 In the repository's **Settings > Secrets and variables > Actions**, configure:
 
 | Kind | Name | Value |
 | --- | --- | --- |
-| Secret | `OCR_LLM_URL` | Full LLM request endpoint, including `/chat/completions` or `/messages`. |
-| Secret | `OCR_LLM_AUTH_TOKEN` | API key for the selected provider. |
-| Variable | `OCR_LLM_USE_ANTHROPIC` | `true` for the Anthropic protocol; omitted or `false` for OpenAI-compatible APIs. |
-| Variable | `OCR_LLM_MODEL` | Provider's model ID. Set this last to enable the workflow. |
+| Secret | `OCR_LLM_URL` | `https://integrate.api.nvidia.com/v1/chat/completions` |
+| Secret | `OCR_LLM_AUTH_TOKEN` | NVIDIA NIM API key. |
+| Variable | `OCR_LLM_USE_ANTHROPIC` | `false` for the NIM OpenAI-compatible endpoint. |
+| Variable | `OCR_LLM_MODEL` | `z-ai/glm-5.3`. Set this last to enable the workflow. |
+| Variable | `OCR_LLM_FALLBACK_MODEL` | `moonshotai/kimi-k3`. Omit to disable fallback. |
 
 No extra GitHub credential is needed: the workflow uses its short-lived `GITHUB_TOKEN`.
 Never put an API key in this file, the workflow, a PR, or a command-line argument.
@@ -25,6 +31,27 @@ Review calls consume that provider's quota.
 
 An unset `OCR_LLM_MODEL` skips the review job. A configured model with missing
 secrets fails before installing or calling OpenCodeReview.
+
+## Fallback behavior
+
+OpenCodeReview 1.12.9 retries requests to its selected model but does not switch
+models automatically. The workflow makes at most one additional review attempt
+with the fallback model when the primary OCR CLI exits nonzero. Both attempts
+review the same PR head and use the same version, endpoint, and credentials.
+
+Checkout, installation, configuration, and comment-publication failures do not
+trigger fallback. Cancellation or the job timeout also stops the run. A primary
+failure stays a failed check unless the fallback action succeeds; failures are
+not silently ignored by `continue-on-error`.
+
+A partially completed review can exit zero and publish its findings. That does
+not trigger another model or duplicate the comments. Inspect the summary's
+coverage and warnings. A failed primary CLI attempt does not publish its
+findings; they remain in the log, and the fallback publishes its own result.
+
+Changing models can help with model-specific failures. It cannot guarantee
+recovery from shared NIM outages, account-wide quotas, or an invalid API key.
+The alternate model is tried only once, even for these failures.
 
 ## Triggers and limits
 
@@ -40,9 +67,14 @@ secrets fails before installing or calling OpenCodeReview.
 
 - A newer run for the same PR cancels an older run. Ordinary PR comments do not
   trigger or cancel reviews.
-- Each job has a 30-minute timeout, two concurrent review tasks, and a 100,000-token
-  budget. The upstream budget is a soft stop checked between LLM rounds, not a hard
-  billing cap; a final round may exceed it, and unfinished files are reported.
+- Each job has a 30-minute timeout. Each attempt has two concurrent review tasks,
+  a 180-second LLM request timeout, and a 100,000-token budget. The CLI multiplies
+  the five-minute task setting by the two rounds of explicit `medium` review
+  effort, giving each file group a ten-minute deadline. The job deadline still
+  applies across all groups and both models. Fallback can consume a second budget.
+  The upstream budget is a soft stop
+  checked between LLM rounds, not a hard billing cap; a final round may exceed it,
+  and unfinished files are reported.
 - Findings are advisory. A successful job means the tool ran, not that the PR is
   defect-free or every file was reviewed. Inspect the summary for partial results.
 - Existing inline findings are preserved. Each run may add findings on the same

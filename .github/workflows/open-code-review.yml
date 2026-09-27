@@ -67,7 +67,9 @@ jobs:
 
       # The action checks out the trusted event ref and reads PR blobs through git.
       # Do not add a checkout of the PR head or execute PR scripts in this job.
-      - name: Review pull request
+      - name: Review with ${{ vars.OCR_LLM_MODEL }}
+        id: primary
+        continue-on-error: true
         uses: alibaba/open-code-review@486022daaf14f7142275eddb9b3cacc3cc5dadfa # 2026-09-24
         with:
           ocr_version: '1.12.9'
@@ -77,6 +79,10 @@ jobs:
           llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC || 'false' }}
           # The upstream default contains a provider-specific "thinking" field.
           llm_extra_body: '{}'
+          llm_reasoning_effort: high
+          llm_timeout: '180'
+          review_task_timeout: '5'
+          effort: medium
           language: Japanese
           review_concurrency: '2'
           max_tokens_budget: '100000'
@@ -86,3 +92,41 @@ jobs:
           base_ref: ${{ steps.pr.outputs.base_ref }}
           head_sha: ${{ steps.pr.outputs.head_sha }}
           pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
+
+      # A nonzero OCR exit happens before comments are posted. Setup and posting
+      # failures must remain failures, without spending another model's quota.
+      - name: Fall back to ${{ vars.OCR_LLM_FALLBACK_MODEL }}
+        id: fallback
+        if: >-
+          !cancelled() && steps.primary.outcome == 'failure' &&
+          env.OCR_EXIT_CODE != '' && env.OCR_EXIT_CODE != '0' &&
+          vars.OCR_LLM_FALLBACK_MODEL != '' &&
+          vars.OCR_LLM_FALLBACK_MODEL != vars.OCR_LLM_MODEL
+        uses: alibaba/open-code-review@486022daaf14f7142275eddb9b3cacc3cc5dadfa # 2026-09-24
+        with:
+          ocr_version: '1.12.9'
+          llm_url: ${{ secrets.OCR_LLM_URL }}
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          llm_model: ${{ vars.OCR_LLM_FALLBACK_MODEL }}
+          llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC || 'false' }}
+          llm_extra_body: '{}'
+          llm_reasoning_effort: high
+          llm_timeout: '180'
+          review_task_timeout: '5'
+          effort: medium
+          language: Japanese
+          review_concurrency: '2'
+          max_tokens_budget: '100000'
+          incremental: 'false'
+          upload_artifacts: 'false'
+          base_ref: ${{ steps.pr.outputs.base_ref }}
+          head_sha: ${{ steps.pr.outputs.head_sha }}
+          pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
+
+      - name: Fail when no review attempt succeeded
+        if: >-
+          !cancelled() && steps.primary.outcome == 'failure' &&
+          steps.fallback.outcome != 'success'
+        run: |
+          echo '::error::The primary review failed and no fallback review succeeded. See the failed step above.'
+          exit 1
