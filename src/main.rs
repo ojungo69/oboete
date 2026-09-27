@@ -12,6 +12,7 @@ mod config;
 mod consumer;
 mod curate;
 mod db;
+mod digest;
 mod embed;
 mod failure;
 mod hook;

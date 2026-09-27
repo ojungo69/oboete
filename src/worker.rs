@@ -43,6 +43,8 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
         Box::new(crate::consumer::claims::Claims),
         // Claims whose quote a later tombstone masked or removed.
         Box::new(crate::consumer::claims::Anchors),
+        // The op log's digests (Task 9), shown while every claim they cite is current.
+        Box::new(crate::consumer::digest::Digests),
         Box::new(crate::consumer::manifest::Manifest::new(home)),
         Box::new(crate::consumer::gaps::Gaps::new(home)),
         Box::new(crate::consumer::compress::Compress),
