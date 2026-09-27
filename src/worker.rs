@@ -334,13 +334,19 @@ fn run_consumers(home: &Path, idle_ms: u64, consumers: Vec<Box<dyn Consumer>>) -
 
 /// The curation phase, when `[summary] curate` asks for it: off until the cut-over (spec 7.5).
 fn curation(home: &Path) -> Result<Option<Box<CurationPhase<'static>>>> {
-    let cfg = crate::config::load(home)?;
-    if !cfg.summary.curate {
+    if !crate::config::load(home)?.summary.curate {
         return Ok(None);
     }
-    let rules = crate::capture::Settings::load(home)?.rules;
     let db = crate::providers_db::open(home)?;
+    let home = home.to_owned();
     Ok(Some(Box::new(move |raw: &mut Raw| {
+        // Read again for each window: a worker that stays up follows the owner's edits (turning
+        // curation off, a provider removed, a lower cap).
+        let cfg = crate::config::load(&home)?;
+        if !cfg.summary.curate {
+            return Ok(Phase::Idle);
+        }
+        let rules = crate::capture::Settings::load(&home)?.rules;
         let mut curator = |span: &str, prompt: &str, working: &dyn Fn() -> Option<i64>| {
             crate::provider::Chain::new(&cfg.providers, &db)
                 .paid_cap(cfg.paid_usd_per_month)
@@ -709,6 +715,31 @@ mod tests {
             .expect("the phase did not run");
         assert_eq!((p.hold.as_str(), p.from_seq, p.to_seq), ("budget", 1, 2));
         assert!(p.reason.contains("spent: 0/0 calls today"), "{}", p.reason);
+    }
+
+    /// A worker that stays up reads the config again for each window: turning curation off
+    /// takes effect without a new worker.
+    #[test]
+    fn a_worker_that_stays_up_follows_the_owners_config() {
+        let home = tempfile::tempdir().unwrap();
+        let config = |curate: bool| {
+            let text = format!(
+                "[summary]\ncurate = {curate}\n[[providers]]\nkind = \"openai\"\n\
+                 name = \"spent\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\
+                 daily_budget = 0\n"
+            );
+            std::fs::write(home.path().join("config.toml"), text).unwrap();
+        };
+        config(true);
+        let mut raw = raw::open(home.path()).unwrap();
+        raw.append(&raw::test_event("a")).unwrap();
+        let mut phase = curation(home.path()).unwrap().expect("curation is on");
+        assert!(matches!(
+            phase(&mut raw).unwrap(),
+            Phase::Waiting { up: false, .. }
+        ));
+        config(false);
+        assert_eq!(phase(&mut raw).unwrap(), Phase::Idle);
     }
 
     /// The Windows runner's worker stopped with "database is locked" after a restore: a search

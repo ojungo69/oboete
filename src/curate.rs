@@ -500,9 +500,11 @@ pub fn run_phase(
             up: until - now <= STAY_UP_MS,
         });
     }
-    // A row for another start is stale: a restore or a skipped window moved the checkpoint.
+    // A row for another window is stale: a restore or a skipped window moved the checkpoint, or
+    // records added since made it longer, and its attempts were not on this text.
+    let range = |p: &Pending| (p.from_seq, p.from_offset, p.to_seq, p.to_offset);
     let pending = providers_db::pending_of(db, &device)?
-        .filter(|p| (p.from_seq, p.from_offset) == (w.from_seq, w.from_offset));
+        .filter(|p| range(p) == (w.from_seq, w.from_offset, w.to_seq, w.to_offset));
     if let Some(p) = &pending
         && p.next_attempt_at > now
     {
@@ -1329,6 +1331,34 @@ mod tests {
             .unwrap();
         assert_eq!((p.from_seq, p.to_seq, p.attempts), (1, 1, 1));
         assert!(p.since > 0);
+    }
+
+    /// Records added to a window that failed make a longer window: its attempts start again, so
+    /// no record is skipped without three attempts on it.
+    #[test]
+    fn a_window_that_grew_starts_its_attempts_again() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&prompt("one")).unwrap();
+        let mut chain = |_: &str, _: &str, _: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
+            Err(went_past(&[("groq", "HTTP 400", Skip::Failed)]))
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        run_phase(&mut raw, &db, &rules, &summary, &mut chain).unwrap();
+        let mut p = providers_db::pending_of(&db, raw.device())
+            .unwrap()
+            .unwrap();
+        assert_eq!((p.to_seq, p.attempts), (1, 1));
+        // Two attempts on it so far, and it is due; then the owner adds a record.
+        (p.attempts, p.next_attempt_at) = (2, 0);
+        providers_db::set_pending(&db, &p).unwrap();
+        raw.append(&prompt("two")).unwrap();
+        let phase = run_phase(&mut raw, &db, &rules, &summary, &mut chain).unwrap();
+        assert!(matches!(phase, Phase::Waiting { .. }), "{phase:?}");
+        let p = providers_db::pending_of(&db, raw.device())
+            .unwrap()
+            .unwrap();
+        assert_eq!((p.to_seq, p.attempts), (2, 1));
     }
 
     /// Milestone 2's coverage part, on a replayed day: every seq is in a window op, curated,

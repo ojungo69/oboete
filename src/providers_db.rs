@@ -49,8 +49,8 @@ CREATE TABLE IF NOT EXISTS isolation(
   PRIMARY KEY(cli, version)
 );
 -- The window each device's curation waits on (docs/milestone-3-plan.md D10, D11): one row per
--- device, for the window that starts at (from_seq, from_offset). It counts only while raw.db's
--- next window still starts there: the curation phase replaces a row that no longer does.
+-- device. It counts only while raw.db's next window is still this one, start and end: the
+-- curation phase replaces a row that no longer is.
 CREATE TABLE IF NOT EXISTS pending(
   device TEXT PRIMARY KEY,
   from_seq INTEGER NOT NULL,
