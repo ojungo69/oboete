@@ -153,9 +153,13 @@ pub fn check(
                 .find_map(|l| crate::curate::locate(w, &l.id, &why));
             d.why = match given {
                 Some(at) => {
-                    if (at.device.as_str(), at.seq)
-                        != (evidence[0].device.as_str(), evidence[0].seq)
-                    {
+                    // Unless the quote's own range holds it: masking the reason alone must
+                    // take its anchor too.
+                    let q = &evidence[0];
+                    let covered = (at.device.as_str(), at.seq) == (q.device.as_str(), q.seq)
+                        && q.offset <= at.offset
+                        && at.offset + at.length <= q.offset + q.length;
+                    if !covered {
                         evidence.push(at);
                     }
                     crate::redact::outbound_with(&why, rules)
@@ -379,6 +383,7 @@ fn passing_run(w: &Window, line: &Line) -> bool {
             && l.repo == line.repo
             && l.role == (Role::Tool { failed: false })
             && runs(&l.text)
+            && !exited_nonzero(l.source_text())
             && {
                 let text = decoded(l.source_text()).to_lowercase();
                 PASSED.iter().any(|p| text.contains(p))
@@ -386,6 +391,22 @@ fn passing_run(w: &Window, line: &Line) -> bool {
                     && !errors.is_match(&text)
             }
     })
+}
+
+/// Whether a run's output says it exited nonzero, whatever the hook's flag: agy prints "The
+/// command exited with code 2", Cursor's output carries `exitCode`.
+fn exited_nonzero(output: &str) -> bool {
+    static EXIT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)\bexit(?:ed)?(?: with)? (?:code|status):? ?[1-9]").unwrap()
+    });
+    let code = serde_json::from_str::<serde_json::Value>(output)
+        .ok()
+        .and_then(|v| {
+            ["exitCode", "exit_code", "returncode"]
+                .iter()
+                .find_map(|k| v.get(*k).and_then(serde_json::Value::as_i64))
+        });
+    code.is_some_and(|c| c != 0) || EXIT.is_match(output)
 }
 
 /// Whether a tool line is a command run (any agent's shell), not a read or a search.
@@ -789,6 +810,24 @@ mod tests {
         assert_eq!(done(&[broken, reply(fixed)]), "proposed");
         let fine = structured("test result: ok. 4 passed; 0 failed", "");
         assert_eq!(done(&[fine, reply(fixed)]), "done");
+        // A nonzero exit is a failure whatever the hook's flag says: agy prints it, Cursor's
+        // output carries it.
+        let agy = (
+            "tool",
+            json!({"tool": "run_command", "input": "cargo test",
+            "output": "The command exited with code 2.\nOutput:\n3 passed", "failed": false}),
+        );
+        assert_eq!(done(&[agy, reply(fixed)]), "proposed");
+        let cursor = |code: i64| {
+            let output = json!({"exitCode": code, "stdout": "test result: ok. 4 passed; 0 failed"})
+                .to_string();
+            (
+                "tool",
+                json!({"tool": "Shell", "input": "cargo test", "output": output, "failed": false}),
+            )
+        };
+        assert_eq!(done(&[cursor(1), reply(fixed)]), "proposed");
+        assert_eq!(done(&[cursor(0), reply(fixed)]), "done");
         // A bare "yes" names nothing done, whatever ran before it.
         let passed = tool("test result: ok. 4 passed; 0 failed", false);
         let w = window(&[passed, reply("I fixed the parser."), user("Yes.")]);
@@ -1020,6 +1059,12 @@ mod tests {
         let seqs: Vec<i64> = evidence.iter().map(|e| e.seq).collect();
         assert_eq!(seqs, [later.lines[0].seq, later.lines[1].seq]);
         assert_eq!(evidence[1].quote, "the old name clashed");
+        // A reason in the quote's own event but outside the quote keeps its own range, so masking
+        // only the reason takes its anchor.
+        let g = change("The module is renamed.", "the old name clashed");
+        let ranges: Vec<(i64, i64)> = g.kept[0].1.iter().map(|e| (e.seq, e.offset)).collect();
+        assert_eq!(ranges.len(), 2, "{ranges:?}");
+        assert_eq!(ranges[0].0, ranges[1].0);
         let explained = change("3 files changed to fix the login check.", "");
         assert_eq!(explained.kept.len(), 1);
         for bare in [
