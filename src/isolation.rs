@@ -84,9 +84,54 @@ fn command(exe: &Path, cwd: &Path) -> Command {
     cmd
 }
 
+/// How long one probe command may take: a codex that stalls fails the gate, and the chain goes on
+/// to the next provider.
+const PROBE_LIMIT: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 5 } else { 30 });
+
+/// `cmd`'s output, or an error when it did not finish within `PROBE_LIMIT` (it is killed).
+fn output(cmd: &mut Command) -> Result<std::process::Output, String> {
+    use std::io::Read;
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
+    let deadline = std::time::Instant::now() + PROBE_LIMIT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("did not finish in {} s", PROBE_LIMIT.as_secs()));
+            }
+        }
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
 /// `<cli> --version`, first line.
 fn version(exe: &Path, cwd: &Path) -> Option<String> {
-    let out = command(exe, cwd).arg("--version").output().ok()?;
+    let out = output(command(exe, cwd).arg("--version")).ok()?;
     let v = String::from_utf8_lossy(&out.stdout)
         .lines()
         .next()?
@@ -135,9 +180,7 @@ fn probe(exe: &Path, home: &Path, cwd: &Path) -> Result<(), String> {
     for f in CODEX_OFF {
         features.args(["--disable", f]);
     }
-    let out = features
-        .output()
-        .map_err(|e| format!("codex features list: {e}"))?;
+    let out = output(&mut features).map_err(|e| format!("codex features list: {e}"))?;
     let listed = String::from_utf8_lossy(&out.stdout);
     for f in CODEX_OFF {
         // `<name>  <stage>  <true|false>`
@@ -152,10 +195,9 @@ fn probe(exe: &Path, home: &Path, cwd: &Path) -> Result<(), String> {
     // Hosted web search is a setting, not a feature: `web_search="disabled"` holds only while
     // this codex still reads that key. An invalid value must be refused by name, with the value
     // the curator sets among the allowed ones; a codex that renamed the key would ignore any value.
-    let bad = command(exe, cwd)
-        .args(["features", "list", "-c", r#"web_search="oboete-probe""#])
-        .output()
-        .map_err(|e| format!("codex features list: {e}"))?;
+    let bad =
+        output(command(exe, cwd).args(["features", "list", "-c", r#"web_search="oboete-probe""#]))
+            .map_err(|e| format!("codex features list: {e}"))?;
     let said = String::from_utf8_lossy(&bad.stderr);
     if bad.status.success() || !(said.contains("`web_search`") && said.contains("`disabled`")) {
         return Err("codex does not refuse an invalid web_search setting".into());
@@ -163,13 +205,14 @@ fn probe(exe: &Path, home: &Path, cwd: &Path) -> Result<(), String> {
     let canary = Canary::new(home).map_err(|e| format!("canary: {e}"))?;
     // What the command said, and its exit code.
     let run = |argv: &[&str]| -> Result<(Option<i32>, String), String> {
-        let out = command(exe, cwd)
-            // With the managed requirements, as `codex exec` resolves the profile.
-            .args(["sandbox", "--include-managed-config"])
-            .args(["-c", &probe_profile(), "-P", "curator", "--"])
-            .args(argv)
-            .output()
-            .map_err(|e| format!("codex sandbox: {e}"))?;
+        let out = output(
+            command(exe, cwd)
+                // With the managed requirements, as `codex exec` resolves the profile.
+                .args(["sandbox", "--include-managed-config"])
+                .args(["-c", &probe_profile(), "-P", "curator", "--"])
+                .args(argv),
+        )
+        .map_err(|e| format!("codex sandbox: {e}"))?;
         let said = String::from_utf8_lossy(&out.stdout).into_owned()
             + &String::from_utf8_lossy(&out.stderr);
         let tool = argv[0];
@@ -462,6 +505,18 @@ mod tests {
             g,
             Gate::Failed("the curl probe was not refused (28)".into())
         );
+    }
+
+    #[test]
+    fn a_probe_that_stalls_fails_the_gate_in_bounded_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let (_, g) = gate_with(&fake(dir.path(), "sleep 60", REFUSES), dir.path());
+        assert_eq!(
+            g,
+            Gate::Failed("codex features list: did not finish in 5 s".into())
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }
 
     #[test]

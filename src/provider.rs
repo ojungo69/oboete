@@ -188,17 +188,6 @@ impl<'a> Chain<'a> {
                 fallbacks.push((name, "cooling down after an earlier failure".into()));
                 continue;
             }
-            // A curator CLI that could act on what it reads is not called at all (spec 6.5).
-            if let Provider::Cli { cli, .. } = p {
-                let started = Instant::now();
-                let gate = crate::isolation::gate(conn, cli)?;
-                if gate != crate::isolation::Gate::Passed {
-                    let ms = started.elapsed().as_millis() as i64;
-                    record("gate", ms, Some(&gate.why()), false, Usage::default(), None)?;
-                    fallbacks.push((name, gate.why()));
-                    continue;
-                }
-            }
             let tokens = f64::from(est) * budget::factor(conn, &name)?;
             let admit = budget::admit(conn, p, tokens, self.paid_usd_per_month, &ceiling_hit)?;
             if let Some(refusal) = admit {
@@ -212,6 +201,18 @@ impl<'a> Chain<'a> {
                 )?;
                 fallbacks.push((name, refusal.detail));
                 continue;
+            }
+            // A curator CLI that could act on what it reads is not called at all (spec 6.5). After
+            // the budget: the probe takes seconds, and a call the budget refuses needs none.
+            if let Provider::Cli { cli, .. } = p {
+                let started = Instant::now();
+                let gate = crate::isolation::gate(conn, cli)?;
+                if gate != crate::isolation::Gate::Passed {
+                    let ms = started.elapsed().as_millis() as i64;
+                    record("gate", ms, Some(&gate.why()), false, Usage::default(), None)?;
+                    fallbacks.push((name, gate.why()));
+                    continue;
+                }
             }
             let used = providers_db::calls_today(conn, &name)?;
             let started = Instant::now();
@@ -2419,6 +2420,33 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(sent, [0, 0]);
+    }
+
+    /// The isolation probe takes seconds: a call the budget refuses runs none.
+    #[test]
+    fn a_curator_cli_the_budget_refuses_is_not_probed() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let spent = Provider::Cli {
+            name: "codex".into(),
+            cli: "codex".into(),
+            model: None,
+            daily_budget: 0,
+            timeout_s: 5,
+            limits: Default::default(),
+        };
+        assert!(
+            Chain::new(&[spent], &conn)
+                .run("curator", "s", "p", &json!({}))
+                .is_err()
+        );
+        let probed: i64 = conn
+            .query_row("SELECT COUNT(*) FROM isolation", [], |r| r.get(0))
+            .unwrap();
+        let outcome: String = conn
+            .query_row("SELECT outcome FROM provider_calls", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((probed, outcome.as_str()), (0, "budget"));
     }
 
     #[test]
