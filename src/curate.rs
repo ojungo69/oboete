@@ -72,6 +72,9 @@ struct Source {
     start: usize,
     text: String,
     hidden: Vec<(usize, usize)>,
+    /// `sentence_start` of the long text before `start`: where a sentence the piece starts inside
+    /// began, which the piece alone cannot see.
+    lead: usize,
 }
 
 /// One record's share of a window.
@@ -367,6 +370,7 @@ impl<'r> Prepared<'r> {
             ));
             source = hidden.as_ref().map(|runs| Source {
                 start,
+                lead: sentence_start(&long[..start]),
                 text: long[start..end].to_owned(),
                 hidden: runs
                     .iter()
@@ -503,11 +507,7 @@ fn grouped(pieces: &[Piece]) -> (String, Vec<Line>) {
 /// with the event's own byte offsets. `None` when it is in neither, or only where the gate hid
 /// something (a quote with a mask in it, or text a mask stands for).
 pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims::Evidence> {
-    // Models write `L4` as `4`, `[L4]` or `l4` too: 67 of 140 drafts were lost to that alone
-    // (docs/milestone-1.md, dev label drafts).
-    let id = line.trim().trim_matches(['[', ']', '"', '\'', ' ']);
-    let id = id.strip_prefix(['L', 'l']).unwrap_or(id);
-    let line = window.lines.iter().find(|l| l.id[1..] == *id)?;
+    let line = &window.lines[line_index(window, line)?];
     let source = line.source.as_ref()?;
     if quote.is_empty() || !line.text.contains(quote) {
         return None;
@@ -522,9 +522,34 @@ pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims:
         seq: line.seq,
         offset: as_i64(source.start + at)?,
         length: as_i64(quote.len())?,
-        sentence: as_i64(source.start + sentence_start(&source.text[..at]))?,
+        sentence: as_i64(source.sentence(at))?,
         quote: quote.to_owned(),
     })
+}
+
+/// The index in `window.lines` of the line a curator names. Models write `L4` as `4`, `[L4]` or
+/// `l4` too: 67 of 140 drafts were lost to that alone (docs/milestone-1.md, dev label drafts).
+pub fn line_index(window: &Window, line: &str) -> Option<usize> {
+    let id = line.trim().trim_matches(['[', ']', '"', '\'', ' ']);
+    let id = id.strip_prefix(['L', 'l']).unwrap_or(id);
+    window.lines.iter().position(|l| l.id[1..] == *id)
+}
+
+const SENTENCE_ENDS: [char; 7] = ['。', '.', '?', '!', '？', '！', '\n'];
+
+impl Source {
+    /// The start, in the long text, of the sentence that byte `at` of the piece is in: the same
+    /// wherever a window split the event (MUST-M18's uid).
+    fn sentence(&self, at: usize) -> usize {
+        let before = &self.text[..at];
+        let ends = before.contains(SENTENCE_ENDS);
+        // Before the piece, the sentence still runs when the text there ends in its spaces.
+        if ends || self.lead == self.start {
+            self.start + sentence_start(before)
+        } else {
+            self.lead
+        }
+    }
 }
 
 /// Where the sentence that `before` runs into starts: after its last sentence end (`。`, `.`,
@@ -534,7 +559,7 @@ fn sentence_start(before: &str) -> usize {
     let end = before
         .char_indices()
         .rev()
-        .find(|&(_, c)| matches!(c, '。' | '.' | '?' | '!' | '？' | '！' | '\n'))
+        .find(|(_, c)| SENTENCE_ENDS.contains(c))
         .map_or(0, |(i, c)| i + c.len_utf8());
     let spaces = before[end..].len() - before[end..].trim_start().len();
     end + spaces
@@ -629,13 +654,23 @@ pub fn run_phase(
             repos.push(repo);
         }
     }
+    // Each repository's candidates, found by its own lines and kept with it: a draft supersedes
+    // only its own repository's claims.
+    let mut shown_in: Vec<(String, String)> = Vec::new();
     for repo in repos {
-        for c in candidates(k, repo, &w.text)? {
+        let text: Vec<&str> = w
+            .lines
+            .iter()
+            .filter(|l| l.repo.as_deref() == Some(repo))
+            .map(|l| l.text.as_str())
+            .collect();
+        for c in candidates(k, repo, &text.join("\n"))? {
             shown.push_str(&format!(
                 "{}: {}\n",
                 c.uid,
                 crate::redact::outbound_with(&c.body, rules)
             ));
+            shown_in.push((repo.to_owned(), c.uid));
         }
     }
     let prompt = prompt(
@@ -669,7 +704,7 @@ pub fn run_phase(
         curator(&span, &prompt, &|| working(raw), &|v| check(&w, v))
     };
     let failed = match answer {
-        Ok(r) => match claims_of(&w, &r.output, &r.provider, r.tier) {
+        Ok(r) => match claims_of(&w, &r.output, &r.provider, r.tier, &shown_in) {
             Ok((summary, claims)) => {
                 let op = json!({"outcome": "curated", "provider": r.provider, "summary": summary});
                 return cover(raw, db, &w, op, claims);
@@ -887,25 +922,42 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
 /// The chain's check of a curator's answer (`provider::AnswerCheck`): the outcome it is refused
 /// under, or `None` when it gives this window something to keep.
 pub fn check(w: &Window, answer: &Value) -> Option<&'static str> {
-    claims_of(w, answer, "", 0)
+    claims_of(w, answer, "", 0, &[])
         .err()
         .map(AnswerFailure::outcome)
 }
 
 /// The summary and a claim op per draft whose quote is found in the window (Task 6's
-/// `ClaimOp`), with the answering entry as its recipe and tier.
+/// `ClaimOp`), with the answering entry as its recipe and tier. `shown` is each candidate's
+/// repository and uid: a draft supersedes a sibling, or a candidate of its own line's repository
+/// (another repository's claim would leave that repository's current tips).
 fn claims_of(
     w: &Window,
     answer: &Value,
     recipe: &str,
     tier: i64,
+    shown: &[(String, String)],
 ) -> std::result::Result<(String, Vec<Value>), AnswerFailure> {
     let (summary, drafts) = parse(answer)?;
+    let ids: Vec<&str> = drafts.iter().map(|d| d.id.as_str()).collect();
     let mut claims = Vec::new();
     for d in &drafts {
-        let Some(evidence) = locate(w, &d.line, &d.quote) else {
+        let (Some(i), Some(evidence)) = (line_index(w, &d.line), locate(w, &d.line, &d.quote))
+        else {
             continue; // not a claim: its quote is not in the window (Task 8 counts these)
         };
+        let repo = w.lines[i].repo.as_deref();
+        let supersedes = d
+            .supersedes
+            .iter()
+            .filter(|to| {
+                ids.contains(&to.as_str())
+                    || shown
+                        .iter()
+                        .any(|(r, uid)| Some(r.as_str()) == repo && uid == *to)
+            })
+            .cloned()
+            .collect();
         let op = crate::claims::ClaimOp {
             id: d.id.clone(),
             kind: d.kind.clone(),
@@ -914,7 +966,7 @@ fn claims_of(
             scope: d.scope.clone(),
             body: d.body.clone(),
             evidence: vec![evidence],
-            supersedes: d.supersedes.clone(),
+            supersedes,
             recipe: recipe.to_owned(),
             tier,
         };
@@ -1304,6 +1356,41 @@ mod tests {
         let at = usize::try_from(ev.offset).unwrap();
         assert!(at > usize::try_from(first.to_offset.unwrap()).unwrap());
         assert_eq!(&long[at..at + yaml.len()], yaml);
+    }
+
+    /// MUST-M18: a quote gets its sentence's start in the whole event, so its uid is the same
+    /// wherever a window split the event.
+    #[test]
+    fn a_quote_in_a_split_sentence_gets_the_sentence_start_of_the_whole_event() {
+        let (_h, mut raw, dev) = store();
+        let filler = "and argued at length ".repeat(60);
+        let reply = format!("Intro line. We decided {filler}to keep the parser strict. Done.");
+        let e = event("reply", serde_json::json!({"assistant": reply}));
+        raw.append(&e).unwrap();
+        let long = long_text(&e).unwrap();
+        let want = long.find("We decided").unwrap() as i64;
+        let quote = "parser strict";
+        let sentence = |w: &Window| {
+            let l = w.lines.iter().find(|l| l.text.contains(quote))?;
+            Some((
+                l.text.contains("We decided"),
+                locate(w, &l.id, quote)?.sentence,
+            ))
+        };
+        let whole = next_window(&raw, &dev, 100_000, &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(sentence(&whole), Some((true, want)));
+        loop {
+            let w = next_window(&raw, &dev, 120, &Rules::default())
+                .unwrap()
+                .unwrap();
+            if let Some(got) = sentence(&w) {
+                assert_eq!(got, (false, want));
+                break;
+            }
+            close(&mut raw, &w);
+        }
     }
 
     #[test]
@@ -2164,6 +2251,66 @@ mod tests {
             let item = |l: &str| l.starts_with("open item ") && l.ends_with(&format!(": {body}"));
             assert!(text.lines().any(item), "{body}: {text}");
         }
+    }
+
+    /// A window of two repositories: a draft of one supersedes only that repository's candidates,
+    /// so the other's claim stays among its current tips.
+    #[test]
+    fn a_draft_supersedes_only_candidates_of_its_own_repository() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let op = kept(&mut raw, "s1", "a", "We store sessions in Postgres.");
+        raw.append_ops(&[op]).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let old = crate::claims::current(&k, "a").unwrap()[0].uid.clone();
+        let in_repo = |session: &str, repo: &str, text: &str| Event {
+            session: session.into(),
+            repo: Some(repo.into()),
+            ..prompt(text)
+        };
+        raw.append(&in_repo("s2", "a", "Sessions leave Postgres for SQLite."))
+            .unwrap();
+        raw.append(&in_repo("s3", "b", "Sessions leave Postgres here too."))
+            .unwrap();
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let dev = raw.device().to_owned();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        let line = |text: &str| {
+            w.lines
+                .iter()
+                .find(|l| l.text.contains(text))
+                .unwrap()
+                .id
+                .clone()
+        };
+        let draft = |id: &str, quote: &str| {
+            json!({"id": id, "kind": "decision", "status": "decided", "speaker": "user",
+                "scope": "repo", "body": quote, "quote": quote, "line": line(quote),
+                "supersedes": [old]})
+        };
+        let answer = json!({"claims": [draft("c1", "Sessions leave Postgres for SQLite"),
+            draft("c2", "Sessions leave Postgres here too")], "summary": "s"});
+        let mut chain = |_: &str,
+                         _: &str,
+                         _: &dyn Fn() -> Option<i64>,
+                         _: &AnswerCheck|
+         -> Result<ChainResult> {
+            Ok(ChainResult {
+                output: answer.clone(),
+                ..answered("fake")
+            })
+        };
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        let ops = raw.ops_after(raw.device(), 1, 10).unwrap();
+        let supersedes: Vec<&Value> = ops
+            .iter()
+            .filter(|o| o.kind == OpKind::Claim)
+            .map(|o| &o.body["supersedes"])
+            .collect();
+        assert_eq!(supersedes, [&json!([old]), &json!([])]);
     }
 
     /// Spec 3.3: a tool output's text reaches the prompt only between the fence lines, which
