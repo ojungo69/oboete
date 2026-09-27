@@ -152,7 +152,7 @@ Task 7's fixtures through the owner's binary built from main f43da4d, in a tempo
 
 ### Curation: today's oboete and claude-mem on the 30 dev sessions
 
-`python3 baseline.py oboete` replayed the 30 dev sessions through the owner's binary of that night (executable sha256 `5fa472f04ab6`, installed before #93) with the API-only chain of `baseline.py config` (groq, groq-20b, nim, opencode-go, openrouter, mistral; 100 calls a day each). It ran from about 01:20 to 04:00 JST. `baseline.py claude-mem` took claude-mem's own rows for the same sessions from the frozen copy: 30 sessions, 4,611 observations. Counts only; no text was printed.
+`python3 baseline.py oboete` replayed the 30 dev sessions through the owner's binary of that night (executable sha256 `5fa472f04ab6`, installed before #93) with the API-only chain of `baseline.py config` (groq, groq-20b, nim, opencode-go, openrouter, mistral; 100 calls a day each). It ran from about 01:20 to 04:10 JST, and the three sessions the budgets stopped were finished from 09:26 to 10:53 JST (below). `baseline.py claude-mem` took claude-mem's own rows for the same sessions from the frozen copy: 30 sessions, 4,611 observations. Counts only; no text was printed.
 
 | session | agent | stratum | oboete observations | oboete summaries | claude-mem observations | claude-mem summaries |
 |---|---|---|---|---|---|---|
@@ -168,7 +168,7 @@ Task 7's fixtures through the owner's binary built from main f43da4d, in a tempo
 | 6e1c07b0 | claude | claude/long/ja | 22 | 2 | 78 | 32 |
 | 8c03f2eb | claude | claude/long/ja | 42 | 5 | 244 | 5 |
 | 687b6a27 | claude | claude/long/ja | 12 | 2 | 29 | 15 |
-| 44ceb1b9 | claude | claude/long/ja | 91 | 9 | 417 | 93 |
+| 44ceb1b9 | claude | claude/long/ja | 276 | 29 | 417 | 93 |
 | 256eb7ae | claude | claude/mid/en | 20 | 2 | 64 | 4 |
 | d844d3b2 | claude | claude/mid/ja | 18 | 2 | 86 | 16 |
 | 8c5e20c4 | claude | claude/mid/ja | 12 | 1 | 85 | 1 |
@@ -183,34 +183,34 @@ Task 7's fixtures through the owner's binary built from main f43da4d, in a tempo
 | 01a06da9 | codex | codex/long/en | 10 | 1 | 3 | 0 |
 | 01a04ea8 | codex | codex/long/ja | 11 | 1 | 1990 | 1 |
 | 01a07645 | codex | codex/mid/en | 6 | 1 | 21 | 0 |
-| 01a036ff | codex | codex/mid/ja | 24 | 2 | 31 | 2 |
+| 01a036ff | codex | codex/mid/ja | 59 | 6 | 31 | 2 |
 | 01a08bb9 | codex | codex/short/en | 8 | 1 | 1 | 1 |
-| 01a09b95 | codex | codex/short/ja | 0 | 0 | 1 | 1 |
+| 01a09b95 | codex | codex/short/ja | 6 | 1 | 1 | 1 |
 
 | provider | outcome | calls |
 |---|---|---|
-| groq | budget | 15 |
-| groq | error | 93 |
-| groq | ok | 4 |
-| groq | wait | 3 |
-| groq-20b | budget | 29 |
-| groq-20b | error | 86 |
-| groq-20b | ok | 9 |
-| groq-20b | wait | 5 |
-| mistral | error | 37 |
-| nim | budget | 19 |
-| nim | error | 32 |
-| nim | invalid | 66 |
+| groq | budget | 18 |
+| groq | error | 130 |
+| groq | ok | 6 |
+| groq | wait | 4 |
+| groq-20b | budget | 32 |
+| groq-20b | error | 122 |
+| groq-20b | ok | 11 |
+| groq-20b | wait | 6 |
+| mistral | error | 51 |
+| nim | budget | 22 |
+| nim | error | 33 |
+| nim | invalid | 99 |
 | nim | ok | 2 |
-| opencode-go | error | 30 |
-| opencode-go | ok | 21 |
-| openrouter | error | 28 |
-| openrouter | invalid | 4 |
-| openrouter | ok | 31 |
+| opencode-go | error | 44 |
+| opencode-go | ok | 23 |
+| openrouter | error | 41 |
+| openrouter | invalid | 5 |
+| openrouter | ok | 50 |
 
-- **Three sessions are not finished.** The daily call budgets ran out (`budget` rows for groq, groq-20b and nim), so `44ceb1b9` (1,557 events), `01a036ff` (30) and `01a09b95` (35) still have windows no provider summarized; `01a09b95` has no row at all. Step 3 says to finish them the next day with `observe --settle-ms 0`. The owner's binary was reinstalled from `v1` 9799713 on the same morning (#96, #97, #99, #100, #101), so finishing now would mix two binaries in one row. The rows stay as this binary left them; the table is 27 complete sessions and 3 partial ones.
-- The provider table is the failure pattern that docs/research/curator-providers-2026-09-27.md analyzes, on the dev sessions: nim answered 2 of 100 calls (66 `invalid`, the truncation #93 fixed), groq 4 of 97, mistral 0 of 37. openrouter (31) and opencode-go (21) carried most windows.
-- oboete keeps fewer records than claude-mem: 652 observations against 4,611. `01a04ea8` alone has 1,990 claude-mem observations. Whether fewer is worse is for the milestone 3 scorers; this task only stores the outputs they will score.
+- **All 30 sessions are finished.** The first night's daily budgets ran out (`budget` rows for groq, groq-20b and nim) with `44ceb1b9` (1,557 events), `01a036ff` (30) and `01a09b95` (35) partly unsummarized. They were finished on 2026-09-27 with the same binary, rebuilt from `v1` 431bafc (executable sha256 `5fa472f04ab6`, checked before the run), by repeating `observe --settle-ms 0` on the same home until no event was left. The owner's own binary had been reinstalled from `v1` 9799713 that morning, so it was not used. The provider table counts the calls of both runs.
+- The provider table is the failure pattern that docs/research/curator-providers-2026-09-27.md analyzes, on the dev sessions: nim answered 2 of 134 calls (99 `invalid`, the truncation #93 fixed), groq 6 of 136, mistral 0 of 51. openrouter (50) and opencode-go (23) carried most windows.
+- oboete keeps fewer records than claude-mem: 878 observations against 4,611. `01a04ea8` alone has 1,990 claude-mem observations. Whether fewer is worse is for the milestone 3 scorers; this task only stores the outputs they will score.
 
 ### Retrieval on dev
 
