@@ -44,6 +44,11 @@ pub struct Refusal {
     pub detail: String,
 }
 
+/// The output reserved on an entry with a ceiling that declares none: the largest of the 42 Groq
+/// answers in the owner's ledger was 1,240 tokens (2026-09-27), and the largest prompt and answer
+/// together, 7,961, was taken under the 8,000 ceiling.
+const UNDECLARED_OUTPUT: u32 = 1_250;
+
 /// A ceiling check keeps this share of the ceiling free: the estimate is not exact.
 const CEILING_SHARE: f64 = 0.95;
 
@@ -65,8 +70,14 @@ pub fn admit(
             detail: format!("{used}/{} calls today", p.daily_budget()),
         }));
     }
-    // The provider reserves the declared output too: a prompt that fits alone can still be refused.
-    let reserved = tokens + f64::from(p.declared_output());
+    // The answer counts against the same limits as the prompt (Groq's TPM is input and output
+    // together): the declared output, or on an entry with a ceiling and none declared, the largest
+    // answer seen (UNDECLARED_OUTPUT).
+    let output = match p.declared_output() {
+        0 if limits.max_request_tokens.is_some() => UNDECLARED_OUTPUT,
+        n => n,
+    };
+    let reserved = tokens + f64::from(output);
     if let Some(max) = limits.max_request_tokens {
         if ceiling_hit.contains(&max) {
             return Ok(Some(Refusal {
@@ -74,7 +85,8 @@ pub fn admit(
                 detail: format!("an entry with the same {max}-token ceiling refused it"),
             }));
         }
-        if reserved > f64::from(max) * CEILING_SHARE {
+        // The estimate keeps its margin; the output is a bound, compared with the ceiling itself.
+        if tokens > f64::from(max) * CEILING_SHARE || reserved > f64::from(max) {
             return Ok(Some(Refusal {
                 outcome: "too_big",
                 detail: format!("about {reserved:.0} tokens, over its {max}"),
@@ -270,7 +282,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(admit(&db, &groq, 7000.0, 5.0, &[]).unwrap().is_none());
+        assert!(admit(&db, &groq, 6700.0, 5.0, &[]).unwrap().is_none());
+        // With no output declared, its largest answer is reserved: 7,000 and 1,250 are over 8,000.
+        let r = admit(&db, &groq, 7000.0, 5.0, &[]).unwrap().unwrap();
+        assert_eq!(r.outcome, "too_big");
         let r = admit(&db, &groq, 7700.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(r.outcome, "too_big"); // over 95% of the ceiling
         let r = admit(&db, &groq, 100.0, 5.0, &[4000, 8000])
