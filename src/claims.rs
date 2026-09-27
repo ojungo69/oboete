@@ -146,6 +146,7 @@ pub struct Claim {
 /// `repo`'s current claims: the chain tips (no active derivation supersedes or retracts them)
 /// that are not retracted, in spec 3.4's order, (valid_from, device, seq), with the uid last so
 /// two claims of one event keep one order on every device (MUST-M7).
+#[allow(dead_code)] // Task 7 reads it for the candidates and the carried open items.
 pub fn current(k: &Connection, repo: &str) -> Result<Vec<Claim>> {
     tips(
         k,
