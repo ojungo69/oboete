@@ -292,6 +292,11 @@ pub fn check(
         g.dropped
             .extend(out.into_iter().map(|why| (d.id.clone(), why)));
     }
+    // An unsettled sibling of a settled claim (one the gates lowered) goes first, so the newest
+    // derivation of the uid, the one `activate` keeps, is settled.
+    g.kept.sort_by_cached_key(|(d, e)| {
+        !(unsettled(&d.status) && settled.contains(crate::claims::uid(&d.kind, &e[0]).as_str()))
+    });
     g
 }
 
@@ -986,6 +991,26 @@ mod tests {
         assert!(g.kept[0].0.supersedes.is_empty());
         let settled = [("c4".to_string(), "a proposal supersedes nothing settled")];
         assert_eq!(g.dropped, settled);
+    }
+
+    /// A sibling the gates lower is the same claim as a settled one: it goes first, so the
+    /// settled one is the newest derivation of the uid, the one `activate` keeps.
+    #[test]
+    fn a_lowered_sibling_never_replaces_the_settled_claim() {
+        let w = window(&[user("Yes, use tabs everywhere.")]);
+        let own = draft(&w, "c1", "decided", "user", "use tabs everywhere");
+        let bare = draft(&w, "c2", "decided", "user", "Yes");
+        assert_eq!(
+            crate::claims::uid("decision", &own.1),
+            crate::claims::uid("decision", &bare.1)
+        );
+        let g = check(&w, &[], &[], vec![own, bare], &Rules::default());
+        let kept: Vec<(&str, &str)> = g
+            .kept
+            .iter()
+            .map(|(d, _)| (d.id.as_str(), d.status.as_str()))
+            .collect();
+        assert_eq!(kept, [("c2", "proposed"), ("c1", "decided")]);
     }
 
     /// Two drafts of one kind quoting one sentence are one claim (`claims::uid`): while either is
