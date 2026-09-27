@@ -41,13 +41,23 @@ fn restored(h: &Path) {
         if out.status.success() && String::from_utf8_lossy(&out.stdout).contains("zebra crossing") {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "search does not find the restored record: {}, stdout {:?}, stderr {:?}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
+        if Instant::now() >= deadline {
+            // Why, on the Windows runner where this fails now and then: whether a worker run
+            // here fails, and whether the search finds the record after it (the detached
+            // worker's stderr goes nowhere).
+            let worker = oboete(h, &["worker", "--idle-ms", "0"], "", false);
+            let again = oboete(h, &["search", "zebra"], "", false);
+            panic!(
+                "search does not find the restored record: {}, stdout {:?}, stderr {:?}; a worker run \
+                 now: {}, stderr {:?}; search after it: stdout {:?}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+                worker.status,
+                String::from_utf8_lossy(&worker.stderr),
+                String::from_utf8_lossy(&again.stdout)
+            );
+        }
         std::thread::sleep(Duration::from_millis(500));
     }
 }
