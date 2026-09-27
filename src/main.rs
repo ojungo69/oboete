@@ -494,8 +494,6 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         }
         Cmd::Correct { uid, status, body } => {
             claims::correct(&home, &uid, status.as_deref(), body.as_deref())?;
-            // Applied before this returns, unless a worker holds the lock: it applies it then.
-            worker::run_once(&home)?;
             println!("corrected {uid}");
             Ok(())
         }

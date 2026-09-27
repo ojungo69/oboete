@@ -202,7 +202,8 @@ impl CorrectionOp {
 }
 
 /// `oboete correct`: the owner's correction of the claim `uid`, appended as a correction op. The
-/// body goes through the same gate as every stored string; the claims consumer applies it.
+/// body goes through the same gate as every stored string; the claims consumer applies it, and
+/// this returns once it has (at most 10 seconds, else an error that says it is recorded).
 pub fn correct(
     home: &std::path::Path,
     uid: &str,
@@ -237,7 +238,29 @@ pub fn correct(
     if let Some(why) = op.fault() {
         anyhow::bail!("the correction is refused: {why}");
     }
-    raw.append_ops(&[(crate::raw::OpKind::Correction, serde_json::to_value(&op)?)])?;
+    let seqs = raw.append_ops(&[(crate::raw::OpKind::Correction, serde_json::to_value(&op)?)])?;
+    let device = raw.device().to_owned();
+    drop(raw);
+    // Applied before this returns, by this process or by the worker already running (which wakes
+    // on the new op): a search or a SessionStart right after never shows the old claim.
+    crate::worker::run_once(home)?;
+    let at = seqs.last().copied().unwrap_or(0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let applied = || -> Result<bool> {
+        let got = crate::knowledge::checkpoint::get_in(
+            &k,
+            crate::knowledge::checkpoint::OPS,
+            "claims",
+            &device,
+        )?;
+        Ok(got >= at)
+    };
+    while !applied()? {
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("the correction is recorded; the worker applies it when it next runs");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     Ok(())
 }
 
