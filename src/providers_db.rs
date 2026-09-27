@@ -97,11 +97,14 @@ pub fn record(conn: &Connection, c: &Call) -> Result<()> {
 /// 3.1): no time ends it, only `oboete resume`.
 pub const OWNER_HOLD: i64 = i64::MAX;
 
-/// Providers stopped until the owner acts, for doctor.
-pub fn held(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT provider FROM provider_state WHERE down_until=?1")?;
+/// Providers the chain skips now, with the time they are used again (`OWNER_HOLD`: when the owner
+/// acts), for doctor.
+pub fn stopped(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT provider, down_until FROM provider_state WHERE down_until > ?1 ORDER BY provider",
+    )?;
     let rows = stmt
-        .query_map([OWNER_HOLD], |r| r.get(0))?
+        .query_map([now_ms()], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<_, _>>()?;
     Ok(rows)
 }

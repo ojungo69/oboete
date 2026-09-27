@@ -1689,10 +1689,14 @@ pub fn doctor(home: &Path) -> Result<()> {
                 println!("    {r}");
             }
         }
-        for p in crate::providers_db::held(&db)? {
-            println!(
-                "  {p}: stopped until you act (for claude: turn on usage credits), then run `oboete resume {p}`"
-            );
+        for (p, until) in crate::providers_db::stopped(&db)? {
+            if until == crate::providers_db::OWNER_HOLD {
+                println!(
+                    "  {p}: stopped until you act (for claude: turn on usage credits), then run `oboete resume {p}`"
+                );
+            } else {
+                println!("  {p}: resting until {}", crate::db::utc(until));
+            }
         }
     }
     let exe_str = exe

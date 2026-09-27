@@ -1451,6 +1451,14 @@ mod tests {
         let e = claude_stream(&rejected).unwrap_err().resting(rest);
         let s = next_state(providers_db::State::default(), &e);
         assert_eq!(s.down_until, reset_s * 1000);
+        // Doctor lists it with its reset.
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        providers_db::set_state(&conn, "claude", s).unwrap();
+        assert_eq!(
+            providers_db::stopped(&conn).unwrap(),
+            [("claude".to_owned(), reset_s * 1000)]
+        );
         // An answer of the wrong shape under a warning, as the chain passes it on.
         let e =
             CallError::other("invalid output: the answer does not match the schema").resting(rest);
@@ -1478,9 +1486,12 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let conn = providers_db::open(home.path()).unwrap();
         providers_db::set_state(&conn, "claude", s).unwrap();
-        assert_eq!(providers_db::held(&conn).unwrap(), ["claude"]);
+        assert_eq!(
+            providers_db::stopped(&conn).unwrap(),
+            [("claude".to_owned(), providers_db::OWNER_HOLD)]
+        );
         assert!(providers_db::resume(&conn, "claude").unwrap());
-        assert!(providers_db::held(&conn).unwrap().is_empty());
+        assert!(providers_db::stopped(&conn).unwrap().is_empty());
         assert_eq!(providers_db::state(&conn, "claude").unwrap().down_until, 0);
     }
 
