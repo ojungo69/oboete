@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS ops (
   type TEXT NOT NULL,          -- 'window', 'claim', 'correction', 'digest'
   ts INTEGER NOT NULL,         -- unix ms, when it was appended
   body TEXT NOT NULL,          -- JSON, at most MAX_OP_BYTES
+  batch INTEGER NOT NULL,      -- the first op_seq of the append it came in: a backup keeps it whole
   PRIMARY KEY (device, op_seq)
 );
 ";
@@ -133,6 +134,15 @@ pub struct Op {
     pub kind: OpKind,
     pub ts: i64,
     pub body: serde_json::Value,
+}
+
+/// One ops row as stored: the body is JSON text.
+struct OpRow {
+    op_seq: i64,
+    kind: String,
+    ts: i64,
+    body: String,
+    batch: i64,
 }
 
 /// The most one op's body may take (spec 6.5, A42).
@@ -555,13 +565,14 @@ impl Raw {
             [&self.device],
             |r| r.get(0),
         )?;
-        let ts = crate::db::now_ms();
+        let (ts, batch) = (crate::db::now_ms(), op_seq + 1);
         let mut seqs = Vec::with_capacity(bodies.len());
         for (kind, body) in &bodies {
             op_seq += 1;
             tx.execute(
-                "INSERT INTO ops(device, op_seq, type, ts, body) VALUES(?1, ?2, ?3, ?4, ?5)",
-                params![self.device, op_seq, kind, ts, body],
+                "INSERT INTO ops(device, op_seq, type, ts, body, batch)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![self.device, op_seq, kind, ts, body, batch],
             )?;
             seqs.push(op_seq);
         }
@@ -573,33 +584,36 @@ impl Raw {
     pub fn ops_after(&self, device: &str, op_seq: i64, limit: usize) -> Result<Vec<Op>> {
         self.op_rows(device, op_seq, limit)?
             .into_iter()
-            .map(|(op_seq, kind, ts, body)| {
+            .map(|r| {
                 Ok(Op {
                     device: device.to_owned(),
-                    op_seq,
-                    kind: OpKind::from_name(&kind)
-                        .with_context(|| format!("op {op_seq}: unknown type {kind:?}"))?,
-                    ts,
-                    body: serde_json::from_str(&body)
-                        .with_context(|| format!("op {op_seq}: body"))?,
+                    op_seq: r.op_seq,
+                    kind: OpKind::from_name(&r.kind)
+                        .with_context(|| format!("op {}: unknown type {:?}", r.op_seq, r.kind))?,
+                    ts: r.ts,
+                    body: serde_json::from_str(&r.body)
+                        .with_context(|| format!("op {}: body", r.op_seq))?,
                 })
             })
             .collect()
     }
 
-    fn op_rows(
-        &self,
-        device: &str,
-        op_seq: i64,
-        limit: usize,
-    ) -> Result<Vec<(i64, String, i64, String)>> {
+    fn op_rows(&self, device: &str, op_seq: i64, limit: usize) -> Result<Vec<OpRow>> {
         let mut st = self.conn.prepare(
-            "SELECT op_seq, type, ts, body FROM ops WHERE device = ?1 AND op_seq > ?2
+            "SELECT op_seq, type, ts, body, batch FROM ops WHERE device = ?1 AND op_seq > ?2
              ORDER BY op_seq LIMIT ?3",
         )?;
         let rows = st.query_map(
             params![device, op_seq, i64::try_from(limit).unwrap_or(i64::MAX)],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| {
+                Ok(OpRow {
+                    op_seq: r.get(0)?,
+                    kind: r.get(1)?,
+                    ts: r.get(2)?,
+                    body: r.get(3)?,
+                    batch: r.get(4)?,
+                })
+            },
         )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -642,25 +656,28 @@ impl Raw {
         }
     }
 
-    /// D1: this device's ops after `op_seq` as backup lines, until `max_bytes` of lines (always
-    /// one). The body stays the stored JSON text, so a restore gives back the same bytes.
+    /// D1: this device's ops after `op_seq` as backup lines, from `max_bytes` of lines on only
+    /// up to the end of an append: a segment never holds a window op without the claims that
+    /// committed with it. The body stays the stored JSON text, so a restore gives back the same
+    /// bytes.
     pub fn export_op_lines(&self, op_seq: i64, max_bytes: usize) -> Result<Vec<(i64, String)>> {
         let (mut out, mut at, mut bytes) = (Vec::new(), op_seq, 0);
+        let mut last_batch = None;
         loop {
             let rows = self.op_rows(&self.device, at, EXPORT_BATCH)?;
             if rows.is_empty() {
                 return Ok(out);
             }
-            for (op_seq, kind, ts, body) in rows {
-                let line = serde_json::json!({"device": self.device, "op_seq": op_seq,
-                    "type": kind, "ts": ts, "body": body})
-                .to_string();
-                bytes += line.len() + 1;
-                out.push((op_seq, line));
-                at = op_seq;
-                if bytes >= max_bytes {
+            for r in rows {
+                if bytes >= max_bytes && last_batch != Some(r.batch) {
                     return Ok(out);
                 }
+                let line = serde_json::json!({"device": self.device, "op_seq": r.op_seq,
+                    "type": r.kind, "ts": r.ts, "body": r.body, "batch": r.batch})
+                .to_string();
+                bytes += line.len() + 1;
+                out.push((r.op_seq, line));
+                (at, last_batch) = (r.op_seq, Some(r.batch));
             }
         }
     }
@@ -953,13 +970,15 @@ impl Rebuild {
             .and_then(OpKind::from_name)
             .with_context(|| format!("op {op_seq}: unknown type"))?;
         self.conn.execute(
-            "INSERT INTO ops(device, op_seq, type, ts, body) VALUES(?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO ops(device, op_seq, type, ts, body, batch)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 v["device"].as_str().context("device")?,
                 op_seq,
                 kind.name(),
                 v["ts"].as_i64().unwrap_or(0),
-                v["body"].as_str().context("body")?
+                v["body"].as_str().context("body")?,
+                v["batch"].as_i64().context("batch")?
             ],
         )?;
         Ok(())
@@ -1256,6 +1275,25 @@ mod tests {
         );
         assert_eq!(raw.max_op_seq().unwrap(), 2);
         assert_eq!(raw.ops_after(&dev, 1, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_ops_segment_ends_only_between_appends() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let claim = |i: i32| {
+            (
+                OpKind::Claim,
+                serde_json::json!({"text": format!("claim {i}")}),
+            )
+        };
+        let window = (OpKind::Window, serde_json::json!({"to_seq": 1}));
+        raw.append_ops(&[window, claim(1), claim(2)]).unwrap();
+        raw.append_ops(&[claim(3)]).unwrap();
+        // The cap is reached after the first line; the window's claims still come with it.
+        let seqs = |lines: Vec<(i64, String)>| lines.into_iter().map(|l| l.0).collect::<Vec<_>>();
+        assert_eq!(seqs(raw.export_op_lines(0, 1).unwrap()), [1, 2, 3]);
+        assert_eq!(seqs(raw.export_op_lines(3, 1).unwrap()), [4]);
     }
 
     #[test]
