@@ -73,7 +73,7 @@ enum Cmd {
     /// Correct a remembered claim by its uid: your status or text holds over whatever curation
     /// derives for it, now and after any recuration or rebuild
     Correct {
-        /// The claim's uid (as `search` and the viewer show it)
+        /// The claim's uid (as `oboete claims` lists it)
         uid: String,
         /// decided, proposed, done or retracted
         #[arg(long, required_unless_present = "body")]
@@ -82,6 +82,9 @@ enum Cmd {
         #[arg(long)]
         body: Option<String>,
     },
+    /// List the current claims of the repository in the current directory, each with the uid
+    /// `oboete correct` takes
+    Claims,
     /// Rebuild raw.db from the backup segments (MUST-M15); the current file is kept aside.
     /// The worker does this by itself when raw.db is damaged.
     Restore,
@@ -491,6 +494,22 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             worker::rebuild(&home)?;
             println!("knowledge.db rebuilt from raw.db, with no AI call");
             Ok(())
+        }
+        Cmd::Claims => {
+            let settings = capture::Settings::load(&home)?;
+            let cwd = std::env::current_dir()?;
+            // The repository label as capture stores it on the claims' records.
+            let (_, repo, _) = capture::checkout(&serde_json::json!({ "cwd": cwd }), &settings);
+            // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits).
+            let _raw = raw::open(&home)?;
+            let k = knowledge::open(&home)?;
+            claims::schema(&k)?;
+            let mut out = String::new();
+            for c in claims::current(&k, &repo)? {
+                let body = redact::outbound(&c.body).replace('\n', " ");
+                out.push_str(&format!("{}  {} {}  {body}\n", c.uid, c.kind, c.status));
+            }
+            emit(&out)
         }
         Cmd::Correct { uid, status, body } => {
             claims::correct(&home, &uid, status.as_deref(), body.as_deref())?;
