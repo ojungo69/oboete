@@ -120,6 +120,8 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
                 if piece.tool {
                     piece = prepared.elided(r.seq);
                     elided.push(r.seq);
+                    // Covered whole: the window is full only when a record follows it.
+                    full = !raw.after_within(device, r.seq, 1, 1)?.is_empty();
                 } else {
                     piece = prepared.split(r.seq, from, budget.saturating_sub(used + heading));
                 }
@@ -469,12 +471,14 @@ thread_local! {
 
 /// The curation phase (D3): this device's next window, curated or waited on. A window that
 /// reaches the device's last record waits until the owner has stopped (the idle gate's time),
-/// so a window is not sent for every few records while the owner works.
+/// so a window is not sent for every few records while the owner works. `chain` is who is asked,
+/// as text (the providers and caps): a window held under other ones is tried again now.
 pub fn run_phase(
     raw: &mut Raw,
     db: &Connection,
     rules: &Rules,
     summary: &Summary,
+    chain: &str,
     curator: &mut Curator,
 ) -> Result<Phase> {
     let device = raw.device().to_owned();
@@ -503,10 +507,11 @@ pub fn run_phase(
         });
     }
     let prompt = prompt(&summary.language, &w.text);
-    let sent = sha256_hex(&prompt);
-    // A row for another request is stale, and its attempts were not on this one: a restore or a
-    // skipped window moved the checkpoint, records added since made the window longer, or new
-    // rules or another language changed what would be sent.
+    let sent = sha256_hex(&format!("{chain}\n{prompt}"));
+    // A row for another request is stale, and its attempts and hold were not on this one: a
+    // restore or a skipped window moved the checkpoint, records added since made the window
+    // longer, new rules or another language changed what would be sent, or the owner changed
+    // who is asked (`chain`: the providers and caps as text).
     let range = |p: &Pending| (p.from_seq, p.from_offset, p.to_seq, p.to_offset);
     let pending = providers_db::pending_of(db, &device)?.filter(|p| {
         range(p) == (w.from_seq, w.from_offset, w.to_seq, w.to_offset) && p.prompt == sent
@@ -805,10 +810,16 @@ mod tests {
         let (_h, raw, dev) = store();
         let mut raw = raw;
         raw.append(&tool(&"y".repeat(5_000))).unwrap();
+        // Covered whole: at the last record it is a tail, which waits for the owner to stop.
+        let w = next_window(&raw, &dev, 300, &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert!(!w.full);
         raw.append(&prompt("next")).unwrap();
         let w = next_window(&raw, &dev, 300, &Rules::default())
             .unwrap()
             .unwrap();
+        assert!(w.full);
         assert_eq!(
             (w.from_seq, w.to_seq, w.to_offset, w.elided.clone()),
             (1, 1, None, vec![1])
@@ -1099,14 +1110,14 @@ mod tests {
         };
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
         STOP_BEFORE_APPEND.with(|s| s.set(true));
-        let stopped = run_phase(&mut raw, &db, &rules, &summary, &mut curator);
+        let stopped = run_phase(&mut raw, &db, &rules, &summary, "", &mut curator);
         STOP_BEFORE_APPEND.with(|s| s.set(false));
         assert!(stopped.is_err());
         assert!(windows(&raw).is_empty());
         assert_eq!(raw.curation_checkpoint(raw.device()).unwrap(), (0, None));
         drop(raw);
         let mut raw = crate::raw::open(home.path()).unwrap();
-        let phase = run_phase(&mut raw, &db, &rules, &summary, &mut curator).unwrap();
+        let phase = run_phase(&mut raw, &db, &rules, &summary, "", &mut curator).unwrap();
         assert_eq!(phase, Phase::Covered);
         let ops = raw.ops_after(raw.device(), 0, 10).unwrap();
         let kinds: Vec<OpKind> = ops.iter().map(|o| o.kind).collect();
@@ -1114,7 +1125,7 @@ mod tests {
         assert_eq!(ops[0].body["to_seq"], 3);
         assert_eq!(ops[0].body["outcome"], "curated");
         assert_eq!(ops[1].body["title"], "UTC on disk");
-        let phase = run_phase(&mut raw, &db, &rules, &summary, &mut curator).unwrap();
+        let phase = run_phase(&mut raw, &db, &rules, &summary, "", &mut curator).unwrap();
         assert_eq!(phase, Phase::Idle);
         assert_eq!(calls.get(), 2);
     }
@@ -1148,7 +1159,7 @@ mod tests {
         raw.append(&at(now - 60_000, "a")).unwrap();
         raw.append(&at(now - 60_000, "b")).unwrap();
         let until = now - 60_000 + 600_000;
-        let phase = run_phase(&mut raw, &db, &rules, &summary, &mut chain).unwrap();
+        let phase = run_phase(&mut raw, &db, &rules, &summary, "", &mut chain).unwrap();
         assert_eq!(phase, Phase::Waiting { until, up: true });
         let p = providers_db::pending_of(&db, raw.device())
             .unwrap()
@@ -1163,7 +1174,7 @@ mod tests {
             p.reason
         );
         // Not tried again before then.
-        let phase = run_phase(&mut raw, &db, &rules, &summary, &mut chain).unwrap();
+        let phase = run_phase(&mut raw, &db, &rules, &summary, "", &mut chain).unwrap();
         assert_eq!(phase, Phase::Waiting { until, up: true });
         assert_eq!(tried.get(), 1);
 
@@ -1179,7 +1190,7 @@ mod tests {
             ..at(now, "c")
         };
         raw.append(&replayed).unwrap();
-        let phase = run_phase(&mut raw, &db, &rules, &summary, &mut chain).unwrap();
+        let phase = run_phase(&mut raw, &db, &rules, &summary, "", &mut chain).unwrap();
         assert_eq!(phase, Phase::Covered);
         assert_eq!(windows(&raw)[0]["provider"], "sub");
     }
@@ -1202,7 +1213,7 @@ mod tests {
             Ok(answered("groq"))
         };
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
-        let phase = run_phase(&mut raw, &db, &rules, &summary, &mut curator).unwrap();
+        let phase = run_phase(&mut raw, &db, &rules, &summary, "", &mut curator).unwrap();
         let until = ts + 600_000;
         assert_eq!(phase, Phase::Waiting { until, up: true });
         assert_eq!(calls.get(), 0);
@@ -1211,11 +1222,11 @@ mod tests {
             idle_minutes: 60,
             ..summary.clone()
         };
-        let phase = run_phase(&mut raw, &db, &rules, &long, &mut curator).unwrap();
+        let phase = run_phase(&mut raw, &db, &rules, &long, "", &mut curator).unwrap();
         let until = ts + STAY_UP_MS;
         assert_eq!(phase, Phase::Waiting { until, up: true });
         // A full window goes at once.
-        let phase = run_phase(&mut raw, &db, &rules, &curating(3), &mut curator).unwrap();
+        let phase = run_phase(&mut raw, &db, &rules, &curating(3), "", &mut curator).unwrap();
         assert_eq!((phase, calls.get()), (Phase::Covered, 1));
     }
 
@@ -1280,7 +1291,7 @@ mod tests {
         };
         let (rules, summary) = (Rules::default(), curating(30));
         for (skips, hold, attempts) in &script {
-            let phase = run_phase(&mut raw, &db, &rules, &summary, &mut chain).unwrap();
+            let phase = run_phase(&mut raw, &db, &rules, &summary, "", &mut chain).unwrap();
             let mut p = providers_db::pending_of(&db, raw.device())
                 .unwrap()
                 .unwrap();
@@ -1299,14 +1310,14 @@ mod tests {
             p.next_attempt_at = 0;
             providers_db::set_pending(&db, &p).unwrap();
         }
-        let phase = run_phase(&mut raw, &db, &rules, &summary, &mut chain).unwrap();
+        let phase = run_phase(&mut raw, &db, &rules, &summary, "", &mut chain).unwrap();
         assert_eq!(phase, Phase::Covered);
         assert!(
             providers_db::pending_of(&db, raw.device())
                 .unwrap()
                 .is_none()
         );
-        let phase = run_phase(&mut raw, &db, &rules, &summary, &mut chain).unwrap();
+        let phase = run_phase(&mut raw, &db, &rules, &summary, "", &mut chain).unwrap();
         assert_eq!(phase, Phase::Covered);
         let ws = windows(&raw);
         assert_eq!(ws[0]["outcome"], "skipped");
@@ -1346,6 +1357,7 @@ mod tests {
             &db,
             &Rules::default(),
             &curating(WINDOW_TOKENS),
+            "",
             &mut chain,
         );
         assert!(matches!(phase.unwrap(), Phase::Waiting { up: true, .. }));
@@ -1367,7 +1379,7 @@ mod tests {
             Err(went_past(&[("groq", "HTTP 400", Skip::Failed)]))
         };
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
-        run_phase(&mut raw, &db, &rules, &summary, &mut chain).unwrap();
+        run_phase(&mut raw, &db, &rules, &summary, "", &mut chain).unwrap();
         let mut p = providers_db::pending_of(&db, raw.device())
             .unwrap()
             .unwrap();
@@ -1376,7 +1388,7 @@ mod tests {
         (p.attempts, p.next_attempt_at) = (2, 0);
         providers_db::set_pending(&db, &p).unwrap();
         raw.append(&prompt("two")).unwrap();
-        let phase = run_phase(&mut raw, &db, &rules, &summary, &mut chain).unwrap();
+        let phase = run_phase(&mut raw, &db, &rules, &summary, "", &mut chain).unwrap();
         assert!(matches!(phase, Phase::Waiting { .. }), "{phase:?}");
         let mut p = providers_db::pending_of(&db, raw.device())
             .unwrap()
@@ -1389,12 +1401,39 @@ mod tests {
             language: "English".into(),
             ..summary.clone()
         };
-        let phase = run_phase(&mut raw, &db, &rules, &english, &mut chain).unwrap();
+        let phase = run_phase(&mut raw, &db, &rules, &english, "", &mut chain).unwrap();
         assert!(matches!(phase, Phase::Waiting { .. }), "{phase:?}");
         let p = providers_db::pending_of(&db, raw.device())
             .unwrap()
             .unwrap();
         assert_eq!((p.to_seq, p.attempts), (2, 1));
+    }
+
+    /// A window held until a budget resets is tried again at once when the owner changes the
+    /// providers or their caps: the hold was the old chain's.
+    #[test]
+    fn a_window_held_by_one_chain_is_tried_again_by_another() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&prompt("one")).unwrap();
+        let tried = std::cell::Cell::new(0);
+        let tomorrow = crate::db::now_ms() + 86_400_000;
+        let mut chain = |_: &str, _: &str, _: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
+            tried.set(tried.get() + 1);
+            Err(went_past(&[(
+                "groq",
+                "spent: 0/0 calls today",
+                Skip::Budget(tomorrow),
+            )]))
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        for _ in 0..2 {
+            let phase = run_phase(&mut raw, &db, &rules, &summary, "budget 0", &mut chain);
+            assert!(matches!(phase.unwrap(), Phase::Waiting { until, .. } if until == tomorrow));
+        }
+        assert_eq!(tried.get(), 1);
+        run_phase(&mut raw, &db, &rules, &summary, "budget 100", &mut chain).unwrap();
+        assert_eq!(tried.get(), 2);
     }
 
     /// Milestone 2's coverage part, on a replayed day: every seq is in a window op, curated,
@@ -1412,7 +1451,9 @@ mod tests {
         };
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
         let mut runs = 0;
-        while run_phase(&mut raw, &db, &rules, &summary, &mut curator).unwrap() == Phase::Covered {
+        while run_phase(&mut raw, &db, &rules, &summary, "", &mut curator).unwrap()
+            == Phase::Covered
+        {
             runs += 1;
             assert!(runs < 10_000);
         }

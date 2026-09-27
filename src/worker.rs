@@ -370,7 +370,9 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
                 .idle_gate(working)
                 .run("curator", span, prompt, &crate::curate::schema())
         };
-        crate::curate::run_phase(raw, db, &rules, &cfg.summary, &mut curator)
+        // Who is asked and within what caps: a window held under other ones is tried again now.
+        let chain = format!("{:?} {}", cfg.providers, cfg.paid_usd_per_month);
+        crate::curate::run_phase(raw, db, &rules, &cfg.summary, &chain, &mut curator)
     })
 }
 
