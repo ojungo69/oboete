@@ -647,6 +647,8 @@ pub fn run_phase(
             up: until - now <= STAY_UP_MS,
         });
     }
+    // `claims::current` reads, never creates: a store the worker has not yet given claims.
+    crate::claims::schema(k)?;
     let mut shown = String::new();
     let mut repos: Vec<&str> = Vec::new();
     for repo in w.lines.iter().filter_map(|l| l.repo.as_deref()) {
@@ -934,7 +936,7 @@ fn claims_of(
     recipe: &str,
     tier: i64,
     shown: &[(String, String)],
-    carried: &[(String, String)],
+    carried: &[(String, Option<String>, String)],
 ) -> std::result::Result<(String, Vec<Value>), AnswerFailure> {
     let (summary, drafts) = parse(answer)?;
     // Each draft's id and its line's repository.
@@ -961,7 +963,9 @@ fn claims_of(
                     || shown
                         .iter()
                         .any(|(r, uid)| Some(r.as_str()) == repo && uid == *to)
-                    || carried.iter().any(|(k, uid)| k == key && uid == *to)
+                    || carried
+                        .iter()
+                        .any(|(k, r, uid)| k == key && r.as_deref() == repo && uid == *to)
             })
             .cloned()
             .collect();
@@ -1026,9 +1030,9 @@ pub fn candidates(k: &Connection, repo: &str, text: &str) -> Result<Vec<crate::c
     Ok(out)
 }
 
-/// The uids `carried` showed, each with its session (agent, then session id, NUL between): a
-/// draft of that session may supersede them.
-type Carried = Vec<(String, String)>;
+/// The uids `carried` showed, each with its session (agent, then session id, NUL between) and its
+/// repository: a draft of that session, anchored in that repository, may supersede them.
+type Carried = Vec<(String, Option<String>, String)>;
 
 /// What each session of the window carries in from before it (spec 3.1, 3.3; D12), as text for
 /// the prompt: its goal (its first prompt, through the gate, 200 characters), its open items,
@@ -1070,27 +1074,28 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             let goal: String = gate(&goal).chars().take(200).collect();
             lines.push(format!("goal: {goal}"));
         }
-        let mut open: Vec<crate::claims::Claim> = Vec::new();
+        let mut open: Vec<(&str, crate::claims::Claim)> = Vec::new();
         for repo in repos {
             open.extend(
                 crate::claims::current(k, repo)?
                     .into_iter()
-                    .filter(|c| c.kind == "open item"),
+                    .filter(|c| c.kind == "open item")
+                    .map(|c| (repo, c)),
             );
         }
         // The newest first, in `current`'s order across the repositories.
-        open.sort_by(|a, b| {
+        open.sort_by(|(_, a), (_, b)| {
             (b.valid_from, &b.device, b.seq, &b.uid).cmp(&(a.valid_from, &a.device, a.seq, &a.uid))
         });
         let mut shown = 0;
-        for c in open {
+        for (c_repo, c) in open {
             if shown == 50 {
                 break;
             }
             // The session's own, before the cap: other sessions' newer items never hide it.
             if session_of(&c.device, c.seq)?.as_deref() == Some(key) {
                 lines.push(format!("open item {}: {}", c.uid, gate(&c.body)));
-                uids.push((key.to_owned(), c.uid.clone()));
+                uids.push((key.to_owned(), Some(c_repo.to_owned()), c.uid.clone()));
                 shown += 1;
             }
         }
@@ -1105,8 +1110,11 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             if status == "proposed" && session_of(&first.device, first.seq)?.as_deref() == Some(key)
             {
                 let uid = crate::claims::uid(kind, first);
-                lines.push(format!("proposed before {uid}: {}", gate(&c.body)));
-                uids.push((key.to_owned(), uid));
+                // Only while it is still current: a sibling or a later window may have settled it.
+                if let Some(repo) = crate::claims::tip_repo(k, &uid)? {
+                    lines.push(format!("proposed before {uid}: {}", gate(&c.body)));
+                    uids.push((key.to_owned(), repo, uid));
+                }
             }
         }
         if !lines.is_empty() {
@@ -2331,6 +2339,101 @@ mod tests {
         assert_eq!(supersedes, [&json!([old]), &json!([]), &json!(["c1"])]);
     }
 
+    /// Two windows through the phase with the consumers between them: the prompts sent and the
+    /// ops appended. `second` answers the second window from its prompt.
+    fn two_windows(
+        first: &[Event],
+        answer: Value,
+        second: &[Event],
+        then: impl Fn(&str) -> Value,
+    ) -> (Vec<String>, Vec<crate::raw::Op>) {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        let sent = std::cell::RefCell::new(Vec::new());
+        let mut chain = |_: &str,
+                         p: &str,
+                         _: &dyn Fn() -> Option<i64>,
+                         _: &AnswerCheck|
+         -> Result<ChainResult> {
+            sent.borrow_mut().push(p.to_owned());
+            let output = if sent.borrow().len() == 1 {
+                answer.clone()
+            } else {
+                then(p)
+            };
+            Ok(ChainResult {
+                output,
+                ..answered("fake")
+            })
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        for events in [first, second] {
+            for e in events {
+                raw.append(e).unwrap();
+            }
+            run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+            consume(&raw, &mut k);
+        }
+        let ops = raw.ops_after(raw.device(), 0, 20).unwrap();
+        (sent.into_inner(), ops)
+    }
+
+    fn claim(id: &str, status: &str, line: &str, quote: &str, supersedes: Value) -> Value {
+        json!({"id": id, "kind": "decision", "status": status, "speaker": "user", "scope": "repo",
+            "body": quote, "quote": quote, "line": line, "supersedes": supersedes})
+    }
+
+    /// A proposal a sibling of its window settled is no longer carried: an acceptance in the next
+    /// window must not link to it.
+    #[test]
+    fn a_proposal_its_window_settled_is_not_carried() {
+        let first = [
+            prompt("Build the importer."),
+            event(
+                "reply",
+                json!({"assistant": "Maybe cache the parsed files?"}),
+            ),
+            prompt("No, keep it simple."),
+        ];
+        let answer = json!({"claims": [
+            claim("c1", "proposed", "L2", "cache the parsed files", json!([])),
+            claim("c2", "decided", "L3", "keep it simple", json!(["c1"]))], "summary": "s"});
+        let none = |_: &str| json!({"claims": [], "summary": "s"});
+        let (sent, _) = two_windows(&first, answer, &[prompt("Yes.")], none);
+        assert!(!sent[1].contains("proposed before"), "{}", sent[1]);
+    }
+
+    /// A session that moved to another repository: what it carried from the first stays there.
+    #[test]
+    fn a_carried_proposal_is_superseded_only_from_its_own_repository() {
+        let in_repo = |repo: &str, e: Event| Event {
+            repo: Some(repo.into()),
+            ..e
+        };
+        let first = [
+            in_repo("a", prompt("Build the importer.")),
+            in_repo(
+                "a",
+                event(
+                    "reply",
+                    json!({"assistant": "Maybe cache the parsed files?"}),
+                ),
+            ),
+        ];
+        let answer = json!({"claims": [
+            claim("c1", "proposed", "L2", "cache the parsed files", json!([]))], "summary": "s"});
+        let accept = |p: &str| {
+            let uid = p.split("proposed before ").nth(1).unwrap()[..64].to_owned();
+            json!({"claims": [claim("c1", "decided", "L1", "Yes, do that", json!([uid]))],
+                "summary": "s"})
+        };
+        let second = [in_repo("b", prompt("Yes, do that."))];
+        let (_, ops) = two_windows(&first, answer, &second, accept);
+        let last = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+        assert_eq!(last.body["supersedes"], json!([]));
+    }
+
     /// Spec 3.3: a tool output's text reaches the prompt only between the fence lines, which
     /// it cannot contain.
     #[test]
@@ -2490,8 +2593,10 @@ mod tests {
             })
         };
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
-        let k = kn();
+        // The consumers run between phases, as the worker's loop does.
+        let mut k = crate::knowledge::open(home.path()).unwrap();
         run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
         // Another session's window comes between: the proposal is still the session's last.
         let other = Event {
             session: "t".into(),
@@ -2499,8 +2604,10 @@ mod tests {
         };
         raw.append(&other).unwrap();
         run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
         raw.append(&prompt("Yes, do that.")).unwrap();
         run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
         let sent = sent.borrow();
         assert!(!sent[1].contains("Cache parsed files."), "{}", sent[1]);
         // Each session's block is headed as its lines are, so the curator can pair them.
