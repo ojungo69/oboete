@@ -220,6 +220,11 @@ impl<'a> Chain<'a> {
                 std::thread::sleep(Duration::from_secs_f64(wait + 0.5));
                 result = call(p, prompt, schema);
             }
+            // The headers hold whatever the answer turns out to be.
+            let rate = match &result {
+                Ok(a) => a.rate,
+                Err(e) => e.rate,
+            };
             // Only strict-schema providers enforce the shape; valid JSON of another shape from the
             // rest would pass here and fail the window later, without trying the next provider.
             let result = result.and_then(|a| {
@@ -234,10 +239,6 @@ impl<'a> Chain<'a> {
                 }
             });
             let ms = started.elapsed().as_millis() as i64;
-            let rate = match &result {
-                Ok(a) => a.rate,
-                Err(e) => e.rate,
-            };
             if let Some(rate) = rate {
                 providers_db::set_rate(conn, &name, rate)?;
             }
@@ -2362,6 +2363,24 @@ mod tests {
             .unwrap();
         assert_eq!(r.provider, "next");
         assert_eq!(outcomes(&conn), ["ok", "budget", "ok"]);
+    }
+
+    #[test]
+    fn rate_headers_are_kept_when_the_answer_has_the_wrong_shape() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let answer = json!({"choices": [{"message": {"content": "{}"}}]}).to_string();
+        let (url, _) = serve_once(
+            answer.into_bytes(),
+            "x-ratelimit-remaining-tokens: 300\r\nx-ratelimit-reset-tokens: 1m\r\n",
+        );
+        let schema = json!({"type": "object", "required": ["summary"]});
+        let r = Chain::new(&[stub(url)], &conn).run("curator", "s", "short", &schema);
+        assert!(r.is_err());
+        assert_eq!(
+            crate::providers_db::rate(&conn, "stub").unwrap().tokens,
+            Some(300)
+        );
     }
 
     #[test]
