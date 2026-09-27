@@ -51,7 +51,9 @@ pub(crate) fn trigrams_upto(query: &str, cap: usize) -> Vec<String> {
     let hiragana = |c: &char| ('\u{3040}'..='\u{309f}').contains(c);
     let mut out: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for run in query.split(|c: char| c.is_whitespace() || SEPARATORS.contains(c)) {
+    // A control character too: FTS5 reads a query as a C string and stops at a NUL.
+    for run in query.split(|c: char| c.is_whitespace() || c.is_control() || SEPARATORS.contains(c))
+    {
         let chars: Vec<char> = run.chars().collect();
         for w in chars.windows(3) {
             // The index folds case, so `HTTP` and `http` are one piece (else bm25 counts it twice).

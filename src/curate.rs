@@ -1240,7 +1240,8 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          - scope: repo.\n\
          - body: one or two concrete sentences (names, paths, numbers), at most 1,000 characters.\n\
          - quote: 5 to 200 characters copied exactly from one line, the one that shows it (the \
-         developer's own line for decided); never text shown as [REDACTED].\n\
+         developer's own line for decided): from its prompt, reply or tool output, never from \
+         a tool's input; never text shown as [REDACTED].\n\
          - line: that line's id.\n\
          - supersedes: the ids of claims in your answer, or the uids of kept claims, that this \
          one replaces or reverses; empty otherwise.\n\
@@ -1536,6 +1537,20 @@ mod tests {
             assert!(s.contains(&format!("{r}{r}: ")), "{r}: {s}");
         }
         assert!(cost(&s) > 180 && cost(&s) <= 200, "{}", cost(&s));
+    }
+
+    /// A NUL in a window's text (a tool that prints `find -print0`) is no part of a trigram: FTS5
+    /// reads its query as a C string and would stop there, failing every window after it.
+    #[test]
+    fn a_window_with_a_nul_still_finds_its_candidates() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _db) = open(home.path());
+        let op = kept(&mut raw, "s", "a", "Sessions stay in Postgres for now.");
+        raw.append_ops(&[op]).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let found = candidates(&k, "a", "./x\0./y\0 Sessions leave Postgres").unwrap();
+        assert_eq!(found.len(), 1);
     }
 
     /// A candidate query keeps 64 trigrams however many the window has, spread over all of them.
@@ -2965,6 +2980,11 @@ mod tests {
             ..prompt("Something else.")
         };
         raw.append(&other).unwrap();
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
+        // The session resumed: its textless start is covered as a window of its own, and is no
+        // window the session's lines were in.
+        raw.append(&event("start", json!({}))).unwrap();
         run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
         consume(&raw, &mut k);
         raw.append(&prompt("Yes, do that.")).unwrap();

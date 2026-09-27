@@ -793,7 +793,9 @@ impl Raw {
     }
 
     /// The ops appended with the last window op (not a recuration) that covered this device's
-    /// latest event of `agent`'s `session` before seq `before`: the session's previous window,
+    /// latest event of `agent`'s `session` before seq `before` that has text (a resumed session's
+    /// `start` is covered on its own, by a window that holds none of its lines): the session's
+    /// previous window,
     /// whose proposals its next window carries (milestone 3 Task 7, D12). Per session, since
     /// sessions interleave: another session's window may come between.
     pub fn previous_window_ops(&self, agent: &str, session: &str, before: i64) -> Result<Vec<Op>> {
@@ -803,7 +805,8 @@ impl Raw {
             .conn
             .query_row(
                 "SELECT seq FROM records WHERE device = ?1 AND seq < ?2 AND type = 'event'
-                   AND agent = ?3 AND session = ?4 ORDER BY seq DESC LIMIT 1",
+                   AND agent = ?3 AND session = ?4 AND kind NOT IN ('start', 'end')
+                 ORDER BY seq DESC LIMIT 1",
                 params![self.device, before, agent, session],
                 |r| r.get(0),
             )
