@@ -249,15 +249,25 @@ fn serve(
 }
 
 pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
+    run_consumers(home, idle_ms, consumers(home))
+}
+
+fn run_consumers(home: &Path, idle_ms: u64, consumers: Vec<Box<dyn Consumer>>) -> Result<()> {
     // Another worker holds the lock: its run, not this one, says how the work went.
     let Some(held) = lock(home)? else {
         return Ok(());
     };
     let mut last = held.1;
-    let result = run_holding(home, idle_ms, consumers(home), || {}, Some(held), &mut last);
+    // Replaced by the outcome when the run ends; a run killed or crashed leaves it for doctor.
+    note(home, last, STOPPED);
+    let result = run_holding(home, idle_ms, consumers, || {}, Some(held), &mut last);
     record(home, last, &result);
     result
 }
+
+/// A run's outcome until it ends.
+const STOPPED: &str = "it stopped before it finished (killed or crashed); the next worker a hook \
+                       starts goes on from where it stopped";
 
 /// A worker a hook started writes its stderr nowhere: its last failure is kept for doctor, and a
 /// good run clears it. `last` numbers the run's last taking of the worker lock, which it has
@@ -265,6 +275,15 @@ pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
 /// own, not the worker lock: a hook that finds the worker lock taken starts no worker, and this
 /// run no longer reads new records.
 fn record(home: &Path, last: u64, result: &Result<()>) {
+    let why = result
+        .as_ref()
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
+    note(home, last, &why);
+}
+
+fn note(home: &Path, last: u64, why: &str) {
     let state = home.join("state");
     let Ok(guard) = std::fs::OpenOptions::new()
         .create(true)
@@ -282,11 +301,6 @@ fn record(home: &Path, last: u64, result: &Result<()>) {
     }
     // The number and the outcome in one file, replaced whole: a run stopped halfway leaves the
     // last outcome as it was.
-    let why = result
-        .as_ref()
-        .err()
-        .map(|e| format!("{e:#}"))
-        .unwrap_or_default();
     let next = state.join("worker-outcome.next");
     if std::fs::write(&next, format!("{last}\n{why}")).is_ok() {
         let _ = std::fs::rename(&next, state.join("worker-outcome"));
@@ -303,9 +317,20 @@ fn outcome(home: &Path) -> Option<(u64, String)> {
 
 /// Why the last `oboete worker` stopped with an error, if it did.
 pub fn last_failure(home: &Path) -> Option<String> {
-    outcome(home)
-        .map(|(_, why)| why)
-        .filter(|why| !why.is_empty())
+    let (_, why) = outcome(home)?;
+    // A run still going has not stopped.
+    if why == STOPPED && running(home) {
+        return None;
+    }
+    Some(why).filter(|why| !why.is_empty())
+}
+
+/// Whether a process holds the worker lock now. It takes no number: this runs nothing.
+fn running(home: &Path) -> bool {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(home.join("state").join("worker.lock"))
+        .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
 /// One run now, for `oboete restore` and tests. It waits up to 2 s for the lock rather than
@@ -447,6 +472,47 @@ mod tests {
         record(home.path(), running.1, &Ok(()));
         assert!(last_failure(home.path()).is_none());
         assert!(lock(home.path()).unwrap().is_none());
+    }
+
+    /// A step that panics.
+    struct Panics;
+    impl Consumer for Panics {
+        fn name(&self) -> &'static str {
+            "panics"
+        }
+        fn step(&mut self, _: &Raw, _: &Connection, _: i64) -> Result<i64> {
+            panic!("a crash in the middle of a run")
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A worker killed or crashed after it took the lock never records how its run ended: doctor
+    /// says it stopped once no process holds the lock, and not while one does.
+    #[test]
+    fn a_run_that_never_ends_is_reported_once_its_lock_is_free() {
+        let home = tempfile::tempdir().unwrap();
+        run(home.path(), 0).unwrap();
+        raw::open(home.path())
+            .unwrap()
+            .append(&raw::test_event("a"))
+            .unwrap();
+        let crashed =
+            std::panic::catch_unwind(|| run_consumers(home.path(), 0, vec![Box::new(Panics)]));
+        assert!(crashed.is_err());
+        let why = last_failure(home.path()).expect("the stopped run was not reported");
+        assert!(why.starts_with("it stopped before it finished"), "{why}");
+        let held = lock(home.path()).unwrap().unwrap();
+        note(home.path(), held.1, STOPPED);
+        assert!(
+            last_failure(home.path()).is_none(),
+            "a live run was reported"
+        );
+        drop(held);
+        assert!(last_failure(home.path()).is_some());
+        run(home.path(), 0).unwrap();
+        assert!(last_failure(home.path()).is_none());
     }
 
     /// The Windows runner's worker stopped with "database is locked" after a restore: a search
