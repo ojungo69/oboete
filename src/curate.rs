@@ -1539,6 +1539,23 @@ mod tests {
         assert!(cost(&s) > 180 && cost(&s) <= 200, "{}", cost(&s));
     }
 
+    /// A split anywhere in the spaces after a sentence end gives the next sentence the start it
+    /// has in the whole event, so its claims keep one uid under any window size.
+    #[test]
+    fn a_split_in_the_spaces_after_a_sentence_end_keeps_the_next_sentences_start() {
+        let long = "Done.          Next thing is here.";
+        let next = long.find("Next").unwrap();
+        for start in 0..next {
+            let source = Source {
+                start,
+                lead: sentence_start(&long[..start]),
+                text: long[start..].to_owned(),
+                hidden: Vec::new(),
+            };
+            assert_eq!(source.sentence(next - start), next, "split at {start}");
+        }
+    }
+
     /// A NUL in a window's text (a tool that prints `find -print0`) is no part of a trigram: FTS5
     /// reads its query as a C string and would stop there, failing every window after it.
     #[test]
