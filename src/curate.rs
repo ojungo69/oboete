@@ -1052,6 +1052,13 @@ fn claims_of(
     Ok((summary, claims))
 }
 
+/// At most `k` of `all`, spread evenly over the whole of it (a window's trigrams: not its first
+/// lines only), all of them when there are no more than `k`.
+fn spread<T>(all: &[T], k: usize) -> impl Iterator<Item = &T> {
+    let take = all.len().min(k);
+    (0..take).map(move |i| &all[i * all.len() / take])
+}
+
 /// Candidates a window may supersede (MUST-M3): up to 20 current claims of `repo` that the full
 /// text index finds for its text, the whole repository, every window. Similarity only proposes
 /// them; the curator decides, and the gates check (Task 8).
@@ -1059,11 +1066,7 @@ fn claims_of(
 // repositories hold tens of thousands.
 pub fn candidates(k: &Connection, repo: &str, text: &str) -> Result<Vec<crate::claims::Claim>> {
     let all = crate::search::trigrams_upto(text, usize::MAX);
-    // Spread over the whole window, not its first lines.
-    let step = all.len().div_ceil(64).max(1);
-    let grams: Vec<String> = all
-        .iter()
-        .step_by(step)
+    let grams: Vec<String> = spread(&all, 64)
         .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
         .collect();
     if grams.is_empty() {
@@ -1527,6 +1530,19 @@ mod tests {
             assert!(s.contains(&format!("{r}{r}: ")), "{r}: {s}");
         }
         assert!(cost(&s) > 180 && cost(&s) <= 200, "{}", cost(&s));
+    }
+
+    /// A candidate query keeps 64 trigrams however many the window has, spread over all of them.
+    #[test]
+    fn the_query_trigrams_are_64_spread_over_the_window() {
+        for n in [10, 64, 65, 100, 127, 1_000] {
+            let all: Vec<usize> = (0..n).collect();
+            let got: Vec<usize> = spread(&all, 64).copied().collect();
+            assert_eq!(got.len(), n.min(64), "{n}");
+            assert!(got.windows(2).all(|w| w[0] < w[1]), "{n}");
+            assert_eq!(got[0], 0);
+            assert!(got[got.len() - 1] >= n - n.div_ceil(64), "{n}: {got:?}");
+        }
     }
 
     #[test]
