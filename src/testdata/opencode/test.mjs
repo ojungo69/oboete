@@ -42,7 +42,8 @@ childProcess.spawn = (exe, args, options) => {
 let injectResult = "remembered context";
 childProcess.execFile = (exe, args, options, callback) => {
   assert.equal(exe, expectedExe);
-  assert.deepEqual(args, [...homeArgs, "inject"]);
+  assert.deepEqual(args.slice(0, -1), [...homeArgs, "inject"]);
+  assert.match(args.at(-1), /^--session=./);
   assert.equal(options.timeout, 3000);
   assert.equal(options.killSignal, "SIGKILL");
   injections.push(options.cwd);

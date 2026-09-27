@@ -73,8 +73,12 @@ enum Cmd {
     /// Rebuild raw.db from the backup segments (MUST-M15); the current file is kept aside.
     /// The worker does this by itself when raw.db is damaged.
     Restore,
-    /// Print the context that would be injected for the current directory
-    Inject,
+    /// Print the context a new session in the current directory gets (OpenCode's plugin reads it)
+    Inject {
+        /// The session it is for, so it is not listed among the other active sessions
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Serve the memory as an MCP server on stdin/stdout (search / get / timeline tools)
     Mcp,
     /// Search observations, summaries and prompts (this repository unless --all): by words, and
@@ -278,11 +282,9 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())
         }
-        Cmd::Inject => {
+        Cmd::Inject { session } => {
             let cwd = std::env::current_dir()?;
-            let conn = db::open(&home)?;
-            let repo = repo::key(&cwd);
-            print!("{}", inject::context(&conn, &repo)?);
+            print!("{}", hook::inject_text(&home, &cwd, session.as_deref())?);
             Ok(())
         }
         Cmd::Mcp => mcp::run(&home),

@@ -85,7 +85,8 @@ export default {
       if (!state) return;
       // Cache the promise too: overlapping calls still start only one injection process.
       state.context ??= new Promise((resolve) => {
-        execFile(exe, [...args, "inject"], {
+        // `=` keeps an id that starts with "-" a value. The session is left out of the other sessions.
+        execFile(exe, [...args, "inject", `--session=${e.sessionID}`], {
           cwd: state.dir,
           timeout: 3000,
           killSignal: "SIGKILL",

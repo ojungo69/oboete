@@ -107,26 +107,7 @@ fn run_io(
             let labels = agent_labels(agent, &payload);
             injecting = injects(home, agent, event, &labels);
             if injecting {
-                let (session, repo, branch) = crate::capture::checkout(&labels, &settings);
-                let session = own_session(session, &store);
-                // It goes to the agent's model provider: the rules as they are now apply, so a
-                // rule added after the text was built already hides its value (spec 6.4).
-                manifest = crate::consumer::manifest::text(
-                    home,
-                    &store,
-                    &repo,
-                    branch.as_deref().unwrap_or(""),
-                    &session,
-                    settings.rules.version(),
-                )
-                .unwrap_or_else(|e| {
-                    eprintln!("oboete: manifest not read: {e:#}");
-                    None
-                })
-                .map(|t| {
-                    let gated = crate::redact::outbound_with(&t, &settings.rules);
-                    crate::manifest::cut(&gated, crate::consumer::manifest::CAP)
-                });
+                manifest = checkout_manifest(home, &store, &labels, &settings);
             }
             return Ok(None);
         }
@@ -296,6 +277,55 @@ pub fn record(
         }
     }
     Ok(appended)
+}
+
+/// The manifest of the checkout `labels` names (Claude Code's fields), for the agent's model
+/// provider: gated with the rules as they are now, so a rule added after the text was built
+/// already hides its value (spec 6.4), and cut to its cap. A manifest that cannot be read is
+/// none, never a failed hook.
+fn checkout_manifest(
+    home: &Path,
+    store: &crate::raw::Raw,
+    labels: &Value,
+    settings: &crate::capture::Settings,
+) -> Option<String> {
+    let (session, repo, branch) = crate::capture::checkout(labels, settings);
+    let session = own_session(session, store);
+    crate::consumer::manifest::text(
+        home,
+        store,
+        &repo,
+        branch.as_deref().unwrap_or(""),
+        &session,
+        settings.rules.version(),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("oboete: manifest not read: {e:#}");
+        None
+    })
+    .map(|t| {
+        let gated = crate::redact::outbound_with(&t, &settings.rules);
+        crate::manifest::cut(&gated, crate::consumer::manifest::CAP)
+    })
+}
+
+/// `oboete inject`: what a SessionStart hook shows for the checkout at `cwd` (the recording-failure
+/// line, then the manifest in its fence). OpenCode's plugin reads its context here, since
+/// OpenCode drops a hook's output.
+pub fn inject_text(home: &Path, cwd: &Path, session: Option<&str>) -> Result<String> {
+    let settings = crate::capture::Settings::load(home)?;
+    let store = crate::raw::open(home)?;
+    let labels = json!({"session_id": session.unwrap_or("unknown"), "cwd": cwd});
+    let parts: Vec<String> = [
+        crate::failure::since(home).map(crate::failure::line),
+        checkout_manifest(home, &store, &labels, &settings)
+            .as_deref()
+            .map(crate::manifest::fenced),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    Ok(parts.join("\n"))
 }
 
 /// An idless event's session is this device's own: a bare "unknown" would be one session on
@@ -1344,6 +1374,9 @@ mod tests {
                 .as_str()
                 .unwrap();
             assert!(text.contains("look at the cache"), "{agent}: {text}");
+            // OpenCode drops the hook's output and asks `oboete inject` for the same text.
+            let asked = inject_text(home.path(), cwd.path(), Some("b")).unwrap();
+            assert_eq!(asked, text, "{agent}");
             let resumed = json!({"session_id": "b", "cwd": c, "source": "resume"});
             assert_eq!(hook("SessionStart", resumed), "", "{agent}");
         }
