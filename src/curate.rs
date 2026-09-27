@@ -66,6 +66,13 @@ pub struct Line {
     source: Option<Source>,
 }
 
+impl Line {
+    /// The part of its record's long text it shows, as stored: a tool's output, never its input.
+    pub(crate) fn source_text(&self) -> &str {
+        self.source.as_ref().map_or("", |s| s.text.as_str())
+    }
+}
+
 /// Whose a line's text is: the gates take a claim's speaker from its quote's line (Task 8).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Role {

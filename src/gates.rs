@@ -285,13 +285,13 @@ fn bare(quote: &str) -> bool {
 }
 
 /// A tool line of the session that did not fail, printed a pass and no failure (MUST-M1): each
-/// `failed` it prints is a `0 failed`.
+/// `failed` it prints is a `0 failed`. Its output only: an input such as `echo passed` ran nothing.
 fn passing_run(w: &Window, key: &str) -> bool {
     static NONE_FAILED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let none = NONE_FAILED.get_or_init(|| regex::Regex::new(r"\b0 failed").unwrap());
     w.lines.iter().any(|l| {
         l.key == key && l.role == (Role::Tool { failed: false }) && {
-            let text = l.text.to_lowercase();
+            let text = l.source_text().to_lowercase();
             PASSED.iter().any(|p| text.contains(p))
                 && text.matches("failed").count() == none.find_iter(&text).count()
         }
@@ -327,7 +327,8 @@ fn bare_file_count(body: &str) -> bool {
     static BARE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     BARE.get_or_init(|| {
         regex::Regex::new(
-            r"(?i)^\s*\d+\s*(files?|ファイル)[^.。]*?(changed|modified|変更)[^.。]*[.。]?\s*$",
+            // The count and a diff stat's own fields only: any other word explains the change.
+            r"(?i)^\s*\d+\s*(?:files?\s+(?:changed|modified)(?:\s*,\s*\d+\s+(?:insertions?|deletions?)\s*\([+-]\))*|ファイル(?:を)?(?:変更|修正)(?:しました)?)\s*[.。]?\s*$",
         )
         .unwrap()
     })
@@ -544,6 +545,13 @@ mod tests {
         assert_eq!(done(&[failing, reply(fixed)]), "proposed");
         let passing = tool("test result: ok. 4 passed; 0 failed", false);
         assert_eq!(done(&[passing, reply(fixed)]), "done");
+        // A pass word in what the tool was given, not in what it printed.
+        let echo = (
+            "tool",
+            json!({"tool": "Bash", "input": "echo passed", "output": "ok",
+            "failed": false}),
+        );
+        assert_eq!(done(&[echo, reply(fixed)]), "proposed");
         // Piped, a failing run exits 0: what it prints decides.
         let piped = tool(
             "test result: FAILED. 3 passed; 1 failed; finished in 0.2s",
@@ -682,9 +690,12 @@ mod tests {
             change("The module is renamed.", " ").kept[0].0.why,
             "unknown"
         );
+        let explained = change("3 files changed to fix the login check.", "");
+        assert_eq!(explained.kept.len(), 1);
         for bare in [
             "3 files changed",
             "12 files changed, 40 insertions(+).",
+            "3 files changed, 2 insertions(+), 1 deletion(-)",
             "5ファイルを変更。",
         ] {
             let g = change(bare, "");
