@@ -1343,7 +1343,7 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A9 | A zstd dictionary is kept only if it saves 20% or more | 2.4 | The 20% threshold |
 | A10 | SQLITE_BUSY is a lock-contention label in doctor only | 2.5 | How busy errors are classified and shown |
 | A11 | Each window tries each provider of its chain at most once per attempt; next_attempt_at bounds the retries | 3.1 | The fallback bound per window |
-| A12 | Default wait: a provider marked subscription curates after 10 minutes without a hook; revisit if windows routinely wait over an hour | 3.1 | The default wait (owner decision 15 left the value to Claude) |
+| A12 | Default wait: a window that reaches the device's last record, for every provider, is curated after 10 minutes without a hook (a setting of at most 30); revisit if windows routinely wait over an hour | 3.1 | The last window's wait (owner decision 30 replaced decision 15's wait of subscriptions; the value stays Claude's) |
 | A13 | An embedder change builds a new vector generation in the background; search switches when it covers every current document; a remote index switches after its send queue drains | 4.10 | How an embedder change rolls out |
 | A14 | No WebSocket in the first release; MUST-M19's WebSocket clause and measure move to Later | 5.1 | Whether the WebSocket wake ships in the first release, as owner decision 11 ("all 23 MUST items") would keep MUST-M19 whole (Appendix C item 15) |
 | A15 | Decision 17 of 2026-09-23 (deletion everywhere) outranks decision 21 of 2026-09-23 (follow claude-mem) on purging | 5.2 | Whether the hub keeps payloads, as the donor does |

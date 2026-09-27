@@ -344,7 +344,7 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
 - M2: coverage 100% (`every_seq_is_curated_elided_or_skipped` on the dev transcripts), and a crash at 20 points gives identical rows; the test fails against v1 first (spec 8.2).
 - Isolation: the per-CLI table (Task 3).
 - Window: the smallest window size that passes M2, M3 and M6 on dev transcripts (spec 8.2).
-- Cost: curator calls at most 20% of each daily cap on a heavy day; paid at most USD 5 a month.
+- Cost: curator calls at most 20% of each daily cap on a heavy day (subscriptions have none, owner decision 30); paid at most USD 5 a month.
 - M3: tuned on the dev labels of milestone 1; the deciding run on the test labels, which need the owner (see below).
 - MUST fixtures, each a test of the task that owns it: M1, M4 (Task 8), M2, M7, M18 (Task 6), M3 (Task 7), M6 (Task 9), M21 (Task 10).
 
