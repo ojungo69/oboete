@@ -266,12 +266,19 @@ pub fn tokens_this_month(conn: &Connection, provider: &str) -> Result<(i64, i64)
     )?)
 }
 
-/// What this month's sent calls to `provider` may have been billed for beyond the usage they
-/// reported: the estimate of each call with no prompt count, and the number of calls with no
-/// completion count (a timeout, a dropped connection, an answer without a full usage block). A
-/// response with an HTTP error status (`http 429: …`) was not billed.
-pub fn unmetered_this_month(conn: &Connection, provider: &str) -> Result<(i64, i64)> {
-    let start = chrono_free_month_start(now_ms());
+/// Since the last UTC midnight and since the first of this month (UTC), for `unmetered`.
+pub fn today() -> i64 {
+    now_ms() / DAY_MS * DAY_MS
+}
+pub fn this_month() -> i64 {
+    chrono_free_month_start(now_ms())
+}
+
+/// What `provider`'s sent calls since `start` may have used beyond the usage they reported: the
+/// estimate of each call with no prompt count, and the number of calls with no completion count
+/// (a timeout, a dropped connection, an answer without a full usage block). A response with an
+/// HTTP error status (`http 429: …`) used none.
+pub fn unmetered(conn: &Connection, provider: &str, start: i64) -> Result<(i64, i64)> {
     Ok(conn.query_row(
         "SELECT COALESCE(SUM(CASE WHEN prompt_tokens IS NULL THEN est_tokens END), 0),
                 COALESCE(SUM(completion_tokens IS NULL), 0)

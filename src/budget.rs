@@ -103,11 +103,12 @@ pub fn admit(
         }));
     }
     if let Some(daily) = limits.daily_tokens {
-        let today = providers_db::tokens_today(db, name)?;
-        if today as f64 + tokens > daily as f64 {
+        let today =
+            providers_db::tokens_today(db, name)? as f64 + unmetered(db, p, providers_db::today())?;
+        if today + reserved > daily as f64 {
             return Ok(Some(Refusal {
                 outcome: "budget",
-                detail: format!("{today}/{daily} tokens today"),
+                detail: format!("{today:.0}/{daily} tokens today"),
             }));
         }
     }
@@ -134,13 +135,30 @@ pub fn spent_this_month(db: &Connection, providers: &[Provider]) -> Result<f64> 
         let limits = p.limits();
         let (prompt, completion) = providers_db::tokens_this_month(db, p.name())?;
         usd += limits.usd(prompt as f64, completion as f64);
-        let (est, calls) = providers_db::unmetered_this_month(db, p.name())?;
-        usd += limits.usd(
-            est as f64,
-            (calls * i64::from(limits.max_output_tokens)) as f64,
-        );
+        let (input, output) = unmetered_parts(db, p, providers_db::this_month())?;
+        usd += limits.usd(input, output);
     }
     Ok(usd)
+}
+
+/// The tokens `p`'s sent calls since `start` may have used and did not report: a missing prompt
+/// count at its calibrated estimate, a missing completion count at the request's declared output
+/// (or the entry's output cap), as input and output.
+fn unmetered_parts(db: &Connection, p: &Provider, start: i64) -> Result<(f64, f64)> {
+    let (est, calls) = providers_db::unmetered(db, p.name(), start)?;
+    let out = match p.declared_output() {
+        0 => p.limits().max_output_tokens,
+        n => n,
+    };
+    Ok((
+        est as f64 * factor(db, p.name())?,
+        (calls * i64::from(out)) as f64,
+    ))
+}
+
+fn unmetered(db: &Connection, p: &Provider, start: i64) -> Result<f64> {
+    let (input, output) = unmetered_parts(db, p, start)?;
+    Ok(input + output)
 }
 
 #[cfg(test)]
@@ -267,6 +285,34 @@ mod tests {
             (r.outcome, r.detail.as_str()),
             ("budget", "8000/10000 tokens today")
         );
+        // The declared output is reserved: 1,000 in and up to 4,000 out do not fit in 2,000.
+        let mut declared = p.clone();
+        if let Provider::Openai { extra, .. } = &mut declared {
+            extra.insert("max_tokens".into(), 4000.into());
+        }
+        let r = admit(&db, &declared, chain, 1000.0, 5.0, &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.outcome, "budget");
+        // A sent call with no usage back counts at its estimate and its largest output: 1,000
+        // in and the entry's 4,000 out take the day to 13,000.
+        record(
+            &db,
+            &Call {
+                provider: "p",
+                role: "curator",
+                span: "s",
+                outcome: "error",
+                ms: 1,
+                detail: Some("http request: timeout: global"),
+                bytes_out: 1,
+                est_tokens: Some(1_000),
+                usage: Usage::default(),
+            },
+        )
+        .unwrap();
+        let r = admit(&db, &p, chain, 1.0, 5.0, &[]).unwrap().unwrap();
+        assert_eq!(r.detail, "13000/10000 tokens today");
     }
 
     #[test]
@@ -355,7 +401,15 @@ mod tests {
             ..Default::default()
         };
         row("ok", None, partial);
-        let spent = spent_this_month(&db, &[paid]).unwrap();
+        let spent = spent_this_month(&db, std::slice::from_ref(&paid)).unwrap();
         assert!((spent - 0.0815).abs() < 1e-9, "{spent}");
+        // Once this provider is known to read twice its estimate, a missing prompt count is
+        // charged at the calibrated 2,000: the 5 samples cost 0.001, the timeout's input 0.001
+        // more.
+        for _ in 0..5 {
+            call(&db, "a", Some(100), 200, 0);
+        }
+        let spent = spent_this_month(&db, &[paid]).unwrap();
+        assert!((spent - 0.0835).abs() < 1e-9, "{spent}");
     }
 }
