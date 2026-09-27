@@ -138,9 +138,11 @@ pub fn check(
                 g.dropped.push((d.id, "a bare file count"));
                 continue;
             }
-            // The record's words, or none: a reason no line gives is the curator's guess.
+            // The record's words, or none: a reason no line of the claim's own session and
+            // repository gives is the curator's guess.
             let why = d.why.trim();
-            d.why = if w.lines.iter().any(|l| l.text.contains(why)) {
+            let own = |l: &&Line| l.key == line.key && l.repo == line.repo;
+            d.why = if w.lines.iter().filter(own).any(|l| l.text.contains(why)) {
                 crate::redact::outbound_with(why, rules)
             } else {
                 String::new()
@@ -172,7 +174,8 @@ pub fn check(
             "decided" if !own_words && !answers && !accepts => {
                 Some("decided needs the user's words or an acceptance right after")
             }
-            "done" if asked || !own_words && !passing_run(w, line) => {
+            // A bare "yes" names nothing done, whatever ran (spec 3.3).
+            "done" if asked || bare(&d.quote) || !own_words && !passing_run(w, line) => {
                 Some("done needs the user's words or a passing run")
             }
             "retracted" if !own_words => Some("retracted needs the user's words"),
@@ -710,6 +713,10 @@ mod tests {
         }
         let clean = tool("=== 3 passed, 0 errors in 0.2s ===", false);
         assert_eq!(done(&[clean.clone(), reply(fixed)]), "done");
+        // A bare "yes" names nothing done, whatever ran before it.
+        let passed = tool("test result: ok. 4 passed; 0 failed", false);
+        let w = window(&[passed, reply("I fixed the parser."), user("Yes.")]);
+        assert_eq!(one(&w, "done", "user", "Yes").0, "proposed");
         // The user's question is not done because a run passed before it.
         let w = window(&[clean, user("Is the parser fixed?")]);
         assert_eq!(one(&w, "done", "user", "Is the parser fixed").0, "proposed");
@@ -900,6 +907,22 @@ mod tests {
             change("The module is renamed.", " ").kept[0].0.why,
             "unknown"
         );
+        // Only the claim's own session and repository give its reason.
+        let two = window(&[
+            user("Renamed the module."),
+            user("Moved the cache because the old name clashed."),
+        ]);
+        for other in ["repo", "session"] {
+            let mut w = two.clone();
+            match other {
+                "repo" => w.lines[1].repo = Some("q".into()),
+                _ => w.lines[1].key = "another".into(),
+            }
+            let mut d = draft(&w, "c1", "done", "user", quote);
+            (d.0.kind, d.0.why) = ("change".into(), "the old name clashed".into());
+            let g = check(&w, &[], &[], vec![d], &Rules::default());
+            assert_eq!(g.kept[0].0.why, "unknown", "{other}");
+        }
         let explained = change("3 files changed to fix the login check.", "");
         assert_eq!(explained.kept.len(), 1);
         for bare in [
