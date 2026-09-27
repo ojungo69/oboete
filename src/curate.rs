@@ -96,6 +96,35 @@ struct Piece {
     repo: Option<String>,
 }
 
+/// A repository as a window shows it: through the gate, a local path (no origin) as its folder,
+/// with either platform's separator.
+fn repo_name(repo: &str, rules: &Rules) -> String {
+    let repo = crate::redact::outbound_with(repo, rules);
+    repo.rsplit(['/', '\\']).next().unwrap_or(&repo).to_owned()
+}
+
+/// The context a window's prompt adds, in whole lines from the start of each part, within `room`
+/// tokens: it shares the provider's request ceiling with the window (Groq's free tier refuses a
+/// request over 8,000 tokens). What the sessions carry in takes at most half; the candidates
+/// (MUST-M3) the rest.
+fn fit(carried: &str, shown: &str, room: u32) -> (String, String) {
+    let keep = |text: &str, room: u32| {
+        let (mut out, mut used) = (String::new(), 0);
+        for line in text.lines() {
+            let cost = crate::budget::estimate(line) + 1;
+            if used + cost > room {
+                break;
+            }
+            used += cost;
+            out.push_str(line);
+            out.push('\n');
+        }
+        (out, used)
+    };
+    let (carried, used) = keep(carried, room / 2);
+    (carried, keep(shown, room - used).0)
+}
+
 /// Bytes of records read at a time while a window is cut, at least one record (spec 3.1: pages
 /// bounded by events and bytes).
 const PAGE_BYTES: usize = 4 << 20;
@@ -324,9 +353,7 @@ impl<'r> Prepared<'r> {
         // Each label through the gate on its own, before it is shortened or joined.
         let place = match (&e.repo, &e.branch) {
             (Some(r), b) => {
-                let repo = gate(r);
-                // A local path (no origin) as its folder, with either platform's separator.
-                let name = repo.rsplit(['/', '\\']).next().unwrap_or(&repo).to_owned();
+                let name = repo_name(r, rules);
                 match b {
                     Some(b) => format!(" in {name}@{}", gate(b)),
                     None => format!(" in {name}"),
@@ -666,7 +693,12 @@ pub fn run_phase(
             .filter(|l| l.repo.as_deref() == Some(repo))
             .map(|l| l.text.as_str())
             .collect();
-        for c in candidates(k, repo, &text.join("\n"))? {
+        // Under the repository's name, as the window's headings show it.
+        let found = candidates(k, repo, &text.join("\n"))?;
+        if !found.is_empty() {
+            shown.push_str(&format!("### in {}\n", repo_name(repo, rules)));
+        }
+        for c in found {
             shown.push_str(&format!(
                 "{}: {}\n",
                 c.uid,
@@ -675,7 +707,11 @@ pub fn run_phase(
             shown_in.push((repo.to_owned(), c.uid));
         }
     }
-    let (carried_text, carried_uids) = carried(raw, k, rules, &w)?;
+    let (carried_text, mut carried_uids) = carried(raw, k, rules, &w)?;
+    // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing.
+    let (carried_text, shown) = fit(&carried_text, &shown, summary.window_tokens / 5);
+    carried_uids.retain(|(_, _, uid)| carried_text.contains(uid.as_str()));
+    shown_in.retain(|(_, uid)| shown.contains(uid.as_str()));
     let prompt = prompt(&summary.language, &w.text, &shown, &carried_text);
     let sent = sha256_hex(&format!(
         "{chain}\n{idle}\n{}\n{}",
@@ -1074,6 +1110,26 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             let goal: String = gate(&goal).chars().take(200).collect();
             lines.push(format!("goal: {goal}"));
         }
+        // Proposals first: they are what an acceptance in this window answers, and the context
+        // is cut from its end (`fit`).
+        for op in previous.iter().filter(|o| o.kind == OpKind::Claim) {
+            let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(op.body.clone()) else {
+                continue;
+            };
+            let Some(first) = c.evidence.first() else {
+                continue;
+            };
+            let (kind, status) = crate::claims::normalize(&c.kind, &c.status);
+            if status == "proposed" && session_of(&first.device, first.seq)?.as_deref() == Some(key)
+            {
+                let uid = crate::claims::uid(kind, first);
+                // Only while it is still current: a sibling or a later window may have settled it.
+                if let Some(repo) = crate::claims::tip_repo(k, &uid)? {
+                    lines.push(format!("proposed before {uid}: {}", gate(&c.body)));
+                    uids.push((key.to_owned(), repo, uid));
+                }
+            }
+        }
         let mut open: Vec<(&str, crate::claims::Claim)> = Vec::new();
         for repo in repos {
             open.extend(
@@ -1097,24 +1153,6 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                 lines.push(format!("open item {}: {}", c.uid, gate(&c.body)));
                 uids.push((key.to_owned(), Some(c_repo.to_owned()), c.uid.clone()));
                 shown += 1;
-            }
-        }
-        for op in previous.iter().filter(|o| o.kind == OpKind::Claim) {
-            let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(op.body.clone()) else {
-                continue;
-            };
-            let Some(first) = c.evidence.first() else {
-                continue;
-            };
-            let (kind, status) = crate::claims::normalize(&c.kind, &c.status);
-            if status == "proposed" && session_of(&first.device, first.seq)?.as_deref() == Some(key)
-            {
-                let uid = crate::claims::uid(kind, first);
-                // Only while it is still current: a sibling or a later window may have settled it.
-                if let Some(repo) = crate::claims::tip_repo(k, &uid)? {
-                    lines.push(format!("proposed before {uid}: {}", gate(&c.body)));
-                    uids.push((key.to_owned(), repo, uid));
-                }
             }
         }
         if !lines.is_empty() {
@@ -1413,6 +1451,29 @@ mod tests {
             }
             close(&mut raw, &w);
         }
+    }
+
+    #[test]
+    fn the_context_a_window_adds_fits_its_share_of_the_budget() {
+        let carried = "open item: a body of forty characters or so\n".repeat(100);
+        let shown = "c0ffee: a candidate body about as long\n".repeat(100);
+        let (c, s) = fit(&carried, &shown, 200);
+        let cost = |t: &str| {
+            t.lines()
+                .map(|l| crate::budget::estimate(l) + 1)
+                .sum::<u32>()
+        };
+        assert!(
+            cost(&c) <= 100 && cost(&c) + cost(&s) <= 200,
+            "{} {}",
+            cost(&c),
+            cost(&s)
+        );
+        assert!(!s.is_empty() && carried.starts_with(&c) && shown.starts_with(&s));
+        // What the sessions carry in leaves its unused half to the candidates.
+        let (c, s) = fit("goal: short\n", &shown, 200);
+        assert_eq!(c, "goal: short\n");
+        assert!(cost(&s) > 100, "{}", cost(&s));
     }
 
     #[test]
@@ -2273,6 +2334,84 @@ mod tests {
             let item = |l: &str| l.starts_with("open item ") && l.ends_with(&format!(": {body}"));
             assert!(text.lines().any(item), "{body}: {text}");
         }
+    }
+
+    /// A candidate the budget cut from the prompt, or never shown, is superseded by nothing; the
+    /// ones shown are labelled with their repository.
+    #[test]
+    fn only_a_candidate_the_prompt_shows_is_superseded() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let filler = "and the pooled connections stay warm between requests ".repeat(4);
+        let ops: Vec<_> = (0..30)
+            .map(|i| {
+                let text = format!("Sessions stay in Postgres, variant {i}, {filler}");
+                kept(&mut raw, &format!("s{i}"), "a", &text)
+            })
+            .collect();
+        raw.append_ops(&ops).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let all: Vec<String> = crate::claims::current(&k, "a")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.uid)
+            .collect();
+        let decision = Event {
+            session: "new".into(),
+            repo: Some("a".into()),
+            ..prompt("Sessions leave Postgres for SQLite.")
+        };
+        raw.append(&decision).unwrap();
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let dev = raw.device().to_owned();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        let line = w
+            .lines
+            .iter()
+            .find(|l| l.text.contains("leave Postgres"))
+            .unwrap()
+            .id
+            .clone();
+        // The candidates the phase finds, as it finds them: more than the budget shows.
+        let text: Vec<&str> = w.lines.iter().map(|l| l.text.as_str()).collect();
+        let found: Vec<String> = candidates(&k, "a", &text.join("\n"))
+            .unwrap()
+            .into_iter()
+            .map(|c| c.uid)
+            .collect();
+        assert!(found.len() > 10 && found.iter().all(|u| all.contains(u)));
+        let sent = std::cell::RefCell::new(String::new());
+        let mut chain = |_: &str,
+                         p: &str,
+                         _: &dyn Fn() -> Option<i64>,
+                         _: &AnswerCheck|
+         -> Result<ChainResult> {
+            *sent.borrow_mut() = p.to_owned();
+            let shown = found.iter().find(|u| p.contains(u.as_str())).unwrap();
+            let cut = found.iter().find(|u| !p.contains(u.as_str())).unwrap();
+            let quote = "Sessions leave Postgres for SQLite";
+            Ok(ChainResult {
+                output: json!({"claims": [claim("c1", "decided", &line, quote,
+                    json!([shown, cut]))], "summary": "s"}),
+                ..answered("fake")
+            })
+        };
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        let sent = sent.into_inner();
+        assert!(sent.contains("### in a\n"), "{sent}");
+        let ops = raw.ops_after(raw.device(), 0, 100).unwrap();
+        let last = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+        let kept: Vec<&str> = last.body["supersedes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert!(sent.contains(kept[0]));
     }
 
     /// A window of two repositories: a draft of one supersedes only that repository's candidates,
