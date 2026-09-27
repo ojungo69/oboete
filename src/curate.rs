@@ -865,7 +865,7 @@ pub fn run_phase(
                     .collect();
                 let op = json!({"outcome": "curated", "provider": r.provider, "summary": summary,
                     "dropped": dropped, "lowered": gated.lowered});
-                return cover(raw, db, &w, op, claims);
+                return cover(raw, db, &w, within_op_cap(op), claims);
             }
             // Counted like a provider that failed: no answer this window can use.
             Err(e) => vec![Fallback {
@@ -1087,6 +1087,27 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
         return Err(AnswerFailure::Shape);
     }
     Ok((summary, drafts))
+}
+
+/// A window op within the op cap. Its lists name the curator's own ids, up to `MAX_CLAIMS` of them
+/// with several reasons each, and an id escapes to six times its bytes: the longer list loses its
+/// last entry until the op fits, and `cut` says how many went, so the append never fails.
+fn within_op_cap(mut op: Value) -> Value {
+    let len = |op: &Value, list: &str| op[list].as_array().map_or(0, Vec::len);
+    let mut cut = 0u64;
+    while op.to_string().len() > crate::raw::MAX_OP_BYTES {
+        let list = if len(&op, "lowered") >= len(&op, "dropped") {
+            "lowered"
+        } else {
+            "dropped"
+        };
+        if op[list].as_array_mut().and_then(Vec::pop).is_none() {
+            break;
+        }
+        cut += 1;
+        op["cut"] = cut.into();
+    }
+    op
 }
 
 /// The chain's check of a curator's answer (`provider::AnswerCheck`): the outcome it is refused
@@ -2951,6 +2972,46 @@ mod tests {
         let (inside, after) = rest.rsplit_once(&format!("\n{fence}")).unwrap();
         assert!(inside.contains(attack));
         assert!(!before.contains(attack) && !after.contains(attack));
+    }
+
+    /// The window op lists every draft the gates dropped or lowered, with its id: fifty ids of
+    /// escaped control characters, each with several reasons, are cut to the op cap, and the
+    /// window is still covered.
+    #[test]
+    fn a_window_ops_lists_are_cut_to_the_op_cap() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&event("reply", json!({"assistant": "We could keep tabs."})))
+            .unwrap();
+        let claims: Vec<Value> = (0..MAX_CLAIMS)
+            .map(|i| {
+                json!({"id": format!("{}{i:04}", "\u{1}".repeat(MAX_ID_BYTES - 4)),
+                    "kind": "decision", "status": "decided", "speaker": "user",
+                    "scope": "global", "body": "Keep tabs.", "quote": "keep tabs", "line": "L1",
+                    "supersedes": ["nowhere"], "why": ""})
+            })
+            .collect();
+        let answer = ChainResult {
+            output: json!({"claims": claims, "summary": "Tabs."}),
+            ..answered("fake")
+        };
+        let mut chain = Some(answer);
+        let mut curator = |_: &str,
+                           _: &str,
+                           _: &dyn Fn() -> Option<i64>,
+                           _: &AnswerCheck|
+         -> Result<ChainResult> { Ok(chain.take().unwrap()) };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
+        assert_eq!(phase, Phase::Covered);
+        let op = &windows(&raw)[0];
+        assert!(op.to_string().len() <= crate::raw::MAX_OP_BYTES);
+        let listed =
+            op["dropped"].as_array().unwrap().len() + op["lowered"].as_array().unwrap().len();
+        assert_eq!(
+            listed as u64 + op["cut"].as_u64().unwrap(),
+            4 * MAX_CLAIMS as u64
+        );
     }
 
     /// Each answer that gives a window nothing fails as a provider does, under its own name.

@@ -7,7 +7,7 @@
 use crate::claims::{Claim, Evidence};
 use crate::curate::{Draft, Line, Role, Window};
 use crate::redact::Rules;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A reply to a proposal that holds one of these accepts it (spec 3.3). Latin ones match whole
 /// words, the others anywhere in the turn.
@@ -161,16 +161,18 @@ pub fn check(
             d.speaker = speaker.into();
             lower(&d, "the speaker is the quote's line");
         }
+        // A user turn that asks, or whose end is in a later window, promotes nothing, whatever
+        // else the window holds (a passing run answers no question).
+        let asked = speaker == "user" && (question(&line.text) || continues(w, line));
         // The user's own words carry the claim; a bare "yes" accepts only what it answers.
-        let own_words =
-            speaker == "user" && !question(&line.text) && !continues(w, line) && !bare(&d.quote);
+        let own_words = speaker == "user" && !asked && !bare(&d.quote);
         let answers = speaker == "user" && bare(&d.quote) && answers_a_reply(w, i);
         let accepts = speaker == "assistant proposal" && accepted(w, i);
         let below = match d.status.as_str() {
             "decided" if !own_words && !answers && !accepts => {
                 Some("decided needs the user's words or an acceptance right after")
             }
-            "done" if !own_words && !passing_run(w, line) => {
+            "done" if asked || !own_words && !passing_run(w, line) => {
                 Some("done needs the user's words or a passing run")
             }
             "retracted" if !own_words => Some("retracted needs the user's words"),
@@ -183,20 +185,42 @@ pub fn check(
         g.kept.push((d, e));
         own.push((own_words, line.repo.as_deref(), &line.key));
     }
-    // Once every status is settled: what a sibling is, after the gates.
-    let siblings: HashMap<String, (String, String, Option<&str>)> = g
+    // Once every status is settled: what a sibling is, after the gates. Siblings of one kind
+    // quoting one sentence are one claim (`claims::uid`), settled when any of them is.
+    let unsettled = |s: &str| matches!(s, "proposed" | "unverified");
+    let uids: Vec<String> = g
+        .kept
+        .iter()
+        .map(|(d, e)| crate::claims::uid(&d.kind, e))
+        .collect();
+    let settled: HashSet<&str> = g
+        .kept
+        .iter()
+        .zip(&uids)
+        .filter(|((d, _), _)| !unsettled(&d.status))
+        .map(|(_, uid)| uid.as_str())
+        .collect();
+    let siblings: HashMap<String, (String, String, Option<&str>, &str)> = g
         .kept
         .iter()
         .zip(&own)
-        .map(|((d, _), &(_, repo, _))| (d.id.clone(), (d.status.clone(), d.kind.clone(), repo)))
+        .zip(&uids)
+        .map(|(((d, _), &(_, repo, _)), uid)| {
+            let status = if unsettled(&d.status) && settled.contains(uid.as_str()) {
+                "decided".to_owned()
+            } else {
+                d.status.clone()
+            };
+            (d.id.clone(), (status, d.kind.clone(), repo, uid.as_str()))
+        })
         .collect();
-    let unsettled = |s: &str| matches!(s, "proposed" | "unverified");
-    for ((d, _), (own_words, repo, key)) in g.kept.iter_mut().zip(own) {
+    for (((d, _), (own_words, repo, key)), uid) in g.kept.iter_mut().zip(own).zip(&uids) {
         let mut out = Vec::new();
         d.supersedes.retain(|to| {
-            // Another repository's claim would leave that repository's current tips.
+            // Another repository's claim would leave that repository's current tips, and a
+            // sibling that is the same claim would supersede itself.
             let target = match siblings.get(to) {
-                Some((status, kind, r)) if *to != d.id && *r == repo => {
+                Some((status, kind, r, u)) if *u != uid && *r == repo => {
                     Some((status.as_str(), kind.as_str(), "repo"))
                 }
                 Some(_) => None,
@@ -555,6 +579,11 @@ mod tests {
         assert!(w.to_offset.is_some(), "the prompt is cut");
         let quote = "Use tabs everywhere";
         assert_eq!(one(&w, "decided", "user", quote).0, "proposed");
+        // Nor done by a passing run of the session in the window.
+        let mut w = w;
+        let run = window(&[tool("test result: ok. 4 passed; 0 failed", false)]).lines;
+        w.lines.extend(run);
+        assert_eq!(one(&w, "done", "user", quote).0, "proposed");
     }
 
     #[test]
@@ -680,7 +709,10 @@ mod tests {
             );
         }
         let clean = tool("=== 3 passed, 0 errors in 0.2s ===", false);
-        assert_eq!(done(&[clean, reply(fixed)]), "done");
+        assert_eq!(done(&[clean.clone(), reply(fixed)]), "done");
+        // The user's question is not done because a run passed before it.
+        let w = window(&[clean, user("Is the parser fixed?")]);
+        assert_eq!(one(&w, "done", "user", "Is the parser fixed").0, "proposed");
         let w = window(&[user("直った、ありがとう。")]);
         assert_eq!(one(&w, "done", "user", "直った").0, "done");
     }
@@ -791,6 +823,49 @@ mod tests {
         assert!(g.kept[0].0.supersedes.is_empty());
         let settled = [("c4".to_string(), "a proposal supersedes nothing settled")];
         assert_eq!(g.dropped, settled);
+    }
+
+    /// Two drafts of one kind quoting one sentence are one claim (`claims::uid`): while either is
+    /// settled a proposal supersedes neither, and neither supersedes the other.
+    #[test]
+    fn a_sibling_quoting_the_same_sentence_is_the_same_claim() {
+        let w = window(&[
+            user("Use spaces, not tabs."),
+            reply("We could keep tabs in Makefiles."),
+        ]);
+        let quote = "Use spaces, not tabs";
+        let first = draft(&w, "c1", "proposed", "user", quote);
+        let mut second = draft(&w, "c2", "decided", "user", quote);
+        second.0.supersedes = vec!["c1".into()];
+        let mut proposal = draft(
+            &w,
+            "c3",
+            "proposed",
+            "assistant proposal",
+            "keep tabs in Makefiles",
+        );
+        proposal.0.supersedes = vec!["c1".into()];
+        let g = check(
+            &w,
+            &[],
+            &[],
+            vec![first, second, proposal],
+            &Rules::default(),
+        );
+        let kept: Vec<&Vec<String>> = g.kept.iter().map(|(d, _)| &d.supersedes).collect();
+        assert_eq!(kept, [&Vec::<String>::new(); 3]);
+        let reasons: Vec<(&str, &str)> = g
+            .dropped
+            .iter()
+            .map(|(id, why)| (id.as_str(), *why))
+            .collect();
+        assert_eq!(
+            reasons,
+            [
+                ("c2", OUTSIDE),
+                ("c3", "a proposal supersedes nothing settled")
+            ]
+        );
     }
 
     #[test]
