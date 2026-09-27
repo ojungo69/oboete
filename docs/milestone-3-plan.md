@@ -169,9 +169,9 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
 - Test: `src/budget.rs`
 
 **Interfaces:**
-- Produces: `budget::estimate(text: &str) -> u32` (D7's script counts); `budget::factor(db, provider) -> f64` (median of the last 50 answers' `prompt_tokens / est_tokens`, from `provider_calls`, where the chain stores each call's uncalibrated estimate; 1.0 with fewer than 5); `budget::admit(db, entry, estimated_tokens) -> Admit` (Go, TooBig, DailyCalls, DailyTokens, MonthlyUsd, RateHeader). A Groq answer's `x-ratelimit-remaining-requests` and `-tokens` are stored in `provider_state` and a later call that would exceed them waits.
+- Produces: `budget::estimate(text: &str) -> u32` (D7's script counts); `budget::factor(db, provider) -> f64` (median of the last 50 answers' `prompt_tokens / est_tokens`, from `provider_calls`, where the chain stores each call's uncalibrated estimate; 1.0 with fewer than 5); `budget::admit(db, entry, estimated_tokens) -> Admit` (Go, TooBig, DailyCalls, DailyTokens, MonthlyUsd, RateHeader). A paid entry is admitted only when the month's spend plus this call's input estimate plus its largest possible output (`max_tokens` or the entry's output cap, at the output price) stays within `monthly_usd`. A Groq answer's `x-ratelimit-remaining-requests` and `-tokens` are stored in `provider_state` and a later call that would exceed them waits.
 
-- [ ] **Step 1: Failing tests.** `a_japanese_window_over_groqs_ceiling_is_skipped_without_a_call` (Review Focus 2; the fake endpoint sees no request); `after_a_413_the_entries_with_the_same_ceiling_are_skipped_for_that_window`; `the_factor_follows_recorded_usage`; `a_month_over_its_usd_cap_skips_the_paid_entry`; `a_rebuild_leaves_the_months_spend` (with Task 11).
+- [ ] **Step 1: Failing tests.** `a_japanese_window_over_groqs_ceiling_is_skipped_without_a_call` (Review Focus 2; the fake endpoint sees no request); `after_a_413_the_entries_with_the_same_ceiling_are_skipped_for_that_window`; `the_factor_follows_recorded_usage`; `a_month_over_its_usd_cap_skips_the_paid_entry`; `a_call_whose_largest_output_would_cross_the_cap_is_not_admitted` (spend just below the cap); `a_rebuild_leaves_the_months_spend` (with Task 11).
 - [ ] **Step 2: Implement.** Calibrate D7's two coefficients on the sweep's recorded usage before fixing them.
 - [ ] **Step 3: Run** the tests and the suite.
 - [ ] **Step 4: Commit** `providers: token and money budgets and the pre-flight size check (milestone 3, Task 4)`.
@@ -191,7 +191,7 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
   - `raw::Op { device, op_seq, kind: OpKind, ts, body: Value }` with `OpKind::{Window, Claim, Correction, Digest}`; `Raw::append_ops(&mut self, ops: &[OpBody]) -> Result<Vec<i64>>` in one transaction; `Raw::ops_after(device, op_seq, limit)`; `Raw::curation_checkpoint(device) -> Result<(i64, Option<i64>)>` (seq and offset, D2).
   - `curate::next_window(raw, k, settings) -> Result<Option<Window>>`: pages through `Raw::after` from the checkpoint, bounded by events and bytes (issue #54), cut per D12 at `window_tokens` (D8); an event over the cap is split into parts with evidence offsets inside it, or elided with the "seen, elided" marker if it is a tool output.
   - `curate::run_phase(home, raw, k, db, settings) -> Result<Phase>` where `Phase` is Curated, Waiting(until) or Idle. Before each subscription call it checks D9's gate.
-  - Pending windows: `pending(device, from_seq, to_seq, reason, attempts, next_attempt_at)` in `providers.db`.
+  - Pending windows: `pending(device, from_seq, to_seq, reason, attempts, next_attempt_at)` in `providers.db`. A pending row counts only while raw.db still holds the same window: on each start the worker drops pending rows above the restored frontier or whose range no longer starts at the curation checkpoint, keeping the call ledger and budget state. Test: `a_restore_that_rewinds_raw_drops_the_pending_rows_above_it`.
 - Consumes: `Chain::run` (Task 1), `budget::admit` (Task 4), `isolation::gate` (Task 3), `redact::outbound` and the exclusion check (the egress gate).
 
 - [ ] **Step 1: Failing tests.**
@@ -217,8 +217,10 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
 
 **Interfaces:**
 - knowledge.db: `claims(uid TEXT PRIMARY KEY, kind, status, speaker, scope, repo, body, valid_from, device, op_seq)`, `evidence(uid, quote, anchor_device, anchor_seq, offset, length)`, `edges(from_uid, to_uid, type)` with type supersedes or retracts, `derivations(uid, recipe, tier, op_device, op_seq)`.
+- Tombstones after curation: when the rescan (or, from milestone 5, forget) tombstones a record or a range that a claim's or digest's evidence anchors on, the claims consumer drops that claim and every digest citing it from knowledge.db, and the span is queued for recuration (Task 11). Rebuild does the same, so a masked secret cannot come back through a paraphrase. Test: `a_rule_added_after_curation_drops_the_claims_quoting_the_masked_text`.
 - `claims::current(k, repo) -> Vec<Claim>`: chain tips, ordered by (valid_from, device, seq) (MUST-M7); the active derivation of a uid is the highest tier, then the newest (MUST-M18).
 - Kinds: decision, preference, lesson, fix, open item, repo fact, change; old kinds map as spec 3.2 says; unknown kinds are stored as repo fact with status unverified (D13).
+- Identity (MUST-M18): a claim's uid is derived in code, never by the model: a hash of its kind and its evidence anchor (device, seq, and the offset of the quote's start rounded down to its sentence). A recuration whose claim has the same kind and an anchor in the same sentence is a new derivation of that uid, whatever its wording; a claim that no longer appears gets a retract edge. Test: `a_recuration_that_rewords_a_claim_keeps_its_uid_and_its_owner_correction`.
 
 ## Task 7: The curator prompt and answer
 
