@@ -466,11 +466,6 @@ pub fn running(home: &Path) -> bool {
         .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
-/// One run now, for `oboete restore` and tests. It waits up to 2 s for the lock rather than
-/// return at once: a worker a hook started holds it only while it drains, and a lock just
-/// released can still be held for a moment by a child another thread forked (it keeps the open
-/// file until it execs), which made hook tests run nothing under a parallel suite.
-#[allow(dead_code)] // Task 12's replay drains without waiting.
 /// `oboete rebuild` (spec 1.7): under the worker lock, knowledge.db is moved aside and every
 /// consumer runs from zero over raw.db and the op log, with no curation phase, so no provider is
 /// called. The old file is removed once the new one is complete; a rebuild that fails keeps it,
@@ -479,12 +474,19 @@ pub fn rebuild(home: &Path) -> Result<()> {
     use anyhow::Context;
     let held = lock(home)?
         .ok_or_else(|| anyhow::anyhow!("a worker is running; try again when it has exited"))?;
-    let (kept, aside) = set_aside(home)?;
+    let name = format!("knowledge.db.rebuilding-{}", crate::db::now_ms());
+    let aside = set_aside(home, &name)?;
+    let kept = home.join(&name);
     run_holding(home, 0, consumers(home), || {}, Some(held), None).with_context(|| {
-        format!(
-            "rebuild; the old knowledge.db is kept as {}",
-            kept.display()
-        )
+        // A home with no knowledge.db yet set nothing aside.
+        if kept.exists() {
+            format!(
+                "rebuild; the old knowledge.db is kept as {}",
+                kept.display()
+            )
+        } else {
+            "rebuild".to_owned()
+        }
     })?;
     for f in aside {
         std::fs::remove_file(&f).with_context(|| format!("remove {}", f.display()))?;
@@ -492,29 +494,39 @@ pub fn rebuild(home: &Path) -> Result<()> {
     Ok(())
 }
 
-/// knowledge.db moved aside as `knowledge.db.rebuilding-<ms>`, its sidecars with it under the
-/// names SQLite looks for beside that file (`...-wal`, `...-shm`), so the kept file opens with
-/// its last commits. Under raw.lock held exclusively, as a restore moves it: every reader of
-/// knowledge.db holds raw.db open (a shared hold) while it reads. The sidecars first: never the
-/// file's name free with an old WAL beside it that SQLite would replay into the new file.
-fn set_aside(home: &Path) -> Result<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
+/// knowledge.db moved aside as `name`, its sidecars with it under the names SQLite looks for
+/// beside that file (`...-wal`, `...-shm`), so the kept file opens with its last commits. Under
+/// raw.lock held exclusively, as a restore moves it: every reader of knowledge.db holds raw.db
+/// open (a shared hold) while it reads. The sidecars first: never the file's name free with an
+/// old WAL beside it that SQLite would replay into the new file. A move that fails puts back the
+/// ones before it, so the file never stays without its WAL.
+fn set_aside(home: &Path, name: &str) -> Result<Vec<std::path::PathBuf>> {
     use anyhow::Context;
     let _swap = crate::raw::lock_for_swap(home)?;
     // Names joined to `home`, never through its display form: a home path need not be UTF-8.
-    let name = format!("knowledge.db.rebuilding-{}", crate::db::now_ms());
-    let kept = home.join(&name);
-    let mut aside = Vec::new();
+    let mut moved = Vec::new();
     for ext in ["-wal", "-shm", ""] {
         let from = home.join(format!("knowledge.db{ext}"));
-        if from.exists() {
-            let to = home.join(format!("{name}{ext}"));
-            std::fs::rename(&from, &to).with_context(|| format!("move {}", from.display()))?;
-            aside.push(to);
+        if !from.exists() {
+            continue;
         }
+        let to = home.join(format!("{name}{ext}"));
+        if let Err(e) = std::fs::rename(&from, &to) {
+            for (from, to) in moved.iter().rev() {
+                let _ = std::fs::rename(to, from);
+            }
+            return Err(e).with_context(|| format!("move {}", from.display()));
+        }
+        moved.push((from, to));
     }
-    Ok((kept, aside))
+    Ok(moved.into_iter().map(|(_, to)| to).collect())
 }
 
+/// One run now, for `oboete restore` and tests. It waits up to 2 s for the lock rather than
+/// return at once: a worker a hook started holds it only while it drains, and a lock just
+/// released can still be held for a moment by a child another thread forked (it keeps the open
+/// file until it execs), which made hook tests run nothing under a parallel suite.
+#[allow(dead_code)] // Task 12's replay drains without waiting.
 pub fn run_once(home: &Path) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut held = lock(home)?;
@@ -619,7 +631,8 @@ mod tests {
             )
             .unwrap();
         }
-        let (kept, aside) = set_aside(p).unwrap();
+        let aside = set_aside(p, "kept").unwrap();
+        let kept = p.join("kept");
         assert!(!p.join("knowledge.db").exists() && aside.contains(&kept));
         let x: i64 = Connection::open(&kept)
             .unwrap()
@@ -628,8 +641,9 @@ mod tests {
         assert_eq!(x, 7);
     }
 
-    /// A home whose path is not UTF-8 (valid on Unix) keeps its file under the right name.
-    #[cfg(unix)]
+    /// A home whose path is not UTF-8 (valid on Linux; macOS refuses such a name) keeps its file
+    /// under the right name.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_home_path_that_is_not_utf8_is_set_aside_in_place() {
         use std::os::unix::ffi::OsStrExt;
@@ -637,9 +651,28 @@ mod tests {
         let home = dir.path().join(std::ffi::OsStr::from_bytes(b"home-\xff"));
         std::fs::create_dir(&home).unwrap();
         drop(knowledge::open(&home).unwrap());
-        let (kept, aside) = set_aside(&home).unwrap();
-        assert_eq!(kept.parent(), Some(home.as_path()));
-        assert!(kept.exists() && aside.iter().all(|f| f.exists()));
+        let aside = set_aside(&home, "kept").unwrap();
+        assert!(aside.contains(&home.join("kept")));
+        assert!(
+            aside
+                .iter()
+                .all(|f| f.parent() == Some(home.as_path()) && f.exists())
+        );
+    }
+
+    /// A move that fails puts back the ones before it: the file never stays without its WAL.
+    #[test]
+    fn a_set_aside_that_fails_puts_the_wal_back() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(p.join("knowledge.db"), b"db").unwrap();
+        std::fs::write(p.join("knowledge.db-wal"), b"wal").unwrap();
+        // The file's new name is a directory's, so its move fails after the WAL's.
+        std::fs::create_dir(p.join("kept")).unwrap();
+        std::fs::write(p.join("kept").join("x"), b"").unwrap();
+        assert!(set_aside(p, "kept").is_err());
+        assert_eq!(std::fs::read(p.join("knowledge.db-wal")).unwrap(), b"wal");
+        assert!(!p.join("kept-wal").exists() && p.join("knowledge.db").exists());
     }
 
     /// MUST-M14 for the op log: a restore that lost ops moves an op consumer back to what raw
