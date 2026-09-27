@@ -523,7 +523,35 @@ fn adapt(
         events.push((event.into(), p));
         return Ok(events);
     }
+    if agent == "codex" && event == "PostToolUse" && codex_call_failed(payload) {
+        return Ok(vec![("PostToolUseFailure".into(), p)]);
+    }
     Ok(vec![(event.into(), p)])
+}
+
+/// Whether the Codex call a PostToolUse reports failed. Codex's hook input carries only the
+/// output (0.155.1), but its rollout records the call's `item_completed`, with `exit_code` and
+/// `status`, under the hook's `tool_use_id` before the hook runs. One bounded read per call.
+fn codex_call_failed(payload: &Value) -> bool {
+    let (Some(id), Some(path)) = (
+        str_field(payload, &["tool_use_id"]),
+        str_field(payload, &["transcript_path"]),
+    ) else {
+        return false;
+    };
+    let needle = format!("\"id\":{}", Value::from(id));
+    transcript_tail(Path::new(path), TAIL)
+        .lines()
+        .rev()
+        .filter(|line| line.contains(&needle))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|v| {
+            let item = &v["payload"]["item"];
+            (v["payload"]["type"] == "item_completed" && item["id"] == id).then(|| {
+                item["status"] == "failed" || item["exit_code"].as_i64().is_some_and(|c| c != 0)
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// The hook file `oboete setup grok` writes. While it exists, Grok delivers its own events.
@@ -1637,6 +1665,30 @@ mod tests {
             let out = String::from_utf8(out).unwrap();
             assert!(out.contains("recording has failed since"), "{agent}: {out}");
         }
+    }
+
+    #[test]
+    fn a_codex_call_that_exited_non_zero_is_recorded_as_failed() {
+        let dir = tmp("codex-exit");
+        let rollout = dir.join("rollout.jsonl");
+        let item = |id: &str, status: &str, code: i64| {
+            json!({"type": "event_msg", "payload": {"type": "item_completed",
+                   "item": {"type": "CommandExecution", "id": id, "status": status, "exit_code": code}}})
+            .to_string()
+        };
+        let lines = [item("exec-1", "failed", 1), item("exec-2", "completed", 0)];
+        std::fs::write(&rollout, lines.join("\n") + "\n").unwrap();
+        // exec-3 is not in the rollout: nothing says it failed.
+        for (id, failed) in [("exec-1", true), ("exec-2", false), ("exec-3", false)] {
+            let payload = json!({"session_id": id, "cwd": dir, "transcript_path": rollout,
+                                 "tool_name": "Bash", "tool_input": {"command": "cat /x"},
+                                 "tool_response": "out", "tool_use_id": id});
+            hook(&dir, "codex", "PostToolUse", &payload);
+            let ev = recorded(&dir, "codex", id);
+            let body: Value = serde_json::from_str(&ev[0].body).unwrap();
+            assert_eq!(body["failed"], failed, "{id}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
