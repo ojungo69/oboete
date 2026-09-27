@@ -152,12 +152,8 @@ fn with_decisions(k: &Connection, repo: &str, text: &str) -> Result<String> {
     if !curated {
         return Ok(text.to_owned());
     }
-    // `current` is oldest first.
-    let lines: Vec<String> = crate::claims::current(k, repo)?
+    let lines: Vec<String> = crate::claims::decisions(k, repo, DECISIONS)?
         .into_iter()
-        .rev()
-        .filter(|c| c.status == "decided" || (c.kind == "open item" && c.status != "done"))
-        .take(DECISIONS)
         .map(|c| {
             let date = &crate::db::utc(c.valid_from)[..10];
             format!("- {date} {}: {}\n", c.kind, one_line(&c.body, CLIP))
@@ -1140,6 +1136,14 @@ mod tests {
             text.find("## Current decisions").unwrap()
                 < text.find("## Owner's directives").unwrap()
         );
+        // At most the limit, the newest first: the query stops there, not the caller.
+        let k = rusqlite::Connection::open(&knowledge).unwrap();
+        let newest: Vec<String> = crate::claims::decisions(&k, "r", 1)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.body)
+            .collect();
+        assert_eq!(newest, ["The CI test is flaky."]);
     }
 
     #[test]

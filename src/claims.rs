@@ -147,18 +147,39 @@ pub struct Claim {
 /// that are not retracted, in spec 3.4's order, (valid_from, device, seq), with the uid last so
 /// two claims of one event keep one order on every device (MUST-M7).
 pub fn current(k: &Connection, repo: &str) -> Result<Vec<Claim>> {
-    let mut st = k.prepare(
-        "SELECT c.uid, d.kind, d.status, d.speaker, d.scope, d.body, d.valid_from,
-                d.anchor_device, d.anchor_seq
-         FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
-         WHERE d.repo = ?1 AND d.status <> 'retracted'
-           AND NOT EXISTS (
-             SELECT 1 FROM edges e
-             JOIN claims a ON a.op_device = e.op_device AND a.op_seq = e.op_seq
-             WHERE e.to_uid = c.uid AND a.uid <> c.uid)
-         ORDER BY d.valid_from, d.anchor_device, d.anchor_seq, c.uid",
-    )?;
-    let rows = st.query_map([repo], |r| {
+    tips(
+        k,
+        &format!("{TIPS} ORDER BY d.valid_from, d.anchor_device, d.anchor_seq, c.uid"),
+        (repo,),
+    )
+}
+
+/// `repo`'s current claims that are decided, or open items not done: at most `limit`, the newest
+/// first (`current`'s order reversed). The manifest reads these at every SessionStart, so the
+/// filter, the order and the limit are the query's.
+pub fn decisions(k: &Connection, repo: &str, limit: usize) -> Result<Vec<Claim>> {
+    let sql = format!(
+        "{TIPS} AND (d.status = 'decided' OR (d.kind = 'open item' AND d.status <> 'done'))
+         ORDER BY d.valid_from DESC, d.anchor_device DESC, d.anchor_seq DESC, c.uid DESC
+         LIMIT ?2"
+    );
+    tips(k, &sql, (repo, limit as i64))
+}
+
+/// A repository's chain tips (no active derivation supersedes or retracts them) that are not
+/// retracted; `?1` is the repository.
+const TIPS: &str = "SELECT c.uid, d.kind, d.status, d.speaker, d.scope, d.body, d.valid_from,
+            d.anchor_device, d.anchor_seq
+     FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
+     WHERE d.repo = ?1 AND d.status <> 'retracted'
+       AND NOT EXISTS (
+         SELECT 1 FROM edges e
+         JOIN claims a ON a.op_device = e.op_device AND a.op_seq = e.op_seq
+         WHERE e.to_uid = c.uid AND a.uid <> c.uid)";
+
+fn tips(k: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Claim>> {
+    let mut st = k.prepare(sql)?;
+    let rows = st.query_map(params, |r| {
         Ok(Claim {
             uid: r.get(0)?,
             kind: r.get(1)?,
