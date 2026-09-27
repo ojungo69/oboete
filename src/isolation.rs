@@ -221,11 +221,15 @@ impl Canary {
             use std::os::unix::fs::DirBuilderExt;
             builder.mode(0o700);
         }
-        builder.create(&dir)?;
-        let secret = dir.join("secret");
-        std::fs::write(&secret, format!("SECRET-{token}\n"))?;
+        // The port first: from here on a failure must remove the directory it made.
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
+        builder.create(&dir)?;
+        let secret = dir.join("secret");
+        if let Err(e) = std::fs::write(&secret, format!("SECRET-{token}\n")) {
+            std::fs::remove_dir_all(&dir).ok();
+            return Err(e);
+        }
         Ok(Self {
             dir,
             secret,
