@@ -98,10 +98,19 @@ fn behind(raw: &Raw, k: &Connection, consumers: &[Box<dyn Consumer>]) -> Result<
 pub fn run_with(
     home: &Path,
     idle_ms: u64,
+    consumers: Vec<Box<dyn Consumer>>,
+    before_exit: impl FnMut(),
+) -> Result<()> {
+    run_holding(home, idle_ms, consumers, before_exit, None)
+}
+
+fn run_holding(
+    home: &Path,
+    idle_ms: u64,
     mut consumers: Vec<Box<dyn Consumer>>,
     mut before_exit: impl FnMut(),
+    mut held: Option<Lock>,
 ) -> Result<()> {
-    let mut held = None;
     // ponytail: D11's 30-minute deadline in memory; every idle exit backs up too, so a lost
     // deadline only brings the next backup forward. It is checked between batches and while
     // idle, so neither a long backlog nor a long idle wait puts it off.
@@ -190,6 +199,7 @@ fn serve(
         }
         // Under the lock: a worker started after the release cannot export the same seqs.
         crate::backup::run(home, &raw);
+        crate::hookstate::prune(home, crate::hookstate::KEEP);
         *held = None;
         before_exit();
         // A hook that asked before the release saw the lock held and started nothing.
@@ -212,9 +222,19 @@ pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
     run_with(home, idle_ms, consumers(home), || {})
 }
 
+/// One run now, for `oboete restore` and tests. It waits up to 2 s for the lock rather than
+/// return at once: a worker a hook started holds it only while it drains, and a lock just
+/// released can still be held for a moment by a child another thread forked (it keeps the open
+/// file until it execs), which made hook tests run nothing under a parallel suite.
 #[allow(dead_code)] // Task 12's replay drains without waiting.
 pub fn run_once(home: &Path) -> Result<()> {
-    run_with(home, 0, consumers(home), || {})
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut held = lock(home)?;
+    while held.is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+        held = lock(home)?;
+    }
+    run_holding(home, 0, consumers(home), || {}, held)
 }
 
 #[cfg(test)]

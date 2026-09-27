@@ -351,6 +351,33 @@ impl Raw {
         )?)
     }
 
+    /// Cursor's SessionEnd backfill counts stored prompt bodies by labels, never a session
+    /// index (spec 1.6). Read through `after` so compressed and tombstoned records agree with
+    /// every other reader; a copied home's earlier device counts too.
+    pub fn prompt_counts(
+        &self,
+        agent: &str,
+        session: &str,
+    ) -> Result<std::collections::HashMap<String, usize>> {
+        let mut st = self.conn.prepare(
+            "SELECT device, seq FROM records
+             WHERE type = 'event' AND kind = 'prompt' AND agent = ?1 AND session = ?2",
+        )?;
+        let rows = st.query_map(params![agent, session], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut counts = std::collections::HashMap::new();
+        for row in rows {
+            let (device, seq) = row?;
+            for r in self.after(&device, seq - 1, 1)? {
+                if let Item::Event(e) = r.item {
+                    *counts.entry(e.body).or_insert(0) += 1;
+                }
+            }
+        }
+        Ok(counts)
+    }
+
     /// Up to `limit` records of `device` after `seq`, in seq order.
     pub fn after(&self, device: &str, seq: i64, limit: usize) -> Result<Vec<Record>> {
         let mut st = self.conn.prepare(

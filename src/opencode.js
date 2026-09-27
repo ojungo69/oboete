@@ -83,14 +83,20 @@ export default {
     ctx.session.hook("context", async (e) => {
       const state = session(e.sessionID, ctx.location);
       if (!state) return;
-      // Cache the promise too: overlapping calls still start only one injection process.
-      state.context ??= new Promise((resolve) => {
-        execFile(exe, [...args, "inject"], {
+      // Cache the promise too: overlapping calls still start only one injection process. The
+      // session's queued SessionStart capture runs first: its write sets or clears the
+      // recording-failure line the text reports. Bounded, so a stuck capture never holds a turn.
+      state.context ??= Promise.race([
+        pending,
+        new Promise((resolve) => setTimeout(resolve, 3000).unref()),
+      ]).then(() => new Promise((resolve) => {
+        // `=` keeps an id that starts with "-" a value. The session is left out of the other sessions.
+        execFile(exe, [...args, "inject", `--session=${e.sessionID}`], {
           cwd: state.dir,
           timeout: 3000,
           killSignal: "SIGKILL",
         }, (error, stdout) => resolve(error ? "" : stdout));
-      }).catch(() => "");
+      })).catch(() => "");
       const text = await state.context;
       if (text) e.system.push({ type: "text", text });
     });

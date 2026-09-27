@@ -65,6 +65,7 @@ pub fn run(
                 raw = Some(crate::raw::open(home)?);
             }
             hook::record(
+                home,
                 raw.as_mut().expect("opened"),
                 ev_agent,
                 event,

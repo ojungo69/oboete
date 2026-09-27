@@ -11,6 +11,7 @@ mod db;
 mod embed;
 mod failure;
 mod hook;
+mod hookstate;
 mod import;
 mod inject;
 mod knowledge;
@@ -72,8 +73,12 @@ enum Cmd {
     /// Rebuild raw.db from the backup segments (MUST-M15); the current file is kept aside.
     /// The worker does this by itself when raw.db is damaged.
     Restore,
-    /// Print the context that would be injected for the current directory
-    Inject,
+    /// Print the context a new session in the current directory gets (OpenCode's plugin reads it)
+    Inject {
+        /// The session it is for, so it is not listed among the other active sessions
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Serve the memory as an MCP server on stdin/stdout (search / get / timeline tools)
     Mcp,
     /// Search observations, summaries and prompts (this repository unless --all): by words, and
@@ -253,8 +258,12 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
     }
     // The egress gate (`redact::outbound`) applies the user's rules as they are now (spec 6.4).
     // Hooks load them per call inside their fail-open boundary; doctor and setup report a
-    // broken `[redaction]` table instead of stopping on it.
-    if !matches!(&cmd, Cmd::Hook { .. } | Cmd::Doctor | Cmd::Setup { .. }) {
+    // broken `[redaction]` table instead of stopping on it, and inject still prints the
+    // recording-failure line such a table causes (OpenCode reads its context there).
+    if !matches!(
+        &cmd,
+        Cmd::Hook { .. } | Cmd::Doctor | Cmd::Setup { .. } | Cmd::Inject { .. }
+    ) {
         redact::set_home(&home)?;
     }
     match cmd {
@@ -277,11 +286,9 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())
         }
-        Cmd::Inject => {
+        Cmd::Inject { session } => {
             let cwd = std::env::current_dir()?;
-            let conn = db::open(&home)?;
-            let repo = repo::key(&cwd);
-            print!("{}", inject::context(&conn, &repo)?);
+            print!("{}", hook::inject_text(&home, &cwd, session.as_deref()));
             Ok(())
         }
         Cmd::Mcp => mcp::run(&home),
