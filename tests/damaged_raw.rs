@@ -45,11 +45,13 @@ fn restored(h: &Path) {
             // Why, on the Windows runner where this fails now and then: whether a worker run
             // here fails, and whether the search finds the record after it (the detached
             // worker's stderr goes nowhere).
+            let detached = std::fs::read_to_string(h.join("state").join("worker-failed"));
             let worker = oboete(h, &["worker", "--idle-ms", "0"], "", false);
             let again = oboete(h, &["search", "zebra"], "", false);
             panic!(
-                "search does not find the restored record: {}, stdout {:?}, stderr {:?}; a worker run \
-                 now: {}, stderr {:?}; search after it: stdout {:?}",
+                "search does not find the restored record: {}, stdout {:?}, stderr {:?}; the \
+                 detached worker's failure: {detached:?}; a worker run now: {}, stderr {:?}; \
+                 search after it: stdout {:?}",
                 out.status,
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr),

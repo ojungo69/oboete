@@ -1649,6 +1649,9 @@ pub fn doctor(home: &Path) -> Result<()> {
     for l in &backup {
         println!("  {l}");
     }
+    if let Ok(why) = std::fs::read_to_string(crate::worker::failed_note(home)) {
+        println!("  the last worker run failed: {}", why.trim_end());
+    }
     if db_path.exists() {
         let conn = db::open(home)?;
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };

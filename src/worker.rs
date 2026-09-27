@@ -219,7 +219,23 @@ fn serve(
 }
 
 pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
-    run_with(home, idle_ms, consumers(home), || {})
+    let result = run_with(home, idle_ms, consumers(home), || {});
+    // A worker a hook started writes its stderr nowhere: its last failure is kept for doctor.
+    let note = failed_note(home);
+    match &result {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&note);
+        }
+        Err(e) => {
+            let _ = std::fs::write(&note, format!("{e:#}\n"));
+        }
+    }
+    result
+}
+
+/// `<home>/state/worker-failed`: why the last `oboete worker` stopped with an error.
+pub fn failed_note(home: &Path) -> std::path::PathBuf {
+    home.join("state").join("worker-failed")
 }
 
 /// One run now, for `oboete restore` and tests. It waits up to 2 s for the lock rather than
