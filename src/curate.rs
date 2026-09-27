@@ -7,7 +7,7 @@
 //! op and its claims in one transaction, or keeps a pending row that says what it waits for.
 
 use crate::config::Summary;
-use crate::provider::{ChainFailed, ChainResult, Fallback, Skip};
+use crate::provider::{AnswerCheck, ChainFailed, ChainResult, Fallback, Skip};
 use crate::providers_db::{self, Pending};
 use crate::raw::{Event, Item, OpKind, Raw};
 use crate::redact::Rules;
@@ -550,7 +550,10 @@ pub enum Phase {
 
 /// The curator: `(span, prompt, working)` to an answer. `working` says until when the owner is
 /// still working (D9), asked right before each subscription call.
-pub type Curator<'a> = dyn FnMut(&str, &str, &dyn Fn() -> Option<i64>) -> Result<ChainResult> + 'a;
+/// The chain for one window: its span, its prompt, the idle gate, and the check its answer
+/// passes (`check`).
+pub type Curator<'a> =
+    dyn FnMut(&str, &str, &dyn Fn() -> Option<i64>, &AnswerCheck) -> Result<ChainResult> + 'a;
 
 /// D10: a wait longer than this does not keep the worker up.
 const STAY_UP_MS: i64 = 30 * 60 * 1000;
@@ -655,10 +658,10 @@ pub fn run_phase(
     let span = format!("{}-{}", w.from_seq, w.to_seq);
     let answer = {
         let raw: &Raw = raw;
-        curator(&span, &prompt, &|| working(raw))
+        curator(&span, &prompt, &|| working(raw), &|v| check(&w, v))
     };
     let failed = match answer {
-        Ok(r) => match claims_of(&w, &r) {
+        Ok(r) => match claims_of(&w, &r.output, &r.provider, r.tier) {
             Ok((summary, claims)) => {
                 let op = json!({"outcome": "curated", "provider": r.provider, "summary": summary});
                 return cover(raw, db, &w, op, claims);
@@ -777,17 +780,12 @@ pub struct Draft {
     pub kind: String,
     pub status: String,
     pub speaker: String,
-    #[serde(default = "repo_scope")]
     pub scope: String,
     pub body: String,
     pub quote: String,
     pub line: String,
     #[serde(default)]
     pub supersedes: Vec<String>,
-}
-
-fn repo_scope() -> String {
-    "repo".into()
 }
 
 /// Why an answer gives this window nothing: each is a provider that failed (D11).
@@ -835,6 +833,10 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
         Value::String(t) if t.trim().is_empty() => return Err(AnswerFailure::Empty),
         _ => return Err(AnswerFailure::Prose),
     };
+    // Other keys only: what a model without strict schema support returns.
+    if !obj.is_empty() && !obj.contains_key("claims") && !obj.contains_key("summary") {
+        return Err(AnswerFailure::Shape);
+    }
     let summary: String = match obj.get("summary") {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(t)) => t.trim().chars().take(MAX_SUMMARY_CHARS).collect(),
@@ -859,13 +861,23 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
     Ok((summary, drafts))
 }
 
+/// The chain's check of a curator's answer (`provider::AnswerCheck`): the outcome it is refused
+/// under, or `None` when it gives this window something to keep.
+pub fn check(w: &Window, answer: &Value) -> Option<&'static str> {
+    claims_of(w, answer, "", 0)
+        .err()
+        .map(AnswerFailure::outcome)
+}
+
 /// The summary and a claim op per draft whose quote is found in the window (Task 6's
 /// `ClaimOp`), with the answering entry as its recipe and tier.
 fn claims_of(
     w: &Window,
-    r: &ChainResult,
+    answer: &Value,
+    recipe: &str,
+    tier: i64,
 ) -> std::result::Result<(String, Vec<Value>), AnswerFailure> {
-    let (summary, drafts) = parse(&r.output)?;
+    let (summary, drafts) = parse(answer)?;
     let mut claims = Vec::new();
     for d in &drafts {
         let Some(evidence) = locate(w, &d.line, &d.quote) else {
@@ -880,8 +892,8 @@ fn claims_of(
             body: d.body.clone(),
             evidence: vec![evidence],
             supersedes: d.supersedes.clone(),
-            recipe: r.provider.clone(),
-            tier: r.tier,
+            recipe: recipe.to_owned(),
+            tier,
         };
         claims.push(serde_json::to_value(op).map_err(|_| AnswerFailure::Shape)?);
     }
@@ -1546,7 +1558,11 @@ mod tests {
             raw.append(&prompt(text)).unwrap();
         }
         let calls = Cell::new(0);
-        let mut curator = |_: &str, _: &str, _: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
+        let mut curator = |_: &str,
+                           _: &str,
+                           _: &dyn Fn() -> Option<i64>,
+                           _: &AnswerCheck|
+         -> Result<ChainResult> {
             calls.set(calls.get() + 1);
             Ok(claimed("L2", "two"))
         };
@@ -1584,17 +1600,20 @@ mod tests {
             ..prompt(&text.repeat(40))
         };
         let tried = Cell::new(0);
-        let mut chain =
-            |_: &str, _: &str, working: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
-                tried.set(tried.get() + 1);
-                match working() {
-                    Some(until) => Err(went_past(&[
-                        ("free", "HTTP 500", Skip::Failed),
-                        ("sub", "waiting for the owner to finish", Skip::Wait(until)),
-                    ])),
-                    None => Ok(answered("sub")),
-                }
-            };
+        let mut chain = |_: &str,
+                         _: &str,
+                         working: &dyn Fn() -> Option<i64>,
+                         _: &AnswerCheck|
+         -> Result<ChainResult> {
+            tried.set(tried.get() + 1);
+            match working() {
+                Some(until) => Err(went_past(&[
+                    ("free", "HTTP 500", Skip::Failed),
+                    ("sub", "waiting for the owner to finish", Skip::Wait(until)),
+                ])),
+                None => Ok(answered("sub")),
+            }
+        };
         // Two windows' worth: the first is full, so it does not wait for more records.
         let (rules, summary) = (Rules::default(), curating(30));
         let home = tempfile::tempdir().unwrap();
@@ -1651,7 +1670,11 @@ mod tests {
         })
         .unwrap();
         let calls = Cell::new(0);
-        let mut curator = |_: &str, _: &str, _: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
+        let mut curator = |_: &str,
+                           _: &str,
+                           _: &dyn Fn() -> Option<i64>,
+                           _: &AnswerCheck|
+         -> Result<ChainResult> {
             calls.set(calls.get() + 1);
             Ok(answered("groq"))
         };
@@ -1724,7 +1747,11 @@ mod tests {
             ),
         ];
         let step = Cell::new(0);
-        let mut chain = |_: &str, _: &str, _: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
+        let mut chain = |_: &str,
+                         _: &str,
+                         _: &dyn Fn() -> Option<i64>,
+                         _: &AnswerCheck|
+         -> Result<ChainResult> {
             let i = step.get();
             step.set(i + 1);
             match script.get(i) {
@@ -1793,7 +1820,11 @@ mod tests {
             prompt: String::new(),
         };
         providers_db::set_pending(&db, &stale).unwrap();
-        let mut chain = |_: &str, _: &str, _: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
+        let mut chain = |_: &str,
+                         _: &str,
+                         _: &dyn Fn() -> Option<i64>,
+                         _: &AnswerCheck|
+         -> Result<ChainResult> {
             Err(went_past(&[("groq", "HTTP 400", Skip::Failed)]))
         };
         let phase = run_phase(
@@ -1820,7 +1851,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let (mut raw, db) = open(home.path());
         raw.append(&prompt("one")).unwrap();
-        let mut chain = |_: &str, _: &str, _: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
+        let mut chain = |_: &str,
+                         _: &str,
+                         _: &dyn Fn() -> Option<i64>,
+                         _: &AnswerCheck|
+         -> Result<ChainResult> {
             Err(went_past(&[("groq", "HTTP 400", Skip::Failed)]))
         };
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
@@ -1863,7 +1898,11 @@ mod tests {
         raw.append(&prompt("one")).unwrap();
         let tried = std::cell::Cell::new(0);
         let tomorrow = crate::db::now_ms() + 86_400_000;
-        let mut chain = |_: &str, _: &str, _: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
+        let mut chain = |_: &str,
+                         _: &str,
+                         _: &dyn Fn() -> Option<i64>,
+                         _: &AnswerCheck|
+         -> Result<ChainResult> {
             tried.set(tried.get() + 1);
             Err(went_past(&[(
                 "groq",
@@ -1924,9 +1963,11 @@ mod tests {
             .join("src/testdata/fixtures/long-24h.jsonl");
         crate::replay::run(home.path(), &fixture, None, 0, &[1], "claude").unwrap();
         let (mut raw, db) = open(home.path());
-        let mut curator = |_: &str, _: &str, _: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
-            Ok(answered("fake"))
-        };
+        let mut curator = |_: &str,
+                           _: &str,
+                           _: &dyn Fn() -> Option<i64>,
+                           _: &AnswerCheck|
+         -> Result<ChainResult> { Ok(answered("fake")) };
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
         let mut runs = 0;
         while run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap()
@@ -2045,6 +2086,7 @@ mod tests {
             (json!({"claims": [], "summary": ""}), "empty"),
             (json!("I could not find anything."), "prose"),
             (json!({"claims": 3, "summary": "s"}), "shape"),
+            (json!({"issue": "x", "decision": "z"}), "shape"),
             (json!({"claims": [{"id": "c1"}], "summary": "s"}), "shape"),
             (json!({"claims": many, "summary": "s"}), "over_cap"),
             (unanchored.clone(), "unanchored"),
@@ -2052,13 +2094,16 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             let (mut raw, db) = open(home.path());
             raw.append(&prompt("one")).unwrap();
-            let mut chain =
-                |_: &str, _: &str, _: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
-                    Ok(ChainResult {
-                        output: output.clone(),
-                        ..answered("fake")
-                    })
-                };
+            let mut chain = |_: &str,
+                             _: &str,
+                             _: &dyn Fn() -> Option<i64>,
+                             _: &AnswerCheck|
+             -> Result<ChainResult> {
+                Ok(ChainResult {
+                    output: output.clone(),
+                    ..answered("fake")
+                })
+            };
             let summary = curating(WINDOW_TOKENS);
             run_phase(
                 &mut raw,
@@ -2098,7 +2143,11 @@ mod tests {
         })
         .unwrap();
         let sent = std::cell::RefCell::new(Vec::new());
-        let mut chain = |_: &str, p: &str, _: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
+        let mut chain = |_: &str,
+                         p: &str,
+                         _: &dyn Fn() -> Option<i64>,
+                         _: &AnswerCheck|
+         -> Result<ChainResult> {
             sent.borrow_mut().push(p.to_owned());
             Err(went_past(&[("groq", "HTTP 400", Skip::Failed)]))
         };
@@ -2139,7 +2188,11 @@ mod tests {
             "speaker": "assistant proposal", "scope": "repo", "body": "Cache parsed files.",
             "quote": "cache the parsed files", "line": "L2", "supersedes": []});
         let sent = std::cell::RefCell::new(Vec::new());
-        let mut chain = |_: &str, p: &str, _: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
+        let mut chain = |_: &str,
+                         p: &str,
+                         _: &dyn Fn() -> Option<i64>,
+                         _: &AnswerCheck|
+         -> Result<ChainResult> {
             sent.borrow_mut().push(p.to_owned());
             Ok(ChainResult {
                 output: json!({"claims": [proposal], "summary": "s"}),

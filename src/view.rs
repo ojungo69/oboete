@@ -403,7 +403,7 @@ fn stats(conn: &rusqlite::Connection, home: &Path, repo: Option<&str>) -> Result
     let mut per: std::collections::BTreeMap<String, [i64; 4]> = Default::default();
     let mut add = |c: &rusqlite::Connection| -> Result<()> {
         let mut stmt = c.prepare(
-            "SELECT provider, SUM(outcome = 'ok'), SUM(outcome IN ('error', 'invalid')),
+            "SELECT provider, SUM(outcome = 'ok'), SUM(outcome IN ('error','invalid','empty','prose','shape','over_cap','unanchored')),
                     SUM(outcome = 'wait'), SUM(CASE WHEN outcome = 'ok' THEN ms ELSE 0 END)
              FROM provider_calls WHERE ts >= ?1 GROUP BY provider",
         )?;

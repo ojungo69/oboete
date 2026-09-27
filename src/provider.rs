@@ -159,6 +159,10 @@ impl CallError {
 
 /// The chain for one run. A provider that failed cools down before it is tried again; the
 /// cooldown is kept in `providers.db`, so the next run skips it too.
+/// What the caller accepts of an answer: `None`, or the `provider_calls.outcome` it is refused
+/// under (the curation phase's `curate::check`, milestone 3 Task 7).
+pub type AnswerCheck<'a> = dyn Fn(&Value) -> Option<&'static str> + 'a;
+
 pub struct Chain<'a> {
     providers: &'a [Provider],
     db: &'a Connection,
@@ -167,6 +171,7 @@ pub struct Chain<'a> {
     working: Option<&'a dyn Fn() -> Option<i64>>,
     /// `OBOETE_FAIL_PROVIDER=<name>`: that provider fails without a call (fallback proof).
     forced_fail: Option<String>,
+    check: Option<&'a AnswerCheck<'a>>,
 }
 
 impl<'a> Chain<'a> {
@@ -177,6 +182,16 @@ impl<'a> Chain<'a> {
             paid_usd_per_month: 5.0,
             working: None,
             forced_fail: std::env::var("OBOETE_FAIL_PROVIDER").ok(),
+            check: None,
+        }
+    }
+
+    /// An answer `check` refuses is a failure recorded under the outcome it names, and the
+    /// chain goes on to its next entry, as with an answer of another shape.
+    pub fn check(self, check: &'a AnswerCheck<'a>) -> Self {
+        Self {
+            check: Some(check),
+            ..self
         }
     }
 
@@ -325,16 +340,27 @@ impl<'a> Chain<'a> {
             };
             // Only strict-schema providers enforce the shape; valid JSON of another shape from the
             // rest would pass here and fail the window later, without trying the next provider.
+            let mut refused = None;
             let result = result.and_then(|a| {
-                if fits(&a.value, schema) {
-                    Ok(a)
-                } else {
-                    Err(
-                        CallError::other("invalid output: the answer does not match the schema")
-                            .with_usage(a.usage)
-                            .resting(a.cool_until),
-                    )
-                }
+                refused = self.check.and_then(|check| check(&a.value));
+                let why = match refused {
+                    Some(outcome) => {
+                        // Why text is not JSON (an answer cut at max_tokens), never the text.
+                        let not_json = a
+                            .value
+                            .as_str()
+                            .and_then(|t| serde_json::from_str::<Value>(unfence(t)).err());
+                        let not_json = not_json.map_or(String::new(), |e| format!(": {e}"));
+                        format!(
+                            "invalid output: the answer gave nothing to keep ({outcome}){not_json}"
+                        )
+                    }
+                    None if fits(&a.value, schema) => return Ok(a),
+                    None => "invalid output: the answer does not match the schema".into(),
+                };
+                Err(CallError::other(why)
+                    .with_usage(a.usage)
+                    .resting(a.cool_until))
             });
             let ms = started.elapsed().as_millis() as i64;
             if let Some(rate) = rate {
@@ -361,7 +387,7 @@ impl<'a> Chain<'a> {
                     if e.status == Some(413) {
                         ceiling_hit.extend(p.limits().max_request_tokens);
                     }
-                    let outcome = if e.invalid() { "invalid" } else { "error" };
+                    let outcome = refused.unwrap_or(if e.invalid() { "invalid" } else { "error" });
                     let sent = !forced && e.sent;
                     // An HTTP error status was not billed; a timeout or a dropped answer may be.
                     let usd = budget::cost(conn, p, est, e.usage, sent && e.status.is_none())?;
@@ -509,6 +535,12 @@ fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Answer, CallError>
     }
 }
 
+/// A model's answer as JSON, or as the text it is when it is not JSON (prose, or nothing), which
+/// the schema or the caller's check refuses under its own outcome.
+fn answer_value(content: &str) -> Value {
+    serde_json::from_str(unfence(content)).unwrap_or_else(|_| Value::String(content.to_owned()))
+}
+
 /// Some models wrap their JSON in a markdown fence even under a strict `json_schema`
 /// (OpenCode Go's glm-5.3-flash, 3 of 4 calls on 2026-09-26).
 fn unfence(content: &str) -> &str {
@@ -627,13 +659,8 @@ fn openai_compat(
                 .with_usage(usage)
                 .rated(rate)
         })?;
-    let answer = serde_json::from_str(unfence(content)).map_err(|e| {
-        CallError::other(format!("invalid output: content is not JSON ({e})"))
-            .with_usage(usage)
-            .rated(rate)
-    })?;
     Ok(Answer {
-        value: answer,
+        value: answer_value(content),
         usage,
         cool_until: None,
         rate,
@@ -1551,16 +1578,14 @@ fn extract_structured(cli: &str, text: &str) -> Result<Value, CallError> {
     if let Some(s) = v.get("structured_output").or(v.get("structuredOutput")) {
         return Ok(s.clone());
     }
-    if v.get("observations").is_some() || v.get("summary").is_some() {
+    if v.get("claims").is_some() || v.get("summary").is_some() {
         return Ok(v);
     }
     let inner = ["result", "text", "response"]
         .iter()
         .find_map(|k| v.get(*k).and_then(Value::as_str));
     match inner {
-        Some(s) => serde_json::from_str(unfence(s)).map_err(|e| {
-            CallError::other(format!("invalid output: {cli} answer is not JSON ({e})"))
-        }),
+        Some(s) => Ok(answer_value(s)),
         None => Err(CallError::other(format!(
             "invalid output: no structured_output in {cli} response"
         ))),
@@ -2822,6 +2847,84 @@ mod tests {
     }
 
     #[test]
+    fn each_answer_failure_is_recorded_as_its_own_outcome() {
+        // A window with no lines: no quote is in it.
+        let w = crate::curate::Window {
+            device: "d".into(),
+            from_seq: 1,
+            from_offset: None,
+            to_seq: 1,
+            to_offset: None,
+            text: String::new(),
+            elided: Vec::new(),
+            full: false,
+            lines: Vec::new(),
+        };
+        let check = |v: &Value| crate::curate::check(&w, v);
+        let claim = json!({"id": "c1", "kind": "decision", "status": "decided", "speaker": "user",
+            "scope": "repo", "body": "b", "quote": "q", "line": "L1", "supersedes": []});
+        let content = |c: String| json!({"choices": [{"message": {"content": c}}]}).to_string();
+        let answers = [
+            ("empty", String::new()),
+            ("prose", "Sure! Here are the claims.".to_owned()),
+            ("shape", json!({"claims": "c1", "summary": "s"}).to_string()),
+            (
+                "over_cap",
+                json!({"claims": vec![claim.clone(); 51]}).to_string(),
+            ),
+            (
+                "unanchored",
+                json!({"claims": [claim], "summary": "s"}).to_string(),
+            ),
+        ];
+        let kept = content(json!({"claims": [], "summary": "s"}).to_string());
+        for (outcome, answer) in answers {
+            let home = tempfile::tempdir().unwrap();
+            let conn = crate::providers_db::open(home.path()).unwrap();
+            let (url, _) = serve_once(content(answer.clone()).into_bytes(), "");
+            let (next, _) = serve_once(kept.clone().into_bytes(), "");
+            let providers = [stub(url), {
+                let mut p = stub(next);
+                if let Provider::Openai { name, .. } = &mut p {
+                    *name = "next".into();
+                }
+                p
+            }];
+            let r = Chain::new(&providers, &conn)
+                .check(&check)
+                .run("curator", "s", "p", &crate::curate::schema())
+                .unwrap();
+            assert_eq!(r.provider, "next", "{outcome}");
+            assert_eq!(outcomes(&conn), [outcome, "ok"]);
+            if outcome == "prose" {
+                // Why it is not JSON, never the answer's text.
+                let detail: String = conn
+                    .query_row("SELECT detail FROM provider_calls ORDER BY id", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert!(detail.contains("expected value"), "{detail}");
+                assert!(!detail.contains("Sure"), "{detail}");
+            }
+            // Alone, it is a provider that failed (D11 counts it).
+            let (url, _) = serve_once(content(answer).into_bytes(), "");
+            let Err(err) = Chain::new(&[stub(url)], &conn).check(&check).run(
+                "curator",
+                "s",
+                "p",
+                &crate::curate::schema(),
+            ) else {
+                panic!("{outcome}: refused answer accepted");
+            };
+            let ChainFailed(fallbacks) = err.downcast::<ChainFailed>().unwrap();
+            assert_eq!(fallbacks[0].skip, Skip::Failed, "{outcome}");
+            // Each was a request sent: the daily budget counts it.
+            let sent = crate::providers_db::calls_today(&conn, "stub").unwrap();
+            assert_eq!(sent, 2, "{outcome}");
+        }
+    }
+
+    #[test]
     fn rate_headers_are_kept_when_the_answer_has_the_wrong_shape() {
         let schema = json!({"type": "object", "required": ["summary"]});
         // Valid JSON of another shape, a body that is not JSON, and content that is not JSON.
@@ -3041,10 +3144,14 @@ mod tests {
         let dir = scratch_dir().unwrap();
         let e = headless_command("nano", None, &dir.0, "p", "{}").unwrap_err();
         assert!(e.message.contains("unsupported"), "{}", e.message);
-        for bad in [r#"{"result": "not json"}"#, r#"{"other": 1}"#, "plain text"] {
+        for bad in [r#"{"other": 1}"#, "plain text"] {
             let e = extract_structured("claude", bad).unwrap_err();
             assert!(e.invalid(), "{bad}: {}", e.message);
         }
+        // An answer that is text reaches the chain as text, which the schema refuses.
+        let prose = extract_structured("claude", r#"{"result": "not json"}"#).unwrap();
+        assert_eq!(prose, json!("not json"));
+        assert!(!fits(&prose, &crate::curate::schema()));
     }
 
     #[test]
@@ -3196,10 +3303,9 @@ mod tests {
                 .unwrap_err()
                 .invalid()
         );
-        assert!(
-            extract_structured("grok", "{\"text\":\"plain\"}")
-                .unwrap_err()
-                .invalid()
+        assert_eq!(
+            extract_structured("grok", "{\"text\":\"plain\"}").unwrap(),
+            json!("plain")
         );
     }
 }
