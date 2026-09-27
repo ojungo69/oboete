@@ -33,6 +33,11 @@ const ACCEPT: &[&str] = &[
     "賛成",
     "了解",
     "承知",
+    // Polite yeses; their ません is exempt from the negation check (`POLITE_YES`).
+    "問題ありません",
+    "構いません",
+    "かまいません",
+    "差し支えありません",
     "オッケー",
     "ok",
     "okay",
@@ -921,6 +926,18 @@ mod tests {
         assert!(bare("Yes, yes, yes, yes."));
         assert!(bare("OK ok ok"));
         assert!(!bare("Yes, yes, use tabs everywhere."));
+        // A polite yes alone is bare too: its ません is no negation, and no decision is in it.
+        for polite in ["問題ありません", "構いません", "差し支えありません。"]
+        {
+            assert!(bare(polite), "{polite}");
+            let w = window(&[user(polite)]);
+            assert_eq!(one(&w, "decided", "user", polite).0, "proposed", "{polite}");
+            let w = window(&[reply(PROPOSAL), user(polite)]);
+            let cache = "cache the parsed files";
+            let got = one(&w, "decided", "assistant proposal", cache).0;
+            assert_eq!(got, "decided", "{polite}");
+        }
+        assert!(!bare("すみません"));
     }
 
     #[test]
