@@ -38,6 +38,8 @@ const BREAKER_AFTER: u32 = 3;
 const COOLDOWN_BREAKER: Duration = Duration::from_secs(30 * 60);
 /// Longest rest a subscription's own reset can set: a weekly window resets within 7 days.
 const MAX_SUBSCRIPTION_REST: Duration = Duration::from_secs(8 * 24 * 3600);
+/// A subscription at its line that names no reset rests this long, and is then asked again.
+const REST_WITHOUT_RESET: Duration = Duration::from_secs(3600);
 /// Longest cooldown of a 429 that names no reset, reached by doubling from `COOLDOWN_429`.
 const MAX_BACKOFF_429: Duration = Duration::from_secs(3600);
 
@@ -1293,10 +1295,10 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
 /// lines since 2026-09-28, owner delegated): a window's reset once it is used to its line (five
 /// hours 95%, a week 93%, the Sonnet week 92%), or in the last quarter hour of a five-hour window
 /// used to 85%, or once it is rejected; with no utilization or in a window it does not name, once
-/// it warns. Paid overage rests it
-/// at once, until the owner acts when no reset comes with it, and so does `credits_required`.
-/// At most `MAX_SUBSCRIPTION_REST` away. Lines that do not parse are passed over: this only ever
-/// adds rest, and a killed run's last line is often cut.
+/// it warns. With no reset it rests `REST_WITHOUT_RESET`, at most `MAX_SUBSCRIPTION_REST`. Paid
+/// overage rests it at once, until the owner acts when no reset comes with it, and so does
+/// `credits_required`. Lines that do not parse are passed over: this only ever adds rest, and a
+/// killed run's last line is often cut.
 fn claude_rest(stdout: &str) -> Option<i64> {
     let now = db::now_ms();
     let infos: Vec<Value> = stdout
@@ -1331,7 +1333,7 @@ fn claude_rest(stdout: &str) -> Option<i64> {
     infos
         .iter()
         .filter(|i| rests(i))
-        .filter_map(reset)
+        .map(|i| reset(i).unwrap_or(now + REST_WITHOUT_RESET.as_millis() as i64))
         .map(|t| t.min(now + MAX_SUBSCRIPTION_REST.as_millis() as i64))
         .max()
 }
@@ -1862,6 +1864,13 @@ mod tests {
         }
         let untyped = json!({"status": "allowed", "resetsAt": later, "utilization": 0.99});
         assert_eq!(rest(untyped), None);
+        // At its line with no reset: an hour, then claude is asked again.
+        let hour = REST_WITHOUT_RESET.as_millis() as i64;
+        let unset = rest(json!({"status": "rejected", "rateLimitType": "five_hour"})).unwrap();
+        assert!(
+            (now_s * 1000 + hour..=db::now_ms() + hour).contains(&unset),
+            "{unset}"
+        );
     }
 
     #[test]
