@@ -341,12 +341,20 @@ fn curation(home: &Path) -> Result<Option<Box<CurationPhase<'static>>>> {
     let home = home.to_owned();
     Ok(Some(Box::new(move |raw: &mut Raw| {
         // Read again for each window: a worker that stays up follows the owner's edits (turning
-        // curation off, a provider removed, a lower cap).
-        let cfg = crate::config::load(&home)?;
+        // curation off, a provider removed, a lower cap). A file that no longer loads (one the
+        // owner is still editing) stops curation for this run, as it does at the start of `run`.
+        let loaded = crate::config::load(&home)
+            .and_then(|cfg| Ok((crate::capture::Settings::load(&home)?.rules, cfg)));
+        let (rules, cfg) = match loaded {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("oboete: no curation this run: {e:#}");
+                return Ok(Phase::Idle);
+            }
+        };
         if !cfg.summary.curate {
             return Ok(Phase::Idle);
         }
-        let rules = crate::capture::Settings::load(&home)?.rules;
         let mut curator = |span: &str, prompt: &str, working: &dyn Fn() -> Option<i64>| {
             crate::provider::Chain::new(&cfg.providers, &db)
                 .paid_cap(cfg.paid_usd_per_month)
@@ -718,7 +726,7 @@ mod tests {
     }
 
     /// A worker that stays up reads the config again for each window: turning curation off
-    /// takes effect without a new worker.
+    /// takes effect without a new worker, and a config that no longer loads turns it off too.
     #[test]
     fn a_worker_that_stays_up_follows_the_owners_config() {
         let home = tempfile::tempdir().unwrap();
@@ -739,6 +747,9 @@ mod tests {
             Phase::Waiting { up: false, .. }
         ));
         config(false);
+        assert_eq!(phase(&mut raw).unwrap(), Phase::Idle);
+        // A file the owner is still editing stops curation for this run, not the worker.
+        std::fs::write(home.path().join("config.toml"), "[summary\n").unwrap();
         assert_eq!(phase(&mut raw).unwrap(), Phase::Idle);
     }
 
