@@ -136,7 +136,8 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
     let (seq, offset) = raw.curation_checkpoint(device)?;
     let mut after = if offset.is_some() { seq - 1 } else { seq };
     let (mut pieces, mut used, mut elided, mut full) = (Vec::<Piece>::new(), 0, Vec::new(), false);
-    let mut sessions = std::collections::HashSet::new();
+    // Each session's last heading: a record under another one (a changed checkout) brings its own.
+    let mut sessions = std::collections::HashMap::new();
     'read: loop {
         let records = raw.after_within(device, after, PAGE, PAGE_BYTES)?;
         if records.is_empty() {
@@ -155,8 +156,8 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
             let from = if r.seq == seq { offset.unwrap_or(0) } else { 0 };
             let prepared = Prepared::new(&e, rules);
             let mut piece = prepared.piece(r.seq, from, None);
-            // A session's first record also brings its heading.
-            let heading = if sessions.contains(&piece.key) {
+            // A session's first record also brings its heading, as does one in another checkout.
+            let heading = if sessions.get(&piece.key) == Some(&piece.heading) {
                 0
             } else {
                 crate::budget::estimate(&format!("## {}\n", piece.heading))
@@ -167,7 +168,7 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
             if used + piece.tokens <= budget {
                 used += piece.tokens;
                 if !piece.text.is_empty() {
-                    sessions.insert(piece.key.clone());
+                    sessions.insert(piece.key.clone(), piece.heading.clone());
                 }
                 pieces.push(piece);
                 continue;
@@ -502,18 +503,23 @@ fn next_char(s: &str, at: usize) -> usize {
 
 /// D12: the window's text with each session's records together, sessions in the order they first
 /// appear, records in seq order within each. Sessions are told apart as stored, not by their
-/// headings, which the gate may make alike.
+/// headings, which the gate may make alike; a session's heading is shown again where its checkout
+/// changes, so each line sits under its own repository.
 fn grouped(pieces: &[Piece]) -> (String, Vec<Line>) {
-    let mut sessions: Vec<(&str, &str)> = Vec::new();
+    let mut sessions: Vec<&str> = Vec::new();
     for p in pieces.iter().filter(|p| !p.text.is_empty()) {
-        if !sessions.iter().any(|(k, _)| *k == p.key) {
-            sessions.push((&p.key, &p.heading));
+        if !sessions.contains(&p.key.as_str()) {
+            sessions.push(&p.key);
         }
     }
     let (mut out, mut lines) = (String::new(), Vec::new());
-    for (key, heading) in sessions {
-        out.push_str(&format!("## {heading}\n"));
+    for key in sessions {
+        let mut shown = None;
         for p in pieces.iter().filter(|p| p.key == key && !p.text.is_empty()) {
+            if shown != Some(&p.heading) {
+                out.push_str(&format!("## {}\n", p.heading));
+                shown = Some(&p.heading);
+            }
             let id = format!("L{}", lines.len() + 1);
             out.push_str(&format!("{id} {}\n", p.text));
             lines.push(Line {
@@ -1125,7 +1131,11 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                 let uid = crate::claims::uid(kind, first);
                 // Only while it is still current: a sibling or a later window may have settled it.
                 if let Some(repo) = crate::claims::tip_repo(k, &uid)? {
-                    lines.push(format!("proposed before {uid}: {}", gate(&c.body)));
+                    let place = repo
+                        .as_deref()
+                        .map(|r| format!(" in {}", repo_name(r, rules)));
+                    let place = place.unwrap_or_default();
+                    lines.push(format!("proposed before {uid}{place}: {}", gate(&c.body)));
                     uids.push((key.to_owned(), repo, uid));
                 }
             }
@@ -1150,7 +1160,8 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             }
             // The session's own, before the cap: other sessions' newer items never hide it.
             if session_of(&c.device, c.seq)?.as_deref() == Some(key) {
-                lines.push(format!("open item {}: {}", c.uid, gate(&c.body)));
+                let place = repo_name(c_repo, rules);
+                lines.push(format!("open item {} in {place}: {}", c.uid, gate(&c.body)));
                 uids.push((key.to_owned(), Some(c_repo.to_owned()), c.uid.clone()));
                 shown += 1;
             }
@@ -1710,6 +1721,38 @@ mod tests {
             "{}",
             w.text
         );
+    }
+
+    /// A session that changes checkout inside a window: each line sits under a heading naming
+    /// its own repository, and the headings are within the window's budget.
+    #[test]
+    fn a_session_that_changes_checkout_shows_each_line_under_its_repository() {
+        let (_h, mut raw, dev) = store();
+        for (repo, text) in [
+            ("/w/alpha", "hello"),
+            ("/w/beta", "bye"),
+            ("/w/alpha", "back"),
+        ] {
+            raw.append(&Event {
+                repo: Some(repo.into()),
+                ..prompt(text)
+            })
+            .unwrap();
+        }
+        let w = next_window(&raw, &dev, 2_000, &Rules::default())
+            .unwrap()
+            .unwrap();
+        let shown: Vec<&str> = w.text.lines().collect();
+        assert_eq!(shown.len(), 6, "{}", w.text);
+        for (at, repo) in [(0, "alpha"), (2, "beta"), (4, "alpha")] {
+            assert!(shown[at].starts_with("## ") && shown[at].ends_with(&format!(" in {repo}")));
+        }
+        // A budget one short of the whole: the headings count, so the window stops early.
+        let budget = crate::budget::estimate(&w.text) - 1;
+        let cut = next_window(&raw, &dev, budget, &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert!(cut.to_seq < 3 && crate::budget::estimate(&cut.text) <= budget);
     }
 
     #[test]
@@ -2327,11 +2370,14 @@ mod tests {
         let rules = Rules::default();
         let w = next_window(&raw, &dev, 100_000, &rules).unwrap().unwrap();
         let (text, _) = carried(&raw, &k, &rules, &w).unwrap();
-        for body in [
-            "The importer drops empty lines.",
-            "The parser needs a fuzz test.",
+        // Each under its own repository, as the window's headings name them.
+        for (repo, body) in [
+            ("r", "The importer drops empty lines."),
+            ("q", "The parser needs a fuzz test."),
         ] {
-            let item = |l: &str| l.starts_with("open item ") && l.ends_with(&format!(": {body}"));
+            let item = |l: &str| {
+                l.starts_with("open item ") && l.ends_with(&format!(" in {repo}: {body}"))
+            };
             assert!(text.lines().any(item), "{body}: {text}");
         }
     }
