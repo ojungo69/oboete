@@ -499,6 +499,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let settings = capture::Settings::load(&home)?;
             let cwd = std::env::current_dir()?;
             // The repository label as capture stores it on the claims' records.
+            // As a hook's JSON payload carries it: a path that is not UTF-8 never panics here.
+            let cwd = cwd.to_string_lossy();
             let (_, repo, _) = capture::checkout(&serde_json::json!({ "cwd": cwd }), &settings);
             // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits).
             let _raw = raw::open(&home)?;

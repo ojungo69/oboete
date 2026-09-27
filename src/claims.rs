@@ -233,7 +233,9 @@ pub fn correct(
         uid: uid.to_owned(),
         anchor,
         status: status.map(str::to_owned),
-        body: body.map(|b| crate::redact::scan(b.trim(), &rules).0),
+        // As a typed prompt is stored: private blocks out (an unclosed one hides the rest), then
+        // the scanners.
+        body: body.map(|b| crate::redact::scan(&crate::hook::strip_blocks(b, true), &rules).0),
     };
     if let Some(why) = op.fault() {
         anyhow::bail!("the correction is refused: {why}");

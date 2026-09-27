@@ -787,6 +787,28 @@ mod tests {
         assert!(!home.path().join("providers.db").exists());
     }
 
+    /// A correction's body is stored as a typed prompt is: a private block never reaches raw.db.
+    #[test]
+    fn a_private_block_in_a_correction_is_never_stored() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let text = "Tabs everywhere.";
+        let seq = raw.append(&event(text, 5)).unwrap();
+        let dev = raw.device().to_owned();
+        let at = vec![quote(&dev, seq, text, "Tabs everywhere", 0)];
+        raw.append_ops(&[op(&claim("c1", "decision", text, at))])
+            .unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        let uid = current(&k, "r").unwrap()[0].uid.clone();
+        let body = "Tabs, four wide. <private>the ssh pass</private>";
+        crate::claims::correct(home.path(), &uid, None, Some(body)).unwrap();
+        let ops = raw.ops_after(&dev, 0, 100).unwrap();
+        assert!(ops.iter().all(|o| !o.body.to_string().contains("ssh pass")));
+        run(&raw, &mut k);
+        assert_eq!(current(&k, "r").unwrap()[0].body, "Tabs, four wide.");
+    }
+
     /// A correction synced before its claim is kept and applies when the claim arrives; one that
     /// corrects nothing is skipped with its reason.
     #[test]
