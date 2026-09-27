@@ -572,6 +572,7 @@ mod tests {
             ),
             (6, 1, 1, 0)
         );
+        drop(conn); // Windows removes no file that is open
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

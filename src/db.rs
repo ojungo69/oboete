@@ -237,20 +237,32 @@ fn ensure_uids(conn: &mut Connection) -> Result<()> {
 /// The store file's identity: a copy on another machine (or a restored backup) is another file.
 /// ponytail: file identity instead of host name + OS machine id (proposal §4.2 3), which needs no
 /// new dependency; a restore on the same machine also gets a new id, which costs nothing.
-fn store_file(path: &Path) -> String {
-    std::fs::metadata(path).map_or_else(|_| String::new(), |m| file_identity(&m))
-}
-
 #[cfg(unix)]
-fn file_identity(meta: &std::fs::Metadata) -> String {
+fn store_file(path: &Path) -> String {
     use std::os::unix::fs::MetadataExt;
-    format!("{}:{}", meta.dev(), meta.ino())
+    std::fs::metadata(path).map_or_else(|_| String::new(), |m| format!("{}:{}", m.dev(), m.ino()))
 }
 
+/// The volume and NTFS file index, which a rename keeps. Not the creation time: NTFS gives a file
+/// renamed into a name freed less than 15 s before that name's old creation time ("tunneling"),
+/// so a restore's swap made the restored raw.db look like another file and changed the device.
 #[cfg(windows)]
-fn file_identity(meta: &std::fs::Metadata) -> String {
-    use std::os::windows::fs::MetadataExt;
-    meta.creation_time().to_string()
+fn store_file(path: &Path) -> String {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let Ok(f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    // SAFETY: all-zero is a valid value of this plain C struct, which the call then fills.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: the handle stays open for the call, and `info` is writable and of the right type.
+    if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
+        return String::new();
+    }
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    format!("{}:{index}", info.dwVolumeSerialNumber)
 }
 
 /// This device's id, 8 hex digits, chosen when the store is created and again when the store
