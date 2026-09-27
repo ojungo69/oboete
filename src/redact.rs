@@ -1322,9 +1322,25 @@ mod tests {
                 pass.clone(),
             ),
             (format!("< Set-Cookie: {cookie}"), cookie.clone()),
+            (
+                format!("-H \"Cookie: sid={token}\" https://x.invalid/"),
+                token.clone(),
+            ),
             (format!("{{\"Cookie\": \"{cookie}\"}}"), cookie.clone()),
             (format!("-H 'Authorization: Token {token}'"), token.clone()),
             (format!("Proxy-Authorization: {token}"), token.clone()),
+            (
+                format!("Set-Cookie: sid=\"{token}\"; Path=/"),
+                token.clone(),
+            ),
+            (
+                format!("Authorization: Digest username=\"u\", nonce=\"n\", response=\"{token}\""),
+                token.clone(),
+            ),
+            (
+                format!("Authorization: AWS4-HMAC-SHA256 Credential=a/b, Signature={token}"),
+                token.clone(),
+            ),
         ];
         for (text, secret) in &cases {
             let (stored, found) = scan(text, &Rules::default());
@@ -1342,6 +1358,9 @@ mod tests {
             assert!(found.is_empty(), "{text}: {found:?}");
             assert_eq!(stored, text);
         }
+        // A header quoted for the shell: its closing quote ends the cookie, not the line.
+        let (stored, _) = scan(&cases[3].0, &Rules::default());
+        assert!(stored.ends_with("\" https://x.invalid/"), "{stored}");
     }
 
     #[test]

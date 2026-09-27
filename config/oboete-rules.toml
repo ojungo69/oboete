@@ -61,13 +61,13 @@ keywords = ["://"]
 
 [[rules]]
 id = "cookie-header"
-description = "Value of a Cookie or Set-Cookie header, whatever the cookie is named"
-regex = '''(?i)\b(?:set-)?cookie["']?\s*[:=]\s*["']?([^\s;=,"']+=[^\r\n"']+)'''
+description = "Cookies of a Cookie or Set-Cookie header, whatever they are named: name=value pairs split by ;, a value bare or quoted"
+regex = '''(?i)\b(?:set-)?cookie["']?\s*[:=]\s*["']?([^\s;=,"']+=(?:"[^"\r\n]*"|[^\s;,"']*)(?:;\s*[^\s;=,"']+(?:=(?:"[^"\r\n]*"|[^\s;,"']*))?)*)'''
 keywords = ["cookie"]
 
 [[rules]]
 id = "authorization-header"
-description = "Credential in an Authorization header of any scheme (Token, ApiKey, none), with or without a curl before it"
-regex = '''(?i)\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?(?:[a-z][a-z0-9-]{1,30}\s+)?([A-Za-z0-9_\-.=+/:~]{8,})'''
+description = "Credential in an Authorization header of any scheme, with or without a curl before it: a scheme's auth-params whole (Digest, AWS4-HMAC-SHA256), else one token (Token, ApiKey, none)"
+regex = '''(?i)\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?(?:[a-z][a-z0-9-]{1,30}\s+([a-z0-9_-]+\s*=\s*(?:"[^"\r\n]*"|[^\s,"']+)(?:\s*,\s*[a-z0-9_-]+\s*=\s*(?:"[^"\r\n]*"|[^\s,"']+))*)|(?:[a-z][a-z0-9-]{1,30}\s+)?([A-Za-z0-9_\-.=+/:~]{8,}))'''
 keywords = ["authorization"]
 entropy = 3.0
