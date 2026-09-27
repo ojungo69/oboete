@@ -274,6 +274,45 @@ pub fn correct(
     Ok(())
 }
 
+/// `oboete pref add`: the owner's directive as an event, and a claim op quoting it whole, a
+/// decided preference of global scope (spec 3.3: global scope only through this or the viewer).
+/// Returns its uid. The consumers take the op on their next pass.
+// ponytail: two appends; a crash between them leaves the directive event with no claim (run it
+// again). One transaction when raw can append an event and ops together.
+pub fn pref_add(home: &std::path::Path, text: &str) -> Result<String> {
+    let settings = crate::capture::Settings::load(home)?;
+    let c = crate::capture::directive(text, crate::db::now_ms(), &settings);
+    let mut raw = crate::raw::open(home)?;
+    let seq = raw.append_with_ledger(&c.event, &c.ledger, settings.rules.version())?;
+    // What the gate stored: the quote reads verbatim there.
+    let quote = crate::curate::long_text(&c.event).unwrap_or_default();
+    let evidence = Evidence {
+        device: raw.device().to_owned(),
+        seq,
+        offset: 0,
+        length: i64::try_from(quote.len())?,
+        sentence: 0,
+        quote: quote.clone(),
+    };
+    let uid = uid("preference", &evidence);
+    let op = ClaimOp {
+        id: "p1".into(),
+        kind: "preference".into(),
+        status: "decided".into(),
+        speaker: "user".into(),
+        scope: "global".into(),
+        body: quote,
+        evidence: vec![evidence],
+        supersedes: Vec::new(),
+        recipe: "oboete pref add".into(),
+        tier: 0,
+        why: String::new(),
+        tainted: false,
+    };
+    raw.append_ops(&[(crate::raw::OpKind::Claim, serde_json::to_value(op)?)])?;
+    Ok(uid)
+}
+
 /// A current claim.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Claim {
