@@ -52,10 +52,9 @@ fn run_io(
     mut input: impl Read,
     mut output: impl Write,
 ) -> Result<()> {
-    // MUST-M16, for Design B's raw.db: whether this call tried to write there (skips, filtered
-    // sessions and agents still on v1's store never do), and whether a row was written. Only a
-    // written row shows that recording works again: a hook with nothing to capture (PreToolUse,
-    // an empty Stop) proves nothing, and a write to v1's store says nothing about raw.db.
+    // MUST-M16, for raw.db: whether this call tried to write there (skips and filtered sessions
+    // never do), and whether a row was written. Only a written row shows that recording works
+    // again: a hook with nothing to capture (PreToolUse, an empty Stop) proves nothing.
     let mut tried = false;
     let mut wrote = false;
     // When the store operation ended (0 until one did): overlapping hooks change the marker in
@@ -92,41 +91,38 @@ fn run_io(
         // Creating the home is part of the attempt: a home that cannot be made is a failure too.
         tried = true;
         std::fs::create_dir_all(home)?;
-        {
-            let labels = agent_labels(agent, &payload);
-            if (agent, event) == ("cursor", "PreCompact") {
-                // Before the write: a compaction whose record fails still reinjects at the next
-                // prompt. A flag that cannot be written costs that reinjection, not the record.
-                if let Err(e) =
-                    crate::hookstate::set(home, agent, session_label(&labels), "compacted")
-                {
-                    eprintln!("oboete: compaction not noted: {e}");
-                }
+        let labels = agent_labels(agent, &payload);
+        if (agent, event) == ("cursor", "PreCompact") {
+            // Before the write: a compaction whose record fails still reinjects at the next
+            // prompt. A flag that cannot be written costs that reinjection, not the record.
+            if let Err(e) = crate::hookstate::set(home, agent, session_label(&labels), "compacted")
+            {
+                eprintln!("oboete: compaction not noted: {e}");
             }
-            // Before the write too: when this call is the agent's injection point and its own
-            // write fails, the point still carries the recording-failure line. Grok's and agy's
-            // points stay taken then (the line is shown once per session, not at every call).
-            injecting = injects(home, agent, event, &labels);
-            if injecting && (agent, event) == ("cursor", "UserPromptSubmit") {
-                took_compaction = Some(session_label(&labels).to_owned());
-            }
-            let settings = crate::capture::Settings::load(home)?;
-            let mut store = crate::raw::open(home)?;
-            let events = record(
-                home,
-                &mut store,
-                agent,
-                event,
-                &payload,
-                db::now_ms(),
-                &settings,
-            )?;
-            wrote = !events.is_empty();
-            ended = crate::failure::now();
-            // A manifest that cannot be read is no recording failure: the row is written.
-            if injecting {
-                manifest = checkout_manifest(home, &store, &labels, &settings);
-            }
+        }
+        // Before the write too: when this call is the agent's injection point and its own
+        // write fails, the point still carries the recording-failure line. Grok's and agy's
+        // points stay taken then (the line is shown once per session, not at every call).
+        injecting = injects(home, agent, event, &labels);
+        if injecting && (agent, event) == ("cursor", "UserPromptSubmit") {
+            took_compaction = Some(session_label(&labels).to_owned());
+        }
+        let settings = crate::capture::Settings::load(home)?;
+        let mut store = crate::raw::open(home)?;
+        let events = record(
+            home,
+            &mut store,
+            agent,
+            event,
+            &payload,
+            db::now_ms(),
+            &settings,
+        )?;
+        wrote = !events.is_empty();
+        ended = crate::failure::now();
+        // A manifest that cannot be read is no recording failure: the row is written.
+        if injecting {
+            manifest = checkout_manifest(home, &store, &labels, &settings);
         }
         Ok(())
     })();
