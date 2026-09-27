@@ -344,6 +344,22 @@ mod tests {
                 format!("Proxy-Authorization: {token}"),
                 "Proxy-Authorization: [REDACTED]".to_string(),
             ),
+            (
+                format!("Set-Cookie: sid=\"{token}\"; Path=/"),
+                "Set-Cookie: [REDACTED]".to_string(),
+            ),
+            (
+                format!("-H \"Cookie: sid={token}\" https://x.invalid/"),
+                "-H \"Cookie: [REDACTED]\" https://x.invalid/".to_string(),
+            ),
+            (
+                format!("Authorization: Digest username=\"u\", nonce=\"n\", response=\"{token}\""),
+                "Authorization: Digest [REDACTED]".to_string(),
+            ),
+            (
+                format!("Authorization: AWS4-HMAC-SHA256 Credential=a/b, Signature={token}"),
+                "Authorization: AWS4-HMAC-SHA256 [REDACTED]".to_string(),
+            ),
         ];
         for (text, masked) in &cases {
             assert_eq!(&redact(text), masked);
