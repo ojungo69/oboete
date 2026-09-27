@@ -121,7 +121,7 @@ pub fn run_with(
     consumers: Vec<Box<dyn Consumer>>,
     before_exit: impl FnMut(),
 ) -> Result<()> {
-    run_holding(home, idle_ms, consumers, before_exit, None, &mut 0)
+    run_holding(home, idle_ms, consumers, before_exit, None)
 }
 
 fn run_holding(
@@ -129,7 +129,41 @@ fn run_holding(
     idle_ms: u64,
     mut consumers: Vec<Box<dyn Consumer>>,
     mut before_exit: impl FnMut(),
-    mut held: Option<Lock>,
+    taken: Option<Lock>,
+) -> Result<()> {
+    let (mut held, mut last) = (None, 0);
+    if let Some(l) = taken {
+        take(home, l, &mut held, &mut last);
+    }
+    let result = serve_until_done(
+        home,
+        idle_ms,
+        &mut consumers,
+        &mut before_exit,
+        &mut held,
+        &mut last,
+    );
+    // A run that never took the lock did no work: another worker's outcome stands.
+    if last > 0 {
+        record(home, last, &result);
+    }
+    result
+}
+
+/// Every lock this run takes is noted as a run that has not ended, until `record` replaces the
+/// note: a worker killed or crashed while it holds any of them is reported (doctor).
+fn take(home: &Path, l: Lock, held: &mut Option<Lock>, last: &mut u64) {
+    *last = l.1;
+    note(home, l.1, STOPPED);
+    *held = Some(l);
+}
+
+fn serve_until_done(
+    home: &Path,
+    idle_ms: u64,
+    consumers: &mut [Box<dyn Consumer>],
+    before_exit: &mut impl FnMut(),
+    held: &mut Option<Lock>,
     last: &mut u64,
 ) -> Result<()> {
     // ponytail: D11's 30-minute deadline in memory; every idle exit backs up too, so a lost
@@ -145,10 +179,10 @@ fn run_holding(
         match serve(
             home,
             idle_ms,
-            &mut consumers,
-            &mut held,
+            consumers,
+            held,
             &mut next_backup,
-            &mut before_exit,
+            before_exit,
             last,
         ) {
             Ok(true) => {}
@@ -157,12 +191,7 @@ fn run_holding(
                 damaged += 1;
                 eprintln!("oboete: {e:#}; opening the stores again");
             }
-            Err(e) => {
-                if let Some(l) = &held {
-                    *last = l.1;
-                }
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -180,7 +209,7 @@ fn serve(
 ) -> Result<bool> {
     if held.is_none() {
         match lock(home)? {
-            Some(l) => *held = Some(l),
+            Some(l) => take(home, l, held, last),
             None => return Ok(false),
         }
     }
@@ -228,9 +257,7 @@ fn serve(
         // Under the lock: a worker started after the release cannot export the same seqs.
         crate::backup::run(home, &raw);
         crate::hookstate::prune(home, crate::hookstate::KEEP);
-        if let Some(l) = held.take() {
-            *last = l.1;
-        }
+        *held = None;
         before_exit();
         // A hook that asked before the release saw the lock held and started nothing.
         let wanted = crate::backup::restore_requested(home);
@@ -238,7 +265,7 @@ fn serve(
             return Ok(false);
         }
         match lock(home)? {
-            Some(l) => *held = Some(l),
+            Some(l) => take(home, l, held, last),
             // Another worker took the lock after the release: the records are its now.
             None => return Ok(false),
         }
@@ -257,12 +284,7 @@ fn run_consumers(home: &Path, idle_ms: u64, consumers: Vec<Box<dyn Consumer>>) -
     let Some(held) = lock(home)? else {
         return Ok(());
     };
-    let mut last = held.1;
-    // Replaced by the outcome when the run ends; a run killed or crashed leaves it for doctor.
-    note(home, last, STOPPED);
-    let result = run_holding(home, idle_ms, consumers, || {}, Some(held), &mut last);
-    record(home, last, &result);
-    result
+    run_holding(home, idle_ms, consumers, || {}, Some(held))
 }
 
 /// A run's outcome until it ends.
@@ -270,8 +292,8 @@ const STOPPED: &str = "it stopped before it finished (killed or crashed); the ne
                        starts goes on from where it stopped";
 
 /// A worker a hook started writes its stderr nowhere: its last failure is kept for doctor, and a
-/// good run clears it. `last` numbers the run's last taking of the worker lock, which it has
-/// released by now: an outcome is recorded unless a later run's already is. Under a lock of its
+/// good run clears it. `last` numbers the run's last taking of the worker lock: an outcome is
+/// recorded unless a later run's already is. Under a lock of its
 /// own, not the worker lock: a hook that finds the worker lock taken starts no worker, and this
 /// run no longer reads new records.
 fn record(home: &Path, last: u64, result: &Result<()>) {
@@ -345,7 +367,7 @@ pub fn run_once(home: &Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(10));
         held = lock(home)?;
     }
-    run_holding(home, 0, consumers(home), || {}, held, &mut 0)
+    run_holding(home, 0, consumers(home), || {}, held)
 }
 
 #[cfg(test)]
@@ -474,14 +496,16 @@ mod tests {
         assert!(lock(home.path()).unwrap().is_none());
     }
 
-    /// A step that panics.
-    struct Panics;
-    impl Consumer for Panics {
+    /// A step that panics once it reaches its seq.
+    struct PanicsAt(i64);
+    impl Consumer for PanicsAt {
         fn name(&self) -> &'static str {
             "panics"
         }
-        fn step(&mut self, _: &Raw, _: &Connection, _: i64) -> Result<i64> {
-            panic!("a crash in the middle of a run")
+        fn step(&mut self, raw: &Raw, _: &Connection, after: i64) -> Result<i64> {
+            let top = raw.max_seq()?;
+            assert!(top < self.0, "a crash in the middle of a run");
+            Ok(after.max(top))
         }
         fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
             Ok(())
@@ -499,7 +523,7 @@ mod tests {
             .append(&raw::test_event("a"))
             .unwrap();
         let crashed =
-            std::panic::catch_unwind(|| run_consumers(home.path(), 0, vec![Box::new(Panics)]));
+            std::panic::catch_unwind(|| run_consumers(home.path(), 0, vec![Box::new(PanicsAt(1))]));
         assert!(crashed.is_err());
         let why = last_failure(home.path()).expect("the stopped run was not reported");
         assert!(why.starts_with("it stopped before it finished"), "{why}");
@@ -513,6 +537,30 @@ mod tests {
         assert!(last_failure(home.path()).is_some());
         run(home.path(), 0).unwrap();
         assert!(last_failure(home.path()).is_none());
+    }
+
+    /// A run that takes the lock again at its idle exit notes that taking too: B takes and
+    /// releases the lock in A's exit window and records its success, then A takes it again and
+    /// crashes. Doctor reports A, not B's success.
+    #[test]
+    fn a_run_that_crashes_after_taking_the_lock_again_is_reported() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        raw.append(&raw::test_event("a")).unwrap();
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut once = true;
+            run_with(home.path(), 0, vec![Box::new(PanicsAt(2))], || {
+                if std::mem::take(&mut once) {
+                    // B: a hook's worker, run to its end while A has let go.
+                    raw.append(&raw::test_event("b")).unwrap();
+                    run_consumers(home.path(), 0, vec![Box::new(Seen)]).unwrap();
+                    assert!(last_failure(home.path()).is_none());
+                }
+            })
+        }));
+        assert!(crashed.is_err(), "A did not take the lock again");
+        let why = last_failure(home.path()).expect("A's crash was not reported");
+        assert!(why.starts_with("it stopped before it finished"), "{why}");
     }
 
     /// The Windows runner's worker stopped with "database is locked" after a restore: a search
