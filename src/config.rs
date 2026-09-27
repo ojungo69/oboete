@@ -97,7 +97,8 @@ pub struct Summary {
     /// A window's size in estimated tokens (docs/milestone-3-plan.md D8).
     #[serde(default = "default_window_tokens")]
     pub window_tokens: u32,
-    /// How long after the owner's last hook record a subscription curator still waits (D9).
+    /// How long after the owner's last hook record a subscription curator still waits (D9). At
+    /// most 30: a longer value is read as 30 (D10, the longest the worker stays up for a wait).
     #[serde(default = "default_idle_minutes")]
     pub idle_minutes: u32,
 }

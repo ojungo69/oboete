@@ -485,7 +485,9 @@ pub fn run_phase(
     if w.text.is_empty() {
         return cover(raw, db, &w, json!({"outcome": "covered"}), Vec::new());
     }
-    let idle = i64::from(summary.idle_minutes) * 60_000;
+    // At most D10's stay-up: a longer wait would not keep the worker up, and once the owner
+    // stopped no hook would start one to curate what waited.
+    let idle = (i64::from(summary.idle_minutes) * 60_000).min(STAY_UP_MS);
     let working = |raw: &Raw| match raw.last_hook_ts() {
         Ok(ts) => ts.map(|ts| ts + idle).filter(|&t| t > crate::db::now_ms()),
         // Unreadable: taken for the owner at work, so no subscription is spent on a guess.
@@ -1192,6 +1194,14 @@ mod tests {
         let until = ts + 600_000;
         assert_eq!(phase, Phase::Waiting { until, up: true });
         assert_eq!(calls.get(), 0);
+        // A wait longer than D10's stay-up is cut to it, so the worker stays up for it.
+        let long = Summary {
+            idle_minutes: 60,
+            ..summary.clone()
+        };
+        let phase = run_phase(&mut raw, &db, &rules, &long, &mut curator).unwrap();
+        let until = ts + STAY_UP_MS;
+        assert_eq!(phase, Phase::Waiting { until, up: true });
         // A full window goes at once.
         let phase = run_phase(&mut raw, &db, &rules, &curating(3), &mut curator).unwrap();
         assert_eq!((phase, calls.get()), (Phase::Covered, 1));
