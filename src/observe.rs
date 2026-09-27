@@ -54,7 +54,8 @@ pub fn run(home: &Path, settle_ms: u64) -> Result<Stats> {
         eprintln!("oboete observe: re-key repositories: {e:#}");
     }
     let mut stats = Stats::default();
-    let mut chain = provider::Chain::new(&cfg.providers);
+    let providers = crate::providers_db::open(home)?;
+    let mut chain = provider::Chain::new(&cfg.providers, &providers);
     // One part per session per round, until every session is done: a long session neither
     // stops early (nothing would start the next run) nor holds the others back.
     let mut pending = db::pending_sessions(&conn, db::now_ms(), settle_ms)?;
@@ -114,7 +115,7 @@ fn process_part(
             earlier.as_deref(),
             &part.text,
         );
-        let result = chain.summarize(conn, &prompt, &schema())?;
+        let result = chain.run("curator", &s.id, &prompt, &schema())?;
         stats.fallbacks += result.fallbacks.len() as u32;
         let observations = parse_observations(&result.output)?;
         let summary = parse_summary(&result.output);
