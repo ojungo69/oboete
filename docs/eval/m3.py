@@ -232,7 +232,9 @@ def map_labels(name, binary):
         else:
             match = 'none'
         seq = min(hits, key=lambda x: abs(x[1] - label_ms))[0] if hits else None
-        found[i] = {'who': d['who'], 'seq': seq, 'match': match, 'hits': len(hits)}
+        tool = raw.execute("SELECT json_extract(body, '$.tool') FROM records WHERE seq = ? AND kind = 'tool'",
+                           (seq,)).fetchone() if seq else None
+        found[i] = {'who': d['who'], 'seq': seq, 'match': match, 'hits': len(hits), 'tool': tool and tool[0]}
         how[(d['who'], match)] = how.get((d['who'], match), 0) + 1
     with open(f'{h}/map.json', 'w') as f:
         json.dump(found, f, indent=1)
@@ -251,10 +253,8 @@ def spans(h, tool=None):
     with open(f'{h}/map.json') as f:
         seqs = {r['seq'] for r in json.load(f).values() if r['seq'] is not None}
     if tool:
-        raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
-        seqs = {s for s in seqs if raw.execute(
-            "SELECT 1 FROM records WHERE seq = ? AND kind = 'tool' AND json_extract(body, '$.tool') = ?",
-            (s, tool)).fetchone()}
+        with open(f'{h}/map.json') as f:
+            seqs = {r['seq'] for r in json.load(f).values() if r['seq'] is not None and r.get('tool') == tool}
     out = set()
     for w in ops:
         if any(w['from_seq'] <= s <= w['to_seq'] for s in seqs):
