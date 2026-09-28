@@ -1009,14 +1009,9 @@ fn request(
     // only its own repository's claims.
     let mut shown_in: Vec<(String, crate::claims::Claim)> = Vec::new();
     for repo in repos {
-        let text: Vec<&str> = w
-            .lines
-            .iter()
-            .filter(|l| l.repo.as_deref() == Some(repo))
-            .map(|l| l.text.as_str())
-            .collect();
+        let (said, rest) = searched(w, repo);
         // Under the repository's name, as the window's headings show it.
-        let found = candidates(k, repo, &text.join("\n"))?;
+        let found = candidates(k, repo, &said, &rest)?;
         if found.is_empty() {
             continue;
         }
@@ -1955,18 +1950,20 @@ fn ended_on_a_proposal(raw: &Raw, k: &Connection, w: &Window) -> Result<Vec<Stri
 }
 
 /// Candidates a window may supersede (MUST-M3): up to 20 current claims of `repo` that the full
-/// text index finds for its text, the whole repository, every window. Similarity only proposes
-/// them; the curator decides, and the gates check (Task 8).
+/// text index finds for its lines, the whole repository, every window. `said` (the owner's and the
+/// assistant's lines, where decisions are made and turned over) is searched first, and `rest`
+/// (tool text, envelopes) fills the places it leaves: about 97% of a window is tool text, and one
+/// search over all of it asked mostly for words of tool output, so an earlier decision the owner
+/// turned over was ranked out or not found (#222). Similarity only proposes them; the curator
+/// decides, and the gates check (Task 8).
 // ponytail: reads every current claim of the repository to keep the tips; an index on tips when
 // repositories hold tens of thousands.
-pub fn candidates(k: &Connection, repo: &str, text: &str) -> Result<Vec<crate::claims::Claim>> {
-    let all = crate::search::trigrams_upto(text, usize::MAX);
-    let grams: Vec<String> = spread(&all, 64)
-        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-        .collect();
-    if grams.is_empty() {
-        return Ok(Vec::new());
-    }
+pub fn candidates(
+    k: &Connection,
+    repo: &str,
+    said: &str,
+    rest: &str,
+) -> Result<Vec<crate::claims::Claim>> {
     let current = crate::claims::current(k, repo)?;
     // The repository's own matches only, ranked, read until 20 are current: another
     // repository's better matches never crowd them out.
@@ -1975,20 +1972,48 @@ pub fn candidates(k: &Connection, repo: &str, text: &str) -> Result<Vec<crate::c
          JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
          WHERE claims_fts MATCH ?1 AND d.repo = ?2 ORDER BY rank",
     )?;
-    let ranked = st.query_map(rusqlite::params![grams.join(" OR "), repo], |r| {
-        r.get::<_, String>(0)
-    })?;
-    let mut out = Vec::new();
-    for uid in ranked {
-        let uid = uid?;
-        if let Some(c) = current.iter().find(|c| c.uid == uid) {
-            out.push(c.clone());
+    let mut out: Vec<crate::claims::Claim> = Vec::new();
+    for text in [said, rest] {
+        let all = crate::search::trigrams_upto(text, usize::MAX);
+        let grams: Vec<String> = spread(&all, 64)
+            .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+            .collect();
+        if grams.is_empty() {
+            continue;
+        }
+        let ranked = st.query_map(rusqlite::params![grams.join(" OR "), repo], |r| {
+            r.get::<_, String>(0)
+        })?;
+        for uid in ranked {
             if out.len() == 20 {
-                break;
+                return Ok(out);
+            }
+            let uid = uid?;
+            if let Some(c) = current.iter().find(|c| c.uid == uid)
+                && !out.iter().any(|o| o.uid == uid)
+            {
+                out.push(c.clone());
             }
         }
     }
     Ok(out)
+}
+
+/// `w`'s lines in `repo` as `candidates` searches them: the owner's and the assistant's, and the
+/// rest.
+fn searched(w: &Window, repo: &str) -> (String, String) {
+    let (said, rest): (Vec<&Line>, Vec<&Line>) = w
+        .lines
+        .iter()
+        .filter(|l| l.repo.as_deref() == Some(repo))
+        .partition(|l| matches!(l.role, Role::User | Role::Assistant | Role::Answer));
+    let join = |ls: Vec<&Line>| {
+        ls.iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    (join(said), join(rest))
 }
 
 /// The claims `carried` showed, each with its session (agent, then session id, NUL between) and
@@ -2536,7 +2561,7 @@ mod tests {
         raw.append_ops(&[op]).unwrap();
         let mut k = crate::knowledge::open(home.path()).unwrap();
         consume(&raw, &mut k);
-        let found = candidates(&k, "a", "./x\0./y\0 Sessions leave Postgres").unwrap();
+        let found = candidates(&k, "a", "./x\0./y\0 Sessions leave Postgres", "").unwrap();
         assert_eq!(found.len(), 1);
     }
 
@@ -3470,9 +3495,55 @@ mod tests {
         raw.append_ops(&crowd).unwrap();
         let mut k = crate::knowledge::open(home.path()).unwrap();
         consume(&raw, &mut k);
-        let found = candidates(&k, "r", "Should sessions move out of Postgres?").unwrap();
+        let found = candidates(&k, "r", "Should sessions move out of Postgres?", "").unwrap();
         let bodies: Vec<&str> = found.iter().map(|c| c.body.as_str()).collect();
         assert_eq!(bodies, ["We store sessions in Postgres."]);
+    }
+
+    /// #222: an earlier decision the owner's words turn over is a candidate even when the rest of
+    /// the window is tool output that finds more claims than a window shows; a window with no
+    /// such line still finds its candidates by its tool text.
+    #[test]
+    fn the_owners_words_are_searched_before_tool_output() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let earlier = "The review bot runs on Workers and Actions.";
+        let mut ops = vec![kept(&mut raw, "s1", "a", earlier)];
+        // A build log whose every line is some claim's: more matches than a window shows.
+        let line = |i: u32| {
+            format!(
+                "Compiling crate_{i} ({:08x})",
+                i.wrapping_mul(2_654_435_761)
+            )
+        };
+        ops.extend((0..30).map(|i| kept(&mut raw, &format!("d{i}"), "a", &line(i))));
+        raw.append_ops(&ops).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let dev = raw.device().to_owned();
+        // The claims' own records are an earlier window's.
+        let before = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        close(&mut raw, &before);
+        let log: String = (0..200).map(|i| line(i) + "\n").collect();
+        for e in [prompt("Drop the review bot on Workers."), tool(&log)] {
+            let e = Event {
+                session: "new".into(),
+                repo: Some("a".into()),
+                ..e
+            };
+            raw.append(&e).unwrap();
+        }
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        let req = request(&raw, &k, &rules, &summary, &w).unwrap();
+        let shown: Vec<&str> = req.shown_in.iter().map(|(_, c)| c.body.as_str()).collect();
+        assert!(shown.contains(&earlier), "{shown:?}");
+        assert_eq!(shown.len(), 20, "tool text fills the places left");
+        assert!(!candidates(&k, "a", "", &log).unwrap().is_empty());
     }
 
     #[test]
@@ -3556,8 +3627,8 @@ mod tests {
             .id
             .clone();
         // The candidates the phase finds, as it finds them: more than the budget shows.
-        let text: Vec<&str> = w.lines.iter().map(|l| l.text.as_str()).collect();
-        let found: Vec<String> = candidates(&k, "a", &text.join("\n"))
+        let (said, rest) = searched(&w, "a");
+        let found: Vec<String> = candidates(&k, "a", &said, &rest)
             .unwrap()
             .into_iter()
             .map(|c| c.uid)
