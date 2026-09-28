@@ -48,6 +48,37 @@ impl Consumer for Claims {
         let Some(last) = ops.last().map(|o| o.op_seq) else {
             return Ok(after);
         };
+        // A span a recuration covered leaves the queue (Task 11), before its claims are derived:
+        // a quote of its own that no longer reads queues it again.
+        for op in ops
+            .iter()
+            .filter(|o| o.kind == OpKind::Window && o.body["recurate"] == true)
+        {
+            // What this window curated, and the part of its span curated through it (`covers`,
+            // when the span took several): queued spans inside it leave, and one it ends inside
+            // of keeps the rest, from a record it curated only part of, that record whole.
+            for range in [&op.body, &op.body["covers"]] {
+                let (from, to) = (range["from_seq"].as_i64(), range["to_seq"].as_i64());
+                let (from_part, to_part) =
+                    (range["from_offset"].is_i64(), range["to_offset"].is_i64());
+                let starts = "(from_seq > ?2 OR (from_seq = ?2 AND NOT ?4))";
+                k.execute(
+                    &format!(
+                        "DELETE FROM recurate WHERE device = ?1 AND {starts}
+                           AND (to_seq < ?3 OR (to_seq = ?3 AND NOT ?5))"
+                    ),
+                    params![op.device, from, to, from_part, to_part],
+                )?;
+                let rest = to.map(|t| if to_part { t } else { t + 1 });
+                k.execute(
+                    &format!(
+                        "UPDATE recurate SET from_seq = ?6 WHERE device = ?1 AND {starts}
+                           AND from_seq <= ?3 AND (to_seq > ?3 OR (to_seq = ?3 AND ?5))"
+                    ),
+                    params![op.device, from, to, from_part, to_part, rest],
+                )?;
+            }
+        }
         let mut derived = Vec::new();
         for op in ops.iter().filter(|o| o.kind == OpKind::Claim) {
             if let Some(d) = derive(raw, k, op)? {

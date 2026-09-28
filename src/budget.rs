@@ -175,6 +175,26 @@ pub fn cost(
     Ok(Some(limits.usd(input, output)))
 }
 
+/// The most `calls` requests of `tokens` estimated tokens in all may cost when every paid entry of
+/// `providers` bills each of them (one that times out or drops its answer may still bill it, and
+/// the chain goes on to the next): each entry's calibrated input, and its largest answer each
+/// time. `None` when no entry is paid (`oboete recurate`'s estimate, Task 11).
+pub fn most_usd(
+    db: &Connection,
+    providers: &[Provider],
+    tokens: u32,
+    calls: usize,
+) -> Result<Option<f64>> {
+    let mut most: Option<f64> = None;
+    for p in providers.iter().filter(|p| p.limits().is_paid()) {
+        let input = f64::from(tokens) * factor(db, p.name())?;
+        let output = calls as f64 * f64::from(largest_output(p));
+        let usd = p.limits().usd(input, output);
+        most = Some(most.unwrap_or(0.0) + usd);
+    }
+    Ok(most)
+}
+
 /// The answer a request may get at most: its declared output, or the entry's output cap.
 fn largest_output(p: &Provider) -> u32 {
     match p.declared_output() {
@@ -233,6 +253,29 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    /// `oboete recurate`'s estimate: every window billed by every paid entry, its largest answer
+    /// each time; none when nothing is paid.
+    #[test]
+    fn the_most_a_recuration_costs_is_every_paid_entry_billed() {
+        let db = open(tempfile::tempdir().unwrap().path()).unwrap();
+        let free = entry("free", Limits::default());
+        let priced = |name: &str, usd: f64| {
+            let limits = Limits {
+                usd_per_mtok_in: usd,
+                usd_per_mtok_out: 2.0 * usd,
+                max_output_tokens: 1_000,
+                ..Default::default()
+            };
+            entry(name, limits)
+        };
+        let all = [free.clone(), priced("cheap", 1.0), priced("dear", 3.0)];
+        // 10,000 tokens in, two answers of 1,000 at twice the input price, on each paid entry.
+        let most = most_usd(&db, &all, 10_000, 2).unwrap().unwrap();
+        let each = |usd: f64| (10_000.0 * usd + 2_000.0 * 2.0 * usd) / 1e6;
+        assert!((most - (each(1.0) + each(3.0))).abs() < 1e-12);
+        assert_eq!(most_usd(&db, &[free], 10_000, 2).unwrap(), None);
     }
 
     /// A call to paid entry `p` with its cost stored, as the chain records one.
