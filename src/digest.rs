@@ -246,6 +246,10 @@ pub fn phase(
                 next_attempt_at: next,
             };
             crate::providers_db::set_digest_pending(db, &p)?;
+            // Given up: nothing waits for it, and the next run goes on to the next digest.
+            if p.attempts >= crate::curate::ATTEMPTS {
+                return Ok(Phase::Covered);
+            }
             return Ok(sooner(out, held(hold, next, now)));
         }
     }
@@ -772,8 +776,13 @@ mod tests {
         for attempt in 1..=3 {
             let (phase, sent) = run(home.path(), Phase::Idle, &fail);
             assert_eq!(sent.len(), 1);
-            assert!(matches!(phase, Phase::Waiting { up: true, .. }));
             assert_eq!(row().attempts, attempt);
+            if attempt == 3 {
+                // Given up: no wait keeps the worker up for it; the next run goes on.
+                assert_eq!(phase, Phase::Covered);
+                break;
+            }
+            assert!(matches!(phase, Phase::Waiting { up: true, .. }));
             // Held until its time: not asked again before then.
             assert!(run(home.path(), Phase::Idle, &fail).1.is_empty());
             db.execute("UPDATE digest_pending SET next_attempt_at = 0", [])
