@@ -3464,7 +3464,8 @@ mod tests {
         assert!(windows.len() > 1, "{}", windows.len());
         let mut none = |_: &str, _: &str, _: &AnswerCheck| Ok(answered("fake"));
         for (i, w) in windows.iter().enumerate() {
-            assert_eq!(skipped_spans(&raw).unwrap(), [span.clone()], "window {i}");
+            let still = skipped_spans(&raw).unwrap();
+            assert_eq!(still, std::slice::from_ref(&span), "window {i}");
             let last = (i + 1 == windows.len()).then_some(&span);
             recurate_window(&mut raw, &k, &rules, &summary, &mut none, w, last)
                 .unwrap()
