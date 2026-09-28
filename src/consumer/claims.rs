@@ -62,13 +62,13 @@ impl Consumer for Claims {
                     op.body["to_seq"].as_i64()
                 ],
             )?;
-            // The last window of a queued span its windows all curated, when it took several.
+            // The span its windows all curated, when it took several.
             k.execute(
-                "DELETE FROM recurate WHERE device = ?1 AND from_seq = ?2 AND to_seq = ?3",
+                "DELETE FROM recurate WHERE device = ?1 AND from_seq >= ?2 AND to_seq <= ?3",
                 params![
                     op.device,
-                    op.body["queued"][0].as_i64(),
-                    op.body["queued"][1].as_i64()
+                    op.body["covers"]["from_seq"].as_i64(),
+                    op.body["covers"]["to_seq"].as_i64()
                 ],
             )?;
         }
