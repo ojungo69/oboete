@@ -1029,6 +1029,52 @@ mod tests {
         .unwrap();
     }
 
+    /// A worker and a command that open the same older knowledge.db at once both migrate it
+    /// (#213): the second checks while the first holds the write lock, as a step's transaction
+    /// does, and finds the change made once it gets the lock. One migration at a time, so the
+    /// second meets each while the first still holds the lock.
+    #[test]
+    fn two_connections_migrate_one_older_knowledge_db_at_once() {
+        let older_evidence = "DROP TABLE evidence;
+             CREATE TABLE evidence(op_device TEXT NOT NULL, op_seq INTEGER NOT NULL,
+               idx INTEGER NOT NULL, device TEXT NOT NULL, seq INTEGER NOT NULL,
+               offset INTEGER NOT NULL, length INTEGER NOT NULL, sentence INTEGER NOT NULL,
+               quote TEXT NOT NULL, PRIMARY KEY (op_device, op_seq, idx));
+             CREATE INDEX evidence_anchor ON evidence(device, seq);
+             INSERT INTO evidence VALUES('d', 1, 0, 'd', 1, 0, 3, 0, 'use');
+             INSERT INTO recurate VALUES('d', 1, 3, 'd', 9);";
+        let older_queue = "INSERT INTO evidence VALUES('d', 1, 0, 'd', 1, 0, 3, 0, 'use', NULL);
+             DROP TABLE recurate;
+             CREATE TABLE recurate(device TEXT NOT NULL, from_seq INTEGER NOT NULL,
+               to_seq INTEGER NOT NULL, op_device TEXT NOT NULL, op_seq INTEGER NOT NULL,
+               PRIMARY KEY (op_device, op_seq));
+             INSERT INTO recurate VALUES('d', 1, 3, 'd', 9);";
+        for older in [older_evidence, older_queue] {
+            let home = tempfile::tempdir().unwrap();
+            let first = crate::knowledge::open(home.path()).unwrap();
+            schema(&first).unwrap();
+            first.execute_batch(older).unwrap();
+            let second = crate::knowledge::open(home.path()).unwrap();
+            first.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let other = std::thread::spawn(move || schema(&second).map_err(|e| e.to_string()));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            schema(&first).unwrap();
+            first.execute_batch("COMMIT").unwrap();
+            other.join().unwrap().unwrap();
+            let now: (i64, i64, i64, i64) = first
+                .query_row(
+                    "SELECT (SELECT count(*) FROM pragma_table_info('evidence')
+                             WHERE name = 'claim_at'),
+                       (SELECT count(*) FROM pragma_table_info('recurate') WHERE pk > 0),
+                       (SELECT count(*) FROM evidence), (SELECT count(*) FROM recurate)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(now, (1, 3, 1, 1), "{older}");
+        }
+    }
+
     /// A knowledge.db from before #192 keys its queue by the claim op alone: the table is made
     /// again keyed by the op and the first record, with its rows.
     #[test]
