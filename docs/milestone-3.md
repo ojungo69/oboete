@@ -1,6 +1,6 @@
 # Milestone 3: Curate
 
-The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and their harness, are in docs/spike/m3-dev.md and docs/eval/m3.py. Every number here is from the dev split: no held-out transcript was read.
+The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and their harness, are in docs/spike/m3-dev.md and docs/eval/m3.py. Every measured result here is from the dev split, and no held-out transcript was read; the heavy-day size under Cost comes from counting the owner's transcripts of the last 90 days (counts only).
 
 ## Where it stands (2026-09-28)
 
@@ -61,7 +61,7 @@ whole and short cut 114 spans, and some of them shared a record, so that record'
   - in 6 it was shown, near the bottom (rank 13 to 17, where 13 to 35 current claims matched), and the curator did not supersede it. With a repository's claims in the thousands rather than tens, a rank that low would not be shown.
 - **The compatible pair dropped** in full and nothink is d121 to d361: the later decision ("このプロジェクトを破棄して…") superseded 案B. By the owner's labels 案B had already been replaced by d123, which d361 overturns. It counts as a drop by the definition; it is 1 of 25, 4%, over the 2% line.
 - **Owner-no records**: the three in nothink (d71, d228, d410) are the three whole also showed. d71 is a long typed plan whose other sentences are rules; d228 and d410 are the assistant's reports of what it did, drafted as the user's decisions. Not a difference that thinking made.
-- **What is not in the window**: drafts dropped because their quote is not in the window, nothink: 263 over 120 kept answers. 195 are paraphrases, 30 match once whitespace is removed, 15 quote a tool's input, 13 quote another record, 6 join two pieces with "...". A whitespace-blind match would keep the 30.
+- **What is not in the window**: drafts dropped because their quote is not in the window, nothink: 263 over 120 kept answers. 195 are paraphrases, 30 match once whitespace is removed, 15 quote a tool's input, 13 quote another record, 6 join two pieces with "...", 1 matches after NFKC normalization, and 3 could not be joined to their window's answer. A whitespace-blind match would keep the 30.
 
 ### Thinking (#193 item 3)
 
@@ -74,7 +74,7 @@ So thinking off is at least as good here and six times faster. It is the default
 
 ### Run to run
 
-whole-2 and nothink both ran with the shrink off and thinking off, on #195 and on main at ce805a4, and recalled 24 and 20. The code between the two binaries is not separated from the spread of two runs, so a difference of a few labels between two single runs is not read as an effect. short-2 is the defaults as they would ship (shrink on, thinking off), on main before #223's search change.
+nothink and whole-2 both ran with the shrink off and thinking off: nothink on #195 recalled 24, and whole-2 on main at ce805a4 recalled 20. The code between the two binaries is not separated from the spread of two runs, so a difference of a few labels between two single runs is not read as an effect. short-2 is the defaults as they would ship (shrink on, thinking off), on main before #223's search change.
 
 ### What the next M3 run needs
 
