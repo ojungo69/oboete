@@ -411,8 +411,9 @@ pub fn decisions(k: &Connection, repo: &str, limit: usize) -> Result<Vec<Claim>>
     tips(k, &format!("{TIPS} {DECIDED}"), (repo, limit as i64))
 }
 
-/// `repo`'s current claims anchored on `device` at or before `seq`, the newest first, at most
-/// `limit`: those a session's digest may cite (milestone 3 Task 9).
+/// `repo`'s current settled claims anchored on `device` at or before `seq`, the newest first, at
+/// most `limit`: those a session's digest may cite (milestone 3 Task 9). A proposal, which may
+/// stand on tool content the gates lowered, is never shown: SessionStart injects the digest.
 pub fn anchored_through(
     k: &Connection,
     repo: &str,
@@ -423,7 +424,8 @@ pub fn anchored_through(
     tips(
         k,
         &format!(
-            "{TIPS} AND a.anchor_device = ?2 AND a.anchor_seq <= ?3
+            "{TIPS} AND a.status NOT IN ('proposed', 'unverified')
+             AND a.anchor_device = ?2 AND a.anchor_seq <= ?3
              ORDER BY a.valid_from DESC, a.anchor_device DESC, a.anchor_seq DESC, a.uid DESC
              LIMIT ?4"
         ),

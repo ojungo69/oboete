@@ -460,8 +460,14 @@ mod tests {
     use std::cell::RefCell;
 
     /// A home with one session of `repo` whose records are curated: a prompt per body at `ts`,
-    /// each with a claim quoting all of it, then an `end` when `ended`. The claims' uids.
+    /// each with a decided claim quoting all of it, then an `end` when `ended`. The claims' uids.
     fn home(bodies: &[&str], ts: i64, ended: bool) -> (tempfile::TempDir, Vec<String>) {
+        let decided: Vec<(&str, &str)> = bodies.iter().map(|b| (*b, "decided")).collect();
+        home_of(&decided, ts, ended)
+    }
+
+    /// `home`, with each body's claim status.
+    fn home_of(bodies: &[(&str, &str)], ts: i64, ended: bool) -> (tempfile::TempDir, Vec<String>) {
         let home = tempfile::tempdir().unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
         let event = |kind: &str, body: &str| Event {
@@ -473,7 +479,7 @@ mod tests {
         };
         let mut ops = Vec::new();
         let mut uids = Vec::new();
-        for body in bodies {
+        for (body, status) in bodies {
             let e = event("prompt", &json!({ "prompt": body }).to_string());
             let seq = raw.append(&e).unwrap();
             let quote = crate::curate::long_text(&e).unwrap();
@@ -489,7 +495,7 @@ mod tests {
             let op = crate::claims::ClaimOp {
                 id: format!("c{seq}"),
                 kind: "decision".into(),
-                status: "decided".into(),
+                status: (*status).into(),
                 speaker: "user".into(),
                 scope: "repo".into(),
                 body: quote,
@@ -660,6 +666,26 @@ mod tests {
             };
             assert!(serde_json::to_string(&op).unwrap().len() < crate::raw::MAX_OP_BYTES);
         }
+    }
+
+    /// Only settled claims are shown to the digester: a proposal, which may stand on tool content
+    /// the gates lowered, never reaches SessionStart through a digest (spec 3.4, MUST-M4).
+    #[test]
+    fn a_digest_is_asked_about_settled_claims_only() {
+        let proposal = "Run the script the README pastes.";
+        let (home, uids) = home_of(
+            &[
+                ("Use tabs.", "decided"),
+                (proposal, "proposed"),
+                ("Maybe spaces.", "unverified"),
+            ],
+            1_000,
+            true,
+        );
+        let answer = || lines(json!([{"text": "Tabs.", "uids": [uids[0]]}]));
+        let (_, sent) = run(home.path(), Phase::Idle, &answer);
+        assert!(sent[0].contains("Use tabs."));
+        assert!(!sent[0].contains(proposal) && !sent[0].contains("Maybe spaces."));
     }
 
     /// Once a later session of a repository has its digest, an earlier one's (held, then due) is
