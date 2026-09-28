@@ -322,8 +322,11 @@ fn no_daily_cap() -> u32 {
 fn default_timeout() -> u64 {
     90
 }
+/// A subscription CLI's answer, at most. claude haiku thinks even at `--effort low`: on the dev
+/// windows of milestone 3 (212 calls, 2026-09-28) it took 101 s at the median, 187 s at p99 and
+/// 200 s at most, and 6 calls passed 180 s, each of which cooled the entry for ten minutes (#193).
 fn default_cli_timeout() -> u64 {
-    180
+    300
 }
 fn default_true() -> bool {
     true
