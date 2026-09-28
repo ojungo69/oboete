@@ -1111,8 +1111,7 @@ pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<Str
         "{} span(s) in {windows} window(s), about {tokens} tokens; {}\n",
         plan.len(),
         match most {
-            Some(usd) =>
-                format!("at most USD {usd:.2} if every window goes to the dearest paid entry"),
+            Some(usd) => format!("at most USD {usd:.2} if every paid entry bills every window"),
             None => "no paid entry in the chain".into(),
         }
     ));
