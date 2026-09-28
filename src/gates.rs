@@ -348,7 +348,8 @@ fn speaker(line: &Line, quote: &str, given: &str) -> &'static str {
 }
 
 /// Whether `quote` is in one of the answers (or the notes the owner added to them) of an
-/// `AskUserQuestion` output, as decoded or as the output's JSON text shows it.
+/// `AskUserQuestion` output, as decoded or as the output's JSON text shows it. An annotation's
+/// `preview` is the picked option's preview, which the assistant wrote, so only `notes` count.
 fn picked(output: &str, quote: &str) -> bool {
     fn strings<'v>(v: &'v Value, out: &mut Vec<&'v str>) {
         match v {
@@ -363,7 +364,11 @@ fn picked(output: &str, quote: &str) -> bool {
     };
     let mut owners = Vec::new();
     strings(&v["answers"], &mut owners);
-    strings(&v["annotations"], &mut owners);
+    if let Some(notes) = v["annotations"].as_object() {
+        notes
+            .values()
+            .for_each(|n| strings(&n["notes"], &mut owners));
+    }
     !quote.trim().is_empty()
         && owners.iter().any(|a| {
             let shown = serde_json::to_string(a).unwrap_or_default();
@@ -812,6 +817,21 @@ mod tests {
         let typed = window(&[asked("SQLite にする。バックアップは毎晩とる")]);
         let quote = "バックアップは毎晩とる";
         assert_eq!(one(&typed, "decided", "user", quote), is("decided", "user"));
+        let mut noted = asked("SQLite にする");
+        let mut io: Value = serde_json::from_str(noted.1["output"].as_str().unwrap()).unwrap();
+        io["annotations"] = json!({"どれで保存しますか?":
+            {"preview": "CREATE TABLE notes (id INTEGER PRIMARY KEY)", "notes": "WAL を使う"}});
+        noted.1["input"] = io.to_string().into();
+        noted.1["output"] = io.to_string().into();
+        let noted = window(&[noted]);
+        assert_eq!(
+            one(&noted, "decided", "user", "WAL を使う"),
+            is("decided", "user")
+        );
+        assert_eq!(
+            one(&noted, "decided", "user", "CREATE TABLE notes").0,
+            "proposed"
+        );
         let (_, body) = asked("SQLite にする");
         let echoed = window(&[tool(body["output"].as_str().unwrap(), false)]);
         assert_eq!(
