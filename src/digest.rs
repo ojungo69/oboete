@@ -494,6 +494,7 @@ mod tests {
                 length: quote.len() as i64,
                 sentence: 0,
                 quote: quote.clone(),
+                nth: 0,
             };
             uids.push(crate::claims::uid("decision", &evidence));
             let op = crate::claims::ClaimOp {

@@ -812,6 +812,7 @@ pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims:
         length: as_i64(quote.len())?,
         sentence: as_i64(source.sentence(at))?,
         quote: quote.to_owned(),
+        nth: 0,
     })
 }
 
@@ -1538,6 +1539,7 @@ fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims:
                     length: r.get(3)?,
                     sentence: r.get(4)?,
                     quote: r.get(5)?,
+                    nth: 0,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -1786,7 +1788,36 @@ fn located(
     if any && found.is_empty() {
         return Err(AnswerFailure::Unanchored);
     }
+    number(&mut found);
     Ok((summary, found, lost))
+}
+
+/// Numbers the drafts of one kind whose first quotes start in one sentence, for their uids
+/// (#125): drafts whose quotes overlap are one claim drafted twice and share a number (the gates
+/// settle them as one), and a quote apart from those before it takes the next. A claim alone in
+/// its sentence is 0, the uid it always had.
+fn number(found: &mut [Located]) {
+    let key = |(d, e, _): &Located| {
+        let (kind, _) = crate::claims::normalize(&d.kind, &d.status);
+        (kind, e.device.clone(), e.seq, e.sentence)
+    };
+    let mut order: Vec<usize> = (0..found.len()).collect();
+    order.sort_by_key(|&i| (key(&found[i]), found[i].1.offset));
+    let (mut last, mut n) = (None, 0);
+    for i in order {
+        let (k, e) = (key(&found[i]), &mut found[i].1);
+        let end = e.offset + e.length;
+        match &mut last {
+            Some((prev, reach)) if *prev == k => {
+                if e.offset >= *reach {
+                    n += 1;
+                }
+                *reach = end.max(*reach);
+            }
+            _ => (last, n) = (Some((k, end)), 0),
+        }
+        e.nth = n;
+    }
 }
 
 /// At most `k` of `all`, spread evenly over the whole of it (a window's trigrams: not its first
@@ -3315,6 +3346,7 @@ mod tests {
             length: text.len() as i64,
             sentence: 0,
             quote: text.into(),
+            nth: 0,
         };
         let op = crate::claims::ClaimOp {
             id: "c".into(),
@@ -4035,6 +4067,68 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect()
+    }
+
+    /// Two decisions in one sentence are two claims with two uids, and a recuration that gives
+    /// them again, reworded and in another order, keeps both; two drafts whose quotes overlap are
+    /// one claim drafted twice (#125).
+    #[test]
+    fn two_decisions_in_one_sentence_get_two_uids_and_keep_them_on_recuration() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        raw.append(&prompt("Use tabs and log to stderr.")).unwrap();
+        let draft = |id: &str, quote: &str, body: &str| {
+            let mut c = claim(id, "decided", "L1", quote, json!([]));
+            c["body"] = json!(body);
+            c
+        };
+        let answers = std::cell::RefCell::new(vec![
+            json!({"claims": [draft("c1", "log to stderr", "Logs go to stderr."),
+                draft("c2", "Use tabs", "Tabs, not spaces."),
+                draft("c3", "Use tabs and", "Indent with tabs.")], "summary": "s"}),
+            json!({"claims": [draft("c1", "Use tabs", "Tabs for indents."),
+                draft("c2", "log to stderr", "Log to stderr.")], "summary": "s"}),
+        ]);
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            Ok(ChainResult {
+                output: answers.borrow_mut().remove(0),
+                ..answered("fake")
+            })
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
+        let uids = |k: &Connection| -> i64 {
+            k.query_row("SELECT count(DISTINCT uid) FROM derivations", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        let decided = |b: &str| (b.to_owned(), "decided".to_owned());
+        assert_eq!(uids(&k), 2);
+        assert_eq!(
+            active(&k),
+            [decided("Indent with tabs."), decided("Logs go to stderr.")]
+        );
+        let span = Span::records(1, 1);
+        let windows = span_windows(&raw, &span, WINDOW_TOKENS, &rules).unwrap();
+        let again = recurate_window(
+            &mut raw,
+            &k,
+            &rules,
+            &summary,
+            &mut chain,
+            &windows[0],
+            None,
+        );
+        assert_eq!(again.unwrap(), Ok((2, 0)));
+        consume(&raw, &mut k);
+        assert_eq!(uids(&k), 2);
+        assert_eq!(
+            active(&k),
+            [decided("Log to stderr."), decided("Tabs for indents.")]
+        );
     }
 
     /// Task 11: a recuration's answer replaces its window's unsettled claims: one anchored in the

@@ -364,6 +364,7 @@ impl Consumer for Anchors {
                             length: r.get(3)?,
                             sentence: r.get(4)?,
                             quote: r.get(5)?,
+                            nth: 0,
                         })
                     })?
                     .collect::<rusqlite::Result<_>>()?;
@@ -476,6 +477,7 @@ mod tests {
             length: quote.len() as i64,
             sentence,
             quote: quote.into(),
+            nth: 0,
         }
     }
 

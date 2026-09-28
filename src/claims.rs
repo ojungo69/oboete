@@ -15,6 +15,15 @@ pub struct Evidence {
     pub length: i64,
     pub sentence: i64,
     pub quote: String,
+    /// On a claim's first quote: how many claims of the same kind in its window start their
+    /// first quote in the same sentence before this one, by where the quote starts (#125). Left
+    /// out when 0, so a claim alone in its sentence keeps the uid it always had.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub nth: i64,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 /// The body of a claim op, which the curation phase writes (Task 7).
@@ -78,12 +87,17 @@ pub fn normalize(kind: &str, status: &str) -> (&'static str, &'static str) {
 }
 
 /// MUST-M18: a claim's uid is its kind and the sentence its first quote starts in, never a name
-/// the model gives, so a recuration that rewords it derives the same uid.
+/// the model gives, so a recuration that rewords it derives the same uid; and its place among
+/// the claims of that kind in that sentence, so two of them keep two uids (#125).
 pub fn uid(kind: &str, first: &Evidence) -> String {
-    crate::curate::sha256_hex(&format!(
+    let key = format!(
         "{kind}\0{}\0{}\0{}",
         first.device, first.seq, first.sentence
-    ))
+    );
+    crate::curate::sha256_hex(&match first.nth {
+        0 => key,
+        n => format!("{key}\0{n}"),
+    })
 }
 
 pub(crate) fn schema(k: &Connection) -> Result<()> {
@@ -317,6 +331,7 @@ pub fn pref_add(home: &std::path::Path, text: &str) -> Result<String> {
         length: i64::try_from(quote.len())?,
         sentence: 0,
         quote: quote.clone(),
+        nth: 0,
     };
     let uid = uid("preference", &evidence);
     let op = ClaimOp {
