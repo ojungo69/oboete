@@ -1129,16 +1129,19 @@ mod tests {
     fn a_restore_asked_for_while_the_worker_waits_opens_the_stores_again() {
         let home = tempfile::tempdir().unwrap();
         let p = home.path().to_path_buf();
+        // A worker that only took the request on its way out would take it after its 10 s wait,
+        // past the 8 s this test allows; a slow runner still gets its worker into the wait (a
+        // Windows runner took over 1 s, #199).
         let worker = {
             let p = p.clone();
-            std::thread::spawn(move || run_with(&p, 2_000, vec![Box::new(Seen)], || {}))
+            std::thread::spawn(move || run_with(&p, 10_000, vec![Box::new(Seen)], || {}))
         };
         std::thread::sleep(Duration::from_millis(300));
         crate::backup::request_restore(&p);
         let t = Instant::now();
         while crate::backup::restore_requested(&p) {
             assert!(
-                t.elapsed() < Duration::from_secs(1),
+                t.elapsed() < Duration::from_secs(8),
                 "not taken while waiting"
             );
             std::thread::sleep(Duration::from_millis(20));
