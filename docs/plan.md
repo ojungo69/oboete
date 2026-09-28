@@ -69,7 +69,7 @@
 
 - 仕様 = この文書 1 枚 + マイルストーンごとの checklist。Spec Kit の 48 タスク儀式は使わない。
 - 実装 = Claude Code が spike と芯を直接書く(品質と速度で有利)。部品移植・adapter など並列可能なものは Codex / Grok。
-- レビュー = PR ごと Codex 1 巡 + 修正後 1 巡。CI = `cargo fmt --check` / `clippy` / `test`。bot は CodeQL のみ。
+- レビュー = 手順の正本は CLAUDE.md の Process の行 (Codex・CodeRabbit・cubic、2026-09-28)。CI = `cargo fmt --check` / `clippy` / `test`。
 - 完了 = 全機能 (M2 / M3) が 3 台 (WSL / Windows / M1 iMac) で動くこと。arm64 VPS は owner が使うと決めたときに同じ条件で足す (提案書 §0.1 決定 10)。OSS 公開は後で別に決める (owner 2026-09-23)。意味検索と同期の設計は `docs/research/search-sync-proposal-2026-09-23.md` で見直し中で、§2b・§3・§8 はそれで置き換える。
 
 ## owner に聞くこと
