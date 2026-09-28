@@ -448,14 +448,14 @@ fn tainted(w: &Window, i: usize, span: &str, tools: &str) -> bool {
 }
 
 /// A tool call of line `i`'s session between the start of its turn (the last user line before it
-/// in the window) and it.
+/// in the window, a typed prompt or the owner's answer to `AskUserQuestion`) and it.
 fn after_a_tool(w: &Window, i: usize) -> bool {
     let key = &w.lines[i].key;
     w.lines[..i]
         .iter()
         .rev()
         .filter(|l| &l.key == key)
-        .take_while(|l| l.role != Role::User)
+        .take_while(|l| !matches!(l.role, Role::User | Role::Answer))
         .any(|l| matches!(l.role, Role::Tool { .. }))
 }
 
@@ -881,6 +881,27 @@ mod tests {
         assert_eq!(
             one(&no, "decided", "assistant proposal", quote).0,
             "proposed"
+        );
+    }
+
+    /// The owner's answer starts a turn, as a typed prompt does: a tool call before the question
+    /// does not taint a proposal made after the answer, which an acceptance then promotes.
+    #[test]
+    fn an_answer_starts_the_turn_a_proposal_is_made_in() {
+        let w = window(&[
+            tool("3 files read", false),
+            asked_with(
+                "どちらにしますか?",
+                &["キャッシュする", "しない"],
+                "キャッシュする",
+            ),
+            reply("パース結果をメモリにキャッシュしましょう。"),
+            user("はい、それでお願いします"),
+        ]);
+        let quote = "パース結果をメモリにキャッシュしましょう";
+        assert_eq!(
+            one(&w, "decided", "assistant proposal", quote),
+            is("decided", "assistant proposal")
         );
     }
 
