@@ -3509,6 +3509,59 @@ mod tests {
         );
     }
 
+    /// A queued record a recuration splits into parts stays queued until its last part is
+    /// curated: a part's window names it only in part (review on #189).
+    #[test]
+    fn a_record_curated_in_part_stays_queued() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        raw.append(&prompt(&"Some filler here.\n".repeat(30)))
+            .unwrap();
+        let window = json!({"from_seq": 1, "from_offset": null, "to_seq": 1, "to_offset": null,
+            "outcome": "curated", "elided": []});
+        raw.append_ops(&[(OpKind::Window, window)]).unwrap();
+        consume(&raw, &mut k);
+        k.execute(
+            "INSERT INTO recurate(device, from_seq, to_seq, op_device, op_seq)
+             VALUES(?1, 1, 1, ?1, 9)",
+            [raw.device()],
+        )
+        .unwrap();
+        let (rules, summary) = (Rules::default(), curating(80));
+        let span = Span::records(1, 1);
+        let parts = span_windows(&raw, &span, 80, &rules).unwrap();
+        assert!(parts.len() >= 3, "{}", parts.len());
+        let calls = std::cell::Cell::new(0);
+        let mut second_fails = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                return Err(went_past(&[("groq", "HTTP 400", Skip::Failed)]));
+            }
+            Ok(answered("fake"))
+        };
+        let plan = [(span.clone(), parts.clone())];
+        let sent = send_plan(&mut raw, &k, &rules, &summary, &mut second_fails, &plan).unwrap();
+        assert_eq!((sent.windows, sent.failed.len()), (1, 1));
+        consume(&raw, &mut k);
+        let queued: i64 = k
+            .query_row(
+                "SELECT count(*) FROM recurate WHERE from_seq = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 1);
+        let mut none = |_: &str, _: &str, _: &AnswerCheck| Ok(answered("fake"));
+        let sent = send_plan(&mut raw, &k, &rules, &summary, &mut none, &plan).unwrap();
+        assert_eq!(sent.windows, parts.len());
+        consume(&raw, &mut k);
+        let left: i64 = k
+            .query_row("SELECT count(*) FROM recurate", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
     /// A quote that a smaller split cuts in two is in neither part, so neither part's answer
     /// retracts it (review on #189).
     #[test]
