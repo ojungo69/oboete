@@ -56,3 +56,22 @@ fn doctor_reports_past_a_store_it_cannot_read() {
     assert!(text.contains("providers (chain order):"), "{text}");
     assert!(!out.status.success());
 }
+
+/// The legacy oboete.db section counts each of its tables, and a readable store is healthy.
+#[test]
+fn doctor_counts_the_tables_of_a_legacy_store() {
+    let home = tempfile::tempdir().unwrap();
+    // An empty file is an empty SQLite database; doctor's open gives it the schema.
+    std::fs::write(home.path().join("oboete.db"), "").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_oboete"))
+        .args(["--home", &home.path().to_string_lossy(), "doctor"])
+        .env("OBOETE_NO_SPAWN", "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("sessions 0 | raw events 0 | observations 0 | summaries 0"),
+        "{text}"
+    );
+    assert!(!text.contains("cannot read oboete.db"), "{text}");
+}
