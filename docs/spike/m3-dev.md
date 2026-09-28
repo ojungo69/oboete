@@ -86,7 +86,9 @@ The two arms ended with recall 13 of 44 with the shrink and 10 of 44 without it 
 
 Both arms ran the #194 binary, before #195, so the owner's picks in `AskUserQuestion` could not reach `decided` in either (0 of 13 in both).
 
-Two more arms ran on the #195 binary without the shrink and with merged spans (no overlap, no claim retracted), one with the curator's thinking as shipped (`full`) and one with `"alwaysThinkingEnabled": false` in the curator's `--settings` (`nothink`). docs/milestone-3.md has the four arms side by side.
+The clause was measured again on main at ce805a4 (#219, thinking off), with merged spans: 22 of 44 with the shrink (short-2) and 20 without it (whole-2). By the rule above the shrink does not fail on decisions. whole-2's 22 retracted claims are one span sent twice by the harness's retry after one window's prose answer, not an overlap (docs/milestone-3.md has the rows).
+
+Two more arms ran on the #195 binary without the shrink and with merged spans (no overlap, no claim retracted), one with the curator's thinking as shipped (`full`) and one with `"alwaysThinkingEnabled": false` in the curator's `--settings` (`nothink`). docs/milestone-3.md has the six arms side by side.
 
 ## Definitions for scoring (fixed before any live number)
 
