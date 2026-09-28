@@ -280,10 +280,16 @@ def partly(out):
 
 
 def cooldown(h):
-    """Sleep until the live entry's cooldown is over, and 5 s more."""
+    """Sleep until the live entry's (claude's, LIVE) cooldown is over, and 5 s more. An entry held
+    until the owner acts (`credits_required`, `OWNER_HOLD` in src/providers_db.rs) has no end to
+    sleep to, so the pass stops there (#228)."""
     p = sqlite3.connect(f'file:{h}/providers.db?mode=ro', uri=True)
-    until = p.execute("SELECT max(down_until) FROM provider_state").fetchone()[0] or 0
+    row = p.execute("SELECT down_until FROM provider_state WHERE provider = 'claude'").fetchone()
     p.close()
+    until = row[0] if row else 0
+    if until == 2**63 - 1:
+        sys.exit(f'claude is held until the owner acts: run `<binary> --home {h} resume claude`, then this '
+                 'again; nothing more was sent')
     time.sleep(max(0, until / 1000 - time.time()) + 5)
 
 
@@ -313,10 +319,17 @@ def live(binary, name, send, tool=None):
         tries[k] += 1
         if r['code'] == 0 and (not send or 'not curated' not in r['out']) or send and partly(r['out']) or tries[k] == 3:
             done.add(k)
+    # The log must be this pass's first spans. One cut another way (another --tool selection, or
+    # spans not yet merged) would send records again, or curate an earlier span after a later one
+    # and so with claims from its future as candidates (#228).
+    todo = spans(h, tool)
+    if set(tries) != {json.dumps([a, b]) for a, b in todo[:len(tries)]}:
+        sys.exit(f'{log} is not the first spans of this pass: it was cut with another --tool selection or '
+                 'before spans were merged. Resume it with that selection, or use a new home')
     if send:
         cooldown(h)  # the pass may have been cut while it waited out a cooldown
     tokens = 0
-    for a, b in spans(h, tool):
+    for a, b in todo:
         if json.dumps([a, b]) in done:
             continue
         # A failure is retried after the entry's cooldown, up to three times: the product would
@@ -341,7 +354,7 @@ def live(binary, name, send, tool=None):
         for word in out.split(','):
             if 'tokens' in word and 'about' in word:
                 tokens += int(word.split('about')[1].split('tokens')[0].strip().replace(',', ''))
-    print(f'{len(spans(h, tool))} spans, about {tokens} tokens this pass; log {log}')
+    print(f'{len(todo)} spans, about {tokens} tokens this pass; log {log}')
 
 
 def score(binary, name):
