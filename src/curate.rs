@@ -168,7 +168,21 @@ const PAGE_BYTES: usize = 4 << 20;
 /// there. `rules` are the redaction rules as they are now: a rule added after capture still
 /// hides its matches (spec 6.4).
 pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Result<Option<Window>> {
-    let (seq, offset) = raw.curation_checkpoint(device)?;
+    let at = raw.curation_checkpoint(device)?;
+    window_at(raw, device, at, None, budget, rules)
+}
+
+/// The window after `at` (a record covered whole, or `Some` offset into it where a split window
+/// stopped), cut as `next_window` cuts, reading no record past `until` when one is given (Task 11:
+/// a span sent again).
+pub(crate) fn window_at(
+    raw: &Raw,
+    device: &str,
+    (seq, offset): (i64, Option<i64>),
+    until: Option<i64>,
+    budget: u32,
+    rules: &Rules,
+) -> Result<Option<Window>> {
     let mut after = if offset.is_some() { seq - 1 } else { seq };
     let (mut pieces, mut used, mut elided, mut full) = (Vec::<Piece>::new(), 0, Vec::new(), false);
     // Each session's last heading: a record under another one (a changed checkout) brings its own.
@@ -179,6 +193,9 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
             break;
         }
         for r in records {
+            if until.is_some_and(|u| r.seq > u) {
+                break 'read;
+            }
             after = r.seq;
             if pieces.len() >= MAX_RECORDS {
                 full = true;
@@ -773,6 +790,68 @@ pub fn run_phase(
             up: until - now <= STAY_UP_MS,
         });
     }
+    let req = request(raw, k, rules, summary, &w)?;
+    let sent = sha256_hex(&format!("{chain}\n{}\n{}", summary.language, w.text));
+    // A row for another request is stale, and its attempts and hold were not on this one: a
+    // restore or a skipped window moved the checkpoint, records added since made the window
+    // longer, new rules or another language changed what would be sent, or the owner changed
+    // who is asked (`chain`: the providers and caps as text). What the window carries in and its
+    // candidates are not part of it: they change while a window waits (a claim a rescan drops),
+    // and a window every provider fails must still reach D11's three.
+    let range = |p: &Pending| (p.from_seq, p.from_offset, p.to_seq, p.to_offset);
+    let pending = providers_db::pending_of(db, &device)?.filter(|p| {
+        range(p) == (w.from_seq, w.from_offset, w.to_seq, w.to_offset) && p.prompt == sent
+    });
+    if let Some(p) = &pending
+        && p.next_attempt_at > now
+    {
+        return Ok(waiting(p, now));
+    }
+    let failed = match answered(raw, k, rules, &w, &req, curator)? {
+        Ok((op, claims)) => return cover(raw, db, &w, op, claims),
+        Err(failed) => failed,
+    };
+    let reason = ChainFailed(failed.clone()).to_string();
+    let (hold, next, counted) = hold(&failed, now);
+    let attempts = pending.as_ref().map_or(0, |p| p.attempts) + i64::from(counted);
+    if attempts >= ATTEMPTS {
+        let op = json!({"outcome": "skipped", "reason": reason});
+        return cover(raw, db, &w, op, Vec::new());
+    }
+    let p = Pending {
+        device,
+        from_seq: w.from_seq,
+        from_offset: w.from_offset,
+        to_seq: w.to_seq,
+        to_offset: w.to_offset,
+        reason,
+        hold: hold.into(),
+        attempts,
+        next_attempt_at: next,
+        since: pending.map_or(now, |p| p.since),
+        prompt: sent,
+    };
+    providers_db::set_pending(db, &p)?;
+    Ok(waiting(&p, now))
+}
+
+/// What a window's request is made of: its prompt, and the candidates and carried claims it
+/// shows, which the gates hold a draft's supersedes to.
+struct Request {
+    prompt: String,
+    shown_in: Vec<(String, crate::claims::Claim)>,
+    carried_uids: Carried,
+}
+
+/// The request for window `w`: its text, the candidates of each of its repositories (found by
+/// that repository's lines) and what its sessions carried in, fitted to a fifth of the budget.
+fn request(
+    raw: &Raw,
+    k: &Connection,
+    rules: &Rules,
+    summary: &Summary,
+    w: &Window,
+) -> Result<Request> {
     // `claims::current` reads, never creates: a store the worker has not yet given claims.
     crate::claims::schema(k)?;
     let mut shown: Vec<String> = Vec::new();
@@ -808,35 +887,37 @@ pub fn run_phase(
         }
         shown.push(block);
     }
-    let (carried_text, mut carried_uids) = carried(raw, k, rules, &w)?;
+    let (carried_text, mut carried_uids) = carried(raw, k, rules, w)?;
     // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing.
     let (carried_text, shown) = fit(&carried_text, &shown, summary.window_tokens / 5);
     carried_uids.retain(|(_, _, c)| carried_text.contains(c.uid.as_str()));
     shown_in.retain(|(_, c)| shown.contains(c.uid.as_str()));
-    let prompt = prompt(&summary.language, &w.text, &shown, &carried_text);
-    let sent = sha256_hex(&format!("{chain}\n{}\n{}", summary.language, w.text));
-    // A row for another request is stale, and its attempts and hold were not on this one: a
-    // restore or a skipped window moved the checkpoint, records added since made the window
-    // longer, new rules or another language changed what would be sent, or the owner changed
-    // who is asked (`chain`: the providers and caps as text). What the window carries in and its
-    // candidates are not part of it: they change while a window waits (a claim a rescan drops),
-    // and a window every provider fails must still reach D11's three.
-    let range = |p: &Pending| (p.from_seq, p.from_offset, p.to_seq, p.to_offset);
-    let pending = providers_db::pending_of(db, &device)?.filter(|p| {
-        range(p) == (w.from_seq, w.from_offset, w.to_seq, w.to_offset) && p.prompt == sent
-    });
-    if let Some(p) = &pending
-        && p.next_attempt_at > now
-    {
-        return Ok(waiting(p, now));
-    }
+    Ok(Request {
+        prompt: prompt(&summary.language, &w.text, &shown, &carried_text),
+        shown_in,
+        carried_uids,
+    })
+}
+
+/// The chain's answer about `w`, as the window op's body (`curated`) and the claim ops the gates
+/// keep (Tasks 7 and 8), or the providers it went past.
+#[allow(clippy::type_complexity)]
+fn answered(
+    raw: &Raw,
+    k: &Connection,
+    rules: &Rules,
+    w: &Window,
+    req: &Request,
+    curator: &mut Curator,
+) -> Result<std::result::Result<(Value, Vec<Value>), Vec<Fallback>>> {
     let span = format!("{}-{}", w.from_seq, w.to_seq);
-    let answer = curator(&span, &prompt, &|v| check(&w, v));
-    let failed = match answer {
-        Ok(r) => match located(&w, &r.output) {
+    let answer = curator(&span, &req.prompt, &|v| check(w, v));
+    Ok(match answer {
+        Ok(r) => match located(w, &r.output) {
             Ok((summary, found, lost)) => {
-                let ended = ended_on_a_proposal(raw, k, &w)?;
-                let gated = crate::gates::check(&w, &shown_in, &carried_uids, &ended, found, rules);
+                let ended = ended_on_a_proposal(raw, k, w)?;
+                let gated =
+                    crate::gates::check(w, &req.shown_in, &req.carried_uids, &ended, found, rules);
                 let (mut claims, mut over) = (Vec::new(), Vec::new());
                 for (d, evidence) in gated.kept {
                     let op = crate::claims::ClaimOp {
@@ -869,42 +950,20 @@ pub fn run_phase(
                     .collect();
                 let op = json!({"outcome": "curated", "provider": r.provider, "summary": summary,
                     "dropped": dropped, "lowered": gated.lowered});
-                return cover(raw, db, &w, op, claims);
+                Ok((op, claims))
             }
             // Counted like a provider that failed: no answer this window can use.
-            Err(e) => vec![Fallback {
+            Err(e) => Err(vec![Fallback {
                 provider: r.provider,
                 reason: e.to_string(),
                 skip: Skip::Failed,
-            }],
+            }]),
         },
         Err(e) => match e.downcast::<ChainFailed>() {
-            Ok(ChainFailed(fallbacks)) => fallbacks,
+            Ok(ChainFailed(fallbacks)) => Err(fallbacks),
             Err(e) => return Err(e),
         },
-    };
-    let reason = ChainFailed(failed.clone()).to_string();
-    let (hold, next, counted) = hold(&failed, now);
-    let attempts = pending.as_ref().map_or(0, |p| p.attempts) + i64::from(counted);
-    if attempts >= ATTEMPTS {
-        let op = json!({"outcome": "skipped", "reason": reason});
-        return cover(raw, db, &w, op, Vec::new());
-    }
-    let p = Pending {
-        device,
-        from_seq: w.from_seq,
-        from_offset: w.from_offset,
-        to_seq: w.to_seq,
-        to_offset: w.to_offset,
-        reason,
-        hold: hold.into(),
-        attempts,
-        next_attempt_at: next,
-        since: pending.map_or(now, |p| p.since),
-        prompt: sent,
-    };
-    providers_db::set_pending(db, &p)?;
-    Ok(waiting(&p, now))
+    })
 }
 
 /// What a window every provider went past waits for, when it is tried again, and whether the
