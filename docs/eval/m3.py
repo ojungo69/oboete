@@ -5,7 +5,7 @@ read here. Every command takes the binary by path: `oboete` on PATH is the owner
   m3.py fixtures <bin>          each transcript the dev labels or the replay set's dev side need ->
                                 a fixture, by <bin>'s own `transcript`
   m3.py replay <bin> <name>     every fixture, merged in time order, into one home; curation off
-  m3.py stub <bin> <name> [--shrink]
+  m3.py stub <bin> <name> [--shrink] [--tokens=N]
                                 curate that home with a localhost stub that answers no claims: the
                                 windows, their estimated tokens, M2's coverage; no call leaves
   m3.py map <bin> <name>        each labeled decision -> the records its quote is in
@@ -75,9 +75,11 @@ def when(ts):
     return datetime.fromisoformat(ts.replace('Z', '+00:00')).timestamp()
 
 
-def config(h, providers, curate, shrink=False):
+def config(h, providers, curate, shrink=False, tokens=None):
+    size = f'window_tokens = {tokens}\n' if tokens else ''
     with open(f'{h}/config.toml', 'w') as f:
-        f.write(f'[summary]\ncurate = {str(curate).lower()}\nshrink = {str(shrink).lower()}\n\n' + providers)
+        f.write(f'[summary]\ncurate = {str(curate).lower()}\nshrink = {str(shrink).lower()}\n{size}\n'
+                + providers)
 
 
 def replay(binary, name):
@@ -153,13 +155,13 @@ def coverage(ops, top):
     return (None if at == (top + 1, None) else f'the windows end at {at}, the records at {top}'), counts
 
 
-def stub(binary, name, shrink):
+def stub(binary, name, shrink, tokens):
     h = home(binary, name)
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Stub)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     config(h, f'[[providers]]\nkind = "openai"\nname = "stub"\n'
               f'base_url = "http://127.0.0.1:{server.server_port}/v1"\nmodel = "stub"\n'
-              f'daily_budget = 1000000\n', True, shrink)
+              f'daily_budget = 1000000\n', True, shrink, tokens)
     # A worker exits when it is idle, and a window at the last record waits for the owner's next
     # hook record; replayed records are not hook records, so none waits here.
     subprocess.run([binary, '--home', h, 'worker', '--idle-ms', '0'], check=True, env=clean_env())
@@ -173,7 +175,7 @@ def stub(binary, name, shrink):
     repos = raw.execute("SELECT repo IS NULL, COUNT(DISTINCT repo), COUNT(DISTINCT session), COUNT(*) "
                         "FROM records WHERE type = 'event' GROUP BY repo IS NULL").fetchall()
     shortened = sum(len(w.get('shortened', [])) for w in ops)
-    report = {'shrink': shrink, 'records': top, 'windows': len(ops), 'outcomes': counts,
+    report = {'shrink': shrink, 'tokens': tokens, 'records': top, 'windows': len(ops), 'outcomes': counts,
               'coverage': broken or '100%', 'shortened': shortened,
               'calls': [dict(zip(('role', 'outcome', 'calls', 'est_tokens', 'max_est', 'bytes'), c)) for c in calls],
               'repos': [dict(zip(('no_repo', 'repos', 'sessions', 'records'), r)) for r in repos]}
@@ -260,8 +262,9 @@ def live(binary, name, send):
     estimates `recurate` prints."""
     h = home(binary, name)
     with open(f'{h}/config.toml') as f:
-        shrink = 'shrink = true' in f.read()
-    config(h, LIVE, False, shrink)
+        cut = f.read()
+    size = [line.split('=')[1].strip() for line in cut.splitlines() if line.startswith('window_tokens')]
+    config(h, LIVE, False, 'shrink = true' in cut, size[0] if size else None)
     raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
     device = raw.execute("SELECT value FROM meta WHERE key = 'device_id'").fetchone()[0]
     raw.close()
@@ -345,7 +348,8 @@ if __name__ == '__main__':
     elif cmd == 'replay':
         replay(args[0], args[1])
     elif cmd == 'stub':
-        stub(args[0], args[1], '--shrink' in args)
+        tokens = next((a.split('=')[1] for a in args if a.startswith('--tokens=')), None)
+        stub(args[0], args[1], '--shrink' in args, tokens)
     elif cmd == 'map':
         map_labels(args[1], args[0])
     elif cmd == 'live':
