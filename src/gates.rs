@@ -212,7 +212,12 @@ pub fn check(
             d.speaker = speaker.into();
             lower(&d, "the speaker is the quote's line");
         }
-        let span = sentence_of(&line.text, &d.quote);
+        // On an `Answer` line the sentence is the answer's, not the serialized call's: a paste's
+        // run is compared as the owner wrote it.
+        let span = match line.role {
+            Role::Answer => sentence_of(turn_said(line, &d.quote), &d.quote),
+            _ => sentence_of(&line.text, &d.quote),
+        };
         // A user turn that asks, or whose end is in a later window, promotes nothing, whatever
         // else the window holds (a passing run answers no question).
         // An answer's end is known on every part of a split call: it is read from the whole call.
@@ -903,6 +908,19 @@ mod tests {
             one(&w, "decided", "assistant proposal", quote),
             is("decided", "assistant proposal")
         );
+    }
+
+    /// A span the owner pasted from a tool output into a typed answer is not their words, as in a
+    /// typed prompt: the paste is measured on the answer, not on the call's JSON.
+    #[test]
+    fn a_paste_in_a_typed_answer_is_not_the_users_words() {
+        // Shorter than a paste run: the whole answer must be found in the tool text.
+        let pasted = "rotate-signing-keys-v2";
+        let w = window(&[
+            tool(&format!("plan: {pasted}"), false),
+            asked_with("どう進めますか?", &["このまま"], pasted),
+        ]);
+        assert_eq!(one(&w, "decided", "user", pasted).0, "proposed");
     }
 
     /// A typed answer that asks promotes nothing, as a typed prompt that asks does not.
