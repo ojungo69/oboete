@@ -362,6 +362,19 @@ fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
     Ok(())
 }
 
+/// A window op that moves the curation checkpoint over `from..=to` of `device`: the checkouts
+/// with events there are built again, so their not-yet-curated count follows it.
+pub(crate) fn curated(k: &Connection, device: &str, from: i64, to: i64) -> Result<()> {
+    schema(k)?;
+    k.execute(
+        "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
+         SELECT DISTINCT repo, branch, device FROM manifest_facts
+         WHERE device = ?1 AND fact = 'event' AND seq BETWEEN ?2 AND ?3",
+        params![device, from, to],
+    )?;
+    Ok(())
+}
+
 fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
@@ -562,11 +575,19 @@ fn build(
             |r| r.get(0),
         )?)
     };
+    // Past the device's curation checkpoint: a record the checkpoint is inside of is curated
+    // only up to its offset. The checkpoint is the op log's, so a rebuild gives the same count.
+    let (checkpoint, part) = raw.curation_checkpoint(device)?;
+    let curated = if part.is_some() {
+        checkpoint - 1
+    } else {
+        checkpoint
+    };
     let Some((last_seq, as_of, uncurated)) = k
         .query_row(
-            "SELECT MAX(seq), MAX(ts), COUNT(*) FROM manifest_facts
+            "SELECT MAX(seq), MAX(ts), COALESCE(SUM(seq > ?4), 0) FROM manifest_facts
              WHERE device = ?1 AND repo = ?2 AND fact = 'event' AND branch = ?3",
-            params![device, repo, branch],
+            params![device, repo, branch, curated],
             |r| {
                 Ok((
                     r.get::<_, Option<i64>>(0)?,
@@ -954,6 +975,42 @@ mod tests {
         ] {
             raw.append(&e).unwrap();
         }
+    }
+
+    /// The not-yet-curated count follows the curation checkpoint (#204): a window op over some
+    /// of the checkout's records leaves the rest, one over all of them leaves none, and a record
+    /// a window stops inside of still counts. A rebuild gives the same count.
+    #[test]
+    fn the_not_yet_curated_count_follows_the_checkpoint() {
+        use crate::raw::OpKind;
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        worker::run_once(home.path()).unwrap();
+        assert!(
+            manifest(home.path())
+                .0
+                .contains("9 record(s) not yet curated")
+        );
+        let window = |to: i64, to_offset: Option<i64>| {
+            let op = serde_json::json!({"from_seq": 1, "from_offset": null, "to_seq": to,
+                "to_offset": to_offset, "outcome": "curated"});
+            raw::open(home.path())
+                .unwrap()
+                .append_ops(&[(OpKind::Window, op)])
+                .unwrap();
+            worker::run_once(home.path()).unwrap();
+            manifest(home.path()).0
+        };
+        assert!(window(5, Some(3)).contains("5 record(s) not yet curated"));
+        assert!(window(5, None).contains("4 record(s) not yet curated"));
+        let all = window(9, None);
+        assert!(all.contains("0 record(s) not yet curated"), "{all}");
+        for f in ["knowledge.db", "knowledge.db-wal", "knowledge.db-shm"] {
+            std::fs::remove_file(home.path().join(f)).ok();
+        }
+        worker::run_once(home.path()).unwrap();
+        assert_eq!(manifest(home.path()).0, all);
     }
 
     #[test]
