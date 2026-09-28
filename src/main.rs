@@ -543,7 +543,12 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let k = knowledge::open(&home)?;
             claims::schema(&k)?;
             let mut out = String::new();
-            for c in claims::current(&k, &repo)? {
+            // The global preferences too: `oboete correct` needs their uids, and no repository
+            // lists them.
+            for c in claims::current(&k, &repo)?
+                .into_iter()
+                .chain(claims::global(&k)?)
+            {
                 let body = redact::outbound(&c.body).replace('\n', " ");
                 out.push_str(&format!("{}  {} {}  {body}\n", c.uid, c.kind, c.status));
             }

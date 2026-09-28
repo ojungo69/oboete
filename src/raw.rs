@@ -902,7 +902,7 @@ impl Raw {
             return Ok(Vec::new());
         };
         Ok(self
-            .ops_after(&self.device, batch - 1, 1_000)?
+            .ops_after(&self.device, batch - 1, MAX_BATCH_OPS)?
             .into_iter()
             .take_while(|o| o.batch == batch)
             .collect())

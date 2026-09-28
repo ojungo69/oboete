@@ -1698,14 +1698,14 @@ pub fn doctor(home: &Path) -> Result<()> {
             "oboete.db",
             (|| -> Result<()> {
                 let conn = db::open(home)?;
-                let count =
-                    |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
+                // A table that cannot be read makes the section unhealthy, not a count of 0.
+                let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0));
                 println!(
                     "  sessions {} | raw events {} | observations {} | summaries {}",
-                    count("SELECT COUNT(*) FROM sessions"),
-                    count("SELECT COUNT(*) FROM events"),
-                    count("SELECT COUNT(*) FROM observations"),
-                    count("SELECT COUNT(*) FROM summaries")
+                    count("SELECT COUNT(*) FROM sessions")?,
+                    count("SELECT COUNT(*) FROM events")?,
+                    count("SELECT COUNT(*) FROM observations")?,
+                    count("SELECT COUNT(*) FROM summaries")?
                 );
                 let mut stmt = conn.prepare(
                     "SELECT provider, outcome, ms, COALESCE(detail,'') FROM provider_calls ORDER BY id DESC LIMIT 5",

@@ -934,7 +934,6 @@ pub fn run_phase(
             up: until - now <= STAY_UP_MS,
         });
     }
-    let req = request(raw, k, rules, summary, &w)?;
     let sent = sha256_hex(&format!("{chain}\n{}\n{}", summary.language, w.text));
     // A row for another request is stale, and its attempts and hold were not on this one: a
     // restore or a skipped window moved the checkpoint, records added since made the window
@@ -951,6 +950,8 @@ pub fn run_phase(
     {
         return Ok(waiting(p, now));
     }
+    // Built only for a window that is sent now: a held one would search its candidates each pass.
+    let req = request(raw, k, rules, summary, &w)?;
     let failed = match answered(raw, k, rules, &w, &req, curator)? {
         Ok((op, claims)) => return cover(raw, db, &w, op, claims),
         Err(failed) => failed,
@@ -4856,6 +4857,13 @@ mod tests {
             })
             .unwrap();
         assert_eq!(applied, 1);
+        // Listed with no repository, for `oboete claims` and `oboete correct`.
+        let listed: Vec<String> = crate::claims::global(&k)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.uid)
+            .collect();
+        assert_eq!(listed, vec![uid.clone()]);
         let raw = crate::raw::open(home.path()).unwrap();
         let stored: Vec<String> = raw
             .export_lines(0, 1 << 20)
