@@ -186,6 +186,8 @@ pub fn open(home: &Path) -> Result<Raw> {
         }
     }
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+    #[cfg(test)]
+    crate::crash::arm(&conn);
     crate::db::wal(&conn, "FULL")?;
     #[cfg(target_os = "macos")]
     conn.execute_batch("PRAGMA fullfsync=ON;")?;

@@ -1289,4 +1289,253 @@ mod tests {
         assert_eq!(checkpoint::get(&k, "seen", &device).unwrap(), 2);
         assert_eq!(seen(&k), vec![1, 2]);
     }
+
+    // M2 (spec 8.2): a crash at 20 points gives the rows of a run with none.
+
+    /// A curator that is a function of its prompt: a claim quoting the end of each line.
+    fn fake_curator(
+        _: &str,
+        prompt: &str,
+        check: &crate::provider::AnswerCheck,
+    ) -> Result<crate::provider::ChainResult> {
+        let claims: Vec<serde_json::Value> = prompt
+            .lines()
+            .filter_map(|l| {
+                let (id, text) = l.split_once(' ')?;
+                id.strip_prefix('L')?.parse::<u32>().ok()?;
+                let chars: Vec<char> = text.chars().collect();
+                let end: String = chars[chars.len().saturating_sub(16)..].iter().collect();
+                let quote = end.trim().to_owned();
+                (quote.chars().count() >= 8).then(|| (id.to_owned(), quote))
+            })
+            .enumerate()
+            .map(|(i, (line, quote))| {
+                let status = if i % 2 == 0 { "decided" } else { "proposed" };
+                serde_json::json!({"id": format!("c{i}"), "kind": "decision", "status": status,
+                    "speaker": "user", "scope": "repo", "body": quote, "quote": quote,
+                    "line": line, "supersedes": []})
+            })
+            .collect();
+        let output = serde_json::json!({"claims": claims, "summary": "s"});
+        assert_eq!(check(&output), None, "{output}");
+        Ok(crate::provider::ChainResult {
+            provider: "fake".into(),
+            output,
+            tier: 1,
+        })
+    }
+
+    /// A digester that cites the first two claims it is shown.
+    fn fake_digester(
+        _: &str,
+        prompt: &str,
+        check: &crate::provider::AnswerCheck,
+    ) -> Result<crate::provider::ChainResult> {
+        let lines: Vec<serde_json::Value> = prompt
+            .lines()
+            .filter_map(|l| l.split_once(": [").map(|(uid, _)| uid))
+            .take(2)
+            .map(|uid| serde_json::json!({"text": format!("about {uid}"), "uids": [uid]}))
+            .collect();
+        let output = serde_json::json!({ "lines": lines });
+        assert_eq!(check(&output), None, "{output}");
+        Ok(crate::provider::ChainResult {
+            provider: "fake".into(),
+            output,
+            tier: 1,
+        })
+    }
+
+    /// A worker run with the fake roles curating and digesting, in small windows.
+    fn curate_all(home: &Path) -> Result<()> {
+        let rules = crate::capture::Settings::load(home)?.rules;
+        let summary = crate::config::Summary {
+            curate: true,
+            window_tokens: 1_500,
+            ..Default::default()
+        };
+        let db = crate::providers_db::open(home)?;
+        let mut phase = |raw: &mut Raw, k: &Connection| {
+            let windows =
+                crate::curate::run_phase(raw, k, &db, &rules, &summary, "", &mut fake_curator)?;
+            crate::digest::phase(
+                raw,
+                k,
+                &db,
+                &rules,
+                &summary,
+                "",
+                &mut fake_digester,
+                windows,
+            )
+        };
+        let held = lock(home)?.expect("no other worker");
+        run_holding(
+            home,
+            0,
+            consumers(home),
+            || {},
+            Some(held),
+            Some(&mut phase),
+        )
+    }
+
+    /// Every row a run derives, each table sorted: raw.db's ops and knowledge.db's tables (an FTS
+    /// table by its text, not its shadow tables), and providers.db's pending. Without the columns
+    /// that hold when the run wrote them: an op's `ts` and the copies of it in knowledge.db, and
+    /// `rewinds.ts`, `gaps.checked_at` and `manifests.built_at`.
+    fn derived(home: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut dump = |c: &Connection, table: &str, cols: &str| {
+            let mut s = c.prepare(&format!("SELECT {cols} FROM {table}")).unwrap();
+            let n = s.column_count();
+            let mut rows: Vec<String> = s
+                .query_map([], |r| {
+                    let cells: Vec<String> = (0..n)
+                        .map(|i| match r.get_ref(i).unwrap() {
+                            rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).into(),
+                            v => format!("{v:?}"),
+                        })
+                        .collect();
+                    Ok(format!("{table}: {}", cells.join(" | ")))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            rows.sort();
+            out.extend(rows);
+        };
+        let raw = Connection::open(home.join("raw.db")).unwrap();
+        dump(&raw, "ops", "device, op_seq, type, body, batch");
+        let k = Connection::open(home.join("knowledge.db")).unwrap();
+        let tables: Vec<(String, String)> = k
+            .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let fts: Vec<&str> = tables
+            .iter()
+            .filter(|(_, sql)| sql.contains("USING fts5"))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        for (name, _) in &tables {
+            let shadow = fts.iter().any(|f| {
+                name.strip_prefix(f)
+                    .is_some_and(|rest| rest.starts_with('_'))
+            });
+            if shadow || name.starts_with("sqlite_") {
+                continue;
+            }
+            let cols = if fts.contains(&name.as_str()) {
+                "rowid, *".to_owned()
+            } else {
+                k.prepare(&format!("SELECT name FROM pragma_table_info('{name}')"))
+                    .unwrap()
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .filter(|c| !["ts", "checked_at", "built_at"].contains(&c.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            dump(&k, name, &cols);
+        }
+        let p = Connection::open(home.join("providers.db")).unwrap();
+        dump(&p, "pending", "*");
+        out
+    }
+
+    /// Copies a home, stores and all, and gives the copy of raw.db the copy's file identity, so
+    /// it keeps the device id (a copied file is otherwise another device, `db::ensure_device`).
+    fn copy_home(from: &Path, to: &Path) {
+        copy(from, to);
+        let path = to.join("raw.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'store_file'",
+                [crate::db::store_file(&path)],
+            )
+            .unwrap();
+    }
+
+    fn copy(from: &Path, to: &Path) {
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                std::fs::create_dir_all(&target).unwrap();
+                copy(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    /// M2's crash half (spec 8.2): the worker dies at 20 points of a curating run, among them
+    /// between a window's ops landing in raw.db and the claims derived from them in knowledge.db,
+    /// and the next worker leaves the same rows as a run that never stopped.
+    #[test]
+    fn a_crash_at_twenty_points_gives_the_rows_of_a_run_with_none() {
+        let base = tempfile::tempdir().unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/testdata/fixtures/overturn-cross.jsonl");
+        crate::replay::run(base.path(), &fixture, None, 0, &[1], "claude").unwrap();
+        let clean = tempfile::tempdir().unwrap();
+        copy_home(base.path(), clean.path());
+        crate::crash::off();
+        curate_all(clean.path()).unwrap();
+        let commits = crate::crash::count();
+        let want = derived(clean.path());
+        let count = |table: &str| {
+            want.iter()
+                .filter(|r| r.starts_with(&format!("{table}: ")))
+                .count()
+        };
+        assert!(
+            count("claims") > 0 && count("derivations") > 0 && count("digests") > 0,
+            "{want:#?}"
+        );
+        assert!(commits >= 40, "{commits} commits");
+        // Crashes that left ops in raw.db the claims consumer had not read yet.
+        let mut underived = 0;
+        for i in 0..20 {
+            let at = 1 + i * commits / 20 + i % 3;
+            let home = tempfile::tempdir().unwrap();
+            copy_home(base.path(), home.path());
+            crate::crash::at(at);
+            let crashed = curate_all(home.path());
+            crate::crash::off();
+            assert!(crashed.is_err(), "no crash at commit {at} of {commits}");
+            let ops: i64 = Connection::open(home.path().join("raw.db"))
+                .unwrap()
+                .query_row("SELECT COALESCE(MAX(op_seq), 0) FROM ops", [], |r| r.get(0))
+                .unwrap();
+            let read: i64 = Connection::open(home.path().join("knowledge.db"))
+                .unwrap()
+                .query_row(
+                    "SELECT COALESCE(MAX(seq), 0) FROM op_checkpoints WHERE consumer = 'claims'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            underived += usize::from(ops > read);
+            curate_all(home.path()).unwrap();
+            let got = derived(home.path());
+            let lost: Vec<&String> = want.iter().filter(|r| !got.contains(r)).collect();
+            let added: Vec<&String> = got.iter().filter(|r| !want.contains(r)).collect();
+            assert!(
+                got == want,
+                "a crash at commit {at} of {commits}: lost {lost:#?}, added {added:#?}"
+            );
+        }
+        assert!(underived > 0, "no crash fell between an op and its claims");
+    }
 }

@@ -10,6 +10,8 @@ pub fn open(home: &Path) -> Result<Connection> {
     let path = home.join("knowledge.db");
     crate::db::private(home, 0o700);
     let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+    #[cfg(test)]
+    crate::crash::arm(&conn);
     crate::db::wal(&conn, "NORMAL")?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS checkpoints(

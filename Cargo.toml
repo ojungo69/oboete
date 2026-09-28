@@ -38,4 +38,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
 strip = true
 
 [dev-dependencies]
+# The commit hook of M2's crash harness (src/crash.rs), in test builds only.
+rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
 tempfile = "3"

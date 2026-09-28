@@ -238,7 +238,7 @@ fn ensure_uids(conn: &mut Connection) -> Result<()> {
 /// ponytail: file identity instead of host name + OS machine id (proposal §4.2 3), which needs no
 /// new dependency; a restore on the same machine also gets a new id, which costs nothing.
 #[cfg(unix)]
-fn store_file(path: &Path) -> String {
+pub(crate) fn store_file(path: &Path) -> String {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).map_or_else(|_| String::new(), |m| format!("{}:{}", m.dev(), m.ino()))
 }
@@ -247,7 +247,7 @@ fn store_file(path: &Path) -> String {
 /// renamed into a name freed less than 15 s before that name's old creation time ("tunneling"),
 /// so a restore's swap made the restored raw.db look like another file and changed the device.
 #[cfg(windows)]
-fn store_file(path: &Path) -> String {
+pub(crate) fn store_file(path: &Path) -> String {
     let Ok(info) = std::fs::File::open(path).and_then(|f| winapi_util::file::information(&f))
     else {
         return String::new();
