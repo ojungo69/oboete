@@ -1103,8 +1103,11 @@ fn answered(
                     .chain(gated.dropped)
                     .chain(over)
                     .collect();
+                // The candidates the prompt showed, in its order: what this window could
+                // supersede, kept for an audit of the gates and for measurement (#222).
+                let shown: Vec<&str> = req.shown_in.iter().map(|(_, c)| c.uid.as_str()).collect();
                 let op = json!({"outcome": "curated", "provider": r.provider, "summary": summary,
-                    "dropped": dropped, "lowered": gated.lowered});
+                    "dropped": dropped, "lowered": gated.lowered, "candidates": shown});
                 Ok((op, claims))
             }
             // Counted like a provider that failed: no answer this window can use.
@@ -3803,6 +3806,21 @@ mod tests {
             .collect();
         assert_eq!(kept.len(), 1);
         assert!(sent.contains(kept[0]));
+        // The window op lists the candidates the prompt showed, in their order, and no other.
+        let window = ops.iter().rev().find(|o| o.kind == OpKind::Window).unwrap();
+        let listed: Vec<&str> = window.body["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let in_prompt: Vec<&str> = found
+            .iter()
+            .map(String::as_str)
+            .filter(|u| sent.contains(u))
+            .collect();
+        assert!(!in_prompt.is_empty() && in_prompt.len() < found.len());
+        assert_eq!(listed, in_prompt);
     }
 
     /// A window of two repositories: a draft of one supersedes only that repository's candidates,
