@@ -1835,9 +1835,10 @@ fn located(
 
 /// Where each draft's claim starts, for its uid (#125), set before the gates as its op keeps it.
 /// Drafts of one kind whose first quotes start in one sentence and overlap are one claim drafted
-/// twice. A claim whose quote overlaps one already derived there keeps that claim's value, so
-/// its uid stays whatever else is drafted with it; the first claim of a sentence where no claim
-/// has none keeps none, the uid a claim always had; any other takes where it starts. A claim
+/// twice. A claim whose quote overlaps one already derived there, as its active derivation quotes
+/// it, keeps that claim's value, so its uid stays whatever else is drafted with it (an older, wider
+/// quote of a claim since narrowed joins nothing, #211); the first claim of a sentence where no
+/// claim has none keeps none, the uid a claim always had; any other takes where it starts. A claim
 /// drafted in an earlier window of the same `recurate` span is not derived yet, so it is not seen.
 fn keyed(k: &Connection, found: &mut [Located]) -> Result<()> {
     let key = |(d, e, _): &Located| {
@@ -1848,7 +1849,8 @@ fn keyed(k: &Connection, found: &mut [Located]) -> Result<()> {
     let mut order: Vec<usize> = (0..found.len()).collect();
     order.sort_by_key(|&i| (keys[i].clone(), found[i].1.offset));
     let mut derived = k.prepare(
-        "SELECT e.offset, e.offset + e.length, e.claim_at FROM derivations d
+        "SELECT e.offset, e.offset + e.length, e.claim_at FROM claims c
+         JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
          JOIN evidence e ON e.op_device = d.op_device AND e.op_seq = d.op_seq AND e.idx = 0
          WHERE d.kind = ?1 AND e.device = ?2 AND e.seq = ?3 AND e.sentence = ?4
          ORDER BY e.offset",
@@ -4353,6 +4355,43 @@ mod tests {
         assert_ne!(
             uid_of(&k, "Tabs, not spaces."),
             uid_of(&k, "Log to stderr.")
+        );
+    }
+
+    /// A claim first quoted with its whole sentence and then narrowed: a later claim apart from
+    /// the narrow quote is a claim of its own, not the old wide quote's (#211).
+    #[test]
+    fn an_old_wide_quote_joins_no_claim_to_a_narrowed_one() {
+        let answer = |claims: Vec<Value>| json!({"claims": claims, "summary": "s"});
+        let wide = drafted(
+            "c1",
+            "decided",
+            "Use tabs and log to stderr",
+            "Tabs and stderr.",
+        );
+        let narrow = drafted("c1", "decided", "Use tabs", "Tabs only.");
+        let again = drafted("c1", "decided", "Use tabs", "Tabs for indents.");
+        let apart = drafted("c2", "decided", "log to stderr", "Log to stderr.");
+        let (_home, k) = one_sentence(
+            "Use tabs and log to stderr.",
+            vec![
+                answer(vec![wide]),
+                answer(vec![narrow]),
+                answer(vec![again, apart]),
+            ],
+        );
+        assert_eq!(
+            uid_of(&k, "Tabs for indents."),
+            uid_of(&k, "Tabs and stderr.")
+        );
+        assert_ne!(
+            uid_of(&k, "Log to stderr."),
+            uid_of(&k, "Tabs for indents.")
+        );
+        let decided = |b: &str| (b.to_owned(), "decided".to_owned());
+        assert_eq!(
+            active(&k),
+            [decided("Log to stderr."), decided("Tabs for indents.")]
         );
     }
 
