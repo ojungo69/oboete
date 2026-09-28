@@ -13,7 +13,7 @@ read here. Every command takes the binary by path: `oboete` on PATH is the owner
                                 each labeled window sent again to one live entry by `recurate`
                                 (estimates only without --yes)
   m3.py score <bin> <name>      M3's counts on the labeled items"""
-import glob, http.server, json, os, sqlite3, subprocess, sys, threading
+import glob, http.server, json, os, sqlite3, subprocess, sys, threading, time
 from datetime import datetime
 
 from common import E, clean_env, owner_only, read_jsonl, sha256_file
@@ -275,16 +275,29 @@ def live(binary, name, send, tool=None):
     device = raw.execute("SELECT value FROM meta WHERE key = 'device_id'").fetchone()[0]
     raw.close()
     log = f'{h}/live{"-sent" if send else ""}.jsonl'
-    done = {json.dumps(r['span']) for r in read_jsonl(log)} if os.path.exists(log) else set()
+    # A span is done once a run of it was curated; a failed one is sent again on the next pass.
+    done = {json.dumps(r['span']) for r in read_jsonl(log)
+            if not send or 'not curated' not in r['out']} if os.path.exists(log) else set()
     tokens = 0
     for a, b in spans(h, tool):
         if json.dumps([a, b]) in done:
             continue
-        r = subprocess.run([binary, '--home', h, 'recurate', f'{device}:{a}-{b}'] + (['--yes'] if send else []),
-                           capture_output=True, text=True, env=clean_env())
-        out = r.stdout.strip()
-        with open(log, 'a', encoding='utf-8') as f:
-            f.write(json.dumps({'span': [a, b], 'code': r.returncode, 'out': out, 'err': r.stderr[-500:]}) + '\n')
+        # A failure is retried after the entry's cooldown, up to three times: the product would
+        # list the span as skipped and send it on a later run, and a cooled-down entry must not
+        # turn the rest of the pass into instant failures (the whole arm lost 65 spans that way).
+        for attempt in range(3):
+            r = subprocess.run([binary, '--home', h, 'recurate', f'{device}:{a}-{b}'] + (['--yes'] if send else []),
+                               capture_output=True, text=True, env=clean_env())
+            out = r.stdout.strip()
+            with open(log, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({'span': [a, b], 'code': r.returncode, 'out': out, 'err': r.stderr[-500:],
+                                    'attempt': attempt}) + '\n')
+            if not send or 'not curated' not in out:
+                break
+            p = sqlite3.connect(f'file:{h}/providers.db?mode=ro', uri=True)
+            until = p.execute("SELECT max(down_until) FROM provider_state").fetchone()[0] or 0
+            p.close()
+            time.sleep(max(0, until / 1000 - time.time()) + 5)
         for word in out.split(','):
             if 'tokens' in word and 'about' in word:
                 tokens += int(word.split('about')[1].split('tokens')[0].strip().replace(',', ''))
@@ -315,6 +328,8 @@ def score(binary, name):
             return 'none'
         if any(st == 'decided' and u not in superseded for u, st in mine):
             return 'current'
+        if any(st == 'decided' for _, st in mine):
+            return 'decided, superseded'
         if any(u in superseded for u, _ in mine):
             return 'superseded'
         if any(st == 'retracted' for _, st in mine):
@@ -340,7 +355,7 @@ def score(binary, name):
     decided = sum(1 for st, _ in claims.values() if st == 'decided')
     out['claims'] = {'active': len(claims), 'decided': decided}
     yes = out['decisions'].get('yes', {})
-    out['recall'] = f'{yes.get("current", 0) + yes.get("superseded", 0)} of {sum(yes.values())}'
+    out['recall'] = f'{yes.get("current", 0) + yes.get("decided, superseded", 0)} of {sum(yes.values())}'
     with open(f'{h}/score.json', 'w') as f:
         json.dump(out, f, indent=1)
     print(json.dumps(out, indent=1, ensure_ascii=False))
