@@ -5,15 +5,16 @@ read here. Every command takes the binary by path: `oboete` on PATH is the owner
   m3.py fixtures <bin>          each transcript the dev labels or the replay set's dev side need ->
                                 a fixture, by <bin>'s own `transcript`
   m3.py replay <bin> <name>     every fixture, merged in time order, into one home; curation off
+  m3.py map <bin> <name>        each labeled decision -> the records its quote is in (before stub:
+                                the worker compresses the bodies it reads)
   m3.py stub <bin> <name> [--shrink] [--tokens=N]
                                 curate that home with a localhost stub that answers no claims: the
                                 windows, their estimated tokens, M2's coverage; no call leaves
-  m3.py map <bin> <name>        each labeled decision -> the records its quote is in
   m3.py live <bin> <name> [--yes]
                                 each labeled window sent again to one live entry by `recurate`
                                 (estimates only without --yes)
   m3.py score <bin> <name>      M3's counts on the labeled items"""
-import collections, glob, http.server, json, os, sqlite3, subprocess, sys, threading, time
+import collections, glob, http.server, json, os, re, sqlite3, subprocess, sys, threading, time
 from datetime import datetime
 
 from common import E, clean_env, owner_only, read_jsonl, sha256_file
@@ -215,6 +216,10 @@ def map_labels(name, binary):
     compression leaves bodies unreadable here. Counts only: no label or record text is printed."""
     h = home(binary, name)
     raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
+    # records_of skips a compressed body: a map after the stub would leave most labels unmapped.
+    (packed,) = raw.execute("SELECT COUNT(*) FROM records WHERE type = 'event' AND enc != 'plain'").fetchone()
+    if packed:
+        sys.exit(f'{packed} records are compressed: map runs after replay and before stub')
     decisions, pairs, drafts = labels()
     items = {d['id']: d for d in decisions}
     for p in pairs:
@@ -250,18 +255,36 @@ LIVE = '[[providers]]\nkind = "cli"\nname = "claude"\ncli = "claude"\nmodel = "h
 
 def spans(h, tool=None):
     """The windows that hold a labeled record (only those in a call of `tool`, when given), as
-    record spans in seq order, each once."""
+    record spans in seq order, each once. Windows that share a record (a record split across
+    windows) are one span: `recurate` cuts a span's windows itself, and two spans sharing a record
+    would send that record twice, the second run retracting what the first derived."""
     ops, _ = windows(h)
     with open(f'{h}/map.json') as f:
         seqs = {r['seq'] for r in json.load(f).values() if r['seq'] is not None}
     if tool:
         with open(f'{h}/map.json') as f:
             seqs = {r['seq'] for r in json.load(f).values() if r['seq'] is not None and r.get('tool') == tool}
-    out = set()
-    for w in ops:
-        if any(w['from_seq'] <= s <= w['to_seq'] for s in seqs):
-            out.add((w['from_seq'], w['to_seq']))
-    return sorted(out)
+    out = []
+    for a, b in sorted({(w['from_seq'], w['to_seq']) for w in ops
+                        if any(w['from_seq'] <= s <= w['to_seq'] for s in seqs)}):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def partly(out):
+    """`recurate` printed that it curated some of the span's windows."""
+    return re.search(r'^[1-9][0-9]* window\(s\) curated again', out, re.M)
+
+
+def cooldown(h):
+    """Sleep until the live entry's cooldown is over, and 5 s more."""
+    p = sqlite3.connect(f'file:{h}/providers.db?mode=ro', uri=True)
+    until = p.execute("SELECT max(down_until) FROM provider_state").fetchone()[0] or 0
+    p.close()
+    time.sleep(max(0, until / 1000 - time.time()) + 5)
 
 
 def live(binary, name, send, tool=None):
@@ -282,9 +305,16 @@ def live(binary, name, send, tool=None):
     env = clean_env()
     if os.path.exists(f'{M}/wrap/claude'):
         env['PATH'] = f'{M}/wrap:' + env['PATH']
-    # A span is done once a run of it was curated; a failed one is sent again on the next pass.
-    done = {json.dumps(r['span']) for r in read_jsonl(log)
-            if r['code'] == 0 and (not send or 'not curated' not in r['out'])} if os.path.exists(log) else set()
+    # A span is done once its attempts ended: curated, partly curated (below), or failed three
+    # times. A pass cut between two calls goes on where it stopped, so a resumed arm is still one pass.
+    tries, done = collections.Counter(), set()
+    for r in read_jsonl(log) if os.path.exists(log) else []:
+        k = json.dumps(r['span'])
+        tries[k] += 1
+        if r['code'] == 0 and (not send or 'not curated' not in r['out']) or send and partly(r['out']) or tries[k] == 3:
+            done.add(k)
+    if send:
+        cooldown(h)  # the pass may have been cut while it waited out a cooldown
     tokens = 0
     for a, b in spans(h, tool):
         if json.dumps([a, b]) in done:
@@ -292,7 +322,7 @@ def live(binary, name, send, tool=None):
         # A failure is retried after the entry's cooldown, up to three times: the product would
         # list the span as skipped and send it on a later run, and a cooled-down entry must not
         # turn the rest of the pass into instant failures (the whole arm lost 65 spans that way).
-        for attempt in range(3):
+        for attempt in range(tries[json.dumps([a, b])], 3):
             r = subprocess.run([binary, '--home', h, 'recurate', f'{device}:{a}-{b}'] + (['--yes'] if send else []),
                                capture_output=True, text=True, env=env)
             out = r.stdout.strip()
@@ -301,10 +331,13 @@ def live(binary, name, send, tool=None):
                                     'attempt': attempt}) + '\n')
             if r.returncode == 0 and (not send or 'not curated' not in out):
                 break
-            p = sqlite3.connect(f'file:{h}/providers.db?mode=ro', uri=True)
-            until = p.execute("SELECT max(down_until) FROM provider_state").fetchone()[0] or 0
-            p.close()
-            time.sleep(max(0, until / 1000 - time.time()) + 5)
+            # Some of the span's windows were curated and one was not: sending the span again would
+            # curate those windows a second time with their first claims as candidates, a history
+            # the other arm does not have (review on #218). The window is left, as the product
+            # leaves it for its next run.
+            if send and partly(out):
+                break
+            cooldown(h)
         for word in out.split(','):
             if 'tokens' in word and 'about' in word:
                 tokens += int(word.split('about')[1].split('tokens')[0].strip().replace(',', ''))
@@ -328,9 +361,25 @@ def score(binary, name):
         "SELECT e.to_uid FROM edges e JOIN claims c ON c.op_device = e.op_device AND c.op_seq = e.op_seq "
         "WHERE e.type = 'supersedes'")}
 
-    def state(item):
+    raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
+
+    def records_of_item(item):
+        """The labeled record, and for an accepted proposal whose label quotes the owner's
+        acceptance (a prompt), the assistant's reply right before it in the session: the claim an
+        acceptance promotes quotes the proposal, not the "yes"."""
         seq = where[item]['seq']
-        mine = [(u, st) for u, (st, seqs) in claims.items() if seq in seqs]
+        if where[item]['who'] != 'assistant_accepted':
+            return {seq}
+        kind, session = raw.execute('SELECT kind, session FROM records WHERE seq = ?', (seq,)).fetchone()
+        if kind != 'prompt':
+            return {seq}
+        (reply,) = raw.execute("SELECT max(seq) FROM records WHERE session = ? AND kind = 'reply' AND seq < ?",
+                               (session, seq)).fetchone()
+        return {seq, reply} - {None}
+
+    def state(item):
+        at = records_of_item(item)
+        mine = [(u, st) for u, (st, seqs) in claims.items() if at & seqs]
         if not mine:
             return 'none'
         if any(st == 'decided' and u not in superseded for u, st in mine):
@@ -394,11 +443,20 @@ def drafts(binary, name):
     h = home(binary, name)
     where = json.load(open(f'{h}/map.json'))
     decisions, _, _ = labels()
-    answers = {}
+    # Every kept answer by its summary; a window op takes the one whose drafts it kept (ids and
+    # bodies alike), so two answers with one summary (the same window in two arms, a rerun) are
+    # told apart, and a window two of them fit is left out and counted (#196).
+    answers = collections.defaultdict(list)
     for f in glob.glob(f'{M}/answers/*.jsonl'):
         a = answer_of(f)
         if a and a.get('summary'):
-            answers[a['summary'].strip()] = a
+            answers[a['summary'].strip()].append(a)
+
+    def answer_for(b):
+        fits = [a for a in answers.get(b.get('summary', '').strip(), [])
+                if all(any(c.get('id') == i and c.get('body') == k.get('body') for c in a.get('claims', []))
+                       for i, k in b['claims'].items())]
+        return fits[0] if len(fits) == 1 else ('ambiguous' if fits else None)
     raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
     ops = [(s, t, json.loads(b)) for s, t, b in raw.execute('SELECT op_seq, type, body FROM ops ORDER BY op_seq')]
     wins, cur = [], None
@@ -424,10 +482,10 @@ def drafts(binary, name):
         if not mine:
             continue
         b = mine[-1]
-        a = answers.get(b.get('summary', '').strip())
+        a = answer_for(b)
         kind = f"{w['who']}/{w.get('tool') or '-'}"
-        if a is None:
-            tally[f'{kind}: answer not kept'] += 1
+        if a is None or a == 'ambiguous':
+            tally[f'{kind}: answer {"not kept" if a is None else "ambiguous"}'] += 1
             continue
         label = d['quote'] + '\n' + d.get('prompt', '')
         about = [c for c in a.get('claims', []) if near(c.get('quote', ''), label)]

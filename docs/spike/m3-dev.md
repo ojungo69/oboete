@@ -80,13 +80,15 @@ Limits, the same for both arms:
 - N is 44 owner-yes decisions (45, less `d424`, which matches no record), so a single label is 0.023, which is over the 0.02 line by itself. The raw counts are reported next to the ratios.
 - One run per arm cannot separate one label's difference from the chain's own non-determinism. So a difference of one label is read as noise, and two or more count against the shrink.
 
-## Where the recall clause stands (2026-09-28, mid-run)
+## Where the recall clause stands (2026-09-29, after the arms)
 
-The recall clause cannot be read yet, so the shrink stays off by default.
-- Mid-run, with 46 of the 114 spans sent in the shrink arm and 40 in the other, recall is 4 of 44 with the shrink and 2 of 44 without it. Both are at the floor, where "drops by 0.02 or less" holds for any shrink and says nothing about it.
-- The floor has two causes that the shrink does not touch. The 13 owner-yes answers to `AskUserQuestion` cannot reach `decided` under today's gates (below). Most typed-prompt misses are instructions for the moment ("新セッションで実装する", "ブラウザ開かないからurl教えて"), which the curator does not keep as claims worth remembering. Whether such instructions count as decisions is the owner's call, since it decides what the memory holds.
-- The clause is measured again, with the same declared rule, on a binary whose dev recall is off the floor.
-- Two numbers of this run do respond to the shrink, and they are reported with the final counts: the labeled items with any claim quoting their record, and the drafts dropped per window because their quote is not in the window (the shrink shows the head and tail, and a curator quoting across the marker loses its draft).
+The two arms ended with recall 13 of 44 with the shrink and 10 of 44 without it (the mid-run counts were 4 and 2), but they cannot decide the clause. Some of their spans shared a record, so that window was sent twice, and the second recuration retracted the claims of the first: 5 overlaps and 202 claims retracted in the shrink arm, 1 and 23 in the other. The shrink moves window boundaries, so the effect does not cancel between the arms. The harness now merges spans that share a record (#196's commit), and the clause is measured again on the current main with both arms cut that way.
+
+Both arms ran the #194 binary, before #195, so the owner's picks in `AskUserQuestion` could not reach `decided` in either (0 of 13 in both).
+
+The clause was measured again on main at ce805a4 (#219, thinking off), with merged spans: 22 of 44 with the shrink (short-2) and 20 without it (whole-2). whole-2's 22 retracted claims are one span sent twice by the harness's retry after one window's prose answer, not an overlap, so that arm was run again from a clean home without the resend (whole3): 24 of 44. By the rule above the shrink fails on decisions, 22 against 24. The two runs of the arm without it differ by 4 labels, more than the pair does, so one run each cannot size the difference (docs/milestone-3.md has the rows).
+
+Two more arms ran on the #195 binary without the shrink and with merged spans (no overlap, no claim retracted), one with the curator's thinking as shipped (`full`) and one with `"alwaysThinkingEnabled": false` in the curator's `--settings` (`nothink`). docs/milestone-3.md has the seven runs side by side.
 
 ## Definitions for scoring (fixed before any live number)
 
@@ -100,7 +102,7 @@ The recall clause cannot be read yet, so the shrink stays off by default.
 ## Found during the live half (2026-09-28)
 
 - **Claude Code 2.1.283's built-in plugins** (`agents-md`, `telemetry`) made every claude curator call fail the isolation check. Fixed in #191 before the live half ran; the first call's failure is kept apart (`live-sent-failed-isolation.jsonl`).
-- **haiku thinks at `--effort low`**: its calls return 9,000 to 16,000 completion tokens for 5,000 to 6,000 in, and take 80 to 130 s. A probe with `"alwaysThinkingEnabled": false` in `--settings` dropped the thinking block and took half the time on a small prompt. Whether the curator's recall holds without thinking is not measured; both arms here run with thinking, as shipped.
+- **haiku thinks at `--effort low`**: its calls return 9,000 to 16,000 completion tokens for 5,000 to 6,000 in, and take 80 to 130 s. A probe with `"alwaysThinkingEnabled": false` in `--settings` dropped the thinking block and took half the time on a small prompt. The `nothink` arm then measured it over the 109 spans: 16.6 s a call at the median against 101 s, and recall 24 of 44 against 19 (docs/milestone-3.md).
 - **One timeout cooled the entry for ten minutes.** At the CLI entry's default 180 s, a call timed out and set the outage cooldown (600 s). The harness sent one span at a time, so 65 spans of the arm without the shrink failed at once. The harness now waits out the cooldown and sends a failed span again (up to three times, as the product's skipped list would on a later run), and the live entry's `timeout_s` is 600. The product's side is #193.
 - **The curator's own answers are kept for the analysis.** A span whose drafts were all dropped looks the same as one where nothing was drafted. From the restart on, the live entry's `claude` runs through a wrapper that keeps its stdout under `~/.oboete/eval/m3/answers/` (owner-only), and `m3.py drafts` joins each answer to its window op (by the summary) to tell "not drafted" from "dropped by a gate".
 - **The owner's answers to `AskUserQuestion` are tool output to the gates.** The owner's answer is in the record's input and output, a JSON string of the questions and answers. The line's role is a tool's, so the speaker gate makes such a claim "tool result", and gate 1 then keeps it from `decided`. 37 of the 132 matched labels are such answers. In the first six live windows, 9 drafts were lowered for "the speaker is the quote's line" and 14 for "decided needs the user's words or an acceptance right after"; no claim reached `decided`. The fix is Task 8's code and touches MUST-M4 (a fake acceptance inside a tool output), so it comes in a PR of its own.
