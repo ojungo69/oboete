@@ -191,6 +191,12 @@ fn fit(carried: &str, shown: &[String], room: u32) -> (String, String) {
     (carried, kept.concat())
 }
 
+/// Whether the fitted candidates list `uid`'s own line (`uid: body`): a uid quoted in another
+/// claim's body is not its line.
+fn shows(shown: &str, uid: &str) -> bool {
+    shown.contains(&format!("\n{uid}: "))
+}
+
 /// Bytes of records read at a time while a window is cut, at least one record (spec 3.1: pages
 /// bounded by events and bytes).
 const PAGE_BYTES: usize = 4 << 20;
@@ -1045,7 +1051,7 @@ fn request(
     // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing.
     let (carried_text, shown) = fit(&carried_text, &shown, summary.window_tokens / 5);
     carried_uids.retain(|(_, _, c)| carried_text.contains(c.uid.as_str()));
-    shown_in.retain(|(_, c)| shown.contains(c.uid.as_str()));
+    shown_in.retain(|(_, c)| shows(&shown, &c.uid));
     Ok(Request {
         prompt: prompt(&summary.language, &w.text, &shown, &carried_text),
         shown_in,
@@ -1800,6 +1806,14 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
 /// last entry until the op fits, and `cut` says how many went, so the append never fails.
 fn within_op_cap(mut op: Value) -> Value {
     let len = |op: &Value, list: &str| op[list].as_array().map_or(0, Vec::len);
+    // The shown candidates go first, from the end of the list: an audit, where the gates' lists
+    // say what the window's claims were held to.
+    let mut cut = 0u64;
+    while op.to_string().len() > crate::raw::MAX_OP_BYTES && len(&op, "candidates") > 0 {
+        op["candidates"].as_array_mut().and_then(Vec::pop);
+        cut += 1;
+        op["candidates_cut"] = cut.into();
+    }
     let mut cut = 0u64;
     while op.to_string().len() > crate::raw::MAX_OP_BYTES {
         let list = if len(&op, "lowered") >= len(&op, "dropped") {
@@ -5164,6 +5178,34 @@ mod tests {
             listed as u64 + op["cut"].as_u64().unwrap(),
             4 * MAX_CLAIMS as u64
         );
+    }
+
+    /// A candidate's line is `uid: body` in the fitted list; its uid quoted inside another's body
+    /// does not count as shown.
+    #[test]
+    fn a_candidate_is_shown_only_by_its_own_line() {
+        let (x, y) = ("a".repeat(64), "b".repeat(64));
+        let shown = format!("### in r\n{y}: the note names {x}: here\n");
+        assert!(shows(&shown, &y));
+        assert!(!shows(&shown, &x));
+    }
+
+    /// Candidates over the op cap are cut from the end of their list, before the gates' lists.
+    #[test]
+    fn the_candidates_list_is_cut_first_to_the_op_cap() {
+        let uids: Vec<String> = (0..2000).map(|i| format!("{i:064}")).collect();
+        let op = json!({"outcome": "curated", "dropped": [["c1", "r"]], "lowered": [],
+            "candidates": uids});
+        let op = within_op_cap(op);
+        assert!(op.to_string().len() <= crate::raw::MAX_OP_BYTES);
+        let kept = op["candidates"].as_array().unwrap();
+        assert_eq!(
+            kept.len() as u64 + op["candidates_cut"].as_u64().unwrap(),
+            2000
+        );
+        assert_eq!(kept[0], json!(format!("{:064}", 0)));
+        assert_eq!(op["dropped"], json!([["c1", "r"]]));
+        assert!(op.get("cut").is_none());
     }
 
     /// The cap holds for the op as appended: an op that fits only before its range is added is
