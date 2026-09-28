@@ -333,9 +333,25 @@ def score(binary, name):
         "SELECT e.to_uid FROM edges e JOIN claims c ON c.op_device = e.op_device AND c.op_seq = e.op_seq "
         "WHERE e.type = 'supersedes'")}
 
-    def state(item):
+    raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
+
+    def records_of_item(item):
+        """The labeled record, and for an accepted proposal whose label quotes the owner's
+        acceptance (a prompt), the assistant's reply right before it in the session: the claim an
+        acceptance promotes quotes the proposal, not the "yes"."""
         seq = where[item]['seq']
-        mine = [(u, st) for u, (st, seqs) in claims.items() if seq in seqs]
+        if where[item]['who'] != 'assistant_accepted':
+            return {seq}
+        kind, session = raw.execute('SELECT kind, session FROM records WHERE seq = ?', (seq,)).fetchone()
+        if kind != 'prompt':
+            return {seq}
+        (reply,) = raw.execute("SELECT max(seq) FROM records WHERE session = ? AND kind = 'reply' AND seq < ?",
+                               (session, seq)).fetchone()
+        return {seq, reply} - {None}
+
+    def state(item):
+        at = records_of_item(item)
+        mine = [(u, st) for u, (st, seqs) in claims.items() if at & seqs]
         if not mine:
             return 'none'
         if any(st == 'decided' and u not in superseded for u, st in mine):
