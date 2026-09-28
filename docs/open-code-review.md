@@ -66,8 +66,8 @@ In the repository's **Settings > Secrets and variables > Actions**, configure:
 | --- | --- | --- |
 | Secret | `OCR_LLM_URL` | `https://openrouter.ai/api/v1/chat/completions` |
 | Secret | `OCR_LLM_AUTH_TOKEN` | OpenRouter API key. |
-| Secret | `OCR_LLM_FALLBACK_URL` | `https://integrate.api.nvidia.com/v1/chat/completions`. Set it with the next one, or neither. Unset: the fallback uses `OCR_LLM_URL` without `OCR_LLM_EXTRA_BODY`, so on OpenRouter it is not pinned to the BYOK key and may spend credits. |
-| Secret | `OCR_LLM_FALLBACK_AUTH_TOKEN` | NVIDIA NIM API key. Unset: the fallback uses `OCR_LLM_AUTH_TOKEN`. |
+| Secret | `OCR_LLM_FALLBACK_URL` | `https://integrate.api.nvidia.com/v1/chat/completions`. Needed when `OCR_LLM_FALLBACK_MODEL` is set. |
+| Secret | `OCR_LLM_FALLBACK_AUTH_TOKEN` | NVIDIA NIM API key. Needed when `OCR_LLM_FALLBACK_MODEL` is set. |
 | Variable | `OCR_LLM_USE_ANTHROPIC` | `false`: both endpoints are OpenAI-compatible. |
 | Variable | `OCR_LLM_EXTRA_BODY` | `{"provider":{"only":["deepseek"],"allow_fallbacks":false}}`. Sent by the primary only. |
 | Variable | `OCR_LLM_MODEL` | `deepseek/deepseek-v4.1-flash`. Set this last to enable the workflow. |
@@ -91,11 +91,11 @@ secrets fails before installing or calling OpenCodeReview.
 OpenCodeReview 1.12.9 retries requests to its selected model but does not switch
 models automatically. The workflow makes at most one additional review attempt
 with the fallback model when the primary OCR CLI exits nonzero. Both attempts
-review the same PR head with the same CLI version. The fallback uses
-`OCR_LLM_FALLBACK_URL` and `OCR_LLM_FALLBACK_AUTH_TOKEN` when both are set, else the
-primary's endpoint and key, and it sends no `OCR_LLM_EXTRA_BODY`. With only one of
-the two set, the job fails before any review, so that no key goes to another
-provider's URL.
+review the same PR head with the same CLI version. The fallback has its own
+endpoint and key, `OCR_LLM_FALLBACK_URL` and `OCR_LLM_FALLBACK_AUTH_TOKEN`, and its
+model is a model of that endpoint. It sends no `OCR_LLM_EXTRA_BODY`. With
+`OCR_LLM_FALLBACK_MODEL` set and either secret missing, the job fails before any
+review.
 
 Checkout, installation, configuration, and comment-publication failures do not
 trigger fallback. Cancellation or the job timeout also stops the run. A primary
