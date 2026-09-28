@@ -13,7 +13,7 @@ read here. Every command takes the binary by path: `oboete` on PATH is the owner
                                 each labeled window sent again to one live entry by `recurate`
                                 (estimates only without --yes)
   m3.py score <bin> <name>      M3's counts on the labeled items"""
-import glob, http.server, json, os, sqlite3, subprocess, sys, threading, time
+import collections, glob, http.server, json, os, sqlite3, subprocess, sys, threading, time
 from datetime import datetime
 
 from common import E, clean_env, owner_only, read_jsonl, sha256_file
@@ -275,6 +275,11 @@ def live(binary, name, send, tool=None):
     device = raw.execute("SELECT value FROM meta WHERE key = 'device_id'").fetchone()[0]
     raw.close()
     log = f'{h}/live{"-sent" if send else ""}.jsonl'
+    # The curator's claude through a wrapper that keeps its stdout under M/answers, so the drafts
+    # the gates drop can be read (`m3.py drafts`); the wrapper is made by hand, owner-only.
+    env = clean_env()
+    if os.path.exists(f'{M}/wrap/claude'):
+        env['PATH'] = f'{M}/wrap:' + env['PATH']
     # A span is done once a run of it was curated; a failed one is sent again on the next pass.
     done = {json.dumps(r['span']) for r in read_jsonl(log)
             if not send or 'not curated' not in r['out']} if os.path.exists(log) else set()
@@ -287,7 +292,7 @@ def live(binary, name, send, tool=None):
         # turn the rest of the pass into instant failures (the whole arm lost 65 spans that way).
         for attempt in range(3):
             r = subprocess.run([binary, '--home', h, 'recurate', f'{device}:{a}-{b}'] + (['--yes'] if send else []),
-                               capture_output=True, text=True, env=clean_env())
+                               capture_output=True, text=True, env=env)
             out = r.stdout.strip()
             with open(log, 'a', encoding='utf-8') as f:
                 f.write(json.dumps({'span': [a, b], 'code': r.returncode, 'out': out, 'err': r.stderr[-500:],
@@ -361,6 +366,89 @@ def score(binary, name):
     print(json.dumps(out, indent=1, ensure_ascii=False))
 
 
+def answer_of(path):
+    """The curator's answer in one kept claude stream (M/answers), or None."""
+    for line in open(path, encoding='utf-8'):
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get('type') == 'result' and not e.get('is_error'):
+            text = e.get('result', '').strip()
+            if text.startswith('```'):
+                text = text.split('\n', 1)[1].rsplit('```', 1)[0]
+            try:
+                return json.loads(text)
+            except ValueError:
+                return None
+    return None
+
+
+def drafts(binary, name):
+    """For each owner-yes decision in a recurated window whose answer was kept: what the curator
+    drafted about it and what the gates did (kept, lowered, dropped), so a miss is told apart from
+    a draft the gates dropped. A draft is about a label when its quote shares 8 characters with
+    the label's quote or its prompt line."""
+    h = home(binary, name)
+    where = json.load(open(f'{h}/map.json'))
+    decisions, _, _ = labels()
+    answers = {}
+    for f in glob.glob(f'{M}/answers/*.jsonl'):
+        a = answer_of(f)
+        if a and a.get('summary'):
+            answers[a['summary'].strip()] = a
+    raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
+    ops = [(s, t, json.loads(b)) for s, t, b in raw.execute('SELECT op_seq, type, body FROM ops ORDER BY op_seq')]
+    wins, cur = [], None
+    for s, t, b in ops:
+        if t == 'window':
+            cur = b if b.get('recurate') and b.get('outcome') == 'curated' else None
+            if cur is not None:
+                cur['claims'] = {}
+                wins.append(cur)
+        elif t == 'claim' and cur is not None:
+            cur['claims'][b['id']] = b
+
+    def near(q, label):
+        q = q.strip()
+        return any(q[i:i + 8] in label for i in range(0, max(1, len(q) - 7)))
+
+    tally = collections.Counter()
+    for d in decisions:
+        w = where.get(d['id'])
+        if d['value'] != 'yes' or not w or w['seq'] is None:
+            continue
+        mine = [b for b in wins if b['from_seq'] <= w['seq'] <= b['to_seq']]
+        if not mine:
+            continue
+        b = mine[-1]
+        a = answers.get(b.get('summary', '').strip())
+        kind = f"{w['who']}/{w.get('tool') or '-'}"
+        if a is None:
+            tally[f'{kind}: answer not kept'] += 1
+            continue
+        label = d['quote'] + '\n' + d.get('prompt', '')
+        about = [c for c in a.get('claims', []) if near(c.get('quote', ''), label)]
+        dropped = dict((i, why) for i, why in b.get('dropped', []))
+        lowered = collections.defaultdict(list)
+        for i, why in b.get('lowered', []):
+            lowered[i].append(why)
+        if not about:
+            tally[f'{kind}: not drafted'] += 1
+            print(d['id'], kind, 'NOT DRAFTED', repr(d['quote'][:60]))
+            continue
+        for c in about:
+            if c['id'] in dropped:
+                out = f"dropped: {dropped[c['id']]}"
+            else:
+                k = b['claims'].get(c['id'], {})
+                out = f"{k.get('status')} ({k.get('speaker')})" + (f" lowered: {'; '.join(lowered[c['id']])}" if lowered[c['id']] else '')
+            tally[f"{kind}: drafted {c['status']} ({c['speaker']}) -> {out}"] += 1
+            print(d['id'], kind, c['status'], c['speaker'], '->', out, '|', repr(c.get('quote', '')[:60]), '| label', repr(d['quote'][:40]))
+    for k, v in tally.most_common():
+        print(v, k)
+
+
 if __name__ == '__main__':
     owner_only()
     cmd, args = sys.argv[1], sys.argv[2:]
@@ -378,5 +466,7 @@ if __name__ == '__main__':
              next((a.split('=')[1] for a in args if a.startswith('--tool=')), None))
     elif cmd == 'score':
         score(args[0], args[1])
+    elif cmd == 'drafts':
+        drafts(args[0], args[1])
     else:
         sys.exit(__doc__)
