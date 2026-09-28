@@ -52,10 +52,11 @@ whole and short cut 114 spans, and some of them shared a record, so that record'
 - **The owner's picks in `AskUserQuestion`** (#195): 11 of the 13 labels that are such picks reached `decided` in full, and none did in whole or short. That is the whole of the gain from whole to full (the typed prompts went from 10 to 8 of 28, run to run).
 - **Recall by kind**, nothink: picks 10 of 13, typed prompts 14 of 28, accepted proposals quoted from the assistant's reply 0 of 3 (0 in every arm).
 - **Instructions for the moment.** About 10 of the 44 labels are instructions whose effect ends with the session ("新セッションで実装する", "ブラウザ開かないからurl教えて", "codex-reviewが未実行ならそれだけ実行して"); this list is mine, not the owner's. Every arm recalled at most one of them. Without them, recall is 23 of 34 (68%) in nothink and 19 of 34 (56%) in full: still under 80%. Whether they count is the owner's call (below).
-- **Overturns fail the 0% line** once recall rises: 8 and 9 of 19 in full and nothink. The curator does write `supersedes` (28 to 59 active edges per arm), but not for these pairs:
-  - 2 of the pairs are across sessions (d123 to d361, d490 to d187). The later decision is drafted, but the earlier claim is not among its candidates, or is and is not superseded: a retrieval or prompt miss.
-  - 17 are in one session. In this harness the windows before a labeled one were covered by the stub, so a session carries nothing in (its goal, proposals and decisions so far). That may be why the same-session overturns fail, but this run cannot tell; measuring it means curating the whole sessions that hold these pairs.
-  - Several pairs share one earlier record, so one missed supersede counts more than once (the per-record definition).
+- **Overturns fail the 0% line** once recall rises: 8 and 9 of 19 in full and nothink. The curator does write `supersedes` (28 to 59 active edges per arm), but not for these pairs. 17 of the 19 pairs are in one session and 2 across sessions (d123 to d361, d490 to d187); several share one earlier record, so one missed supersede counts more than once (the per-record definition).
+- **Why, read after the fact.** An earlier decision reaches a later window only as a candidate: up to 20 current claims of the repository that the full-text index finds for 64 trigrams spread over the window's text. What a session carries in is its goal, its previous window's proposals and its open items, not its decisions, so the harness's stub-covered windows do not hide it. Replaying that search for the 9 pairs left current in nothink (with the window's records standing in for its rendered text, and the index as it ended):
+  - 54 to 63 of the 64 trigrams came from tool text in every later window, so the search mostly looks for words of tool output;
+  - in 3 pairs (d151, d176, d142 as the earlier side) the earlier decision matched none of them and was not shown;
+  - in 6 it was shown, near the bottom (rank 13 to 17, where 13 to 35 current claims matched), and the curator did not supersede it. With a repository's claims in the thousands rather than tens, a rank that low would not be shown.
 - **The compatible pair dropped** in full and nothink is d121 to d361: the later decision ("このプロジェクトを破棄して…") superseded 案B. By the owner's labels 案B had already been replaced by d123, which d361 overturns. It counts as a drop by the definition; it is 1 of 25, 4%, over the 2% line.
 - **Owner-no records**: the three in nothink (d71, d228, d410) are the three whole also showed. d71 is a long typed plan whose other sentences are rules; d228 and d410 are the assistant's reports of what it did, drafted as the user's decisions. Not a difference that thinking made.
 - **What is not in the window**: drafts dropped because their quote is not in the window, nothink: 263 over 120 kept answers. 195 are paraphrases, 30 match once whitespace is removed, 15 quote a tool's input, 13 quote another record, 6 join two pieces with "...". A whitespace-blind match would keep the 30.
@@ -76,7 +77,7 @@ The shrink was measured on the #194 binary with thinking on; thinking off on the
 ### What the next M3 run needs
 
 1. The owner's answer on instructions for the moment, and the test labels.
-2. Supersedes: the whole sessions that hold the 17 same-session overturn pairs, curated with their carried context, to tell a harness limit from a curator miss; then the candidates and the prompt for the 2 cross-session pairs.
+2. Supersedes: candidates found by the owner's and the assistant's lines rather than a spread over mostly tool text, and a prompt that asks for `supersedes` when the owner drops or redoes what an earlier decision set up.
 3. The quote match: whitespace-blind, then the paraphrases.
 4. One arm with the defaults as they would ship (shrink on, thinking off, the current main).
 

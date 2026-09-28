@@ -5,10 +5,11 @@ read here. Every command takes the binary by path: `oboete` on PATH is the owner
   m3.py fixtures <bin>          each transcript the dev labels or the replay set's dev side need ->
                                 a fixture, by <bin>'s own `transcript`
   m3.py replay <bin> <name>     every fixture, merged in time order, into one home; curation off
+  m3.py map <bin> <name>        each labeled decision -> the records its quote is in (before stub:
+                                the worker compresses the bodies it reads)
   m3.py stub <bin> <name> [--shrink] [--tokens=N]
                                 curate that home with a localhost stub that answers no claims: the
                                 windows, their estimated tokens, M2's coverage; no call leaves
-  m3.py map <bin> <name>        each labeled decision -> the records its quote is in
   m3.py live <bin> <name> [--yes]
                                 each labeled window sent again to one live entry by `recurate`
                                 (estimates only without --yes)
@@ -215,6 +216,10 @@ def map_labels(name, binary):
     compression leaves bodies unreadable here. Counts only: no label or record text is printed."""
     h = home(binary, name)
     raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
+    # records_of skips a compressed body: a map after the stub would leave most labels unmapped.
+    (packed,) = raw.execute("SELECT COUNT(*) FROM records WHERE type = 'event' AND enc != 'plain'").fetchone()
+    if packed:
+        sys.exit(f'{packed} records are compressed: map runs after replay and before stub')
     decisions, pairs, drafts = labels()
     items = {d['id']: d for d in decisions}
     for p in pairs:
