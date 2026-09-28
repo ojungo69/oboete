@@ -88,7 +88,7 @@ def command(cli, variant, scratch):
                '--output-format', 'stream-json', '--verbose', '--permission-mode', 'dontAsk',
                '--permission-prompts', 'none', '--disallowedTools', 'Agent', 'Task', 'Monitor', 'mcp__*',
                '--disable-slash-commands', '--setting-sources', '', '--tools', '', '--strict-mcp-config',
-               '--no-session-persistence', '--settings', '{"disableAllHooks":true}']
+               '--no-session-persistence', '--settings', '{"disableAllHooks":true,"enabledPlugins":{"agents-md@builtin":false,"telemetry@builtin":false}}']
         cmd += {'schema': ['--json-schema', json.dumps(SCHEMA)], 'max-turns': ['--max-turns', '1'],
                 'effort': ['--effort', 'low']}.get(variant, [])
         return cmd
