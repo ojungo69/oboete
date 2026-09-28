@@ -97,6 +97,10 @@ pub enum Role {
     Tool {
         failed: bool,
     },
+    /// An `AskUserQuestion` call: its answers are the owner's pick, which Claude Code fills in
+    /// from the terminal over whatever the model sent (docs/spike/m3-dev.md); its questions and
+    /// options are the assistant's.
+    Answer,
     /// A harness envelope, a compaction summary, a session's start or end.
     Other,
 }
@@ -274,7 +278,8 @@ pub(crate) fn window_at(
             full = true;
             if pieces.iter().all(|p| p.text.is_empty()) {
                 // The first event to read does not fit: a tool output is elided, anything else is
-                // split, and the next window starts where this part stops.
+                // split (an `AskUserQuestion` too: its answers are the owner's words), and the next
+                // window starts where this part stops.
                 if matches!(piece.role, Role::Tool { .. }) {
                     piece = prepared.elided(r.seq);
                     elided.push(r.seq);
@@ -320,7 +325,7 @@ fn cut_back(pieces: &mut Vec<Piece>) {
         pieces.truncate(i);
     } else if let Some(i) = pieces
         .iter()
-        .rposition(|p| matches!(p.role, Role::Tool { .. }))
+        .rposition(|p| matches!(p.role, Role::Tool { .. } | Role::Answer))
     {
         pieces.truncate(i + 1);
     }
@@ -519,11 +524,16 @@ impl<'r> Prepared<'r> {
                 };
                 let name = gate(body["tool"].as_str().unwrap_or("?"));
                 let output = if memory { MEMORY_READ } else { "" };
-                (
-                    format!("[tool {name}{failed}] input: {input}\n  output:{output}"),
+                let role = if tool == "AskUserQuestion" && body["failed"] != true {
+                    Role::Answer
+                } else {
                     Role::Tool {
                         failed: body["failed"] == true,
-                    },
+                    }
+                };
+                (
+                    format!("[tool {name}{failed}] input: {input}\n  output:{output}"),
+                    role,
                 )
             }
             _ => (String::new(), Role::Other), // a session's start or end: nothing to read

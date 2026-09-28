@@ -7,6 +7,7 @@
 use crate::claims::{Claim, Evidence};
 use crate::curate::{Draft, Line, Role, Window};
 use crate::redact::Rules;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 /// A reply to a proposal that holds one of these accepts it (spec 3.3). Latin ones match whole
@@ -207,7 +208,7 @@ pub fn check(
             d.scope = "repo".into();
             lower(&d, "global scope only through oboete pref add");
         }
-        let speaker = speaker(line.role, &d.speaker);
+        let speaker = speaker(line, &d.quote, &d.speaker);
         if d.speaker != speaker {
             d.speaker = speaker.into();
             lower(&d, "the speaker is the quote's line");
@@ -328,10 +329,13 @@ pub fn check(
 }
 
 /// A claim's speaker is its quote's line's (spec 3.2), never the curator's word: tool and file
-/// content is never the user's.
-fn speaker(role: Role, given: &str) -> &'static str {
-    match role {
+/// content is never the user's. On an `AskUserQuestion` line only the answers are the user's.
+fn speaker(line: &Line, quote: &str, given: &str) -> &'static str {
+    match line.role {
         Role::User => "user",
+        Role::Answer if picked(line.source_text(), quote) => "user",
+        // Its questions and the options the owner did not pick are the assistant's proposals.
+        Role::Answer => "assistant proposal",
         Role::Tool { .. } => "tool result",
         // A non-strict curator's case variants are read as the label they are; a label it does
         // not recognize is inferred, which an acceptance never promotes.
@@ -341,6 +345,30 @@ fn speaker(role: Role, given: &str) -> &'static str {
         },
         Role::Other => "assistant inferred",
     }
+}
+
+/// Whether `quote` is in one of the answers (or the notes the owner added to them) of an
+/// `AskUserQuestion` output, as decoded or as the output's JSON text shows it.
+fn picked(output: &str, quote: &str) -> bool {
+    fn strings<'v>(v: &'v Value, out: &mut Vec<&'v str>) {
+        match v {
+            Value::String(s) => out.push(s),
+            Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+            Value::Object(o) => o.values().for_each(|x| strings(x, out)),
+            _ => {}
+        }
+    }
+    let Ok(v) = serde_json::from_str::<Value>(output) else {
+        return false;
+    };
+    let mut owners = Vec::new();
+    strings(&v["answers"], &mut owners);
+    strings(&v["annotations"], &mut owners);
+    !quote.trim().is_empty()
+        && owners.iter().any(|a| {
+            let shown = serde_json::to_string(a).unwrap_or_default();
+            a.contains(quote) || shown[1..shown.len() - 1].contains(quote)
+        })
 }
 
 /// Spec 3.3: a turn that ends in a question mark never promotes.
@@ -754,6 +782,42 @@ mod tests {
 
     fn is(status: &str, speaker: &str) -> (String, String) {
         (status.into(), speaker.into())
+    }
+
+    /// An `AskUserQuestion` call as the hook records it: its input and output are the questions
+    /// and the owner's answers, as JSON text.
+    fn asked(answer: &str) -> (&'static str, Value) {
+        let questions = json!([{"question": "どれで保存しますか?", "header": "保存先",
+            "options": [{"label": "SQLite にする"}, {"label": "JSON ファイルにする"}]}]);
+        let io =
+            json!({"questions": questions, "answers": {"どれで保存しますか?": answer}}).to_string();
+        let body = json!({"tool": "AskUserQuestion", "input": io, "output": io, "failed": false});
+        ("tool", body)
+    }
+
+    /// The owner's pick in `AskUserQuestion` is the user's words, which Claude Code fills in from
+    /// the terminal over what the model sent (docs/spike/m3-dev.md); an option not picked is the
+    /// assistant's proposal, and the same text in another tool's output is tool content (MUST-M4).
+    #[test]
+    fn the_owners_answer_to_a_question_is_the_users_words() {
+        let w = window(&[asked("SQLite にする")]);
+        assert_eq!(
+            one(&w, "decided", "user", "SQLite にする"),
+            is("decided", "user")
+        );
+        assert_eq!(
+            one(&w, "decided", "user", "JSON ファイルにする").0,
+            "proposed"
+        );
+        let typed = window(&[asked("SQLite にする。バックアップは毎晩とる")]);
+        let quote = "バックアップは毎晩とる";
+        assert_eq!(one(&typed, "decided", "user", quote), is("decided", "user"));
+        let (_, body) = asked("SQLite にする");
+        let echoed = window(&[tool(body["output"].as_str().unwrap(), false)]);
+        assert_eq!(
+            one(&echoed, "decided", "user", "SQLite にする"),
+            is("proposed", "tool result")
+        );
     }
 
     const PROPOSAL: &str = "We could cache the parsed files.";
