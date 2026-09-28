@@ -5,8 +5,8 @@ The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and
 ## Where it stands (2026-09-28)
 
 - Tasks 1 to 11 are merged. The last of them are recuration (#189), the crash harness (#190), and claude's built-in plugins turned off for a curator call (#191, Claude Code 2.1.283).
-- Task 12, the judge's first role ("shrink, never drop"), is behind `[summary] shrink`, off by default (#194). Its second role (a veto on `decided` and `supersedes`) has no code: it waits on M3's dev recall.
-- Task 13 has the lines below. The first dev tuning of the gates is merged: the owner's answer to `AskUserQuestion` is the owner's words (#195, #202).
+- Task 12, the judge's first role ("shrink, never drop"), is behind `[summary] shrink` (#194) and passes on dev (below); turning it on by default is a PR of its own. Its second role (a veto on `decided` and `supersedes`) has no code: it waits on M3.
+- Task 13 has the lines below: M2 passes, Cost fails with today's defaults, M3 fails on the dev labels. The first dev tuning of the gates is merged: the owner's answer to `AskUserQuestion` is the owner's words (#195, #202, #209).
 
 ## M2 on the dev transcripts: passes
 
@@ -33,22 +33,72 @@ A heavy day, measured: the owner's transcripts of the last 90 days (3,870 files 
 - **The line fails with today's defaults.** Groq's free tier allows 1,000 requests and 200,000 tokens a day per model. The default chain gives each of its three Groq entries 800 calls a day and no token budget, so on a heavy day the curator takes all of each model's tokens, not 20%. Keeping to 20% means about 40,000 tokens a model, some 24 windows a day across the three. The rest of a heavy day falls to the subscriptions.
 - **The subscriptions' speed is a limit too.** claude haiku takes about 100 s a window (212 calls: median 101 s, 99th percentile 187 s). The 526 windows of a heavy day with the shrink on are about 14.6 hours of calls in a row, and without the shrink about 65 hours. A day that heavy is curated over the following days, or by several entries at once.
 - Paid entries: none in the default chain, so the USD 5 cap is not reached.
-- What would meet the line is a decision about defaults, taken with M3's dev result: token budgets at 20% on the free entries, the shrink on, and (#193) the curator's thinking.
+- With the curator's thinking off (measured below: 16.6 s a call at the median), the 526 windows are about 2.4 hours of calls in a row. That is a projection: no arm ran the shrink and thinking off together.
+- What would meet the line is a decision about defaults: token budgets at 20% on the free entries, the shrink on, and the curator's thinking off (#193).
 
-## M3 on the dev labels
+## M3 on the dev labels: fails
 
-(Filled in when the live arms end: recall per arm, the causes, the owner's question.)
+The line: recall of the owner's decisions 80% or more, no overturned decision shown as current (0%), and at most 2% of compatible earlier decisions dropped. Four arms were run, one live entry (claude haiku), one run each, over the windows that hold a label (docs/spike/m3-dev.md has the harness and the definitions, fixed before any live number).
 
-## Judge, role (a): the shrink
+| Arm | Binary | Shrink | Thinking | Recall (of 44) | Overturned, still current (of 19) | Compatible, dropped (of 25) | Owner-no records shown as decided (of 5) | Decided claims |
+|---|---|---|---|---|---|---|---|---|
+| whole | #194 + #191 | off | on | 10 | 2 | 0 | 4 | 65 |
+| short | #194 + #191 | on | on | 13 | 3 | 0 | 1 | 57 |
+| full | #195 (the owner's picks are the user's words) | off | on | 19 | 8 | 1 | 1 | 95 |
+| nothink | #195 | off | off | 24 | 9 | 1 | 3 | 122 |
 
-- Input: 70.9% less (17.59M against 60.43M estimated tokens on the dev set), past the 30% the spec asks.
-- Recall: (filled in when the live arms end).
+whole and short cut 114 spans; full and nothink 109, because spans that share a record were merged into one (#196's commit). The table is `m3.py score`; the counts by kind, the drop classes and the records below were read after the fact with one-off queries over the same homes.
+
+- **The owner's picks in `AskUserQuestion`** (#195): 11 of the 13 labels that are such picks reached `decided` in full, and none did in whole or short. That is the whole of the gain from whole to full (the typed prompts went from 10 to 8 of 28, run to run).
+- **Recall by kind**, nothink: picks 10 of 13, typed prompts 14 of 28, accepted proposals quoted from the assistant's reply 0 of 3 (0 in every arm).
+- **Instructions for the moment.** About 10 of the 44 labels are instructions whose effect ends with the session ("新セッションで実装する", "ブラウザ開かないからurl教えて", "codex-reviewが未実行ならそれだけ実行して"); this list is mine, not the owner's. Every arm recalled at most one of them. Without them, recall is 23 of 34 (68%) in nothink and 19 of 34 (56%) in full: still under 80%. Whether they count is the owner's call (below).
+- **Overturns fail the 0% line** once recall rises: 8 and 9 of 19 in full and nothink. The curator does write `supersedes` (28 to 59 active edges per arm), but not for these pairs:
+  - 2 of the pairs are across sessions (d123 to d361, d490 to d187). The later decision is drafted, but the earlier claim is not among its candidates, or is and is not superseded: a retrieval or prompt miss.
+  - 17 are in one session. In this harness the windows before a labeled one were covered by the stub, so a session carries nothing in (its goal, proposals and decisions so far). That may be why the same-session overturns fail, but this run cannot tell; measuring it means curating the whole sessions that hold these pairs.
+  - Several pairs share one earlier record, so one missed supersede counts more than once (the per-record definition).
+- **The compatible pair dropped** in full and nothink is d121 to d361: the later decision ("このプロジェクトを破棄して…") superseded 案B. By the owner's labels 案B had already been replaced by d123, which d361 overturns. It counts as a drop by the definition; it is 1 of 25, 4%, over the 2% line.
+- **Owner-no records**: the three in nothink (d71, d228, d410) are the three whole also showed. d71 is a long typed plan whose other sentences are rules; d228 and d410 are the assistant's reports of what it did, drafted as the user's decisions. Not a difference that thinking made.
+- **What is not in the window**: drafts dropped because their quote is not in the window, nothink: 263 over 120 kept answers. 195 are paraphrases, 30 match once whitespace is removed, 15 quote a tool's input, 13 quote another record, 6 join two pieces with "...". A whitespace-blind match would keep the 30.
+
+### Thinking (#193 item 3)
+
+Measured once each on the #195 binary, after the fact: there was no rule declared before, as there was for the shrink.
+- Recall 24 of 44 with thinking off, 19 with it on.
+- A curator call took 16.6 s at the median with thinking off (90th percentile 28.7 s), 101 s with it on (150 s). 0 answers were refused with it off, 5 with it on (2 unanchored, 2 prose, 1 shape).
+- Decided claims: 122 with it off, 95 with it on.
+
+So thinking off is at least as good here and six times faster. It is a PR of its own, so it can be reverted alone.
+
+### Not measured together
+
+The shrink was measured on the #194 binary with thinking on; thinking off on the #195 binary without the shrink. No arm ran the shrink, thinking off and #195 together, which is what the defaults would become.
+
+### What the next M3 run needs
+
+1. The owner's answer on instructions for the moment, and the test labels.
+2. Supersedes: the whole sessions that hold the 17 same-session overturn pairs, curated with their carried context, to tell a harness limit from a curator miss; then the candidates and the prompt for the 2 cross-session pairs.
+3. The quote match: whitespace-blind, then the paraphrases.
+4. One arm with the defaults as they would ship (shrink on, thinking off, the current main).
+
+## Judge, role (a): the shrink: passes on dev
+
+Both arms ran the same binary (#194 with #191) and one live entry (claude haiku, thinking on as shipped), once each, over the windows that hold a label. The rule was declared before measuring (docs/spike/m3-dev.md): one label's difference is noise, two or more fewer count against the shrink.
+
+- **Input**: 70.9% less (17.59M against 60.43M estimated tokens on the dev set), past the 30% the spec asks.
+- **Recall**: 13 of 44 with the shrink, 10 of 44 without it. The shrink recalled three more, so "drops by 0.02 or less" holds.
+- A window cut with the shrink holds about four times the records, so the arms' labeled spans differ: 136 windows and about 0.74M estimated tokens with the shrink, 128 and 0.62M without. That is the shrink as it would ship, not a second variable.
+- Read after the fact, not part of the rule:
+  - labeled items with any claim on their record: 32 of 44 with the shrink, 28 without;
+  - drafts dropped because their quote is not in the window: 324 over 145 kept answers (2.2 each) with the shrink, 227 over 134 (1.7) without;
+  - records the owner said are not decisions, shown as current decisions: 1 of 5 with the shrink, 4 of 5 without.
+
+So the shrink can be on by default, for decisions: lessons and fixes have no dev labels, and the spec's clause names all three. It is a PR of its own after this note, and the test labels confirm it when they exist.
 
 ## Window
 
-Not measured yet. The window is the smallest size that passes M2, M3 and M6 on the dev transcripts. It waits for M3's dev recall to leave the floor.
+Not measured. The window is the smallest size that passes M2, M3 and M6 on the dev transcripts, and no size passes M3 yet: it is measured with the next M3 run.
 
 ## What needs the owner
 
-1. Whether a one-off instruction ("新セッションで実装する", "url教えて") counts as a decision the memory keeps. It sets what M3 measures, and the test labels follow it.
+1. Whether an instruction for the moment ("新セッションで実装する", "url教えて") counts as a decision the memory keeps. About 10 of the 44 dev labels are such instructions, and the curator keeps almost none; without them recall is 68% at best, with them 55%. It sets what M3 measures, and the test labels follow it.
 2. M3's test labels (plan, "What needs the owner", item 1).
