@@ -302,15 +302,16 @@ pub fn last_calls(conn: &Connection, n: u32) -> Result<Vec<String>> {
     Ok(rows)
 }
 
-const DAY_MS: i64 = 86_400_000;
+pub const DAY_MS: i64 = 86_400_000;
 
-/// Tokens (prompt plus completion) `provider` reported since the last UTC midnight.
-pub fn tokens_today(conn: &Connection, provider: &str) -> Result<i64> {
+/// Tokens (prompt plus completion) `provider` reported since `since`, and when its oldest call
+/// since then was made.
+pub fn tokens_since(conn: &Connection, provider: &str, since: i64) -> Result<(i64, Option<i64>)> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), 0)
+        "SELECT COALESCE(SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), 0), MIN(ts)
          FROM provider_calls WHERE provider=?1 AND ts>=?2",
-        params![provider, now_ms() / DAY_MS * DAY_MS],
-        |r| r.get(0),
+        params![provider, since],
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
 }
 

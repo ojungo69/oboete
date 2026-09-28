@@ -122,14 +122,18 @@ pub fn admit(
             skip: Skip::Wait(at),
         }));
     }
+    // Counted over the last 24 hours: Groq's day is a rolling window (docs/milestone-1.md), and a
+    // budget kept per UTC day could take twice its share around midnight.
     if let Some(daily) = limits.daily_tokens {
-        let today =
-            providers_db::tokens_today(db, name)? as f64 + unmetered(db, p, providers_db::today())?;
-        if today + reserved > daily as f64 {
+        let since = now - providers_db::DAY_MS;
+        let (reported, oldest) = providers_db::tokens_since(db, name, since)?;
+        let used = reported as f64 + unmetered(db, p, since)?;
+        if used + reserved > daily as f64 {
             return Ok(Some(Refusal {
                 outcome: "budget",
-                detail: format!("{today:.0}/{daily} tokens today"),
-                skip: Skip::Budget(providers_db::next_day()),
+                detail: format!("{used:.0}/{daily} tokens in 24 hours"),
+                // When the oldest call counted leaves the 24 hours.
+                skip: Skip::Budget(oldest.unwrap_or(now) + providers_db::DAY_MS),
             }));
         }
     }
@@ -374,7 +378,7 @@ mod tests {
         let r = admit(&db, &p, 800.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(
             (r.outcome, r.detail.as_str()),
-            ("budget", "8000/10000 tokens today")
+            ("budget", "8000/10000 tokens in 24 hours")
         );
         // The declared output is reserved: 1,000 in and up to 4,000 out do not fit in 2,000.
         let mut declared = p.clone();
@@ -402,7 +406,39 @@ mod tests {
         )
         .unwrap();
         let r = admit(&db, &p, 1.0, 5.0, &[]).unwrap().unwrap();
-        assert_eq!(r.detail, "13000/10000 tokens today");
+        assert_eq!(r.detail, "13000/10000 tokens in 24 hours");
+    }
+
+    /// Groq's day is a rolling window: a call 23 hours ago still counts, one 25 hours ago does
+    /// not, and a refused call waits until the oldest counted one leaves the 24 hours.
+    #[test]
+    fn daily_tokens_are_counted_over_the_last_24_hours() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let p = entry(
+            "p",
+            Limits {
+                daily_tokens: Some(10_000),
+                ..Default::default()
+            },
+        );
+        let (now, hour) = (crate::db::now_ms(), 3_600_000);
+        for ago in [25, 23] {
+            call(&db, "p", None, 5000, 1000);
+            db.execute(
+                "UPDATE provider_calls SET ts = ?1 WHERE id = (SELECT MAX(id) FROM provider_calls)",
+                [now - ago * hour],
+            )
+            .unwrap();
+        }
+        // 6,000 in the 24 hours: 2,700 in and 1,250 reserved fit in the 4,000 left, 2,800 do not.
+        assert!(admit(&db, &p, 2700.0, 5.0, &[]).unwrap().is_none());
+        let r = admit(&db, &p, 2800.0, 5.0, &[]).unwrap().unwrap();
+        assert_eq!(r.detail, "6000/10000 tokens in 24 hours");
+        let Skip::Budget(until) = r.skip else {
+            panic!("{:?}", r.skip)
+        };
+        assert_eq!(until, now - 23 * hour + providers_db::DAY_MS);
     }
 
     #[test]
