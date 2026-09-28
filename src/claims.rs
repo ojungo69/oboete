@@ -251,27 +251,93 @@ pub fn correct(
     let seqs = raw.append_ops(&[(crate::raw::OpKind::Correction, serde_json::to_value(&op)?)])?;
     let device = raw.device().to_owned();
     drop(raw);
-    // Applied before this returns, by this process or by the worker already running (which wakes
-    // on the new op): a search or a SessionStart right after never shows the old claim.
+    // A search or a SessionStart right after never shows the old claim.
+    applied(home, &k, &device, &seqs, "correction")
+}
+
+/// The owner's ops `seqs`, applied before the command returns: by this process or by the worker
+/// already running (which wakes on the new op). At most 10 seconds, else an error that says the
+/// `what` is recorded.
+fn applied(
+    home: &std::path::Path,
+    k: &Connection,
+    device: &str,
+    seqs: &[i64],
+    what: &str,
+) -> Result<()> {
     crate::worker::run_once(home)?;
     let at = seqs.last().copied().unwrap_or(0);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let applied = || -> Result<bool> {
+    let done = || -> Result<bool> {
         let got = crate::knowledge::checkpoint::get_in(
-            &k,
+            k,
             crate::knowledge::checkpoint::OPS,
             "claims",
-            &device,
+            device,
         )?;
         Ok(got >= at)
     };
-    while !applied()? {
+    while !done()? {
         if std::time::Instant::now() >= deadline {
-            anyhow::bail!("the correction is recorded; the worker applies it when it next runs");
+            anyhow::bail!("the {what} is recorded; the worker applies it when it next runs");
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     Ok(())
+}
+
+/// `oboete pref add`: the owner's directive as an event, and a claim op quoting it whole, a
+/// decided preference of global scope (spec 3.3: global scope only through this or the viewer).
+/// Returns its uid, once the claims consumer has applied it: the next SessionStart shows it.
+// ponytail: two appends; a crash between them leaves the directive event with no claim (run it
+// again). One transaction when raw can append an event and ops together.
+pub fn pref_add(home: &std::path::Path, text: &str) -> Result<String> {
+    let settings = crate::capture::Settings::load(home)?;
+    let c = crate::capture::directive(text, crate::db::now_ms(), &settings);
+    // What the gate stores: the quote reads verbatim there. Checked before either append, so a
+    // preference that cannot be a claim leaves no event behind.
+    let quote = crate::curate::long_text(&c.event).unwrap_or_default();
+    if quote.trim().is_empty() {
+        anyhow::bail!("nothing is left to record once the <private> parts are removed");
+    }
+    if quote.chars().count() > MAX_BODY_CHARS {
+        anyhow::bail!(
+            "a preference can be at most {MAX_BODY_CHARS} characters; this one has {}",
+            quote.chars().count()
+        );
+    }
+    // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
+    let mut raw = crate::raw::open(home)?;
+    let k = crate::knowledge::open(home)?;
+    let seq = raw.append_with_ledger(&c.event, &c.ledger, settings.rules.version())?;
+    let evidence = Evidence {
+        device: raw.device().to_owned(),
+        seq,
+        offset: 0,
+        length: i64::try_from(quote.len())?,
+        sentence: 0,
+        quote: quote.clone(),
+    };
+    let uid = uid("preference", &evidence);
+    let op = ClaimOp {
+        id: "p1".into(),
+        kind: "preference".into(),
+        status: "decided".into(),
+        speaker: "user".into(),
+        scope: "global".into(),
+        body: quote,
+        evidence: vec![evidence],
+        supersedes: Vec::new(),
+        recipe: "oboete pref add".into(),
+        tier: 0,
+        why: String::new(),
+        tainted: false,
+    };
+    let seqs = raw.append_ops(&[(crate::raw::OpKind::Claim, serde_json::to_value(op)?)])?;
+    let device = raw.device().to_owned();
+    drop(raw);
+    applied(home, &k, &device, &seqs, "preference")?;
+    Ok(uid)
 }
 
 /// A current claim.

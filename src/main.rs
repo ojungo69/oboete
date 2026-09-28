@@ -54,6 +54,12 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum PrefCmd {
+    /// Keep a preference that applies in every repository
+    Add { text: String },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Receive one agent hook event on stdin and store it (fail-open, always exit 0)
     Hook {
@@ -130,6 +136,12 @@ enum Cmd {
     Doctor,
     /// Use a provider again after it stopped for the owner (claude's credits) or cooled down
     Resume { provider: String },
+    /// A preference for every repository, in your own words (the only way to one besides the
+    /// viewer)
+    Pref {
+        #[command(subcommand)]
+        action: PrefCmd,
+    },
     /// Browse the memory in a browser: a read-only page on 127.0.0.1 (prints its URL)
     View {
         /// Port to listen on (0 = any free port)
@@ -482,6 +494,14 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             )?)
         }
         Cmd::Doctor => setup::doctor(&home),
+        Cmd::Pref {
+            action: PrefCmd::Add { text },
+        } => {
+            // Whole: `oboete correct` takes the full id.
+            let id = claims::pref_add(&home, &text)?;
+            println!("kept for every repository ({id})");
+            Ok(())
+        }
         Cmd::Resume { provider } => {
             let db = providers_db::open(&home)?;
             if providers_db::resume(&db, &provider)? {

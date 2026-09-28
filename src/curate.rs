@@ -368,6 +368,7 @@ fn long_of(kind: &str, body: &Value) -> Option<String> {
         "prompt" | "envelope" => joined(text(&body["prompt"]), &["prompt", "omitted"]),
         "reply" => joined(text(&body["assistant"]), &["assistant"]),
         "compaction" => joined(text(&body["summary"]), &["summary", "trigger"]),
+        "directive" => text(&body["text"]),
         "tool" => {
             let known = [
                 "tool",
@@ -406,7 +407,8 @@ impl<'r> Prepared<'r> {
     fn new(e: &Event, rules: &'r Rules) -> Self {
         let body: Value = serde_json::from_str(&e.body).unwrap_or(Value::String(e.body.clone()));
         let memory = e.kind == "tool" && memory_read(body["tool"].as_str().unwrap_or(""), &body);
-        let long = if memory {
+        // An owner directive is already a claim (`oboete pref add`): nothing for the curator.
+        let long = if memory || e.kind == "directive" {
             None
         } else {
             long_of(&e.kind, &body)
@@ -3056,6 +3058,109 @@ mod tests {
             prompt("Also look at the logs."),
         ];
         assert_eq!(status(&later, "L2", quote), "proposed");
+    }
+
+    /// `oboete pref add` stores no `<private>` part, in its event or its claim, and records nothing
+    /// for a preference over the claim cap or one that is all private.
+    #[test]
+    fn pref_add_keeps_no_private_part_and_refuses_what_it_cannot_store() {
+        let home = tempfile::tempdir().unwrap();
+        let text = "Use tabs <private>for customer acme</private> always.";
+        let uid = crate::claims::pref_add(home.path(), text).unwrap();
+        // Applied before it returns: the next SessionStart reads it with no worker running.
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let applied: i64 = k
+            .query_row("SELECT count(*) FROM claims WHERE uid = ?1", [&uid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(applied, 1);
+        let raw = crate::raw::open(home.path()).unwrap();
+        let stored: Vec<String> = raw
+            .export_lines(0, 1 << 20)
+            .unwrap()
+            .into_iter()
+            .chain(raw.export_op_lines(0, 1 << 20).unwrap())
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(stored.len(), 2);
+        assert!(stored.iter().all(|l| !l.contains("acme")), "{stored:?}");
+        // Binary content becomes its marker, as in a typed prompt.
+        let logo = "Use data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAE= as the logo.";
+        crate::claims::pref_add(home.path(), logo).unwrap();
+        let stored = raw.export_lines(0, 1 << 20).unwrap();
+        assert!(
+            stored.iter().all(|(_, l)| !l.contains("iVBORw0KGgo")),
+            "{stored:?}"
+        );
+        let (seq, ops) = (raw.max_seq().unwrap(), raw.max_op_seq().unwrap());
+        let long = "word ".repeat(250);
+        for text in [long.as_str(), "<private>all of it</private>"] {
+            assert!(
+                crate::claims::pref_add(home.path(), text).is_err(),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            (raw.max_seq().unwrap(), raw.max_op_seq().unwrap()),
+            (seq, ops)
+        );
+    }
+
+    /// Spec 3.3, #144: global scope only through `oboete pref add`; the directive is its own
+    /// claim, never a line of a window, and a curator's global draft stays repo.
+    #[test]
+    fn pref_add_creates_a_global_preference_and_a_curators_global_draft_stays_repo() {
+        let home = tempfile::tempdir().unwrap();
+        let text = "Always answer in Japanese.";
+        let uid = crate::claims::pref_add(home.path(), text).unwrap();
+        let (mut raw, db) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        type Stored = (String, String, String, Option<String>);
+        let stored: Stored = k
+            .query_row(
+                "SELECT d.scope, d.status, d.speaker, d.repo FROM claims c
+                 JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
+                 WHERE c.uid = ?1",
+                [&uid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        // In no repository's current claims: global ones are read by scope.
+        let want = ("global".into(), "decided".into(), "user".into(), None);
+        assert_eq!(stored, want);
+        raw.append(&prompt(text)).unwrap();
+        let answer = json!({"claims": [{"id": "c1", "kind": "preference", "status": "decided",
+            "speaker": "user", "scope": "global", "body": "Answer in Japanese.",
+            "quote": "Always answer in Japanese", "line": "L1", "supersedes": []}],
+            "summary": "s"});
+        let sent = std::cell::RefCell::new(String::new());
+        let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            *sent.borrow_mut() = p.to_owned();
+            Ok(ChainResult {
+                output: answer.clone(),
+                ..answered("fake")
+            })
+        };
+        let summary = curating(WINDOW_TOKENS);
+        run_phase(
+            &mut raw,
+            &k,
+            &db,
+            &Rules::default(),
+            &summary,
+            "",
+            &mut chain,
+        )
+        .unwrap();
+        // The directive is no line: the prompt is the window's only one.
+        let sent = sent.borrow();
+        let lines: Vec<&str> = sent.lines().filter(|l| l.starts_with('L')).collect();
+        assert_eq!(lines, [format!("L1 [user] {text}")], "{sent}");
+        let ops = raw.ops_after(raw.device(), 0, 10).unwrap();
+        let draft = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+        assert_eq!(draft.body["scope"], "repo");
     }
 
     /// Spec 3.3: a tool output's text reaches the prompt only between the fence lines, which

@@ -243,6 +243,22 @@ fn capture(
     }
 }
 
+/// The owner's directive `oboete pref add` records (spec 3.3; MUST-M1's owner directive): an
+/// event of its own, through the same gate as every stored string, with no repository or
+/// checkout: its claim is global, in no repository's current claims (milestone 4's injection
+/// reads global ones by scope). `curate` never shows it in a window: its claim is appended with
+/// it.
+pub fn directive(text: &str, ts: i64, settings: &Settings) -> Captured {
+    let payload = json!({"session_id": "owner"});
+    // As a typed prompt: an opted-out part is never stored, and binary content is its marker.
+    let body = json!({"text": base64_runs(&strip_blocks(text, true)), "scope": "global"});
+    let mut c = capture("oboete", "directive", body, &payload, ts, settings);
+    c.event.repo = None;
+    c.event.cwd = None;
+    (c.event.branch, c.event.head, c.event.gitdir) = (None, None, None);
+    c
+}
+
 /// The one gate every stored string passes (spec 2.2): `redact::scan_capped` over its whole
 /// length (head and tail above the cap), each finding kept with the field it is in.
 struct Gate<'a> {
