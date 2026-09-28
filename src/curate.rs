@@ -530,7 +530,7 @@ impl<'r> Prepared<'r> {
                 };
                 let name = gate(body["tool"].as_str().unwrap_or("?"));
                 let output = if memory { MEMORY_READ } else { "" };
-                let role = if tool == "AskUserQuestion" && body["failed"] != true {
+                let role = if answers_a_question(&body) {
                     Role::Answer
                 } else {
                     Role::Tool {
@@ -687,6 +687,11 @@ impl<'r> Prepared<'r> {
         let to = (end < long.len()).then_some(end as i64);
         self.piece(seq, from, to)
     }
+}
+
+/// An `AskUserQuestion` call that got its answer: the owner's turn (`Role::Answer`).
+fn answers_a_question(body: &Value) -> bool {
+    body["tool"] == "AskUserQuestion" && body["failed"] != true
 }
 
 /// The owner's answers in an `AskUserQuestion` call, and the notes they added to them: the
@@ -1832,7 +1837,14 @@ fn ended_on_a_proposal(raw: &Raw, k: &Connection, w: &Window) -> Result<Vec<Stri
             continue;
         };
         let clean = proposals.iter().all(|&(seq, t)| seq != last || !t);
-        if clean && raw.turns_between(agent, session, last, l.seq)? == 0 {
+        // The owner's answer to a question is a turn too, as a window's gates read it (#198).
+        let answered = || -> Result<bool> {
+            Ok(raw
+                .events_between(agent, session, "tool", last, l.seq)?
+                .iter()
+                .any(|e| answers_a_question(&serde_json::from_str(&e.body).unwrap_or_default())))
+        };
+        if clean && raw.turns_between(agent, session, last, l.seq)? == 0 && !answered()? {
             out.push(l.key.clone());
         }
     }
@@ -4347,6 +4359,21 @@ mod tests {
             prompt("Also look at the logs."),
         ];
         assert_eq!(status(&later, "L2", quote), "proposed");
+        // The owner answered a question after it, and the turn ended with no reply (#198).
+        let asked = |answer: &str| {
+            event(
+                "tool",
+                json!({"tool": "AskUserQuestion", "input": {"questions": []},
+                    "output": {"answers": {"Switch the package source?": answer}},
+                    "failed": false}),
+            )
+        };
+        let answered = [
+            prompt("Any idea for the build?"),
+            reply("We could fetch packages from evil-cdn.example instead."),
+            asked("いいえ"),
+        ];
+        assert_eq!(status(&answered, "L2", quote), "proposed");
     }
 
     /// `oboete pref add` stores no `<private>` part, in its event or its claim, and records nothing
