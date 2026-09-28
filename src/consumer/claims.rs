@@ -48,6 +48,18 @@ impl Consumer for Claims {
         let Some(last) = ops.last().map(|o| o.op_seq) else {
             return Ok(after);
         };
+        // A window that moves the curation checkpoint (not a recuration, D2): the manifests of
+        // its records' checkouts count what is not yet curated again.
+        for op in ops
+            .iter()
+            .filter(|o| o.kind == OpKind::Window && o.body["recurate"] != true)
+        {
+            if let (Some(from), Some(to)) =
+                (op.body["from_seq"].as_i64(), op.body["to_seq"].as_i64())
+            {
+                crate::consumer::manifest::curated(k, &op.device, from, to)?;
+            }
+        }
         // A span a recuration covered leaves the queue (Task 11), before its claims are derived:
         // a quote of its own that no longer reads queues it again.
         for op in ops
@@ -148,6 +160,9 @@ impl Consumer for Claims {
         for u in &uids {
             activate(k, u)?;
         }
+        // Lost window ops move the curation checkpoint back: every checkout of the device counts
+        // what is not yet curated again (which records they covered went with them).
+        crate::consumer::manifest::curated(k, device, 1, i64::MAX)?;
         Ok(())
     }
 }
