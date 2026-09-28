@@ -1111,7 +1111,7 @@ mod tests {
             length: quote.len() as i64,
             sentence: 0,
             quote: quote.clone(),
-            nth: 0,
+            claim_at: None,
         };
         let uid = crate::claims::uid(kind, &evidence);
         let op = crate::claims::ClaimOp {
