@@ -1129,34 +1129,73 @@ pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<Str
             .check(check)
             .run("curator", span, prompt, &schema())
     };
-    let (mut claims, mut retracted, mut failed) = (0, 0, Vec::new());
-    for (span, ws) in &plan {
-        let mut all = true;
-        for (i, w) in ws.iter().enumerate() {
-            let last = (all && i + 1 == ws.len()).then_some(span);
-            match recurate_window(&mut raw, &k, &rules, &cfg.summary, &mut curator, w, last)? {
-                Ok((c, r)) => (claims, retracted) = (claims + c, retracted + r),
-                Err(why) => {
-                    all = false;
-                    failed.push(format!("{}-{}: {why}", w.from_seq, w.to_seq));
-                }
-            }
-        }
-    }
+    let sent = send_plan(&mut raw, &k, &rules, &cfg.summary, &mut curator, &plan)?;
     drop((k, raw, held));
     crate::worker::run_once(home)?;
     out.push_str(&format!(
-        "{} window(s) curated again: {claims} claim(s), {retracted} retracted\n",
-        windows - failed.len()
+        "{} window(s) curated again: {} claim(s), {} retracted\n",
+        sent.windows, sent.claims, sent.retracted
     ));
-    for f in &failed {
-        out.push_str(&format!("not curated, every provider went past: {f}\n"));
+    for f in &sent.failed {
+        out.push_str(&format!(
+            "not curated, every provider went past: {f}; the rest of its span is left for the \
+             next run\n"
+        ));
     }
     Ok(out)
 }
 
-/// This device's windows every provider went past (`skipped`), less those a later recuration
-/// covered: what `oboete recurate --skipped` sends.
+/// What `send_plan` curated.
+#[derive(Debug, Default, PartialEq)]
+pub struct Sent {
+    pub windows: usize,
+    pub claims: usize,
+    pub retracted: usize,
+    pub failed: Vec<String>,
+}
+
+/// Each span's windows in order, each naming the part of its span curated so far. A span stops
+/// at the first window every provider goes past: the chain is spent, and the windows after it
+/// would spend it again; the next run starts there.
+pub fn send_plan(
+    raw: &mut Raw,
+    k: &Connection,
+    rules: &Rules,
+    summary: &Summary,
+    curator: &mut Curator,
+    plan: &[(Span, Vec<Window>)],
+) -> Result<Sent> {
+    let mut sent = Sent::default();
+    for (span, ws) in plan {
+        for (i, w) in ws.iter().enumerate() {
+            let through = if i + 1 == ws.len() {
+                span.clone()
+            } else {
+                Span {
+                    to: w.to_seq,
+                    to_offset: w.to_offset,
+                    ..span.clone()
+                }
+            };
+            match recurate_window(raw, k, rules, summary, curator, w, Some(&through))? {
+                Ok((c, r)) => {
+                    sent.windows += 1;
+                    (sent.claims, sent.retracted) = (sent.claims + c, sent.retracted + r);
+                }
+                Err(why) => {
+                    sent.failed
+                        .push(format!("{}-{}: {why}", w.from_seq, w.to_seq));
+                    break;
+                }
+            }
+        }
+    }
+    Ok(sent)
+}
+
+/// This device's windows every provider went past (`skipped`), less what a later recuration
+/// covered (a span whose first part it curated before a failure leaves the rest): what
+/// `oboete recurate --skipped` sends.
 pub fn skipped_spans(raw: &Raw) -> Result<Vec<Span>> {
     let device = raw.device().to_owned();
     let (mut after, mut skipped, mut recurated) = (0, Vec::new(), Vec::new());
@@ -1169,9 +1208,9 @@ pub fn skipped_spans(raw: &Raw) -> Result<Vec<Span>> {
                 continue;
             };
             if o.body["recurate"] == true {
-                // A span it completed, whatever windows that took.
-                if let Some(whole) = op_span(&o.body["covers"]) {
-                    recurated.push((o.op_seq, whole));
+                // The part of a span curated through it, whatever windows that took.
+                if let Some(through) = op_span(&o.body["covers"]) {
+                    recurated.push((o.op_seq, through));
                 }
                 recurated.push((o.op_seq, span));
             } else if o.body["outcome"] == "skipped" {
@@ -1179,15 +1218,25 @@ pub fn skipped_spans(raw: &Raw) -> Result<Vec<Span>> {
             }
         }
     }
-    let covered = |at: i64, s: &Span| {
-        recurated
-            .iter()
-            .any(|(r, c)| *r > at && c.start() <= s.start() && s.end() <= c.end())
+    // What a later recuration left of each skipped span, in op order.
+    let rest = |at: i64, mut s: Span| {
+        for (_, c) in recurated.iter().filter(|(r, _)| *r > at) {
+            if c.start() > s.start() || c.end() < s.start() {
+                continue;
+            }
+            if s.end() <= c.end() {
+                return None;
+            }
+            (s.from, s.from_offset) = match c.to_offset {
+                Some(o) => (c.to, Some(o)),
+                None => (c.to + 1, None),
+            };
+        }
+        Some(s)
     };
     Ok(skipped
         .into_iter()
-        .filter(|(at, s)| !covered(*at, s))
-        .map(|(_, s)| s)
+        .filter_map(|(at, s)| rest(at, s))
         .collect())
 }
 
@@ -1203,11 +1252,12 @@ fn op_span(op: &Value) -> Option<Span> {
 
 /// Curates window `w` again (Task 11): the answer's window op, marked `recurate: true` so the
 /// checkpoint stays where it is (D2), its claims, which become new derivations of the same uids
-/// (MUST-M18), and a `retracted` derivation of each claim anchored in the window that the answer
-/// no longer gives, at its active derivation's tier so it is the active one (an owner correction
-/// still applies over it). One append. A window with no text to read is covered without a call,
-/// as the curation phase covers one. `covers`, on the last window of a span whose windows were all
-/// curated, names that span: it is off the queue and no longer skipped, whatever windows it took.
+/// (MUST-M18), and a `retracted` derivation of each unsettled claim anchored in the window that
+/// the answer no longer gives, at its active derivation's tier so it is the active one (an owner
+/// correction still applies over it). One append. A window with no text to read is covered
+/// without a call, as the curation phase covers one. `covers` names the part of a span curated
+/// through this window, from the span's start: that part is off the queue and no longer skipped,
+/// whatever windows it took, and a later run sends only the rest.
 /// How many claims and retractions it wrote, or why every provider went past.
 pub fn recurate_window(
     raw: &mut Raw,
@@ -1268,9 +1318,10 @@ pub fn recurate_window(
 }
 
 /// The active derivation of each claim whose first quote is in `w` (inside its offsets where it
-/// starts or ends within a split event, so one part of an event never retracts another's), not
-/// retracted and not global (the owner's `pref add`, which no window shows), as a claim op with
-/// its uid.
+/// starts or ends within a split event, so one part of an event never retracts another's), as a
+/// claim op with its uid: an unsettled one (`proposed`, `unverified`), not global (the owner's
+/// `pref add`, which no window shows). A settled claim stays when an answer leaves it out: a
+/// curator's answers vary, and `retracted` needs the user's words or the owner's correction.
 fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims::ClaimOp)>> {
     let mut derivations = k.prepare(
         "SELECT d.uid, d.op_device, d.op_seq, d.kind, d.speaker, d.scope, d.body, d.tier
@@ -1279,7 +1330,7 @@ fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims:
          WHERE d.anchor_device = ?1 AND d.anchor_seq BETWEEN ?2 AND ?3
            AND (e.seq <> ?2 OR ?4 IS NULL OR e.offset >= ?4)
            AND (e.seq <> ?3 OR ?5 IS NULL OR e.offset < ?5)
-           AND d.status <> 'retracted' AND d.scope <> 'global'
+           AND d.status IN ('proposed', 'unverified') AND d.scope <> 'global'
          ORDER BY d.anchor_seq, d.uid",
     )?;
     let mut evidence = k.prepare(
@@ -3348,7 +3399,8 @@ mod tests {
             } else {
                 return json!({"claims": [], "summary": "s"});
             };
-            json!({"claims": [claim("c1", "decided", line, quote, json!([]))], "summary": "s"})
+            // Unsettled, so that a recuration that leaves one out retracts it.
+            json!({"claims": [claim("c1", "proposed", line, quote, json!([]))], "summary": "s"})
         };
         let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
             Ok(ChainResult {
@@ -3371,7 +3423,7 @@ mod tests {
         let done = recurate_window(&mut raw, &k, &rules, &summary, &mut none, &again[0], None);
         assert_eq!(done.unwrap(), Ok((0, 1)));
         consume(&raw, &mut k);
-        // The first part's claim stays (a proposal: its turn ends in a later window, Task 8).
+        // The first part's claim stays: it is quoted from the other part.
         let retracted = ("Log to stderr".to_owned(), "retracted".to_owned());
         assert_eq!(
             active(&k),
@@ -3439,8 +3491,74 @@ mod tests {
         );
     }
 
-    /// A skipped span a recuration cuts into several windows is no longer skipped once its last
-    /// window lands, which none of them covers alone; a window with no text calls no one.
+    /// A span whose second window every provider goes past: the run stops there, the first
+    /// window's op names the part it curated, and that part leaves the queue and stops being
+    /// skipped; the next run sends only the rest (review on #189).
+    #[test]
+    fn a_failed_window_leaves_only_the_rest_of_its_span() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        for text in ["one two three", "four five six", "seven eight nine"] {
+            raw.append(&prompt(text)).unwrap();
+        }
+        let skipped = json!({"from_seq": 1, "from_offset": null, "to_seq": 3,
+            "to_offset": null, "outcome": "skipped", "elided": []});
+        raw.append_ops(&[(OpKind::Window, skipped)]).unwrap();
+        consume(&raw, &mut k);
+        k.execute(
+            "INSERT INTO recurate(device, from_seq, to_seq, op_device, op_seq)
+             VALUES(?1, 1, 3, ?1, 9)",
+            [raw.device()],
+        )
+        .unwrap();
+        let (rules, summary) = (Rules::default(), curating(20));
+        let span = Span::records(1, 3);
+        let windows = span_windows(&raw, &span, 20, &rules).unwrap();
+        assert_eq!(windows.len(), 3);
+        let calls = std::cell::Cell::new(0);
+        let mut second_fails = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                return Err(went_past(&[("groq", "HTTP 400", Skip::Failed)]));
+            }
+            Ok(answered("fake"))
+        };
+        let plan = [(span.clone(), windows.clone())];
+        let sent = send_plan(&mut raw, &k, &rules, &summary, &mut second_fails, &plan).unwrap();
+        assert_eq!((sent.windows, sent.failed.len(), calls.get()), (1, 1, 2));
+        let first = windows.iter().find(|w| w.to_seq == 1).unwrap();
+        let ops = raw.ops_after(raw.device(), 0, 100).unwrap();
+        let op = &ops.last().unwrap().body;
+        assert_eq!(op["to_seq"], first.to_seq);
+        assert_eq!(op["covers"]["from_seq"], 1);
+        assert_eq!(op["covers"]["to_seq"], 1);
+        consume(&raw, &mut k);
+        let queued = |k: &Connection| -> Vec<(i64, i64)> {
+            k.prepare("SELECT from_seq, to_seq FROM recurate")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let rest = Span::records(2, 3);
+        assert_eq!(queued(&k), [(2, 3)]);
+        assert_eq!(skipped_spans(&raw).unwrap(), std::slice::from_ref(&rest));
+        // The next run: two windows, and nothing is left.
+        let again = span_windows(&raw, &rest, 20, &rules).unwrap();
+        assert_eq!(again.len(), 2);
+        let mut none = |_: &str, _: &str, _: &AnswerCheck| Ok(answered("fake"));
+        let plan = [(rest, again)];
+        let sent = send_plan(&mut raw, &k, &rules, &summary, &mut none, &plan).unwrap();
+        assert_eq!((sent.windows, sent.failed.len()), (2, 0));
+        consume(&raw, &mut k);
+        assert!(queued(&k).is_empty());
+        assert!(skipped_spans(&raw).unwrap().is_empty());
+    }
+
+    /// A skipped span a recuration cuts into several windows loses each window's part as it
+    /// lands, and is no longer skipped once its last lands; a window with no text calls no one.
     #[test]
     fn a_skipped_span_of_several_windows_and_a_window_with_no_text() {
         let home = tempfile::tempdir().unwrap();
@@ -3463,8 +3581,13 @@ mod tests {
         assert!(windows.len() > 1, "{}", windows.len());
         let mut none = |_: &str, _: &str, _: &AnswerCheck| Ok(answered("fake"));
         for (i, w) in windows.iter().enumerate() {
+            let rest = Span {
+                from: w.from_seq,
+                from_offset: w.from_offset,
+                ..span.clone()
+            };
             let still = skipped_spans(&raw).unwrap();
-            assert_eq!(still, std::slice::from_ref(&span), "window {i}");
+            assert_eq!(still, [rest], "window {i}");
             let last = (i + 1 == windows.len()).then_some(&span);
             recurate_window(&mut raw, &k, &rules, &summary, &mut none, w, last)
                 .unwrap()
@@ -3490,9 +3613,10 @@ mod tests {
             .collect()
     }
 
-    /// Task 11: a recuration's answer replaces its window's claims. One it gives again keeps its
-    /// uid; one anchored in the window that it no longer gives is retracted (a newer derivation
-    /// at the same tier); the curation checkpoint does not move.
+    /// Task 11: a recuration's answer replaces its window's unsettled claims: one anchored in the
+    /// window that it no longer gives is retracted (a newer derivation at the same tier). A
+    /// settled one it leaves out stays, since a curator's answers vary and `retracted` needs the
+    /// user's words (review on #189). The curation checkpoint does not move.
     #[test]
     fn a_claim_a_recuration_no_longer_produces_is_retracted() {
         let home = tempfile::tempdir().unwrap();
@@ -3501,10 +3625,10 @@ mod tests {
         raw.append(&prompt("Use tabs.")).unwrap();
         raw.append(&prompt("Log to stderr.")).unwrap();
         let tabs = claim("c1", "decided", "L1", "Use tabs", json!([]));
-        let stderr = claim("c2", "decided", "L2", "Log to stderr", json!([]));
+        let stderr = claim("c2", "proposed", "L2", "Log to stderr", json!([]));
         let answers = std::cell::RefCell::new(vec![
-            json!({"claims": [tabs.clone(), stderr], "summary": "s"}),
-            json!({"claims": [tabs], "summary": "s"}),
+            json!({"claims": [tabs, stderr], "summary": "s"}),
+            json!({"claims": [], "summary": "s"}),
         ]);
         let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
             Ok(ChainResult {
@@ -3516,7 +3640,8 @@ mod tests {
         run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
         consume(&raw, &mut k);
         let decided = |b: &str| (b.to_owned(), "decided".to_owned());
-        assert_eq!(active(&k), [decided("Log to stderr"), decided("Use tabs")]);
+        let proposed = ("Log to stderr".to_owned(), "proposed".to_owned());
+        assert_eq!(active(&k), [proposed, decided("Use tabs")]);
         let checkpoint = raw.curation_checkpoint(raw.device()).unwrap();
         // Queued spans (Task 6's `Anchors`): the one the recuration covers leaves the queue.
         for (from, to, op_seq) in [(1, 2, 98), (5, 6, 99)] {
@@ -3539,7 +3664,7 @@ mod tests {
             &windows[0],
             None,
         );
-        assert_eq!(done.unwrap(), Ok((1, 1)));
+        assert_eq!(done.unwrap(), Ok((0, 1)));
         consume(&raw, &mut k);
         let retracted = ("Log to stderr".to_owned(), "retracted".to_owned());
         assert_eq!(active(&k), [retracted, decided("Use tabs")]);

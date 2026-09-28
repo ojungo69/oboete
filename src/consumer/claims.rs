@@ -62,14 +62,25 @@ impl Consumer for Claims {
                     op.body["to_seq"].as_i64()
                 ],
             )?;
-            // The span its windows all curated, when it took several.
+            // The part of a span curated through this window, when it took several: a span it
+            // ends inside of keeps the rest (from a record it ends within, that record whole).
+            let covers = &op.body["covers"];
+            let (from, to) = (covers["from_seq"].as_i64(), covers["to_seq"].as_i64());
             k.execute(
                 "DELETE FROM recurate WHERE device = ?1 AND from_seq >= ?2 AND to_seq <= ?3",
-                params![
-                    op.device,
-                    op.body["covers"]["from_seq"].as_i64(),
-                    op.body["covers"]["to_seq"].as_i64()
-                ],
+                params![op.device, from, to],
+            )?;
+            let rest = to.map(|t| {
+                if covers["to_offset"].is_i64() {
+                    t
+                } else {
+                    t + 1
+                }
+            });
+            k.execute(
+                "UPDATE recurate SET from_seq = ?4
+                 WHERE device = ?1 AND from_seq >= ?2 AND from_seq <= ?3 AND to_seq > ?3",
+                params![op.device, from, to, rest],
             )?;
         }
         let mut derived = Vec::new();
