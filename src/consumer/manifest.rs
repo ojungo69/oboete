@@ -1011,6 +1011,14 @@ mod tests {
         }
         worker::run_once(home.path()).unwrap();
         assert_eq!(manifest(home.path()).0, all);
+        // A restore that lost the last two window ops while knowledge.db stays.
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM ops WHERE op_seq > 1", [])
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let back = manifest(home.path()).0;
+        assert!(back.contains("5 record(s) not yet curated"), "{back}");
     }
 
     #[test]

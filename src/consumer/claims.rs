@@ -160,6 +160,9 @@ impl Consumer for Claims {
         for u in &uids {
             activate(k, u)?;
         }
+        // Lost window ops move the curation checkpoint back: every checkout of the device counts
+        // what is not yet curated again (which records they covered went with them).
+        crate::consumer::manifest::curated(k, device, 1, i64::MAX)?;
         Ok(())
     }
 }
