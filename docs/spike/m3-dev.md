@@ -31,7 +31,7 @@ Three homes were replayed from the same fixtures in the same order: their `(seq,
 - The two homes without the shrink give the same windows and the same tokens, so the cut is deterministic.
 - **The shrink sends 70.8% less**: 17.64M against 60.43M estimated tokens, in 3,493 windows instead of 15,426. That clears the −30% clause of spec 3.5 (a). The estimate above (−71%) was right.
 - The token counts include each prompt's fixed part and its candidates. The stub answered no claims, so no session carried anything.
-- Every record has a repository value (11 in all, over the 63 sessions). A session that ran outside a git checkout gets its folder as its repository, as the labels' `repo` field shows.
+- Every record has a repository value (11 in all, over the 63 sessions). A session that ran outside a git checkout gets its folder as its repository, as the labels' `repo` field shows. All 63 dev pairs have both of their decisions in one repository, so repository scope never keeps a pair's later claim from seeing the earlier one as a candidate.
 
 ## What the curator is sent
 
