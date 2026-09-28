@@ -14,7 +14,7 @@ read here. Every command takes the binary by path: `oboete` on PATH is the owner
                                 each labeled window sent again to one live entry by `recurate`
                                 (estimates only without --yes)
   m3.py score <bin> <name>      M3's counts on the labeled items"""
-import collections, glob, http.server, json, os, sqlite3, subprocess, sys, threading, time
+import collections, glob, http.server, json, os, re, sqlite3, subprocess, sys, threading, time
 from datetime import datetime
 
 from common import E, clean_env, owner_only, read_jsonl, sha256_file
@@ -310,6 +310,12 @@ def live(binary, name, send, tool=None):
                 f.write(json.dumps({'span': [a, b], 'code': r.returncode, 'out': out, 'err': r.stderr[-500:],
                                     'attempt': attempt}) + '\n')
             if r.returncode == 0 and (not send or 'not curated' not in out):
+                break
+            # Some of the span's windows were curated and one was not: sending the span again would
+            # curate those windows a second time with their first claims as candidates, a history
+            # the other arm does not have (review on #218). The window is left, as the product
+            # leaves it for its next run.
+            if send and re.search(r'^[1-9][0-9]* window\(s\) curated again', out, re.M):
                 break
             p = sqlite3.connect(f'file:{h}/providers.db?mode=ro', uri=True)
             until = p.execute("SELECT max(down_until) FROM provider_state").fetchone()[0] or 0
