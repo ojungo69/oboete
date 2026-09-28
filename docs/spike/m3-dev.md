@@ -80,15 +80,13 @@ Limits, the same for both arms:
 - N is 44 owner-yes decisions (45, less `d424`, which matches no record), so a single label is 0.023, which is over the 0.02 line by itself. The raw counts are reported next to the ratios.
 - One run per arm cannot separate one label's difference from the chain's own non-determinism. So a difference of one label is read as noise, and two or more count against the shrink.
 
-## Where the recall clause stands (2026-09-28, final)
+## Where the recall clause stands (2026-09-28, after the arms)
 
-The two arms ended with recall 13 of 44 with the shrink and 10 of 44 without it (the mid-run counts were 4 and 2). The rule above reads two or more fewer as a failure; the shrink recalled three more, so the clause holds, for decisions. Both arms ran the #194 binary, before #195, so the owner's picks in `AskUserQuestion` could not reach `decided` in either (0 of 13 in both).
+The two arms ended with recall 13 of 44 with the shrink and 10 of 44 without it (the mid-run counts were 4 and 2), but they cannot decide the clause. Some of their spans shared a record, so that window was sent twice, and the second recuration retracted the claims of the first: 5 overlaps and 202 claims retracted in the shrink arm, 1 and 23 in the other. The shrink moves window boundaries, so the effect does not cancel between the arms. The harness now merges spans that share a record (#196's commit), and the clause is measured again on the current main with both arms cut that way.
 
-The two numbers that respond to the shrink, read after the fact:
-- labeled items with any claim quoting their record: 32 of 44 with the shrink, 28 without;
-- drafts dropped because their quote is not in the window: 324 over 145 kept answers with the shrink (2.2 each), 227 over 134 without (1.7). With the shrink the curator more often quotes what it was not shown whole.
+Both arms ran the #194 binary, before #195, so the owner's picks in `AskUserQuestion` could not reach `decided` in either (0 of 13 in both).
 
-Two more arms ran on the #195 binary without the shrink, one with the curator's thinking as shipped (`full`) and one with `"alwaysThinkingEnabled": false` in the curator's `--settings` (`nothink`). docs/milestone-3.md has the four arms side by side.
+Two more arms ran on the #195 binary without the shrink and with merged spans (no overlap, no claim retracted), one with the curator's thinking as shipped (`full`) and one with `"alwaysThinkingEnabled": false` in the curator's `--settings` (`nothink`). docs/milestone-3.md has the four arms side by side.
 
 ## Definitions for scoring (fixed before any live number)
 

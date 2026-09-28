@@ -5,7 +5,7 @@ The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and
 ## Where it stands (2026-09-28)
 
 - Tasks 1 to 11 are merged. The last of them are recuration (#189), the crash harness (#190), and claude's built-in plugins turned off for a curator call (#191, Claude Code 2.1.283).
-- Task 12, the judge's first role ("shrink, never drop"), is behind `[summary] shrink` (#194) and passes on dev (below); turning it on by default is a PR of its own. Its second role (a veto on `decided` and `supersedes`) has no code: it waits on M3.
+- Task 12, the judge's first role ("shrink, never drop"), is behind `[summary] shrink` (#194), off by default. Its input clause passes on dev; its recall clause is measured again (below). Its second role (a veto on `decided` and `supersedes`) has no code: it waits on M3.
 - Task 13 has the lines below: M2 passes, Cost fails with today's defaults, M3 fails on the dev labels. The first dev tuning of the gates is merged: the owner's answer to `AskUserQuestion` is the owner's words (#195, #202, #209).
 
 ## M2 on the dev transcripts: passes
@@ -34,7 +34,7 @@ A heavy day, measured: the owner's transcripts of the last 90 days (3,870 files 
 - **The subscriptions' speed is a limit too.** claude haiku takes about 100 s a window (212 calls: median 101 s, 99th percentile 187 s). The 526 windows of a heavy day with the shrink on are about 14.6 hours of calls in a row, and without the shrink about 65 hours. A day that heavy is curated over the following days, or by several entries at once.
 - Paid entries: none in the default chain, so the USD 5 cap is not reached.
 - With the curator's thinking off (measured below: 16.6 s a call at the median), the 526 windows are about 2.4 hours of calls in a row. That is a projection: no arm ran the shrink and thinking off together.
-- What would meet the line is a decision about defaults: token budgets at 20% on the free entries, the shrink on, and the curator's thinking off (#193).
+- What would meet the line is a decision about defaults: token budgets at 20% on the free entries, the shrink on once its recall clause passes, and the curator's thinking off (#193, now the default).
 
 ## M3 on the dev labels: fails
 
@@ -47,7 +47,7 @@ The line: recall of the owner's decisions 80% or more, no overturned decision sh
 | full | #195 (the owner's picks are the user's words) | off | on | 19 | 8 | 1 | 1 | 95 |
 | nothink | #195 | off | off | 24 | 9 | 1 | 3 | 122 |
 
-whole and short cut 114 spans; full and nothink 109, because spans that share a record were merged into one (#196's commit). The table is `m3.py score`; the counts by kind, the drop classes and the records below were read after the fact with one-off queries over the same homes.
+whole and short cut 114 spans, and some of them shared a record, so that record's window was sent twice and the second pass retracted the first pass's claims: 1 overlap and 23 claims retracted in whole, 5 overlaps and 202 retracted in short. Their rows are kept here, but they do not measure what they were meant to. full and nothink cut 109 spans, merged so that none shares a record (#196's commit), and retracted none. The table is `m3.py score`; the counts by kind, the drop classes and the records below were read after the fact with one-off queries over the same homes.
 
 - **The owner's picks in `AskUserQuestion`** (#195): 11 of the 13 labels that are such picks reached `decided` in full, and none did in whole or short. That is the whole of the gain from whole to full (the typed prompts went from 10 to 8 of 28, run to run).
 - **Recall by kind**, nothink: picks 10 of 13, typed prompts 14 of 28, accepted proposals quoted from the assistant's reply 0 of 3 (0 in every arm).
@@ -67,7 +67,7 @@ Measured once each on the #195 binary, after the fact: there was no rule declare
 - A curator call took 16.6 s at the median with thinking off (90th percentile 28.7 s), 101 s with it on (150 s). 0 answers were refused with it off, 5 with it on (2 unanchored, 2 prose, 1 shape).
 - Decided claims: 122 with it off, 95 with it on.
 
-So thinking off is at least as good here and six times faster. It is a PR of its own, so it can be reverted alone.
+So thinking off is at least as good here and six times faster. It is the default since #219, a PR of its own so it can be reverted alone.
 
 ### Not measured together
 
@@ -80,19 +80,11 @@ The shrink was measured on the #194 binary with thinking on; thinking off on the
 3. The quote match: whitespace-blind, then the paraphrases.
 4. One arm with the defaults as they would ship (shrink on, thinking off, the current main).
 
-## Judge, role (a): the shrink: passes on dev
-
-Both arms ran the same binary (#194 with #191) and one live entry (claude haiku, thinking on as shipped), once each, over the windows that hold a label. The rule was declared before measuring (docs/spike/m3-dev.md): one label's difference is noise, two or more fewer count against the shrink.
+## Judge, role (a): the shrink: not established
 
 - **Input**: 70.9% less (17.59M against 60.43M estimated tokens on the dev set), past the 30% the spec asks.
-- **Recall**: 13 of 44 with the shrink, 10 of 44 without it. The shrink recalled three more, so "drops by 0.02 or less" holds.
-- A window cut with the shrink holds about four times the records, so the arms' labeled spans differ: 136 windows and about 0.74M estimated tokens with the shrink, 128 and 0.62M without. That is the shrink as it would ship, not a second variable.
-- Read after the fact, not part of the rule:
-  - labeled items with any claim on their record: 32 of 44 with the shrink, 28 without;
-  - drafts dropped because their quote is not in the window: 324 over 145 kept answers (2.2 each) with the shrink, 227 over 134 (1.7) without;
-  - records the owner said are not decisions, shown as current decisions: 1 of 5 with the shrink, 4 of 5 without.
-
-So the shrink can be on by default, for decisions: lessons and fixes have no dev labels, and the spec's clause names all three. It is a PR of its own after this note, and the test labels confirm it when they exist.
+- **Recall**: the two arms that were to decide it (whole and short, above) sent overlapping spans, and short's second passes retracted 202 claims against whole's 23. So 13 against 10 does not measure the shrink. It is measured again on the current main, with merged spans, the shrink on and off, and the rule declared before (one label's difference is noise, two or more fewer fail).
+- **Even if it passes**, it passes for decisions: the clause names lessons and fixes too, which have no dev labels. So the shrink stays off by default until they are measured as well (review on #220).
 
 ## Window
 
