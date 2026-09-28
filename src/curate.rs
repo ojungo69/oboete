@@ -12,7 +12,7 @@ use crate::providers_db::{self, Pending};
 use crate::raw::{Event, Item, OpKind, Raw};
 use crate::redact::Rules;
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
 /// D8's interim window size, in estimated tokens (`budget::estimate`): Groq free's 8,000-token
@@ -964,6 +964,141 @@ fn answered(
             Err(e) => return Err(e),
         },
     })
+}
+
+/// Records `from` to `to` of this device, to curate again (Task 11).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    pub from: i64,
+    pub to: i64,
+}
+
+/// The windows `span` is cut into, in order, as `next_window` cuts the device's records.
+pub fn span_windows(raw: &Raw, span: &Span, budget: u32, rules: &Rules) -> Result<Vec<Window>> {
+    let device = raw.device().to_owned();
+    let (mut at, mut out) = ((span.from - 1, None), Vec::new());
+    while let Some(w) = window_at(raw, &device, at, Some(span.to), budget, rules)? {
+        at = (w.to_seq, w.to_offset);
+        let last = w.to_seq >= span.to && w.to_offset.is_none();
+        out.push(w);
+        if last {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Curates window `w` again (Task 11): the answer's window op, marked `recurate: true` so the
+/// checkpoint stays where it is (D2), its claims, which become new derivations of the same uids
+/// (MUST-M18), and a `retracted` derivation of each claim anchored in the window that the answer
+/// no longer gives, at its active derivation's tier so it is the active one (an owner correction
+/// still applies over it). One append. How many claims and retractions it wrote, or why every
+/// provider went past.
+pub fn recurate_window(
+    raw: &mut Raw,
+    k: &Connection,
+    rules: &Rules,
+    summary: &Summary,
+    curator: &mut Curator,
+    w: &Window,
+) -> Result<std::result::Result<(usize, usize), String>> {
+    crate::claims::schema(k)?;
+    let req = request(raw, k, rules, summary, w)?;
+    let (mut op, claims) = match answered(raw, k, rules, w, &req, curator)? {
+        Ok(answer) => answer,
+        Err(failed) => return Ok(Err(ChainFailed(failed).to_string())),
+    };
+    let given: std::collections::HashSet<String> = claims
+        .iter()
+        .filter_map(|c| serde_json::from_value::<crate::claims::ClaimOp>(c.clone()).ok())
+        .filter_map(|c| Some(crate::claims::uid(&c.kind, c.evidence.first()?)))
+        .collect();
+    let recipe = op["provider"].as_str().unwrap_or("").to_owned();
+    let retracted: Vec<Value> = anchored_in(k, w)?
+        .into_iter()
+        .filter(|(uid, _)| !given.contains(uid))
+        .enumerate()
+        .map(|(i, (_, mut c))| {
+            (c.id, c.status, c.recipe) =
+                (format!("r{}", i + 1), "retracted".into(), recipe.clone());
+            (c.supersedes, c.why, c.tainted) = (Vec::new(), String::new(), false);
+            serde_json::to_value(c)
+        })
+        .collect::<serde_json::Result<_>>()?;
+    let counts = (claims.len(), retracted.len());
+    op["recurate"] = true.into();
+    op["from_seq"] = w.from_seq.into();
+    op["from_offset"] = w.from_offset.into();
+    op["to_seq"] = w.to_seq.into();
+    op["to_offset"] = w.to_offset.into();
+    op["elided"] = w.elided.clone().into();
+    let mut ops = vec![(OpKind::Window, within_op_cap(op))];
+    ops.extend(
+        claims
+            .into_iter()
+            .chain(retracted)
+            .map(|c| (OpKind::Claim, c)),
+    );
+    raw.append_ops(&ops)?;
+    Ok(Ok(counts))
+}
+
+/// The active derivation of each claim whose first quote is in `w`'s records, not retracted and
+/// not global (the owner's `pref add`, which no window shows), as a claim op with its uid.
+// ponytail: a window that starts inside a split event counts that event's claims whole; the
+// quote's offset against `from_offset` when a split event's claims must stay.
+fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims::ClaimOp)>> {
+    let mut derivations = k.prepare(
+        "SELECT d.uid, d.op_device, d.op_seq, d.kind, d.speaker, d.scope, d.body, d.tier
+         FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
+         WHERE d.anchor_device = ?1 AND d.anchor_seq BETWEEN ?2 AND ?3
+           AND d.status <> 'retracted' AND d.scope <> 'global'
+         ORDER BY d.anchor_seq, d.uid",
+    )?;
+    let mut evidence = k.prepare(
+        "SELECT device, seq, offset, length, sentence, quote FROM evidence
+         WHERE op_device = ?1 AND op_seq = ?2 ORDER BY idx",
+    )?;
+    let rows: Vec<(String, String, i64, crate::claims::ClaimOp)> = derivations
+        .query_map(params![w.device, w.from_seq, w.to_seq], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                crate::claims::ClaimOp {
+                    id: String::new(),
+                    kind: r.get(3)?,
+                    status: String::new(),
+                    speaker: r.get(4)?,
+                    scope: r.get(5)?,
+                    body: r.get(6)?,
+                    evidence: Vec::new(),
+                    supersedes: Vec::new(),
+                    recipe: String::new(),
+                    tier: r.get(7)?,
+                    why: String::new(),
+                    tainted: false,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = Vec::new();
+    for (uid, op_device, op_seq, mut c) in rows {
+        c.evidence = evidence
+            .query_map(params![op_device, op_seq], |r| {
+                Ok(crate::claims::Evidence {
+                    device: r.get(0)?,
+                    seq: r.get(1)?,
+                    offset: r.get(2)?,
+                    length: r.get(3)?,
+                    sentence: r.get(4)?,
+                    quote: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        out.push((uid, c));
+    }
+    Ok(out)
 }
 
 /// What a window every provider went past waits for, when it is tried again, and whether the
@@ -2859,6 +2994,72 @@ mod tests {
         }
         let ops = raw.ops_after(raw.device(), 0, 20).unwrap();
         (sent.into_inner(), ops)
+    }
+
+    /// The bodies and statuses of every uid's active derivation, retracted ones too.
+    fn active(k: &Connection) -> Vec<(String, String)> {
+        k.prepare("SELECT body, status FROM active ORDER BY body")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// Task 11: a recuration's answer replaces its window's claims. One it gives again keeps its
+    /// uid; one anchored in the window that it no longer gives is retracted (a newer derivation
+    /// at the same tier); the curation checkpoint does not move.
+    #[test]
+    fn a_claim_a_recuration_no_longer_produces_is_retracted() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        raw.append(&prompt("Use tabs.")).unwrap();
+        raw.append(&prompt("Log to stderr.")).unwrap();
+        let tabs = claim("c1", "decided", "L1", "Use tabs", json!([]));
+        let stderr = claim("c2", "decided", "L2", "Log to stderr", json!([]));
+        let answers = std::cell::RefCell::new(vec![
+            json!({"claims": [tabs.clone(), stderr], "summary": "s"}),
+            json!({"claims": [tabs], "summary": "s"}),
+        ]);
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            Ok(ChainResult {
+                output: answers.borrow_mut().remove(0),
+                ..answered("fake")
+            })
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
+        let decided = |b: &str| (b.to_owned(), "decided".to_owned());
+        assert_eq!(active(&k), [decided("Log to stderr"), decided("Use tabs")]);
+        let checkpoint = raw.curation_checkpoint(raw.device()).unwrap();
+        // Queued spans (Task 6's `Anchors`): the one the recuration covers leaves the queue.
+        for (from, to, op_seq) in [(1, 2, 98), (5, 6, 99)] {
+            k.execute(
+                "INSERT INTO recurate(device, from_seq, to_seq, op_device, op_seq)
+                 VALUES(?1, ?2, ?3, ?1, ?4)",
+                params![raw.device(), from, to, op_seq],
+            )
+            .unwrap();
+        }
+        let span = Span { from: 1, to: 2 };
+        let windows = span_windows(&raw, &span, WINDOW_TOKENS, &rules).unwrap();
+        assert_eq!(windows.len(), 1);
+        let done = recurate_window(&mut raw, &k, &rules, &summary, &mut chain, &windows[0]);
+        assert_eq!(done.unwrap(), Ok((1, 1)));
+        consume(&raw, &mut k);
+        let retracted = ("Log to stderr".to_owned(), "retracted".to_owned());
+        assert_eq!(active(&k), [retracted, decided("Use tabs")]);
+        assert_eq!(raw.curation_checkpoint(raw.device()).unwrap(), checkpoint);
+        let queued: Vec<i64> = k
+            .prepare("SELECT from_seq FROM recurate")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(queued, [5]);
     }
 
     fn claim(id: &str, status: &str, line: &str, quote: &str, supersedes: Value) -> Value {

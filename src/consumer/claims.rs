@@ -48,6 +48,21 @@ impl Consumer for Claims {
         let Some(last) = ops.last().map(|o| o.op_seq) else {
             return Ok(after);
         };
+        // A span a recuration covered leaves the queue (Task 11), before its claims are derived:
+        // a quote of its own that no longer reads queues it again.
+        for op in ops
+            .iter()
+            .filter(|o| o.kind == OpKind::Window && o.body["recurate"] == true)
+        {
+            k.execute(
+                "DELETE FROM recurate WHERE device = ?1 AND from_seq >= ?2 AND to_seq <= ?3",
+                params![
+                    op.device,
+                    op.body["from_seq"].as_i64(),
+                    op.body["to_seq"].as_i64()
+                ],
+            )?;
+        }
         let mut derived = Vec::new();
         for op in ops.iter().filter(|o| o.kind == OpKind::Claim) {
             if let Some(d) = derive(raw, k, op)? {
