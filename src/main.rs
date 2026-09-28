@@ -552,10 +552,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 Some(span) => {
                     let parsed = span.split_once(':').and_then(|(device, range)| {
                         let (from, to) = range.split_once('-')?;
-                        let span = curate::Span {
-                            from: from.parse().ok()?,
-                            to: to.parse().ok()?,
-                        };
+                        let span = curate::Span::records(from.parse().ok()?, to.parse().ok()?);
                         Some(curate::Again::Span(device.to_owned(), span))
                     });
                     parsed.ok_or_else(|| {
