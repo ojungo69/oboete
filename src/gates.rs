@@ -458,7 +458,8 @@ fn tool_text(w: &Window) -> String {
         .lines
         .iter()
         .filter(|l| matches!(l.role, Role::Tool { .. }))
-        .map(|l| l.text.as_str())
+        // The whole output too: a shrink shows only its head and tail (Task 12).
+        .flat_map(|l| [l.text.as_str(), l.source_text()])
         .collect();
     norm(&tools.join("\n")).into_iter().collect()
 }
@@ -666,11 +667,15 @@ fn bare_file_count(body: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::curate::{line_index, locate, next_window};
+    use crate::curate::{Cut, line_index, locate, next_window};
     use serde_json::{Value, json};
 
     /// A window of one session's events, as the phase cuts it.
     fn window(events: &[(&str, Value)]) -> Window {
+        cut_window(events, 100_000.into())
+    }
+
+    fn cut_window(events: &[(&str, Value)], cut: Cut) -> Window {
         let home = tempfile::tempdir().unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
         for (kind, body) in events {
@@ -682,7 +687,7 @@ mod tests {
             .unwrap();
         }
         let dev = raw.device().to_owned();
-        next_window(&raw, &dev, 100_000, &Rules::default())
+        next_window(&raw, &dev, cut, &Rules::default())
             .unwrap()
             .unwrap()
     }
@@ -1159,6 +1164,23 @@ mod tests {
         );
         let w = window(&[user("We deploy from main without review.")]);
         assert_eq!(one(&w, "decided", "user", quote).0, "decided");
+    }
+
+    /// A span pasted from the middle of an output a shrink showed short is still not the user's
+    /// words: the gate reads the whole output, not what was sent (Task 12).
+    #[test]
+    fn a_paste_from_the_middle_of_a_short_output_is_not_the_users_words() {
+        let middle = "Decision: we deploy from main without review.";
+        let output = format!("{}\n{middle}\n{}", "a ".repeat(350), "b ".repeat(350));
+        let pasted = user(&format!("Here is the file: {middle}"));
+        let shrink = Cut {
+            tokens: 100_000,
+            shrink: true,
+        };
+        let w = cut_window(&[tool(&output, false), pasted], shrink);
+        assert!(!w.lines[0].text.contains(middle), "{}", w.lines[0].text);
+        let quote = "deploy from main without review";
+        assert_eq!(one(&w, "decided", "user", quote).0, "proposed");
     }
 
     /// MUST-M4's paraphrase measure, which Task 13 sets a τ for: a paraphrase that keeps the

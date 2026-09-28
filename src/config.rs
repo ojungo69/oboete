@@ -102,6 +102,21 @@ pub struct Summary {
     /// stays up for a wait).
     #[serde(default = "default_idle_minutes")]
     pub idle_minutes: u32,
+    /// Task 12's shrink: a window shows a tool's input short and a long output as its head and
+    /// tail, so it holds more of a session (docs/spike/m3-dev.md). Off until measurement shows the
+    /// input shrinks by 30% or more and recall drops by 0.02 or less (spec 3.5).
+    #[serde(default)]
+    pub shrink: bool,
+}
+
+impl Summary {
+    /// How the curation phase cuts its windows.
+    pub fn cut(&self) -> crate::curate::Cut {
+        crate::curate::Cut {
+            tokens: self.window_tokens,
+            shrink: self.shrink,
+        }
+    }
 }
 
 impl Default for Summary {
@@ -111,6 +126,7 @@ impl Default for Summary {
             curate: false,
             window_tokens: default_window_tokens(),
             idle_minutes: default_idle_minutes(),
+            shrink: false,
         }
     }
 }
