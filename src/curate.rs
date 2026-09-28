@@ -81,8 +81,8 @@ pub struct Line {
     /// On an `Answer` line, the owner's answers and notes, from the whole call whatever part of it
     /// the line shows (`owners_answers`); empty on every other line.
     pub(crate) answers: Vec<String>,
-    /// A tool whose output is the owner's words (`OWNERS_WORDS`) and did not fail: `searched`
-    /// reads it with the owner's lines (#222).
+    /// A tool whose output is the owner's words (`OWNERS_WORDS`), neither failed nor interrupted:
+    /// `searched` reads it with the owner's lines (#222).
     owners: bool,
 }
 
@@ -1964,13 +1964,16 @@ fn ended_on_a_proposal(raw: &Raw, k: &Connection, w: &Window) -> Result<Vec<Stri
     Ok(out)
 }
 
-/// Candidates a window may supersede (MUST-M3): up to 20 current claims of `repo` that the full
-/// text index finds for its lines, the whole repository, every window. `said` (the owner's and the
-/// assistant's lines, where decisions are made and turned over) is searched first, and `rest`
-/// (tool text, envelopes) fills the places it leaves: about 97% of a window is tool text, and one
-/// search over all of it asked mostly for words of tool output, so an earlier decision the owner
-/// turned over was ranked out or not found (#222). Similarity only proposes them; the curator
-/// decides, and the gates check (Task 8).
+/// At most this many candidates a window is shown.
+const CANDIDATES: usize = 20;
+
+/// Candidates a window may supersede (MUST-M3): up to `CANDIDATES` current claims of `repo` that
+/// the full text index finds for its lines, the whole repository, every window. `said` (the
+/// owner's and the assistant's lines, where decisions are made and turned over) is searched first,
+/// and `rest` (tool text, envelopes) fills the places it leaves: about 97% of a window is tool
+/// text, and one search over all of it asked mostly for words of tool output, so an earlier
+/// decision the owner turned over was ranked out or not found (#222). Similarity only proposes
+/// them; the curator decides, and the gates check (Task 8).
 // ponytail: reads every current claim of the repository to keep the tips; an index on tips when
 // repositories hold tens of thousands.
 pub fn candidates(
@@ -1980,7 +1983,7 @@ pub fn candidates(
     rest: &str,
 ) -> Result<Vec<crate::claims::Claim>> {
     let current = crate::claims::current(k, repo)?;
-    // The repository's own matches only, ranked, read until 20 are current: another
+    // The repository's own matches only, ranked, read until `CANDIDATES` are current: another
     // repository's better matches never crowd them out.
     let mut st = k.prepare(
         "SELECT c.uid FROM claims_fts f JOIN claims c ON c.rowid = f.rowid
@@ -1989,7 +1992,7 @@ pub fn candidates(
     )?;
     let mut out: Vec<crate::claims::Claim> = Vec::new();
     for text in [said, rest] {
-        if out.len() == 20 {
+        if out.len() == CANDIDATES {
             break;
         }
         let all = crate::search::trigrams_upto(text, usize::MAX);
@@ -2003,7 +2006,7 @@ pub fn candidates(
             r.get::<_, String>(0)
         })?;
         for uid in ranked {
-            if out.len() == 20 {
+            if out.len() == CANDIDATES {
                 return Ok(out);
             }
             let uid = uid?;
