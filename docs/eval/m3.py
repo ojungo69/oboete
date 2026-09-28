@@ -5,9 +5,14 @@ read here. Every command takes the binary by path: `oboete` on PATH is the owner
   m3.py fixtures <bin>          each transcript the dev labels or the replay set's dev side need ->
                                 a fixture, by <bin>'s own `transcript`
   m3.py replay <bin> <name>     every fixture, merged in time order, into one home; curation off
-  m3.py stub <bin> <name>       curate that home with a localhost stub that answers no claims: the
+  m3.py stub <bin> <name> [--shrink]
+                                curate that home with a localhost stub that answers no claims: the
                                 windows, their estimated tokens, M2's coverage; no call leaves
-  m3.py map <bin> <name>        each labeled decision -> the records its quote is in"""
+  m3.py map <bin> <name>        each labeled decision -> the records its quote is in
+  m3.py live <bin> <name> [--yes]
+                                each labeled window sent again to one live entry by `recurate`
+                                (estimates only without --yes)
+  m3.py score <bin> <name>      M3's counts on the labeled items"""
 import glob, http.server, json, os, sqlite3, subprocess, sys, threading
 from datetime import datetime
 
@@ -68,9 +73,9 @@ def when(ts):
     return datetime.fromisoformat(ts.replace('Z', '+00:00')).timestamp()
 
 
-def config(h, providers, curate):
+def config(h, providers, curate, shrink=False):
     with open(f'{h}/config.toml', 'w') as f:
-        f.write(f'[summary]\ncurate = {"true" if curate else "false"}\n\n' + providers)
+        f.write(f'[summary]\ncurate = {str(curate).lower()}\nshrink = {str(shrink).lower()}\n\n' + providers)
 
 
 def replay(binary, name):
@@ -146,13 +151,13 @@ def coverage(ops, top):
     return (None if at == (top + 1, None) else f'the windows end at {at}, the records at {top}'), counts
 
 
-def stub(binary, name):
+def stub(binary, name, shrink):
     h = home(binary, name)
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Stub)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     config(h, f'[[providers]]\nkind = "openai"\nname = "stub"\n'
               f'base_url = "http://127.0.0.1:{server.server_port}/v1"\nmodel = "stub"\n'
-              f'daily_budget = 1000000\n', True)
+              f'daily_budget = 1000000\n', True, shrink)
     # A worker exits when it is idle, and a window at the last record waits for the owner's next
     # hook record; replayed records are not hook records, so none waits here.
     subprocess.run([binary, '--home', h, 'worker', '--idle-ms', '0'], check=True, env=clean_env())
@@ -165,7 +170,9 @@ def stub(binary, name):
     raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
     repos = raw.execute("SELECT repo IS NULL, COUNT(DISTINCT repo), COUNT(DISTINCT session), COUNT(*) "
                         "FROM records WHERE type = 'event' GROUP BY repo IS NULL").fetchall()
-    report = {'records': top, 'windows': len(ops), 'outcomes': counts, 'coverage': broken or '100%',
+    shortened = sum(len(w.get('shortened', [])) for w in ops)
+    report = {'shrink': shrink, 'records': top, 'windows': len(ops), 'outcomes': counts,
+              'coverage': broken or '100%', 'shortened': shortened,
               'calls': [dict(zip(('role', 'outcome', 'calls', 'est_tokens', 'max_est', 'bytes'), c)) for c in calls],
               'repos': [dict(zip(('no_repo', 'repos', 'sessions', 'records'), r)) for r in repos]}
     with open(f'{h}/stub.json', 'w') as f:
@@ -228,6 +235,106 @@ def map_labels(name, binary):
     print(f'{len(found)} labeled items:', {f'{w} {m}': c for (w, m), c in sorted(how.items())})
 
 
+# The live half's one entry: a single model for both arms, so a difference is the shrink's and
+# not the chain's (docs/spike/m3-dev.md). A subscription: no bill, within owner decision 30.
+LIVE = '[[providers]]\nkind = "cli"\nname = "claude"\ncli = "claude"\nmodel = "haiku"\n'
+
+
+def spans(h):
+    """The windows that hold a labeled record, as record spans in seq order, each once."""
+    ops, _ = windows(h)
+    with open(f'{h}/map.json') as f:
+        seqs = {r['seq'] for r in json.load(f).values() if r['seq'] is not None}
+    out = set()
+    for w in ops:
+        if any(w['from_seq'] <= s <= w['to_seq'] for s in seqs):
+            out.add((w['from_seq'], w['to_seq']))
+    return sorted(out)
+
+
+def live(binary, name, send):
+    """Each labeled window sent again to the live entry with `oboete recurate`, one span at a time
+    in seq order, so an earlier claim is a candidate for a later window. Without `send`, only the
+    estimates `recurate` prints."""
+    h = home(binary, name)
+    with open(f'{h}/config.toml') as f:
+        shrink = 'shrink = true' in f.read()
+    config(h, LIVE, False, shrink)
+    raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
+    device = raw.execute("SELECT value FROM meta WHERE key = 'device_id'").fetchone()[0]
+    raw.close()
+    log = f'{h}/live{"-sent" if send else ""}.jsonl'
+    done = {json.dumps(r['span']) for r in read_jsonl(log)} if os.path.exists(log) else set()
+    tokens = 0
+    for a, b in spans(h):
+        if json.dumps([a, b]) in done:
+            continue
+        r = subprocess.run([binary, '--home', h, 'recurate', f'{device}:{a}-{b}'] + (['--yes'] if send else []),
+                           capture_output=True, text=True, env=clean_env())
+        out = r.stdout.strip()
+        with open(log, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'span': [a, b], 'code': r.returncode, 'out': out, 'err': r.stderr[-500:]}) + '\n')
+        for word in out.split(','):
+            if 'tokens' in word and 'about' in word:
+                tokens += int(word.split('about')[1].split('tokens')[0].strip().replace(',', ''))
+    print(f'{len(spans(h))} spans, about {tokens} tokens this pass; log {log}')
+
+
+def score(binary, name):
+    """M3 on the labeled items, by the definitions of docs/spike/m3-dev.md. Counts only."""
+    h = home(binary, name)
+    k = sqlite3.connect(f'file:{h}/knowledge.db?mode=ro', uri=True)
+    with open(f'{h}/map.json') as f:
+        where = json.load(f)
+    decisions, pairs, drafts = labels()
+    # Each active claim with the seqs its active derivation quotes.
+    claims = {}
+    for uid, status, seq in k.execute(
+            "SELECT a.uid, a.status, e.seq FROM active a JOIN claims c ON c.uid = a.uid "
+            "JOIN evidence e ON e.op_device = c.op_device AND e.op_seq = c.op_seq"):
+        claims.setdefault(uid, [status, set()])[1].add(seq)
+    superseded = {u for (u,) in k.execute(
+        "SELECT e.to_uid FROM edges e JOIN claims c ON c.op_device = e.op_device AND c.op_seq = e.op_seq "
+        "WHERE e.type = 'supersedes'")}
+
+    def state(item):
+        seq = where[item]['seq']
+        mine = [(u, st) for u, (st, seqs) in claims.items() if seq in seqs]
+        if not mine:
+            return 'none'
+        if any(st == 'decided' and u not in superseded for u, st in mine):
+            return 'current'
+        if any(u in superseded for u, _ in mine):
+            return 'superseded'
+        if any(st == 'retracted' for _, st in mine):
+            return 'retracted'
+        return 'other:' + ','.join(sorted({st for _, st in mine}))
+
+    out = {'decisions': {}, 'pairs': {}}
+    for d in decisions:
+        if where[d['id']]['seq'] is None:
+            continue
+        key = f'{d["value"]}'
+        st = state(d['id'])
+        out['decisions'].setdefault(key, {}).setdefault(st, 0)
+        out['decisions'][key][st] += 1
+    for p in pairs:
+        if where[p['earlier']]['seq'] is None or where[p['later']]['seq'] is None:
+            continue
+        cross = drafts[p['earlier']]['session'] != drafts[p['later']]['session']
+        key = f'{p["value"]}{" cross" if cross else ""}'
+        st = state(p['earlier'])
+        out['pairs'].setdefault(key, {}).setdefault(st, 0)
+        out['pairs'][key][st] += 1
+    decided = sum(1 for st, _ in claims.values() if st == 'decided')
+    out['claims'] = {'active': len(claims), 'decided': decided}
+    yes = out['decisions'].get('yes', {})
+    out['recall'] = f'{yes.get("current", 0) + yes.get("superseded", 0)} of {sum(yes.values())}'
+    with open(f'{h}/score.json', 'w') as f:
+        json.dump(out, f, indent=1)
+    print(json.dumps(out, indent=1, ensure_ascii=False))
+
+
 if __name__ == '__main__':
     owner_only()
     cmd, args = sys.argv[1], sys.argv[2:]
@@ -236,8 +343,12 @@ if __name__ == '__main__':
     elif cmd == 'replay':
         replay(args[0], args[1])
     elif cmd == 'stub':
-        stub(args[0], args[1])
+        stub(args[0], args[1], '--shrink' in args)
     elif cmd == 'map':
         map_labels(args[1], args[0])
+    elif cmd == 'live':
+        live(args[0], args[1], '--yes' in args)
+    elif cmd == 'score':
+        score(args[0], args[1])
     else:
         sys.exit(__doc__)
