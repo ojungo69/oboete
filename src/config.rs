@@ -103,9 +103,10 @@ pub struct Summary {
     #[serde(default = "default_idle_minutes")]
     pub idle_minutes: u32,
     /// Task 12's shrink: a window shows a tool's input short and a long output as its head and
-    /// tail, so it holds more of a session (docs/spike/m3-dev.md). Off until measurement shows the
-    /// input shrinks by 30% or more and recall drops by 0.02 or less (spec 3.5).
-    #[serde(default)]
+    /// tail, so it holds more of a session (docs/spike/m3-dev.md). On: on the dev transcripts the
+    /// input shrank by 70.9% and recall did not drop (13 of 44 against 10), which spec 3.5 asks
+    /// before the role is enabled (docs/milestone-3.md).
+    #[serde(default = "default_shrink")]
     pub shrink: bool,
 }
 
@@ -126,9 +127,13 @@ impl Default for Summary {
             curate: false,
             window_tokens: default_window_tokens(),
             idle_minutes: default_idle_minutes(),
-            shrink: false,
+            shrink: default_shrink(),
         }
     }
+}
+
+fn default_shrink() -> bool {
+    true
 }
 
 fn default_window_tokens() -> u32 {
