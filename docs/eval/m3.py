@@ -250,18 +250,23 @@ LIVE = '[[providers]]\nkind = "cli"\nname = "claude"\ncli = "claude"\nmodel = "h
 
 def spans(h, tool=None):
     """The windows that hold a labeled record (only those in a call of `tool`, when given), as
-    record spans in seq order, each once."""
+    record spans in seq order, each once. Windows that share a record (a record split across
+    windows) are one span: `recurate` cuts a span's windows itself, and two spans sharing a record
+    would send that record twice, the second run retracting what the first derived."""
     ops, _ = windows(h)
     with open(f'{h}/map.json') as f:
         seqs = {r['seq'] for r in json.load(f).values() if r['seq'] is not None}
     if tool:
         with open(f'{h}/map.json') as f:
             seqs = {r['seq'] for r in json.load(f).values() if r['seq'] is not None and r.get('tool') == tool}
-    out = set()
-    for w in ops:
-        if any(w['from_seq'] <= s <= w['to_seq'] for s in seqs):
-            out.add((w['from_seq'], w['to_seq']))
-    return sorted(out)
+    out = []
+    for a, b in sorted({(w['from_seq'], w['to_seq']) for w in ops
+                        if any(w['from_seq'] <= s <= w['to_seq'] for s in seqs)}):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
 
 
 def live(binary, name, send, tool=None):
@@ -394,11 +399,20 @@ def drafts(binary, name):
     h = home(binary, name)
     where = json.load(open(f'{h}/map.json'))
     decisions, _, _ = labels()
-    answers = {}
+    # Every kept answer by its summary; a window op takes the one whose drafts it kept (ids and
+    # bodies alike), so two answers with one summary (the same window in two arms, a rerun) are
+    # told apart, and a window two of them fit is left out and counted (#196).
+    answers = collections.defaultdict(list)
     for f in glob.glob(f'{M}/answers/*.jsonl'):
         a = answer_of(f)
         if a and a.get('summary'):
-            answers[a['summary'].strip()] = a
+            answers[a['summary'].strip()].append(a)
+
+    def answer_for(b):
+        fits = [a for a in answers.get(b.get('summary', '').strip(), [])
+                if all(any(c.get('id') == i and c.get('body') == k.get('body') for c in a.get('claims', []))
+                       for i, k in b['claims'].items())]
+        return fits[0] if len(fits) == 1 else ('ambiguous' if fits else None)
     raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
     ops = [(s, t, json.loads(b)) for s, t, b in raw.execute('SELECT op_seq, type, body FROM ops ORDER BY op_seq')]
     wins, cur = [], None
@@ -424,10 +438,10 @@ def drafts(binary, name):
         if not mine:
             continue
         b = mine[-1]
-        a = answers.get(b.get('summary', '').strip())
+        a = answer_for(b)
         kind = f"{w['who']}/{w.get('tool') or '-'}"
-        if a is None:
-            tally[f'{kind}: answer not kept'] += 1
+        if a is None or a == 'ambiguous':
+            tally[f'{kind}: answer {"not kept" if a is None else "ambiguous"}'] += 1
             continue
         label = d['quote'] + '\n' + d.get('prompt', '')
         about = [c for c in a.get('claims', []) if near(c.get('quote', ''), label)]
