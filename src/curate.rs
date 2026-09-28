@@ -107,6 +107,8 @@ pub enum Role {
 struct Source {
     start: usize,
     text: String,
+    /// What the window does not show of it, in the long text's offsets: what the gate hides, and
+    /// the middle a shrink left out, so a quote is anchored where the curator saw it.
     hidden: Vec<(usize, usize)>,
     /// `sentence_start` of the long text before `start`: where a sentence the piece starts inside
     /// began, which the piece alone cannot see.
@@ -577,7 +579,8 @@ impl<'r> Prepared<'r> {
                 let tail = chars().nth_back(SHORT_CHARS - 1)?;
                 (head < tail).then_some((head, tail))
             });
-            match middle.flatten() {
+            let middle = middle.flatten();
+            match middle {
                 Some((head, tail)) => {
                     let left = long[head..tail].chars().count();
                     text.push_str(&gate(start..head));
@@ -595,6 +598,7 @@ impl<'r> Prepared<'r> {
                     .iter()
                     .copied()
                     .filter(|&(s, e)| s < end && start < e)
+                    .chain(middle)
                     .collect(),
             });
         }
@@ -3141,6 +3145,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(whole.text.contains("not sent") && whole.shortened.is_empty());
+    }
+
+    /// A quote the window shows in an output's tail is anchored there, not where the same text
+    /// sits in the middle the shrink left out: the evidence is what the curator saw.
+    #[test]
+    fn a_quote_from_the_tail_is_anchored_in_the_tail() {
+        let (_home, mut raw, dev) = store();
+        let same = "warning: unused import";
+        let output = format!("{}\n{same}\n{}\n{same}\n", "a".repeat(400), "b".repeat(400));
+        raw.append(&tool(&output)).unwrap();
+        let w = next_window(&raw, &dev, shrinking(WINDOW_TOKENS), &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.text.matches(same).count(), 1, "{}", w.text);
+        let e = locate(&w, "L1", same).unwrap();
+        assert_eq!(
+            usize::try_from(e.offset).unwrap(),
+            output.rfind(same).unwrap()
+        );
     }
 
     /// The owner's answer to a question arrives as a tool output: a shrink never shortens it.
