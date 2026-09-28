@@ -275,10 +275,11 @@ fn derive(raw: &Raw, k: &Connection, op: &Op) -> Result<Option<Derived>> {
     for (i, e) in (0_i64..).zip(&c.evidence) {
         k.execute(
             "INSERT INTO evidence(op_device, op_seq, idx, device, seq, offset, length, sentence,
-               quote)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+               quote, claim_at)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                op.device, op.op_seq, i, e.device, e.seq, e.offset, e.length, e.sentence, e.quote
+                op.device, op.op_seq, i, e.device, e.seq, e.offset, e.length, e.sentence, e.quote,
+                e.claim_at
             ],
         )?;
     }
@@ -364,6 +365,7 @@ impl Consumer for Anchors {
                             length: r.get(3)?,
                             sentence: r.get(4)?,
                             quote: r.get(5)?,
+                            claim_at: None,
                         })
                     })?
                     .collect::<rusqlite::Result<_>>()?;
@@ -476,6 +478,7 @@ mod tests {
             length: quote.len() as i64,
             sentence,
             quote: quote.into(),
+            claim_at: None,
         }
     }
 
@@ -980,6 +983,27 @@ mod tests {
         let mut k = crate::knowledge::open(home.path()).unwrap();
         run(&raw, &mut k);
         assert_eq!(bodies(&k), ["Newer."]);
+    }
+
+    /// A knowledge.db from before #125 has no `claim_at` on its quotes: the column is added.
+    #[test]
+    fn an_older_evidence_table_gets_its_claim_at_column() {
+        let home = tempfile::tempdir().unwrap();
+        let k = crate::knowledge::open(home.path()).unwrap();
+        k.execute_batch(
+            "CREATE TABLE evidence(op_device TEXT NOT NULL, op_seq INTEGER NOT NULL,
+               idx INTEGER NOT NULL, device TEXT NOT NULL, seq INTEGER NOT NULL,
+               offset INTEGER NOT NULL, length INTEGER NOT NULL, sentence INTEGER NOT NULL,
+               quote TEXT NOT NULL, PRIMARY KEY (op_device, op_seq, idx));",
+        )
+        .unwrap();
+        schema(&k).unwrap();
+        schema(&k).unwrap();
+        k.execute(
+            "INSERT INTO evidence VALUES('d', 1, 0, 'd', 1, 0, 3, 0, 'use', 5)",
+            [],
+        )
+        .unwrap();
     }
 
     /// A restore that lost a claim op takes its derivation back out, with its quotes and edges,

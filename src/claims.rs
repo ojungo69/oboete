@@ -15,6 +15,11 @@ pub struct Evidence {
     pub length: i64,
     pub sentence: i64,
     pub quote: String,
+    /// On a claim's first quote, when its sentence holds another claim of its kind: where the
+    /// claim starts in the event, which its uid adds (#125, `curate::keyed`). Left out otherwise,
+    /// so a claim alone in its sentence keeps the uid it always had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_at: Option<i64>,
 }
 
 /// The body of a claim op, which the curation phase writes (Task 7).
@@ -78,12 +83,17 @@ pub fn normalize(kind: &str, status: &str) -> (&'static str, &'static str) {
 }
 
 /// MUST-M18: a claim's uid is its kind and the sentence its first quote starts in, never a name
-/// the model gives, so a recuration that rewords it derives the same uid.
+/// the model gives, so a recuration that rewords it derives the same uid; and where it starts
+/// when its sentence holds another claim of its kind, so two of them keep two uids (#125).
 pub fn uid(kind: &str, first: &Evidence) -> String {
-    crate::curate::sha256_hex(&format!(
+    let key = format!(
         "{kind}\0{}\0{}\0{}",
         first.device, first.seq, first.sentence
-    ))
+    );
+    crate::curate::sha256_hex(&match first.claim_at {
+        None => key,
+        Some(at) => format!("{key}\0@{at}"),
+    })
 }
 
 pub(crate) fn schema(k: &Connection) -> Result<()> {
@@ -106,6 +116,7 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            op_device TEXT NOT NULL, op_seq INTEGER NOT NULL, idx INTEGER NOT NULL,
            device TEXT NOT NULL, seq INTEGER NOT NULL, offset INTEGER NOT NULL,
            length INTEGER NOT NULL, sentence INTEGER NOT NULL, quote TEXT NOT NULL,
+           claim_at INTEGER,
            PRIMARY KEY (op_device, op_seq, idx)
          );
          CREATE INDEX IF NOT EXISTS evidence_anchor ON evidence(device, seq);
@@ -159,6 +170,15 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            PRIMARY KEY (op_device, op_seq)
          );",
     )?;
+    // Before #125 a quote kept no `claim_at`: the column is added, empty, as those ops had none.
+    let has: i64 = k.query_row(
+        "SELECT count(*) FROM pragma_table_info('evidence') WHERE name = 'claim_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has == 0 {
+        k.execute_batch("ALTER TABLE evidence ADD COLUMN claim_at INTEGER")?;
+    }
     Ok(())
 }
 
@@ -317,6 +337,7 @@ pub fn pref_add(home: &std::path::Path, text: &str) -> Result<String> {
         length: i64::try_from(quote.len())?,
         sentence: 0,
         quote: quote.clone(),
+        claim_at: None,
     };
     let uid = uid("preference", &evidence);
     let op = ClaimOp {

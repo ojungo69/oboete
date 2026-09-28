@@ -258,7 +258,8 @@ pub fn check(
         own.push((own_words, line.repo.as_deref(), &line.key));
     }
     // Once every status is settled: what a sibling is, after the gates. Siblings of one kind
-    // quoting one sentence are one claim (`claims::uid`), settled when any of them is.
+    // whose quotes overlap in one sentence are one claim (`claims::uid`, `curate::number`),
+    // settled when any of them is.
     let unsettled = |s: &str| matches!(s, "proposed" | "unverified");
     let uids: Vec<String> = g
         .kept

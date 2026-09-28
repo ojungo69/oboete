@@ -812,6 +812,7 @@ pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims:
         length: as_i64(quote.len())?,
         sentence: as_i64(source.sentence(at))?,
         quote: quote.to_owned(),
+        claim_at: None,
     })
 }
 
@@ -1057,7 +1058,8 @@ fn answered(
     let answer = curator(&span, &req.prompt, &|v| check(w, v));
     Ok(match answer {
         Ok(r) => match located(w, &r.output) {
-            Ok((summary, found, lost)) => {
+            Ok((summary, mut found, lost)) => {
+                keyed(k, &mut found)?;
                 let ended = ended_on_a_proposal(raw, k, w)?;
                 let gated =
                     crate::gates::check(w, &req.shown_in, &req.carried_uids, &ended, found, rules);
@@ -1498,7 +1500,7 @@ fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims:
          ORDER BY d.anchor_seq, d.uid",
     )?;
     let mut evidence = k.prepare(
-        "SELECT device, seq, offset, length, sentence, quote FROM evidence
+        "SELECT device, seq, offset, length, sentence, quote, claim_at FROM evidence
          WHERE op_device = ?1 AND op_seq = ?2 ORDER BY idx",
     )?;
     let rows: Vec<(String, String, i64, crate::claims::ClaimOp)> = derivations
@@ -1538,6 +1540,7 @@ fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims:
                     length: r.get(3)?,
                     sentence: r.get(4)?,
                     quote: r.get(5)?,
+                    claim_at: r.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -1787,6 +1790,63 @@ fn located(
         return Err(AnswerFailure::Unanchored);
     }
     Ok((summary, found, lost))
+}
+
+/// Where each draft's claim starts, for its uid (#125), set before the gates as its op keeps it.
+/// Drafts of one kind whose first quotes start in one sentence and overlap are one claim drafted
+/// twice. A claim whose quote overlaps one already derived there keeps that claim's value, so
+/// its uid stays whatever else is drafted with it; the first claim of a sentence where no claim
+/// has none keeps none, the uid a claim always had; any other takes where it starts. A claim
+/// drafted in an earlier window of the same `recurate` span is not derived yet, so it is not seen.
+fn keyed(k: &Connection, found: &mut [Located]) -> Result<()> {
+    let key = |(d, e, _): &Located| {
+        let (kind, _) = crate::claims::normalize(&d.kind, &d.status);
+        (kind, e.device.clone(), e.seq, e.sentence)
+    };
+    let keys: Vec<_> = found.iter().map(key).collect();
+    let mut order: Vec<usize> = (0..found.len()).collect();
+    order.sort_by_key(|&i| (keys[i].clone(), found[i].1.offset));
+    let mut derived = k.prepare(
+        "SELECT e.offset, e.offset + e.length, e.claim_at FROM derivations d
+         JOIN evidence e ON e.op_device = d.op_device AND e.op_seq = d.op_seq AND e.idx = 0
+         WHERE d.kind = ?1 AND e.device = ?2 AND e.seq = ?3 AND e.sentence = ?4
+         ORDER BY e.offset",
+    )?;
+    for group in order.chunk_by(|&a, &b| keys[a] == keys[b]) {
+        let (kind, device, seq, sentence) = &keys[group[0]];
+        let before: Vec<(i64, i64, Option<i64>)> = derived
+            .query_map(params![kind, device, seq, sentence], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        // The overlapping drafts, each with the range they cover.
+        let mut claims: Vec<(i64, i64, Vec<usize>)> = Vec::new();
+        for &i in group {
+            let (start, end) = (found[i].1.offset, found[i].1.offset + found[i].1.length);
+            match claims.last_mut() {
+                Some((_, reach, members)) if start < *reach => {
+                    *reach = end.max(*reach);
+                    members.push(i);
+                }
+                _ => claims.push((start, end, vec![i])),
+            }
+        }
+        let mut none_taken = before.iter().any(|&(_, _, at)| at.is_none());
+        for (start, end, members) in claims {
+            let at = match before.iter().find(|&&(s, e, _)| s < end && start < e) {
+                Some(&(_, _, at)) => at,
+                None if !none_taken => {
+                    none_taken = true;
+                    None
+                }
+                None => Some(start),
+            };
+            for i in members {
+                found[i].1.claim_at = at;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// At most `k` of `all`, spread evenly over the whole of it (a window's trigrams: not its first
@@ -3315,6 +3375,7 @@ mod tests {
             length: text.len() as i64,
             sentence: 0,
             quote: text.into(),
+            claim_at: None,
         };
         let op = crate::claims::ClaimOp {
             id: "c".into(),
@@ -4035,6 +4096,157 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect()
+    }
+
+    /// A sentence's claims, curated from `answers` in turn: the first by the phase, each later
+    /// one by a recuration of the same window, with the consumers run after each.
+    fn one_sentence(text: &str, answers: Vec<Value>) -> (tempfile::TempDir, Connection) {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        raw.append(&prompt(text)).unwrap();
+        let answers = std::cell::RefCell::new(answers);
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            Ok(ChainResult {
+                output: answers.borrow_mut().remove(0),
+                ..answered("fake")
+            })
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
+        let span = Span::records(1, 1);
+        while !answers.borrow().is_empty() {
+            let w = span_windows(&raw, &span, WINDOW_TOKENS, &rules).unwrap();
+            recurate_window(&mut raw, &k, &rules, &summary, &mut chain, &w[0], None)
+                .unwrap()
+                .unwrap();
+            consume(&raw, &mut k);
+        }
+        (home, k)
+    }
+
+    fn drafted(id: &str, status: &str, quote: &str, body: &str) -> Value {
+        let mut c = claim(id, status, "L1", quote, json!([]));
+        c["body"] = json!(body);
+        c
+    }
+
+    fn uid_of(k: &Connection, body: &str) -> String {
+        k.query_row("SELECT uid FROM derivations WHERE body = ?1", [body], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    /// Two decisions in one sentence are two claims with two uids, and a recuration that gives
+    /// them again, reworded and in another order, keeps both; two drafts whose quotes overlap are
+    /// one claim drafted twice (#125).
+    #[test]
+    fn two_decisions_in_one_sentence_get_two_uids_and_keep_them_on_recuration() {
+        let first = json!({"claims": [
+            drafted("c1", "decided", "log to stderr", "Logs go to stderr."),
+            drafted("c2", "decided", "Use tabs", "Tabs, not spaces."),
+            drafted("c3", "decided", "Use tabs and", "Indent with tabs.")], "summary": "s"});
+        let again = json!({"claims": [
+            drafted("c1", "decided", "Use tabs", "Tabs for indents."),
+            drafted("c2", "decided", "log to stderr", "Log to stderr.")], "summary": "s"});
+        let (_home, k) = one_sentence("Use tabs and log to stderr.", vec![first, again]);
+        let uids: i64 = k
+            .query_row("SELECT count(DISTINCT uid) FROM derivations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(uids, 2);
+        let decided = |b: &str| (b.to_owned(), "decided".to_owned());
+        assert_eq!(
+            active(&k),
+            [decided("Log to stderr."), decided("Tabs for indents.")]
+        );
+        assert_eq!(
+            uid_of(&k, "Tabs for indents."),
+            uid_of(&k, "Tabs, not spaces.")
+        );
+        assert_eq!(
+            uid_of(&k, "Log to stderr."),
+            uid_of(&k, "Logs go to stderr.")
+        );
+    }
+
+    /// A recuration that leaves out the second proposal of a sentence retracts that one, not the
+    /// first (review on #210).
+    #[test]
+    fn a_recuration_retracts_the_proposal_it_leaves_out_of_a_sentence() {
+        let first = json!({"claims": [
+            drafted("c1", "proposed", "Use tabs", "Tabs, not spaces."),
+            drafted("c2", "proposed", "log to stderr", "Logs go to stderr.")], "summary": "s"});
+        let again = json!({"claims": [
+            drafted("c1", "proposed", "Use tabs", "Tabs for indents.")], "summary": "s"});
+        let (_home, k) = one_sentence("Use tabs and log to stderr.", vec![first, again]);
+        let status = |s: &str| s.to_owned();
+        assert_eq!(
+            active(&k),
+            [
+                ("Logs go to stderr.".to_owned(), status("retracted")),
+                ("Tabs for indents.".to_owned(), status("proposed"))
+            ]
+        );
+    }
+
+    /// A recuration that finds a claim earlier in the sentence leaves the uid of the claim it
+    /// already had: the owner's correction of it stays on it (review on #210).
+    #[test]
+    fn a_claim_found_earlier_in_a_sentence_leaves_the_uid_of_the_one_there() {
+        let first = json!({"claims": [
+            drafted("c1", "decided", "log to stderr", "Logs go to stderr.")], "summary": "s"});
+        let again = json!({"claims": [
+            drafted("c1", "decided", "Use tabs", "Tabs, not spaces."),
+            drafted("c2", "decided", "log to stderr", "Log to stderr.")], "summary": "s"});
+        let (_home, k) = one_sentence("Use tabs and log to stderr.", vec![first, again]);
+        assert_eq!(
+            uid_of(&k, "Log to stderr."),
+            uid_of(&k, "Logs go to stderr.")
+        );
+        assert_ne!(
+            uid_of(&k, "Tabs, not spaces."),
+            uid_of(&k, "Log to stderr.")
+        );
+    }
+
+    /// A sentence longer than a window: a claim in its second part is kept apart from the one in
+    /// its first, which the consumers derived in between (review on #210).
+    #[test]
+    fn claims_in_two_windows_of_one_sentence_get_two_uids() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        let text = format!(
+            "Use tabs {}and log to stderr",
+            "with some filler words ".repeat(20)
+        );
+        raw.append(&prompt(&text)).unwrap();
+        let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            let quote = ["Use tabs", "log to stderr"]
+                .into_iter()
+                .find(|q| p.contains(q));
+            let claims: Vec<Value> = quote
+                .map(|q| drafted("c1", "decided", q, q))
+                .into_iter()
+                .collect();
+            Ok(ChainResult {
+                output: json!({"claims": claims, "summary": "s"}),
+                ..answered("fake")
+            })
+        };
+        let (rules, summary) = (Rules::default(), curating(80));
+        for _ in 0..3 {
+            run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+            consume(&raw, &mut k);
+        }
+        assert!(windows(&raw).len() > 1, "{}", windows(&raw).len());
+        let shown: Vec<String> = active(&k).into_iter().map(|(b, _)| b).collect();
+        assert_eq!(shown, ["Use tabs", "log to stderr"]);
+        assert_ne!(uid_of(&k, "Use tabs"), uid_of(&k, "log to stderr"));
     }
 
     /// Task 11: a recuration's answer replaces its window's unsettled claims: one anchored in the
