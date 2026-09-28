@@ -78,6 +78,9 @@ pub struct Line {
     pub(crate) text: String,
     pub(crate) role: Role,
     source: Option<Source>,
+    /// On an `Answer` line, the owner's answers and notes, from the whole call whatever part of it
+    /// the line shows (`owners_answers`); empty on every other line.
+    pub(crate) answers: Vec<String>,
 }
 
 impl Line {
@@ -97,6 +100,10 @@ pub enum Role {
     Tool {
         failed: bool,
     },
+    /// An `AskUserQuestion` call: its answers are the owner's pick, which Claude Code fills in
+    /// from the terminal over whatever the model sent (docs/spike/m3-dev.md); its questions and
+    /// options are the assistant's.
+    Answer,
     /// A harness envelope, a compaction summary, a session's start or end.
     Other,
 }
@@ -134,6 +141,7 @@ struct Piece {
     repo: Option<String>,
     /// Shown short (Task 12's shrink): its source is still the whole output.
     shortened: bool,
+    answers: Vec<String>,
 }
 
 /// A repository as a window shows it: through the gate, a local path (no origin) as its folder,
@@ -274,7 +282,8 @@ pub(crate) fn window_at(
             full = true;
             if pieces.iter().all(|p| p.text.is_empty()) {
                 // The first event to read does not fit: a tool output is elided, anything else is
-                // split, and the next window starts where this part stops.
+                // split (an `AskUserQuestion` too: its answers are the owner's words), and the next
+                // window starts where this part stops.
                 if matches!(piece.role, Role::Tool { .. }) {
                     piece = prepared.elided(r.seq);
                     elided.push(r.seq);
@@ -320,7 +329,7 @@ fn cut_back(pieces: &mut Vec<Piece>) {
         pieces.truncate(i);
     } else if let Some(i) = pieces
         .iter()
-        .rposition(|p| matches!(p.role, Role::Tool { .. }))
+        .rposition(|p| matches!(p.role, Role::Tool { .. } | Role::Answer))
     {
         pieces.truncate(i + 1);
     }
@@ -340,6 +349,7 @@ fn empty(seq: i64) -> Piece {
         source: None,
         repo: None,
         shortened: false,
+        answers: Vec::new(),
     }
 }
 
@@ -475,6 +485,7 @@ struct Prepared<'r> {
     short: bool,
     /// A tool input the shrink cut at `SHORT_CHARS`.
     cut_input: bool,
+    answers: Vec<String>,
 }
 
 impl<'r> Prepared<'r> {
@@ -519,11 +530,16 @@ impl<'r> Prepared<'r> {
                 };
                 let name = gate(body["tool"].as_str().unwrap_or("?"));
                 let output = if memory { MEMORY_READ } else { "" };
-                (
-                    format!("[tool {name}{failed}] input: {input}\n  output:{output}"),
+                let role = if tool == "AskUserQuestion" && body["failed"] != true {
+                    Role::Answer
+                } else {
                     Role::Tool {
                         failed: body["failed"] == true,
-                    },
+                    }
+                };
+                (
+                    format!("[tool {name}{failed}] input: {input}\n  output:{output}"),
+                    role,
                 )
             }
             _ => (String::new(), Role::Other), // a session's start or end: nothing to read
@@ -558,6 +574,11 @@ impl<'r> Prepared<'r> {
             heading,
             short,
             cut_input,
+            answers: if role == Role::Answer {
+                owners_answers(&body)
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -623,6 +644,7 @@ impl<'r> Prepared<'r> {
             text,
             source: None,
             shortened: self.cut_input,
+            answers: self.answers.clone(),
         }
     }
 
@@ -665,6 +687,36 @@ impl<'r> Prepared<'r> {
         let to = (end < long.len()).then_some(end as i64);
         self.piece(seq, from, to)
     }
+}
+
+/// The owner's answers in an `AskUserQuestion` call, and the notes they added to them: the
+/// values of `answers` and each annotation's `notes`, from its output (else its input) as JSON.
+/// A question's text (a key of `answers`) and an option's `preview` are the assistant's.
+fn owners_answers(body: &Value) -> Vec<String> {
+    fn strings(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::String(s) => out.push(s.clone()),
+            Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+            Value::Object(o) => o.values().for_each(|x| strings(x, out)),
+            _ => {}
+        }
+    }
+    for field in ["output", "input"] {
+        let v = match &body[field] {
+            Value::String(s) => serde_json::from_str(s).unwrap_or(Value::Null),
+            v => v.clone(),
+        };
+        if v["answers"].is_null() {
+            continue;
+        }
+        let mut out = Vec::new();
+        strings(&v["answers"], &mut out);
+        if let Some(notes) = v["annotations"].as_object() {
+            notes.values().for_each(|n| strings(&n["notes"], &mut out));
+        }
+        return out;
+    }
+    Vec::new()
 }
 
 /// `e`'s text from byte `from` of its long text to `to` (its end when none), through the gate.
@@ -730,6 +782,7 @@ fn grouped(pieces: &[Piece]) -> (String, Vec<Line>) {
                 text: p.text.clone(),
                 role: p.role,
                 source: p.source.clone(),
+                answers: p.answers.clone(),
             });
         }
     }
@@ -1750,7 +1803,9 @@ fn ended_on_a_proposal(raw: &Raw, k: &Connection, w: &Window) -> Result<Vec<Stri
     let mut out = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
     for l in &w.lines {
-        if seen.contains(&l.key.as_str()) || !matches!(l.role, Role::User | Role::Assistant) {
+        if seen.contains(&l.key.as_str())
+            || !matches!(l.role, Role::User | Role::Assistant | Role::Answer)
+        {
             continue;
         }
         seen.push(&l.key);

@@ -207,19 +207,29 @@ pub fn check(
             d.scope = "repo".into();
             lower(&d, "global scope only through oboete pref add");
         }
-        let speaker = speaker(line.role, &d.speaker);
+        let speaker = speaker(line, &d.quote, &d.speaker);
         if d.speaker != speaker {
             d.speaker = speaker.into();
             lower(&d, "the speaker is the quote's line");
         }
-        let span = sentence_of(&line.text, &d.quote);
+        // On an `Answer` line the sentence is the answer's, not the serialized call's: a paste's
+        // run is compared as the owner wrote it.
+        let span = match line.role {
+            Role::Answer => sentence_of(turn_said(line, &d.quote), &d.quote),
+            _ => sentence_of(&line.text, &d.quote),
+        };
         // A user turn that asks, or whose end is in a later window, promotes nothing, whatever
         // else the window holds (a passing run answers no question).
-        let asked = speaker == "user" && (question(&line.text) || continues(w, line));
+        // An answer's end is known on every part of a split call: it is read from the whole call.
+        let asked = speaker == "user"
+            && match line.role {
+                Role::Answer => question(turn_said(line, &d.quote)),
+                _ => question(&line.text) || continues(w, line),
+            };
         // The user's own words carry the claim, unless they were pasted from a tool line; a bare
         // "yes" accepts only what it answers. Any part of a user turn that says nothing but
         // acceptance and filler is bare too ("please" from "Yes, please.").
-        let is_bare = bare(&d.quote) || speaker == "user" && unsaid(line.source_text()) == 0;
+        let is_bare = bare(&d.quote) || speaker == "user" && unsaid(turn_said(line, &d.quote)) == 0;
         let paste = speaker == "user" && pasted(&norm(span), &tools);
         let own_words = speaker == "user" && !asked && !is_bare && !paste;
         let answers = speaker == "user" && is_bare && answers_a_reply(w, i, &tools, ended);
@@ -328,10 +338,13 @@ pub fn check(
 }
 
 /// A claim's speaker is its quote's line's (spec 3.2), never the curator's word: tool and file
-/// content is never the user's.
-fn speaker(role: Role, given: &str) -> &'static str {
-    match role {
+/// content is never the user's. On an `AskUserQuestion` line only the answers are the user's.
+fn speaker(line: &Line, quote: &str, given: &str) -> &'static str {
+    match line.role {
         Role::User => "user",
+        Role::Answer if answer_of(line, quote).is_some() => "user",
+        // Its questions and the options the owner did not pick are the assistant's proposals.
+        Role::Answer => "assistant proposal",
         Role::Tool { .. } => "tool result",
         // A non-strict curator's case variants are read as the label they are; a label it does
         // not recognize is inferred, which an acceptance never promotes.
@@ -340,6 +353,40 @@ fn speaker(role: Role, given: &str) -> &'static str {
             _ => "assistant inferred",
         },
         Role::Other => "assistant inferred",
+    }
+}
+
+/// The answer (or the note the owner added to one) of an `AskUserQuestion` line that holds
+/// `quote`, as decoded or as the output's JSON text shows it.
+fn answer_of<'l>(line: &'l Line, quote: &str) -> Option<&'l str> {
+    if quote.trim().is_empty() {
+        return None;
+    }
+    line.answers
+        .iter()
+        .find(|a| {
+            let shown = serde_json::to_string(a).unwrap_or_default();
+            a.contains(quote) || shown[1..shown.len() - 1].contains(quote)
+        })
+        .map(String::as_str)
+}
+
+/// What the user said on a user turn, for the checks that read a whole turn (a question, bare
+/// acceptance): a prompt's whole text, or on an `AskUserQuestion` line the answer that holds
+/// `quote` (its questions and other options are the assistant's).
+fn turn_said<'l>(line: &'l Line, quote: &str) -> &'l str {
+    match line.role {
+        Role::Answer => answer_of(line, quote).unwrap_or(""),
+        _ => line.source_text(),
+    }
+}
+
+/// Whether a user turn accepts: a prompt holds an acceptance, or every answer (and note) of an
+/// `AskUserQuestion` does, so a pick of "no" to one of its questions accepts nothing.
+fn turn_accepts(line: &Line) -> bool {
+    match line.role {
+        Role::Answer => !line.answers.is_empty() && line.answers.iter().all(|a| acceptance(a)),
+        _ => acceptance(&line.text),
     }
 }
 
@@ -364,9 +411,9 @@ fn accepted(w: &Window, i: usize) -> bool {
     w.lines[i + 1..]
         .iter()
         .filter(|l| l.key == line.key)
-        .find(|l| matches!(l.role, Role::User | Role::Assistant))
+        .find(|l| matches!(l.role, Role::User | Role::Assistant | Role::Answer))
         // After a checkout change the turn is in another repository: not this proposal's answer.
-        .is_some_and(|l| l.role == Role::User && l.repo == line.repo && acceptance(&l.text))
+        .is_some_and(|l| l.role != Role::Assistant && l.repo == line.repo && turn_accepts(l))
 }
 
 /// User line `i` accepts, and the turn before it in the same session, past tool calls and harness
@@ -381,8 +428,8 @@ fn answers_a_reply(w: &Window, i: usize, tools: &str, ended: &[String]) -> bool 
         .enumerate()
         .rev()
         .filter(|(_, l)| &l.key == key)
-        .find(|(_, l)| matches!(l.role, Role::User | Role::Assistant));
-    acceptance(&w.lines[i].text)
+        .find(|(_, l)| matches!(l.role, Role::User | Role::Assistant | Role::Answer));
+    turn_accepts(&w.lines[i])
         && match before {
             Some((j, l)) => {
                 l.role == Role::Assistant
@@ -406,14 +453,14 @@ fn tainted(w: &Window, i: usize, span: &str, tools: &str) -> bool {
 }
 
 /// A tool call of line `i`'s session between the start of its turn (the last user line before it
-/// in the window) and it.
+/// in the window, a typed prompt or the owner's answer to `AskUserQuestion`) and it.
 fn after_a_tool(w: &Window, i: usize) -> bool {
     let key = &w.lines[i].key;
     w.lines[..i]
         .iter()
         .rev()
         .filter(|l| &l.key == key)
-        .take_while(|l| l.role != Role::User)
+        .take_while(|l| !matches!(l.role, Role::User | Role::Answer))
         .any(|l| matches!(l.role, Role::Tool { .. }))
 }
 
@@ -754,6 +801,161 @@ mod tests {
 
     fn is(status: &str, speaker: &str) -> (String, String) {
         (status.into(), speaker.into())
+    }
+
+    /// An `AskUserQuestion` call as the hook records it: its input and output are the questions
+    /// and the owner's answers, as JSON text.
+    fn asked(answer: &str) -> (&'static str, Value) {
+        let questions = json!([{"question": "どれで保存しますか?", "header": "保存先",
+            "options": [{"label": "SQLite にする"}, {"label": "JSON ファイルにする"}]}]);
+        let io =
+            json!({"questions": questions, "answers": {"どれで保存しますか?": answer}}).to_string();
+        let body = json!({"tool": "AskUserQuestion", "input": io, "output": io, "failed": false});
+        ("tool", body)
+    }
+
+    /// The owner's pick in `AskUserQuestion` is the user's words, which Claude Code fills in from
+    /// the terminal over what the model sent (docs/spike/m3-dev.md); an option not picked is the
+    /// assistant's proposal, and the same text in another tool's output is tool content (MUST-M4).
+    #[test]
+    fn the_owners_answer_to_a_question_is_the_users_words() {
+        let w = window(&[asked("SQLite にする")]);
+        assert_eq!(
+            one(&w, "decided", "user", "SQLite にする"),
+            is("decided", "user")
+        );
+        assert_eq!(
+            one(&w, "decided", "user", "JSON ファイルにする").0,
+            "proposed"
+        );
+        let typed = window(&[asked("SQLite にする。バックアップは毎晩とる")]);
+        let quote = "バックアップは毎晩とる";
+        assert_eq!(one(&typed, "decided", "user", quote), is("decided", "user"));
+        let mut noted = asked("SQLite にする");
+        let mut io: Value = serde_json::from_str(noted.1["output"].as_str().unwrap()).unwrap();
+        io["annotations"] = json!({"どれで保存しますか?":
+            {"preview": "CREATE TABLE notes (id INTEGER PRIMARY KEY)", "notes": "WAL を使う"}});
+        noted.1["input"] = io.to_string().into();
+        noted.1["output"] = io.to_string().into();
+        let noted = window(&[noted]);
+        assert_eq!(
+            one(&noted, "decided", "user", "WAL を使う"),
+            is("decided", "user")
+        );
+        assert_eq!(
+            one(&noted, "decided", "user", "CREATE TABLE notes").0,
+            "proposed"
+        );
+        let (_, body) = asked("SQLite にする");
+        let echoed = window(&[tool(body["output"].as_str().unwrap(), false)]);
+        assert_eq!(
+            one(&echoed, "decided", "user", "SQLite にする"),
+            is("proposed", "tool result")
+        );
+    }
+
+    /// A question asked with `AskUserQuestion`, and the owner's pick as its output.
+    fn asked_with(question: &str, options: &[&str], answer: &str) -> (&'static str, Value) {
+        let options: Vec<Value> = options.iter().map(|o| json!({"label": o})).collect();
+        let io = json!({"questions": [{"question": question, "options": options}],
+            "answers": {question: answer}})
+        .to_string();
+        let body = json!({"tool": "AskUserQuestion", "input": io, "output": io, "failed": false});
+        ("tool", body)
+    }
+
+    /// The owner's pick answers the proposal right before it like a typed reply: a pick that
+    /// accepts promotes it, a pick that does not (and an option not picked) promotes nothing.
+    #[test]
+    fn a_pick_that_accepts_promotes_the_proposal_before_it() {
+        let proposal = "DB は SQLite にしましょう。";
+        let quote = "SQLite にしましょう";
+        let options = ["はい、この案で進める", "いいえ"];
+        let yes = window(&[
+            reply(proposal),
+            asked_with("この案で進めますか?", &options, "はい、この案で進める"),
+        ]);
+        assert_eq!(
+            one(&yes, "decided", "assistant proposal", quote),
+            is("decided", "assistant proposal")
+        );
+        let no = window(&[
+            reply(proposal),
+            asked_with("この案で進めますか?", &options, "いいえ"),
+        ]);
+        assert_eq!(
+            one(&no, "decided", "assistant proposal", quote).0,
+            "proposed"
+        );
+    }
+
+    /// The owner's answer starts a turn, as a typed prompt does: a tool call before the question
+    /// does not taint a proposal made after the answer, which an acceptance then promotes.
+    #[test]
+    fn an_answer_starts_the_turn_a_proposal_is_made_in() {
+        let w = window(&[
+            tool("3 files read", false),
+            asked_with(
+                "どちらにしますか?",
+                &["キャッシュする", "しない"],
+                "キャッシュする",
+            ),
+            reply("パース結果をメモリにキャッシュしましょう。"),
+            user("はい、それでお願いします"),
+        ]);
+        let quote = "パース結果をメモリにキャッシュしましょう";
+        assert_eq!(
+            one(&w, "decided", "assistant proposal", quote),
+            is("decided", "assistant proposal")
+        );
+    }
+
+    /// A span the owner pasted from a tool output into a typed answer is not their words, as in a
+    /// typed prompt: the paste is measured on the answer, not on the call's JSON.
+    #[test]
+    fn a_paste_in_a_typed_answer_is_not_the_users_words() {
+        // Shorter than a paste run: the whole answer must be found in the tool text.
+        let pasted = "rotate-signing-keys-v2";
+        let w = window(&[
+            tool(&format!("plan: {pasted}"), false),
+            asked_with("どう進めますか?", &["このまま"], pasted),
+        ]);
+        assert_eq!(one(&w, "decided", "user", pasted).0, "proposed");
+    }
+
+    /// A typed answer that asks promotes nothing, as a typed prompt that asks does not.
+    #[test]
+    fn an_answer_that_asks_promotes_nothing() {
+        let w = window(&[asked_with(
+            "どれで保存しますか?",
+            &["JSON"],
+            "SQLite にするのはどう?",
+        )]);
+        assert_eq!(
+            one(&w, "decided", "user", "SQLite にするのはどう"),
+            is("proposed", "user")
+        );
+    }
+
+    /// A call too large for its window is split, and the pick in its first part is still the
+    /// owner's: the answers are read from the whole call, not from the part a line shows.
+    #[test]
+    fn a_pick_in_a_split_call_is_the_users_words() {
+        let io = json!({"answers": {"どれで保存しますか?": "SQLite にする"},
+            "questions": [{"question": "どれで保存しますか?", "options":
+                [{"label": "SQLite にする", "description": "長い説明。".repeat(400)}]}]})
+        .to_string();
+        let body = json!({"tool": "AskUserQuestion", "input": "{}", "output": io,
+            "failed": false});
+        let w = cut_window(&[("tool", body)], 400.into());
+        assert!(w.to_offset.is_some(), "not split: {}", w.text);
+        // The part this line shows is no JSON document on its own.
+        assert!(serde_json::from_str::<Value>(w.lines[0].source_text()).is_err());
+        // Its end is in a later window, and the answer is still `decided`: it is read whole.
+        assert_eq!(
+            one(&w, "decided", "user", "SQLite にする"),
+            is("decided", "user")
+        );
     }
 
     const PROPOSAL: &str = "We could cache the parsed files.";
