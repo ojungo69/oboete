@@ -243,7 +243,9 @@ def map_labels(name, binary):
 
 # The live half's one entry: a single model for both arms, so a difference is the shrink's and
 # not the chain's (docs/spike/m3-dev.md). A subscription: no bill, within owner decision 30.
-LIVE = '[[providers]]\nkind = "cli"\nname = "claude"\ncli = "claude"\nmodel = "haiku"\n'
+# A timeout well past haiku's slowest answer (162 s of 22): at the shipped 180 s one call in about
+# 40 timed out and cooled the entry for ten minutes (#193); the product sends that window later.
+LIVE = '[[providers]]\nkind = "cli"\nname = "claude"\ncli = "claude"\nmodel = "haiku"\ntimeout_s = 600\n'
 
 
 def spans(h, tool=None):
