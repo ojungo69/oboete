@@ -1496,11 +1496,7 @@ fn codex_rest_now() -> Option<i64> {
     if UNDER_UNTIL.load(Ordering::Relaxed) > now {
         return None;
     }
-    // A read that fails is not tried again for a minute: each try may wait out its timeout.
-    let Some(read) = codex_limits(std::ffi::OsStr::new("codex"), CODEX_LIMITS_TIMEOUT) else {
-        UNDER_UNTIL.store(now + 60_000, Ordering::Relaxed);
-        return None;
-    };
+    let read = codex_limits(std::ffi::OsStr::new("codex"), CODEX_LIMITS_TIMEOUT)?;
     let rest = codex_rest(&read, now);
     if rest.is_none() {
         UNDER_UNTIL.store(now + CODEX_LIMITS_EVERY_MS, Ordering::Relaxed);
