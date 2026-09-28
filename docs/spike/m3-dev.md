@@ -80,15 +80,15 @@ Limits, the same for both arms:
 - N is 44 owner-yes decisions (45, less `d424`, which matches no record), so a single label is 0.023, which is over the 0.02 line by itself. The raw counts are reported next to the ratios.
 - One run per arm cannot separate one label's difference from the chain's own non-determinism. So a difference of one label is read as noise, and two or more count against the shrink.
 
-## Where the recall clause stands (2026-09-28, after the arms)
+## Where the recall clause stands (2026-09-29, after the arms)
 
 The two arms ended with recall 13 of 44 with the shrink and 10 of 44 without it (the mid-run counts were 4 and 2), but they cannot decide the clause. Some of their spans shared a record, so that window was sent twice, and the second recuration retracted the claims of the first: 5 overlaps and 202 claims retracted in the shrink arm, 1 and 23 in the other. The shrink moves window boundaries, so the effect does not cancel between the arms. The harness now merges spans that share a record (#196's commit), and the clause is measured again on the current main with both arms cut that way.
 
 Both arms ran the #194 binary, before #195, so the owner's picks in `AskUserQuestion` could not reach `decided` in either (0 of 13 in both).
 
-The clause was measured again on main at ce805a4 (#219, thinking off), with merged spans: 22 of 44 with the shrink (short-2) and 20 without it (whole-2). By the rule above the shrink does not fail on decisions. whole-2's 22 retracted claims are one span sent twice by the harness's retry after one window's prose answer, not an overlap (docs/milestone-3.md has the rows).
+The clause was measured again on main at ce805a4 (#219, thinking off), with merged spans: 22 of 44 with the shrink (short-2) and 20 without it (whole-2). whole-2's 22 retracted claims are one span sent twice by the harness's retry after one window's prose answer, not an overlap, so that arm was run again from a clean home without the resend (whole3): 24 of 44. By the rule above the shrink fails on decisions, 22 against 24. The two runs of the arm without it differ by 4 labels, more than the pair does, so one run each cannot size the difference (docs/milestone-3.md has the rows).
 
-Two more arms ran on the #195 binary without the shrink and with merged spans (no overlap, no claim retracted), one with the curator's thinking as shipped (`full`) and one with `"alwaysThinkingEnabled": false` in the curator's `--settings` (`nothink`). docs/milestone-3.md has the six arms side by side.
+Two more arms ran on the #195 binary without the shrink and with merged spans (no overlap, no claim retracted), one with the curator's thinking as shipped (`full`) and one with `"alwaysThinkingEnabled": false` in the curator's `--settings` (`nothink`). docs/milestone-3.md has the seven runs side by side.
 
 ## Definitions for scoring (fixed before any live number)
 

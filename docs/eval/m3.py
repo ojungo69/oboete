@@ -306,7 +306,7 @@ def live(binary, name, send, tool=None):
     if os.path.exists(f'{M}/wrap/claude'):
         env['PATH'] = f'{M}/wrap:' + env['PATH']
     # A span is done once its attempts ended: curated, partly curated (below), or failed three
-    # times. A pass cut short goes on where it stopped, so a resumed arm is still one pass.
+    # times. A pass cut between two calls goes on where it stopped, so a resumed arm is still one pass.
     tries, done = collections.Counter(), set()
     for r in read_jsonl(log) if os.path.exists(log) else []:
         k = json.dumps(r['span'])
