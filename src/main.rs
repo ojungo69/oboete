@@ -10,6 +10,8 @@ mod claims;
 mod codex_probe;
 mod config;
 mod consumer;
+#[cfg(test)]
+mod crash;
 mod curate;
 mod db;
 mod digest;

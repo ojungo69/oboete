@@ -87,6 +87,8 @@ pub fn open(home: &Path) -> Result<Connection> {
     let path = home.join("providers.db");
     crate::db::private(home, 0o700);
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+    #[cfg(test)]
+    crate::crash::arm(&conn);
     crate::db::wal(&conn, "NORMAL")?;
     conn.execute_batch(SCHEMA).context("providers schema")?;
     // Columns added after the table's first version (milestone 3, Task 4).
