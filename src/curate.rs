@@ -988,6 +988,158 @@ pub fn span_windows(raw: &Raw, span: &Span, budget: u32, rules: &Rules) -> Resul
     Ok(out)
 }
 
+/// What `oboete recurate` sends again.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Again {
+    /// The spans queued since (a quote a rule masked or a forget removed, Task 6's `Anchors`).
+    Queued,
+    /// The windows every provider skipped.
+    Skipped,
+    /// A span the owner names, with the device whose records it is.
+    Span(String, Span),
+}
+
+/// `oboete recurate`: the spans of `source`, the windows they are cut into and an estimate; with
+/// `send`, each window curated again through the curator chain, then the consumers run. What it
+/// did, to print.
+pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<String> {
+    let cfg = crate::config::load(home)?;
+    let rules = crate::capture::Settings::load(home)?.rules;
+    // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
+    let mut raw = crate::raw::open(home)?;
+    let k = crate::knowledge::open(home)?;
+    crate::claims::schema(&k)?;
+    let device = raw.device().to_owned();
+    let (checkpoint, _) = raw.curation_checkpoint(&device)?;
+    let mut out = String::new();
+    let spans = match source {
+        Again::Queued => {
+            let others: i64 = k.query_row(
+                "SELECT count(DISTINCT device) FROM recurate WHERE device <> ?1",
+                [&device],
+                |r| r.get(0),
+            )?;
+            if others > 0 {
+                out.push_str(&format!(
+                    "{others} other device(s) have spans queued: run oboete recurate there\n"
+                ));
+            }
+            k.prepare(
+                "SELECT DISTINCT from_seq, to_seq FROM recurate WHERE device = ?1
+                 ORDER BY from_seq, to_seq",
+            )?
+            .query_map([&device], |r| {
+                Ok(Span {
+                    from: r.get(0)?,
+                    to: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        }
+        Again::Skipped => skipped_spans(&raw)?,
+        Again::Span(of, span) => {
+            // A device curates only its own records (its window ops hold its checkpoint).
+            if of != device {
+                anyhow::bail!("a span of device {of}: run oboete recurate on that device");
+            }
+            // Past the checkpoint the worker curates it, and a recuration would send it twice.
+            if span.from < 1 || span.to < span.from || span.to > checkpoint {
+                anyhow::bail!(
+                    "records {}-{} are not a curated span of this device: it has curated records 1-{checkpoint}",
+                    span.from,
+                    span.to
+                );
+            }
+            vec![span]
+        }
+    };
+    let mut windows = Vec::new();
+    for span in &spans {
+        windows.extend(span_windows(&raw, span, cfg.summary.window_tokens, &rules)?);
+    }
+    if windows.is_empty() {
+        out.push_str("nothing to curate again\n");
+        return Ok(out);
+    }
+    let mut tokens = 0u32;
+    for w in &windows {
+        let req = request(&raw, &k, &rules, &cfg.summary, w)?;
+        tokens = tokens.saturating_add(crate::budget::estimate(&req.prompt));
+    }
+    let db = providers_db::open(home)?;
+    let most = crate::budget::most_usd(&db, &cfg.providers, tokens, windows.len())?;
+    out.push_str(&format!(
+        "{} span(s) in {} window(s), about {tokens} tokens; {}\n",
+        spans.len(),
+        windows.len(),
+        match most {
+            Some(usd) =>
+                format!("at most USD {usd:.2} if every window goes to the dearest paid entry"),
+            None => "no paid entry in the chain".into(),
+        }
+    ));
+    if !send {
+        out.push_str("nothing sent: run it again with --yes to curate them\n");
+        return Ok(out);
+    }
+    let mut curator = |span: &str, prompt: &str, check: &AnswerCheck| {
+        crate::provider::Chain::new(&cfg.providers, &db)
+            .paid_cap(cfg.paid_usd_per_month)
+            .check(check)
+            .run("curator", span, prompt, &schema())
+    };
+    let (mut claims, mut retracted, mut failed) = (0, 0, Vec::new());
+    for w in &windows {
+        match recurate_window(&mut raw, &k, &rules, &cfg.summary, &mut curator, w)? {
+            Ok((c, r)) => (claims, retracted) = (claims + c, retracted + r),
+            Err(why) => failed.push(format!("{}-{}: {why}", w.from_seq, w.to_seq)),
+        }
+    }
+    drop((k, raw));
+    crate::worker::run_once(home)?;
+    out.push_str(&format!(
+        "{} window(s) curated again: {claims} claim(s), {retracted} retracted\n",
+        windows.len() - failed.len()
+    ));
+    for f in &failed {
+        out.push_str(&format!("not curated, every provider went past: {f}\n"));
+    }
+    Ok(out)
+}
+
+/// This device's windows every provider went past (`skipped`), less those a later recuration
+/// covered: what `oboete recurate --skipped` sends.
+pub fn skipped_spans(raw: &Raw) -> Result<Vec<Span>> {
+    let device = raw.device().to_owned();
+    let (mut after, mut skipped, mut recurated) = (0, Vec::new(), Vec::new());
+    loop {
+        let ops = raw.ops_after(&device, after, 1_000)?;
+        let Some(last) = ops.last() else { break };
+        after = last.op_seq;
+        for o in ops.iter().filter(|o| o.kind == OpKind::Window) {
+            let (Some(from), Some(to)) = (o.body["from_seq"].as_i64(), o.body["to_seq"].as_i64())
+            else {
+                continue;
+            };
+            if o.body["recurate"] == true {
+                recurated.push((o.op_seq, Span { from, to }));
+            } else if o.body["outcome"] == "skipped" {
+                skipped.push((o.op_seq, Span { from, to }));
+            }
+        }
+    }
+    let covered = |at: i64, s: &Span| {
+        recurated
+            .iter()
+            .any(|(r, c)| *r > at && c.from <= s.from && s.to <= c.to)
+    };
+    Ok(skipped
+        .into_iter()
+        .filter(|(at, s)| !covered(*at, s))
+        .map(|(_, s)| s)
+        .collect())
+}
+
 /// Curates window `w` again (Task 11): the answer's window op, marked `recurate: true` so the
 /// checkpoint stays where it is (D2), its claims, which become new derivations of the same uids
 /// (MUST-M18), and a `retracted` derivation of each claim anchored in the window that the answer
@@ -2994,6 +3146,92 @@ mod tests {
         }
         let ops = raw.ops_after(raw.device(), 0, 20).unwrap();
         (sent.into_inner(), ops)
+    }
+
+    /// Task 11: a span sent again is cut at its end: the curator reads none of the records after
+    /// it, and the phase then has nothing left to send (the checkpoint did not move).
+    #[test]
+    fn recurating_an_old_span_does_not_send_later_windows_again() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let k = crate::knowledge::open(home.path()).unwrap();
+        for text in ["one", "two", "three"] {
+            raw.append(&prompt(text)).unwrap();
+        }
+        let sent = std::cell::RefCell::new(Vec::new());
+        let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            sent.borrow_mut().push(p.to_owned());
+            Ok(answered("fake"))
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        let windows = span_windows(&raw, &Span { from: 1, to: 2 }, WINDOW_TOKENS, &rules).unwrap();
+        assert_eq!(windows.len(), 1);
+        let done = recurate_window(&mut raw, &k, &rules, &summary, &mut chain, &windows[0]);
+        assert_eq!(done.unwrap(), Ok((0, 0)));
+        let sent = sent.into_inner();
+        assert!(
+            sent[1].contains("two") && !sent[1].contains("three"),
+            "{}",
+            sent[1]
+        );
+        let phase = run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut |_, _, _| {
+            panic!("nothing is sent again")
+        });
+        assert_eq!(phase.unwrap(), Phase::Idle);
+    }
+
+    /// Task 11: `recurate --skipped` finds each window every provider skipped, until a recuration
+    /// covers it.
+    #[test]
+    fn a_skipped_window_is_curated_by_recurate_skipped() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _) = open(home.path());
+        let k = crate::knowledge::open(home.path()).unwrap();
+        for text in ["We use tabs.", "two"] {
+            raw.append(&prompt(text)).unwrap();
+        }
+        let window = |from: i64, to: i64, outcome: &str| {
+            let op = json!({"from_seq": from, "from_offset": null, "to_seq": to,
+                "to_offset": null, "outcome": outcome, "elided": []});
+            (OpKind::Window, op)
+        };
+        raw.append_ops(&[window(1, 1, "skipped"), window(2, 2, "curated")])
+            .unwrap();
+        let skipped = skipped_spans(&raw).unwrap();
+        assert_eq!(skipped, [Span { from: 1, to: 1 }]);
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let windows = span_windows(&raw, &skipped[0], WINDOW_TOKENS, &rules).unwrap();
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck| Ok(claimed("L1", "We use tabs"));
+        let done = recurate_window(&mut raw, &k, &rules, &summary, &mut chain, &windows[0]);
+        assert_eq!(done.unwrap(), Ok((1, 0)));
+        assert!(skipped_spans(&raw).unwrap().is_empty());
+    }
+
+    /// `oboete recurate` without --yes lists and estimates and sends nothing; it refuses a span
+    /// past the checkpoint or of another device, and says when nothing is queued.
+    #[test]
+    fn recurate_lists_before_it_sends() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _) = open(home.path());
+        raw.append(&prompt("We use tabs.")).unwrap();
+        raw.append(&prompt("Not curated yet.")).unwrap();
+        let op = json!({"from_seq": 1, "from_offset": null, "to_seq": 1, "to_offset": null,
+            "outcome": "curated", "elided": []});
+        raw.append_ops(&[(OpKind::Window, op)]).unwrap();
+        let device = raw.device().to_owned();
+        drop(raw);
+        let span = |from, to| Again::Span(device.clone(), Span { from, to });
+        let listed = recurate(home.path(), span(1, 1), false).unwrap();
+        assert!(listed.contains("1 span(s) in 1 window(s)"), "{listed}");
+        assert!(listed.contains("nothing sent"), "{listed}");
+        let (raw, _) = open(home.path());
+        assert_eq!(windows(&raw).len(), 1);
+        assert!(recurate(home.path(), span(1, 2), false).is_err());
+        let other = Again::Span("elsewhere".into(), Span { from: 1, to: 1 });
+        assert!(recurate(home.path(), other, false).is_err());
+        let queued = recurate(home.path(), Again::Queued, false).unwrap();
+        assert_eq!(queued, "nothing to curate again\n");
     }
 
     /// The bodies and statuses of every uid's active derivation, retracted ones too.

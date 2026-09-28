@@ -77,6 +77,19 @@ enum Cmd {
     /// Rebuild knowledge.db (claims, digests, indexes, manifests) from raw.db and its op log,
     /// with no AI call
     Rebuild,
+    /// Curate again what was curated before: the spans queued since (a quote a new rule masked
+    /// or a forget removed), the windows every provider skipped, or a span you name. It lists
+    /// the windows and an estimate; nothing is sent without --yes
+    Recurate {
+        /// The windows every provider skipped
+        #[arg(long, conflicts_with = "span")]
+        skipped: bool,
+        /// A span of this device's records, as <device>:<from>-<to>
+        span: Option<String>,
+        /// Send them
+        #[arg(long)]
+        yes: bool,
+    },
     /// Correct a remembered claim by its uid: your status or text holds over whatever curation
     /// derives for it, now and after any recuration or rebuild
     Correct {
@@ -533,6 +546,27 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 out.push_str(&format!("{}  {} {}  {body}\n", c.uid, c.kind, c.status));
             }
             emit(&out)
+        }
+        Cmd::Recurate { skipped, span, yes } => {
+            let again = match span {
+                Some(span) => {
+                    let parsed = span.split_once(':').and_then(|(device, range)| {
+                        let (from, to) = range.split_once('-')?;
+                        let span = curate::Span {
+                            from: from.parse().ok()?,
+                            to: to.parse().ok()?,
+                        };
+                        Some(curate::Again::Span(device.to_owned(), span))
+                    });
+                    parsed.ok_or_else(|| {
+                        anyhow::anyhow!("a span is <device>:<from>-<to>, such as 1a2b3c4d:120-180")
+                    })?
+                }
+                None if skipped => curate::Again::Skipped,
+                None => curate::Again::Queued,
+            };
+            print!("{}", curate::recurate(&home, again, yes)?);
+            Ok(())
         }
         Cmd::Correct { uid, status, body } => {
             claims::correct(&home, &uid, status.as_deref(), body.as_deref())?;
