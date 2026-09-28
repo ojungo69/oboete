@@ -81,6 +81,9 @@ pub struct Line {
     /// On an `Answer` line, the owner's answers and notes, from the whole call whatever part of it
     /// the line shows (`owners_answers`); empty on every other line.
     pub(crate) answers: Vec<String>,
+    /// A prompt typed while its session's turn was still running (`Raw::mid_turn`); false on
+    /// every other line.
+    pub(crate) mid_turn: bool,
 }
 
 impl Line {
@@ -142,6 +145,7 @@ struct Piece {
     /// Shown short (Task 12's shrink): its source is still the whole output.
     shortened: bool,
     answers: Vec<String>,
+    mid_turn: bool,
 }
 
 /// A repository as a window shows it: through the gate, a local path (no origin) as its folder,
@@ -258,7 +262,9 @@ pub(crate) fn window_at(
                 continue;
             };
             let from = if r.seq == seq { offset.unwrap_or(0) } else { 0 };
-            let prepared = Prepared::new(&e, rules, shrink);
+            let mut prepared = Prepared::new(&e, rules, shrink);
+            prepared.mid_turn =
+                e.kind == "prompt" && raw.mid_turn(device, r.seq, &e.agent, &e.session)?;
             // Where the span's part of this record ends, when it is the span's last record.
             let end = until.and_then(|(u, o)| o.filter(|_| r.seq == u));
             let mut piece = prepared.piece(r.seq, from, end);
@@ -350,6 +356,7 @@ fn empty(seq: i64) -> Piece {
         repo: None,
         shortened: false,
         answers: Vec::new(),
+        mid_turn: false,
     }
 }
 
@@ -486,6 +493,7 @@ struct Prepared<'r> {
     /// A tool input the shrink cut at `SHORT_CHARS`.
     cut_input: bool,
     answers: Vec<String>,
+    mid_turn: bool,
 }
 
 impl<'r> Prepared<'r> {
@@ -579,6 +587,7 @@ impl<'r> Prepared<'r> {
             } else {
                 Vec::new()
             },
+            mid_turn: false,
         }
     }
 
@@ -645,6 +654,7 @@ impl<'r> Prepared<'r> {
             source: None,
             shortened: self.cut_input,
             answers: self.answers.clone(),
+            mid_turn: self.mid_turn,
         }
     }
 
@@ -779,6 +789,7 @@ fn grouped(pieces: &[Piece]) -> (String, Vec<Line>) {
                 role: p.role,
                 source: p.source.clone(),
                 answers: p.answers.clone(),
+                mid_turn: p.mid_turn,
             });
         }
     }

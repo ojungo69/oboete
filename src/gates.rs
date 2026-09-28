@@ -502,16 +502,24 @@ fn norm(text: &str) -> Vec<char> {
 /// The tool lines of the window that line `i` could have taken words from, as MUST-M4 compares
 /// them: every tool line of its session before it, and every tool line of the other sessions,
 /// whose lines the window does not order against it. A tool line after it in its session came
-/// later: an agent writing the owner's words to a file is no paste into them (#203). Each text is
-/// normalized on its own and joined by a NUL, which no user span holds, so no run crosses from
-/// one text into the next (#197).
+/// later: an agent writing the owner's words to a file is no paste into them (#203). Except after
+/// a prompt typed mid-turn, up to the turn's reply: a call already running then (its input shown)
+/// is recorded after the prompt (#206). Each text is normalized on its own and joined by a NUL,
+/// which no user span holds, so no run crosses from one text into the next (#197).
 fn tool_text(w: &Window, i: usize) -> String {
-    let key = &w.lines[i].key;
+    let line = &w.lines[i];
+    let same = |l: &Line| l.key == line.key;
+    let running = |j: usize| {
+        line.mid_turn
+            && !w.lines[i + 1..j]
+                .iter()
+                .any(|l| same(l) && l.role == Role::Assistant)
+    };
     let tools: Vec<String> = w
         .lines
         .iter()
         .enumerate()
-        .filter(|&(j, l)| matches!(l.role, Role::Tool { .. }) && (j < i || &l.key != key))
+        .filter(|&(j, l)| matches!(l.role, Role::Tool { .. }) && (j < i || !same(l) || running(j)))
         .map(|(_, l)| l)
         // The whole output too: a shrink shows only its head and tail (Task 12).
         .flat_map(|l| [l.text.as_str(), l.source_text()])
@@ -1041,6 +1049,56 @@ mod tests {
         );
         let pasted = window(&[tool(decision, false), user(decision)]);
         assert_eq!(one(&pasted, "decided", "user", quote).0, "proposed");
+    }
+
+    /// A prompt typed while its turn still ran reaches the prompt hook when it is queued, so a
+    /// call already running then is recorded after it: that call's words are a paste source up to
+    /// the turn's reply, and the next turn's calls are not (#206). Where the turn stood is read
+    /// from raw, also when the window starts at the prompt, as D12 cuts it.
+    #[test]
+    fn a_call_running_when_a_prompt_was_queued_is_a_paste_source() {
+        let decision = "Deploy only from the main branch, never from a feature branch.";
+        let quote = "Deploy only from the main branch, never from a feature branch";
+        let write = || {
+            let body = json!({"tool": "Write", "input": {"file_path": "NOTES.md", "content": decision},
+                "output": "File created", "failed": false});
+            ("tool", body)
+        };
+        let status = |w: &Window| {
+            let line = w.lines.iter().find(|l| l.text.contains(quote)).unwrap();
+            let d = draft_on(w, &line.id, "c1", "decided", "user", quote);
+            gated(w, vec![d]).remove(0)
+        };
+        // The first record is left out of the window: what came before is read from raw.
+        let from_prompt = |events: &[(&str, Value)]| {
+            let home = tempfile::tempdir().unwrap();
+            let mut raw = crate::raw::open(home.path()).unwrap();
+            for (kind, body) in events {
+                raw.append(&crate::raw::Event {
+                    kind: (*kind).into(),
+                    repo: Some("r".into()),
+                    ..crate::raw::test_event(&body.to_string())
+                })
+                .unwrap();
+            }
+            let dev = raw.device().to_owned();
+            let rules = Rules::default();
+            crate::curate::window_at(&raw, &dev, (1, None), None, 100_000.into(), &rules)
+                .unwrap()
+                .unwrap()
+        };
+        let running = [tool("ok", false), user(decision), write()];
+        assert_eq!(status(&window(&running)).0, "proposed");
+        assert_eq!(status(&from_prompt(&running)).0, "proposed");
+        // Queued after another prompt, before its turn recorded anything.
+        let second = [user("look at the deploy script"), user(decision), write()];
+        assert_eq!(status(&window(&second)).0, "proposed");
+        // The running turn's reply ends it: a call after it is the next turn's.
+        let ended = [tool("ok", false), user(decision), reply("Done."), write()];
+        assert_eq!(status(&window(&ended)), is("decided", "user"));
+        // Typed after a finished turn.
+        let after = [reply("Done."), user(decision), write()];
+        assert_eq!(status(&from_prompt(&after)), is("decided", "user"));
     }
 
     const PROPOSAL: &str = "We could cache the parsed files.";

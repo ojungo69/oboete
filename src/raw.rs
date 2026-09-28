@@ -432,6 +432,29 @@ impl Raw {
             }))
     }
 
+    /// Whether the prompt at `seq` was typed while its session's turn was still running: the
+    /// session's record before it is a tool call or a prompt, not a reply, a start or an end
+    /// (envelopes and compactions come at any time). The prompt hook gets a prompt typed mid-turn
+    /// when it is queued, so a tool call running then is recorded after it (#206).
+    /// ponytail: sessions have no index (spec 1.6), so this walks the primary key back to the
+    /// session's previous record (at most 4 ms for any of the 507 prompts of the 70,904-event dev
+    /// home); an index on (device, agent, session, seq) if it shows in the curation phase's time.
+    pub fn mid_turn(&self, device: &str, seq: i64, agent: &str, session: &str) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        let kind: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT kind FROM records WHERE device = ?1 AND seq < ?2 AND type = 'event'
+                   AND COALESCE(agent, '') = ?3 AND COALESCE(session, '') = ?4
+                   AND kind IN ('prompt', 'tool', 'reply', 'start', 'end')
+                 ORDER BY seq DESC LIMIT 1",
+                params![device, seq, agent, session],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(matches!(kind.as_deref(), Some("prompt" | "tool")))
+    }
+
     /// The agent and session labels of `device`'s event `seq`, NUL between (how `curate` keys a
     /// session), from the row alone: no body is read.
     pub fn session_key(&self, device: &str, seq: i64) -> Result<Option<String>> {
