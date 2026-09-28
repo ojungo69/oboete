@@ -1218,9 +1218,15 @@ pub enum Again {
 /// did, to print.
 pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<String> {
     let cfg = crate::config::load(home)?;
-    // The consumers first: a recuration appended before a crash or a failed run leaves the queue
-    // only when the claims consumer reads it, and the plan would send its span again (#192).
-    crate::worker::run_once(home)?;
+    // The worker's lock, with the consumers drained under it (#192): a recuration appended before
+    // a crash or a failed run has left the queue, and no worker or other recuration moves the
+    // queue between the plan and its sending. Sending needs it: no curation phase sends at the
+    // same time (the month's cap is read before each call and written after it), and no consumer
+    // changes the claims a window retracts from. A list is made without it while a worker runs.
+    let held = crate::worker::drained(home)?;
+    if send && held.is_none() {
+        anyhow::bail!("a worker is running; try again when it has exited");
+    }
     let rules = crate::capture::Settings::load(home)?.rules;
     // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
     let mut raw = crate::raw::open(home)?;
@@ -1299,10 +1305,6 @@ pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<Str
         out.push_str("nothing sent: run it again with --yes to curate them\n");
         return Ok(out);
     }
-    // The worker's lock: no curation phase sends at the same time (the month's cap is read before
-    // each call and written after it), and no consumer changes the claims a window retracts from.
-    let held = crate::worker::lock(home)?
-        .ok_or_else(|| anyhow::anyhow!("a worker is running; try again when it has exited"))?;
     let mut curator = |span: &str, prompt: &str, check: &AnswerCheck| {
         crate::provider::Chain::new(&cfg.providers, &db)
             .paid_cap(cfg.paid_usd_per_month)
