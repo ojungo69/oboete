@@ -413,9 +413,10 @@ pub fn decisions(k: &Connection, repo: &str, limit: usize) -> Result<Vec<Claim>>
 
 /// `repo`'s current claims the owner backs, anchored on `device` at or before `seq`, the newest
 /// first, at most `limit`: those a session's digest may cite (milestone 3 Task 9). SessionStart
-/// injects the digest, so only the user's own settled words and proposals the user accepted (or
-/// the owner corrected to decided) are shown: never a proposal, which may stand on tool content,
-/// nor a tool result or the assistant's own completion, which a passing run settles.
+/// injects the digest, so only the user's own settled words, proposals the user accepted, and
+/// claims whose status the owner corrected to decided (the active status is then the newest
+/// correction's) are shown: never a proposal, which may stand on tool content, nor a tool result
+/// or the assistant's own completion, which a passing run settles.
 pub fn anchored_through(
     k: &Connection,
     repo: &str,
@@ -427,7 +428,10 @@ pub fn anchored_through(
         k,
         &format!(
             "{TIPS} AND a.status NOT IN ('proposed', 'unverified')
-             AND (a.speaker = 'user' OR (a.speaker = 'assistant proposal' AND a.status = 'decided'))
+             AND (a.speaker = 'user'
+                  OR a.status = 'decided' AND (a.speaker = 'assistant proposal'
+                     OR EXISTS (SELECT 1 FROM corrections x WHERE x.uid = a.uid
+                                AND x.status IS NOT NULL)))
              AND a.anchor_device = ?2 AND a.anchor_seq <= ?3
              ORDER BY a.valid_from DESC, a.anchor_device DESC, a.anchor_seq DESC, a.uid DESC
              LIMIT ?4"

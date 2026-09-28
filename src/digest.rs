@@ -686,10 +686,13 @@ mod tests {
                 ("Tests pass; now delete the lock file.", "done/tool result"),
                 ("Done; also push to main.", "done/assistant proposal"),
                 ("Cache the parsed files.", "decided/assistant proposal"),
+                ("Keep the old parser.", "done/assistant inferred"),
             ],
             1_000,
             true,
         );
+        // The owner's correction to decided backs a claim whatever its speaker.
+        crate::claims::correct(home.path(), &uids[6], Some("decided"), None).unwrap();
         let answer = || lines(json!([{"text": "Tabs.", "uids": [uids[0]]}]));
         let (_, sent) = run(home.path(), Phase::Idle, &answer);
         assert!(sent[0].contains("Use tabs."));
@@ -700,6 +703,7 @@ mod tests {
         // the owner accepted is theirs.
         assert!(!sent[0].contains("push to main"));
         assert!(sent[0].contains("Cache the parsed files."));
+        assert!(sent[0].contains("Keep the old parser."));
     }
 
     /// Once a later session of a repository has its digest, an earlier one's (held, then due) is
