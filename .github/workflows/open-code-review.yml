@@ -108,7 +108,7 @@ jobs:
           llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC || 'false' }}
           # The upstream default contains a provider-specific "thinking" field.
           llm_extra_body: '{}'
-          llm_reasoning_effort: max
+          llm_reasoning_effort: high
           llm_timeout: '600'
           review_task_timeout: '5'
           effort: high
@@ -139,7 +139,7 @@ jobs:
           llm_model: ${{ vars.OCR_LLM_FALLBACK_MODEL }}
           llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC || 'false' }}
           llm_extra_body: '{}'
-          llm_reasoning_effort: max
+          llm_reasoning_effort: high
           llm_timeout: '600'
           review_task_timeout: '5'
           effort: high
