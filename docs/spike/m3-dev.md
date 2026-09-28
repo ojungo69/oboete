@@ -19,17 +19,19 @@ Milestone 3, Task 13 (lines M2, M3, Window, Cost) and Task 12 (judge role (a), "
 
 The home is curated by a localhost OpenAI-compatible stub. It answers every curator request with no claims and every digest request with no lines, so nothing leaves the machine. This pass gives the windows and their tokens exactly, and it checks M2's coverage half on the dev transcripts.
 
-Three homes were replayed from the same fixtures in the same order: the `(seq, ts, kind, session)` rows of their 70,904 events hash alike, so one label map serves all three. (The rescan's 159 tombstones after them carry the replay's own time.) The map is made before the stub pass: the worker's compression leaves the bodies unreadable to `m3.py map`. The binaries are main at 448085f (the first home) and the shrink branch (the other two).
+Every home was replayed from the same fixtures in the same order: the `(seq, ts, kind, session)` rows of their 70,904 events hash alike, so one label map serves them all. (The rescan's 159 tombstones after them carry the replay's own time.) The map is made before the stub pass: the worker's compression leaves the bodies unreadable to `m3.py map`. The binaries are main at 448085f (the first home) and the shrink branch (the others).
 
 | Home | Shrink | Windows | Estimated tokens sent | Largest window | Tool calls shown short | Coverage |
 |---|---|---|---|---|---|---|
 | first stub | no | 15,426 | 60.43M | 5,714 | - | 100% |
 | `whole` | no | 15,426 | 60.43M | | 0 | 100% |
 | `short` | yes | 3,493 | 17.64M | 5,690 | 38,024 | 100% |
+| `short`, as reviewed | yes | 3,483 | 17.59M | 5,690 | 52,510 | 100% |
 
 - **M2's coverage half passes on the dev transcripts.** In each home the window ops run from seq 1 to the last record (71,063, the 70,904 events plus the rescan's tombstones), with no gap and no overlap. Every window is `curated`, or `covered` where it holds no text.
 - The two homes without the shrink give the same windows and the same tokens, so the cut is deterministic.
-- **The shrink sends 70.8% less**: 17.64M against 60.43M estimated tokens, in 3,493 windows instead of 15,426. That clears the −30% clause of spec 3.5 (a). The estimate above (−71%) was right.
+- **The shrink sends 70.9% less**: 17.59M against 60.43M estimated tokens, in 3,483 windows instead of 15,426. That clears the −30% clause of spec 3.5 (a). The estimate above (−71%) was right.
+- The first `short` home cut the input of the tools that carry the owner's words at 2,000 characters, and did not count a call cut only in its input as shown short. The review of #194 brought both in line with the rule below (every tool's input at 300, and every cut named), which the second row measures. The live arms below were cut by the first binary; the difference is these tools' inputs, whose outputs hold the same answers whole.
 - The token counts include each prompt's fixed part and its candidates. The stub answered no claims, so no session carried anything.
 - Every record has a repository value (11 in all, over the 63 sessions). A session that ran outside a git checkout gets its folder as its repository, as the labels' `repo` field shows. All 63 dev pairs have both of their decisions in one repository, so repository scope never keeps a pair's later claim from seeing the earlier one as a candidate.
 
