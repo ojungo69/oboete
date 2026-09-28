@@ -11,13 +11,19 @@ It supplements the existing Rust CI and SonarCloud checks; it does not approve o
 
 ## Provider setup
 
-This repository uses NVIDIA NIM: `z-ai/glm-5.3` is the primary model and
-`moonshotai/kimi-k3` is the fallback. GLM is the starting choice for text-only
-code review, not a claim that it outperforms Kimi on every repository. Both use
-the same NIM account, OpenAI-compatible endpoint, and `high` reasoning effort
-(the owner lowered it from `max` on 2026-09-28). OCR's separate review effort is
-at its maximum, `high` (three review rounds); OCR does not accept `max` for that
-setting.
+This repository uses NVIDIA NIM: `deepseek-ai/deepseek-v4.1-flash` is the primary
+model and `z-ai/glm-5.3` is the fallback (owner, 2026-09-29: DeepSeek on NIM with
+deeper reasoning). Until then GLM was the primary and `moonshotai/kimi-k3` the
+fallback; Kimi returned no token in any of its eight fallback attempts on
+2026-09-28 (each stopped at the 15-minute deadline, from run 36394141175 to
+36456002254), so GLM takes the fallback's place. GLM, the primary in those
+runs, also stopped at that deadline in the six where it started (the other two
+failed at launch, before #217); the longer deadline below is for both models. Both use the same NIM
+account, OpenAI-compatible endpoint, and `high` reasoning effort (the owner
+lowered it from `max` on 2026-09-28). For DeepSeek, NIM accepts `none`, `low`,
+`high` and `max` and rejects `medium` with a 400 (measured 2026-09-29). OCR's
+separate review effort is at its maximum, `high` (three review rounds); OCR does
+not accept `max` for that setting.
 
 In the repository's **Settings > Secrets and variables > Actions**, configure:
 
@@ -26,8 +32,8 @@ In the repository's **Settings > Secrets and variables > Actions**, configure:
 | Secret | `OCR_LLM_URL` | `https://integrate.api.nvidia.com/v1/chat/completions` |
 | Secret | `OCR_LLM_AUTH_TOKEN` | NVIDIA NIM API key. |
 | Variable | `OCR_LLM_USE_ANTHROPIC` | `false` for the NIM OpenAI-compatible endpoint. |
-| Variable | `OCR_LLM_MODEL` | `z-ai/glm-5.3`. Set this last to enable the workflow. |
-| Variable | `OCR_LLM_FALLBACK_MODEL` | `moonshotai/kimi-k3`. Omit to disable fallback. |
+| Variable | `OCR_LLM_MODEL` | `deepseek-ai/deepseek-v4.1-flash`. Set this last to enable the workflow. |
+| Variable | `OCR_LLM_FALLBACK_MODEL` | `z-ai/glm-5.3`. Omit to disable fallback. |
 
 No extra GitHub credential is needed: the workflow uses its short-lived `GITHUB_TOKEN`.
 Never put an API key in this file, the workflow, a PR, or a command-line argument.
@@ -81,19 +87,32 @@ The alternate model is tried only once, even for these failures.
 - At the start of a queued job, the workflow fetches the current PR metadata.
   Automatic reviews skip closed/draft PRs and superseded head/base snapshots.
   Manual reviews use the current head and still reject closed/draft PRs.
-- Each job has a 45-minute timeout. Each attempt reviews one file group at a time,
-  with a 600-second LLM request timeout and a 500,000-token budget. The longer request
-  and job limits leave room for long reasoning and the fallback attempt.
-  The CLI multiplies the five-minute task setting by the three rounds of explicit
-  `high` review effort, giving each file group a fifteen-minute deadline. The job
+- Each job has a 120-minute timeout. Each attempt reviews one file group at a time,
+  with a 600-second LLM request timeout and a 3,000,000-token budget.
+  The CLI multiplies the fifteen-minute task setting by the three rounds of explicit
+  `high` review effort, giving each file group a 45-minute deadline. The job
   deadline still applies across all groups and both models. Fallback can consume
   a second budget.
+- These limits are sized for DeepSeek, measured locally with OCR 1.12.9 on
+  2026-09-29. With the old 500,000-token budget (and a 15-minute task setting) it
+  failed PR #218's one file: a planning call and 21 review calls, each resending
+  the growing conversation, used 547,309 tokens (446,656 of them cached input),
+  and the first round of three stopped at the budget after 11 minutes. With these
+  limits it reviewed the seven files of #225's merged change (4bbe0fa..82ec6be)
+  in three groups in 18 minutes with 983,770 tokens, so PRs pushed close together
+  wait about that long for each other in the shared slot.
+- NIM's gateway answers 504 to a request still running at about 300 seconds, and
+  OCR sends it again, so one slow call can cost a file group five minutes or more.
+  DeepSeek's planning call on #218 got a 504 after 302 seconds, then answered in
+  162 seconds: 7.7 of that run's 11 minutes. GLM's planning call on #218 (run
+  36456002254) got two 504s, then answered in 227 seconds: about 14 minutes of
+  the old 15-minute deadline, at which the file failed. The longer task setting
+  leaves room for such retries.
   The CLI also checks an estimated file-group cost before dispatch. The initial
   100,000-token budget rejected all nine selected files in PR #147 before review:
   the first group was estimated at 249,216 tokens with GLM and 338,132 with Kimi.
-  The 500,000-token cap admits those groups while retaining a finite limit.
-  It is a soft stop, not a hard billing cap; an in-flight group or final round may
-  exceed it, and unfinished files are reported.
+  The budget is a soft stop, not a hard billing cap; an in-flight group or final
+  round may exceed it, and unfinished files are reported.
 - Findings are advisory. A successful job means the tool ran, not that the PR is
   defect-free or every file was reviewed. Inspect the summary for partial results.
 - Existing inline findings are preserved. Each run may add findings on the same
