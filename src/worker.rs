@@ -1129,6 +1129,11 @@ mod tests {
     fn a_restore_asked_for_while_the_worker_waits_opens_the_stores_again() {
         let home = tempfile::tempdir().unwrap();
         let p = home.path().to_path_buf();
+        let device = {
+            let mut raw = raw::open(&p).unwrap();
+            raw.append(&raw::test_event("first")).unwrap();
+            raw.device().to_owned()
+        };
         // A worker that only took the request on its way out would take it after its 10 s wait,
         // past the 8 s this test allows; a slow runner still gets its worker into the wait (a
         // Windows runner took over 1 s, #199).
@@ -1136,7 +1141,20 @@ mod tests {
             let p = p.clone();
             std::thread::spawn(move || run_with(&p, 10_000, vec![Box::new(Seen)], || {}))
         };
-        std::thread::sleep(Duration::from_millis(300));
+        // Asked only once the worker has read the event: past its start, where a request would be
+        // taken too, so only the wait can take it.
+        let t = Instant::now();
+        while knowledge::open(&p)
+            .ok()
+            .and_then(|k| checkpoint::get(&k, "seen", &device).ok())
+            != Some(1)
+        {
+            assert!(
+                t.elapsed() < Duration::from_secs(30),
+                "the worker never read"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         crate::backup::request_restore(&p);
         let t = Instant::now();
         while crate::backup::restore_requested(&p) {
