@@ -49,7 +49,7 @@ jobs:
       contents: read
       pull-requests: write
     concurrency:
-      group: open-code-review-nim
+      group: open-code-review
       cancel-in-progress: false
       queue: max
     steps:
@@ -110,15 +110,16 @@ jobs:
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           llm_model: ${{ vars.OCR_LLM_MODEL }}
           llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC || 'false' }}
-          # The upstream default contains a provider-specific "thinking" field.
-          llm_extra_body: '{}'
+          # The upstream default contains a provider-specific "thinking" field. The variable pins
+          # OpenRouter to the owner's DeepSeek key (docs/open-code-review.md).
+          llm_extra_body: ${{ vars.OCR_LLM_EXTRA_BODY || '{}' }}
           llm_reasoning_effort: high
           llm_timeout: '600'
           review_task_timeout: '15'
           effort: high
           language: Japanese
           review_concurrency: '1'
-          max_tokens_budget: '3000000'
+          max_tokens_budget: '6000000'
           # Line overlap alone does not prove two findings describe the same problem.
           incremental: 'false'
           upload_artifacts: 'false'
@@ -138,8 +139,8 @@ jobs:
         uses: alibaba/open-code-review@486022daaf14f7142275eddb9b3cacc3cc5dadfa # 2026-09-24
         with:
           ocr_version: '1.12.9'
-          llm_url: ${{ secrets.OCR_LLM_URL }}
-          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          llm_url: ${{ secrets.OCR_LLM_FALLBACK_URL || secrets.OCR_LLM_URL }}
+          llm_auth_token: ${{ secrets.OCR_LLM_FALLBACK_AUTH_TOKEN || secrets.OCR_LLM_AUTH_TOKEN }}
           llm_model: ${{ vars.OCR_LLM_FALLBACK_MODEL }}
           llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC || 'false' }}
           llm_extra_body: '{}'
@@ -149,7 +150,7 @@ jobs:
           effort: high
           language: Japanese
           review_concurrency: '1'
-          max_tokens_budget: '3000000'
+          max_tokens_budget: '6000000'
           incremental: 'false'
           upload_artifacts: 'false'
           base_ref: ${{ steps.pr.outputs.base_ref }}
