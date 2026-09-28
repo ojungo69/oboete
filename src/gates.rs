@@ -150,7 +150,6 @@ pub fn check(
     rules: &Rules,
 ) -> Gated {
     let mut g = Gated::default();
-    let tools = tool_text(w);
     // Whether each kept draft stands on the user's own words, and its line's repository, for its
     // supersedes.
     let mut own = Vec::new();
@@ -230,9 +229,10 @@ pub fn check(
         // "yes" accepts only what it answers. Any part of a user turn that says nothing but
         // acceptance and filler is bare too ("please" from "Yes, please.").
         let is_bare = bare(&d.quote) || speaker == "user" && unsaid(turn_said(line, &d.quote)) == 0;
+        let tools = tool_text(w, i);
         let paste = speaker == "user" && pasted(&norm(span), &tools);
         let own_words = speaker == "user" && !asked && !is_bare && !paste;
-        let answers = speaker == "user" && is_bare && answers_a_reply(w, i, &tools, ended);
+        let answers = speaker == "user" && is_bare && answers_a_reply(w, i, ended);
         d.tainted = speaker == "assistant proposal" && tainted(w, i, span, &tools);
         let accepts = speaker == "assistant proposal" && !d.tainted && accepted(w, i);
         let below = match d.status.as_str() {
@@ -421,7 +421,7 @@ fn accepted(w: &Window, i: usize) -> bool {
 /// other end of `accepted`. A reply before a checkout change is another repository's, and the
 /// claim anchors on this line. With no turn before it in the window, the session's previous
 /// window must have ended on an untainted proposal of this repository (`ended`, #144).
-fn answers_a_reply(w: &Window, i: usize, tools: &str, ended: &[String]) -> bool {
+fn answers_a_reply(w: &Window, i: usize, ended: &[String]) -> bool {
     let key = &w.lines[i].key;
     let before = w.lines[..i]
         .iter()
@@ -434,7 +434,7 @@ fn answers_a_reply(w: &Window, i: usize, tools: &str, ended: &[String]) -> bool 
             Some((j, l)) => {
                 l.role == Role::Assistant
                     && l.repo == w.lines[i].repo
-                    && !tainted(w, j, said(&l.text), tools)
+                    && !tainted(w, j, said(&l.text), &tool_text(w, j))
             }
             None => ended.contains(key),
         }
@@ -499,13 +499,20 @@ fn norm(text: &str) -> Vec<char> {
         .collect()
 }
 
-/// Every tool line of the window, as MUST-M4 compares them: each text normalized on its own and
-/// joined by a NUL, which no user span holds, so no run crosses from one text into the next (#197).
-fn tool_text(w: &Window) -> String {
+/// The tool lines of the window that line `i` could have taken words from, as MUST-M4 compares
+/// them: every tool line of its session before it, and every tool line of the other sessions,
+/// whose lines the window does not order against it. A tool line after it in its session came
+/// later: an agent writing the owner's words to a file is no paste into them (#203). Each text is
+/// normalized on its own and joined by a NUL, which no user span holds, so no run crosses from
+/// one text into the next (#197).
+fn tool_text(w: &Window, i: usize) -> String {
+    let key = &w.lines[i].key;
     let tools: Vec<String> = w
         .lines
         .iter()
-        .filter(|l| matches!(l.role, Role::Tool { .. }))
+        .enumerate()
+        .filter(|&(j, l)| matches!(l.role, Role::Tool { .. }) && (j < i || &l.key != key))
+        .map(|(_, l)| l)
         // The whole output too: a shrink shows only its head and tail (Task 12).
         .flat_map(|l| [l.text.as_str(), l.source_text()])
         .map(|t| norm(t).into_iter().collect())
@@ -771,6 +778,19 @@ mod tests {
             .unwrap()
             .id
             .clone();
+        draft_on(w, &line, id, status, speaker, quote)
+    }
+
+    /// A draft of `status` quoting `quote` from line `line`.
+    fn draft_on(
+        w: &Window,
+        line: &str,
+        id: &str,
+        status: &str,
+        speaker: &str,
+        quote: &str,
+    ) -> (Draft, Evidence, usize) {
+        let line = line.to_owned();
         let d = Draft {
             id: id.into(),
             kind: "decision".into(),
@@ -986,6 +1006,41 @@ mod tests {
             window(&[asked("SQLite にする")]).lines[0].answers,
             ["SQLite にする"]
         );
+    }
+
+    /// A tool call that writes the owner's words to a file after they said them is no paste into
+    /// them (#203): the owner's decision stays theirs, and an accepted proposal the agent then
+    /// writes down stays promoted. A tool output before the words still is one.
+    #[test]
+    fn words_a_later_tool_call_repeats_are_no_paste() {
+        let decision = "Deploy only from the main branch, never from a feature branch.";
+        let quote = "Deploy only from the main branch, never from a feature branch";
+        let write = |text: &str| {
+            let body = json!({"tool": "Write", "input": {"file_path": "NOTES.md", "content": text},
+                "output": "File created", "failed": false});
+            ("tool", body)
+        };
+        // The first line that holds it: the tool line after it holds it too.
+        let first = |w: &Window, status: &str, speaker: &str, quote: &str| {
+            let line = w.lines.iter().find(|l| l.text.contains(quote)).unwrap();
+            let d = draft_on(w, &line.id, "c1", status, speaker, quote);
+            gated(w, vec![d]).remove(0)
+        };
+        let w = window(&[user(decision), write(decision)]);
+        assert_eq!(first(&w, "decided", "user", quote), is("decided", "user"));
+        let proposal = "We should pin every dependency to an exact version in the lockfile.";
+        let w = window(&[
+            reply(proposal),
+            user("はい、それでお願いします"),
+            write(proposal),
+        ]);
+        let pinned = "pin every dependency to an exact version in the lockfile";
+        assert_eq!(
+            first(&w, "decided", "assistant proposal", pinned),
+            is("decided", "assistant proposal")
+        );
+        let pasted = window(&[tool(decision, false), user(decision)]);
+        assert_eq!(one(&pasted, "decided", "user", quote).0, "proposed");
     }
 
     const PROPOSAL: &str = "We could cache the parsed files.";
