@@ -81,6 +81,9 @@ pub struct Line {
     /// On an `Answer` line, the owner's answers and notes, from the whole call whatever part of it
     /// the line shows (`owners_answers`); empty on every other line.
     pub(crate) answers: Vec<String>,
+    /// A tool whose output is the owner's words (`OWNERS_WORDS`) and did not fail: `searched`
+    /// reads it with the owner's lines (#222).
+    owners: bool,
 }
 
 impl Line {
@@ -142,6 +145,7 @@ struct Piece {
     /// Shown short (Task 12's shrink): its source is still the whole output.
     shortened: bool,
     answers: Vec<String>,
+    owners: bool,
 }
 
 /// A repository as a window shows it: through the gate, a local path (no origin) as its folder,
@@ -350,6 +354,7 @@ fn empty(seq: i64) -> Piece {
         repo: None,
         shortened: false,
         answers: Vec::new(),
+        owners: false,
     }
 }
 
@@ -486,6 +491,7 @@ struct Prepared<'r> {
     /// A tool input the shrink cut at `SHORT_CHARS`.
     cut_input: bool,
     answers: Vec<String>,
+    owners: bool,
 }
 
 impl<'r> Prepared<'r> {
@@ -579,6 +585,7 @@ impl<'r> Prepared<'r> {
             } else {
                 Vec::new()
             },
+            owners: e.kind == "tool" && OWNERS_WORDS.contains(&tool) && body["failed"] != true,
         }
     }
 
@@ -645,6 +652,7 @@ impl<'r> Prepared<'r> {
             source: None,
             shortened: self.cut_input,
             answers: self.answers.clone(),
+            owners: self.owners,
         }
     }
 
@@ -784,6 +792,7 @@ fn grouped(pieces: &[Piece]) -> (String, Vec<Line>) {
                 role: p.role,
                 source: p.source.clone(),
                 answers: p.answers.clone(),
+                owners: p.owners,
             });
         }
     }
@@ -1975,6 +1984,9 @@ pub fn candidates(
     )?;
     let mut out: Vec<crate::claims::Claim> = Vec::new();
     for text in [said, rest] {
+        if out.len() == 20 {
+            break;
+        }
         let all = crate::search::trigrams_upto(text, usize::MAX);
         let grams: Vec<String> = spread(&all, 64)
             .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
@@ -2000,14 +2012,14 @@ pub fn candidates(
     Ok(out)
 }
 
-/// `w`'s lines in `repo` as `candidates` searches them: the owner's and the assistant's, and the
-/// rest.
+/// `w`'s lines in `repo` as `candidates` searches them: the owner's (typed, answered, or an
+/// `OWNERS_WORDS` tool's output) and the assistant's, and the rest.
 fn searched(w: &Window, repo: &str) -> (String, String) {
     let (said, rest): (Vec<&Line>, Vec<&Line>) = w
         .lines
         .iter()
         .filter(|l| l.repo.as_deref() == Some(repo))
-        .partition(|l| matches!(l.role, Role::User | Role::Assistant | Role::Answer));
+        .partition(|l| l.owners || matches!(l.role, Role::User | Role::Assistant | Role::Answer));
     let join = |ls: Vec<&Line>| {
         ls.iter()
             .map(|l| l.text.as_str())
@@ -3545,6 +3557,86 @@ mod tests {
         assert!(shown.contains(&earlier), "{shown:?}");
         assert_eq!(shown.len(), 20, "tool text fills the places left");
         assert!(!candidates(&k, "a", "", &log).unwrap().is_empty());
+    }
+
+    /// An approved plan is the owner's words, though its line is a tool's: it is searched with the
+    /// owner's lines, not after the tool output (#222). Here the owner's pasted build log finds
+    /// more claims than a window shows, and only the approval names the earlier decision.
+    #[test]
+    fn an_approved_plan_is_searched_with_the_owners_words() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let earlier = "The review bot runs on Workers and Actions.";
+        let mut ops = vec![kept(&mut raw, "s1", "a", earlier)];
+        let line = |i: u32| {
+            format!(
+                "Compiling crate_{i} ({:08x})",
+                i.wrapping_mul(2_654_435_761)
+            )
+        };
+        ops.extend((0..30).map(|i| kept(&mut raw, &format!("d{i}"), "a", &line(i))));
+        raw.append_ops(&ops).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let dev = raw.device().to_owned();
+        let before = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        close(&mut raw, &before);
+        let log: String = (0..30).map(|i| line(i) + "\n").collect();
+        let approval = event(
+            "tool",
+            serde_json::json!({"tool": "ExitPlanMode", "input": {"plan": "Move the bot."},
+                "output": "User has approved your plan. Drop the review bot on Workers; it runs on Actions only.",
+                "failed": false}),
+        );
+        for e in [prompt(&format!("Why does this fail?\n{log}")), approval] {
+            let e = Event {
+                session: "new".into(),
+                repo: Some("a".into()),
+                ..e
+            };
+            raw.append(&e).unwrap();
+        }
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        let req = request(&raw, &k, &rules, &summary, &w).unwrap();
+        let shown: Vec<&str> = req.shown_in.iter().map(|(_, c)| c.body.as_str()).collect();
+        assert!(shown.contains(&earlier), "{shown:?}");
+        assert_eq!(shown.len(), 20);
+    }
+
+    /// A claim both searches find is shown once, and a claim only tool output finds takes one of
+    /// the places the owner's lines left.
+    #[test]
+    fn a_claim_both_searches_find_is_shown_once() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let both = "Sessions stay in Postgres for now.";
+        let tool_only = "The importer reads dd.mm.yyyy dates.";
+        let ops = vec![
+            kept(&mut raw, "s1", "a", both),
+            kept(&mut raw, "s2", "a", tool_only),
+        ];
+        raw.append_ops(&ops).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let found = candidates(
+            &k,
+            "a",
+            "Keep sessions in Postgres.",
+            "grep: sessions stay in Postgres; the importer reads dd.mm.yyyy dates",
+        )
+        .unwrap();
+        let bodies: Vec<&str> = found.iter().map(|c| c.body.as_str()).collect();
+        assert_eq!(
+            bodies.iter().filter(|b| **b == both).count(),
+            1,
+            "{bodies:?}"
+        );
+        assert!(bodies.contains(&tool_only), "{bodies:?}");
     }
 
     #[test]
