@@ -91,9 +91,17 @@ jobs:
         env:
           OCR_LLM_URL: ${{ secrets.OCR_LLM_URL }}
           OCR_LLM_AUTH_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          OCR_LLM_FALLBACK_URL: ${{ secrets.OCR_LLM_FALLBACK_URL }}
+          OCR_LLM_FALLBACK_AUTH_TOKEN: ${{ secrets.OCR_LLM_FALLBACK_AUTH_TOKEN }}
         run: |
           if [[ -z "$OCR_LLM_URL" || -z "$OCR_LLM_AUTH_TOKEN" ]]; then
             echo '::error::Configure OCR_LLM_URL and OCR_LLM_AUTH_TOKEN in repository Actions secrets. See docs/open-code-review.md.'
+            exit 1
+          fi
+          # Half a pair would send one provider's key to the other's URL.
+          if [[ -n "$OCR_LLM_FALLBACK_URL" && -z "$OCR_LLM_FALLBACK_AUTH_TOKEN" ]] ||
+             [[ -z "$OCR_LLM_FALLBACK_URL" && -n "$OCR_LLM_FALLBACK_AUTH_TOKEN" ]]; then
+            echo '::error::Set both OCR_LLM_FALLBACK_URL and OCR_LLM_FALLBACK_AUTH_TOKEN, or neither. See docs/open-code-review.md.'
             exit 1
           fi
 

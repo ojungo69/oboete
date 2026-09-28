@@ -27,8 +27,13 @@ does not accept `max` for that setting.
   answers 504 to a call still running at about 300 seconds (below).
 - **Routing.** `OCR_LLM_EXTRA_BODY` is `{"provider":{"only":["deepseek"],"allow_fallbacks":false}}`:
   OpenRouter tries BYOK endpoints first, and this keeps it off the model's other
-  providers, which would spend OpenRouter credits instead. A response shows the
-  route: `"provider": "DeepSeek"` and `"is_byok": true` in its usage.
+  providers, which would spend OpenRouter credits. It does not keep a call off
+  OpenRouter's own DeepSeek endpoint when the BYOK key fails: OpenRouter tries its
+  shared capacity after the BYOK keys ([BYOK](https://openrouter.ai/docs/guides/overview/auth/byok)).
+  The BYOK key's option "Never use shared capacity for models this key applies to"
+  closes that route; a failed key then fails the primary, and the fallback runs on
+  NIM. A response shows the route: `"provider": "DeepSeek"` and `"is_byok": true`
+  in its usage.
 - **Cost.** DeepSeek bills the owner's account at its price. OpenRouter charges 5%
   of the OpenRouter price for BYOK calls beyond a free monthly allowance
   ([BYOK](https://openrouter.ai/docs/guides/overview/auth/byok), read 2026-09-29), and
@@ -45,9 +50,9 @@ does not accept `max` for that setting.
   ([filereader.go](https://github.com/alibaba/open-code-review/blob/bccbc15/internal/tool/filereader.go)).
 
 Until 2026-09-29 the primary was the same model on NIM, with `z-ai/glm-5.3` as the
-fallback. Its first two reviews on main (PR #231, runs 36483093911 and 36484506317)
-finished in 11 minutes 42 seconds and 8 minutes 31 seconds, 120,831 and 44,327
-tokens, with no retry, no finding and no fallback. Before that GLM was the primary
+fallback. Its first two reviews on main, of PR #231 at heads 2eead29 and 0129e12
+(runs 36483093911 and 36484506317), finished in 11 minutes 42 seconds and 8 minutes
+31 seconds with 120,831 and 44,327 tokens, no retry, no finding and no fallback. Before that GLM was the primary
 and `moonshotai/kimi-k3` the fallback. Kimi returned no token in any of its eight
 fallback attempts on 2026-09-28, each stopped at the 15-minute deadline (runs
 36394141175 to 36456002254). GLM stopped at that deadline in the six of those runs
@@ -61,7 +66,7 @@ In the repository's **Settings > Secrets and variables > Actions**, configure:
 | --- | --- | --- |
 | Secret | `OCR_LLM_URL` | `https://openrouter.ai/api/v1/chat/completions` |
 | Secret | `OCR_LLM_AUTH_TOKEN` | OpenRouter API key. |
-| Secret | `OCR_LLM_FALLBACK_URL` | `https://integrate.api.nvidia.com/v1/chat/completions`. Unset: the fallback uses `OCR_LLM_URL`. |
+| Secret | `OCR_LLM_FALLBACK_URL` | `https://integrate.api.nvidia.com/v1/chat/completions`. Set it with the next one, or neither. Unset: the fallback uses `OCR_LLM_URL` without `OCR_LLM_EXTRA_BODY`, so on OpenRouter it is not pinned to the BYOK key and may spend credits. |
 | Secret | `OCR_LLM_FALLBACK_AUTH_TOKEN` | NVIDIA NIM API key. Unset: the fallback uses `OCR_LLM_AUTH_TOKEN`. |
 | Variable | `OCR_LLM_USE_ANTHROPIC` | `false`: both endpoints are OpenAI-compatible. |
 | Variable | `OCR_LLM_EXTRA_BODY` | `{"provider":{"only":["deepseek"],"allow_fallbacks":false}}`. Sent by the primary only. |
@@ -87,8 +92,10 @@ OpenCodeReview 1.12.9 retries requests to its selected model but does not switch
 models automatically. The workflow makes at most one additional review attempt
 with the fallback model when the primary OCR CLI exits nonzero. Both attempts
 review the same PR head with the same CLI version. The fallback uses
-`OCR_LLM_FALLBACK_URL` and `OCR_LLM_FALLBACK_AUTH_TOKEN` when they are set, else the
-primary's endpoint and key, and it sends no `OCR_LLM_EXTRA_BODY`.
+`OCR_LLM_FALLBACK_URL` and `OCR_LLM_FALLBACK_AUTH_TOKEN` when both are set, else the
+primary's endpoint and key, and it sends no `OCR_LLM_EXTRA_BODY`. With only one of
+the two set, the job fails before any review, so that no key goes to another
+provider's URL.
 
 Checkout, installation, configuration, and comment-publication failures do not
 trigger fallback. Cancellation or the job timeout also stops the run. A primary
