@@ -16,6 +16,9 @@ use serde_json::{Value, json};
 
 /// A digest's text, all lines together, at most (spec 6.5).
 pub const MAX_CHARS: usize = 2_000;
+/// A digest's lines, at most: the prompt asks for 1 to 6. With `CLAIMS` uids a line, the largest
+/// digest stays well within the op cap.
+const MAX_LINES: usize = 6;
 
 /// The body of a digest op.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -340,7 +343,7 @@ fn check(shown: &[(String, String)], v: &Value) -> Option<&'static str> {
 
 /// The answer's lines as the op keeps them: each with only the uids it was shown, a line left with
 /// none dropped (MUST-M6: an instruction in a claim body never yields an uncited line), within the
-/// 2,000-character cap, through the egress gate as a claim body is.
+/// 2,000-character cap and six lines, through the egress gate as a claim body is.
 fn kept(shown: &[(String, String)], v: &Value, rules: &Rules) -> Vec<Line> {
     let mut out = Vec::new();
     let mut chars = 0;
@@ -364,7 +367,7 @@ fn kept(shown: &[(String, String)], v: &Value, rules: &Rules) -> Vec<Line> {
             continue;
         }
         chars += text.chars().count();
-        if chars > MAX_CHARS {
+        if chars > MAX_CHARS || out.len() == MAX_LINES {
             break;
         }
         out.push(Line { text, uids, seen });
@@ -629,6 +632,30 @@ mod tests {
         let uncited = json!({"lines": [{"text": "HACKED", "uids": []}]});
         assert_eq!(check(&shown, &uncited), Some("empty"));
         assert_eq!(check(&shown, &json!({"summary": "x"})), Some("shape"));
+        // At most the six lines the prompt asks for, so the largest answer that passes, every
+        // line citing every claim shown, is an op the record can hold.
+        let shown: Vec<(String, String)> = (0..CLAIMS)
+            .map(|i| (format!("{i:064x}"), version("decided", &i.to_string())))
+            .collect();
+        let all: Vec<&String> = shown.iter().map(|(u, _)| u).collect();
+        for text in ["x".to_owned(), "x".repeat(MAX_CHARS / MAX_LINES)] {
+            let many: Vec<Value> = (0..30)
+                .map(|_| json!({"text": text, "uids": all}))
+                .collect();
+            let lines = kept(&shown, &json!({ "lines": many }), &Rules::default());
+            assert_eq!(lines.len(), MAX_LINES);
+            let op = DigestOp {
+                agent: "claude".into(),
+                session: "s".into(),
+                repo: Some("r".into()),
+                through: Through {
+                    device: "d".into(),
+                    seq: 1,
+                },
+                lines,
+            };
+            assert!(serde_json::to_string(&op).unwrap().len() < crate::raw::MAX_OP_BYTES);
+        }
     }
 
     #[test]
