@@ -486,6 +486,38 @@ impl Raw {
         )?)
     }
 
+    /// `agent`'s `session` events of `kind` on this device strictly between two seqs, as `after`
+    /// returns them: picked by their labels, and only their bodies read.
+    pub fn events_between(
+        &self,
+        agent: &str,
+        session: &str,
+        kind: &str,
+        after: i64,
+        before: i64,
+    ) -> Result<Vec<Event>> {
+        let seqs: Vec<i64> = self
+            .conn
+            .prepare(
+                "SELECT seq FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
+                   AND type = 'event' AND agent = ?4 AND session = ?5 AND kind = ?6
+                 ORDER BY seq",
+            )?
+            .query_map(
+                params![self.device, after, before, agent, session, kind],
+                |r| r.get(0),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut out = Vec::new();
+        for seq in seqs {
+            let record = self.after(&self.device, seq - 1, 1)?.into_iter().next();
+            if let Some(Item::Event(e)) = record.filter(|r| r.seq == seq).map(|r| r.item) {
+                out.push(*e);
+            }
+        }
+        Ok(out)
+    }
+
     /// The typed prompts and harness envelopes this device recorded in one agent's session (Task
     /// 11). A scan by label: sessions have no index (spec 1.6).
     pub fn turns(&self, agent: &str, session: &str) -> Result<i64> {
