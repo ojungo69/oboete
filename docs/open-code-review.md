@@ -11,9 +11,10 @@ It supplements the existing Rust CI and SonarCloud checks; it does not approve o
 This repository uses NVIDIA NIM: `z-ai/glm-5.3` is the primary model and
 `moonshotai/kimi-k3` is the fallback. GLM is the starting choice for text-only
 code review, not a claim that it outperforms Kimi on every repository. Both use
-the same NIM account, OpenAI-compatible endpoint, and maximum `max` reasoning
-effort. OCR's separate review effort is also at its maximum, `high` (three
-review rounds); OCR does not accept `max` for that setting.
+the same NIM account, OpenAI-compatible endpoint, and `high` reasoning effort
+(the owner lowered it from `max` on 2026-09-28). OCR's separate review effort is
+at its maximum, `high` (three review rounds); OCR does not accept `max` for that
+setting.
 
 In the repository's **Settings > Secrets and variables > Actions**, configure:
 
@@ -79,7 +80,7 @@ The alternate model is tried only once, even for these failures.
   Manual reviews use the current head and still reject closed/draft PRs.
 - Each job has a 45-minute timeout. Each attempt reviews one file group at a time,
   with a 600-second LLM request timeout and a 500,000-token budget. The longer request
-  and job limits leave room for maximum reasoning and the fallback attempt.
+  and job limits leave room for long reasoning and the fallback attempt.
   The CLI multiplies the five-minute task setting by the three rounds of explicit
   `high` review effort, giving each file group a fifteen-minute deadline. The job
   deadline still applies across all groups and both models. Fallback can consume
