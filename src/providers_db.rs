@@ -268,16 +268,16 @@ pub fn set_rate(conn: &Connection, provider: &str, r: RateLeft) -> Result<()> {
     Ok(())
 }
 
-/// Requests sent to `provider` since the last UTC midnight (the per-provider daily budget window).
-/// A 429 that was waited out still counts: the budget bounds our requests, not our successes.
-pub fn calls_today(conn: &Connection, provider: &str) -> Result<u32> {
-    let day_ms: i64 = 86_400_000;
-    let midnight = now_ms() / day_ms * day_ms;
+/// Requests sent to `provider` in the last 24 hours, and when the oldest of them was sent: the
+/// per-provider daily budget counts a rolling day, as Groq counts its own (docs/milestone-1.md), so
+/// it holds in any 24 hours, UTC days included. A 429 that was waited out still counts: the budget
+/// bounds our requests, not our successes.
+pub fn calls_in_a_day(conn: &Connection, provider: &str) -> Result<(u32, Option<i64>)> {
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM provider_calls WHERE provider=?1 AND ts>=?2
+        "SELECT COUNT(*), MIN(ts) FROM provider_calls WHERE provider=?1 AND ts>=?2
            AND outcome IN ('ok','error','invalid','wait','empty','prose','shape','over_cap','unanchored')",
-        params![provider, midnight],
-        |r| r.get(0),
+        params![provider, now_ms() - DAY_MS],
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
 }
 
@@ -305,10 +305,13 @@ pub fn last_calls(conn: &Connection, n: u32) -> Result<Vec<String>> {
 pub const DAY_MS: i64 = 86_400_000;
 
 /// Tokens (prompt plus completion) `provider` reported since `since`, and when its oldest call
-/// since then was made.
+/// since then that used any was made: one that reported tokens or sent a request (a refusal row
+/// neither sent nor used any, so its age frees nothing).
 pub fn tokens_since(conn: &Connection, provider: &str, since: i64) -> Result<(i64, Option<i64>)> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), 0), MIN(ts)
+        "SELECT COALESCE(SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), 0),
+                MIN(CASE WHEN COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0) > 0
+                          OR bytes_out > 0 THEN ts END)
          FROM provider_calls WHERE provider=?1 AND ts>=?2",
         params![provider, since],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -323,16 +326,6 @@ pub fn usd_this_month(conn: &Connection) -> Result<f64> {
         [chrono_free_month_start(now_ms())],
         |r| r.get(0),
     )?)
-}
-
-/// The last UTC midnight, for `unmetered`.
-pub fn today() -> i64 {
-    now_ms() / DAY_MS * DAY_MS
-}
-
-/// When the daily counts start again: the next UTC midnight.
-pub fn next_day() -> i64 {
-    today() + DAY_MS
 }
 
 /// When the monthly spend starts again: the first of the next UTC month.

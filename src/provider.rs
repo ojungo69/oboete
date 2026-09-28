@@ -300,7 +300,7 @@ impl<'a> Chain<'a> {
                     continue;
                 }
             }
-            let used = providers_db::calls_today(conn, &name)?;
+            let (used, _) = providers_db::calls_in_a_day(conn, &name)?;
             let started = Instant::now();
             let forced = forced_fail.as_deref() == Some(name.as_str());
             let mut result = if forced {
@@ -2535,19 +2535,21 @@ mod tests {
             named("spent", 0),
             refused,
         ];
+        let before = crate::db::now_ms();
         let err = Chain::new(&providers, &conn)
             .run("curator", "s", "p", &json!({}))
             .unwrap_err();
+        let after = crate::db::now_ms();
         let failed = err.downcast_ref::<ChainFailed>().expect("a ChainFailed");
         let skips: Vec<&Skip> = failed.0.iter().map(|f| &f.skip).collect();
+        // A budget with no call in the last 24 hours waits a whole day.
+        let &&Skip::Budget(until) = &skips[2] else {
+            panic!("{skips:?}")
+        };
+        assert!((before..=after).contains(&(until - providers_db::DAY_MS)));
         assert_eq!(
-            skips,
-            [
-                &Skip::Owner,
-                &Skip::Wait(cool_until),
-                &Skip::Budget(providers_db::next_day()),
-                &Skip::Failed
-            ]
+            [skips[0], skips[1], skips[3]],
+            [&Skip::Owner, &Skip::Wait(cool_until), &Skip::Failed]
         );
         assert!(
             err.to_string()
@@ -3272,7 +3274,7 @@ mod tests {
             let ChainFailed(fallbacks) = err.downcast::<ChainFailed>().unwrap();
             assert_eq!(fallbacks[0].skip, Skip::Failed, "{outcome}");
             // Each was a request sent: the daily budget counts it.
-            let sent = crate::providers_db::calls_today(&conn, "stub").unwrap();
+            let (sent, _) = crate::providers_db::calls_in_a_day(&conn, "stub").unwrap();
             assert_eq!(sent, 2, "{outcome}");
         }
     }

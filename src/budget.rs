@@ -66,12 +66,14 @@ pub fn admit(
 ) -> Result<Option<Refusal>> {
     let name = p.name();
     let limits = p.limits();
-    let used = providers_db::calls_today(db, name)?;
+    let now = crate::db::now_ms();
+    // A rolling day, as `limits.daily_tokens` below: until the oldest call counted leaves it.
+    let (used, oldest) = providers_db::calls_in_a_day(db, name)?;
     if used >= p.daily_budget() {
         return Ok(Some(Refusal {
             outcome: "budget",
-            detail: format!("{used}/{} calls today", p.daily_budget()),
-            skip: Skip::Budget(providers_db::next_day()),
+            detail: format!("{used}/{} calls in 24 hours", p.daily_budget()),
+            skip: Skip::Budget(oldest.unwrap_or(now) + providers_db::DAY_MS),
         }));
     }
     // The answer counts against the same limits as the prompt (Groq's TPM is input and output
@@ -99,7 +101,6 @@ pub fn admit(
         }
     }
     let rate = providers_db::rate(db, name)?;
-    let now = crate::db::now_ms();
     if rate.requests == Some(0)
         && let Some(at) = rate.requests_reset_at.filter(|&t| t > now)
     {
@@ -234,6 +235,26 @@ mod tests {
             limits,
             subscription: false,
         }
+    }
+
+    /// A call the budget refused: recorded, nothing sent, no usage.
+    fn refusal(db: &Connection, provider: &str) {
+        record(
+            db,
+            &Call {
+                provider,
+                role: "curator",
+                span: "s",
+                outcome: "budget",
+                ms: 0,
+                detail: Some("budget"),
+                bytes_out: 0,
+                est_tokens: None,
+                usage: Usage::default(),
+                usd: None,
+            },
+        )
+        .unwrap();
     }
 
     fn call(db: &Connection, provider: &str, est: Option<u32>, prompt: i64, completion: i64) {
@@ -423,18 +444,52 @@ mod tests {
             },
         );
         let (now, hour) = (crate::db::now_ms(), 3_600_000);
+        let aged = |ms: i64| {
+            db.execute(
+                "UPDATE provider_calls SET ts = ?1 WHERE id = (SELECT MAX(id) FROM provider_calls)",
+                [now - ms],
+            )
+            .unwrap();
+        };
         for ago in [25, 23] {
             call(&db, "p", None, 5000, 1000);
+            aged(ago * hour);
+        }
+        // A refusal older than the counted call sent nothing: its age frees no token.
+        refusal(&db, "p");
+        aged(23 * hour + hour / 2);
+        // 6,000 in the 24 hours: 2,700 in and 1,250 reserved fit in the 4,000 left, 2,800 do not.
+        assert!(admit(&db, &p, 2700.0, 5.0, &[]).unwrap().is_none());
+        let r = admit(&db, &p, 2800.0, 5.0, &[]).unwrap().unwrap();
+        assert_eq!(r.detail, "6000/10000 tokens in 24 hours");
+        let Skip::Budget(until) = r.skip else {
+            panic!("{:?}", r.skip)
+        };
+        assert_eq!(until, now - 23 * hour + providers_db::DAY_MS);
+    }
+
+    /// The call budget counts a rolling day too, and waits until its oldest call leaves it.
+    #[test]
+    fn daily_calls_are_counted_over_the_last_24_hours() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let mut p = entry("p", Limits::default());
+        if let Provider::Openai { daily_budget, .. } = &mut p {
+            *daily_budget = Some(2);
+        }
+        let (now, hour) = (crate::db::now_ms(), 3_600_000);
+        for ago in [25, 23] {
+            call(&db, "p", None, 10, 10);
             db.execute(
                 "UPDATE provider_calls SET ts = ?1 WHERE id = (SELECT MAX(id) FROM provider_calls)",
                 [now - ago * hour],
             )
             .unwrap();
         }
-        // 6,000 in the 24 hours: 2,700 in and 1,250 reserved fit in the 4,000 left, 2,800 do not.
-        assert!(admit(&db, &p, 2700.0, 5.0, &[]).unwrap().is_none());
-        let r = admit(&db, &p, 2800.0, 5.0, &[]).unwrap().unwrap();
-        assert_eq!(r.detail, "6000/10000 tokens in 24 hours");
+        assert!(admit(&db, &p, 10.0, 5.0, &[]).unwrap().is_none());
+        call(&db, "p", None, 10, 10);
+        let r = admit(&db, &p, 10.0, 5.0, &[]).unwrap().unwrap();
+        assert_eq!(r.detail, "2/2 calls in 24 hours");
         let Skip::Budget(until) = r.skip else {
             panic!("{:?}", r.skip)
         };
