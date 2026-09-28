@@ -284,7 +284,7 @@ def live(binary, name, send, tool=None):
         env['PATH'] = f'{M}/wrap:' + env['PATH']
     # A span is done once a run of it was curated; a failed one is sent again on the next pass.
     done = {json.dumps(r['span']) for r in read_jsonl(log)
-            if not send or 'not curated' not in r['out']} if os.path.exists(log) else set()
+            if r['code'] == 0 and (not send or 'not curated' not in r['out'])} if os.path.exists(log) else set()
     tokens = 0
     for a, b in spans(h, tool):
         if json.dumps([a, b]) in done:
@@ -299,7 +299,7 @@ def live(binary, name, send, tool=None):
             with open(log, 'a', encoding='utf-8') as f:
                 f.write(json.dumps({'span': [a, b], 'code': r.returncode, 'out': out, 'err': r.stderr[-500:],
                                     'attempt': attempt}) + '\n')
-            if not send or 'not curated' not in out:
+            if r.returncode == 0 and (not send or 'not curated' not in out):
                 break
             p = sqlite3.connect(f'file:{h}/providers.db?mode=ro', uri=True)
             until = p.execute("SELECT max(down_until) FROM provider_state").fetchone()[0] or 0

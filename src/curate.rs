@@ -25,7 +25,7 @@ const TOOL_INPUT_CHARS: usize = 2_000;
 /// and an output longer than twice this shown as its head and its tail of this many characters.
 const SHORT_CHARS: usize = 300;
 /// Tools whose output is the owner's own words (an answer to a question, a plan approved or sent
-/// back): a shrink never shortens them.
+/// back): a shrink never shortens their output. Their input is cut like any tool's.
 const OWNERS_WORDS: [&str; 4] = [
     "AskUserQuestion",
     "ExitPlanMode",
@@ -56,7 +56,8 @@ pub struct Window {
     pub text: String,
     /// Tool outputs larger than a window: seen, and elided with a marker in `text`.
     pub elided: Vec<i64>,
-    /// Tool calls shown short (Task 12's shrink): their middle is left out, with a marker.
+    /// Tool calls shown short (Task 12's shrink): an input cut at `SHORT_CHARS`, or an output's
+    /// middle left out with a marker.
     pub shortened: Vec<i64>,
     /// Cut by its size: more records follow. Otherwise it ends at the device's last record.
     pub full: bool,
@@ -468,8 +469,10 @@ struct Prepared<'r> {
     key: String,
     heading: String,
     repo: Option<String>,
-    /// A tool call shown short (Task 12's shrink).
+    /// A tool output shown as its head and tail when long (Task 12's shrink).
     short: bool,
+    /// A tool input the shrink cut at `SHORT_CHARS`.
+    cut_input: bool,
 }
 
 impl<'r> Prepared<'r> {
@@ -478,6 +481,7 @@ impl<'r> Prepared<'r> {
         let tool = body["tool"].as_str().unwrap_or("");
         let memory = e.kind == "tool" && memory_read(tool, &body);
         let short = shrink && e.kind == "tool" && !OWNERS_WORDS.contains(&tool);
+        let mut cut_input = false;
         // An owner directive is already a claim (`oboete pref add`): nothing for the curator.
         let long = if memory || e.kind == "directive" {
             None
@@ -495,11 +499,16 @@ impl<'r> Prepared<'r> {
             "tool" => {
                 let input = text(&body["input"]).unwrap_or_default();
                 // Cut like a split event: a secret across the cut is found in the whole input.
-                let cap = if short { SHORT_CHARS } else { TOOL_INPUT_CHARS };
+                let cap = if shrink {
+                    SHORT_CHARS
+                } else {
+                    TOOL_INPUT_CHARS
+                };
                 let cut = input
                     .char_indices()
                     .nth(cap)
                     .map_or(input.len(), |(i, _)| i);
+                cut_input = shrink && cut < input.len();
                 let input = crate::redact::outbound_part(&input, 0..cut, rules);
                 let failed = if body["failed"] == true {
                     " failed"
@@ -546,13 +555,14 @@ impl<'r> Prepared<'r> {
             repo: e.repo.clone(),
             heading,
             short,
+            cut_input,
         }
     }
 
     /// Its text from byte `from` of its long text to `to` (its end when none), through the gate.
     fn piece(&self, seq: i64, from: i64, to: Option<i64>) -> Piece {
         let mut text = self.head.clone();
-        let (mut source, mut shortened) = (None, false);
+        let (mut source, mut shortened) = (None, self.cut_input);
         if let Some((long, hidden)) = &self.long {
             let start = boundary(long, from);
             let end = to.map_or(long.len(), |t| boundary(long, t)).max(start);
@@ -608,7 +618,7 @@ impl<'r> Prepared<'r> {
             role: self.role,
             text,
             source: None,
-            shortened: false,
+            shortened: self.cut_input,
         }
     }
 
@@ -3149,6 +3159,31 @@ mod tests {
             .unwrap();
         assert!(w.shortened.is_empty());
         assert!(w.text.contains(answer.trim_end()), "{}", w.text);
+    }
+
+    /// Every tool's input is cut at `SHORT_CHARS` under the shrink, an owner's-words tool's too
+    /// (its output holds the answers whole), and a call cut only in its input is named as shown
+    /// short.
+    #[test]
+    fn a_long_input_is_cut_for_every_tool_and_named_as_shown_short() {
+        let (_home, mut raw, dev) = store();
+        let input = format!("{}the input's end", "q".repeat(400));
+        let mut seqs = Vec::new();
+        for name in ["Bash", "AskUserQuestion"] {
+            let call = serde_json::json!({"tool": name, "input": input, "output": "ok, answered",
+                "failed": false});
+            seqs.push(raw.append(&event("tool", call)).unwrap());
+        }
+        let w = next_window(&raw, &dev, shrinking(WINDOW_TOKENS), &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.shortened, seqs);
+        assert!(!w.text.contains("the input's end"), "{}", w.text);
+        assert_eq!(w.text.matches("ok, answered").count(), 2, "{}", w.text);
+        let whole = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert!(whole.text.contains("the input's end") && whole.shortened.is_empty());
     }
 
     /// The phase records the calls it showed short, and a window holds more of them short.
