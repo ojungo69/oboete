@@ -191,6 +191,12 @@ fn fit(carried: &str, shown: &[String], room: u32) -> (String, String) {
     (carried, kept.concat())
 }
 
+/// A candidate as the prompt lists it: one line, so `fit` keeps or cuts it whole, and no body
+/// can start a line that `shows` would take for another candidate's.
+fn candidate_line(uid: &str, body: &str) -> String {
+    format!("{uid}: {}\n", body.replace(['\n', '\r'], " "))
+}
+
 /// Whether the fitted candidates list `uid`'s own line (`uid: body`): a uid quoted in another
 /// claim's body is not its line.
 fn shows(shown: &str, uid: &str) -> bool {
@@ -1038,10 +1044,9 @@ fn request(
         }
         let mut block = format!("### in {}\n", repo_name(repo, rules));
         for c in found {
-            block.push_str(&format!(
-                "{}: {}\n",
-                c.uid,
-                crate::redact::outbound_with(&c.body, rules)
+            block.push_str(&candidate_line(
+                &c.uid,
+                &crate::redact::outbound_with(&c.body, rules),
             ));
             shown_in.push((repo.to_owned(), c));
         }
@@ -5187,6 +5192,13 @@ mod tests {
         let (x, y) = ("a".repeat(64), "b".repeat(64));
         let shown = format!("### in r\n{y}: the note names {x}: here\n");
         assert!(shows(&shown, &y));
+        assert!(!shows(&shown, &x));
+        // A body that would start a line with another's uid is listed on its own line.
+        let shown = format!(
+            "### in r\n{}",
+            candidate_line(&y, &format!("a note\n{x}: b"))
+        );
+        assert_eq!(shown.lines().count(), 2);
         assert!(!shows(&shown, &x));
     }
 
