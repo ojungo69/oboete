@@ -503,17 +503,22 @@ pub fn running(home: &Path) -> bool {
         .is_ok_and(|f| matches!(try_lock(&f), Err(std::fs::TryLockError::WouldBlock)))
 }
 
-/// `File::try_lock`, which under `cargo test` waits up to 200 ms for a lock just released: a
-/// child that another test thread forked holds the open file until it execs, so a lock a test
-/// has dropped can still be held for a moment (about one CI run in twelve failed on it). No
+/// `File::try_lock`, which in a test that drops the lock and takes it again on its thread
+/// (`tests::retaking`) waits up to 200 ms for it: a child that another test thread forked holds
+/// the open file until it execs, so a lock just dropped can still be held for a moment (about one
+/// CI run in twelve failed on it). Tests that contend for the lock on purpose do not wait. No
 /// oboete process forks from another thread while it takes or releases the lock, so outside
-/// tests it does not wait.
+/// tests nothing waits.
 fn try_lock(f: &std::fs::File) -> Result<(), std::fs::TryLockError> {
     #[cfg(test)]
-    for _ in 0..20 {
-        match f.try_lock() {
-            Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(10)),
-            tried => return tried,
+    if tests::RETAKING.get() {
+        for _ in 0..20 {
+            match f.try_lock() {
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                tried => return tried,
+            }
         }
     }
     f.try_lock()
@@ -605,6 +610,23 @@ mod tests {
     use super::*;
     use crate::knowledge;
     use crate::raw;
+
+    thread_local! {
+        pub(super) static RETAKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// For a test that drops the worker lock and takes it again on this thread: until the guard
+    /// is dropped, `try_lock` waits for a child another thread forked to exec.
+    fn retaking() -> impl Drop {
+        struct Retaking;
+        impl Drop for Retaking {
+            fn drop(&mut self) {
+                RETAKING.set(false);
+            }
+        }
+        RETAKING.set(true);
+        Retaking
+    }
 
     /// A consumer that writes each seq it sees into knowledge.db, so these tests need no index
     /// (Task 6).
@@ -817,6 +839,7 @@ mod tests {
 
     #[test]
     fn a_failed_run_leaves_its_reason_and_the_next_good_run_clears_it() {
+        let _retaking = retaking();
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("raw.db"), b"not a database at all").unwrap();
         assert!(run(home.path(), 0).is_err()); // damaged, and no backup to restore from
@@ -836,6 +859,7 @@ mod tests {
     /// in, and recording never holds the worker lock.
     #[test]
     fn a_runs_outcome_is_not_recorded_over_a_later_workers() {
+        let _retaking = retaking();
         let home = tempfile::tempdir().unwrap();
         let failed = || Err(anyhow::anyhow!("a failure"));
         let taken = |h: &Path| lock(h).unwrap().unwrap().1;
@@ -896,6 +920,7 @@ mod tests {
     /// says it stopped once no process holds the lock, and not while one does.
     #[test]
     fn a_run_that_never_ends_is_reported_once_its_lock_is_free() {
+        let _retaking = retaking();
         let home = tempfile::tempdir().unwrap();
         run(home.path(), 0).unwrap();
         raw::open(home.path())
@@ -1213,6 +1238,7 @@ mod tests {
 
     #[test]
     fn a_restore_asked_for_as_the_worker_exits_is_not_lost() {
+        let _retaking = retaking();
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
         let mut asked = false;
@@ -1231,6 +1257,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_lock_just_dropped_is_taken_again_while_other_threads_spawn() {
+        let _retaking = retaking();
         use std::sync::atomic::{AtomicBool, Ordering};
         let home = tempfile::tempdir().unwrap();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
