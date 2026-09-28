@@ -690,8 +690,10 @@ impl<'r> Prepared<'r> {
 }
 
 /// The owner's answers in an `AskUserQuestion` call, and the notes they added to them: the
-/// values of `answers` and each annotation's `notes`, from its output (else its input) as JSON.
-/// A question's text (a key of `answers`) and an option's `preview` are the assistant's.
+/// values of `answers` and each annotation's `notes`, from its output as JSON. A question's text
+/// (a key of `answers`) and an option's `preview` are the assistant's. Only the output: a quote is
+/// anchored in the output alone, so answers found only in the input could never be evidence
+/// (#198).
 fn owners_answers(body: &Value) -> Vec<String> {
     fn strings(v: &Value, out: &mut Vec<String>) {
         match v {
@@ -701,22 +703,16 @@ fn owners_answers(body: &Value) -> Vec<String> {
             _ => {}
         }
     }
-    for field in ["output", "input"] {
-        let v = match &body[field] {
-            Value::String(s) => serde_json::from_str(s).unwrap_or(Value::Null),
-            v => v.clone(),
-        };
-        if v["answers"].is_null() {
-            continue;
-        }
-        let mut out = Vec::new();
-        strings(&v["answers"], &mut out);
-        if let Some(notes) = v["annotations"].as_object() {
-            notes.values().for_each(|n| strings(&n["notes"], &mut out));
-        }
-        return out;
+    let v = match &body["output"] {
+        Value::String(s) => serde_json::from_str(s).unwrap_or(Value::Null),
+        v => v.clone(),
+    };
+    let mut out = Vec::new();
+    strings(&v["answers"], &mut out);
+    if let Some(notes) = v["annotations"].as_object() {
+        notes.values().for_each(|n| strings(&n["notes"], &mut out));
     }
-    Vec::new()
+    out
 }
 
 /// `e`'s text from byte `from` of its long text to `to` (its end when none), through the gate.

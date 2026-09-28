@@ -499,16 +499,18 @@ fn norm(text: &str) -> Vec<char> {
         .collect()
 }
 
-/// Every tool line of the window, as MUST-M4 compares them.
+/// Every tool line of the window, as MUST-M4 compares them: each text normalized on its own and
+/// joined by a NUL, which no user span holds, so no run crosses from one text into the next (#197).
 fn tool_text(w: &Window) -> String {
-    let tools: Vec<&str> = w
+    let tools: Vec<String> = w
         .lines
         .iter()
         .filter(|l| matches!(l.role, Role::Tool { .. }))
         // The whole output too: a shrink shows only its head and tail (Task 12).
         .flat_map(|l| [l.text.as_str(), l.source_text()])
+        .map(|t| norm(t).into_iter().collect())
         .collect();
-    norm(&tools.join("\n")).into_iter().collect()
+    tools.join("\0")
 }
 
 /// What a line says, without its `[role]` head.
@@ -955,6 +957,34 @@ mod tests {
         assert_eq!(
             one(&w, "decided", "user", "SQLite にする"),
             is("decided", "user")
+        );
+    }
+
+    /// The owner's words that repeat the end of a tool output and then its start are no paste:
+    /// the paste corpus never runs from one text into the next (#197).
+    #[test]
+    fn words_across_the_seam_of_two_tool_texts_are_no_paste() {
+        let output = format!(
+            "we tag v2 after the freeze ends.\n{}\nthe release goes out on friday",
+            "log line\n".repeat(20)
+        );
+        let words = "the release goes out on friday we tag v2 after the freeze ends";
+        let w = window(&[tool(&output, false), user(words)]);
+        assert_eq!(one(&w, "decided", "user", words), is("decided", "user"));
+    }
+
+    /// Answers only in the call's input are not read: a quote is anchored in the output alone
+    /// (#198).
+    #[test]
+    fn answers_only_in_the_input_are_not_the_owners() {
+        let input = json!({"questions": [{"question": "どれ?"}], "answers": {"どれ?": "SQLite"}});
+        let body = json!({"tool": "AskUserQuestion", "input": input.to_string(),
+            "output": json!({"answered": true}).to_string(), "failed": false});
+        let w = window(&[("tool", body)]);
+        assert!(w.lines[0].answers.is_empty());
+        assert_eq!(
+            window(&[asked("SQLite にする")]).lines[0].answers,
+            ["SQLite にする"]
         );
     }
 
