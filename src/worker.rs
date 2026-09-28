@@ -95,7 +95,7 @@ pub fn lock(home: &Path) -> Result<Option<Lock>> {
         .truncate(false)
         .write(true)
         .open(state.join("worker.lock"))?;
-    match f.try_lock() {
+    match try_lock(&f) {
         Ok(()) => {
             // Replaced whole, never rewritten in place: a number cut off by a crash or a full disk
             // would start the count again below the last recorded outcome's.
@@ -500,7 +500,46 @@ pub fn running(home: &Path) -> bool {
     std::fs::OpenOptions::new()
         .write(true)
         .open(home.join("state").join("worker.lock"))
-        .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+        .is_ok_and(|f| matches!(try_lock(&f), Err(std::fs::TryLockError::WouldBlock)))
+}
+
+/// `File::try_lock`, which under `cargo test` waits up to 200 ms for a lock just released: a
+/// child that another test thread forked holds the open file until it execs, so a lock a test
+/// dropped can still be held for a moment (about one CI run in twelve failed on it). A thread that
+/// contends for the lock on purpose (`contending`) gets its answer at once. No oboete process
+/// forks from another thread while it takes or releases the lock, so outside tests nothing waits.
+fn try_lock(f: &std::fs::File) -> Result<(), std::fs::TryLockError> {
+    #[cfg(test)]
+    if !CONTENDING.get() {
+        for _ in 0..20 {
+            match f.try_lock() {
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                tried => return tried,
+            }
+        }
+    }
+    f.try_lock()
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONTENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// For a test thread that contends for the worker lock with other threads on purpose: until the
+/// guard is dropped, the lock is taken or found held at once, so the threads still overlap.
+#[cfg(test)]
+pub(crate) fn contending() -> impl Drop {
+    struct Contending;
+    impl Drop for Contending {
+        fn drop(&mut self) {
+            CONTENDING.set(false);
+        }
+    }
+    CONTENDING.set(true);
+    Contending
 }
 
 /// `oboete rebuild` (spec 1.7): under the worker lock, knowledge.db is moved aside and every
@@ -1208,6 +1247,32 @@ mod tests {
         })
         .unwrap();
         assert!(!crate::backup::restore_requested(p));
+    }
+
+    /// Children that other threads fork hold the lock file until they exec: a lock just dropped
+    /// is taken again all the same.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_just_dropped_is_taken_again_while_other_threads_spawn() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let home = tempfile::tempdir().unwrap();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let spawners: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = std::process::Command::new("true").status();
+                    }
+                })
+            })
+            .collect();
+        let taken = (0..100)
+            .take_while(|_| lock(home.path()).unwrap().is_some())
+            .count();
+        stop.store(true, Ordering::Relaxed);
+        spawners.into_iter().for_each(|t| t.join().unwrap());
+        assert_eq!(taken, 100, "a dropped lock was still held");
     }
 
     #[test]

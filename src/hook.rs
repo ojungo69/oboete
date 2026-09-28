@@ -1003,6 +1003,8 @@ mod tests {
     use rusqlite::Connection;
 
     fn hook(home: &Path, agent: &str, event: &str, payload: &Value) -> String {
+        // Hooks run at once on several threads here: one holds the lock, the others go on.
+        let _contending = crate::worker::contending();
         let _worker = crate::worker::lock(home).unwrap();
         let mut output = Vec::new();
         run_io(
