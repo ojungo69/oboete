@@ -3959,7 +3959,7 @@ mod tests {
         assert_eq!(queue(&k), [(1, 1)]);
         drop((raw, k));
         let listed = recurate(home.path(), Again::Queued, false).unwrap();
-        assert!(listed.contains("1 span(s) in 1 window(s)"), "{listed}");
+        assert!(listed.contains("1 span(s) in 1 window(s)"));
     }
 
     /// A recuration appended before the consumers read it (a crash, a failed run) is read before
