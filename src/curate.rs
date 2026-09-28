@@ -1217,7 +1217,6 @@ pub enum Again {
 /// `send`, each window curated again through the curator chain, then the consumers run. What it
 /// did, to print.
 pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<String> {
-    let cfg = crate::config::load(home)?;
     // The worker's lock, with the consumers drained under it (#192): a recuration appended before
     // a crash or a failed run has left the queue, and no worker or other recuration moves the
     // queue between the plan and its sending. Sending needs it: no curation phase sends at the
@@ -1227,6 +1226,19 @@ pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<Str
     if send && held.is_none() {
         anyhow::bail!("a worker is running; try again when it has exited");
     }
+    let out = planned(home, source, send);
+    // Released as a worker releases it: a hook that appended while it was held started no
+    // worker, so the consumers run once more, sent or not.
+    if let Some(held) = held {
+        drop(held);
+        crate::worker::run_once(home)?;
+    }
+    out
+}
+
+/// `recurate`'s plan, and with `send` its sending, under the worker's lock when sending.
+fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> {
+    let cfg = crate::config::load(home)?;
     let rules = crate::capture::Settings::load(home)?.rules;
     // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
     let mut raw = crate::raw::open(home)?;
@@ -1312,8 +1324,6 @@ pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<Str
             .run("curator", span, prompt, &schema())
     };
     let sent = send_plan(&mut raw, &k, &rules, &cfg.summary, &mut curator, &plan)?;
-    drop((k, raw, held));
-    crate::worker::run_once(home)?;
     out.push_str(&format!(
         "{} window(s) curated again: {} claim(s), {} retracted\n",
         sent.windows, sent.claims, sent.retracted
