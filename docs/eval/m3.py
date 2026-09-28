@@ -274,6 +274,19 @@ def spans(h, tool=None):
     return out
 
 
+def partly(out):
+    """`recurate` printed that it curated some of the span's windows."""
+    return re.search(r'^[1-9][0-9]* window\(s\) curated again', out, re.M)
+
+
+def cooldown(h):
+    """Sleep until the live entry's cooldown is over, and 5 s more."""
+    p = sqlite3.connect(f'file:{h}/providers.db?mode=ro', uri=True)
+    until = p.execute("SELECT max(down_until) FROM provider_state").fetchone()[0] or 0
+    p.close()
+    time.sleep(max(0, until / 1000 - time.time()) + 5)
+
+
 def live(binary, name, send, tool=None):
     """Each labeled window sent again to the live entry with `oboete recurate`, one span at a time
     in seq order, so an earlier claim is a candidate for a later window. Without `send`, only the
@@ -292,9 +305,16 @@ def live(binary, name, send, tool=None):
     env = clean_env()
     if os.path.exists(f'{M}/wrap/claude'):
         env['PATH'] = f'{M}/wrap:' + env['PATH']
-    # A span is done once a run of it was curated; a failed one is sent again on the next pass.
-    done = {json.dumps(r['span']) for r in read_jsonl(log)
-            if r['code'] == 0 and (not send or 'not curated' not in r['out'])} if os.path.exists(log) else set()
+    # A span is done once its attempts ended: curated, partly curated (below), or failed three
+    # times. A pass cut short goes on where it stopped, so a resumed arm is still one pass.
+    tries, done = collections.Counter(), set()
+    for r in read_jsonl(log) if os.path.exists(log) else []:
+        k = json.dumps(r['span'])
+        tries[k] += 1
+        if r['code'] == 0 and (not send or 'not curated' not in r['out']) or send and partly(r['out']) or tries[k] == 3:
+            done.add(k)
+    if send:
+        cooldown(h)  # the pass may have been cut while it waited out a cooldown
     tokens = 0
     for a, b in spans(h, tool):
         if json.dumps([a, b]) in done:
@@ -302,7 +322,7 @@ def live(binary, name, send, tool=None):
         # A failure is retried after the entry's cooldown, up to three times: the product would
         # list the span as skipped and send it on a later run, and a cooled-down entry must not
         # turn the rest of the pass into instant failures (the whole arm lost 65 spans that way).
-        for attempt in range(3):
+        for attempt in range(tries[json.dumps([a, b])], 3):
             r = subprocess.run([binary, '--home', h, 'recurate', f'{device}:{a}-{b}'] + (['--yes'] if send else []),
                                capture_output=True, text=True, env=env)
             out = r.stdout.strip()
@@ -315,12 +335,9 @@ def live(binary, name, send, tool=None):
             # curate those windows a second time with their first claims as candidates, a history
             # the other arm does not have (review on #218). The window is left, as the product
             # leaves it for its next run.
-            if send and re.search(r'^[1-9][0-9]* window\(s\) curated again', out, re.M):
+            if send and partly(out):
                 break
-            p = sqlite3.connect(f'file:{h}/providers.db?mode=ro', uri=True)
-            until = p.execute("SELECT max(down_until) FROM provider_state").fetchone()[0] or 0
-            p.close()
-            time.sleep(max(0, until / 1000 - time.time()) + 5)
+            cooldown(h)
         for word in out.split(','):
             if 'tokens' in word and 'about' in word:
                 tokens += int(word.split('about')[1].split('tokens')[0].strip().replace(',', ''))
