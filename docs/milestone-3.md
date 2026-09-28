@@ -30,11 +30,11 @@ A heavy day, measured: the owner's transcripts of the last 90 days (3,870 files 
 
 (From the dev stub pass: 0.218 windows and 852 tokens per event with the shrink off, 0.049 and 248 with it on.)
 
-- **The line fails with today's defaults.** Groq's free tier allows 1,000 requests and 200,000 tokens a day per model. The default chain gives each of its three Groq entries 800 calls a day and no token budget, so on a heavy day the curator takes all of each model's tokens, not 20%. Keeping to 20% means about 40,000 tokens a model, some 24 windows a day across the three. The rest of a heavy day falls to the subscriptions.
+- **The line failed with the defaults until 2026-09-29.** Groq's free tier allows 1,000 requests and 200,000 tokens a day per model (console.groq.com/docs/rate-limits). The default chain gave each of its three Groq entries 800 calls a day and no token budget, so on a heavy day the curator took all of each model's tokens, not 20%. Since 2026-09-29 each Groq entry takes at most 40,000 tokens and 200 calls a day, and OpenRouter free at most 200 of the 1,000 requests a day an account gets for all its `:free` models: a fifth of each cap. That is some 24 windows a day across the three Groq models. The rest of a heavy day falls to the subscriptions.
 - **The subscriptions' speed is a limit too.** claude haiku takes about 100 s a window (212 calls: median 101 s, 99th percentile 187 s). The 526 windows of a heavy day with the shrink on are about 14.6 hours of calls in a row, and without the shrink about 65 hours. A day that heavy is curated over the following days, or by several entries at once.
 - Paid entries: none in the default chain, so the USD 5 cap is not reached.
 - With the curator's thinking off, a call took 16.6 s at the median without the shrink (nothink) and 15.6 s with it (short-2, 125 calls), so the 526 windows are about 2.3 hours of calls in a row. That is a projection: no full day was run.
-- What would meet the line is a decision about defaults: token budgets at 20% on the free entries, the shrink on if several runs show it keeps decisions and lessons and fixes are measured (its clean pair, short-2 against whole3, failed the declared rule by two labels), and the curator's thinking off (#193, now the default).
+- What would meet the line is a decision about defaults: token budgets at 20% on the free entries (the default since 2026-09-29), the shrink on if several runs show it keeps decisions and lessons and fixes are measured (its clean pair, short-2 against whole3, failed the declared rule by two labels), and the curator's thinking off (#193, now the default).
 
 ## M3 on the dev labels: fails
 

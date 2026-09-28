@@ -446,7 +446,8 @@ fn default_providers() -> Vec<Provider> {
             groq,
             "GROQ_API_KEY.md",
             "openai/gpt-oss-120b",
-            800,
+            // A fifth of Groq free's 1,000 requests a day per model: the cost line (spec 8.2).
+            200,
             true,
             // Reasoning tokens count against Groq's 200,000 tokens a day. Low effort cut them from
             // 533 to 9 (20b) and 386 to 75 (120b) on a short window, with valid JSON (2026-09-27).
@@ -457,7 +458,7 @@ fn default_providers() -> Vec<Provider> {
             groq,
             "GROQ_API_KEY.md",
             "openai/gpt-oss-20b",
-            800,
+            200,
             true,
             // Reasoning tokens count against Groq's 200,000 tokens a day. Low effort cut them from
             // 533 to 9 (20b) and 386 to 75 (120b) on a short window, with valid JSON (2026-09-27).
@@ -471,7 +472,7 @@ fn default_providers() -> Vec<Provider> {
             groq,
             "GROQ_API_KEY.md",
             "qwen/qwen3.8-27b",
-            800,
+            200,
             true,
             serde_json::json!({"reasoning_effort": "none"}),
         ),
@@ -480,7 +481,9 @@ fn default_providers() -> Vec<Provider> {
             "https://openrouter.ai/api/v1",
             "OPENROUTER_API_KEY.md",
             "nvidia/nemotron-3-super-120b-a12b:free",
-            300,
+            // A fifth of the 1,000 requests a day that OpenRouter gives all `:free` models of an
+            // account together: the cost line (spec 8.2).
+            200,
             false,
             serde_json::json!({"models": ["qwen/qwen3.8-27b:free"], "provider": {"require_parameters": true}}),
         ),
@@ -512,7 +515,9 @@ fn default_providers() -> Vec<Provider> {
         cli("claude", Some("haiku")),
     ];
     // Groq free refuses a request over 8,000 tokens (its tokens-a-minute limit is also a ceiling
-    // per request; docs/research/curator-providers-2026-09-27.md section 3).
+    // per request; docs/research/curator-providers-2026-09-27.md section 3). The curator takes a
+    // fifth of each model's 200,000 tokens a day (the cost line, spec 8.2; the limits page,
+    // console.groq.com/docs/rate-limits, 2026-09-29).
     for p in &mut chain {
         if let Provider::Openai {
             base_url, limits, ..
@@ -520,6 +525,7 @@ fn default_providers() -> Vec<Provider> {
             && base_url == groq
         {
             limits.max_request_tokens = Some(8000);
+            limits.daily_tokens = Some(40_000);
         }
     }
     chain
