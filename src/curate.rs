@@ -81,6 +81,7 @@ pub struct Line {
 
 impl Line {
     /// The part of its record's long text it shows, as stored: a tool's output, never its input.
+    /// All of it where a shrink showed only its head and tail: the gates read the whole.
     pub(crate) fn source_text(&self) -> &str {
         self.source.as_ref().map_or("", |s| s.text.as_str())
     }
