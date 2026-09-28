@@ -171,7 +171,7 @@ pub fn phase(
         }
         let key = format!("{}\u{0}{}", s.agent, s.session);
         for (repo, through) in &s.repos {
-            if digested(k, &device, &s, repo, *through)? {
+            if digested(k, &device, repo, *through)? {
                 continue;
             }
             let mut claims = Vec::new();
@@ -252,12 +252,14 @@ pub fn phase(
     Ok(out)
 }
 
-/// Whether a digest of this session and repository reaches `through` already.
-fn digested(k: &Connection, device: &str, s: &Session, repo: &str, through: i64) -> Result<bool> {
+/// Whether a digest of `repo` from this device reaches `through` already: this session's, or a
+/// later session's. An earlier session's digest written after a later one's would be the newest by
+/// time, and SessionStart would go back to older work.
+fn digested(k: &Connection, device: &str, repo: &str, through: i64) -> Result<bool> {
     Ok(k.query_row(
-        "SELECT EXISTS(SELECT 1 FROM digests WHERE repo = ?1 AND agent = ?2 AND session = ?3
-           AND through_device = ?4 AND through_seq >= ?5)",
-        params![repo, s.agent, s.session, device, through],
+        "SELECT EXISTS(SELECT 1 FROM digests WHERE repo = ?1 AND through_device = ?2
+           AND through_seq >= ?3)",
+        params![repo, device, through],
         |r| r.get(0),
     )?)
 }
@@ -658,6 +660,25 @@ mod tests {
             };
             assert!(serde_json::to_string(&op).unwrap().len() < crate::raw::MAX_OP_BYTES);
         }
+    }
+
+    /// Once a later session of a repository has its digest, an earlier one's (held, then due) is
+    /// never written: it would be the newest by time and roll SessionStart back to older work.
+    #[test]
+    fn an_earlier_session_is_not_digested_after_a_later_one() {
+        let k = Connection::open_in_memory().unwrap();
+        schema(&k).unwrap();
+        k.execute(
+            "INSERT INTO digests(op_device, op_seq, ts, agent, session, repo, through_device,
+               through_seq, lines) VALUES('d', 1, 1, 'claude', 'later', 'r', 'd', 10, '[]')",
+            [],
+        )
+        .unwrap();
+        assert!(digested(&k, "d", "r", 5).unwrap());
+        assert!(digested(&k, "d", "r", 10).unwrap());
+        assert!(!digested(&k, "d", "r", 11).unwrap());
+        assert!(!digested(&k, "e", "r", 5).unwrap());
+        assert!(!digested(&k, "d", "other", 5).unwrap());
     }
 
     /// The check keeps what the op will keep: with the owner's extra rule, a line its masks grow
