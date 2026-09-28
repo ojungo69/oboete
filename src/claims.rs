@@ -105,16 +105,32 @@ const RECURATE: &str = "CREATE TABLE IF NOT EXISTS recurate(
   PRIMARY KEY (op_device, op_seq, from_seq)
 )";
 
+/// Runs `change` when `needed` says so, asked again under the write lock: a worker and a command
+/// can open the same older knowledge.db at once, and the second to change it would fail or
+/// change it twice (#213). The read first keeps a current file free of the lock; a step's
+/// transaction holds it already (it is immediate), and anywhere else one is taken here.
+fn migrate(k: &Connection, needed: &str, change: &str) -> Result<()> {
+    let is = |c: &Connection| c.query_row(needed, [], |r| r.get::<_, bool>(0));
+    if !is(k)? {
+        return Ok(());
+    }
+    if !k.is_autocommit() {
+        return Ok(k.execute_batch(change)?);
+    }
+    let tx = rusqlite::Transaction::new_unchecked(k, rusqlite::TransactionBehavior::Immediate)?;
+    if is(&tx)? {
+        tx.execute_batch(change)?;
+    }
+    Ok(tx.commit()?)
+}
+
 pub(crate) fn schema(k: &Connection) -> Result<()> {
     // Before #192 a queued window was keyed by its claim op alone, so it could not be split: the
     // table is made again with its rows, in one savepoint (a step's transaction may hold it).
-    let old: i64 = k.query_row(
-        "SELECT count(*) FROM pragma_table_info('recurate') WHERE pk > 0",
-        [],
-        |r| r.get(0),
-    )?;
-    if old == 2 {
-        k.execute_batch(&format!(
+    migrate(
+        k,
+        "SELECT count(*) = 2 FROM pragma_table_info('recurate') WHERE pk > 0",
+        &format!(
             "SAVEPOINT recurate_key;
              ALTER TABLE recurate RENAME TO recurate_old;
              {RECURATE};
@@ -122,8 +138,8 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
                FROM recurate_old;
              DROP TABLE recurate_old;
              RELEASE recurate_key;"
-        ))?;
-    }
+        ),
+    )?;
     k.execute_batch(RECURATE)?;
     k.execute_batch(
         "-- Every derivation of a claim: one claim op each (op_device, op_seq).
@@ -192,15 +208,11 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
          );",
     )?;
     // Before #125 a quote kept no `claim_at`: the column is added, empty, as those ops had none.
-    let has: i64 = k.query_row(
-        "SELECT count(*) FROM pragma_table_info('evidence') WHERE name = 'claim_at'",
-        [],
-        |r| r.get(0),
-    )?;
-    if has == 0 {
-        k.execute_batch("ALTER TABLE evidence ADD COLUMN claim_at INTEGER")?;
-    }
-    Ok(())
+    migrate(
+        k,
+        "SELECT count(*) = 0 FROM pragma_table_info('evidence') WHERE name = 'claim_at'",
+        "ALTER TABLE evidence ADD COLUMN claim_at INTEGER",
+    )
 }
 
 /// The body of a correction op, which `oboete correct` writes (spec 3.4, MUST-M21): the owner's
