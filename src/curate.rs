@@ -21,6 +21,17 @@ use serde_json::{Value, json};
 pub const WINDOW_TOKENS: u32 = 5_000;
 /// A tool's input shown in a window, at most: the output is what a window reads or elides.
 const TOOL_INPUT_CHARS: usize = 2_000;
+/// Task 12's shrink (`[summary] shrink`, docs/spike/m3-dev.md): a tool's input shown up to this,
+/// and an output longer than twice this shown as its head and its tail of this many characters.
+const SHORT_CHARS: usize = 300;
+/// Tools whose output is the owner's own words (an answer to a question, a plan approved or sent
+/// back): a shrink never shortens them.
+const OWNERS_WORDS: [&str; 4] = [
+    "AskUserQuestion",
+    "ExitPlanMode",
+    "request_user_input",
+    "request_user_input_async",
+];
 /// A session heading's length, at most.
 const HEADING_CHARS: usize = 200;
 /// Records read at a time while a window is cut.
@@ -45,6 +56,8 @@ pub struct Window {
     pub text: String,
     /// Tool outputs larger than a window: seen, and elided with a marker in `text`.
     pub elided: Vec<i64>,
+    /// Tool calls shown short (Task 12's shrink): their middle is left out, with a marker.
+    pub shortened: Vec<i64>,
     /// Cut by its size: more records follow. Otherwise it ends at the device's last record.
     pub full: bool,
     /// Its lines in `text`'s order, each with the id it has there (`L1`, `L2`, ...).
@@ -115,6 +128,8 @@ struct Piece {
     role: Role,
     source: Option<Source>,
     repo: Option<String>,
+    /// Shown short (Task 12's shrink): its source is still the whole output.
+    shortened: bool,
 }
 
 /// A repository as a window shows it: through the gate, a local path (no origin) as its folder,
@@ -167,9 +182,31 @@ const PAGE_BYTES: usize = 4 << 20;
 /// The device's next window after its curation checkpoint, or `None` when it has no record
 /// there. `rules` are the redaction rules as they are now: a rule added after capture still
 /// hides its matches (spec 6.4).
-pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Result<Option<Window>> {
+pub fn next_window(
+    raw: &Raw,
+    device: &str,
+    cut: impl Into<Cut>,
+    rules: &Rules,
+) -> Result<Option<Window>> {
     let at = raw.curation_checkpoint(device)?;
-    window_at(raw, device, at, None, budget, rules)
+    window_at(raw, device, at, None, cut.into(), rules)
+}
+
+/// How windows are cut: their size in estimated tokens (D8), and whether tool calls are shown
+/// short (Task 12's shrink, `[summary] shrink`). A size alone cuts with tool calls in full.
+#[derive(Debug, Clone, Copy)]
+pub struct Cut {
+    pub tokens: u32,
+    pub shrink: bool,
+}
+
+impl From<u32> for Cut {
+    fn from(tokens: u32) -> Self {
+        Cut {
+            tokens,
+            shrink: false,
+        }
+    }
 }
 
 /// The window after `at` (a record covered whole, or `Some` offset into it where a split window
@@ -180,7 +217,10 @@ pub(crate) fn window_at(
     device: &str,
     (seq, offset): (i64, Option<i64>),
     until: Option<(i64, Option<i64>)>,
-    budget: u32,
+    Cut {
+        tokens: budget,
+        shrink,
+    }: Cut,
     rules: &Rules,
 ) -> Result<Option<Window>> {
     let mut after = if offset.is_some() { seq - 1 } else { seq };
@@ -206,7 +246,7 @@ pub(crate) fn window_at(
                 continue;
             };
             let from = if r.seq == seq { offset.unwrap_or(0) } else { 0 };
-            let prepared = Prepared::new(&e, rules);
+            let prepared = Prepared::new(&e, rules, shrink);
             // Where the span's part of this record ends, when it is the span's last record.
             let end = until.and_then(|(u, o)| o.filter(|_| r.seq == u));
             let mut piece = prepared.piece(r.seq, from, end);
@@ -259,6 +299,11 @@ pub(crate) fn window_at(
         to_offset: last.to,
         text,
         elided,
+        shortened: pieces
+            .iter()
+            .filter(|p| p.shortened)
+            .map(|p| p.seq)
+            .collect(),
         full,
         lines,
     }))
@@ -290,6 +335,7 @@ fn empty(seq: i64) -> Piece {
         role: Role::Other,
         source: None,
         repo: None,
+        shortened: false,
     }
 }
 
@@ -421,12 +467,16 @@ struct Prepared<'r> {
     key: String,
     heading: String,
     repo: Option<String>,
+    /// A tool call shown short (Task 12's shrink).
+    short: bool,
 }
 
 impl<'r> Prepared<'r> {
-    fn new(e: &Event, rules: &'r Rules) -> Self {
+    fn new(e: &Event, rules: &'r Rules, shrink: bool) -> Self {
         let body: Value = serde_json::from_str(&e.body).unwrap_or(Value::String(e.body.clone()));
-        let memory = e.kind == "tool" && memory_read(body["tool"].as_str().unwrap_or(""), &body);
+        let tool = body["tool"].as_str().unwrap_or("");
+        let memory = e.kind == "tool" && memory_read(tool, &body);
+        let short = shrink && e.kind == "tool" && !OWNERS_WORDS.contains(&tool);
         // An owner directive is already a claim (`oboete pref add`): nothing for the curator.
         let long = if memory || e.kind == "directive" {
             None
@@ -444,9 +494,10 @@ impl<'r> Prepared<'r> {
             "tool" => {
                 let input = text(&body["input"]).unwrap_or_default();
                 // Cut like a split event: a secret across the cut is found in the whole input.
+                let cap = if short { SHORT_CHARS } else { TOOL_INPUT_CHARS };
                 let cut = input
                     .char_indices()
-                    .nth(TOOL_INPUT_CHARS)
+                    .nth(cap)
                     .map_or(input.len(), |(i, _)| i);
                 let input = crate::redact::outbound_part(&input, 0..cut, rules);
                 let failed = if body["failed"] == true {
@@ -493,23 +544,38 @@ impl<'r> Prepared<'r> {
             key: format!("{}\u{0}{}", e.agent, e.session),
             repo: e.repo.clone(),
             heading,
+            short,
         }
     }
 
     /// Its text from byte `from` of its long text to `to` (its end when none), through the gate.
     fn piece(&self, seq: i64, from: i64, to: Option<i64>) -> Piece {
         let mut text = self.head.clone();
-        let mut source = None;
+        let (mut source, mut shortened) = (None, false);
         if let Some((long, hidden)) = &self.long {
             let start = boundary(long, from);
             let end = to.map_or(long.len(), |t| boundary(long, t)).max(start);
+            let gate = |r: std::ops::Range<usize>| {
+                crate::redact::outbound_range(long, r, hidden.as_deref(), self.rules)
+            };
             text.push(' ');
-            text.push_str(&crate::redact::outbound_range(
-                long,
-                start..end,
-                hidden.as_deref(),
-                self.rules,
-            ));
+            // The head and the tail of a long output; the gates still read the whole of it.
+            let middle = self.short.then(|| {
+                let chars = || long[start..end].char_indices().map(|(i, _)| start + i);
+                let head = chars().nth(SHORT_CHARS)?;
+                let tail = chars().nth_back(SHORT_CHARS - 1)?;
+                (head < tail).then_some((head, tail))
+            });
+            match middle.flatten() {
+                Some((head, tail)) => {
+                    let left = long[head..tail].chars().count();
+                    text.push_str(&gate(start..head));
+                    text.push_str(&format!(" [... {left} characters not shown ...] "));
+                    text.push_str(&gate(tail..end));
+                    shortened = true;
+                }
+                None => text.push_str(&gate(start..end)),
+            }
             source = hidden.as_ref().map(|runs| Source {
                 start,
                 lead: sentence_start(&long[..start]),
@@ -523,6 +589,7 @@ impl<'r> Prepared<'r> {
         }
         Piece {
             source,
+            shortened,
             ..self.with(seq, from, to, text)
         }
     }
@@ -540,6 +607,7 @@ impl<'r> Prepared<'r> {
             role: self.role,
             text,
             source: None,
+            shortened: false,
         }
     }
 
@@ -587,7 +655,7 @@ impl<'r> Prepared<'r> {
 /// `e`'s text from byte `from` of its long text to `to` (its end when none), through the gate.
 #[cfg(test)]
 fn render(e: &Event, seq: i64, from: i64, to: Option<i64>, rules: &Rules) -> Piece {
-    Prepared::new(e, rules).piece(seq, from, to)
+    Prepared::new(e, rules, false).piece(seq, from, to)
 }
 
 /// What a piece's line takes in a window, its newline included: the sum over a window's lines and
@@ -772,7 +840,7 @@ pub fn run_phase(
     curator: &mut Curator,
 ) -> Result<Phase> {
     let device = raw.device().to_owned();
-    let Some(w) = next_window(raw, &device, summary.window_tokens, rules)? else {
+    let Some(w) = next_window(raw, &device, summary.cut(), rules)? else {
         providers_db::clear_pending(db, &device)?;
         return Ok(Phase::Idle);
     };
@@ -1005,7 +1073,13 @@ impl Span {
 }
 
 /// The windows `span` is cut into, in order, as `next_window` cuts the device's records.
-pub fn span_windows(raw: &Raw, span: &Span, budget: u32, rules: &Rules) -> Result<Vec<Window>> {
+pub fn span_windows(
+    raw: &Raw,
+    span: &Span,
+    cut: impl Into<Cut>,
+    rules: &Rules,
+) -> Result<Vec<Window>> {
+    let cut = cut.into();
     let device = raw.device().to_owned();
     let mut at = match span.from_offset {
         Some(o) => (span.from, Some(o)),
@@ -1013,7 +1087,7 @@ pub fn span_windows(raw: &Raw, span: &Span, budget: u32, rules: &Rules) -> Resul
     };
     let mut out = Vec::new();
     let until = Some((span.to, span.to_offset));
-    while let Some(w) = window_at(raw, &device, at, until, budget, rules)? {
+    while let Some(w) = window_at(raw, &device, at, until, cut, rules)? {
         let next = (w.to_seq, w.to_offset);
         let last = w.to_seq > span.to || next == (span.to, span.to_offset);
         out.push(w);
@@ -1092,7 +1166,7 @@ pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<Str
     // are curated.
     let mut plan = Vec::new();
     for span in spans {
-        let windows = span_windows(&raw, &span, cfg.summary.window_tokens, &rules)?;
+        let windows = span_windows(&raw, &span, cfg.summary.cut(), &rules)?;
         plan.push((span, windows));
     }
     let windows = plan.iter().map(|(_, w)| w.len()).sum::<usize>();
@@ -1323,6 +1397,9 @@ pub fn recurate_window(
     op["to_seq"] = w.to_seq.into();
     op["to_offset"] = w.to_offset.into();
     op["elided"] = w.elided.clone().into();
+    if !w.shortened.is_empty() {
+        op["shortened"] = w.shortened.clone().into();
+    }
     let mut ops = vec![(OpKind::Window, within_op_cap(op))];
     ops.extend(
         claims
@@ -1460,6 +1537,9 @@ fn cover(
     op["to_seq"] = w.to_seq.into();
     op["to_offset"] = w.to_offset.into();
     op["elided"] = w.elided.clone().into();
+    if !w.shortened.is_empty() {
+        op["shortened"] = w.shortened.clone().into();
+    }
     let mut ops = vec![(OpKind::Window, within_op_cap(op))];
     ops.extend(claims.into_iter().map(|c| (OpKind::Claim, c)));
     #[cfg(test)]
@@ -3012,6 +3092,91 @@ mod tests {
         assert_eq!(next, (raw.max_seq().unwrap() + 1, None));
     }
 
+    // Task 12's shrink (docs/spike/m3-dev.md).
+
+    fn shrinking(tokens: u32) -> Cut {
+        Cut {
+            tokens,
+            shrink: true,
+        }
+    }
+
+    /// A long output is shown as its head and its tail, and the window names it as shown short;
+    /// the gates still read the whole output, and a quote from the tail is found in the event.
+    #[test]
+    fn a_long_tool_output_is_shown_short_and_read_whole() {
+        let (_home, mut raw, dev) = store();
+        let output = format!(
+            "{}{}{}test result: ok. 5 passed; 0 failed",
+            "compiling oboete\n".repeat(30),
+            "the middle line that is not sent\n".repeat(40),
+            "test tail ok\n".repeat(25)
+        );
+        let seq = raw.append(&tool(&output)).unwrap();
+        let rules = Rules::default();
+        let w = next_window(&raw, &dev, shrinking(WINDOW_TOKENS), &rules)
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.shortened, [seq]);
+        assert!(!w.text.contains("not sent"), "{}", w.text);
+        assert!(w.text.contains("characters not shown"), "{}", w.text);
+        assert!(w.text.contains("5 passed; 0 failed"), "{}", w.text);
+        assert!(w.lines[0].source_text().contains("not sent"));
+        let e = locate(&w, "L1", "5 passed; 0 failed").unwrap();
+        let at = usize::try_from(e.offset).unwrap();
+        assert_eq!(&output[at..at + 18], "5 passed; 0 failed");
+        // Without the shrink the window shows it whole.
+        let whole = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        assert!(whole.text.contains("not sent") && whole.shortened.is_empty());
+    }
+
+    /// The owner's answer to a question arrives as a tool output: a shrink never shortens it.
+    #[test]
+    fn an_answer_to_a_question_is_never_shown_short() {
+        let (_home, mut raw, dev) = store();
+        let answer = format!(
+            "The user answered: {}",
+            "keep the importer simple and skip the cache. ".repeat(30)
+        );
+        let asked = serde_json::json!({"tool": "AskUserQuestion", "input": {"questions": "q"},
+            "output": answer, "failed": false});
+        raw.append(&event("tool", asked)).unwrap();
+        let w = next_window(&raw, &dev, shrinking(WINDOW_TOKENS), &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert!(w.shortened.is_empty());
+        assert!(w.text.contains(answer.trim_end()), "{}", w.text);
+    }
+
+    /// The phase records the calls it showed short, and a window holds more of them short.
+    #[test]
+    fn the_phase_records_the_calls_it_showed_short() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        for _ in 0..4 {
+            raw.append(&tool(&"x".repeat(2_000))).unwrap();
+        }
+        let mut curator =
+            |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> { Ok(answered("fake")) };
+        let summary = Summary {
+            shrink: true,
+            ..curating(1_000)
+        };
+        let rules = Rules::default();
+        let mut runs = 0;
+        while run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap()
+            == Phase::Covered
+        {
+            runs += 1;
+            assert!(runs < 10);
+        }
+        let ws = windows(&raw);
+        assert_eq!(ws.len(), 1, "{ws:?}");
+        assert_eq!(ws[0]["shortened"], serde_json::json!([1, 2, 3, 4]));
+    }
+
     // Task 7: the prompt and the answer.
 
     fn kept(raw: &mut Raw, session: &str, repo: &str, text: &str) -> (OpKind, Value) {
@@ -4248,6 +4413,7 @@ mod tests {
             to_offset: None,
             text: String::new(),
             elided: Vec::new(),
+            shortened: Vec::new(),
             full: false,
             lines: Vec::new(),
         };

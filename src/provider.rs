@@ -3205,6 +3205,7 @@ mod tests {
             to_offset: None,
             text: String::new(),
             elided: Vec::new(),
+            shortened: Vec::new(),
             full: false,
             lines: Vec::new(),
         };
