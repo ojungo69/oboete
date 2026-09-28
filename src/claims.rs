@@ -458,6 +458,17 @@ pub fn current(k: &Connection, repo: &str) -> Result<Vec<Claim>> {
     )
 }
 
+/// The current claims of no repository, in `current`'s order: `oboete pref add`'s preferences,
+/// whose event records no checkout.
+pub fn global(k: &Connection) -> Result<Vec<Claim>> {
+    let sql = TIPS.replacen("a.repo = ?1", "a.repo IS NULL", 1);
+    tips(
+        k,
+        &format!("{sql} ORDER BY a.valid_from, a.anchor_device, a.anchor_seq, a.uid"),
+        [],
+    )
+}
+
 /// `repo`'s current claims that are decided, or open items not done: at most `limit`, the newest
 /// first (`current`'s order reversed). The manifest reads these at every SessionStart, so the
 /// filter, the order and the limit are the query's.

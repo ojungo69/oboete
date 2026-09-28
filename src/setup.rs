@@ -1698,14 +1698,19 @@ pub fn doctor(home: &Path) -> Result<()> {
             "oboete.db",
             (|| -> Result<()> {
                 let conn = db::open(home)?;
-                let count =
-                    |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
+                // A table that cannot be read makes the section unhealthy, not a count of 0; the
+                // readable counts and the calls below are still shown.
+                let counts = ["sessions", "events", "observations", "summaries"].map(|t| {
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                });
+                let shown = counts
+                    .each_ref()
+                    .map(|c| c.as_ref().map_or("unreadable".into(), i64::to_string));
                 println!(
                     "  sessions {} | raw events {} | observations {} | summaries {}",
-                    count("SELECT COUNT(*) FROM sessions"),
-                    count("SELECT COUNT(*) FROM events"),
-                    count("SELECT COUNT(*) FROM observations"),
-                    count("SELECT COUNT(*) FROM summaries")
+                    shown[0], shown[1], shown[2], shown[3]
                 );
                 let mut stmt = conn.prepare(
                     "SELECT provider, outcome, ms, COALESCE(detail,'') FROM provider_calls ORDER BY id DESC LIMIT 5",
@@ -1727,6 +1732,7 @@ pub fn doctor(home: &Path) -> Result<()> {
                         println!("    {r}");
                     }
                 }
+                counts.into_iter().try_for_each(|c| c.map(drop))?;
                 Ok(())
             })(),
         );
