@@ -411,6 +411,35 @@ pub fn decisions(k: &Connection, repo: &str, limit: usize) -> Result<Vec<Claim>>
     tips(k, &format!("{TIPS} {DECIDED}"), (repo, limit as i64))
 }
 
+/// `repo`'s current claims the owner backs, anchored on `device` at or before `seq`, the newest
+/// first, at most `limit`: those a session's digest may cite (milestone 3 Task 9). SessionStart
+/// injects the digest, so only the user's own settled words, proposals the user accepted, and
+/// claims whose status the owner corrected to decided (the active status is then the newest
+/// correction's) are shown: never a proposal, which may stand on tool content, nor a tool result
+/// or the assistant's own completion, which a passing run settles.
+pub fn anchored_through(
+    k: &Connection,
+    repo: &str,
+    device: &str,
+    seq: i64,
+    limit: usize,
+) -> Result<Vec<Claim>> {
+    tips(
+        k,
+        &format!(
+            "{TIPS} AND a.status NOT IN ('proposed', 'unverified')
+             AND (a.speaker = 'user'
+                  OR a.status = 'decided' AND (a.speaker = 'assistant proposal'
+                     OR EXISTS (SELECT 1 FROM corrections x WHERE x.uid = a.uid
+                                AND x.status IS NOT NULL)))
+             AND a.anchor_device = ?2 AND a.anchor_seq <= ?3
+             ORDER BY a.valid_from DESC, a.anchor_device DESC, a.anchor_seq DESC, a.uid DESC
+             LIMIT ?4"
+        ),
+        (repo, device, seq, limit as i64),
+    )
+}
+
 /// `decisions`' filter, order and limit (`?2`), which `derivations_repo` serves in order.
 pub(crate) const DECIDED: &str =
     "AND (a.status = 'decided' OR (a.kind = 'open item' AND a.status <> 'done'))

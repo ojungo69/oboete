@@ -1166,10 +1166,11 @@ mod tests {
         );
         store.append_ops(&[spaces]).unwrap();
         assert_eq!(shown_digest(&store), None);
-        // A claim the owner corrects after the digest: its text may no longer be the digest's.
-        store
-            .append_ops(&[digest("r", &[("Spaces now.", &[&spaces_uid])])])
-            .unwrap();
+        // A claim the owner corrects after the digest: it no longer says what the digest saw.
+        let mut now = digest("r", &[("Spaces now.", &[&spaces_uid])]);
+        now.1["lines"][0]["seen"] =
+            serde_json::json!([crate::digest::version("decided", "Use spaces instead.")]);
+        store.append_ops(&[now]).unwrap();
         assert_eq!(shown_digest(&store).as_deref(), Some("- Spaces now."));
         let correction = crate::claims::CorrectionOp {
             uid: spaces_uid.clone(),

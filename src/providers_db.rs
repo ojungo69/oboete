@@ -66,6 +66,21 @@ CREATE TABLE IF NOT EXISTS pending(
   since INTEGER NOT NULL,                 -- when the window first waited
   prompt TEXT NOT NULL                    -- the SHA-256 of the request the attempts were on, with who was asked
 );
+-- A session's digest that every provider failed (milestone 3 Task 9), as `pending` is for a
+-- window: it counts only for the same request, and after D11's three attempts it is given up
+-- until the request changes (the session's newer records, its claims, who is asked).
+CREATE TABLE IF NOT EXISTS digest_pending(
+  device TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  session TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  hold TEXT NOT NULL,
+  attempts INTEGER NOT NULL,
+  next_attempt_at INTEGER NOT NULL,
+  PRIMARY KEY(device, agent, session, repo)
+);
 ";
 
 pub fn open(home: &Path) -> Result<Connection> {
@@ -162,6 +177,10 @@ pub fn stopped(conn: &Connection) -> Result<Vec<(String, i64)>> {
 pub fn resume(conn: &Connection, provider: &str) -> Result<bool> {
     conn.execute(
         "UPDATE pending SET next_attempt_at = 0 WHERE hold = 'owner'",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE digest_pending SET next_attempt_at = 0 WHERE hold = 'owner'",
         [],
     )?;
     Ok(conn.execute("DELETE FROM provider_state WHERE provider=?1", [provider])? > 0)
@@ -443,6 +462,84 @@ pub fn clear_pending(conn: &Connection, device: &str) -> Result<()> {
     Ok(())
 }
 
+/// A session's digest waiting after every provider failed (`digest_pending`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DigestPending {
+    pub device: String,
+    pub agent: String,
+    pub session: String,
+    pub repo: String,
+    /// The SHA-256 of the request the attempts were on.
+    pub prompt: String,
+    pub reason: String,
+    pub hold: String,
+    pub attempts: i64,
+    pub next_attempt_at: i64,
+}
+
+pub fn digest_pending_of(
+    conn: &Connection,
+    device: &str,
+    agent: &str,
+    session: &str,
+    repo: &str,
+) -> Result<Option<DigestPending>> {
+    Ok(conn
+        .query_row(
+            "SELECT prompt, reason, hold, attempts, next_attempt_at FROM digest_pending
+             WHERE device = ?1 AND agent = ?2 AND session = ?3 AND repo = ?4",
+            params![device, agent, session, repo],
+            |r| {
+                Ok(DigestPending {
+                    device: device.into(),
+                    agent: agent.into(),
+                    session: session.into(),
+                    repo: repo.into(),
+                    prompt: r.get(0)?,
+                    reason: r.get(1)?,
+                    hold: r.get(2)?,
+                    attempts: r.get(3)?,
+                    next_attempt_at: r.get(4)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+pub fn set_digest_pending(conn: &Connection, p: &DigestPending) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO digest_pending(device, agent, session, repo, prompt, reason, hold,
+           attempts, next_attempt_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            p.device,
+            p.agent,
+            p.session,
+            p.repo,
+            p.prompt,
+            p.reason,
+            p.hold,
+            p.attempts,
+            p.next_attempt_at
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn clear_digest_pending(
+    conn: &Connection,
+    device: &str,
+    agent: &str,
+    session: &str,
+    repo: &str,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM digest_pending WHERE device = ?1 AND agent = ?2 AND session = ?3
+           AND repo = ?4",
+        params![device, agent, session, repo],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +572,22 @@ mod tests {
             .map(|p| p.next_attempt_at)
             .collect();
         assert_eq!(due, [0, 5_000_000_000_000]);
+        // A digest that waits on the owner too.
+        let digest = DigestPending {
+            device: "a".into(),
+            agent: "claude".into(),
+            session: "s".into(),
+            repo: "r".into(),
+            prompt: "p".into(),
+            reason: "r".into(),
+            hold: "owner".into(),
+            attempts: 0,
+            next_attempt_at: 5_000_000_000_000,
+        };
+        set_digest_pending(&conn, &digest).unwrap();
+        resume(&conn, "claude").unwrap();
+        let got = digest_pending_of(&conn, "a", "claude", "s", "r").unwrap();
+        assert_eq!(got.unwrap().next_attempt_at, 0);
     }
 
     #[test]

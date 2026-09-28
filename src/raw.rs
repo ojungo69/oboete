@@ -446,6 +446,27 @@ impl Raw {
         Ok(labels.map(|(a, s)| format!("{}\u{0}{}", a.unwrap_or_default(), s.unwrap_or_default())))
     }
 
+    /// This device's newest `limit` event records, the newest first, by their labels alone (no
+    /// body): where the curation phase looks for a session whose digest is due (milestone 3 Task
+    /// 9). Down the primary key: sessions have no index (spec 1.6).
+    pub fn newest_labels(&self, limit: usize) -> Result<Vec<Labels>> {
+        let mut st = self.conn.prepare(
+            "SELECT agent, session, repo, seq, ts, kind FROM records
+             WHERE device = ?1 AND type = 'event' ORDER BY seq DESC LIMIT ?2",
+        )?;
+        let rows = st.query_map(params![self.device, limit as i64], |r| {
+            Ok(Labels {
+                agent: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                session: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                repo: r.get(2)?,
+                seq: r.get(3)?,
+                ts: r.get(4)?,
+                kind: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Typed prompts and replies of `agent`'s `session` on this device strictly between two seqs:
     /// none when a proposal was the session's last turn before a window (milestone 3 Task 8).
     pub fn turns_between(
@@ -1250,6 +1271,17 @@ fn unzstd(z: &[u8]) -> std::io::Result<Vec<u8>> {
 }
 
 /// A prompt event with this body, for tests of every later consumer.
+/// An event record's labels (`Raw::newest_labels`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Labels {
+    pub agent: String,
+    pub session: String,
+    pub repo: Option<String>,
+    pub seq: i64,
+    pub ts: i64,
+    pub kind: String,
+}
+
 #[cfg(test)]
 pub fn test_event(body: &str) -> Event {
     Event {
