@@ -209,7 +209,7 @@ pub fn phase(
                 })
                 .collect();
             let span = format!("digest {through}");
-            let answer = digester(&span, &prompt, &|v| check(&shown, v));
+            let answer = digester(&span, &prompt, &|v| check(&shown, v, rules));
             let failed = match answer {
                 Ok(r) => {
                     let op = DigestOp {
@@ -331,14 +331,13 @@ pub fn answer_schema() -> Value {
 }
 
 /// The chain's check of a digest answer: `shape` when it is not `{lines: [...]}`, `empty` when no
-/// line cites a claim it was shown.
-fn check(shown: &[(String, String)], v: &Value) -> Option<&'static str> {
+/// line is left as the op keeps them under the active `rules` (none cites a claim it was shown, or
+/// the masks grow them past the cap).
+fn check(shown: &[(String, String)], v: &Value, rules: &Rules) -> Option<&'static str> {
     if !v.get("lines").is_some_and(Value::is_array) {
         return Some("shape");
     }
-    kept(shown, v, &Rules::default())
-        .is_empty()
-        .then_some("empty")
+    kept(shown, v, rules).is_empty().then_some("empty")
 }
 
 /// The answer's lines as the op keeps them: each with only the uids it was shown, a line left with
@@ -630,8 +629,11 @@ mod tests {
         assert_eq!(op.lines[0].seen.len(), 1);
         let shown: Vec<(String, String)> = uids.iter().map(|u| (u.clone(), "v".into())).collect();
         let uncited = json!({"lines": [{"text": "HACKED", "uids": []}]});
-        assert_eq!(check(&shown, &uncited), Some("empty"));
-        assert_eq!(check(&shown, &json!({"summary": "x"})), Some("shape"));
+        assert_eq!(check(&shown, &uncited, &Rules::default()), Some("empty"));
+        assert_eq!(
+            check(&shown, &json!({"summary": "x"}), &Rules::default()),
+            Some("shape")
+        );
         // At most the six lines the prompt asks for, so the largest answer that passes, every
         // line citing every claim shown, is an op the record can hold.
         let shown: Vec<(String, String)> = (0..CLAIMS)
@@ -656,6 +658,30 @@ mod tests {
             };
             assert!(serde_json::to_string(&op).unwrap().len() < crate::raw::MAX_OP_BYTES);
         }
+    }
+
+    /// The check keeps what the op will keep: with the owner's extra rule, a line its masks grow
+    /// past the cap is no line, so the answer fails the check instead of making an empty op.
+    #[test]
+    fn the_check_uses_the_active_redaction_rules() {
+        let extra = crate::config::ExtraRule {
+            id: "ticket".into(),
+            regex: r"\bT\d{3}\b".into(),
+            keywords: Vec::new(),
+            entropy: None,
+            secret_group: None,
+        };
+        let rules = Rules::new(&crate::config::Redaction {
+            extra_rules: vec![extra],
+            allowlist: Vec::new(),
+        })
+        .unwrap();
+        let uid = "a".repeat(64);
+        let shown = vec![(uid.clone(), "v".to_owned())];
+        let text: Vec<String> = (0..300).map(|i| format!("T{i:03}")).collect();
+        let answer = json!({"lines": [{"text": text.join(" "), "uids": [uid]}]});
+        assert_eq!(check(&shown, &answer, &Rules::default()), None);
+        assert_eq!(check(&shown, &answer, &rules), Some("empty"));
     }
 
     #[test]
