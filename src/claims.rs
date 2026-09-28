@@ -96,7 +96,35 @@ pub fn uid(kind: &str, first: &Evidence) -> String {
     })
 }
 
+/// Windows whose claims lost a quote to a mask or a removal since: Task 11 sends them again.
+/// With the claim op that lost it, so a rewind that loses the op takes it back, and its first
+/// record: a recuration of a span's middle leaves the parts on both sides (#192).
+const RECURATE: &str = "CREATE TABLE IF NOT EXISTS recurate(
+  device TEXT NOT NULL, from_seq INTEGER NOT NULL, to_seq INTEGER NOT NULL,
+  op_device TEXT NOT NULL, op_seq INTEGER NOT NULL,
+  PRIMARY KEY (op_device, op_seq, from_seq)
+)";
+
 pub(crate) fn schema(k: &Connection) -> Result<()> {
+    // Before #192 a queued window was keyed by its claim op alone, so it could not be split: the
+    // table is made again with its rows, in one savepoint (a step's transaction may hold it).
+    let old: i64 = k.query_row(
+        "SELECT count(*) FROM pragma_table_info('recurate') WHERE pk > 0",
+        [],
+        |r| r.get(0),
+    )?;
+    if old == 2 {
+        k.execute_batch(&format!(
+            "SAVEPOINT recurate_key;
+             ALTER TABLE recurate RENAME TO recurate_old;
+             {RECURATE};
+             INSERT INTO recurate SELECT device, from_seq, to_seq, op_device, op_seq
+               FROM recurate_old;
+             DROP TABLE recurate_old;
+             RELEASE recurate_key;"
+        ))?;
+    }
+    k.execute_batch(RECURATE)?;
     k.execute_batch(
         "-- Every derivation of a claim: one claim op each (op_device, op_seq).
          CREATE TABLE IF NOT EXISTS derivations(
@@ -135,13 +163,6 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS claims_op ON claims(op_device, op_seq);
          -- The active derivations' bodies and quotes, for Task 7's candidates.
          CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5(text, tokenize='trigram');
-         -- Windows whose claims lost a quote to a mask or a removal since: Task 11 sends them
-         -- again. With the claim op that lost it, so a rewind that loses the op takes it back.
-         CREATE TABLE IF NOT EXISTS recurate(
-           device TEXT NOT NULL, from_seq INTEGER NOT NULL, to_seq INTEGER NOT NULL,
-           op_device TEXT NOT NULL, op_seq INTEGER NOT NULL,
-           PRIMARY KEY (op_device, op_seq)
-         );
          -- The owner's corrections (spec 3.4, MUST-M21): each field the newest one gives
          -- applies over whatever derivation of the uid is active, so it survives recuration,
          -- re-derivation and rebuild. One for a uid with no claim yet waits for it.
