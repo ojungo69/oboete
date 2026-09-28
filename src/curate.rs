@@ -585,7 +585,12 @@ impl<'r> Prepared<'r> {
             } else {
                 Vec::new()
             },
-            owners: e.kind == "tool" && OWNERS_WORDS.contains(&tool) && body["failed"] != true,
+            // An interrupted call (the transcript's `interrupted`) got no answer: its text is the
+            // assistant's plan or question only.
+            owners: e.kind == "tool"
+                && OWNERS_WORDS.contains(&tool)
+                && body["failed"] != true
+                && body["interrupted"] != true,
         }
     }
 
@@ -3606,6 +3611,49 @@ mod tests {
         let shown: Vec<&str> = req.shown_in.iter().map(|(_, c)| c.body.as_str()).collect();
         assert!(shown.contains(&earlier), "{shown:?}");
         assert_eq!(shown.len(), 20);
+    }
+
+    /// An approval is searched with the owner's lines; a call interrupted before the owner
+    /// answered, or one that failed, is searched with the tool output.
+    #[test]
+    fn only_an_answered_owners_tool_call_is_searched_as_the_owners_words() {
+        let (_home, mut raw, dev) = store();
+        let call = |output: Value, extra: &str| {
+            let mut body = serde_json::json!({"tool": "ExitPlanMode",
+                "input": {"plan": format!("plan {extra}")}, "output": output});
+            match extra {
+                "interrupted" => body["interrupted"] = true.into(),
+                "failed" => body["failed"] = true.into(),
+                _ => {}
+            }
+            Event {
+                repo: Some("a".into()),
+                ..event("tool", body)
+            }
+        };
+        for e in [
+            call("User has approved your plan.".into(), "approved"),
+            call(Value::Null, "interrupted"),
+            call("tool error".into(), "failed"),
+        ] {
+            raw.append(&e).unwrap();
+        }
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        let (said, rest) = searched(&w, "a");
+        assert!(
+            said.contains("plan approved") && said.contains("approved your plan"),
+            "{said}"
+        );
+        assert!(
+            rest.contains("plan interrupted") && rest.contains("plan failed"),
+            "{rest}"
+        );
+        assert!(
+            !said.contains("interrupted") && !said.contains("plan failed"),
+            "{said}"
+        );
     }
 
     /// A claim both searches find is shown once, and a claim only tool output finds takes one of
