@@ -215,12 +215,12 @@ pub fn check(
         let span = sentence_of(&line.text, &d.quote);
         // A user turn that asks, or whose end is in a later window, promotes nothing, whatever
         // else the window holds (a passing run answers no question).
+        // An answer's end is known on every part of a split call: it is read from the whole call.
         let asked = speaker == "user"
-            && (question(if line.role == Role::Answer {
-                turn_said(line, &d.quote)
-            } else {
-                &line.text
-            }) || continues(w, line));
+            && match line.role {
+                Role::Answer => question(turn_said(line, &d.quote)),
+                _ => question(&line.text) || continues(w, line),
+            };
         // The user's own words carry the claim, unless they were pasted from a tool line; a bare
         // "yes" accepts only what it answers. Any part of a user turn that says nothing but
         // acceptance and filler is bare too ("please" from "Yes, please.").
@@ -933,7 +933,11 @@ mod tests {
         assert!(w.to_offset.is_some(), "not split: {}", w.text);
         // The part this line shows is no JSON document on its own.
         assert!(serde_json::from_str::<Value>(w.lines[0].source_text()).is_err());
-        assert_eq!(one(&w, "decided", "user", "SQLite にする").1, "user");
+        // Its end is in a later window, and the answer is still `decided`: it is read whole.
+        assert_eq!(
+            one(&w, "decided", "user", "SQLite にする"),
+            is("decided", "user")
+        );
     }
 
     const PROPOSAL: &str = "We could cache the parsed files.";
