@@ -40,7 +40,7 @@ jobs:
        (github.event_name == 'workflow_dispatch' &&
         github.ref == format('refs/heads/{0}', github.event.repository.default_branch)))
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     env:
       # The CLI's first call starts a background `npm i -g` of the newest release, which replaced
       # the pinned version while the action was still calling it ("Cannot find module").
@@ -114,11 +114,11 @@ jobs:
           llm_extra_body: '{}'
           llm_reasoning_effort: high
           llm_timeout: '600'
-          review_task_timeout: '5'
+          review_task_timeout: '15'
           effort: high
           language: Japanese
           review_concurrency: '1'
-          max_tokens_budget: '500000'
+          max_tokens_budget: '3000000'
           # Line overlap alone does not prove two findings describe the same problem.
           incremental: 'false'
           upload_artifacts: 'false'
@@ -145,11 +145,11 @@ jobs:
           llm_extra_body: '{}'
           llm_reasoning_effort: high
           llm_timeout: '600'
-          review_task_timeout: '5'
+          review_task_timeout: '15'
           effort: high
           language: Japanese
           review_concurrency: '1'
-          max_tokens_budget: '500000'
+          max_tokens_budget: '3000000'
           incremental: 'false'
           upload_artifacts: 'false'
           base_ref: ${{ steps.pr.outputs.base_ref }}
