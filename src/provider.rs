@@ -1097,6 +1097,9 @@ pub(crate) fn codex_exec_flags(profile: &str) -> Vec<String> {
 /// them. The prompt never goes on the command line (any local user can read another process's
 /// arguments): it is piped to stdin (claude, codex, and agy as one stream-json turn) or written
 /// into the private scratch directory (grok's --prompt-file). Returns what to write to stdin.
+/// claude's `--settings` for a curator call: no hook, and none of Claude Code's built-in plugins.
+const CLAUDE_SETTINGS: &str = r#"{"disableAllHooks":true,"enabledPlugins":{"agents-md@builtin":false,"telemetry@builtin":false}}"#;
+
 fn headless_command(
     cli: &str,
     model: Option<&str>,
@@ -1143,11 +1146,10 @@ fn headless_command(
                 "",
                 "--strict-mcp-config",
             ]);
-            cmd.args([
-                "--no-session-persistence",
-                "--settings",
-                r#"{"disableAllHooks":true}"#,
-            ]);
+            // The plugins built into Claude Code load whatever the setting sources are (2.1.283:
+            // agents-md and telemetry), and `claude_stream` discards any answer whose init lists a
+            // plugin: they are turned off here. A new one fails closed until it is added.
+            cmd.args(["--no-session-persistence", "--settings", CLAUDE_SETTINGS]);
             cmd.arg("--system-prompt-file")
                 .arg(write("system.md", &system)?);
             // spec 6.5's extra layers; `claude_stream` checks what the init event reports.
@@ -1867,8 +1869,14 @@ mod tests {
             ["--permission-prompts", "none"],
             ["--tools", ""],
             ["--max-turns", "1"],
+            ["--settings", CLAUDE_SETTINGS],
         ] {
             assert!(has(pair), "{pair:?}: {args:?}");
+        }
+        let settings: Value = serde_json::from_str(CLAUDE_SETTINGS).unwrap();
+        assert_eq!(settings["disableAllHooks"], true);
+        for builtin in ["agents-md@builtin", "telemetry@builtin"] {
+            assert_eq!(settings["enabledPlugins"][builtin], false, "{builtin}");
         }
         for flag in [
             "--verbose",

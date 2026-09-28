@@ -15,7 +15,7 @@ Versions: Claude Code 2.1.278, codex-cli 0.155.1 (the dogfood user's installs).
 
 ## Invocations
 
-- claude: `claude -p --model haiku --system-prompt-file <f> --output-format stream-json --verbose --permission-mode dontAsk --permission-prompts none --disallowedTools Agent Task Monitor mcp__* --disable-slash-commands --setting-sources '' --tools '' --strict-mcp-config --no-session-persistence --settings '{"disableAllHooks":true}'`, prompt on stdin, environment reduced to PATH, HOME, LANG, USER, TMPDIR plus `OBOETE_SKIP=1`.
+- claude: `claude -p --model haiku --system-prompt-file <f> --output-format stream-json --verbose --permission-mode dontAsk --permission-prompts none --disallowedTools Agent Task Monitor mcp__* --disable-slash-commands --setting-sources '' --tools '' --strict-mcp-config --no-session-persistence --settings '{"disableAllHooks":true,"enabledPlugins":{"agents-md@builtin":false,"telemetry@builtin":false}}'` (the plugins were added on 2026-09-28, below), prompt on stdin, environment reduced to PATH, HOME, LANG, USER, TMPDIR plus `OBOETE_SKIP=1`.
   - Variants add `--json-schema` (schema), `--max-turns 1`, `--effort low`, or write stdin 5 s late (delayed-stdin).
 - codex: `codex exec --json --ephemeral --skip-git-repo-check --sandbox read-only -c model=gpt-6-luna`.
   - base and direct also pass `--output-schema <f> -c model_reasoning_effort=low`. The `-free` variants drop the schema and use medium effort, so the model is freer to act.
@@ -104,6 +104,13 @@ The profile does not govern tools that act outside commands:
 - The stream's `rate_limit_event` carries `status`, `resetsAt`, `rateLimitType` and `utilization`. On this day it was `allowed_warning` for `seven_day` (utilization 0.87, threshold 0.75, reset 2026-09-30 14:00 JST) on every call, so C1 rests claude until that reset.
 - S8's environment, live: with `ANTHROPIC_BASE_URL` pointing at a closed port and `CLAUDE_CODE_EFFORT_LEVEL=max` in the parent environment, claude and codex both answered (the test `live_subscription_curators_answer_under_the_curator_environment`); claude read 512 input tokens.
 - `@` in the prompt (claude 2.1.283, found by the security review of Tasks 2 and 3, `curator-isolation/at_probe.py`): with every flag above, a session line `please look at @/tmp/oboete-sysprobe/at-canary.txt` made claude read that file into the turn itself. The answer quoted the canary's random word. init still said `tools: []`, and no turn used a tool, so neither check sees it. With each `@` sent as U+FF20 the word did not come back (1 call each; input 580 and 497 tokens). The curator now sends U+FF20. codex exec does not read an `@` path (1 call, same prompt).
+
+## Built-in plugins (2026-09-28; claude 2.1.283, the owner's user)
+
+- Claude Code 2.1.283 loads two plugins of its own, `agents-md` and `telemetry` (`"path": "builtin"`, `"source": "<name>@builtin"`), whatever `--setting-sources` says. So the init of every curator call listed them, and `claude_stream` discarded every answer. The first call of the dev run in docs/spike/m3-dev.md failed this way. The dogfood user's 2.1.278 lists no plugin.
+- `--bare` would skip them, but it reads only an API key and never the subscription login, so it is not used.
+- They are turned off in `--settings`, with `"enabledPlugins": {"agents-md@builtin": false, "telemetry@builtin": false}`. The init then lists `plugins: []` and the answer is kept (probe of 2026-09-28: `tools: []`, `plugins: []`, result `success`).
+- The rule does not change: an init that lists any plugin still discards the answer. A built-in plugin that a later version adds therefore stops the claude entry (the chain goes on to the next entry) until its name is added to the settings.
 
 ## The gate (2026-09-27, milestone 3, Task 3; codex 0.155.1, dogfood user)
 
