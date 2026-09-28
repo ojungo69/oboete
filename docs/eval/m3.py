@@ -23,7 +23,9 @@ PART = 20_000  # events per replayed part: `oboete replay` reads a fixture whole
 
 
 def home(binary, name):
-    return f'{M}/{sha256_file(binary)[:12]}/{name}'
+    """The home a binary made, by its hash; or `name` itself when it is a path (a later binary on a
+    home an earlier one cut, docs/spike/m3-dev.md)."""
+    return name if name.startswith('/') else f'{M}/{sha256_file(binary)[:12]}/{name}'
 
 
 def transcripts():

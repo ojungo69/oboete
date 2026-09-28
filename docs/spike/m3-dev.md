@@ -19,7 +19,19 @@ Milestone 3, Task 13 (lines M2, M3, Window, Cost) and Task 12 (judge role (a), "
 
 The home is curated by a localhost OpenAI-compatible stub. It answers every curator request with no claims and every digest request with no lines, so nothing leaves the machine. This pass gives the windows and their tokens exactly, and it checks M2's coverage half on the dev transcripts.
 
-(results: filled in when the run ends)
+Three homes were replayed from the same fixtures in the same order: their `(seq, ts, kind, session)` rows hash alike, so one label map serves all three. The binaries are main at 448085f (the first home) and the shrink branch (the other two).
+
+| Home | Shrink | Windows | Estimated tokens sent | Largest window | Tool calls shown short | Coverage |
+|---|---|---|---|---|---|---|
+| first stub | no | 15,426 | 60.43M | 5,714 | - | 100% |
+| `whole` | no | 15,426 | 60.43M | | 0 | 100% |
+| `short` | yes | 3,493 | 17.64M | 5,690 | 38,024 | 100% |
+
+- **M2's coverage half passes on the dev transcripts.** In each home the window ops run from seq 1 to the last record (71,063, the 70,904 events plus the rescan's tombstones), with no gap and no overlap. Every window is `curated`, or `covered` where it holds no text.
+- The two homes without the shrink give the same windows and the same tokens, so the cut is deterministic.
+- **The shrink sends 70.8% less**: 17.64M against 60.43M estimated tokens, in 3,493 windows instead of 15,426. That clears the −30% clause of spec 3.5 (a). The estimate above (−71%) was right.
+- The token counts include each prompt's fixed part and its candidates. The stub answered no claims, so no session carried anything.
+- Every record has a repository (11 repositories, 63 sessions). Sessions that ran in the home directory have a repository too, so repository scope does not drop any dev pair.
 
 ## What the curator is sent
 
