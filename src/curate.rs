@@ -1295,6 +1295,23 @@ pub fn recurate_window(
             serde_json::to_value(c)
         })
         .collect::<serde_json::Result<_>>()?;
+    // Within one append's caps, window op and claims first: a retraction left out leaves an
+    // unsettled draft as it was, and the span still leaves the queue.
+    let (mut room, mut bytes) = (
+        crate::raw::MAX_BATCH_OPS.saturating_sub(1 + claims.len()),
+        crate::raw::MAX_BATCH_BYTES
+            .saturating_sub(crate::raw::MAX_OP_BYTES)
+            .saturating_sub(claims.iter().map(|c| c.to_string().len()).sum()),
+    );
+    let retracted: Vec<Value> = retracted
+        .into_iter()
+        .take_while(|r| {
+            let size = r.to_string().len();
+            let fits = room > 0 && size <= bytes;
+            (room, bytes) = (room.saturating_sub(1), bytes.saturating_sub(size));
+            fits
+        })
+        .collect();
     let counts = (claims.len(), retracted.len());
     op["recurate"] = true.into();
     if let Some(c) = covers {
@@ -1317,8 +1334,9 @@ pub fn recurate_window(
     Ok(Ok(counts))
 }
 
-/// The active derivation of each claim whose first quote is in `w` (inside its offsets where it
-/// starts or ends within a split event, so one part of an event never retracts another's), as a
+/// The active derivation of each claim whose first quote is in `w`, whole (inside its offsets where
+/// it starts or ends within a split event, so one part of an event never retracts another's, and a
+/// quote a later split cuts in two is in no part and not retracted), as a
 /// claim op with its uid: an unsettled one (`proposed`, `unverified`), not global (the owner's
 /// `pref add`, which no window shows). A settled claim stays when an answer leaves it out: a
 /// curator's answers vary, and `retracted` needs the user's words or the owner's correction.
@@ -1329,7 +1347,7 @@ fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims:
          JOIN evidence e ON e.op_device = d.op_device AND e.op_seq = d.op_seq AND e.idx = 0
          WHERE d.anchor_device = ?1 AND d.anchor_seq BETWEEN ?2 AND ?3
            AND (e.seq <> ?2 OR ?4 IS NULL OR e.offset >= ?4)
-           AND (e.seq <> ?3 OR ?5 IS NULL OR e.offset < ?5)
+           AND (e.seq <> ?3 OR ?5 IS NULL OR e.offset + e.length <= ?5)
            AND d.status IN ('proposed', 'unverified') AND d.scope <> 'global'
          ORDER BY d.anchor_seq, d.uid",
     )?;
@@ -3489,6 +3507,72 @@ mod tests {
             refused.to_string().contains("a worker is running"),
             "{refused}"
         );
+    }
+
+    /// A quote that a smaller split cuts in two is in neither part, so neither part's answer
+    /// retracts it (review on #189).
+    #[test]
+    fn a_quote_a_new_split_cuts_in_two_is_not_retracted() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        let text = "Some filler here.\n".repeat(30);
+        let (_, mut op) = kept(&mut raw, "s", "r", &text);
+        let rules = Rules::default();
+        let parts = span_windows(&raw, &Span::records(1, 1), 80, &rules).unwrap();
+        assert!(parts.len() >= 2, "{}", parts.len());
+        let cut = usize::try_from(parts[0].to_offset.unwrap()).unwrap();
+        let at = cut - 4;
+        op["status"] = "proposed".into();
+        op["evidence"][0]["offset"] = at.into();
+        op["evidence"][0]["length"] = 8.into();
+        op["evidence"][0]["quote"] = text[at..at + 8].into();
+        let window = json!({"from_seq": 1, "from_offset": null, "to_seq": 1, "to_offset": null,
+            "outcome": "curated", "elided": []});
+        raw.append_ops(&[(OpKind::Window, window), (OpKind::Claim, op)])
+            .unwrap();
+        consume(&raw, &mut k);
+        let summary = curating(80);
+        let mut none = |_: &str, _: &str, _: &AnswerCheck| Ok(answered("fake"));
+        for part in &parts {
+            let done = recurate_window(&mut raw, &k, &rules, &summary, &mut none, part, None);
+            assert_eq!(done.unwrap(), Ok((0, 0)));
+        }
+        consume(&raw, &mut k);
+        assert_eq!(active(&k)[0].1, "proposed");
+    }
+
+    /// More unsettled claims in one window than an append holds: the retractions that fit are
+    /// written, the rest stay as they were, and the window lands (review on #189).
+    #[test]
+    fn retractions_past_the_batch_cap_are_left_out() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        let mut claims = Vec::new();
+        for i in 0..1_100 {
+            let (kind, mut op) = kept(&mut raw, "s", "r", &format!("p{i} x"));
+            op["status"] = "proposed".into();
+            claims.push((kind, op));
+        }
+        let window = json!({"from_seq": 1, "from_offset": null, "to_seq": 1_100,
+            "to_offset": null, "outcome": "curated", "elided": []});
+        raw.append_ops(&[(OpKind::Window, window)]).unwrap();
+        for chunk in claims.chunks(500) {
+            raw.append_ops(chunk).unwrap();
+        }
+        consume(&raw, &mut k);
+        let rules = Rules::default();
+        let windows = span_windows(&raw, &Span::records(1, 1_100), 1_000_000, &rules).unwrap();
+        assert_eq!(windows.len(), 1);
+        let summary = curating(1_000_000);
+        let mut none = |_: &str, _: &str, _: &AnswerCheck| Ok(answered("fake"));
+        let done = recurate_window(&mut raw, &k, &rules, &summary, &mut none, &windows[0], None);
+        let room = crate::raw::MAX_BATCH_OPS - 1;
+        assert_eq!(done.unwrap(), Ok((0, room)));
+        consume(&raw, &mut k);
+        let retracted = active(&k).iter().filter(|(_, s)| s == "retracted").count();
+        assert_eq!(retracted, room);
     }
 
     /// A span whose second window every provider goes past: the run stops there, the first
