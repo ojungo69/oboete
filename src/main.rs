@@ -497,8 +497,9 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         Cmd::Pref {
             action: PrefCmd::Add { text },
         } => {
-            let uid = claims::pref_add(&home, &text)?;
-            println!("kept for every repository ({})", &uid[..12]);
+            // Whole: `oboete correct` takes the full id.
+            let id = claims::pref_add(&home, &text)?;
+            println!("kept for every repository ({id})");
             Ok(())
         }
         Cmd::Resume { provider } => {

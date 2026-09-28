@@ -3066,7 +3066,15 @@ mod tests {
     fn pref_add_keeps_no_private_part_and_refuses_what_it_cannot_store() {
         let home = tempfile::tempdir().unwrap();
         let text = "Use tabs <private>for customer acme</private> always.";
-        crate::claims::pref_add(home.path(), text).unwrap();
+        let uid = crate::claims::pref_add(home.path(), text).unwrap();
+        // Applied before it returns: the next SessionStart reads it with no worker running.
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let applied: i64 = k
+            .query_row("SELECT count(*) FROM claims WHERE uid = ?1", [&uid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(applied, 1);
         let raw = crate::raw::open(home.path()).unwrap();
         let stored: Vec<String> = raw
             .export_lines(0, 1 << 20)
