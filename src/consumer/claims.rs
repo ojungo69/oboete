@@ -3,6 +3,7 @@
 //! active derivation (`claims::schema`).
 
 use crate::claims::{ClaimOp, CorrectionOp, Evidence, normalize, schema, uid};
+use crate::curate::Span;
 use crate::knowledge::checkpoint;
 use crate::raw::{Item, Op, OpKind, Raw};
 use crate::worker::Consumer;
@@ -67,28 +68,42 @@ impl Consumer for Claims {
             .filter(|o| o.kind == OpKind::Window && o.body["recurate"] == true)
         {
             // What this window curated, and the part of its span curated through it (`covers`,
-            // when the span took several): queued spans inside it leave, and one it ends inside
-            // of keeps the rest, from a record it curated only part of, that record whole.
+            // when the span took several): each queued span keeps what is left of it on either
+            // side (#192), a record it curated only part of whole.
             for range in [&op.body, &op.body["covers"]] {
-                let (from, to) = (range["from_seq"].as_i64(), range["to_seq"].as_i64());
-                let (from_part, to_part) =
-                    (range["from_offset"].is_i64(), range["to_offset"].is_i64());
-                let starts = "(from_seq > ?2 OR (from_seq = ?2 AND NOT ?4))";
-                k.execute(
-                    &format!(
-                        "DELETE FROM recurate WHERE device = ?1 AND {starts}
-                           AND (to_seq < ?3 OR (to_seq = ?3 AND NOT ?5))"
-                    ),
-                    params![op.device, from, to, from_part, to_part],
-                )?;
-                let rest = to.map(|t| if to_part { t } else { t + 1 });
-                k.execute(
-                    &format!(
-                        "UPDATE recurate SET from_seq = ?6 WHERE device = ?1 AND {starts}
-                           AND from_seq <= ?3 AND (to_seq > ?3 OR (to_seq = ?3 AND ?5))"
-                    ),
-                    params![op.device, from, to, from_part, to_part, rest],
-                )?;
+                let Some(c) = crate::curate::op_span(range) else {
+                    continue;
+                };
+                let whole = Span::records(
+                    c.from + i64::from(c.from_offset.is_some()),
+                    c.to - i64::from(c.to_offset.is_some()),
+                );
+                if whole.from > whole.to {
+                    continue;
+                }
+                let rows: Vec<(i64, i64, String, i64)> = k
+                    .prepare(
+                        "SELECT from_seq, to_seq, op_device, op_seq FROM recurate
+                         WHERE device = ?1 AND from_seq <= ?3 AND to_seq >= ?2",
+                    )?
+                    .query_map(params![op.device, whole.from, whole.to], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                for (from, to, of, at) in rows {
+                    k.execute(
+                        "DELETE FROM recurate WHERE op_device = ?1 AND op_seq = ?2
+                           AND from_seq = ?3",
+                        params![of, at, from],
+                    )?;
+                    for part in Span::records(from, to).minus(&whole) {
+                        k.execute(
+                            "INSERT OR IGNORE INTO recurate(device, from_seq, to_seq, op_device,
+                               op_seq) VALUES(?1, ?2, ?3, ?4, ?5)",
+                            params![op.device, part.from, part.to, of, at],
+                        )?;
+                    }
+                }
             }
         }
         let mut derived = Vec::new();
@@ -317,14 +332,22 @@ fn live(raw: &Raw, e: &Evidence) -> Result<Option<crate::raw::Event>> {
 
 /// The window the claim op `op_seq` of `op_device` came with, for Task 11 to send again: its
 /// span, or the quote's event alone when the op came without one.
-fn queue(raw: &Raw, k: &Connection, op_device: &str, op_seq: i64, e: &Evidence) -> Result<()> {
+pub(crate) fn queue(
+    raw: &Raw,
+    k: &Connection,
+    op_device: &str,
+    op_seq: i64,
+    e: &Evidence,
+) -> Result<()> {
     let (device, from, to) = match raw.window_of(op_device, op_seq)? {
         Some((from, to)) => (op_device, from, to),
         None => (e.device.as_str(), e.seq, e.seq),
     };
+    // Once per op: an op queued already, whole or in the parts a recuration left, stays so.
     k.execute(
-        "INSERT OR IGNORE INTO recurate(device, from_seq, to_seq, op_device, op_seq)
-         VALUES(?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO recurate(device, from_seq, to_seq, op_device, op_seq)
+         SELECT ?1, ?2, ?3, ?4, ?5
+         WHERE NOT EXISTS (SELECT 1 FROM recurate WHERE op_device = ?4 AND op_seq = ?5)",
         params![device, from, to, op_device, op_seq],
     )?;
     Ok(())
@@ -1004,6 +1027,34 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    /// A knowledge.db from before #192 keys its queue by the claim op alone: the table is made
+    /// again keyed by the op and the first record, with its rows.
+    #[test]
+    fn the_queue_of_an_older_knowledge_db_is_keyed_again() {
+        let home = tempfile::tempdir().unwrap();
+        let k = crate::knowledge::open(home.path()).unwrap();
+        k.execute_batch(
+            "CREATE TABLE recurate(device TEXT NOT NULL, from_seq INTEGER NOT NULL,
+               to_seq INTEGER NOT NULL, op_device TEXT NOT NULL, op_seq INTEGER NOT NULL,
+               PRIMARY KEY (op_device, op_seq));
+             INSERT INTO recurate VALUES('d', 1, 3, 'd', 9);",
+        )
+        .unwrap();
+        schema(&k).unwrap();
+        schema(&k).unwrap();
+        // A second part of the same op, as a recuration of the middle leaves.
+        k.execute("INSERT INTO recurate VALUES('d', 5, 6, 'd', 9)", [])
+            .unwrap();
+        let rows: Vec<(i64, i64)> = k
+            .prepare("SELECT from_seq, to_seq FROM recurate ORDER BY from_seq")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(rows, [(1, 3), (5, 6)]);
     }
 
     /// A restore that lost a claim op takes its derivation back out, with its quotes and edges,

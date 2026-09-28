@@ -117,6 +117,22 @@ pub fn lock(home: &Path) -> Result<Option<Lock>> {
     }
 }
 
+/// The lock for a command that plans from knowledge.db and then appends to raw (`oboete
+/// recurate`), with the consumers drained under it first as a worker drains them: the plan reads
+/// what raw holds, and no worker or other command moves it until the lock is dropped. `None` when
+/// another process holds it.
+pub fn drained(home: &Path) -> Result<Option<Lock>> {
+    let Some(held) = lock(home)? else {
+        return Ok(None);
+    };
+    let raw = crate::backup::open_raw(home)?;
+    let mut k = crate::backup::open_knowledge(home)?;
+    let mut consumers = consumers(home);
+    checkpoint::rewind(&raw, &k, &mut consumers)?;
+    while pass(&raw, &mut k, &mut consumers)? {}
+    Ok(Some(held))
+}
+
 /// How often a worker looks for new records while it waits.
 const POLL: Duration = Duration::from_millis(200);
 

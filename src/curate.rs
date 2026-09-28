@@ -1141,6 +1141,38 @@ impl Span {
     fn end(&self) -> (i64, i64) {
         (self.to, self.to_offset.unwrap_or(i64::MAX))
     }
+
+    /// What is left of it once `c` is curated: its part before `c` and its part after, where
+    /// either is (#192).
+    pub(crate) fn minus(&self, c: &Span) -> Vec<Span> {
+        if c.end() <= self.start() || self.end() <= c.start() {
+            return vec![self.clone()];
+        }
+        let mut left = Vec::new();
+        if self.start() < c.start() {
+            let (to, to_offset) = match c.from_offset {
+                Some(o) => (c.from, Some(o)),
+                None => (c.from - 1, None),
+            };
+            left.push(Span {
+                to,
+                to_offset,
+                ..self.clone()
+            });
+        }
+        if c.end() < self.end() {
+            let (from, from_offset) = match c.to_offset {
+                Some(o) => (c.to, Some(o)),
+                None => (c.to + 1, None),
+            };
+            left.push(Span {
+                from,
+                from_offset,
+                ..self.clone()
+            });
+        }
+        left
+    }
 }
 
 /// The windows `span` is cut into, in order, as `next_window` cuts the device's records.
@@ -1185,6 +1217,27 @@ pub enum Again {
 /// `send`, each window curated again through the curator chain, then the consumers run. What it
 /// did, to print.
 pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<String> {
+    // The worker's lock, with the consumers drained under it (#192): a recuration appended before
+    // a crash or a failed run has left the queue, and no worker or other recuration moves the
+    // queue between the plan and its sending. Sending needs it: no curation phase sends at the
+    // same time (the month's cap is read before each call and written after it), and no consumer
+    // changes the claims a window retracts from. A list is made without it while a worker runs.
+    let held = crate::worker::drained(home)?;
+    if send && held.is_none() {
+        anyhow::bail!("a worker is running; try again when it has exited");
+    }
+    let out = planned(home, source, send);
+    // Released as a worker releases it: a hook that appended while it was held started no
+    // worker, so the consumers run once more, sent or not.
+    if let Some(held) = held {
+        drop(held);
+        crate::worker::run_once(home)?;
+    }
+    out
+}
+
+/// `recurate`'s plan, and with `send` its sending, under the worker's lock when sending.
+fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> {
     let cfg = crate::config::load(home)?;
     let rules = crate::capture::Settings::load(home)?.rules;
     // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
@@ -1264,10 +1317,6 @@ pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<Str
         out.push_str("nothing sent: run it again with --yes to curate them\n");
         return Ok(out);
     }
-    // The worker's lock: no curation phase sends at the same time (the month's cap is read before
-    // each call and written after it), and no consumer changes the claims a window retracts from.
-    let held = crate::worker::lock(home)?
-        .ok_or_else(|| anyhow::anyhow!("a worker is running; try again when it has exited"))?;
     let mut curator = |span: &str, prompt: &str, check: &AnswerCheck| {
         crate::provider::Chain::new(&cfg.providers, &db)
             .paid_cap(cfg.paid_usd_per_month)
@@ -1275,8 +1324,6 @@ pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<Str
             .run("curator", span, prompt, &schema())
     };
     let sent = send_plan(&mut raw, &k, &rules, &cfg.summary, &mut curator, &plan)?;
-    drop((k, raw, held));
-    crate::worker::run_once(home)?;
     out.push_str(&format!(
         "{} window(s) curated again: {} claim(s), {} retracted\n",
         sent.windows, sent.claims, sent.retracted
@@ -1363,30 +1410,24 @@ pub fn skipped_spans(raw: &Raw) -> Result<Vec<Span>> {
             }
         }
     }
-    // What a later recuration left of each skipped span, in op order.
-    let rest = |at: i64, mut s: Span| {
-        for (_, c) in recurated.iter().filter(|(r, _)| *r > at) {
-            if c.start() > s.start() || c.end() < s.start() {
-                continue;
-            }
-            if s.end() <= c.end() {
-                return None;
-            }
-            (s.from, s.from_offset) = match c.to_offset {
-                Some(o) => (c.to, Some(o)),
-                None => (c.to + 1, None),
-            };
-        }
-        Some(s)
+    // What the later recurations left of each skipped span, in op order: a recuration of its
+    // middle leaves a part on each side (#192).
+    let rest = |at: i64, s: Span| {
+        recurated
+            .iter()
+            .filter(|(r, _)| *r > at)
+            .fold(vec![s], |parts, (_, c)| {
+                parts.iter().flat_map(|p| p.minus(c)).collect()
+            })
     };
     Ok(skipped
         .into_iter()
-        .filter_map(|(at, s)| rest(at, s))
+        .flat_map(|(at, s)| rest(at, s))
         .collect())
 }
 
 /// A window op's range, offsets and all.
-fn op_span(op: &Value) -> Option<Span> {
+pub(crate) fn op_span(op: &Value) -> Option<Span> {
     Some(Span {
         from: op["from_seq"].as_i64()?,
         from_offset: op["from_offset"].as_i64(),
@@ -3855,6 +3896,108 @@ mod tests {
             refused.to_string().contains("a worker is running"),
             "{refused}"
         );
+    }
+
+    /// A recuration of the middle of a queued or skipped span leaves the parts on both sides,
+    /// and one of its end leaves the other side (#192).
+    #[test]
+    fn a_recuration_of_a_spans_middle_leaves_both_sides() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        for text in ["one two three", "four five six", "seven eight nine"] {
+            raw.append(&prompt(text)).unwrap();
+        }
+        let op = json!({"from_seq": 1, "from_offset": null, "to_seq": 3, "to_offset": null,
+            "outcome": "skipped", "elided": []});
+        raw.append_ops(&[(OpKind::Window, op)]).unwrap();
+        consume(&raw, &mut k);
+        let queue = |k: &Connection| -> Vec<(i64, i64)> {
+            k.prepare("SELECT from_seq, to_seq FROM recurate ORDER BY from_seq")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        k.execute(
+            "INSERT INTO recurate(device, from_seq, to_seq, op_device, op_seq)
+             VALUES(?1, 1, 3, ?1, 9)",
+            [raw.device()],
+        )
+        .unwrap();
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let mut none = |_: &str, _: &str, _: &AnswerCheck| Ok(answered("fake"));
+        let mut again = |raw: &mut Raw, k: &mut Connection, span: Span| {
+            let w = span_windows(raw, &span, WINDOW_TOKENS, &rules).unwrap();
+            assert_eq!(w.len(), 1);
+            recurate_window(raw, k, &rules, &summary, &mut none, &w[0], Some(&span))
+                .unwrap()
+                .unwrap();
+            consume(raw, k);
+        };
+        again(&mut raw, &mut k, Span::records(2, 2));
+        assert_eq!(queue(&k), [(1, 1), (3, 3)]);
+        assert_eq!(
+            skipped_spans(&raw).unwrap(),
+            [Span::records(1, 1), Span::records(3, 3)]
+        );
+        again(&mut raw, &mut k, Span::records(3, 3));
+        assert_eq!(queue(&k), [(1, 1)]);
+        assert_eq!(skipped_spans(&raw).unwrap(), [Span::records(1, 1)]);
+        // The claim op queued again for a record curated since: it is queued once.
+        let e = crate::claims::Evidence {
+            device: raw.device().to_owned(),
+            seq: 3,
+            offset: 0,
+            length: 5,
+            sentence: 0,
+            quote: "seven".into(),
+            claim_at: None,
+        };
+        crate::consumer::claims::queue(&raw, &k, raw.device(), 9, &e).unwrap();
+        assert_eq!(queue(&k), [(1, 1)]);
+        drop((raw, k));
+        let listed = recurate(home.path(), Again::Queued, false).unwrap();
+        assert!(listed.contains("1 span(s) in 1 window(s)"));
+    }
+
+    /// A recuration appended before the consumers read it (a crash, a failed run) is read before
+    /// `oboete recurate` plans, so its span is not sent again (#192).
+    #[test]
+    fn a_recuration_the_consumers_have_not_read_is_not_sent_again() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        raw.append(&prompt("We use tabs.")).unwrap();
+        let op = json!({"from_seq": 1, "from_offset": null, "to_seq": 1, "to_offset": null,
+            "outcome": "curated", "elided": []});
+        raw.append_ops(&[(OpKind::Window, op)]).unwrap();
+        consume(&raw, &mut k);
+        k.execute(
+            "INSERT INTO recurate(device, from_seq, to_seq, op_device, op_seq)
+             VALUES(?1, 1, 1, ?1, 9)",
+            [raw.device()],
+        )
+        .unwrap();
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let span = Span::records(1, 1);
+        let w = span_windows(&raw, &span, WINDOW_TOKENS, &rules).unwrap();
+        let mut none = |_: &str, _: &str, _: &AnswerCheck| Ok(answered("fake"));
+        recurate_window(
+            &mut raw,
+            &k,
+            &rules,
+            &summary,
+            &mut none,
+            &w[0],
+            Some(&span),
+        )
+        .unwrap()
+        .unwrap();
+        drop((raw, k));
+        let listed = recurate(home.path(), Again::Queued, false).unwrap();
+        assert_eq!(listed, "nothing to curate again\n");
     }
 
     /// A queued record a recuration splits into parts stays queued until its last part is
