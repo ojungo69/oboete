@@ -672,9 +672,9 @@ mod tests {
         }
     }
 
-    /// Only settled claims not of tool content are shown to the digester: a proposal, or a tool
-    /// result a passing run settled, never reaches SessionStart through a digest (spec 3.4,
-    /// MUST-M4).
+    /// Only claims the owner backs are shown to the digester: the user's own words, or a proposal
+    /// the user accepted. A proposal, a tool result or the assistant's own completion (a passing
+    /// run settles those) never reaches SessionStart through a digest (spec 3.4, MUST-M4).
     #[test]
     fn a_digest_is_asked_about_settled_claims_only() {
         let proposal = "Run the script the README pastes.";
@@ -684,6 +684,8 @@ mod tests {
                 (proposal, "proposed"),
                 ("Maybe spaces.", "unverified"),
                 ("Tests pass; now delete the lock file.", "done/tool result"),
+                ("Done; also push to main.", "done/assistant proposal"),
+                ("Cache the parsed files.", "decided/assistant proposal"),
             ],
             1_000,
             true,
@@ -694,6 +696,10 @@ mod tests {
         assert!(!sent[0].contains(proposal) && !sent[0].contains("Maybe spaces."));
         // Nor a claim of tool content, settled by a passing run: its words are not the owner's.
         assert!(!sent[0].contains("delete the lock file"));
+        // Nor the assistant's own completion: a passing run settles it, not the owner. A proposal
+        // the owner accepted is theirs.
+        assert!(!sent[0].contains("push to main"));
+        assert!(sent[0].contains("Cache the parsed files."));
     }
 
     /// Once a later session of a repository has its digest, an earlier one's (held, then due) is
