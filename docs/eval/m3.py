@@ -244,11 +244,17 @@ def map_labels(name, binary):
 LIVE = '[[providers]]\nkind = "cli"\nname = "claude"\ncli = "claude"\nmodel = "haiku"\n'
 
 
-def spans(h):
-    """The windows that hold a labeled record, as record spans in seq order, each once."""
+def spans(h, tool=None):
+    """The windows that hold a labeled record (only those in a call of `tool`, when given), as
+    record spans in seq order, each once."""
     ops, _ = windows(h)
     with open(f'{h}/map.json') as f:
         seqs = {r['seq'] for r in json.load(f).values() if r['seq'] is not None}
+    if tool:
+        raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
+        seqs = {s for s in seqs if raw.execute(
+            "SELECT 1 FROM records WHERE seq = ? AND kind = 'tool' AND json_extract(body, '$.tool') = ?",
+            (s, tool)).fetchone()}
     out = set()
     for w in ops:
         if any(w['from_seq'] <= s <= w['to_seq'] for s in seqs):
@@ -256,7 +262,7 @@ def spans(h):
     return sorted(out)
 
 
-def live(binary, name, send):
+def live(binary, name, send, tool=None):
     """Each labeled window sent again to the live entry with `oboete recurate`, one span at a time
     in seq order, so an earlier claim is a candidate for a later window. Without `send`, only the
     estimates `recurate` prints."""
@@ -271,7 +277,7 @@ def live(binary, name, send):
     log = f'{h}/live{"-sent" if send else ""}.jsonl'
     done = {json.dumps(r['span']) for r in read_jsonl(log)} if os.path.exists(log) else set()
     tokens = 0
-    for a, b in spans(h):
+    for a, b in spans(h, tool):
         if json.dumps([a, b]) in done:
             continue
         r = subprocess.run([binary, '--home', h, 'recurate', f'{device}:{a}-{b}'] + (['--yes'] if send else []),
@@ -282,7 +288,7 @@ def live(binary, name, send):
         for word in out.split(','):
             if 'tokens' in word and 'about' in word:
                 tokens += int(word.split('about')[1].split('tokens')[0].strip().replace(',', ''))
-    print(f'{len(spans(h))} spans, about {tokens} tokens this pass; log {log}')
+    print(f'{len(spans(h, tool))} spans, about {tokens} tokens this pass; log {log}')
 
 
 def score(binary, name):
@@ -353,7 +359,8 @@ if __name__ == '__main__':
     elif cmd == 'map':
         map_labels(args[1], args[0])
     elif cmd == 'live':
-        live(args[0], args[1], '--yes' in args)
+        live(args[0], args[1], '--yes' in args,
+             next((a.split('=')[1] for a in args if a.startswith('--tool=')), None))
     elif cmd == 'score':
         score(args[0], args[1])
     else:
