@@ -729,6 +729,21 @@ fn answers_a_question(body: &Value) -> bool {
     body["tool"] == "AskUserQuestion" && body["failed"] != true
 }
 
+/// Whether the owner answered a question in `agent`'s `session` on this device strictly between
+/// two seqs: an answer is a turn too, as a window's gates read it (#198).
+fn answered_between(
+    raw: &Raw,
+    agent: &str,
+    session: &str,
+    after: i64,
+    before: i64,
+) -> Result<bool> {
+    Ok(raw
+        .events_between(agent, session, "tool", after, before)?
+        .iter()
+        .any(|e| answers_a_question(&serde_json::from_str(&e.body).unwrap_or_default())))
+}
+
 /// The owner's answers in an `AskUserQuestion` call, and the notes they added to them: the
 /// values of `answers` and each annotation's `notes`, from its output as JSON. A question's text
 /// (a key of `answers`) and an option's `preview` are the assistant's. Only the output: a quote is
@@ -2063,14 +2078,10 @@ fn ended_on_a_proposal(raw: &Raw, k: &Connection, w: &Window) -> Result<Vec<Stri
             continue;
         };
         let clean = proposals.iter().all(|&(seq, t)| seq != last || !t);
-        // The owner's answer to a question is a turn too, as a window's gates read it (#198).
-        let answered = || -> Result<bool> {
-            Ok(raw
-                .events_between(agent, session, "tool", last, l.seq)?
-                .iter()
-                .any(|e| answers_a_question(&serde_json::from_str(&e.body).unwrap_or_default())))
-        };
-        if clean && raw.turns_between(agent, session, last, l.seq)? == 0 && !answered()? {
+        if clean
+            && raw.turns_between(agent, session, last, l.seq)? == 0
+            && !answered_between(raw, agent, session, last, l.seq)?
+        {
             out.push(l.key.clone());
         }
     }
@@ -2200,8 +2211,9 @@ fn quoted_line(raw: &Raw, e: &crate::claims::Evidence, rules: &Rules) -> Result<
 }
 
 /// The options a reply lists, on one line: two or more of its lines that start with a number
-/// (`1.`, `１．`, `2)`, `①`) or a letter (`A.`, `b)`), at most 6, each at most 80 characters,
-/// masked as the whole reply is; `None` when it lists fewer or the event is not a reply.
+/// (`1.`, `１．`, `2)`, `①`) or a letter (`A.`, `b)`), at most 4, each at most 60 characters,
+/// masked as the whole reply is; `None` when it lists fewer or the event is not a reply. Short:
+/// `fit` keeps the carried lines up to the first that does not fit, and cuts all after it.
 fn options_of(raw: &Raw, device: &str, seq: i64, rules: &Rules) -> Result<Option<String>> {
     let Some(r) = raw.after(device, seq - 1, 1)?.into_iter().next() else {
         return Ok(None);
@@ -2223,13 +2235,13 @@ fn options_of(raw: &Raw, device: &str, seq: i64, rules: &Rules) -> Result<Option
         let start = at + line.len() - line.trim_start().len();
         at += line.len();
         let option = line.trim();
-        if options.len() == 6 || !is_option(option) {
+        if options.len() == 4 || !is_option(option) {
             continue;
         }
         let end = start
             + option
                 .char_indices()
-                .nth(80)
+                .nth(60)
                 .map_or(option.len(), |(i, _)| i);
         let part = crate::redact::outbound_range(&text, start..end, Some(&hidden), rules);
         options.push(part.replace(['\n', '\r'], " ").trim().to_owned());
@@ -2237,8 +2249,9 @@ fn options_of(raw: &Raw, device: &str, seq: i64, rules: &Rules) -> Result<Option
     Ok((options.len() >= 2).then(|| options.join(" / ")))
 }
 
-/// Whether a line starts an option: one or two digits and `.`, `)`, `．` or `）`, a circled
-/// number, or one letter and `.` or `)` and a space; markdown's `#` and `*` before it are skipped.
+/// Whether a line starts an option: one or two digits and `.` or `)` and a space, or `．` or `）`,
+/// a circled number, or one letter and `.` or `)` and a space; markdown's `#` and `*` before it
+/// are skipped.
 fn is_option(line: &str) -> bool {
     let line = line.trim_start_matches(['#', '*', ' ']);
     let digits = line
@@ -2247,7 +2260,13 @@ fn is_option(line: &str) -> bool {
         .count();
     let mut after = line.chars().skip(digits);
     match digits {
-        1 | 2 => matches!(after.next(), Some('.' | ')' | '．' | '）')),
+        // `1.5x` and `1.0.0` are not options: an ASCII mark is followed by whitespace, as a
+        // markdown list's is; Japanese writes `１．項目` with none.
+        1 | 2 => match after.next() {
+            Some('.' | ')') => after.next().is_none_or(char::is_whitespace),
+            Some('．' | '）') => true,
+            _ => false,
+        },
         0 => {
             let mut c = line.chars();
             match (c.next(), c.next(), c.next()) {
@@ -2349,7 +2368,8 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
         // Proposals first: they are what an acceptance in this window answers. The assistant's
         // own before the rest (inferred, a tool's), since `fit` cuts from the end (#244).
         let mut proposals: Vec<(bool, String, Option<String>, crate::claims::Claim)> = Vec::new();
-        let mut latest: Option<(String, i64)> = None;
+        // The carried proposals' evidence on this window's device, with their repositories.
+        let mut ends: Vec<(i64, Option<String>)> = Vec::new();
         for op in previous.iter().filter(|o| o.kind == OpKind::Claim) {
             let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(op.body.clone()) else {
                 continue;
@@ -2383,10 +2403,10 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                         .map(|l| format!(" (from: {l})"))
                         .unwrap_or_default();
                     let line = format!("proposed before {uid}{place}: {}{from}", gate(&tip.body));
-                    proposals.push((tip.speaker != "assistant proposal", line, repo, tip));
-                    if latest.as_ref().is_none_or(|(_, seq)| first.seq > *seq) {
-                        latest = Some((first.device.clone(), first.seq));
+                    if first.device == w.device {
+                        ends.push((first.seq, repo.clone()));
                     }
+                    proposals.push((tip.speaker != "assistant proposal", line, repo, tip));
                 }
             }
         }
@@ -2396,18 +2416,30 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             uids.push((key.to_owned(), repo, tip));
         }
         // The options of the reply the session's first line here answers, the developer's with
-        // nothing between them: a bare "1" names one, and the proposal's quote may not (#244,
-        // d107: the reply's recommendation was quoted, its "1." line was not).
-        if let Some((device, seq)) = latest
-            && let Some(l) = w.lines.iter().find(|l| l.key == key)
+        // no turn or answer to a question between them, in the same repository (as an acceptance
+        // is, `gates`): a bare "1" names one, and the proposal's quote may not (#244, d107: the
+        // reply's recommendation was quoted, its "1." line was not). The newest carried proposal
+        // that is a reply's: one quoted from a later tool output has no options.
+        ends.sort_by_key(|&(seq, _)| std::cmp::Reverse(seq));
+        ends.dedup_by_key(|(seq, _)| *seq);
+        if let Some(l) = w.lines.iter().find(|l| l.key == key)
             && matches!(l.role, Role::User)
-            && raw.turns_between(agent, session, seq, l.seq)? == 0
-            && let Some(options) = options_of(raw, &device, seq, rules)?
         {
-            lines.push(format!(
-                "options in the reply just before {}: {options}",
-                l.id
-            ));
+            for (seq, repo) in ends {
+                if l.repo != repo
+                    || raw.turns_between(agent, session, seq, l.seq)? != 0
+                    || answered_between(raw, agent, session, seq, l.seq)?
+                {
+                    continue;
+                }
+                if let Some(options) = options_of(raw, &w.device, seq, rules)? {
+                    lines.push(format!(
+                        "options in the reply just before {}: {options}",
+                        l.id
+                    ));
+                    break;
+                }
+            }
         }
         // The session's own, in its repositories, before the cap: other sessions' newer claims
         // never hide one.
@@ -6224,7 +6256,7 @@ mod tests {
     /// #244, d107: the reply numbered its options and the proposal quoted its recommendation, so
     /// the carried proposal named no number. A window that opens with the developer's answer to
     /// that reply is shown the reply's options, masked in the whole reply before each is cut to
-    /// 80 characters; one that opens with a tool's line is not.
+    /// 60 characters; one that opens with a tool's line, or in another repository, is not.
     #[test]
     fn a_window_that_answers_a_reply_is_shown_its_options() {
         let ghp = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
@@ -6232,7 +6264,7 @@ mod tests {
             "Three ways:\n\n1. **Cache the parsed files** (recommended)\n   Fast.\n\
              2) **Parse in parallel** {} {ghp}\nC. Stream the rows\n\n\
              My proposal: cache the parsed files first. Shall I go ahead?",
-            "b".repeat(45)
+            "b".repeat(30)
         );
         let first = [
             prompt("Build the importer."),
@@ -6248,7 +6280,7 @@ mod tests {
             .lines()
             .find(|l| l.starts_with("options in the reply just before "))
             .unwrap_or_else(|| panic!("{}", sent[1]));
-        let parse = format!("2) **Parse in parallel** {} [REDACTED]", "b".repeat(45));
+        let parse = format!("2) **Parse in parallel** {} [REDACTED]", "b".repeat(30));
         assert_eq!(
             options,
             format!(
@@ -6258,6 +6290,40 @@ mod tests {
         );
         let (sent, _) = two_windows(&first, answer.clone(), &[tool("ls"), prompt("1")], none);
         assert!(!sent[1].contains("options in the reply"), "{}", sent[1]);
+        let elsewhere = Event {
+            repo: Some("elsewhere".into()),
+            ..prompt("1")
+        };
+        let (sent, _) = two_windows(&first, answer.clone(), &[elsewhere], none);
+        assert!(sent[1].contains("proposed before "), "{}", sent[1]);
+        assert!(!sent[1].contains("options in the reply"), "{}", sent[1]);
+        // The owner answered a question after the reply: "1" answers that, not the options.
+        let asked = event(
+            "tool",
+            json!({"tool": "AskUserQuestion", "input": {"questions": []},
+                "output": {"answers": {"Which store?": "SQLite"}}, "failed": false}),
+        );
+        let with_answer = [first[0].clone(), first[1].clone(), asked];
+        let (sent, _) = two_windows(&with_answer, answer.clone(), &[prompt("1")], none);
+        assert!(sent[1].contains("proposed before "), "{}", sent[1]);
+        assert!(!sent[1].contains("options in the reply"), "{}", sent[1]);
+        // A proposal quoted from a later tool output has no options; the reply's are shown.
+        let with_tool = [
+            first[0].clone(),
+            first[1].clone(),
+            tool("plan: stream the parsed rows"),
+        ];
+        let from_tool = json!({"id": "c2", "kind": "decision", "status": "proposed",
+            "speaker": "assistant inferred", "scope": "repo", "body": "Stream the parsed rows.",
+            "quote": "stream the parsed rows", "line": "L3", "supersedes": []});
+        let mut both = answer.clone();
+        both["claims"].as_array_mut().unwrap().push(from_tool);
+        let (sent, _) = two_windows(&with_tool, both, &[prompt("1")], none);
+        assert!(
+            sent[1].contains("options in the reply just before L1: 1."),
+            "{}",
+            sent[1]
+        );
         // Turns after the reply: the developer's line answers the last of them, not the options.
         let later = [
             first[0].clone(),
@@ -6277,7 +6343,9 @@ mod tests {
         ] {
             assert!(is_option(line), "{line}");
         }
-        for line in ["e.g. a", "2026. a", "1 a", "- 1. a", "Fast.", "a", ""] {
+        for line in [
+            "e.g. a", "2026. a", "1 a", "- 1. a", "Fast.", "a", "", "1.5x a", "1.0.0",
+        ] {
             assert!(!is_option(line), "{line}");
         }
     }
