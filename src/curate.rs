@@ -2112,6 +2112,29 @@ fn searched(w: &Window, repo: &str) -> (String, String) {
 /// its repository: a draft of that session, anchored in that repository, may supersede them.
 type Carried = Vec<(String, Option<String>, crate::claims::Claim)>;
 
+/// The line of its event a quote starts in, trimmed, at most 200 characters; `None` when the
+/// event is gone or its text no longer holds the quote where the evidence says.
+fn quoted_line(raw: &Raw, e: &crate::claims::Evidence) -> Result<Option<String>> {
+    let Some(r) = raw.after(&e.device, e.seq - 1, 1)?.into_iter().next() else {
+        return Ok(None);
+    };
+    let (Item::Event(event), true) = (&r.item, r.seq == e.seq) else {
+        return Ok(None);
+    };
+    let Some(text) = long_text(event) else {
+        return Ok(None);
+    };
+    let (Ok(at), Ok(len)) = (usize::try_from(e.offset), usize::try_from(e.length)) else {
+        return Ok(None);
+    };
+    if text.get(at..at + len) != Some(e.quote.as_str()) {
+        return Ok(None);
+    }
+    let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+    Ok(Some(text[start..end].trim().chars().take(200).collect()))
+}
+
 /// What each session of the window carries in from before it (spec 3.1, 3.3; D12), as text for
 /// the prompt: its goal (its first prompt, through the gate, 200 characters), the claims its
 /// previous window left proposed, so that an acceptance in this window can point at them, its
@@ -2220,7 +2243,16 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                         .as_deref()
                         .map(|r| format!(" in {}", repo_name(r, rules)));
                     let place = place.unwrap_or_default();
-                    lines.push(format!("proposed before {uid}{place}: {}", gate(&tip.body)));
+                    // The line it was quoted from, as the reply wrote it: an option's number is
+                    // what a bare answer ("1") names (#244).
+                    let from = quoted_line(raw, first)?
+                        .filter(|l| l != first.quote.trim())
+                        .map(|l| format!(" (from: {})", gate(&l)))
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "proposed before {uid}{place}: {}{from}",
+                        gate(&tip.body)
+                    ));
                     uids.push((key.to_owned(), repo, tip));
                 }
             }
@@ -2283,8 +2315,8 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          Extract the claims worth remembering in future sessions of these repositories. For each:\n\
          - id: c1, c2, ... unique in your answer.\n\
          - kind: decision, preference, lesson, fix, open item, repo fact or change.\n\
-         - status: decided (the developer said it or accepted it), proposed (suggested, not \
-         accepted), done, or retracted.\n\
+         - status: decided (the developer said it, asked for it or accepted it), proposed \
+         (suggested, not accepted), done, or retracted.\n\
          - speaker: user (the developer's own words), assistant proposal, assistant inferred, or \
          tool result.\n\
          - scope: repo.\n\
@@ -2295,8 +2327,9 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          - line: that line's id.\n\
          - supersedes: the ids of claims in your answer, or the uids of kept or carried claims, \
          that this one changes, reverses or cancels (the developer chose another way, dropped or \
-         removed what it set up, or decided the opposite); empty when it only adds to or details \
-         them, or is about something else.\n\
+         removed what it set up, or decided the opposite), or that it accepts (a go-ahead such \
+         as \"yes\" or \"do it\", or the number or letter of one of its options); empty when it \
+         only adds to or details them, or is about something else.\n\
          - why: for a change, the reason the lines give for it, copied exactly from one line; \
          empty when they give none, and for every other kind.\n\
          Skip routine tool noise and what the code itself shows. When nothing is worth \
@@ -5026,7 +5059,7 @@ mod tests {
             assert!(
                 lines
                     .iter()
-                    .all(|l| l.ends_with(": Parse once, then cache."))
+                    .all(|l| l.contains(": Parse once, then cache. (from: "))
             );
         }
     }
@@ -5765,7 +5798,11 @@ mod tests {
             .filter(|l| l.starts_with("proposed before "))
             .collect();
         assert_eq!(carried.len(), 1, "{}", sent[2]);
-        assert!(carried[0].ends_with(": Parse in parallel."), "{}", sent[2]);
+        assert!(
+            carried[0].contains(": Parse in parallel. (from: "),
+            "{}",
+            sent[2]
+        );
         let uid = &carried[0]["proposed before ".len()..][..64];
         let ops = raw.ops_after(raw.device(), 0, 20).unwrap();
         let accepted = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
@@ -5843,11 +5880,56 @@ mod tests {
             .filter(|l| l.starts_with("proposed before "))
             .collect();
         assert_eq!(carried.len(), 1, "{}", sent[3]);
-        assert!(carried[0].ends_with(": Parse in parallel."), "{}", sent[3]);
+        assert!(
+            carried[0].contains(": Parse in parallel. (from: "),
+            "{}",
+            sent[3]
+        );
         let ops = raw.ops_after(raw.device(), 0, 40).unwrap();
         let accepted = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
         let uid = &carried[0]["proposed before ".len()..][..64];
         assert_eq!(accepted.body["supersedes"], json!([uid]));
         assert_eq!(accepted.body["status"], "decided");
+    }
+
+    /// #244: a carried proposal shows the line of the reply it was quoted from, so that a bare
+    /// "1" names it: an option's number is outside the quote.
+    #[test]
+    fn a_carried_proposal_shows_the_line_its_option_number_is_on() {
+        let options = "Two ways:\n1. **Cache the parsed files**\n2. **Parse in parallel**";
+        let first = [
+            prompt("Build the importer."),
+            event("reply", json!({"assistant": options})),
+        ];
+        let proposal = |id: &str, quote: &str, body: &str| {
+            json!({"id": id, "kind": "decision", "status": "proposed",
+                "speaker": "assistant proposal", "scope": "repo", "body": body,
+                "quote": quote, "line": "L2", "supersedes": []})
+        };
+        let answer = json!({"claims": [
+            proposal("c1", "Cache the parsed files", "Cache parsed files."),
+            proposal("c2", "Parse in parallel", "Parse in parallel.")], "summary": "s"});
+        let none = |_: &str| json!({"claims": [], "summary": "s"});
+        let (sent, _) = two_windows(&first, answer, &[prompt("1")], none);
+        let carried: Vec<&str> = sent[1]
+            .lines()
+            .filter(|l| l.starts_with("proposed before "))
+            .collect();
+        assert_eq!(carried.len(), 2, "{}", sent[1]);
+        let from = |body: &str, line: &str| {
+            carried
+                .iter()
+                .any(|l| l.ends_with(&format!(": {body} (from: {line})")))
+        };
+        assert!(
+            from("Cache parsed files.", "1. **Cache the parsed files**"),
+            "{}",
+            sent[1]
+        );
+        assert!(
+            from("Parse in parallel.", "2. **Parse in parallel**"),
+            "{}",
+            sent[1]
+        );
     }
 }
