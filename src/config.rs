@@ -440,6 +440,27 @@ fn default_providers() -> Vec<Provider> {
         // (owner's store, 2026-09-22..26); a call cut off at the timeout may still be billed.
         *timeout_s = 150;
     }
+    let mut nim = openai(
+        "nim",
+        "https://integrate.api.nvidia.com/v1",
+        "NVIDIA_NIM_KEY.md",
+        // NIM retires nemotron-3-super on 2026-10-03: its answers carry that `deprecation` (#233).
+        "nvidia/nemotron-3-ultra-550b-a55b",
+        500,
+        true,
+        // Nemotron reasons before it answers, and the reasoning counts against max_tokens: on a
+        // full-size window super stopped at 2000 tokens mid-JSON (finish_reason "length"), which
+        // is every one of nim's failures in the owner's calls. Without reasoning it answered
+        // valid JSON in about 5 s with 837 tokens (probe of 2026-09-27, a 16,000-character
+        // synthetic window).
+        serde_json::json!({"max_tokens": 4000, "chat_template_kwargs": {"enable_thinking": false}}),
+    );
+    // ultra answered 24 of 24 calls on six windows of main's prompt in valid JSON (2026-09-29,
+    // #233): 27 s at the median, 75 s at p95, 96 s at most. Twice the p95 keeps it within half
+    // the timeout, the probe's line.
+    if let Provider::Openai { timeout_s, .. } = &mut nim {
+        *timeout_s = 160;
+    }
     let mut chain = vec![
         openai(
             "groq",
@@ -493,20 +514,7 @@ fn default_providers() -> Vec<Provider> {
             true,
             serde_json::json!({}),
         ),
-        openai(
-            "nim",
-            "https://integrate.api.nvidia.com/v1",
-            "NVIDIA_NIM_KEY.md",
-            "nvidia/nemotron-3-super-120b-a12b",
-            500,
-            true,
-            // Nemotron reasons before it answers, and the reasoning counts against max_tokens: on
-            // a full-size window it stopped at 2000 tokens mid-JSON (finish_reason "length"), which
-            // is every one of nim's failures in the owner's calls. Without reasoning it answered
-            // valid JSON in about 5 s with 837 tokens (probe of 2026-09-27, a 16,000-character
-            // synthetic window).
-            serde_json::json!({"max_tokens": 4000, "chat_template_kwargs": {"enable_thinking": false}}),
-        ),
+        nim,
         opencode_go,
         cli("codex", Some("gpt-6-luna")),
         cli("claude", Some("haiku")),
@@ -763,7 +771,11 @@ paid_usd_per_month = 2.5
                     _ => None,
                 };
                 assert_eq!(effort, want, "{name}");
-                let want = if name == "opencode-go" { 150 } else { 90 };
+                let want = match name.as_str() {
+                    "opencode-go" => 150,
+                    "nim" => 160,
+                    _ => 90,
+                };
                 assert_eq!(*timeout_s, want, "{name}");
             }
         }
