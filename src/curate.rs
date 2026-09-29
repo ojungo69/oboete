@@ -205,10 +205,10 @@ fn shows(shown: &str, uid: &str) -> bool {
     shown.contains(&format!("\n{uid}: "))
 }
 
-/// Whether the fitted carried context lists `uid`'s own line, a proposal or an open item: a uid
-/// quoted in another line is not its line (`carried` keeps each on one line).
+/// Whether the fitted carried context lists `uid`'s own line, a proposal, a decision or an open
+/// item: a uid quoted in another line is not its line (`carried` keeps each on one line).
 fn carries(carried: &str, uid: &str) -> bool {
-    ["proposed before", "open item"]
+    ["proposed before", "decided before", "open item"]
         .iter()
         .any(|line| carried.contains(&format!("\n{line} {uid}")))
 }
@@ -2017,6 +2017,9 @@ fn ended_on_a_proposal(raw: &Raw, k: &Connection, w: &Window) -> Result<Vec<Stri
 /// At most this many candidates a window is shown.
 const CANDIDATES: usize = 20;
 
+/// At most this many of a session's decided claims its later windows carry, the newest first.
+const CARRIED_DECISIONS: usize = 20;
+
 /// Candidates a window may supersede (MUST-M3): up to `CANDIDATES` current claims of `repo` that
 /// the full text index finds for its lines, the whole repository, every window. `said` (the
 /// owner's and the assistant's lines, where decisions are made and turned over) is searched first,
@@ -2092,9 +2095,11 @@ fn searched(w: &Window, repo: &str) -> (String, String) {
 type Carried = Vec<(String, Option<String>, crate::claims::Claim)>;
 
 /// What each session of the window carries in from before it (spec 3.1, 3.3; D12), as text for
-/// the prompt: its goal (its first prompt, through the gate, 200 characters), its open items,
-/// and the claims its previous window left proposed, so that an acceptance in this window can
-/// point at them. Every value goes through the gate before it is shown.
+/// the prompt: its goal (its first prompt, through the gate, 200 characters), the claims its
+/// previous window left proposed, so that an acceptance in this window can point at them, its
+/// decided claims from before this window, so that a reversal here is linked as if in one window
+/// (spec 3.3; 17 of the 19 overturns of M3's dev labels are within one session, #222), and its
+/// open items. Every value goes through the gate before it is shown.
 // ponytail: a child session (a subagent) starts with nothing of its parent's until capture
 // records the link.
 fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(String, Carried)> {
@@ -2118,7 +2123,52 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
         }
     }
     let session_of = |device: &str, seq: i64| raw.session_key(device, seq);
-    let (mut out, mut open) = (String::new(), String::new());
+    // Before this window: on its device, in an earlier record, or in the part of its split first
+    // record that the previous window read.
+    let before_window = |c: &crate::claims::Claim| -> Result<bool> {
+        Ok(c.device == w.device
+            && (c.seq < w.from_seq
+                || c.seq == w.from_seq
+                    && match w.from_offset {
+                        Some(from) => crate::claims::quoted_before(k, &c.uid, from)?,
+                        None => false,
+                    }))
+    };
+    // The claims a session may carry, read once for the window rather than once per session, each
+    // with its session: the decided ones from before the window, and the open items (carried as
+    // such, whatever their status). The newest first, in `current`'s order across repositories.
+    let mut repos: Vec<&str> = Vec::new();
+    for r in sessions.iter().flat_map(|(_, rs)| rs) {
+        if !repos.contains(r) {
+            repos.push(r);
+        }
+    }
+    let (mut decided, mut items) = (Vec::new(), Vec::new());
+    for repo in repos {
+        for c in crate::claims::current(k, repo)? {
+            let list = if c.kind == "open item" {
+                if c.status == "done" {
+                    continue;
+                }
+                &mut items
+            } else if c.status == "decided" && before_window(&c)? {
+                &mut decided
+            } else {
+                continue;
+            };
+            list.push((repo, session_of(&c.device, c.seq)?, c));
+        }
+    }
+    type Tip<'a> = (&'a str, Option<String>, crate::claims::Claim);
+    let newest = |(_, _, a): &Tip, (_, _, b): &Tip| {
+        (b.valid_from, &b.device, b.seq, &b.uid).cmp(&(a.valid_from, &a.device, a.seq, &a.uid))
+    };
+    decided.sort_by(newest);
+    items.sort_by(newest);
+    // Every session's goal and proposals, then every session's decided claims, then its open
+    // items: `fit` cuts from the end, so a session's many claims never cut the proposal another
+    // session's acceptance answers.
+    let (mut out, mut settled, mut open) = (String::new(), String::new(), String::new());
     let mut uids: Carried = Vec::new();
     for (key, repos) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
@@ -2132,8 +2182,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             let goal: String = gate(&goal).chars().take(200).collect();
             lines.push(format!("goal: {goal}"));
         }
-        // Proposals first: they are what an acceptance in this window answers, and the context
-        // is cut from its end (`fit`).
+        // Proposals first: they are what an acceptance in this window answers.
         for op in previous.iter().filter(|o| o.kind == OpKind::Claim) {
             let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(op.body.clone()) else {
                 continue;
@@ -2160,30 +2209,25 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                 }
             }
         }
-        let mut items: Vec<(&str, crate::claims::Claim)> = Vec::new();
-        for repo in repos {
-            items.extend(
-                crate::claims::current(k, repo)?
-                    .into_iter()
-                    .filter(|c| c.kind == "open item" && c.status != "done")
-                    .map(|c| (repo, c)),
-            );
-        }
-        // The newest first, in `current`'s order across the repositories.
-        items.sort_by(|(_, a), (_, b)| {
-            (b.valid_from, &b.device, b.seq, &b.uid).cmp(&(a.valid_from, &a.device, a.seq, &a.uid))
-        });
-        let (mut shown, mut open_lines) = (0, Vec::new());
-        for (c_repo, c) in items {
-            if shown == 50 {
-                break;
-            }
-            // The session's own, before the cap: other sessions' newer items never hide it.
-            if session_of(&c.device, c.seq)?.as_deref() == Some(key) {
+        // The session's own, in its repositories, before the cap: other sessions' newer claims
+        // never hide one.
+        let (mut decided_lines, mut open_lines) = (Vec::new(), Vec::new());
+        for (list, line, cap, out) in [
+            (
+                &decided,
+                "decided before",
+                CARRIED_DECISIONS,
+                &mut decided_lines,
+            ),
+            (&items, "open item", 50, &mut open_lines),
+        ] {
+            let own = list
+                .iter()
+                .filter(|(repo, s, _)| s.as_deref() == Some(key) && repos.contains(repo));
+            for (c_repo, _, c) in own.take(cap) {
                 let place = repo_name(c_repo, rules);
-                open_lines.push(format!("open item {} in {place}: {}", c.uid, gate(&c.body)));
-                uids.push((key.to_owned(), Some(c_repo.to_owned()), c.clone()));
-                shown += 1;
+                out.push(format!("{line} {} in {place}: {}", c.uid, gate(&c.body)));
+                uids.push((key.to_owned(), Some((*c_repo).to_owned()), c.clone()));
             }
         }
         // As the window's own heading names the session, so the curator can pair them.
@@ -2191,13 +2235,17 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             .chars()
             .take(HEADING_CHARS)
             .collect();
-        for (part, lines) in [(&mut out, lines), (&mut open, open_lines)] {
+        for (part, lines) in [
+            (&mut out, lines),
+            (&mut settled, decided_lines),
+            (&mut open, open_lines),
+        ] {
             if !lines.is_empty() {
                 part.push_str(&format!("### {heading}\n{}\n", lines.join("\n")));
             }
         }
     }
-    // Every session's goal and proposals before any session's open items: `fit` cuts from the end.
+    out.push_str(&settled);
     out.push_str(&open);
     Ok((out, uids))
 }
@@ -2229,12 +2277,15 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          developer's own line for decided): from its prompt, reply or tool output, never from \
          a tool's input; never text shown as [REDACTED].\n\
          - line: that line's id.\n\
-         - supersedes: the ids of claims in your answer, or the uids of kept claims, that this \
-         one replaces or reverses; empty otherwise.\n\
+         - supersedes: the ids of claims in your answer, or the uids of kept or carried claims, \
+         that this one changes, reverses or cancels (the developer chose another way, dropped or \
+         removed what it set up, or decided the opposite); empty when it only adds to or details \
+         them, or is about something else.\n\
          - why: for a change, the reason the lines give for it, copied exactly from one line; \
          empty when they give none, and for every other kind.\n\
          Skip routine tool noise and what the code itself shows. When nothing is worth \
-         remembering, return an empty claims array.\n\
+         remembering, return an empty claims array. Before you answer, check each claim against \
+         the kept and carried claims below, and fill its supersedes as defined above.\n\
          The summary is 2-4 sentences: what was worked on, what was decided, what is still open.\n\
          Write every body and the summary in {language}.\n\n\
          {fence}\n{text}\n## Kept claims these lines may replace or reverse (uid: body)\n\
@@ -3785,6 +3836,93 @@ mod tests {
         assert!(!text.contains("The flaky retry is fixed now."), "{text}");
     }
 
+    /// A session's decisions from before a window are carried into it, the newest first and at
+    /// most `CARRIED_DECISIONS`, as claims the window may supersede; another session's are not,
+    /// nor one quoted in the window itself (spec 3.3: a reversal in a later window of one session
+    /// is linked as if in one window).
+    #[test]
+    fn a_sessions_earlier_decisions_are_carried_into_its_later_windows() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let mut ops: Vec<_> = (0..=CARRIED_DECISIONS)
+            .map(|i| kept(&mut raw, "s", "r", &format!("Decision {i} of the session.")))
+            .collect();
+        // The newest is a preference: any decided claim is carried.
+        ops[CARRIED_DECISIONS].1["kind"] = "preference".into();
+        ops.push(kept(&mut raw, "t", "r", "Another session's decision."));
+        raw.append_ops(&ops).unwrap();
+        let before = CARRIED_DECISIONS as i64 + 2;
+        let inside = kept(&mut raw, "s", "r", "A decision in the window.");
+        raw.append_ops(&[inside]).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let dev = raw.device().to_owned();
+        let rules = Rules::default();
+        let w = window_at(&raw, &dev, (before, None), None, 100_000.into(), &rules)
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.from_seq, before + 1);
+        let (text, uids) = carried(&raw, &k, &rules, &w).unwrap();
+        let decided: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("decided before "))
+            .collect();
+        assert_eq!(decided.len(), CARRIED_DECISIONS, "{text}");
+        let newest = format!(" in r: Decision {CARRIED_DECISIONS} of the session.");
+        assert!(decided[0].ends_with(&newest), "{text}");
+        assert!(
+            !decided
+                .iter()
+                .any(|l| l.ends_with(": Decision 0 of the session."))
+        );
+        assert!(!text.contains("Another session's decision."), "{text}");
+        assert!(!text.contains("A decision in the window."), "{text}");
+        assert_eq!(uids.len(), CARRIED_DECISIONS);
+        assert!(uids.iter().all(|(_, _, c)| carries(&text, &c.uid)));
+    }
+
+    /// A window that starts inside a split record carries a decision quoted in the part the
+    /// previous window read, and not one quoted in its own part.
+    #[test]
+    fn a_decision_in_the_part_of_a_split_record_read_before_is_carried() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let text = format!(
+            "{}Use Postgres. {}Use SQLite.",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        let (kind, template) = kept(&mut raw, "s", "r", &text);
+        let seq = template["evidence"][0]["seq"].as_i64().unwrap();
+        let quoted = |quote: &str, sentence: i64| {
+            let mut op = template.clone();
+            op["body"] = quote.into();
+            op["evidence"][0]["offset"] = text.find(quote).unwrap().into();
+            op["evidence"][0]["length"] = quote.len().into();
+            op["evidence"][0]["sentence"] = sentence.into();
+            op["evidence"][0]["quote"] = quote.into();
+            (kind, op)
+        };
+        let ops = [quoted("Use Postgres.", 0), quoted("Use SQLite.", 1)];
+        raw.append_ops(&ops).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let dev = raw.device().to_owned();
+        let rules = Rules::default();
+        let split = text.find('b').unwrap() as i64;
+        let w = window_at(&raw, &dev, (seq, Some(split)), None, 100_000.into(), &rules)
+            .unwrap()
+            .unwrap();
+        assert_eq!((w.from_seq, w.from_offset), (seq, Some(split)));
+        let (text, _) = carried(&raw, &k, &rules, &w).unwrap();
+        let decided: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("decided before "))
+            .collect();
+        assert_eq!(decided.len(), 1);
+        assert!(decided[0].ends_with(": Use Postgres."));
+    }
+
     /// A candidate the budget cut from the prompt, or never shown, is superseded by nothing; the
     /// ones shown are labelled with their repository.
     #[test]
@@ -4839,10 +4977,11 @@ mod tests {
         }
     }
 
-    /// Every session's proposals come before any session's open items: open items of the first
-    /// session never cut the proposal a later session's acceptance answers.
+    /// Every session's proposals come before any session's decided claims, and those before any
+    /// session's open items: the first session's claims never cut the proposal a later session's
+    /// acceptance answers.
     #[test]
-    fn every_sessions_proposals_are_carried_before_open_items() {
+    fn every_sessions_proposals_are_carried_before_its_other_claims() {
         // One repository: open items are carried from the repositories of the session's lines.
         let prompt = |t: &str| Event {
             repo: Some("r".into()),
@@ -4883,12 +5022,23 @@ mod tests {
             "cache the parsed files",
             json!([]),
         ));
+        claims.extend((0..2).map(|i| {
+            json!({"id": format!("d{i}"), "kind": "decision", "status": "decided",
+                "speaker": "user", "scope": "repo", "body": format!("Fix item {i} first."),
+                "quote": format!("Item {i} is broken"), "line": "L1", "supersedes": []})
+        }));
         let answer = json!({"claims": claims, "summary": "s"});
         let none = |_: &str| json!({"claims": [], "summary": "s"});
         let second = [prompt("Go on."), other(prompt("Yes."))];
         let (sent, _) = two_windows(&first, answer, &second, none);
-        assert!(sent[1].contains("open item "), "{}", sent[1]);
-        assert!(sent[1].contains("proposed before "), "{}", sent[1]);
+        let at = |line: &str| sent[1].find(line).unwrap_or(usize::MAX);
+        assert!(
+            at("proposed before ") < at("decided before "),
+            "{}",
+            sent[1]
+        );
+        assert!(at("decided before ") < at("open item "), "{}", sent[1]);
+        assert!(at("open item ") < usize::MAX, "{}", sent[1]);
     }
 
     /// A draft whose claim op the record cannot hold is no claim: the window is still covered.
@@ -5237,6 +5387,7 @@ mod tests {
         assert!(carries(&text, &y));
         assert!(!carries(&text, &x));
         assert!(carries(&format!("### s\nopen item {x} in r: b\n"), &x));
+        assert!(carries(&format!("### s\ndecided before {x} in r: b\n"), &x));
         // A repository's name is one line too: its heading cannot start either line.
         let rules = Rules::default();
         assert_eq!(
