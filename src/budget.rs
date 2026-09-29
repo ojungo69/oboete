@@ -307,7 +307,6 @@ mod tests {
     fn entry(name: &str, limits: Limits) -> Provider {
         Provider::Openai {
             name: name.into(),
-            on: true,
             base_url: "http://127.0.0.1:9".into(),
             key_file: None,
             model: "m".into(),

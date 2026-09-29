@@ -47,6 +47,14 @@ pub struct ChainOverlay {
     pub model: std::collections::BTreeMap<String, String>,
 }
 
+impl ChainOverlay {
+    /// Whether `[chain] off` names the entry: it stays in `Config::providers` for doctor, and
+    /// `load_chain` leaves it out of the chain.
+    pub fn turns_off(&self, name: &str) -> bool {
+        self.off.iter().any(|n| n == name)
+    }
+}
+
 fn default_paid_usd_per_month() -> f64 {
     5.0
 }
@@ -170,10 +178,6 @@ pub enum Provider {
     /// OpenAI-compatible chat completions with `response_format: json_schema`.
     Openai {
         name: String,
-        /// Off (`[chain] off`): listed by doctor, never called. Not a `[[providers]]` key, so
-        /// `[chain] off` alone turns an entry off and on (cubic on #94).
-        #[serde(skip_deserializing, default = "default_true")]
-        on: bool,
         base_url: String,
         /// File whose second line is the API key (owner convention: ~/X_KEY.md). None = no auth.
         #[serde(default)]
@@ -207,8 +211,6 @@ pub enum Provider {
     /// A subscription CLI run headless (`agy`, `claude`, `grok`, `codex`).
     Cli {
         name: String,
-        #[serde(skip_deserializing, default = "default_true")]
-        on: bool,
         /// Which CLI; decides the argument shape.
         cli: String,
         #[serde(default)]
@@ -353,12 +355,6 @@ impl Provider {
             Provider::Cli { .. } => false,
         }
     }
-    /// Whether the chain calls it (`[chain] off` turns it off).
-    pub fn on(&self) -> bool {
-        match self {
-            Provider::Openai { on, .. } | Provider::Cli { on, .. } => *on,
-        }
-    }
 }
 
 fn default_budget() -> u32 {
@@ -412,7 +408,6 @@ fn openai(
 ) -> Provider {
     Provider::Openai {
         name: name.into(),
-        on: true,
         base_url: base_url.into(),
         key_file: Some(home_dir().join(key)),
         model: model.into(),
@@ -452,7 +447,6 @@ fn gemini() -> Provider {
 fn cli(name: &str, model: Option<&str>) -> Provider {
     Provider::Cli {
         name: name.into(),
-        on: true,
         cli: name.into(),
         model: model.map(Into::into),
         daily_budget: no_daily_cap(),
@@ -663,7 +657,10 @@ pub fn load(home: &Path) -> Result<Config> {
 /// are not in it.
 pub fn load_chain(home: &Path) -> Result<Config> {
     let mut cfg = load(home)?;
-    cfg.providers.retain(Provider::on);
+    let Config {
+        providers, chain, ..
+    } = &mut cfg;
+    providers.retain(|p| !chain.turns_off(p.name()));
     Ok(cfg)
 }
 
@@ -710,8 +707,7 @@ fn overlay(cfg: &mut Config) {
     for p in providers.iter_mut() {
         let name = p.name().to_owned();
         let set = chain.model.get(&name);
-        let (Provider::Openai { on, timeout_s, .. } | Provider::Cli { on, timeout_s, .. }) = p;
-        *on &= !chain.off.contains(&name);
+        let (Provider::Openai { timeout_s, .. } | Provider::Cli { timeout_s, .. }) = p;
         if let Some(&s) = chain.timeout_s.get(&name) {
             *timeout_s = s;
         }
@@ -757,7 +753,10 @@ fn overlay(cfg: &mut Config) {
             }
         }
     }
-    if summary.curate && !providers.is_empty() && !providers.iter().any(Provider::on) {
+    if summary.curate
+        && !providers.is_empty()
+        && providers.iter().all(|p| chain.turns_off(p.name()))
+    {
         warnings.push(
             "every chain entry is off, so nothing is curated: to stop curation, set [summary] curate = false instead".into(),
         );
@@ -790,7 +789,7 @@ pub fn doctor_line(p: &Provider, chain: &ChainOverlay) -> String {
         } => (*timeout_s, model.as_deref()),
     };
     let mut parts = Vec::new();
-    if !p.on() {
+    if chain.turns_off(p.name()) {
         parts.push("off".to_owned());
     }
     if !p.budget_from_key() {
@@ -1269,7 +1268,7 @@ model = { claude = "sonnet", groq = "openai/gpt-oss-20b" }
             ]
         );
         let off: Vec<_> = (cfg.providers.iter())
-            .filter(|p| !p.on())
+            .filter(|p| cfg.chain.turns_off(p.name()))
             .map(Provider::name)
             .collect();
         assert_eq!(off, ["groq-20b", "codex"]);
@@ -1302,7 +1301,7 @@ model = { claude = "sonnet", groq = "openai/gpt-oss-20b" }
             .collect();
         assert!(!called.contains(&"codex".to_owned()), "{called:?}");
         assert_eq!(called.len(), default_providers().len() - 1);
-        assert!(!find(&load(dir.path()).unwrap(), "codex").on());
+        assert!(load(dir.path()).unwrap().chain.turns_off("codex"));
     }
 
     #[test]
@@ -1336,7 +1335,7 @@ cli = "claude"
         let names: Vec<_> = cfg.providers.iter().map(Provider::name).collect();
         assert_eq!(names, ["claude", "local", "other"]);
         let local = find(&cfg, "local");
-        assert!(!local.on());
+        assert!(cfg.chain.turns_off("local"));
         assert_eq!(
             (local.daily_budget(), timeout(local), model(local)),
             (3, 20, Some("qwen3:14b"))
@@ -1352,7 +1351,7 @@ cli = "claude"
         );
         let other = find(&cfg, "other");
         assert_eq!((other.daily_budget(), timeout(other)), (300, 90));
-        assert!(other.on() && claude.on());
+        assert!(!cfg.chain.turns_off("other") && !cfg.chain.turns_off("claude"));
     }
 
     /// Names that match nothing, and names given twice, are warnings for doctor: a failed
@@ -1370,7 +1369,7 @@ model = { gone = "m" }
 "#,
         );
         assert_eq!(cfg.providers[0].name(), "groq");
-        assert!(!find(&cfg, "nim").on());
+        assert!(cfg.chain.turns_off("nim"));
         let w = cfg.warnings.join("\n");
         for line in [
             "[chain] order: no chain entry is named \"gone\"",
@@ -1468,9 +1467,6 @@ model = { gone = "m" }
             "{paid}{entry}limits = {{ usd_per_mtok_in = 1.0 }}\n"
         ));
         assert!(!doctor_line(find(&cfg, "o"), &cfg.chain).contains("set in [chain]"));
-        // `on` is not a `[[providers]]` key: `[chain] off` alone turns an entry off.
-        let cfg = load_text(&format!("{entry}on = false\n"));
-        assert!(find(&cfg, "o").on());
     }
 
     #[test]
