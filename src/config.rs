@@ -368,7 +368,7 @@ pub const OPENROUTER: &str = "https://openrouter.ai/api/v1";
 const OPENROUTER_FREE_BUDGET: u32 = 10;
 /// A `daily_budget` no day reaches. A subscription stops at its own limits instead: a cooldown
 /// until their reset (spec 3.1, Claude decision C1).
-fn no_daily_cap() -> u32 {
+pub(crate) fn no_daily_cap() -> u32 {
     u32::MAX
 }
 fn default_timeout() -> u64 {
@@ -609,8 +609,14 @@ pub fn load(home: &Path) -> Result<Config> {
     }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let mut cfg: Config = toml::from_str(&text)
-        .map_err(|e| toml_error(&text, &e))
+    from_text(&path, &text)
+}
+
+/// `load()` on the text of the file at `path` (which only names it in errors): the settings
+/// page checks a file it is about to write with it.
+pub(crate) fn from_text(path: &Path, text: &str) -> Result<Config> {
+    let mut cfg: Config = toml::from_str(text)
+        .map_err(|e| toml_error(text, &e))
         .with_context(|| format!("parse {}", path.display()))?;
     if let Some(place) = cfg.gemini
         && !cfg.providers.iter().any(|p| p.name() == "gemini")
@@ -772,7 +778,7 @@ fn overlay(cfg: &mut Config) {
 }
 
 /// An OpenRouter `:free` model, by the URL as written in any case (#238).
-fn openrouter_free(base_url: &str, model: &str) -> bool {
+pub(crate) fn openrouter_free(base_url: &str, model: &str) -> bool {
     base_url
         .trim()
         .trim_end_matches('/')
@@ -780,7 +786,7 @@ fn openrouter_free(base_url: &str, model: &str) -> bool {
         && is_free(model)
 }
 
-fn is_free(model: &str) -> bool {
+pub(crate) fn is_free(model: &str) -> bool {
     model.to_ascii_lowercase().ends_with(":free")
 }
 
@@ -845,7 +851,7 @@ pub fn inject(home: &Path) -> Result<Inject> {
     }
 }
 
-fn parse_inject(text: &str) -> Result<Inject> {
+pub(crate) fn parse_inject(text: &str) -> Result<Inject> {
     #[derive(Deserialize)]
     struct File {
         #[serde(default)]

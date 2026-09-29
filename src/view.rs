@@ -1,15 +1,16 @@
 //! `oboete view`: the memory in a browser, on 127.0.0.1. std `TcpListener` + `httparse`, one
 //! thread per connection, one bundled page and a small JSON API over `search` (reads) plus two
-//! delete endpoints. Every `/api` request carries the per-launch token, which the page reads from
-//! the URL fragment and sends as a header. docs/m1.md decisions 11 and 14 have the reasons
-//! (tiny_http's open CVEs) and the threat model.
+//! delete endpoints and the settings page's save (#94), the one request with a body. Every
+//! `/api` request carries the per-launch token, which the page reads from the URL fragment and
+//! sends as a header. docs/m1.md decisions 11 and 14 have the reasons (tiny_http's open CVEs) and
+//! the threat model; spec 6.6 has the save's.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use rusqlite::params;
@@ -23,6 +24,10 @@ const APP_JS: &str = include_str!("../assets/viewer/app.js");
 const APP_CSS: &str = include_str!("../assets/viewer/app.css");
 /// Request line and headers; a browser's GET is well under 2 KB.
 const MAX_HEAD: usize = 16 * 1024;
+/// A settings save's body; the page's is under 2 KB.
+const MAX_BODY: usize = 16 * 1024;
+/// Head and body together: a slow sender holds its thread this long at most.
+const REQUEST_TIME: Duration = Duration::from_secs(5);
 const MAX_LIMIT: usize = 200;
 const SECURITY_HEADERS: &str = "Content-Security-Policy: default-src 'none'; script-src 'self'; \
     style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; \
@@ -35,6 +40,15 @@ struct Viewer {
     cwd_repo: String,
     port: u16,
     token: String,
+    /// Settings saves, one at a time.
+    saving: Mutex<()>,
+}
+
+/// What a request's head leads to: an answer, or a settings save whose body of this many bytes
+/// is read first.
+enum Head {
+    Answer(Response),
+    Body(usize),
 }
 
 struct Response {
@@ -70,6 +84,9 @@ impl Response {
             403 => "Forbidden",
             404 => "Not Found",
             405 => "Method Not Allowed",
+            409 => "Conflict",
+            413 => "Content Too Large",
+            422 => "Unprocessable Content",
             _ => "Internal Server Error",
         };
         let mut out = format!(
@@ -97,6 +114,7 @@ pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
         cwd_repo: repo::key(&std::env::current_dir()?),
         port,
         token: raw.iter().map(|b| format!("{b:02x}")).collect(),
+        saving: Mutex::new(()),
     });
     let url = format!("http://127.0.0.1:{port}/#t={}", viewer.token);
     println!("{url}\n(open it in a browser; Ctrl-C stops the viewer)");
@@ -148,19 +166,31 @@ fn open_browser(url: &str) {
 
 impl Viewer {
     fn serve(&self, mut stream: TcpStream) {
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let deadline = Instant::now() + REQUEST_TIME;
         let mut buf = Vec::with_capacity(2048);
         let mut chunk = [0u8; 4096];
-        let (resp, head_only) = loop {
-            let n = match stream.read(&mut chunk) {
-                Ok(0) | Err(_) => return,
-                Ok(n) => n,
-            };
-            buf.extend_from_slice(&chunk[..n]);
+        // False once the peer is gone or the request's time is up.
+        let mut more = |stream: &mut TcpStream, buf: &mut Vec<u8>| {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+                return false;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => false,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    true
+                }
+            }
+        };
+        let (head, at, head_only) = loop {
+            if !more(&mut stream, &mut buf) {
+                return;
+            }
             let mut headers = [httparse::EMPTY_HEADER; 64];
             let mut req = httparse::Request::new(&mut headers);
             match req.parse(&buf) {
-                Ok(httparse::Status::Complete(_)) => {
+                Ok(httparse::Status::Complete(at)) => {
                     let method = req.method.unwrap_or("");
                     let pairs: Vec<(&str, &str)> = req
                         .headers
@@ -168,16 +198,116 @@ impl Viewer {
                         .map(|h| (h.name, std::str::from_utf8(h.value).unwrap_or("")))
                         .collect();
                     break (
-                        self.route(method, req.path.unwrap_or(""), &pairs),
+                        self.head(method, req.path.unwrap_or(""), &pairs),
+                        at,
                         method == "HEAD",
                     );
                 }
                 Ok(httparse::Status::Partial) if buf.len() < MAX_HEAD => continue,
                 // Malformed, too many headers, or a head over the cap.
-                _ => break (Response::text(400, "bad request"), false),
+                _ => break (Head::Answer(Response::text(400, "bad request")), 0, false),
+            }
+        };
+        let resp = match head {
+            Head::Answer(r) => r,
+            // Read only once the head has passed every check (`save_gate`).
+            Head::Body(len) => {
+                while buf.len() < at + len {
+                    if !more(&mut stream, &mut buf) {
+                        return;
+                    }
+                }
+                self.save(&buf[at..at + len])
             }
         };
         let _ = stream.write_all(&resp.bytes(head_only));
+    }
+
+    /// The settings save goes through `save_gate`; every other request is answered by `route`.
+    fn head(&self, method: &str, target: &str, headers: &[(&str, &str)]) -> Head {
+        if method == "POST" && target == "/api/settings" {
+            return match self.save_gate(headers) {
+                Ok(len) => Head::Body(len),
+                Err(r) => Head::Answer(r),
+            };
+        }
+        Head::Answer(self.route(method, target, headers))
+    }
+
+    /// Spec 6.6 for the one write with a body, all on the head, before any byte of the body is
+    /// read: no chunked framing, the Host and token as for every `/api` request, an `Origin` of
+    /// this viewer (a browser sends one on every POST; the page's fetch asks for it with
+    /// `referrerPolicy: 'same-origin'`, as the document's `no-referrer` would make it `null`),
+    /// JSON, and one `Content-Length` of at most `MAX_BODY`.
+    fn save_gate(&self, headers: &[(&str, &str)]) -> std::result::Result<usize, Response> {
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, v)| *v)
+        };
+        if header("transfer-encoding").is_some() {
+            return Err(Response::text(400, "requests carry no chunked body"));
+        }
+        if !self.host_ok(header("host")) {
+            return Err(Response::text(
+                403,
+                "open the viewer through 127.0.0.1 or localhost",
+            ));
+        }
+        if !self.token_ok(header("x-oboete-token")) {
+            return Err(Response::text(401, "missing or wrong token"));
+        }
+        let origin = header("origin").and_then(|o| o.strip_prefix("http://"));
+        if !self.host_ok(origin) {
+            return Err(Response::text(403, "a save comes from this viewer's page"));
+        }
+        if !header("content-type")
+            .is_some_and(|t| t.to_ascii_lowercase().starts_with("application/json"))
+        {
+            return Err(Response::text(400, "a save is JSON"));
+        }
+        let lengths: Vec<&str> = headers
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case("content-length"))
+            .map(|(_, v)| *v)
+            .collect();
+        let len = match lengths[..] {
+            [l] if !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit()) => {
+                l.parse::<usize>().unwrap_or(usize::MAX)
+            }
+            _ => return Err(Response::text(400, "a save declares one length")),
+        };
+        if len > MAX_BODY {
+            return Err(Response::text(413, "a save is at most 16 KiB"));
+        }
+        Ok(len)
+    }
+
+    /// The save's answer: the settings as saved, or `{code, field}` for the page to put in words.
+    fn save(&self, body: &[u8]) -> Response {
+        match crate::settings::save(&self.home, &self.saving, body) {
+            Ok(v) => Response::json(&v),
+            Err(r) => Response::new(
+                r.status,
+                "application/json",
+                serde_json::to_vec(&json!({"code": r.code, "field": r.field})).unwrap_or_default(),
+            ),
+        }
+    }
+
+    /// DNS rebinding: a page on another name that resolves to 127.0.0.1 sends its own Host.
+    /// Browsers leave port 80 out of Host.
+    fn host_ok(&self, host: Option<&str>) -> bool {
+        host.is_some_and(|h| {
+            h == format!("127.0.0.1:{}", self.port)
+                || h == format!("localhost:{}", self.port)
+                || (self.port == 80 && (h == "127.0.0.1" || h == "localhost"))
+        })
+    }
+
+    fn token_ok(&self, given: Option<&str>) -> bool {
+        Sha256::digest(given.unwrap_or("").as_bytes()) == Sha256::digest(self.token.as_bytes())
     }
 
     fn route(&self, method: &str, target: &str, headers: &[(&str, &str)]) -> Response {
@@ -202,14 +332,7 @@ impl Viewer {
         {
             return Response::text(400, "requests carry no body");
         }
-        // DNS rebinding: a page on another name that resolves to 127.0.0.1 sends its own Host.
-        // Browsers leave port 80 out of Host.
-        let host_ok = header("host").is_some_and(|h| {
-            h == format!("127.0.0.1:{}", self.port)
-                || h == format!("localhost:{}", self.port)
-                || (self.port == 80 && (h == "127.0.0.1" || h == "localhost"))
-        });
-        if !host_ok {
+        if !self.host_ok(header("host")) {
             return Response::text(403, "open the viewer through 127.0.0.1 or localhost");
         }
         match path {
@@ -220,12 +343,15 @@ impl Viewer {
             p if !p.starts_with("/api/") => return Response::text(404, "not found"),
             _ => {}
         }
-        let given = header("x-oboete-token").unwrap_or("");
-        if Sha256::digest(given.as_bytes()) != Sha256::digest(self.token.as_bytes()) {
+        if !self.token_ok(header("x-oboete-token")) {
             return Response::text(401, "missing or wrong token");
         }
         let q = params(query);
         let name = &path["/api/".len()..];
+        // config.toml, not the store: no `db::open`, and no error text in the answer.
+        if name == "settings" {
+            return Response::json(&crate::settings::show(&self.home));
+        }
         let result = if deleting {
             self.delete(name, &q)
         } else {
@@ -519,6 +645,7 @@ mod tests {
             cwd_repo: "/r".into(),
             port: 4321,
             token: "t0k".into(),
+            saving: Mutex::new(()),
         };
         (dir, v)
     }
@@ -772,6 +899,173 @@ mod tests {
         // Exactly the cap: every byte is read before the 400, so the close is a FIN, not a RST.
         huge.resize(MAX_HEAD, b'a');
         assert!(ask(&huge).starts_with("HTTP/1.1 400 "));
+        server.join().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What `serve` does with a request, without a socket: a save's body is `body`.
+    fn request(
+        v: &Viewer,
+        method: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Response {
+        match v.head(method, target, headers) {
+            Head::Answer(r) => r,
+            Head::Body(len) => {
+                assert_eq!(len, body.len());
+                v.save(body)
+            }
+        }
+    }
+
+    /// A save of the settings `shown`, with injection at session start turned off.
+    fn save_body(shown: &Value) -> Vec<u8> {
+        let chain: Vec<Value> = (shown["chain"].as_array().unwrap().iter())
+            .map(|e| {
+                json!({"name": e["name"], "on": e["on"], "daily_budget": e["daily_budget"],
+                    "timeout_s": e["timeout_s"], "model": e["model"]})
+            })
+            .collect();
+        serde_json::to_vec(&json!({"version": shown["version"],
+            "inject": {"session_start": false, "session_start_chars": 6000},
+            "capture": shown["capture"], "chain": chain}))
+        .unwrap()
+    }
+
+    /// #94 test 3: the settings save is the one request with a body, and its head passes every
+    /// check (spec 6.6) before a byte of the body is read.
+    #[test]
+    fn a_settings_save_passes_every_guard_first() {
+        let (dir, v) = viewer("save-guards");
+        let origin = ("Origin", "http://127.0.0.1:4321");
+        let json_type = ("Content-Type", "application/json");
+        assert_eq!(v.route("GET", "/api/settings", &[HOST]).status, 401);
+        let shown = json_of(&v.route("GET", "/api/settings", &[HOST, TOKEN]));
+        let body = save_body(&shown);
+        let len = body.len().to_string();
+        let cl = ("Content-Length", len.as_str());
+        let status = |h: &[(&str, &str)]| request(&v, "POST", "/api/settings", h, &body).status;
+        assert_eq!(status(&[HOST, origin, json_type, cl]), 401);
+        assert_eq!(
+            status(&[("Host", "evil.example:4321"), TOKEN, origin, json_type, cl]),
+            403
+        );
+        for bad in [
+            None,
+            Some("null"),
+            Some("http://evil.example:4321"),
+            Some("https://127.0.0.1:4321"),
+            Some("http://127.0.0.1:4322"),
+        ] {
+            let mut h = vec![HOST, TOKEN, json_type, cl];
+            h.extend(bad.map(|o| ("Origin", o)));
+            assert_eq!(status(&h), 403, "{bad:?}");
+        }
+        assert_eq!(
+            status(&[HOST, TOKEN, origin, ("Content-Type", "text/plain"), cl]),
+            400
+        );
+        assert_eq!(status(&[HOST, TOKEN, origin, json_type]), 400);
+        assert_eq!(status(&[HOST, TOKEN, origin, json_type, cl, cl]), 400);
+        assert_eq!(
+            status(&[
+                HOST,
+                TOKEN,
+                origin,
+                json_type,
+                cl,
+                ("Transfer-Encoding", "chunked")
+            ]),
+            400
+        );
+        for l in ["+1", " 1", "1x", ""] {
+            let h = [HOST, TOKEN, origin, json_type, ("Content-Length", l)];
+            assert_eq!(status(&h), 400, "{l:?}");
+        }
+        let over = [HOST, TOKEN, origin, json_type, ("Content-Length", "16385")];
+        match v.head("POST", "/api/settings", &over) {
+            Head::Answer(r) => assert_eq!(r.status, 413),
+            Head::Body(_) => panic!("a body over the cap would be read"),
+        }
+        // Every other method on it, and a POST anywhere else, stay 405.
+        for m in ["PUT", "PATCH", "OPTIONS", "DELETE"] {
+            let r = request(&v, m, "/api/settings", &[HOST, TOKEN, origin], b"");
+            assert_eq!(r.status, 405, "{m}");
+        }
+        for t in ["/api/repos", "/api/settings?x=1", "/api/doc?id=o1"] {
+            let r = request(&v, "POST", t, &[HOST, TOKEN, origin, json_type, cl], &body);
+            assert_eq!(r.status, 405, "{t}");
+        }
+        assert!(!dir.join("config.toml").exists());
+        let saved = request(
+            &v,
+            "POST",
+            "/api/settings",
+            &[HOST, TOKEN, origin, json_type, cl],
+            &body,
+        );
+        assert_eq!(json_of(&saved)["inject"]["session_start"], false);
+        assert!(!crate::config::inject(&dir).unwrap().session_start);
+        // The same body again names the file as it was: refused, and nothing echoes an error.
+        let stale = request(
+            &v,
+            "POST",
+            "/api/settings",
+            &[HOST, TOKEN, origin, json_type, cl],
+            &body,
+        );
+        assert_eq!(stale.status, 409);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&stale.body).unwrap(),
+            json!({"code": "stale", "field": ""})
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Over a socket: a head declaring too large a body is answered at once, with the body never
+    /// sent, and a save whose body comes in pieces is read whole.
+    #[test]
+    fn a_save_is_read_only_after_its_head_passes() {
+        let (dir, mut v) = viewer("save-socket");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        v.port = listener.local_addr().unwrap().port();
+        let port = v.port;
+        let home = dir.clone();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (s, _) = listener.accept().unwrap();
+                v.serve(s);
+            }
+        });
+        let head = |len: usize| {
+            format!(
+                "POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Oboete-Token: t0k\r\n\
+                 Origin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {len}\r\n\r\n"
+            )
+        };
+        let started = Instant::now();
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(head(20_000).as_bytes()).unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).unwrap();
+        assert!(
+            out.starts_with("HTTP/1.1 413 Content Too Large\r\n"),
+            "{out}"
+        );
+        assert!(started.elapsed() < REQUEST_TIME);
+        let body = save_body(&crate::settings::show(&home));
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(head(body.len()).as_bytes()).unwrap();
+        c.write_all(&body[..10]).unwrap();
+        c.flush().unwrap();
+        c.write_all(&body[10..]).unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).unwrap();
+        assert!(out.starts_with("HTTP/1.1 200 OK\r\n"), "{out}");
+        assert!(!crate::config::inject(&home).unwrap().session_start);
         server.join().unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }

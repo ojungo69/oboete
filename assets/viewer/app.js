@@ -235,12 +235,14 @@ function hitEntry(h) {
 // The API returns at most this many rows; the page says so when a list is cut there.
 const LIMIT = 100;
 
-const VIEWS = ['feed', 'sessions', 'context', 'stats'];
+const VIEWS = ['feed', 'sessions', 'context', 'stats', 'settings'];
 let view = VIEWS.includes(recall('oboete-view', 'feed')) ? recall('oboete-view', 'feed') : 'feed';
 
 function setView(name) {
   view = name;
   remember('oboete-view', name);
+  // The repository picker, search and Refresh redraw the view, which would drop unsaved settings.
+  $('controls').hidden = name === 'settings';
   for (const b of document.querySelectorAll('#tabs .tab')) {
     b.classList.toggle('active', b.dataset.view === name);
     b.setAttribute('aria-current', b.dataset.view === name ? 'page' : 'false');
@@ -337,8 +339,394 @@ async function showStats(repo) {
   };
 }
 
+// --- Settings (#94): injection, capture and the curator chain, in config.toml ---------------
+// The settings panel's words switch between English and Japanese; the rest of the viewer stays
+// English. The server sends codes, and the page puts them in words.
+
+const LANGS = ['en', 'ja'];
+const TEXT = {
+  en: {
+    heading: 'Settings',
+    language: 'Language',
+    lead: 'These settings are kept in config.toml in the oboete home. They apply from the next session start or the next curation window; nothing needs a restart.',
+    inject_h: 'Handing memory to agents',
+    inject_desc: 'The summary of your memory that an agent is given when a session starts.',
+    inject_on: 'Give agents the summary of your memory',
+    inject_chars: 'Size in characters (1,000 to 6,000)',
+    capture_h: 'Recording',
+    capture_desc: 'What is recorded from each session.',
+    store_prompts: 'Keep the text of your prompts',
+    tool_output: 'Output of tools',
+    tool_full: 'Keep it whole (the start and end when very long)',
+    tool_head_tail: 'Keep only the start and end',
+    chain_h: 'Curators',
+    chain_desc: 'The curators are asked in this order. An empty field follows the curator\'s own value, shown in grey.',
+    col_order: 'Order',
+    col_on: 'Use',
+    col_name: 'Curator',
+    col_model: 'Model',
+    col_budget: 'Calls a day',
+    col_timeout: 'Timeout (s)',
+    up: 'Move up',
+    down: 'Move down',
+    key_ok: 'Key found',
+    key_missing: 'Key file not found',
+    key_none: 'No key needed',
+    key_on_path: 'Installed',
+    key_not_on_path: 'Not installed',
+    key_file: 'Key file: {path}',
+    from_key: 'From its key: a fifth of the key\'s daily limit ({n} now)',
+    no_cap: 'No cap',
+    model_fixed: 'This curator has prices for its model, so its model is changed in [[providers]] together with its prices.',
+    model_free: 'Only models whose names end in :free.',
+    save: 'Save',
+    saved: 'Saved.',
+    warnings_h: 'Notes on config.toml',
+    file_error: 'config.toml has a mistake, so this page shows no settings. Run `oboete doctor` to see the line.',
+    stale: 'config.toml was changed elsewhere. The page now shows its current values; please make your change again.',
+    range: 'This value is out of range.',
+    names: 'The list of curators has changed. Please reload the page.',
+    model: 'A model name uses letters, digits and . _ : / @ + - (200 characters at most).',
+    paid_model: 'This model could be billed outside the monthly limit, so it cannot be set here.',
+    chain_empty: 'Please keep at least one curator in use. To stop curation, set [summary] curate = false.',
+    file_invalid: 'config.toml has a mistake, so this page cannot change it. Run `oboete doctor` to see the line.',
+    type: 'The page sent a value of the wrong kind. Please reload the page.',
+    bad_request: 'The request was not understood. Please reload the page.',
+    too_large: 'The request is too large.',
+    write_failed: 'config.toml could not be written.',
+    unauthorized: 'This page needs the full address printed by `oboete view` (it carries the access key after #).',
+    forbidden: 'Please open the viewer through the address `oboete view` prints.',
+    other: 'Saving failed ({status}).',
+  },
+  ja: {
+    heading: '設定',
+    language: '言語',
+    lead: 'ここでの設定は、oboete のホームにある config.toml に保存されます。次のセッションの開始時か、次の要約から反映されます。再起動は必要ありません。',
+    inject_h: '記憶の受け渡し',
+    inject_desc: 'セッションの開始時に、エージェントへ渡す記憶のまとめです。',
+    inject_on: 'エージェントに記憶のまとめを渡す',
+    inject_chars: '大きさ(文字数、1,000〜6,000)',
+    capture_h: '記録',
+    capture_desc: '各セッションから記録する内容です。',
+    store_prompts: 'プロンプトの本文を保存する',
+    tool_output: 'ツールの出力',
+    tool_full: 'すべて残す(非常に長いときは先頭と末尾)',
+    tool_head_tail: '先頭と末尾だけ残す',
+    chain_h: '要約役',
+    chain_desc: '要約役は上から順に使われます。空欄の項目は、その要約役の既定の値(灰色で表示)に従います。',
+    col_order: '順番',
+    col_on: '使う',
+    col_name: '要約役',
+    col_model: 'モデル',
+    col_budget: '1 日の回数',
+    col_timeout: '待ち時間(秒)',
+    up: '上へ移動',
+    down: '下へ移動',
+    key_ok: 'キーがあります',
+    key_missing: 'キーのファイルが見つかりません',
+    key_none: 'キーは不要です',
+    key_on_path: 'インストール済み',
+    key_not_on_path: 'インストールされていません',
+    key_file: 'キーのファイル: {path}',
+    from_key: 'キーから決まります: キーの 1 日の上限の 5 分の 1(現在 {n} 回)',
+    no_cap: '上限なし',
+    model_fixed: 'この要約役にはモデルの料金が設定されているため、モデルは [[providers]] で料金と一緒に変更してください。',
+    model_free: '名前が :free で終わるモデルだけ設定できます。',
+    save: '保存',
+    saved: '保存しました。',
+    warnings_h: 'config.toml についての注意',
+    file_error: 'config.toml に誤りがあるため、設定を表示できません。`oboete doctor` で該当する行を確認してください。',
+    stale: 'config.toml がほかの場所で変更されました。現在の値を表示し直しましたので、もう一度変更してください。',
+    range: 'この値は範囲外です。',
+    names: '要約役の一覧が変わりました。ページを再読み込みしてください。',
+    model: 'モデル名に使えるのは英数字と . _ : / @ + - だけです(200 文字まで)。',
+    paid_model: 'このモデルは月の上限の外で課金されるおそれがあるため、ここでは設定できません。',
+    chain_empty: '要約役を少なくとも 1 つは使う設定にしてください。要約を止めるには、[summary] curate = false を設定します。',
+    file_invalid: 'config.toml に誤りがあるため、この画面からは変更できません。`oboete doctor` で該当する行を確認してください。',
+    type: '画面から誤った種類の値が送られました。ページを再読み込みしてください。',
+    bad_request: '要求を処理できませんでした。ページを再読み込みしてください。',
+    too_large: '要求が大きすぎます。',
+    write_failed: 'config.toml に書き込めませんでした。',
+    unauthorized: 'このページは `oboete view` が表示するアドレス全体(# の後ろのアクセスキーを含む)で開いてください。',
+    forbidden: '`oboete view` が表示するアドレスから開いてください。',
+    other: '保存できませんでした({status})。',
+  },
+};
+
+const stored = recall('oboete-lang', '');
+let lang = LANGS.includes(stored) ? stored : (navigator.language || '').toLowerCase().startsWith('ja') ? 'ja' : 'en';
+
+// A string of the current language; `{name}` takes vars.name. A key a language lacks is English.
+function t(key, vars = {}) {
+  const table = Object.hasOwn(TEXT[lang], key) ? TEXT[lang] : TEXT.en;
+  const text = Object.hasOwn(table, key) ? table[key] : key;
+  return text.replace(/\{(\w+)\}/g, (_, k) => (Object.hasOwn(vars, k) ? String(vars[k]) : ''));
+}
+
+// The form's values between redraws: a language switch or a move keeps what is not saved yet.
+let form = null;
+
+function formOf(s) {
+  if (s.error) return null;
+  const text = (v) => (v === null || v === undefined ? '' : String(v));
+  return {
+    version: s.version,
+    inject: { ...s.inject, session_start_chars: String(s.inject.session_start_chars) },
+    capture: { ...s.capture },
+    chain: s.chain.map((e) => ({
+      ...e,
+      edit: { on: e.on, daily_budget: text(e.daily_budget), timeout_s: text(e.timeout_s), model: text(e.model) },
+    })),
+    warnings: s.warnings,
+  };
+}
+
+async function showSettings() {
+  const s = await api('settings');
+  return () => {
+    form = formOf(s);
+    drawSettings();
+    setStatus('');
+  };
+}
+
+function checkbox(checked, onChange) {
+  const c = el('input');
+  c.type = 'checkbox';
+  c.checked = checked;
+  c.addEventListener('change', () => onChange(c.checked));
+  return c;
+}
+
+// A text or number field that keeps its value in the form as it is typed; `field` is the name
+// the server uses when it refuses the value.
+function input(type, value, placeholder, field, onInput) {
+  const i = el('input');
+  i.type = type;
+  if (type === 'number') {
+    i.inputMode = 'numeric';
+    i.step = '1';
+  } else {
+    i.autocomplete = 'off';
+    i.spellcheck = false;
+  }
+  i.value = value;
+  i.placeholder = placeholder;
+  i.dataset.field = field;
+  i.addEventListener('input', () => {
+    i.classList.remove('invalid');
+    i.removeAttribute('aria-invalid');
+    onInput(i.value);
+  });
+  return i;
+}
+
+function note(text) {
+  return el('span', 'note', text);
+}
+
+function keyState(r) {
+  const state = el('span', 'note', t(`key_${r.key.replaceAll('-', '_')}`));
+  return r.key_file ? [state, note(t('key_file', { path: r.key_file }))] : [state];
+}
+
+function budgetPlaceholder(r) {
+  if (r.effective_daily_budget === null) return t('no_cap');
+  return String(r.effective_daily_budget);
+}
+
+function chainRow(r, i, redraw) {
+  const tr = el('tr', r.edit.on ? null : 'off');
+  const move = (d) => {
+    const to = i + d;
+    [form.chain[i], form.chain[to]] = [form.chain[to], form.chain[i]];
+    redraw();
+    // Keep the keyboard on the row that moved.
+    document.querySelector(`[data-move="${to}:${d}"]`)?.focus();
+  };
+  const arrow = (d, glyph, label) => {
+    const b = el('button', 'quiet small', glyph);
+    b.type = 'button';
+    b.title = label;
+    b.setAttribute('aria-label', `${label}: ${r.name}`);
+    b.dataset.move = `${i}:${d}`;
+    b.disabled = i + d < 0 || i + d >= form.chain.length;
+    b.addEventListener('click', () => move(d));
+    return b;
+  };
+  const on = checkbox(r.edit.on, (v) => {
+    r.edit.on = v;
+    tr.classList.toggle('off', !v);
+  });
+  on.setAttribute('aria-label', `${t('col_on')}: ${r.name}`);
+  const model = input('text', r.edit.model, r.effective_model ?? '', `chain.${r.name}.model`, (v) => { r.edit.model = v; });
+  model.setAttribute('aria-label', `${t('col_model')}: ${r.name}`);
+  model.disabled = r.model_rule === 'fixed';
+  const budget = input('number', r.edit.daily_budget, budgetPlaceholder(r), `chain.${r.name}.daily_budget`, (v) => { r.edit.daily_budget = v; });
+  budget.min = '1';
+  budget.max = '100000';
+  budget.setAttribute('aria-label', `${t('col_budget')}: ${r.name}`);
+  const timeout = input('number', r.edit.timeout_s, String(r.effective_timeout_s), `chain.${r.name}.timeout_s`, (v) => { r.edit.timeout_s = v; });
+  timeout.min = '5';
+  timeout.max = '900';
+  timeout.setAttribute('aria-label', `${t('col_timeout')}: ${r.name}`);
+  const modelNote = { fixed: t('model_fixed'), free: t('model_free') }[r.model_rule];
+  tr.append(
+    el('td', null, el('span', 'move', arrow(-1, '↑', t('up')), arrow(1, '↓', t('down')))),
+    el('td', null, on),
+    el('td', null, el('span', 'entry-name', r.name), ...keyState(r)),
+    el('td', null, model, modelNote ? note(modelNote) : null),
+    el('td', null, budget, r.budget_from_key && !r.edit.daily_budget ? note(t('from_key', { n: r.effective_daily_budget })) : null),
+    el('td', null, timeout));
+  return tr;
+}
+
+// The save's body, or the field a value is wrong in.
+function saveBody() {
+  const whole = (v, min, max) => (/^\d+$/.test(v.trim()) && Number(v) >= min && Number(v) <= max ? Number(v) : NaN);
+  const chars = whole(form.inject.session_start_chars, 1000, 6000);
+  if (Number.isNaN(chars)) return { field: 'inject.session_start_chars' };
+  const chain = [];
+  for (const r of form.chain) {
+    const optional = (v, min, max) => (v.trim() === '' ? null : whole(v, min, max));
+    const daily = optional(r.edit.daily_budget, 1, 100000);
+    if (Number.isNaN(daily)) return { field: `chain.${r.name}.daily_budget` };
+    const timeout = optional(r.edit.timeout_s, 5, 900);
+    if (Number.isNaN(timeout)) return { field: `chain.${r.name}.timeout_s` };
+    chain.push({ name: r.name, on: r.edit.on, daily_budget: daily, timeout_s: timeout, model: r.edit.model.trim() || null });
+  }
+  return {
+    body: {
+      version: form.version,
+      inject: { session_start: form.inject.session_start, session_start_chars: chars },
+      capture: { store_prompts: form.capture.store_prompts, tool_output: form.capture.tool_output },
+      chain,
+    },
+  };
+}
+
+function markInvalid(field) {
+  const i = [...document.querySelectorAll('#panel input')].find((x) => x.dataset.field === field);
+  if (!i) return;
+  i.classList.add('invalid');
+  i.setAttribute('aria-invalid', 'true');
+  i.focus();
+}
+
+async function saveSettings(button) {
+  const { body, field } = saveBody();
+  if (!body) {
+    markInvalid(field);
+    setStatus(t('range'), true);
+    return;
+  }
+  button.disabled = true;
+  try {
+    // 'same-origin': under the document's no-referrer policy a same-origin POST would carry
+    // `Origin: null`, which the viewer refuses.
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'X-Oboete-Token': token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      referrerPolicy: 'same-origin',
+      credentials: 'omit',
+    });
+    if (res.ok) {
+      form = formOf(await res.json());
+      drawSettings();
+      setStatus(t('saved'));
+      return;
+    }
+    const answer = (res.headers.get('content-type') || '').startsWith('application/json') ? await res.json() : {};
+    if (res.status === 409) {
+      form = formOf(await api('settings'));
+      drawSettings();
+      setStatus(t('stale'), true);
+      return;
+    }
+    const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
+    const code = answer.code || byStatus[res.status] || 'other';
+    if (answer.field) markInvalid(answer.field);
+    setStatus(t(code, { status: res.status }), true);
+  } catch (e) {
+    setStatus(e.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function drawSettings() {
+  const pick = el('select', null, ...LANGS.map((l) => {
+    const o = el('option', null, l === 'ja' ? '日本語' : 'English');
+    o.value = l;
+    return o;
+  }));
+  pick.value = lang;
+  pick.addEventListener('change', () => {
+    lang = pick.value;
+    remember('oboete-lang', lang);
+    drawSettings();
+    setStatus('');
+  });
+  const panel = el('div', 'settings', el('label', 'field lang', el('span', null, t('language')), pick));
+  panel.lang = lang;
+  if (!form) {
+    panel.append(el('p', 'text pending', t('file_error')));
+    draw(t('heading'), [], [panel]);
+    return;
+  }
+  const f = form;
+  const chars = input('number', f.inject.session_start_chars, '6000', 'inject.session_start_chars', (v) => { f.inject.session_start_chars = v; });
+  chars.min = '1000';
+  chars.max = '6000';
+  const tool = el('select', null, ...['full', 'head-tail'].map((v) => {
+    const o = el('option', null, t(v === 'full' ? 'tool_full' : 'tool_head_tail'));
+    o.value = v;
+    return o;
+  }));
+  tool.value = f.capture.tool_output;
+  tool.addEventListener('change', () => { f.capture.tool_output = tool.value; });
+  const rows = el('tbody');
+  const redraw = () => rows.replaceChildren(...f.chain.map((r, i) => chainRow(r, i, redraw)));
+  redraw();
+  const head = el('tr', null, ...['col_order', 'col_on', 'col_name', 'col_model', 'col_budget', 'col_timeout'].map((k) => {
+    const th = el('th', null, t(k));
+    th.scope = 'col';
+    return th;
+  }));
+  const save = el('button', 'save', t('save'));
+  save.type = 'submit';
+  const formEl = el('form', null,
+    el('section', null,
+      el('h3', null, t('inject_h')),
+      el('p', 'desc', t('inject_desc')),
+      el('label', 'check', checkbox(f.inject.session_start, (v) => { f.inject.session_start = v; }), t('inject_on')),
+      el('label', 'field', el('span', null, t('inject_chars')), chars)),
+    el('section', null,
+      el('h3', null, t('capture_h')),
+      el('p', 'desc', t('capture_desc')),
+      el('label', 'check', checkbox(f.capture.store_prompts, (v) => { f.capture.store_prompts = v; }), t('store_prompts')),
+      el('label', 'field', el('span', null, t('tool_output')), tool)),
+    el('section', null,
+      el('h3', null, t('chain_h')),
+      el('p', 'desc', t('chain_desc')),
+      el('div', 'scroll', el('table', 'chain', el('thead', null, head), rows))),
+    f.warnings.length
+      ? el('section', 'warnings', el('h3', null, t('warnings_h')), el('ul', null, ...f.warnings.map((w) => el('li', null, w))))
+      : null,
+    save);
+  formEl.noValidate = true;
+  formEl.addEventListener('submit', (e) => {
+    e.preventDefault();
+    saveSettings(save);
+  });
+  panel.append(el('p', 'lead', t('lead')), formEl);
+  draw(t('heading'), [], [panel]);
+}
+
 const LOADERS = new Map([
   ['feed', showFeed], ['sessions', showSessions], ['context', showContext], ['stats', showStats],
+  ['settings', showSettings],
 ]);
 
 // Only the latest request may draw: an earlier, slower one must not overwrite it.
@@ -407,7 +795,8 @@ async function poll() {
     const changed = version === null ? drawnWithoutBaseline : v !== version;
     // Stats also counts raw events, provider calls and handed-over context, which the marker
     // leaves out on purpose; that view is cheap, so it just follows every poll.
-    const wanted = changed || (view === 'stats' && !$('q').value.trim());
+    // Never the settings: a redraw would drop what is typed and not saved.
+    const wanted = view !== 'settings' && (changed || (view === 'stats' && !$('q').value.trim()));
     // The marker moves on only once the page shows that state; a failed redraw is retried by
     // the next poll.
     if (wanted && !(await refresh())) return;

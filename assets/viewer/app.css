@@ -216,6 +216,27 @@ main { max-width: 60rem; padding: 8px 24px 64px; }
 .providers th, .providers td { text-align: left; padding: 4px 14px 4px 0; border-bottom: 1px solid var(--line); }
 .providers th { font-size: 12px; color: var(--muted); font-weight: 600; }
 
+/* Settings (#94) */
+.settings section { margin: 20px 0; }
+.settings h3 { font-size: 14px; margin: 0 0 2px; }
+.settings .desc { color: var(--muted); margin: 0 0 10px; }
+.settings .check { display: flex; gap: 8px; align-items: center; margin: 6px 0 10px; }
+.settings .lang { max-width: 12rem; }
+.settings input[type="number"] { width: 8rem; }
+.settings .note { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
+.settings .scroll { overflow-x: auto; }
+.chain { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+.chain th, .chain td { text-align: left; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.chain th { font-size: 12px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.chain td input[type="number"] { width: 6.5rem; }
+.chain td input[type="text"] { width: 13rem; }
+.chain .move { display: inline-flex; gap: 4px; }
+.chain .entry-name { font-weight: 600; }
+.chain tr.off .entry-name { color: var(--muted); text-decoration: line-through; }
+input.invalid { border-color: var(--red); background: var(--red-bg); }
+.warnings ul { margin: 4px 0 0; padding-left: 18px; color: var(--yellow); }
+.settings .save { margin-top: 4px; }
+
 .notice { margin: 24px; }
 
 /* On a phone the controls take half the screen; let them scroll away. */

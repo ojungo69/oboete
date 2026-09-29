@@ -1,0 +1,795 @@
+//! The viewer's settings page (#94): what it shows of config.toml, and its one write. The page
+//! edits `[inject]`, `[capture]` and `[chain]`; the rest of the file, comments included, stays as
+//! it is (toml_edit). No key file's contents, header or `extra` value goes into an answer, and an
+//! error's text never does either: it could quote a value from the file (`config::toml_error`).
+
+use std::path::Path;
+use std::sync::Mutex;
+
+use rusqlite::Connection;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+use crate::config::{self, ChainOverlay, Provider, ToolOutput};
+
+/// Why a save was refused: an HTTP status, a code the page puts in words, and the field it is
+/// about ("chain.groq.timeout_s"), empty when it is about the whole request.
+#[derive(Debug, PartialEq)]
+pub struct Refusal {
+    pub status: u16,
+    pub code: &'static str,
+    pub field: String,
+}
+
+fn refused(status: u16, code: &'static str, field: impl Into<String>) -> Refusal {
+    Refusal {
+        status,
+        code,
+        field: field.into(),
+    }
+}
+
+/// A file that does not read or parse: the page shows no form, and doctor gives the line.
+fn invalid() -> Refusal {
+    refused(422, "file_invalid", "")
+}
+
+const BUDGET: std::ops::RangeInclusive<u32> = 1..=100_000;
+const TIMEOUT_S: std::ops::RangeInclusive<u64> = 5..=900;
+const MODEL_CHARS: usize = 200;
+
+/// config.toml's bytes, none when there is no file.
+fn bytes(home: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::read(home.join("config.toml")) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// What a save names to replace the file: its bytes' SHA-256, "none" for no file.
+fn version(bytes: Option<&[u8]>) -> String {
+    bytes.map_or_else(
+        || "none".to_owned(),
+        |b| {
+            Sha256::digest(b)
+                .iter()
+                .map(|x| format!("{x:02x}"))
+                .collect()
+        },
+    )
+}
+
+/// The file as every reader of it parses it, or none when one of them would refuse it.
+fn parsed(path: &Path, text: &str) -> Option<(config::Config, config::Capture, config::Inject)> {
+    Some((
+        config::from_text(path, text).ok()?,
+        config::parse_capture(Some(text)).ok()?.capture,
+        config::parse_inject(text).ok()?,
+    ))
+}
+
+/// The page's GET: the values as they apply, and each chain entry's own state.
+pub fn show(home: &Path) -> Value {
+    let path = home.join("config.toml");
+    let Ok(bytes) = bytes(home) else {
+        return json!({"version": "none", "error": "file_invalid"});
+    };
+    let version = version(bytes.as_deref());
+    let text = match bytes.as_deref().map(std::str::from_utf8) {
+        None => "",
+        Some(Ok(t)) => t,
+        Some(Err(_)) => return json!({"version": version, "error": "file_invalid"}),
+    };
+    let Some((cfg, capture, inject)) = parsed(&path, text) else {
+        return json!({"version": version, "error": "file_invalid"});
+    };
+    // Read, not made: the worker makes providers.db.
+    let db = (home.join("providers.db").exists())
+        .then(|| crate::providers_db::open(home).ok())
+        .flatten();
+    let chain: Vec<Value> = (cfg.providers.iter())
+        .map(|p| entry(p, &cfg.chain, db.as_ref()))
+        .collect();
+    json!({
+        "version": version,
+        "inject": {
+            "session_start": inject.session_start,
+            "session_start_chars": inject.session_start_chars,
+        },
+        "capture": {
+            "store_prompts": capture.store_prompts,
+            "tool_output": tool_output(capture.tool_output),
+        },
+        "chain": chain,
+        "warnings": cfg.warnings,
+    })
+}
+
+fn tool_output(t: ToolOutput) -> &'static str {
+    match t {
+        ToolOutput::Full => "full",
+        ToolOutput::HeadTail => "head-tail",
+    }
+}
+
+/// One chain entry for the page. `key` is the key file's state as doctor words it; its path is
+/// shown so the user knows where the key goes, and its contents are never read into the answer
+/// (a budget from the key reads it inside the process, to fingerprint it).
+fn entry(p: &Provider, chain: &ChainOverlay, db: Option<&Connection>) -> Value {
+    let name = p.name();
+    let (kind, key, key_file, model, timeout_s, model_rule) = match p {
+        Provider::Openai {
+            key_file,
+            model,
+            timeout_s,
+            base_url,
+            ..
+        } => (
+            "api",
+            match key_file {
+                Some(f) if f.exists() => "ok",
+                Some(_) => "missing",
+                None => "none",
+            },
+            key_file.as_ref().map(|f| f.display().to_string()),
+            Some(model.as_str()),
+            *timeout_s,
+            model_rule(p, base_url, model),
+        ),
+        Provider::Cli {
+            cli,
+            model,
+            timeout_s,
+            ..
+        } => (
+            "cli",
+            if crate::setup::on_path(cli) {
+                "on-path"
+            } else {
+                "not-on-path"
+            },
+            None,
+            model.as_deref(),
+            *timeout_s,
+            "any",
+        ),
+    };
+    let budget = match db {
+        Some(db) if p.budget_from_key() => crate::budget::daily(db, p).unwrap_or(p.daily_budget()),
+        _ => p.daily_budget(),
+    };
+    json!({
+        "name": name,
+        "kind": kind,
+        "on": !chain.turns_off(name),
+        "key": key,
+        "key_file": key_file,
+        // Set only when it applies: one `load()` left unset (a model the entry cannot price) is
+        // not the page's to keep, and a save without it removes it.
+        "model": chain.model.get(name).filter(|m| Some(m.as_str()) == model),
+        "effective_model": model,
+        "model_rule": model_rule,
+        "daily_budget": chain.daily_budget.get(name),
+        "effective_daily_budget": (budget != config::no_daily_cap()).then_some(budget),
+        "budget_from_key": p.budget_from_key(),
+        "timeout_s": chain.timeout_s.get(name),
+        "effective_timeout_s": timeout_s,
+    })
+}
+
+/// Which models `[chain] model` may set on an API entry: none on one with prices (its prices are
+/// its model's), only `:free` ones on an OpenRouter `:free` entry, else any.
+fn model_rule(p: &Provider, base_url: &str, model: &str) -> &'static str {
+    if p.limits().is_paid() {
+        "fixed"
+    } else if config::openrouter_free(base_url, model) {
+        "free"
+    } else {
+        "any"
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Save {
+    version: String,
+    inject: InjectIn,
+    capture: CaptureIn,
+    /// Every chain entry once, in the order the page wants.
+    chain: Vec<EntryIn>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InjectIn {
+    session_start: bool,
+    session_start_chars: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureIn {
+    store_prompts: bool,
+    tool_output: ToolOutput,
+}
+
+/// An entry's values; `None` follows the entry's own value.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntryIn {
+    name: String,
+    on: bool,
+    daily_budget: Option<u32>,
+    timeout_s: Option<u64>,
+    model: Option<String>,
+}
+
+/// The page's save: checks the request against the file it read (`version`), writes the page's
+/// keys into it and checks the result as every reader parses it before it replaces the file, and
+/// answers the new `show`. A value that equals the entry's own is not written, so it keeps
+/// following later changes to the defaults.
+pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
+    let posted: Save = serde_json::from_slice(body).map_err(|e| match e.classify() {
+        serde_json::error::Category::Data => refused(422, "type", ""),
+        _ => refused(400, "bad_request", ""),
+    })?;
+    // Two tabs saving at once: one after the other, and the second finds the file changed.
+    let _held = saving
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let path = home.join("config.toml");
+    let was = bytes(home).map_err(|_| invalid())?;
+    if version(was.as_deref()) != posted.version {
+        return Err(refused(409, "stale", ""));
+    }
+    let text = match was.as_deref().map(std::str::from_utf8) {
+        None => "",
+        Some(Ok(t)) => t,
+        Some(Err(_)) => return Err(invalid()),
+    };
+    let (now, capture, inject) = parsed(&path, text).ok_or_else(invalid)?;
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| invalid())?;
+    // Each entry as it is without `[chain]`: what a value equal to its own is compared with.
+    let base = {
+        let mut b = doc.clone();
+        b.remove("chain");
+        config::from_text(&path, &b.to_string()).map_err(|_| invalid())?
+    };
+    let chain = checked(&posted, &base)?;
+    // The order changes when the chain's does, not when `order` would be spelled another way.
+    let reordered = !(posted.chain.iter().map(|e| e.name.as_str()))
+        .eq(now.providers.iter().map(Provider::name));
+    let i = &posted.inject;
+    if i.session_start != inject.session_start {
+        put(&mut doc, "inject", "session_start", i.session_start.into());
+    }
+    if i.session_start_chars != inject.session_start_chars {
+        put(
+            &mut doc,
+            "inject",
+            "session_start_chars",
+            (i.session_start_chars as i64).into(),
+        );
+    }
+    let c = &posted.capture;
+    if c.store_prompts != capture.store_prompts {
+        put(&mut doc, "capture", "store_prompts", c.store_prompts.into());
+    }
+    if c.tool_output != capture.tool_output {
+        put(
+            &mut doc,
+            "capture",
+            "tool_output",
+            tool_output(c.tool_output).into(),
+        );
+    }
+    write_chain(&mut doc, &now.chain, reordered, chain);
+    let candidate = doc.to_string();
+    if candidate == text {
+        return Ok(show(home));
+    }
+    parsed(&path, &candidate).ok_or_else(invalid)?;
+    let staged =
+        crate::setup::stage(&path, &candidate).map_err(|_| refused(500, "write_failed", ""))?;
+    // A hand edit or another viewer between the read and here is not overwritten (the temp file
+    // goes when `staged` drops).
+    if version(bytes(home).map_err(|_| invalid())?.as_deref()) != posted.version {
+        return Err(refused(409, "stale", ""));
+    }
+    staged
+        .commit()
+        .map_err(|_| refused(500, "write_failed", ""))?;
+    Ok(show(home))
+}
+
+/// `[chain]` as the page asks for it, over the entries `base` has.
+struct Chain {
+    order: Vec<String>,
+    off: Vec<String>,
+    daily_budget: std::collections::BTreeMap<String, u32>,
+    timeout_s: std::collections::BTreeMap<String, u64>,
+    model: std::collections::BTreeMap<String, String>,
+}
+
+/// The posted values, refused where one is out of range, names a model the entry cannot price,
+/// or the entries are not the chain's; each value equal to the entry's own is left out.
+fn checked(posted: &Save, base: &config::Config) -> Result<Chain, Refusal> {
+    let chars = posted.inject.session_start_chars;
+    if !(1_000..=crate::consumer::manifest::CAP).contains(&chars) {
+        return Err(refused(422, "range", "inject.session_start_chars"));
+    }
+    let mut names: Vec<&str> = posted.chain.iter().map(|e| e.name.as_str()).collect();
+    let mut own: Vec<&str> = base.providers.iter().map(Provider::name).collect();
+    let order = names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+    let base_order: Vec<String> = own.iter().map(|n| (*n).to_owned()).collect();
+    names.sort_unstable();
+    own.sort_unstable();
+    if names != own {
+        return Err(refused(422, "names", "chain"));
+    }
+    if posted.chain.iter().all(|e| !e.on) {
+        return Err(refused(422, "chain_empty", "chain"));
+    }
+    let mut chain = Chain {
+        order: if order == base_order {
+            Vec::new()
+        } else {
+            order
+        },
+        off: (posted.chain.iter())
+            .filter(|e| !e.on)
+            .map(|e| e.name.clone())
+            .collect(),
+        daily_budget: Default::default(),
+        timeout_s: Default::default(),
+        model: Default::default(),
+    };
+    for e in &posted.chain {
+        let field = |key: &str| format!("chain.{}.{key}", e.name);
+        let p = (base.providers.iter())
+            .find(|p| p.name() == e.name)
+            .ok_or_else(|| refused(422, "names", "chain"))?;
+        if let Some(n) = e.daily_budget {
+            if !BUDGET.contains(&n) {
+                return Err(refused(422, "range", field("daily_budget")));
+            }
+            // A budget from the key follows the key: any number typed is the user's.
+            if p.budget_from_key() || n != p.daily_budget() {
+                chain.daily_budget.insert(e.name.clone(), n);
+            }
+        }
+        let (own_timeout, own_model) = match p {
+            Provider::Openai {
+                timeout_s, model, ..
+            } => (*timeout_s, Some(model.as_str())),
+            Provider::Cli {
+                timeout_s, model, ..
+            } => (*timeout_s, model.as_deref()),
+        };
+        if let Some(s) = e.timeout_s {
+            if !TIMEOUT_S.contains(&s) {
+                return Err(refused(422, "range", field("timeout_s")));
+            }
+            if s != own_timeout {
+                chain.timeout_s.insert(e.name.clone(), s);
+            }
+        }
+        if let Some(m) = &e.model
+            && Some(m.as_str()) != own_model
+        {
+            let allowed = |c: char| c.is_ascii_alphanumeric() || "._:/@+-".contains(c);
+            if m.is_empty() || m.chars().count() > MODEL_CHARS || !m.chars().all(allowed) {
+                return Err(refused(422, "model", field("model")));
+            }
+            let priced = match p {
+                Provider::Openai {
+                    base_url, model, ..
+                } => match model_rule(p, base_url, model) {
+                    "fixed" => false,
+                    "free" => config::is_free(m),
+                    _ => true,
+                },
+                Provider::Cli { .. } => true,
+            };
+            if !priced {
+                return Err(refused(422, "paid_model", field("model")));
+            }
+            chain.model.insert(e.name.clone(), m.clone());
+        }
+    }
+    Ok(chain)
+}
+
+/// Sets `table.key`, making the table (a `[table]`, not an inline one) when it is missing.
+fn put(doc: &mut toml_edit::DocumentMut, table: &str, key: &str, value: toml_edit::Value) {
+    if !doc.contains_key(table) {
+        doc.insert(table, toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    doc[table][key] = toml_edit::Item::Value(value);
+}
+
+/// Writes each `[chain]` key whose value changes from what the file has now (`now`; the order
+/// when `reordered`), and removes one the page no longer sets; a key that does not change is not
+/// touched, so its comments stay.
+fn write_chain(doc: &mut toml_edit::DocumentMut, now: &ChainOverlay, reordered: bool, to: Chain) {
+    fn map<V: Clone + Into<toml_edit::Value>>(
+        m: &std::collections::BTreeMap<String, V>,
+    ) -> toml_edit::Value {
+        let mut t = toml_edit::InlineTable::new();
+        for (k, v) in m {
+            t.insert(k, v.clone().into());
+        }
+        toml_edit::Value::InlineTable(t)
+    }
+    fn list(names: &[String]) -> toml_edit::Value {
+        toml_edit::Value::Array(names.iter().map(String::as_str).collect())
+    }
+    let budget = to
+        .daily_budget
+        .iter()
+        .map(|(k, v)| (k.clone(), i64::from(*v)))
+        .collect();
+    let timeout = (to.timeout_s.iter())
+        .map(|(k, v)| (k.clone(), *v as i64))
+        .collect();
+    fn set(v: &[String]) -> std::collections::BTreeSet<&String> {
+        v.iter().collect()
+    }
+    let changes: [(&str, bool, bool, toml_edit::Value); 5] = [
+        ("order", reordered, to.order.is_empty(), list(&to.order)),
+        (
+            "off",
+            set(&to.off) != set(&now.off),
+            to.off.is_empty(),
+            list(&to.off),
+        ),
+        (
+            "daily_budget",
+            to.daily_budget != now.daily_budget,
+            to.daily_budget.is_empty(),
+            map::<i64>(&budget),
+        ),
+        (
+            "timeout_s",
+            to.timeout_s != now.timeout_s,
+            to.timeout_s.is_empty(),
+            map::<i64>(&timeout),
+        ),
+        (
+            "model",
+            to.model != now.model,
+            to.model.is_empty(),
+            map(&to.model),
+        ),
+    ];
+    for (key, changed, empty, value) in changes {
+        if !changed {
+            continue;
+        }
+        if empty {
+            if let Some(t) = doc
+                .get_mut("chain")
+                .and_then(toml_edit::Item::as_table_like_mut)
+            {
+                t.remove(key);
+            }
+        } else {
+            put(doc, "chain", key, value);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn home_with(text: Option<&str>) -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        if let Some(t) = text {
+            std::fs::write(home.path().join("config.toml"), t).unwrap();
+        }
+        home
+    }
+
+    fn file(home: &tempfile::TempDir) -> Option<String> {
+        std::fs::read_to_string(home.path().join("config.toml")).ok()
+    }
+
+    /// The page's body for the values `show` gave, with `change` applied to it.
+    fn posted(shown: &Value, change: impl FnOnce(&mut Value)) -> Vec<u8> {
+        let chain: Vec<Value> = (shown["chain"].as_array().unwrap().iter())
+            .map(|e| {
+                json!({"name": e["name"], "on": e["on"], "daily_budget": e["daily_budget"],
+                    "timeout_s": e["timeout_s"], "model": e["model"]})
+            })
+            .collect();
+        let mut v = json!({"version": shown["version"], "inject": shown["inject"],
+            "capture": shown["capture"], "chain": chain});
+        change(&mut v);
+        serde_json::to_vec(&v).unwrap()
+    }
+
+    fn save_to(home: &tempfile::TempDir, body: &[u8]) -> Result<Value, Refusal> {
+        save(home.path(), &Mutex::new(()), body)
+    }
+
+    fn at<'a>(shown: &'a Value, name: &str) -> &'a Value {
+        (shown["chain"].as_array().unwrap().iter())
+            .find(|e| e["name"] == name)
+            .unwrap()
+    }
+
+    /// #94 acceptance test 2: no key reaches the page, and none is taken from it.
+    #[test]
+    fn no_key_is_shown_or_taken() {
+        let home = tempfile::tempdir().unwrap();
+        let sentinel = format!("{}-{}", "oboete-sentinel", "4b1d");
+        let key = home.path().join("LOCAL_KEY.md");
+        std::fs::write(&key, format!("# the key\n{sentinel}\n")).unwrap();
+        let text = format!(
+            "[[providers]]\nkind = \"openai\"\nname = \"local\"\nbase_url = \"http://127.0.0.1:9/v1\"\n\
+             model = \"m\"\nkey_file = {:?}\nheaders = {{ \"x-h\" = \"{sentinel}\" }}\n\
+             extra = {{ note = \"{sentinel}\" }}\n",
+            key.display().to_string()
+        );
+        std::fs::write(home.path().join("config.toml"), &text).unwrap();
+        let shown = show(home.path());
+        assert!(shown.get("error").is_none(), "{shown}");
+        assert!(!shown.to_string().contains(&sentinel), "{shown}");
+        assert_eq!(at(&shown, "local")["key"], "ok");
+        for extra in [
+            ("key", json!(sentinel)),
+            ("base_url", json!("http://evil.example/v1")),
+            ("key_file", json!("/tmp/k")),
+            ("headers", json!({"x": "y"})),
+        ] {
+            let body = posted(&shown, |v| {
+                v["chain"][0][extra.0] = extra.1.clone();
+            });
+            let refusal = save_to(&home, &body).unwrap_err();
+            assert_eq!((refusal.status, refusal.code), (422, "type"), "{}", extra.0);
+            assert_eq!(file(&home).as_deref(), Some(text.as_str()));
+        }
+        let saved = save_to(
+            &home,
+            &posted(&shown, |v| v["chain"][0]["timeout_s"] = json!(30)),
+        )
+        .unwrap();
+        assert!(!saved.to_string().contains(&sentinel), "{saved}");
+    }
+
+    /// A save writes only the keys it changes, keeps the rest of the file (comments, other
+    /// tables) as it was, and leaves a value equal to the entry's own out.
+    #[test]
+    fn a_save_writes_only_what_changes() {
+        let text = "# my settings\n[summary]\ncurate = false # not yet\n\n[backup]\ndir = \"b\"\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        let unchanged = save_to(&home, &posted(&shown, |_| {})).unwrap();
+        assert_eq!(file(&home).as_deref(), Some(text));
+        assert_eq!(unchanged["version"], shown["version"]);
+        let groq = at(&shown, "groq");
+        let own_timeout = groq["effective_timeout_s"].clone();
+        let names: Vec<Value> = (shown["chain"].as_array().unwrap().iter())
+            .map(|e| e["name"].clone())
+            .collect();
+        let saved = save_to(
+            &home,
+            &posted(&shown, |v| {
+                v["inject"]["session_start_chars"] = json!(2000);
+                v["capture"]["tool_output"] = json!("head-tail");
+                let chain = v["chain"].as_array_mut().unwrap();
+                chain.swap(0, 1);
+                for e in chain.iter_mut() {
+                    match e["name"].as_str().unwrap() {
+                        "codex" => e["on"] = json!(false),
+                        "groq" => {
+                            e["timeout_s"] = own_timeout.clone();
+                            e["daily_budget"] = json!(50);
+                        }
+                        "claude" => e["model"] = json!("sonnet"),
+                        _ => {}
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let after = file(&home).unwrap();
+        assert!(after.starts_with(text), "{after}");
+        for line in [
+            "session_start_chars = 2000",
+            "tool_output = \"head-tail\"",
+            "off = [\"codex\"]",
+            "daily_budget = { groq = 50 }",
+            "model = { claude = \"sonnet\" }",
+        ] {
+            assert!(after.contains(line), "{line}: {after}");
+        }
+        // The groq timeout equals its own: not written.
+        assert!(!after.contains("timeout_s"), "{after}");
+        let order = format!(
+            "order = [{:?}, {:?}",
+            names[1].as_str().unwrap(),
+            names[0].as_str().unwrap()
+        );
+        assert!(after.contains(&order), "{order}: {after}");
+        assert_eq!(saved["inject"]["session_start_chars"], 2000);
+        assert_eq!(at(&saved, "codex")["on"], false);
+        assert_eq!(at(&saved, "claude")["effective_model"], "sonnet");
+        // Back to the entry's own values: the keys go.
+        let back = save_to(
+            &home,
+            &posted(&saved, |v| {
+                for e in v["chain"].as_array_mut().unwrap() {
+                    e["on"] = json!(true);
+                    e["daily_budget"] = Value::Null;
+                    e["model"] = Value::Null;
+                }
+                let chain = v["chain"].as_array_mut().unwrap();
+                chain.swap(0, 1);
+            }),
+        )
+        .unwrap();
+        let after = file(&home).unwrap();
+        for key in ["order", "off", "daily_budget", "model"] {
+            assert!(!after.contains(&format!("{key} =")), "{key}: {after}");
+        }
+        assert_eq!(at(&back, "codex")["on"], true);
+    }
+
+    /// Each refusal leaves the file's bytes as they were.
+    #[test]
+    fn a_refused_save_leaves_the_file() {
+        let text = "[summary]\ncurate = false\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        let refusal = |change: &dyn Fn(&mut Value)| {
+            let r = save_to(&home, &posted(&shown, change)).unwrap_err();
+            assert_eq!(file(&home).as_deref(), Some(text));
+            (r.status, r.code, r.field)
+        };
+        let named = |name: &'static str, key: &'static str, value: Value| {
+            move |v: &mut Value| {
+                for e in v["chain"].as_array_mut().unwrap() {
+                    if e["name"] == name {
+                        e[key] = value.clone();
+                    }
+                }
+            }
+        };
+        assert_eq!(
+            refusal(&|v| v["version"] = json!("0000")),
+            (409, "stale", String::new())
+        );
+        assert_eq!(
+            refusal(&|v| v["inject"]["session_start_chars"] = json!(999)),
+            (422, "range", "inject.session_start_chars".into())
+        );
+        assert_eq!(
+            refusal(&named("groq", "daily_budget", json!(0))),
+            (422, "range", "chain.groq.daily_budget".into())
+        );
+        assert_eq!(
+            refusal(&named("groq", "timeout_s", json!(4))),
+            (422, "range", "chain.groq.timeout_s".into())
+        );
+        assert_eq!(
+            refusal(&named("groq", "model", json!("m\nx"))),
+            (422, "model", "chain.groq.model".into())
+        );
+        assert_eq!(
+            refusal(&named("openrouter", "model", json!("openai/gpt-6"))),
+            (422, "paid_model", "chain.openrouter.model".into())
+        );
+        assert_eq!(
+            refusal(&|v| {
+                v["chain"].as_array_mut().unwrap().pop();
+            }),
+            (422, "names", "chain".into())
+        );
+        assert_eq!(
+            refusal(&|v| {
+                let first = v["chain"][0].clone();
+                v["chain"].as_array_mut().unwrap().push(first);
+            }),
+            (422, "names", "chain".into())
+        );
+        assert_eq!(
+            refusal(&|v| {
+                for e in v["chain"].as_array_mut().unwrap() {
+                    e["on"] = json!(false);
+                }
+            }),
+            (422, "chain_empty", "chain".into())
+        );
+        assert_eq!(
+            refusal(&|v| v["capture"]["tool_output"] = json!("some")),
+            (422, "type", String::new())
+        );
+        let r = save_to(&home, b"{not json").unwrap_err();
+        assert_eq!((r.status, r.code), (400, "bad_request"));
+        assert_eq!(file(&home).as_deref(), Some(text));
+    }
+
+    /// A model the entry cannot price is refused; an OpenRouter `:free` entry takes another
+    /// `:free` model, and an entry with prices keeps its model.
+    #[test]
+    fn a_model_the_entry_cannot_price_is_refused() {
+        let text = "gemini = \"after-subscriptions\"\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        assert_eq!(at(&shown, "gemini")["model_rule"], "fixed");
+        assert_eq!(at(&shown, "openrouter")["model_rule"], "free");
+        assert_eq!(at(&shown, "groq")["model_rule"], "any");
+        let model = |name: &'static str, m: &'static str| {
+            posted(&shown, move |v| {
+                for e in v["chain"].as_array_mut().unwrap() {
+                    if e["name"] == name {
+                        e["model"] = json!(m);
+                    }
+                }
+            })
+        };
+        let r = save_to(&home, &model("gemini", "gemini-9-pro")).unwrap_err();
+        assert_eq!((r.status, r.code), (422, "paid_model"));
+        let own = at(&shown, "gemini")["effective_model"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let same = posted(&shown, |v| {
+            for e in v["chain"].as_array_mut().unwrap() {
+                if e["name"] == "gemini" {
+                    e["model"] = json!(own);
+                }
+            }
+        });
+        save_to(&home, &same).unwrap();
+        assert_eq!(file(&home).as_deref(), Some(text));
+        let saved = save_to(&home, &model("openrouter", "qwen/qwen3.8-27b:free")).unwrap();
+        assert_eq!(
+            at(&saved, "openrouter")["effective_model"],
+            "qwen/qwen3.8-27b:free"
+        );
+    }
+
+    /// No file: the page shows the defaults and a save makes a file with only what it changes.
+    #[test]
+    fn a_save_without_a_file_makes_one() {
+        let home = home_with(None);
+        let shown = show(home.path());
+        assert_eq!(shown["version"], "none");
+        assert_eq!(shown["inject"]["session_start_chars"], 6_000);
+        save_to(
+            &home,
+            &posted(&shown, |v| v["inject"]["session_start"] = json!(false)),
+        )
+        .unwrap();
+        assert_eq!(
+            file(&home).as_deref(),
+            Some("[inject]\nsession_start = false\n")
+        );
+        assert!(!config::inject(home.path()).unwrap().session_start);
+    }
+
+    /// A file that does not parse: no form, and no save.
+    #[test]
+    fn a_file_that_does_not_parse_is_neither_shown_nor_written() {
+        for text in [
+            "[chain]\noff = 3\n",
+            "[inject]\nsession_start = \"no\"\n",
+            "[summary\n",
+        ] {
+            let home = home_with(Some(text));
+            let shown = show(home.path());
+            assert_eq!(shown["error"], "file_invalid", "{text}");
+            let body = json!({"version": shown["version"], "inject": {"session_start": true,
+                "session_start_chars": 6000}, "capture": {"store_prompts": true,
+                "tool_output": "full"}, "chain": []});
+            let r = save_to(&home, &serde_json::to_vec(&body).unwrap()).unwrap_err();
+            assert_eq!((r.status, r.code), (422, "file_invalid"), "{text}");
+            assert_eq!(file(&home).as_deref(), Some(text));
+        }
+    }
+}

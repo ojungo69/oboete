@@ -35,6 +35,7 @@ mod redact;
 mod replay;
 mod repo;
 mod search;
+mod settings;
 mod setup;
 mod transcript;
 mod view;
