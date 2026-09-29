@@ -295,6 +295,8 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
         crate::setup::stage(&path, &candidate).map_err(|_| refused(500, "write_failed", ""))?;
     // A hand edit or another viewer between the read and here is not overwritten (the temp file
     // goes when `staged` drops).
+    // ponytail: one landing between this check and the rename still is; a lock file shared with
+    // hand edits' tools cannot exist, so add one for two viewers if that is ever seen.
     if version(bytes(home).map_err(|_| invalid())?.as_deref()) != posted.version {
         return Err(refused(409, "stale", ""));
     }

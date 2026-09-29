@@ -240,40 +240,41 @@ impl Viewer {
     /// `referrerPolicy: 'same-origin'`, as the document's `no-referrer` would make it `null`),
     /// JSON, and one `Content-Length` of at most `MAX_BODY`.
     fn save_gate(&self, headers: &[(&str, &str)]) -> std::result::Result<usize, Response> {
-        let header = |name: &str| {
-            headers
-                .iter()
-                .find(|(n, _)| n.eq_ignore_ascii_case(name))
-                .map(|(_, v)| *v)
+        // Exactly one: a request with two of these is no browser's.
+        let only = |name: &str| {
+            let mut all = headers.iter().filter(|(n, _)| n.eq_ignore_ascii_case(name));
+            match (all.next(), all.next()) {
+                (Some((_, v)), None) => Some(*v),
+                _ => None,
+            }
         };
-        if header("transfer-encoding").is_some() {
+        if headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("transfer-encoding"))
+        {
             return Err(Response::text(400, "requests carry no chunked body"));
         }
-        if !self.host_ok(header("host")) {
+        if !self.host_ok(only("host")) {
             return Err(Response::text(
                 403,
                 "open the viewer through 127.0.0.1 or localhost",
             ));
         }
-        if !self.token_ok(header("x-oboete-token")) {
+        if !self.token_ok(only("x-oboete-token")) {
             return Err(Response::text(401, "missing or wrong token"));
         }
-        let origin = header("origin").and_then(|o| o.strip_prefix("http://"));
+        let origin = only("origin").and_then(|o| o.strip_prefix("http://"));
         if !self.host_ok(origin) {
             return Err(Response::text(403, "a save comes from this viewer's page"));
         }
-        if !header("content-type")
-            .is_some_and(|t| t.to_ascii_lowercase().starts_with("application/json"))
+        // The media type itself, parameters aside: `application/jsonp` is not JSON.
+        let media = |t: &str| t.split(';').next().unwrap_or("").trim().to_owned();
+        if !only("content-type").is_some_and(|t| media(t).eq_ignore_ascii_case("application/json"))
         {
             return Err(Response::text(400, "a save is JSON"));
         }
-        let lengths: Vec<&str> = headers
-            .iter()
-            .filter(|(n, _)| n.eq_ignore_ascii_case("content-length"))
-            .map(|(_, v)| *v)
-            .collect();
-        let len = match lengths[..] {
-            [l] if !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit()) => {
+        let len = match only("content-length") {
+            Some(l) if !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit()) => {
                 l.parse::<usize>().unwrap_or(usize::MAX)
             }
             _ => return Err(Response::text(400, "a save declares one length")),
@@ -963,8 +964,15 @@ mod tests {
             h.extend(bad.map(|o| ("Origin", o)));
             assert_eq!(status(&h), 403, "{bad:?}");
         }
+        // Two of a header a browser sends once (Codex on #94).
+        assert_eq!(status(&[HOST, TOKEN, origin, origin, json_type, cl]), 403);
+        assert_eq!(status(&[HOST, HOST, TOKEN, origin, json_type, cl]), 403);
+        for t in ["text/plain", "application/jsonp", "application/json-seq"] {
+            let h = [HOST, TOKEN, origin, ("Content-Type", t), cl];
+            assert_eq!(status(&h), 400, "{t}");
+        }
         assert_eq!(
-            status(&[HOST, TOKEN, origin, ("Content-Type", "text/plain"), cl]),
+            status(&[HOST, TOKEN, origin, json_type, json_type, cl]),
             400
         );
         assert_eq!(status(&[HOST, TOKEN, origin, json_type]), 400);
@@ -1003,7 +1011,13 @@ mod tests {
             &v,
             "POST",
             "/api/settings",
-            &[HOST, TOKEN, origin, json_type, cl],
+            &[
+                HOST,
+                TOKEN,
+                origin,
+                ("Content-Type", "Application/JSON; charset=utf-8"),
+                cl,
+            ],
             &body,
         );
         assert_eq!(json_of(&saved)["inject"]["session_start"], false);
