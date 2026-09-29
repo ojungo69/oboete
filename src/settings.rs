@@ -61,6 +61,11 @@ fn version(bytes: Option<&[u8]>) -> String {
     )
 }
 
+/// The file's text, "" for no file; none when it is not UTF-8.
+fn utf8(bytes: Option<&[u8]>) -> Option<&str> {
+    bytes.map_or(Some(""), |b| std::str::from_utf8(b).ok())
+}
+
 /// The file as every reader of it parses it, or none when one of them would refuse it.
 fn parsed(path: &Path, text: &str) -> Option<(config::Config, config::Capture, config::Inject)> {
     Some((
@@ -77,12 +82,7 @@ pub fn show(home: &Path) -> Value {
         return json!({"version": "none", "error": "file_invalid"});
     };
     let version = version(bytes.as_deref());
-    let text = match bytes.as_deref().map(std::str::from_utf8) {
-        None => "",
-        Some(Ok(t)) => t,
-        Some(Err(_)) => return json!({"version": version, "error": "file_invalid"}),
-    };
-    let Some((cfg, capture, inject)) = parsed(&path, text) else {
+    let Some((cfg, capture, inject)) = utf8(bytes.as_deref()).and_then(|t| parsed(&path, t)) else {
         return json!({"version": version, "error": "file_invalid"});
     };
     // Read, not made: the worker makes providers.db.
@@ -244,11 +244,7 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
     if version(was.as_deref()) != posted.version {
         return Err(refused(409, "stale", ""));
     }
-    let text = match was.as_deref().map(std::str::from_utf8) {
-        None => "",
-        Some(Ok(t)) => t,
-        Some(Err(_)) => return Err(invalid()),
-    };
+    let text = utf8(was.as_deref()).ok_or_else(invalid)?;
     let (now, capture, inject) = parsed(&path, text).ok_or_else(invalid)?;
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| invalid())?;
     // Each entry as it is without `[chain]`: what a value equal to its own is compared with.
@@ -416,26 +412,9 @@ fn put(doc: &mut toml_edit::DocumentMut, table: &str, key: &str, value: toml_edi
 /// when `reordered`), and removes one the page no longer sets; a key that does not change is not
 /// touched, so its comments stay.
 fn write_chain(doc: &mut toml_edit::DocumentMut, now: &ChainOverlay, reordered: bool, to: Chain) {
-    fn map<V: Clone + Into<toml_edit::Value>>(
-        m: &std::collections::BTreeMap<String, V>,
-    ) -> toml_edit::Value {
-        let mut t = toml_edit::InlineTable::new();
-        for (k, v) in m {
-            t.insert(k, v.clone().into());
-        }
-        toml_edit::Value::InlineTable(t)
-    }
     fn list(names: &[String]) -> toml_edit::Value {
         toml_edit::Value::Array(names.iter().map(String::as_str).collect())
     }
-    let budget = to
-        .daily_budget
-        .iter()
-        .map(|(k, v)| (k.clone(), i64::from(*v)))
-        .collect();
-    let timeout = (to.timeout_s.iter())
-        .map(|(k, v)| (k.clone(), *v as i64))
-        .collect();
     fn set(v: &[String]) -> std::collections::BTreeSet<&String> {
         v.iter().collect()
     }
@@ -451,19 +430,31 @@ fn write_chain(doc: &mut toml_edit::DocumentMut, now: &ChainOverlay, reordered: 
             "daily_budget",
             to.daily_budget != now.daily_budget,
             to.daily_budget.is_empty(),
-            map::<i64>(&budget),
+            toml_edit::Value::InlineTable(
+                (to.daily_budget.iter())
+                    .map(|(k, v)| (k.as_str(), i64::from(*v)))
+                    .collect(),
+            ),
         ),
         (
             "timeout_s",
             to.timeout_s != now.timeout_s,
             to.timeout_s.is_empty(),
-            map::<i64>(&timeout),
+            toml_edit::Value::InlineTable(
+                (to.timeout_s.iter())
+                    .map(|(k, v)| (k.as_str(), *v as i64))
+                    .collect(),
+            ),
         ),
         (
             "model",
             to.model != now.model,
             to.model.is_empty(),
-            map(&to.model),
+            toml_edit::Value::InlineTable(
+                (to.model.iter())
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect(),
+            ),
         ),
     ];
     for (key, changed, empty, value) in changes {

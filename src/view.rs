@@ -268,9 +268,8 @@ impl Viewer {
             return Err(Response::text(403, "a save comes from this viewer's page"));
         }
         // The media type itself, parameters aside: `application/jsonp` is not JSON.
-        let media = |t: &str| t.split(';').next().unwrap_or("").trim().to_owned();
-        if !only("content-type").is_some_and(|t| media(t).eq_ignore_ascii_case("application/json"))
-        {
+        let media = only("content-type").map(|t| t.split(';').next().unwrap_or("").trim());
+        if !media.is_some_and(|m| m.eq_ignore_ascii_case("application/json")) {
             return Err(Response::text(400, "a save is JSON"));
         }
         let len = match only("content-length") {

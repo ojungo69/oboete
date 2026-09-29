@@ -530,11 +530,6 @@ function keyState(r) {
   return r.key_file ? [state, note(t('key_file', { path: r.key_file }))] : [state];
 }
 
-function budgetPlaceholder(r) {
-  if (r.effective_daily_budget === null) return t('no_cap');
-  return String(r.effective_daily_budget);
-}
-
 function chainRow(r, i, redraw) {
   const tr = el('tr', r.edit.on ? null : 'off');
   const move = (d) => {
@@ -562,7 +557,7 @@ function chainRow(r, i, redraw) {
   const model = input('text', r.edit.model, r.effective_model ?? '', `chain.${r.name}.model`, (v) => { r.edit.model = v; });
   model.setAttribute('aria-label', `${t('col_model')}: ${r.name}`);
   model.disabled = r.model_rule === 'fixed';
-  const budget = input('number', r.edit.daily_budget, budgetPlaceholder(r), `chain.${r.name}.daily_budget`, (v) => { r.edit.daily_budget = v; });
+  const budget = input('number', r.edit.daily_budget, r.effective_daily_budget === null ? t('no_cap') : String(r.effective_daily_budget), `chain.${r.name}.daily_budget`, (v) => { r.edit.daily_budget = v; });
   budget.min = '1';
   budget.max = '100000';
   budget.setAttribute('aria-label', `${t('col_budget')}: ${r.name}`);
