@@ -78,11 +78,11 @@ jobs:
               core.setOutput('review', 'false');
               return;
             }
+            // No push queues a review (a PR's last push is reviewed by hand), so an opening review
+            // that waited in the queue past a push reviews the current head, as a manual one does.
             const eventPr = context.payload.pull_request;
             if (eventPr && (pr.head.sha !== eventPr.head.sha || pr.base.ref !== eventPr.base.ref)) {
-              core.notice('Skipping a superseded pull request snapshot. Use the latest PR event or a manual review.');
-              core.setOutput('review', 'false');
-              return;
+              core.notice('The pull request moved while this review was queued: reviewing its current head.');
             }
             core.setOutput('base_ref', pr.base.ref);
             core.setOutput('head_sha', pr.head.sha);
