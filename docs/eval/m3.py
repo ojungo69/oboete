@@ -409,6 +409,19 @@ def shares(a, b, n=8):
     return any(a[i:i + n] in b for i in range(len(a) - n + 1))
 
 
+def its(item, quotes, on, quote_of):
+    """Whether a claim's quotes in one of the item's records (its own, or the other end of an
+    accepted proposal) are the item's; `on` holds the labeled items of that record. Per decision
+    (owner, 2026-09-29): on a record that holds another labeled item, a quote sharing text with
+    some of them is theirs alone; one sharing none is every item's, as a record's claims all were
+    before."""
+    on = on if item in on else on + [item]
+    if len(on) < 2:
+        return True
+    hit = {i for i in on for q in quotes if shares(q, quote_of[i])}
+    return not hit or item in hit
+
+
 def score(binary, name):
     """M3 on the labeled items, by the definitions of docs/spike/m3-dev.md. Counts only."""
     h = home(binary, name)
@@ -428,17 +441,6 @@ def score(binary, name):
         if w['seq'] is not None:
             labeled.setdefault(w['seq'], []).append(i)
 
-    def its(item, seq, quotes):
-        """Whether a claim's quotes in record `seq`, one of the item's (its own, or the other end of
-        an accepted proposal), are the item's. Per decision (owner, 2026-09-29): on a record that
-        holds another labeled item, a quote sharing text with some of them is theirs alone; one
-        sharing none is every item's, as a record's claims all were before."""
-        on = labeled.get(seq, [])
-        on = on if item in on else on + [item]
-        if len(on) < 2:
-            return True
-        hit = {i for i in on for q in quotes if shares(q, quote_of[i])}
-        return not hit or item in hit
     superseded = {u for (u,) in k.execute(
         "SELECT e.to_uid FROM edges e JOIN claims c ON c.op_device = e.op_device AND c.op_seq = e.op_seq "
         "WHERE e.type = 'supersedes'")}
@@ -448,7 +450,8 @@ def score(binary, name):
     def state(item):
         at = item_records(raw, where, item)
         mine = [(u, st) for u, (st, seqs) in claims.items()
-                if any(s in at and its(item, s, qs) for s, qs in seqs.items())]
+                if any(s in at and its(item, qs, labeled.get(s, []), quote_of)
+                       for s, qs in seqs.items())]
         if not mine:
             return 'none'
         if any(st == 'decided' and u not in superseded for u, st in mine):
