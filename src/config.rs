@@ -272,7 +272,8 @@ impl Provider {
     pub fn budget_from_key(&self) -> bool {
         matches!(self, Provider::Openai {
                 base_url, model, daily_budget: None, subscription: false, ..
-            } if base_url.trim_end_matches('/') == OPENROUTER && model.ends_with(":free"))
+            } if base_url.trim().trim_end_matches('/').eq_ignore_ascii_case(OPENROUTER)
+                && model.to_ascii_lowercase().ends_with(":free"))
     }
     pub fn daily_budget(&self) -> u32 {
         match self {
@@ -763,6 +764,11 @@ mod tests {
         let free = "base_url = \"https://openrouter.ai/api/v1/\"\nmodel = \"m:free\"\n";
         assert!(entry(free).budget_from_key());
         assert_eq!(entry(free).daily_budget(), 10);
+        // The URL as written, in any case, and a model's suffix in any case.
+        assert!(
+            entry("base_url = \" https://OpenRouter.ai/api/v1/ \"\nmodel = \"m:FREE\"\n")
+                .budget_from_key()
+        );
         let own = entry(&format!("{free}daily_budget = 30\n"));
         assert!(!own.budget_from_key());
         assert_eq!(own.daily_budget(), 30);

@@ -612,26 +612,32 @@ fn key_id(key: Option<&str>) -> String {
     })
 }
 
+/// Which key `p` holds now, as a `key_id`: empty for none, and for a CLI entry, which has no key.
+pub(crate) fn key_of(p: &Provider) -> String {
+    match p {
+        Provider::Openai { key_file, .. } => key_id(
+            key_file
+                .as_deref()
+                .and_then(|f| config::read_key(f).ok())
+                .as_deref(),
+        ),
+        Provider::Cli { .. } => String::new(),
+    }
+}
+
 /// Which keys the entries whose budget is their key's (#238) hold now, as `key_id`s: part of who
 /// is asked, since another key has its own limit.
 pub(crate) fn budget_keys(providers: &[Provider]) -> Vec<String> {
     providers
         .iter()
         .filter(|p| p.budget_from_key())
-        .map(|p| match p {
-            Provider::Openai { key_file, .. } => key_id(
-                key_file
-                    .as_deref()
-                    .and_then(|f| config::read_key(f).ok())
-                    .as_deref(),
-            ),
-            Provider::Cli { .. } => String::new(),
-        })
+        .map(key_of)
         .collect()
 }
 
 /// The `:free` model requests a day that `key` may make, as OpenRouter's GET /api/v1/key at `url`
-/// answers (`data.free_model_daily_requests.limit`, 2026-09-30); None on any failure. The key
+/// answers (`data.free_model_daily_requests.limit`, 2026-09-30); None on any failure, and for a
+/// limit of 0, which leaves nothing to take a fifth of: the entry keeps its default. The key
 /// goes only to `url`, which answers itself (no redirect is followed), and nothing of the answer
 /// is kept but that number.
 fn free_limit(url: &str, key: &str) -> Option<u32> {

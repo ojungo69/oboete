@@ -65,7 +65,14 @@ pub fn daily(db: &Connection, p: &Provider) -> Result<u32> {
     if !p.budget_from_key() {
         return Ok(p.daily_budget());
     }
-    Ok(daily_after(p, &providers_db::key_limit(db, p.name())?))
+    Ok(daily_after(p, &key_read(db, p)?))
+}
+
+/// The last read of `p`'s key's limit, when it read the key `p` holds now: one of a replaced key,
+/// or of none, is not this key's (doctor reads without the chain's refresh).
+fn key_read(db: &Connection, p: &Provider) -> Result<Option<(Option<u32>, i64, String)>> {
+    let now = crate::provider::key_of(p);
+    Ok(providers_db::key_limit(db, p.name())?.filter(|(_, _, of)| *of == now))
 }
 
 /// `daily` for an entry whose key's last read is `read`.
@@ -80,7 +87,7 @@ fn daily_after(p: &Provider, read: &Option<(Option<u32>, i64, String)>) -> u32 {
 /// came from. `db` is None before providers.db exists.
 pub fn key_budget(db: Option<&Connection>, p: &Provider) -> Result<String> {
     let read = match db {
-        Some(db) => providers_db::key_limit(db, p.name())?,
+        Some(db) => key_read(db, p)?,
         None => None,
     };
     let budget = daily_after(p, &read);
@@ -119,7 +126,7 @@ pub fn admit(
         let mut until = providers_db::out_of_the_day(oldest.unwrap_or(now));
         // A key whose limit its last read did not give: the next read may raise the budget.
         if p.budget_from_key()
-            && let Some((None, at, _)) = providers_db::key_limit(db, name)?
+            && let Some((None, at, _)) = key_read(db, p)?
         {
             until = until.min(at + KEY_READ_RETRY_MS);
         }
@@ -541,14 +548,21 @@ mod tests {
     /// The call budget counts a rolling day too, and waits until its oldest call leaves it.
     /// #238: an OpenRouter free entry with no budget of the owner's takes a fifth of the limit its
     /// key's last read gave, and 10 until a read gives one; admit counts calls against that, and
-    /// doctor says which it is. The owner's own budget holds whatever the key says.
+    /// doctor says which it is. The owner's own budget holds whatever the key says, and a read of
+    /// a key the entry no longer holds is none.
     #[test]
     fn a_key_budget_is_a_fifth_of_what_its_last_read_gave() {
         let home = tempfile::tempdir().unwrap();
         let db = open(home.path()).unwrap();
-        let free =
-            "kind = \"openai\"\nbase_url = \"https://openrouter.ai/api/v1\"\nmodel = \"m:free\"\n";
+        let key_file = home.path().join("KEY.md");
+        std::fs::write(&key_file, "# a test key\nkey-a\n").unwrap();
+        let free = format!(
+            "kind = \"openai\"\nbase_url = \"https://openrouter.ai/api/v1\"\nmodel = \"m:free\"\n\
+             key_file = {key_file:?}\n"
+        );
         let p: Provider = toml::from_str(&format!("name = \"o\"\n{free}")).unwrap();
+        let k = crate::provider::key_of(&p);
+        let k = k.as_str();
         let said = |db: Option<&Connection>| key_budget(db, &p).unwrap();
         assert_eq!(daily(&db, &p).unwrap(), 10);
         assert_eq!(
@@ -556,7 +570,7 @@ mod tests {
             "10 calls a day until its key's own limit is read"
         );
         assert_eq!(said(Some(&db)), said(None));
-        providers_db::set_key_limit(&db, "o", Some(1000), 1, "k").unwrap();
+        providers_db::set_key_limit(&db, "o", Some(1000), 1, k).unwrap();
         assert_eq!(daily(&db, &p).unwrap(), 200);
         assert_eq!(
             said(Some(&db)),
@@ -565,10 +579,20 @@ mod tests {
                 crate::db::utc(1)
             )
         );
+        // doctor reads without the chain's refresh: a read of the key the file held before is
+        // not this key's.
+        std::fs::write(&key_file, "# a test key\nkey-b\n").unwrap();
+        assert_eq!(daily(&db, &p).unwrap(), 10);
+        assert_eq!(
+            said(Some(&db)),
+            "10 calls a day until its key's own limit is read"
+        );
+        std::fs::write(&key_file, "# a test key\nkey-a\n").unwrap();
+        assert_eq!(daily(&db, &p).unwrap(), 200);
         let own: Provider =
             toml::from_str(&format!("name = \"o\"\n{free}daily_budget = 30\n")).unwrap();
         assert_eq!(daily(&db, &own).unwrap(), 30);
-        providers_db::set_key_limit(&db, "o", None, 2, "k").unwrap();
+        providers_db::set_key_limit(&db, "o", None, 2, k).unwrap();
         assert_eq!(daily(&db, &p).unwrap(), 10);
         assert_eq!(
             said(Some(&db)),
@@ -577,7 +601,7 @@ mod tests {
                 crate::db::utc(2)
             )
         );
-        providers_db::set_key_limit(&db, "o", Some(5), 3, "k").unwrap();
+        providers_db::set_key_limit(&db, "o", Some(5), 3, k).unwrap();
         call(&db, "o", None, 10, 10);
         let r = admit(&db, &p, 10.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(r.detail, "1/1 calls in 24 hours");
@@ -586,7 +610,7 @@ mod tests {
         };
         // After a failed read, the refusal holds until the read is tried again, not for the day.
         let at = crate::db::now_ms();
-        providers_db::set_key_limit(&db, "o", None, at, "k").unwrap();
+        providers_db::set_key_limit(&db, "o", None, at, k).unwrap();
         (0..9).for_each(|_| call(&db, "o", None, 10, 10));
         let r = admit(&db, &p, 10.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(r.detail, "10/10 calls in 24 hours");
