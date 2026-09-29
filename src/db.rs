@@ -103,6 +103,25 @@ pub(crate) fn quick_check(conn: &Connection, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// `quick_check` table by table, the virtual tables left out: FTS5 answers any quick_check with
+/// its whole-index check (it ignores isQuick), about 10 s at every worker start on a 70,000-record
+/// home, where this takes half a second. sqlite_schema's check covers the freelist; only a page
+/// that no table uses goes unseen. doctor runs the whole `quick_check`.
+pub(crate) fn quick_check_tables(conn: &Connection, name: &str) -> Result<()> {
+    let first: Option<String> = conn
+        .query_row(
+            "SELECT q.quick_check FROM pragma_table_list l, pragma_quick_check(l.name) q
+             WHERE l.schema = 'main' AND l.type IN ('table', 'shadow') AND q.quick_check != 'ok'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match first {
+        None => Ok(()),
+        Some(first) => anyhow::bail!("{name}: quick_check: {first}"),
+    }
+}
+
 pub(crate) fn wal(conn: &Connection, synchronous: &str) -> Result<()> {
     conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
     // Switching a file to WAL takes an exclusive lock that the busy handler does not cover:

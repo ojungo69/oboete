@@ -524,7 +524,7 @@ pub fn open_raw(home: &Path) -> Result<Raw> {
 /// then rebuilds from seq 0 (spec 1.7); raw.db and the segments are not touched.
 pub fn open_knowledge(home: &Path) -> Result<rusqlite::Connection> {
     let checked = crate::knowledge::open(home)
-        .and_then(|k| crate::db::quick_check(&k, "knowledge.db").map(|()| k));
+        .and_then(|k| crate::db::quick_check_tables(&k, "knowledge.db").map(|()| k));
     match checked {
         Ok(k) => Ok(k),
         Err(e) if damaged(&e) => {
@@ -796,6 +796,24 @@ mod tests {
         assert_eq!(std::fs::read(&seg).unwrap(), seg_bytes);
         let hits = crate::search::raw(p, "zq007x", None, 5).unwrap();
         assert_eq!(hits.first().map(|h| h.seq), Some(8));
+    }
+
+    #[test]
+    fn a_knowledge_db_opens_without_checking_its_search_indexes_against_their_text() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("note zq001x kept")).unwrap();
+        drop(raw);
+        crate::worker::run_once(p).unwrap();
+        let k = crate::knowledge::open(p).unwrap();
+        k.execute("DELETE FROM raw_fts_content", []).unwrap(); // the index keeps its terms
+        assert!(crate::db::quick_check(&k, "knowledge.db").is_err());
+        drop(k);
+        open_knowledge(p).unwrap();
+        assert!(!quarantined(p, "knowledge.db"));
+        let e = crate::setup::doctor(p).unwrap_err().to_string();
+        assert!(e.contains("knowledge.db is damaged"), "{e}");
     }
 
     /// raw.db of `n` events, one segment exported after each `per` of them.
