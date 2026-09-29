@@ -1568,8 +1568,8 @@ pub(crate) fn op_span(op: &Value) -> Option<Span> {
 /// the answer no longer gives, at its active derivation's tier so it is the active one (an owner
 /// correction still applies over it). A settled one it no longer gives stays, since a curator's
 /// answers vary and `retracted` needs the user's words or the owner's correction; but a settled
-/// claim of the answer that restates it, of another uid (another kind) quoting the same words,
-/// supersedes it (#261): the curator cannot, as it is not shown the window's own claims (#256),
+/// claim of the answer that restates it, of another uid (another kind) quoting from where it
+/// starts, supersedes it (#261): the curator cannot, as it is not shown the window's own claims (#256),
 /// and both would be current. One append. A window with no text to read is covered
 /// without a call, as the curation phase covers one. `covers` names the part of a span curated
 /// through this window, from the span's start: that part is off the queue and no longer skipped,
@@ -1660,10 +1660,11 @@ pub fn recurate_window(
 /// Adds, to each settled claim of a recuration's answer that restates a settled claim of the
 /// window the answer leaves out (`recurate_window`), the left-out claim's uid (#261). A restatement
 /// is of a new uid, since one the window has is a re-derivation beside it, and its first quote
-/// overlaps the left-out claim's in the same event: the same words, not only the same sentence,
-/// which can hold several claims (`claim_at` tells apart only claims of one kind). A re-derivation
-/// keeps such a supersede its active derivation has, or a second recuration would make both
-/// current again. Settled on both sides, as the gates' rules have it: a proposal supersedes
+/// starts where the left-out claim's does, in the same event: not only in the same sentence, which
+/// can hold several claims (`claim_at` tells apart only claims of one kind), nor where two quotes
+/// only share a joining word. A re-derivation keeps a supersede its active derivation has, wherever
+/// it quotes now, or a second recuration would make both current again. Settled on both sides, as
+/// the gates' rules have it: a proposal supersedes
 /// nothing settled, and a global claim changes only by the owner (`anchored_in` has none). A
 /// claim the owner corrected is left as it is: the correction applies by uid (MUST-M21), and a
 /// restatement in the curator's words would hide it. An addition that would put a claim op over
@@ -1696,11 +1697,8 @@ fn restate(
         "SELECT 1 FROM claims c JOIN edges e ON e.op_device = c.op_device AND e.op_seq = c.op_seq
          WHERE c.uid = ?1 AND e.to_uid = ?2",
     )?;
-    let overlap = |a: &crate::claims::Evidence, b: &crate::claims::Evidence| {
-        a.device == b.device
-            && a.seq == b.seq
-            && a.offset < b.offset + b.length
-            && b.offset < a.offset + a.length
+    let same_start = |a: &crate::claims::Evidence, b: &crate::claims::Evidence| {
+        a.device == b.device && a.seq == b.seq && a.offset == b.offset
     };
     for c in claims {
         let mut n: crate::claims::ClaimOp = serde_json::from_value(c.clone())?;
@@ -1710,7 +1708,12 @@ fn restate(
         let uid = crate::claims::uid(&n.kind, first);
         let again = anchored.iter().any(|(u, _)| *u == uid);
         for &(s, at) in &left {
-            if overlap(at, first) && (!again || had.exists(params![uid, s])?) {
+            let restates = if again {
+                had.exists(params![uid, s])?
+            } else {
+                same_start(at, first)
+            };
+            if restates {
                 n.supersedes.push(s.to_owned());
                 if serde_json::to_string(&n)?.len() > crate::raw::MAX_OP_BYTES {
                     n.supersedes.pop();
@@ -5538,6 +5541,56 @@ mod tests {
             current_bodies(&k),
             ["Prefer stderr logs.", "Tabs, not spaces."]
         );
+    }
+
+    /// #261: two claims of a sentence that share only a joining word are two claims: a
+    /// restatement quoting from the second does not supersede the first (cubic on 2de9778).
+    #[test]
+    fn a_quote_sharing_only_a_joining_word_restates_nothing() {
+        let first = answer(vec![drafted(
+            "c1",
+            "decided",
+            "Use tabs and",
+            "Tabs, not spaces.",
+        )]);
+        let again = answer(vec![preference(
+            "c1",
+            "decided",
+            "and log to stderr",
+            "Prefer stderr logs.",
+        )]);
+        let (_home, k) = one_sentence("Use tabs and log to stderr.", vec![first, again]);
+        assert_eq!(
+            current_bodies(&k),
+            ["Prefer stderr logs.", "Tabs, not spaces."]
+        );
+    }
+
+    /// #261: a restatement derived again with its quote moved within the sentence (still its uid:
+    /// the new quote overlaps the old, `keyed`) keeps the supersede its active derivation has,
+    /// though it no longer starts where the claim it restated does (cubic on 2de9778).
+    #[test]
+    fn a_restatement_quoting_elsewhere_in_its_sentence_still_supersedes() {
+        let first = answer(vec![drafted(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Tabs, not spaces.",
+        )]);
+        let restated = answer(vec![preference(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Prefer tabs.",
+        )]);
+        let moved = answer(vec![preference(
+            "c1",
+            "decided",
+            "tabs, never",
+            "Prefer tabs over spaces.",
+        )]);
+        let (_home, k) = one_sentence("Use tabs, never spaces.", vec![first, restated, moved]);
+        assert_eq!(current_bodies(&k), ["Prefer tabs over spaces."]);
     }
 
     /// #261: a claim the owner corrected is not superseded by a restatement: the correction
