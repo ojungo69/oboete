@@ -429,11 +429,13 @@ def score(binary, name):
             labeled.setdefault(w['seq'], []).append(i)
 
     def its(item, seq, quotes):
-        """Whether a claim's quotes in record `seq` are the item's. Per decision (owner, 2026-09-29):
-        on a record that holds several labeled items, a quote sharing text with some of them is
-        theirs alone; one sharing none is every item's, as a record's claims all were before."""
+        """Whether a claim's quotes in record `seq`, one of the item's (its own, or the other end of
+        an accepted proposal), are the item's. Per decision (owner, 2026-09-29): on a record that
+        holds another labeled item, a quote sharing text with some of them is theirs alone; one
+        sharing none is every item's, as a record's claims all were before."""
         on = labeled.get(seq, [])
-        if seq != where[item]['seq'] or len(on) < 2:
+        on = on if item in on else on + [item]
+        if len(on) < 2:
             return True
         hit = {i for i in on for q in quotes if shares(q, quote_of[i])}
         return not hit or item in hit
