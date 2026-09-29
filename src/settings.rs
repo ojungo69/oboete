@@ -90,8 +90,21 @@ pub fn show(home: &Path) -> Value {
     let db = (home.join("providers.db").exists())
         .then(|| crate::providers_db::open(home).ok())
         .flatten();
+    // A `[chain]` model is shown where it applies to an entry of its name: one `load()` left
+    // unset everywhere (a model no entry of the name can price) is not the page's to keep, and a
+    // save without it removes it. Every entry of one name shows the same value (Codex on #270).
+    let applied: std::collections::BTreeSet<&str> = (cfg.providers.iter())
+        .filter(|p| {
+            let own = match p {
+                Provider::Openai { model, .. } => Some(model.as_str()),
+                Provider::Cli { model, .. } => model.as_deref(),
+            };
+            own.is_some() && cfg.chain.model.get(p.name()).map(String::as_str) == own
+        })
+        .map(Provider::name)
+        .collect();
     let chain: Vec<Value> = (cfg.providers.iter())
-        .map(|p| entry(p, &cfg.chain, db.as_ref()))
+        .map(|p| entry(p, &cfg.chain, applied.contains(p.name()), db.as_ref()))
         .collect();
     json!({
         "version": version,
@@ -124,7 +137,7 @@ fn tool_output(t: ToolOutput) -> &'static str {
 /// One chain entry for the page. `key` is the key file's state as doctor words it; its path is
 /// shown so the user knows where the key goes, and its contents are never read into the answer
 /// (a budget from the key reads it inside the process, to fingerprint it).
-fn entry(p: &Provider, chain: &ChainOverlay, db: Option<&Connection>) -> Value {
+fn entry(p: &Provider, chain: &ChainOverlay, applied: bool, db: Option<&Connection>) -> Value {
     let name = p.name();
     let (kind, key, key_file, model, timeout_s) = match p {
         Provider::Openai {
@@ -170,9 +183,7 @@ fn entry(p: &Provider, chain: &ChainOverlay, db: Option<&Connection>) -> Value {
         "on": !chain.turns_off(name),
         "key": key,
         "key_file": key_file,
-        // Set only when it applies: one `load()` left unset (a model the entry cannot price) is
-        // not the page's to keep, and a save without it removes it.
-        "model": chain.model.get(name).filter(|m| Some(m.as_str()) == model),
+        "model": chain.model.get(name).filter(|_| applied),
         "effective_model": model,
         "model_rule": p.model_rule(),
         "daily_budget": chain.daily_budget.get(name),
@@ -391,12 +402,17 @@ fn put_entry(
             chain.timeout_s.insert(e.name.clone(), s);
         }
     }
+    // The file's own value stays as it is, applied where each entry's rule allows it.
     if let Some(m) = &e.model
+        && now.model.get(&e.name) == Some(m)
+    {
+        chain.model.insert(e.name.clone(), m.clone());
+    } else if let Some(m) = &e.model
         && !each(&|p| own_model(p).as_ref() == Some(m))
     {
         let allowed = |c: char| c.is_ascii_alphanumeric() || "._:/@+-".contains(c);
         let fits = !m.is_empty() && m.chars().count() <= MODEL_CHARS && m.chars().all(allowed);
-        if !fits && now.model.get(&e.name) != Some(m) {
+        if !fits {
             return Err(refused(422, "model", field("model")));
         }
         if !each(&|p| p.model_rule().allows(m)) {
@@ -901,6 +917,29 @@ mod tests {
             .map(|e| &e["effective_timeout_s"])
             .collect();
         assert_eq!(timeouts, [60, 60]);
+    }
+
+    /// Two entries of one name whose rules differ: `[chain]`'s model applies to one of them, both
+    /// rows show it, and a save that leaves it keeps it (Codex on #270).
+    #[test]
+    fn a_shared_name_shows_one_model_and_keeps_it() {
+        let text = "[chain]\nmodel = { a = \"x\" }\n\n[[providers]]\nkind = \"openai\"\nname = \"a\"\n\
+                    base_url = \"https://example.invalid/v1\"\nmodel = \"m\"\n\
+                    limits = { usd_per_mtok_in = 1.0 }\n\n\
+                    [[providers]]\nkind = \"cli\"\nname = \"a\"\ncli = \"claude\"\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        let models: Vec<&Value> = (shown["chain"].as_array().unwrap().iter())
+            .map(|e| &e["model"])
+            .collect();
+        assert_eq!(models, ["x", "x"]);
+        let saved = save_to(
+            &home,
+            &posted(&shown, |v| v["inject"]["session_start"] = json!(false)),
+        )
+        .unwrap();
+        assert_eq!(saved["inject"]["session_start"], false);
+        assert_eq!(config::load(home.path()).unwrap().chain.model["a"], "x");
     }
 
     /// A file that does not parse: no form, and no save.
