@@ -126,11 +126,24 @@ whole-2 and whole3 are one arm run twice, on one binary with the same settings (
   - Codex on #252: a pick was the user's own words, so it could supersede any claim of its repository. In acc6 d107's "１" superseded the reply's key-rotation lesson and CCS-removal change with the OmniRoute proposal. A pick (an option label alone: "1", "１", "②", "B", "1番で", "案A") is now bare, as a "yes" is: it settles only an option that the reply it answers listed, in the window or in the options line carried in; it replaces only a claim of its kind; it never marks done, retracts or retires a lesson. MUST-M4's provenance fallback is not applied to a pick: a bare "yes" to a reply that followed a tool call settles nothing, but a pick names one option, and d107's reply followed a tool call. Reverting that is one predicate in `gates::picks_an_option`.
   - d107's window curated again with that build (0de90bd) on four more fresh copies of acc5: each time "１" was kept as the user's decision superseding the OmniRoute proposal only.
 
+### Keep what applies later (#254)
+
+The curator's prompt now says to keep what should still change what an agent does in a later session. That is the rule the labels use for instructions for the moment (above). A request that ends with the session is not a claim. A go-ahead is the decision it accepts. A rule, permission, limit or fact about the setup is kept, even when the developer states it as a request or in passing. Work left for a new session is a decided open item. The verdict was declared in #254 before the run.
+
+- **Run**: `live --typed` (the 25 owner-yes labels in the owner's own prompts and the 5 owner-no records, 30 spans). 4 passes per arm, alternating, each from a fresh copy of the prepared home. B is `oboete-base-2ea4fa8` (#252 at 2ea4fa8) and L is `oboete-later-6da174d`, the same build with the prompt change.
+- **Hits over the 24 lasting typed labels** (0 to 4 each; d332 is left out): B 48, L 56. That is +8, the verdict's threshold, so L ships. No label lost more than one hit (d435, 4 → 3). The owner-no records decided were 13 in each arm, over 5 records × 4 passes.
+- **Labels that moved** (B → L):
+  - d360「新セッションで実装する」: 1 → 4. The prompt names work left for a new session.
+  - d215: 1 → 3.
+  - d11, d112, d146, d294: +1 each.
+  - d332, the instruction for the moment in the set: 1 → 0.
+- **Decided claims per pass**: B 17, 31, 38, 52; L 28, 54, 22, 29. The spread within an arm is wide, but the means are close (34.5 and 33.3). With equal owner-no counts, L's gain is not from deciding more overall.
+
 ### What the next M3 run needs
 
 1. The test labels, classed by the same rule (instructions for the moment, above).
 2. Supersedes: a window now carries its sessions' decided claims, so a same-session earlier decision is in the prompt; the cross-session pairs need the hybrid search (#222). A record holding two labels is scored per decision (2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and with the reply's options carried, 2 of 6 acceptances settle their proposal (acc6: d462 and d107; #244: a go-ahead is often drafted as a proposal or not at all, or quotes another line than the owner's, and a quote from another repository's tool line loses its supersedes).
-3. The quote match: whitespace-blind, then the paraphrases.
+3. The quote match: the paraphrases (whitespace-blind matching is #248).
 4. The defaults as they would ship were run once (short-2): 22 of 44.
 5. Several runs of each arm (Run to run, above).
 
