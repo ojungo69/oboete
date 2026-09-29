@@ -2225,7 +2225,9 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             let goal: String = gate(&goal).chars().take(200).collect();
             lines.push(format!("goal: {goal}"));
         }
-        // Proposals first: they are what an acceptance in this window answers.
+        // Proposals first: they are what an acceptance in this window answers. The assistant's
+        // own before the rest (inferred, a tool's), since `fit` cuts from the end (#244).
+        let mut proposals: Vec<(bool, String, Option<String>, crate::claims::Claim)> = Vec::new();
         for op in previous.iter().filter(|o| o.kind == OpKind::Claim) {
             let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(op.body.clone()) else {
                 continue;
@@ -2246,6 +2248,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                 if let Some((repo, tip)) = crate::claims::tip(k, &uid)?
                     && tip.status == "proposed"
                     && !uids.iter().any(|(_, _, u)| u.uid == uid)
+                    && !proposals.iter().any(|(.., u)| u.uid == uid)
                 {
                     let place = repo
                         .as_deref()
@@ -2257,13 +2260,15 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                         .filter(|l| l != first.quote.trim())
                         .map(|l| format!(" (from: {})", gate(&l)))
                         .unwrap_or_default();
-                    lines.push(format!(
-                        "proposed before {uid}{place}: {}{from}",
-                        gate(&tip.body)
-                    ));
-                    uids.push((key.to_owned(), repo, tip));
+                    let line = format!("proposed before {uid}{place}: {}{from}", gate(&tip.body));
+                    proposals.push((tip.speaker != "assistant proposal", line, repo, tip));
                 }
             }
+        }
+        proposals.sort_by_key(|(inferred, ..)| *inferred);
+        for (_, line, repo, tip) in proposals {
+            lines.push(line);
+            uids.push((key.to_owned(), repo, tip));
         }
         // The session's own, in its repositories, before the cap: other sessions' newer claims
         // never hide one.
@@ -5916,12 +5921,13 @@ mod tests {
                 "quote": quote, "line": line, "supersedes": []})
         };
         let answer = json!({"claims": [
-            claim("c1", "decision", "Cache the parsed files", "L2", "Cache parsed files."),
-            claim("c2", "decision", "Parse in parallel", "L2", "Parse in parallel."),
+            // A tool's line is no option list: its text is not shown again. And its speaker is
+            // the tool's, so it comes after the assistant's proposals, which `fit` cuts last.
+            claim("c1", "decision", "stream the parsed rows", "L3", "Stream the parsed rows."),
+            claim("c2", "decision", "Cache the parsed files", "L2", "Cache parsed files."),
+            claim("c3", "decision", "Parse in parallel", "L2", "Parse in parallel."),
             // A fact the gates lowered is nothing an acceptance settles.
-            claim("c3", "repo fact", "Two ways", "L2", "The importer can go two ways."),
-            // A tool's line is no option list: its text is not shown again.
-            claim("c4", "decision", "stream the parsed rows", "L3", "Stream the parsed rows.")],
+            claim("c4", "repo fact", "Two ways", "L2", "The importer can go two ways.")],
             "summary": "s"});
         let none = |_: &str| json!({"claims": [], "summary": "s"});
         let (sent, _) = two_windows(&first, answer, &[prompt("1")], none);
@@ -5931,9 +5937,7 @@ mod tests {
             .collect();
         assert_eq!(carried.len(), 3, "{}", sent[1]);
         assert!(
-            carried
-                .iter()
-                .any(|l| l.ends_with(": Stream the parsed rows.")),
+            carried[2].ends_with(": Stream the parsed rows."),
             "{}",
             sent[1]
         );
