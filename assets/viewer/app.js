@@ -586,7 +586,9 @@ function saveBody() {
     if (Number.isNaN(daily)) return { field: `chain.${r.name}.daily_budget` };
     const timeout = optional(r.edit.timeout_s, r.timeout_s, ...form.ranges.timeout_s);
     if (Number.isNaN(timeout)) return { field: `chain.${r.name}.timeout_s` };
-    chain.push({ name: r.name, on: r.edit.on, daily_budget: daily, timeout_s: timeout, model: r.edit.model.trim() || null });
+    // A model config.toml has, left as it is, is sent as it is.
+    const model = r.edit.model === (r.model ?? '') ? r.model : r.edit.model.trim() || null;
+    chain.push({ name: r.name, on: r.edit.on, daily_budget: daily, timeout_s: timeout, model });
   }
   return {
     body: {
@@ -737,7 +739,9 @@ async function show() {
   const q = $('q').value.trim();
   setStatus('Loading…');
   try {
-    const render = q ? await showSearch(repo, q) : await (LOADERS.get(view) || showFeed)(repo);
+    // The settings view has no search: its controls are hidden, and a query left in them is not its.
+    const search = q && view !== 'settings';
+    const render = search ? await showSearch(repo, q) : await (LOADERS.get(view) || showFeed)(repo);
     if (mine !== generation) return false;
     render();
     if (version === null) drawnWithoutBaseline = true;
@@ -773,6 +777,9 @@ async function refresh() {
     setStatus(e.message, true);
     return false;
   }
+  // A poll that began on another view does not redraw the settings opened meanwhile: that would
+  // drop what is typed and not saved.
+  if (view === 'settings') return true;
   return show();
 }
 

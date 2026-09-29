@@ -496,65 +496,109 @@ fn put(doc: &mut toml_edit::DocumentMut, table: &str, key: &str, mut value: toml
 /// when `reordered`), and removes one the page no longer sets; a key that does not change is not
 /// touched, so its comments stay.
 fn write_chain(doc: &mut toml_edit::DocumentMut, now: &ChainOverlay, reordered: bool, to: Chain) {
-    fn list(names: &[String]) -> toml_edit::Value {
-        toml_edit::Value::Array(names.iter().map(String::as_str).collect())
-    }
     fn set(v: &[String]) -> std::collections::BTreeSet<&String> {
         v.iter().collect()
     }
-    let changes: [(&str, bool, bool, toml_edit::Value); 5] = [
-        ("order", reordered, to.order.is_empty(), list(&to.order)),
+    fn map<V>(
+        m: &std::collections::BTreeMap<String, V>,
+        f: impl Fn(&V) -> toml_edit::Value,
+    ) -> New {
+        New::Map(m.iter().map(|(k, v)| (k.clone(), f(v))).collect())
+    }
+    let changes = [
+        ("order", reordered, New::List(to.order.clone())),
         (
             "off",
             set(&to.off) != set(&now.off),
-            to.off.is_empty(),
-            list(&to.off),
+            New::List(to.off.clone()),
         ),
         (
             "daily_budget",
             to.daily_budget != now.daily_budget,
-            to.daily_budget.is_empty(),
-            toml_edit::Value::InlineTable(
-                (to.daily_budget.iter())
-                    .map(|(k, v)| (k.as_str(), i64::from(*v)))
-                    .collect(),
-            ),
+            map(&to.daily_budget, |v| i64::from(*v).into()),
         ),
         (
             "timeout_s",
             to.timeout_s != now.timeout_s,
-            to.timeout_s.is_empty(),
-            toml_edit::Value::InlineTable(
-                (to.timeout_s.iter())
-                    .map(|(k, v)| (k.as_str(), *v as i64))
-                    .collect(),
-            ),
+            map(&to.timeout_s, |v| (*v as i64).into()),
         ),
         (
             "model",
             to.model != now.model,
-            to.model.is_empty(),
-            toml_edit::Value::InlineTable(
-                (to.model.iter())
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .collect(),
-            ),
+            map(&to.model, |v| v.as_str().into()),
         ),
     ];
-    for (key, changed, empty, value) in changes {
-        if !changed {
-            continue;
+    for (key, changed, new) in changes {
+        if changed {
+            set_key(doc, key, new);
         }
-        if empty {
-            if let Some(t) = doc
-                .get_mut("chain")
-                .and_then(toml_edit::Item::as_table_like_mut)
-            {
-                t.remove(key);
+    }
+}
+
+/// A `[chain]` key's new value: names, or values by name.
+enum New {
+    List(Vec<String>),
+    Map(Vec<(String, toml_edit::Value)>),
+}
+
+/// Sets `[chain].key`, or removes it when it is empty. A map the file has already, as `{ ... }`
+/// or as a table of its own, changes entry by entry, so an entry that does not change keeps its
+/// comment and place (cubic on #270).
+fn set_key(doc: &mut toml_edit::DocumentMut, key: &str, new: New) {
+    let empty = match &new {
+        New::List(v) => v.is_empty(),
+        New::Map(m) => m.is_empty(),
+    };
+    if empty {
+        if let Some(t) = (doc.get_mut("chain")).and_then(toml_edit::Item::as_table_like_mut) {
+            t.remove(key);
+        }
+        return;
+    }
+    let had = (doc.get("chain").and_then(|c| c.get(key)))
+        .and_then(toml_edit::Item::as_table_like)
+        .is_some();
+    match new {
+        New::Map(m) if had => {
+            let Some(t) = doc["chain"][key].as_table_like_mut() else {
+                return;
+            };
+            let gone: Vec<String> = (t.iter().map(|(k, _)| k.to_owned()))
+                .filter(|k| !m.iter().any(|(n, _)| n == k))
+                .collect();
+            for k in gone {
+                t.remove(&k);
             }
-        } else {
-            put(doc, "chain", key, value);
+            let same = |a: &toml_edit::Value, b: &toml_edit::Value| {
+                (a.as_integer().is_some() && a.as_integer() == b.as_integer())
+                    || (a.as_str().is_some() && a.as_str() == b.as_str())
+            };
+            for (n, v) in m {
+                match t.get_mut(&n).and_then(toml_edit::Item::as_value_mut) {
+                    Some(old) if same(old, &v) => {}
+                    Some(old) => {
+                        let decor = old.decor().clone();
+                        *old = v;
+                        *old.decor_mut() = decor;
+                    }
+                    None => {
+                        t.insert(&n, toml_edit::Item::Value(v));
+                    }
+                }
+            }
         }
+        New::Map(m) => put(
+            doc,
+            "chain",
+            key,
+            toml_edit::Value::InlineTable(m.into_iter().collect()),
+        ),
+        New::List(v) => put(
+            doc,
+            "chain",
+            key,
+            toml_edit::Value::Array(v.iter().map(String::as_str).collect()),
+        ),
     }
 }
 
@@ -986,6 +1030,38 @@ mod tests {
         assert_eq!(
             (&row["model"], &row["model_rule"]),
             (&json!("m:free"), &json!("any"))
+        );
+    }
+
+    /// A map written as a table of its own changes entry by entry: an entry that does not change
+    /// keeps its comment and place, and one that does keeps its comment (cubic on #270).
+    #[test]
+    fn a_map_table_changes_entry_by_entry() {
+        let text = "[chain.daily_budget]\ngroq = 100 # half\nnim = 50 # trying it\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        save_to(
+            &home,
+            &posted(&shown, |v| {
+                for e in v["chain"].as_array_mut().unwrap() {
+                    match e["name"].as_str().unwrap() {
+                        "nim" => e["daily_budget"] = json!(60),
+                        "groq-20b" => e["daily_budget"] = json!(20),
+                        _ => {}
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let saved = file(&home).unwrap();
+        assert!(
+            saved.starts_with("[chain.daily_budget]\ngroq = 100 # half\nnim = 60 # trying it\n"),
+            "{saved}"
+        );
+        let budgets = config::load(home.path()).unwrap().chain.daily_budget;
+        assert_eq!(
+            (budgets["groq"], budgets["nim"], budgets["groq-20b"]),
+            (100, 60, 20)
         );
     }
 
