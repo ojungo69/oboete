@@ -10,9 +10,10 @@ read here. Every command takes the binary by path: `oboete` on PATH is the owner
   m3.py stub <bin> <name> [--shrink] [--tokens=N]
                                 curate that home with a localhost stub that answers no claims: the
                                 windows, their estimated tokens, M2's coverage; no call leaves
-  m3.py live <bin> <name> [--yes]
+  m3.py live <bin> <name> [--yes] [--tool=T] [--accepted]
                                 each labeled window sent again to one live entry by `recurate`
-                                (estimates only without --yes)
+                                (estimates only without --yes); only those of a tool's calls, or of
+                                the accepted proposals (both ends), when asked
   m3.py score <bin> <name>      M3's counts on the labeled items"""
 import collections, glob, http.server, json, os, re, sqlite3, subprocess, sys, threading, time
 from datetime import datetime
@@ -253,17 +254,43 @@ def map_labels(name, binary):
 LIVE = '[[providers]]\nkind = "cli"\nname = "claude"\ncli = "claude"\nmodel = "haiku"\ntimeout_s = 600\n'
 
 
-def spans(h, tool=None):
-    """The windows that hold a labeled record (only those in a call of `tool`, when given), as
-    record spans in seq order, each once. Windows that share a record (a record split across
-    windows) are one span: `recurate` cuts a span's windows itself, and two spans sharing a record
-    would send that record twice, the second run retracting what the first derived."""
+def item_records(raw, where, item):
+    """The labeled record, and for an accepted proposal the other end of its acceptance in the
+    session: the reply right before a label that quotes the owner's acceptance (a prompt), or the
+    owner's next prompt after a label that quotes the proposal (a reply). The claim that settles it
+    quotes either: the proposal, or the acceptance that supersedes the proposal carried into a
+    later window (spec 3.3, #240). A pick answered in a tool record holds both ends."""
+    seq = where[item]['seq']
+    if where[item]['who'] != 'assistant_accepted':
+        return {seq}
+    kind, device, agent, session = raw.execute(
+        'SELECT kind, device, agent, session FROM records WHERE seq = ?', (seq,)).fetchone()
+    same = 'device = ? AND agent = ? AND session = ?'
+    if kind == 'prompt':
+        other = f"SELECT max(seq) FROM records WHERE {same} AND kind = 'reply' AND seq < ?"
+    elif kind == 'reply':
+        other = f"SELECT min(seq) FROM records WHERE {same} AND kind = 'prompt' AND seq > ?"
+    else:
+        return {seq}
+    (other,) = raw.execute(other, (device, agent, session, seq)).fetchone()
+    return {seq, other} - {None}
+
+
+def spans(h, tool=None, accepted=False):
+    """The windows that hold a labeled item's records (`item_records`: both ends of an accepted
+    proposal), only those in a call of `tool` or only the accepted proposals' when asked, as record
+    spans in seq order, each once. Windows that share a record (a record split across windows) are
+    one span: `recurate` cuts a span's windows itself, and two spans sharing a record would send
+    that record twice, the second run retracting what the first derived."""
     ops, _ = windows(h)
     with open(f'{h}/map.json') as f:
-        seqs = {r['seq'] for r in json.load(f).values() if r['seq'] is not None}
-    if tool:
-        with open(f'{h}/map.json') as f:
-            seqs = {r['seq'] for r in json.load(f).values() if r['seq'] is not None and r.get('tool') == tool}
+        where = json.load(f)
+    raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
+    seqs = {s for i, r in where.items() if r['seq'] is not None
+            and (tool is None or r.get('tool') == tool)
+            and (not accepted or r['who'] == 'assistant_accepted')
+            for s in item_records(raw, where, i)}
+    raw.close()
     out = []
     for a, b in sorted({(w['from_seq'], w['to_seq']) for w in ops
                         if any(w['from_seq'] <= s <= w['to_seq'] for s in seqs)}):
@@ -293,7 +320,7 @@ def cooldown(h):
     time.sleep(max(0, until / 1000 - time.time()) + 5)
 
 
-def live(binary, name, send, tool=None):
+def live(binary, name, send, tool=None, accepted=False):
     """Each labeled window sent again to the live entry with `oboete recurate`, one span at a time
     in seq order, so an earlier claim is a candidate for a later window. Without `send`, only the
     estimates `recurate` prints."""
@@ -319,13 +346,14 @@ def live(binary, name, send, tool=None):
         tries[k] += 1
         if r['code'] == 0 and (not send or 'not curated' not in r['out']) or send and partly(r['out']) or tries[k] == 3:
             done.add(k)
-    # The log must be this pass's first spans. One cut another way (another --tool selection, or
-    # spans not yet merged) would send records again, or curate an earlier span after a later one
-    # and so with claims from its future as candidates (#228).
-    todo = spans(h, tool)
+    # The log must be this pass's first spans. One cut another way (another --tool or --accepted
+    # selection, or spans not yet merged or not yet holding both ends of an accepted proposal)
+    # would send records again, or curate an earlier span after a later one and so with claims
+    # from its future as candidates (#228).
+    todo = spans(h, tool, accepted)
     if set(tries) != {json.dumps([a, b]) for a, b in todo[:len(tries)]}:
-        sys.exit(f'{log} is not the first spans of this pass: it was cut with another --tool selection or '
-                 'before spans were merged. Resume it with that selection, or use a new home')
+        sys.exit(f'{log} is not the first spans of this pass: it was cut with another --tool or --accepted '
+                 'selection, or by an older m3.py. Resume it with that selection, or use a new home')
     if send:
         cooldown(h)  # the pass may have been cut while it waited out a cooldown
     tokens = 0
@@ -376,22 +404,8 @@ def score(binary, name):
 
     raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
 
-    def records_of_item(item):
-        """The labeled record, and for an accepted proposal whose label quotes the owner's
-        acceptance (a prompt), the assistant's reply right before it in the session: the claim an
-        acceptance promotes quotes the proposal, not the "yes"."""
-        seq = where[item]['seq']
-        if where[item]['who'] != 'assistant_accepted':
-            return {seq}
-        kind, session = raw.execute('SELECT kind, session FROM records WHERE seq = ?', (seq,)).fetchone()
-        if kind != 'prompt':
-            return {seq}
-        (reply,) = raw.execute("SELECT max(seq) FROM records WHERE session = ? AND kind = 'reply' AND seq < ?",
-                               (session, seq)).fetchone()
-        return {seq, reply} - {None}
-
     def state(item):
-        at = records_of_item(item)
+        at = item_records(raw, where, item)
         mine = [(u, st) for u, (st, seqs) in claims.items() if at & seqs]
         if not mine:
             return 'none'
@@ -536,7 +550,7 @@ if __name__ == '__main__':
         map_labels(args[1], args[0])
     elif cmd == 'live':
         live(args[0], args[1], '--yes' in args,
-             next((a.split('=')[1] for a in args if a.startswith('--tool=')), None))
+             next((a.split('=')[1] for a in args if a.startswith('--tool=')), None), '--accepted' in args)
     elif cmd == 'score':
         score(args[0], args[1])
     elif cmd == 'drafts':
