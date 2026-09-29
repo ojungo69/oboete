@@ -2,11 +2,12 @@
 
 The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and their harness, are in docs/spike/m3-dev.md and docs/eval/m3.py. Every measured result here is from the dev split, and no held-out transcript was read; the heavy-day size under Cost comes from counting the owner's transcripts of the last 90 days (counts only).
 
-## Where it stands (2026-09-29)
+## Where it stands (2026-09-30)
 
 - Tasks 1 to 11 are merged. The last of them are recuration (#189), the crash harness (#190), and claude's built-in plugins turned off for a curator call (#191, Claude Code 2.1.283).
 - Task 12, the judge's first role ("shrink, never drop"), is behind `[summary] shrink` (#194), off by default. Its input clause passes on dev. Its recall clause fails for decisions by the rule declared before the run, 22 against 24 of 44 (below), a difference smaller than two runs of one arm showed (20 and 24); lessons and fixes are not measured. It stays off. Its second role (a veto on `decided` and `supersedes`) has no code: it waits on M3.
-- Task 13 has the lines below: M2 passes, Cost fails with today's defaults, M3 fails on the dev labels. The first dev tuning of the gates is merged: the owner's answer to `AskUserQuestion` is the owner's words (#195, #202, #209).
+- Task 13 has the lines below: M2 passes, Cost's budgets meet the line since 2026-09-29 (a heavy day needs speed too), M3 fails on the dev labels. The first dev tuning of the gates is merged: the owner's answer to `AskUserQuestion` is the owner's words (#195, #202, #209).
+- M3's typed decisions: #254's prompt shipped. #259 (the typed lines listed again) and #262 (a request carried out is the developer's decision) did not ship (below).
 
 ## M2 on the dev transcripts: passes
 
@@ -30,7 +31,7 @@ A heavy day, measured: the owner's transcripts of the last 90 days (3,870 files 
 
 (From the dev stub pass: 0.218 windows and 852 tokens per event with the shrink off, 0.049 and 248 with it on.)
 
-- **The line failed with the defaults until 2026-09-29.** Groq's free tier allows 1,000 requests and 200,000 tokens a day per model (console.groq.com/docs/rate-limits). The default chain gave each of its three Groq entries 800 calls a day and no token budget, so on a heavy day the curator took all of each model's tokens, not 20%. Since 2026-09-29 each Groq entry is admitted up to 40,000 tokens and 200 calls in any 24 hours (Groq counts its day as a rolling window, and so do the budgets; the token budget adds reported usage and estimates, so a last call can pass it by its own size). OpenRouter free takes at most 10 calls in 24 hours: a fifth of the 50 `:free` requests a day of an account that bought less than 10 credits (1,000 after that, openrouter.ai/docs/api/reference/limits). That is some 24 windows a day across the three Groq models. The rest of a heavy day falls to the subscriptions.
+- **The line failed with the defaults until 2026-09-29.** Groq's free tier allows 1,000 requests and 200,000 tokens a day per model (console.groq.com/docs/rate-limits). The default chain gave each of its three Groq entries 800 calls a day and no token budget, so on a heavy day the curator took all of each model's tokens, not 20%. Since 2026-09-29 each Groq entry is admitted up to 40,000 tokens and 200 calls in any 24 hours (Groq counts its day as a rolling window, and so do the budgets; the token budget adds reported usage and estimates, so a last call can pass it by its own size). OpenRouter free takes a fifth of its key's own free-model limit, which `GET /api/v1/key` reports (#238): 10 calls in 24 hours on an account that bought less than 10 credits (50 `:free` requests a day), 200 on one that bought more (1,000 a day, openrouter.ai/docs/api/reference/limits), and 10 until the key's limit is read. That is some 24 windows a day across the three Groq models. The rest of a heavy day falls to the subscriptions.
 - **The subscriptions' speed is a limit too.** claude haiku takes about 100 s a window (212 calls: median 101 s, 99th percentile 187 s). The 526 windows of a heavy day with the shrink on are about 14.6 hours of calls in a row, and without the shrink about 65 hours. A day that heavy is curated over the following days, or by several entries at once.
 - Paid entries: none in the default chain, so the USD 5 cap is not reached.
 - With the curator's thinking off, a call took 16.6 s at the median without the shrink (nothink) and 15.6 s with it (short-2, 125 calls), so the 526 windows are about 2.3 hours of calls in a row. That is a projection: no full day was run.
@@ -144,7 +145,7 @@ The curator's prompt now says to keep what should still change what an agent doe
 #254's L passes missed 40 of the 96 hits the 24 lasting typed labels could have (4 passes). By what the passes kept, and the curator's answers the harness saved:
 
 - **No draft from the typed line** (15): d331「野良コンテナの判断は任せる」, d363「全権限をいつでも使えるように認証したいからそのコマンドを教えて」 and d365「ブラウザ開かないからurl教えて」 in all 4 passes, and d211 in 3. Each window is mostly tool output and the assistant's report, and the curator drafted repo facts from those. d365's line is also close to an example #254 added to the requests that stop mattering ("a URL to open").
-- **The request, carried out in the window, kept as a done change** quoting the developer's line (7): d352「モデルにglm5.2を追加して」 3 times, d294 and d54 twice each. M3 counts a claim with status decided, of any kind.
+- **The request, carried out in the window, kept as done** quoting the developer's line (7): d352「モデルにglm5.2を追加して」 as a change with status done 3 times, d294 and d54 as decisions with status done twice each. M3 counts a claim with status decided, of any kind.
 - **A question or a condition** (8): d293「codexみたいにフル権限で委譲する方が運用しやすくない？」 lowered to a proposal twice and superseded twice; d427「CodeRabbitが必要なら待っていいよ。」 a proposal 3 times, and once a draft that quoted both of its sentences across the line break was dropped as not in the window. Both of #254's builds predate #248 (the whitespace-blind quote match).
 - **A label whose quote is the assistant's text** (4): d50, in all 4 passes.
 - **Once each** (6): d112, d352 and d435 with no claim, d215 and d54 a proposal, d146 unverified.
@@ -154,11 +155,32 @@ The change for the first group: the window's typed lines (`[user]` lines, not `A
 - **Run**: `live --typed`, 4 passes per arm, alternating, each from a fresh copy of the prepared home. B is `oboete-base259-58a322c` (#256 at 3b8283f with #258's prompt, so both arms have #248) and N is `oboete-typed-e1fd962`, the same build with the change. The verdict was declared in #259 before the run.
 - **Hits over the 24 lasting typed labels**: B 59, N 62. That is +3, under the +8 to ship, and d112 lost 3 hits (3 → 0), which alone rejects it. The change is not in main. The owner-no records decided were 16 and 12, d332 (the instruction for the moment) 0 and 2, and the prompt tokens 1.9% more in N.
 - **What moved** (B → N):
-  - The first group moved as intended: d331 1 → 4, d363 0 → 1. d294 went 0 → 4 (a done change in every B pass), d146 2 → 4, d449 3 → 4.
+  - The first group moved as intended: d331 1 → 4, d363 0 → 1. d294 went 0 → 4 (a decision with status done in every B pass), d146 2 → 4, d449 3 → 4.
   - d112「削除して。ついでにuranai-aiとcloudflareのuranai-ai関連も削除して」 3 → 0: in all 4 N passes the curator answered its window with no claims; B's passes drafted the line as a decision 3 times. d446 4 → 2; d215, d435 and d54 lost 1 each.
   - d365 stayed at 0 in both arms, with the example changed.
 - **A reading, not tested**: "read each on its own" invites judging a line without the lines around it, so a request whose weight is in its context (d112's deletion, after a long exchange) reads as one step that stops mattering. A variant would keep the list and drop that phrase.
 - **Decided claims per pass**: B 48, 30, 28, 48; N 36, 29, 33, 30.
+
+### A request carried out is the developer's decision (#262)
+
+The second group of #259's breakdown is a request that an agent carried out in the same window and that was kept as done. The change: the keep rules say that a change the developer asks for is a decided decision quoting their line, even when an agent then makes it, and the decision's body says that it was made. The verdict was declared in #262 before the run.
+
+- **Run**: `live --typed`, 4 passes per arm, alternating B and N, each from a fresh copy of the prepared home. B is `oboete-base259-58a322c` (#259's B arm). N is `oboete-asked-9f72dda`, which is B with the change.
+- **Hits over the 24 lasting typed labels**: B 59, N 57, a difference of −2. No label lost 3 hits; d146, d363 and d449 lost 2 each.
+  - The owner-no records decided were 14 in B and 12 in N.
+  - N used 1.1% more prompt tokens.
+  - By the declared rule the result is inconclusive, so the change does not ship and is not in main.
+- **The target did not move**:
+  - d352「モデルにglm5.2を追加して」 was never decided in either arm. In N it was a change with status done in 3 passes, and a decision with status done in the fourth.
+  - d294 and d331 gained a pass each.
+  - d146 lost two passes, each time to a claim with status done.
+  - The curator keeps a request that the window carries out as done, whatever the prompt says.
+- **Run to run, 4 passes per arm**: B is #259's B binary run again, so the two B arms show how much one binary varies between runs.
+  - The hits were 59 both times, but 10 of the 24 labels differ, by 14 hits in all.
+  - One label moved by 3 (d363, 0 → 3).
+  - So one label losing 3 hits is within run-to-run noise at 4 passes. #259's rejection rested on that rule: d112 went 3 → 0. Its sum, +3, was under its +8 in any case.
+  - A rule declared for the next run should not reject on one label alone, or it needs more passes.
+- **A question about the metric**: M3 counts a claim with status decided. A done claim that quotes the owner's request records that the change was asked for and made. Whether that counts as recalling the owner's decision depends on what "remembering my decision" means to the owner. The curator's prompt cannot settle it.
 
 ### What the next M3 run needs
 
@@ -166,7 +188,7 @@ The change for the first group: the window's typed lines (`[user]` lines, not `A
 2. Supersedes: a window now carries its sessions' decided claims, so a same-session earlier decision is in the prompt; the cross-session pairs need the hybrid search (#222). A record holding two labels is scored per decision (2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and with the reply's options carried, 2 of 6 acceptances settle their proposal (acc6: d462 and d107; #244: a go-ahead is often drafted as a proposal or not at all, or quotes another line than the owner's, and a quote from another repository's tool line loses its supersedes).
 3. The quote match: the paraphrases (whitespace-blind matching is #248).
 4. The defaults as they would ship were run once (short-2): 22 of 44.
-5. Several runs of each arm (Run to run, above).
+5. Several runs of each arm (Run to run, above). At 4 passes per arm one label can move by 3 between two runs of one binary (#262), so a declared rule should not reject on one label alone.
 
 ## Judge, role (a): the shrink: fails on decisions by the declared rule; off
 
