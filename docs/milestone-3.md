@@ -139,6 +139,27 @@ The curator's prompt now says to keep what should still change what an agent doe
   - d332, the instruction for the moment in the set: 1 → 0.
 - **Decided claims per pass**: B 17, 31, 38, 52; L 28, 54, 22, 29. The spread within an arm is wide, but the means are close (34.5 and 33.3). With equal owner-no counts, L's gain is not from deciding more overall.
 
+### Why typed decisions are missed, and the typed lines listed again (#259)
+
+#254's L passes missed 40 of the 96 hits the 24 lasting typed labels could have (4 passes). By what the passes kept, and the curator's answers the harness saved:
+
+- **No draft from the typed line** (15): d331「野良コンテナの判断は任せる」, d363「全権限をいつでも使えるように認証したいからそのコマンドを教えて」 and d365「ブラウザ開かないからurl教えて」 in all 4 passes, and d211 in 3. Each window is mostly tool output and the assistant's report, and the curator drafted repo facts from those. d365's line is also close to an example #254 added to the requests that stop mattering ("a URL to open").
+- **The request, carried out in the window, kept as a done change** quoting the developer's line (7): d352「モデルにglm5.2を追加して」 3 times, d294 and d54 twice each. M3 counts a claim with status decided, of any kind.
+- **A question or a condition** (8): d293「codexみたいにフル権限で委譲する方が運用しやすくない？」 lowered to a proposal twice and superseded twice; d427「CodeRabbitが必要なら待っていいよ。」 a proposal 3 times, and once a draft that quoted both of its sentences across the line break was dropped as not in the window. Both of #254's builds predate #248 (the whitespace-blind quote match).
+- **A label whose quote is the assistant's text** (4): d50, in all 4 passes.
+- **Once each** (6): d112, d352 and d435 with no claim, d215 and d54 a proposal, d146 unverified.
+
+The change for the first group: the window's typed lines (`[user]` lines, not `AskUserQuestion` answers), each cut at 200 characters, are listed again at the end of the prompt, after the carried claims, and the instructions say to read each on its own. #254's example "a URL to open" is now "a link to click once".
+
+- **Run**: `live --typed`, 4 passes per arm, alternating, each from a fresh copy of the prepared home. B is `oboete-base259-58a322c` (#256 at 3b8283f with #258's prompt, so both arms have #248) and N is `oboete-typed-e1fd962`, the same build with the change. The verdict was declared in #259 before the run.
+- **Hits over the 24 lasting typed labels**: B 59, N 62. That is +3, under the +8 to ship, and d112 lost 3 hits (3 → 0), which alone rejects it. The change is not in main. The owner-no records decided were 16 and 12, d332 (the instruction for the moment) 0 and 2, and the prompt tokens 1.9% more in N.
+- **What moved** (B → N):
+  - The first group moved as intended: d331 1 → 4, d363 0 → 1. d294 went 0 → 4 (a done change in every B pass), d146 2 → 4, d449 3 → 4.
+  - d112「削除して。ついでにuranai-aiとcloudflareのuranai-ai関連も削除して」 3 → 0: in all 4 N passes the curator answered its window with no claims; B's passes drafted the line as a decision 3 times. d446 4 → 2; d215, d435 and d54 lost 1 each.
+  - d365 stayed at 0 in both arms, with the example changed.
+- **A reading, not tested**: "read each on its own" invites judging a line without the lines around it, so a request whose weight is in its context (d112's deletion, after a long exchange) reads as one step that stops mattering. A variant would keep the list and drop that phrase.
+- **Decided claims per pass**: B 48, 30, 28, 48; N 36, 29, 33, 30.
+
 ### What the next M3 run needs
 
 1. The test labels, classed by the same rule (instructions for the moment, above).
