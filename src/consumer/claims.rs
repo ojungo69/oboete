@@ -558,6 +558,50 @@ mod tests {
         raw::open(home).unwrap()
     }
 
+    /// #249: the claims a window takes as its own are those quoted in its records on its device:
+    /// another device's claim quoted in a record of the same seq still supersedes for it.
+    #[test]
+    fn another_devices_claim_at_the_same_seq_is_not_the_windows_own() {
+        let home = tempfile::tempdir().unwrap();
+        let over = "Move sessions to SQLite.";
+        let seq = as_device(home.path(), "dev-a")
+            .append(&event(over, 1))
+            .unwrap();
+        let mut raw = as_device(home.path(), "dev-b");
+        let kept = "Keep sessions in Postgres.";
+        assert_eq!(raw.append(&event(kept, 2)).unwrap(), seq);
+        let postgres = claim(
+            "c1",
+            "decision",
+            kept,
+            vec![quote("dev-b", seq, kept, kept, 0)],
+        );
+        let mut sqlite = claim(
+            "c2",
+            "decision",
+            over,
+            vec![quote("dev-a", seq, over, over, 0)],
+        );
+        sqlite.supersedes = vec![uid("decision", &postgres.evidence[0])];
+        raw.append_ops(&[op(&postgres), op(&sqlite)]).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        let rules = crate::redact::Rules::default();
+        let w = crate::curate::next_window(&raw, "dev-b", 100_000, &rules)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (w.device.as_str(), w.from_seq, w.to_seq),
+            ("dev-b", seq, seq)
+        );
+        let current: Vec<String> = crate::claims::current_before(&k, "r", &w)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.body)
+            .collect();
+        assert_eq!(current, [over]);
+    }
+
     /// MUST-M18: a claim's uid is its kind and the sentence its quote starts in. A rewording
     /// quoted at another offset of that sentence is a new derivation of the same claim.
     #[test]
@@ -922,7 +966,16 @@ mod tests {
         raw.append_ops(&[op(&ship)]).unwrap();
         run(&raw, &mut k);
         assert!(bodies(&k).is_empty());
-        assert!(crate::claims::tip(&k, &uid).unwrap().is_none());
+        // Nor a tip to a later window, whose own claim it is not.
+        let window = json!({"from_seq": 1, "to_seq": seq, "outcome": "curated"});
+        raw.append_ops(&[(OpKind::Window, window)]).unwrap();
+        raw.append(&event("Later.", 6)).unwrap();
+        let rules = crate::redact::Rules::default();
+        let w = crate::curate::next_window(&raw, &dev, 100_000, &rules)
+            .unwrap()
+            .unwrap();
+        assert!(w.from_seq > seq);
+        assert!(crate::claims::tip(&k, &uid, &w).unwrap().is_none());
         // A restore that lost the correction op takes it back: the claim is current again.
         Claims.rewind(&k, &dev, 0).unwrap();
         assert_eq!(count(&k, "corrections"), 0);

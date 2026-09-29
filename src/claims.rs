@@ -409,14 +409,6 @@ pub struct Claim {
     pub seq: i64,
 }
 
-/// A claim `a` (a row of the `active` view) is current: a chain tip (no active derivation of
-/// another uid supersedes or retracts it) that is not retracted, by its derivation or the owner.
-const TIP: &str = "a.status <> 'retracted'
-    AND NOT EXISTS (
-      SELECT 1 FROM edges e
-      JOIN claims x ON x.op_device = e.op_device AND x.op_seq = e.op_seq
-      WHERE e.to_uid = a.uid AND x.uid <> a.uid)";
-
 /// Whether `uid`'s first quote (its active derivation's) starts before `offset` in its record: in
 /// the part of a split record that an earlier window read.
 pub fn quoted_before(k: &Connection, uid: &str, offset: i64) -> Result<bool> {
@@ -429,18 +421,55 @@ pub fn quoted_before(k: &Connection, uid: &str, offset: i64) -> Result<bool> {
     )?)
 }
 
-/// When `uid` is a current claim, its repository (`None` for one anchored outside any) and its
-/// active derivation.
-pub fn tip(k: &Connection, uid: &str) -> Result<Option<(Option<String>, Claim)>> {
+/// Claim `c` (a row of `claims`) is one of window `?2` to `?6`'s own: its active derivation is
+/// anchored in the window's records on its device, and in a split record in the window's part (as
+/// `curate::anchored_in` reads a window). A recuration of the window replaces its own.
+const OWN: &str = "EXISTS (
+      SELECT 1 FROM derivations d
+      JOIN evidence q ON q.op_device = d.op_device AND q.op_seq = d.op_seq AND q.idx = 0
+      WHERE d.op_device = c.op_device AND d.op_seq = c.op_seq
+        AND d.anchor_device = ?2 AND d.anchor_seq BETWEEN ?3 AND ?4
+        AND (q.seq <> ?3 OR ?5 IS NULL OR q.offset >= ?5)
+        AND (q.seq <> ?4 OR ?6 IS NULL OR q.offset + q.length <= ?6))";
+
+/// Claim `a` (a row of the `active` view) as window `?2` to `?6` found it before it was curated
+/// (#249): not one of the window's own claims (`OWN`), and no active derivation of another uid
+/// supersedes or retracts it but the window's own. A window curated for the first time has none.
+fn before_window() -> String {
+    format!(
+        "a.status <> 'retracted'
+         AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.uid = a.uid AND {OWN})
+         AND NOT EXISTS (
+           SELECT 1 FROM edges e
+           JOIN claims c ON c.op_device = e.op_device AND c.op_seq = e.op_seq
+           WHERE e.to_uid = a.uid AND c.uid <> a.uid AND NOT {OWN})"
+    )
+}
+
+/// When `uid` is a current claim as window `w` found it (`before_window`), its repository (`None`
+/// for one anchored outside any) and its active derivation.
+pub fn tip(
+    k: &Connection,
+    uid: &str,
+    w: &crate::curate::Window,
+) -> Result<Option<(Option<String>, Claim)>> {
     use rusqlite::OptionalExtension;
     schema(k)?;
     Ok(k.query_row(
         &format!(
             "SELECT a.repo, a.uid, a.kind, a.status, a.speaker, a.scope, a.body, a.valid_from,
                     a.anchor_device, a.anchor_seq
-             FROM active a WHERE a.uid = ?1 AND {TIP}"
+             FROM active a WHERE a.uid = ?1 AND {}",
+            before_window()
         ),
-        [uid],
+        rusqlite::params![
+            uid,
+            w.device,
+            w.from_seq,
+            w.to_seq,
+            w.from_offset,
+            w.to_offset
+        ],
         |r| {
             let claim = Claim {
                 uid: r.get(1)?,
@@ -467,6 +496,29 @@ pub fn current(k: &Connection, repo: &str) -> Result<Vec<Claim>> {
         k,
         &format!("{TIPS} ORDER BY a.valid_from, a.anchor_device, a.anchor_seq, a.uid"),
         (repo,),
+    )
+}
+
+/// `current`, as window `w` found it (`before_window`): to a recuration, what its earlier curation
+/// superseded is current, and what it derived is not.
+pub fn current_before(k: &Connection, repo: &str, w: &crate::curate::Window) -> Result<Vec<Claim>> {
+    tips(
+        k,
+        &format!(
+            "SELECT a.uid, a.kind, a.status, a.speaker, a.scope, a.body, a.valid_from,
+                    a.anchor_device, a.anchor_seq
+             FROM active a WHERE a.repo = ?1 AND {}
+             ORDER BY a.valid_from, a.anchor_device, a.anchor_seq, a.uid",
+            before_window()
+        ),
+        rusqlite::params![
+            repo,
+            w.device,
+            w.from_seq,
+            w.to_seq,
+            w.from_offset,
+            w.to_offset
+        ],
     )
 }
 
@@ -523,7 +575,9 @@ pub(crate) const DECIDED: &str =
      ORDER BY a.valid_from DESC, a.anchor_device DESC, a.anchor_seq DESC, a.uid DESC
      LIMIT ?2";
 
-/// A repository's current claims (`TIP`, over the `active` view); `?1` is the repository.
+/// A repository's current claims, over the `active` view; `?1` is the repository. A claim `a` is
+/// current as a chain tip (no active derivation of another uid supersedes or retracts it) that is
+/// not retracted, by its derivation or the owner.
 pub(crate) const TIPS: &str =
     "SELECT a.uid, a.kind, a.status, a.speaker, a.scope, a.body, a.valid_from,
             a.anchor_device, a.anchor_seq
