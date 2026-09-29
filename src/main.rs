@@ -158,7 +158,7 @@ enum Cmd {
         #[command(subcommand)]
         action: PrefCmd,
     },
-    /// Browse the memory in a browser: a read-only page on 127.0.0.1 (prints its URL)
+    /// Browse the memory and change the settings in a browser: a page on 127.0.0.1 (prints its URL)
     View {
         /// Port to listen on (0 = any free port)
         #[arg(long, default_value_t = 0)]

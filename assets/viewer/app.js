@@ -389,6 +389,7 @@ const TEXT = {
     model: 'A model name uses letters, digits and . _ : / @ + - (200 characters at most).',
     paid_model: 'This model could be billed outside the monthly limit, so it cannot be set here.',
     chain_empty: 'Please keep at least one curator in use. To stop curation, set [summary] curate = false.',
+    shared_name: 'Two curators share a name, and config.toml changes both together. Please give both rows the same values.',
     file_invalid: 'config.toml has a mistake, so this page cannot change it. Run `oboete doctor` to see the line.',
     type: 'The page sent a value of the wrong kind. Please reload the page.',
     bad_request: 'The request was not understood. Please reload the page.',
@@ -442,6 +443,7 @@ const TEXT = {
     model: 'モデル名に使えるのは英数字と . _ : / @ + - だけです(200 文字まで)。',
     paid_model: 'このモデルは月の上限の外で課金されるおそれがあるため、ここでは設定できません。',
     chain_empty: '要約役を少なくとも 1 つは使う設定にしてください。要約を止めるには、[summary] curate = false を設定します。',
+    shared_name: '同じ名前の要約役が 2 つあり、config.toml では両方が一緒に変わります。両方の行を同じ値にしてください。',
     file_invalid: 'config.toml に誤りがあるため、この画面からは変更できません。`oboete doctor` で該当する行を確認してください。',
     type: '画面から誤った種類の値が送られました。ページを再読み込みしてください。',
     bad_request: '要求を処理できませんでした。ページを再読み込みしてください。',
@@ -626,17 +628,14 @@ async function saveSettings(button) {
       referrerPolicy: 'same-origin',
       credentials: 'omit',
     });
-    if (res.ok) {
-      form = formOf(await res.json());
-      drawSettings();
-      setStatus(t('saved'));
-      return;
-    }
     const answer = (res.headers.get('content-type') || '').startsWith('application/json') ? await res.json() : {};
-    if (res.status === 409) {
-      form = formOf(await api('settings'));
+    const current = res.status === 409 ? await api('settings') : null;
+    // Moved to another tab while saving: that tab keeps its view.
+    if (view !== 'settings') return;
+    if (res.ok || current) {
+      form = formOf(current || answer);
       drawSettings();
-      setStatus(t('stale'), true);
+      setStatus(t(current ? 'stale' : 'saved'), Boolean(current));
       return;
     }
     const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };

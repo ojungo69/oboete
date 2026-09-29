@@ -119,12 +119,11 @@ fn tool_output(t: ToolOutput) -> &'static str {
 /// (a budget from the key reads it inside the process, to fingerprint it).
 fn entry(p: &Provider, chain: &ChainOverlay, db: Option<&Connection>) -> Value {
     let name = p.name();
-    let (kind, key, key_file, model, timeout_s, model_rule) = match p {
+    let (kind, key, key_file, model, timeout_s) = match p {
         Provider::Openai {
             key_file,
             model,
             timeout_s,
-            base_url,
             ..
         } => (
             "api",
@@ -136,7 +135,6 @@ fn entry(p: &Provider, chain: &ChainOverlay, db: Option<&Connection>) -> Value {
             key_file.as_ref().map(|f| f.display().to_string()),
             Some(model.as_str()),
             *timeout_s,
-            model_rule(p, base_url, model),
         ),
         Provider::Cli {
             cli,
@@ -153,7 +151,6 @@ fn entry(p: &Provider, chain: &ChainOverlay, db: Option<&Connection>) -> Value {
             None,
             model.as_deref(),
             *timeout_s,
-            "any",
         ),
     };
     let budget = match db {
@@ -170,25 +167,13 @@ fn entry(p: &Provider, chain: &ChainOverlay, db: Option<&Connection>) -> Value {
         // not the page's to keep, and a save without it removes it.
         "model": chain.model.get(name).filter(|m| Some(m.as_str()) == model),
         "effective_model": model,
-        "model_rule": model_rule,
+        "model_rule": p.model_rule(),
         "daily_budget": chain.daily_budget.get(name),
         "effective_daily_budget": (budget != config::no_daily_cap()).then_some(budget),
         "budget_from_key": p.budget_from_key(),
         "timeout_s": chain.timeout_s.get(name),
         "effective_timeout_s": timeout_s,
     })
-}
-
-/// Which models `[chain] model` may set on an API entry: none on one with prices (its prices are
-/// its model's), only `:free` ones on an OpenRouter `:free` entry, else any.
-fn model_rule(p: &Provider, base_url: &str, model: &str) -> &'static str {
-    if p.limits().is_paid() {
-        "fixed"
-    } else if config::openrouter_free(base_url, model) {
-        "free"
-    } else {
-        "any"
-    }
 }
 
 #[derive(Deserialize)]
@@ -216,7 +201,7 @@ struct CaptureIn {
 }
 
 /// An entry's values; `None` follows the entry's own value.
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct EntryIn {
     name: String,
@@ -253,7 +238,7 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
         b.remove("chain");
         config::from_text(&path, &b.to_string()).map_err(|_| invalid())?
     };
-    let chain = checked(&posted, &base)?;
+    let chain = checked(&posted, &base, &now)?;
     // The order changes when the chain's does, not when `order` would be spelled another way.
     let reordered = !(posted.chain.iter().map(|e| e.name.as_str()))
         .eq(now.providers.iter().map(Provider::name));
@@ -312,8 +297,9 @@ struct Chain {
 }
 
 /// The posted values, refused where one is out of range, names a model the entry cannot price,
-/// or the entries are not the chain's; each value equal to the entry's own is left out.
-fn checked(posted: &Save, base: &config::Config) -> Result<Chain, Refusal> {
+/// or the entries are not the chain's; each value equal to the entry's own is left out. `now` is
+/// the file as it applies before the save.
+fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result<Chain, Refusal> {
     let chars = posted.inject.session_start_chars;
     if !(1_000..=crate::consumer::manifest::CAP).contains(&chars) {
         return Err(refused(422, "range", "inject.session_start_chars"));
@@ -327,7 +313,16 @@ fn checked(posted: &Save, base: &config::Config) -> Result<Chain, Refusal> {
     if names != own {
         return Err(refused(422, "names", "chain"));
     }
-    if posted.chain.iter().all(|e| !e.on) {
+    // `[chain]` changes every entry of one name alike, so two of one name take the same values.
+    for (i, e) in posted.chain.iter().enumerate() {
+        if posted.chain[..i].iter().any(|d| d.name == e.name && d != e) {
+            return Err(refused(422, "shared_name", format!("chain.{}", e.name)));
+        }
+    }
+    // Turning off the last entry in use. A chain with none in use already (all off by hand, or no
+    // entries) is not this save's doing, so the rest of the settings still save (cubic on #94).
+    let in_use = |p: &Provider| !now.chain.turns_off(p.name());
+    if posted.chain.iter().all(|e| !e.on) && now.providers.iter().any(in_use) {
         return Err(refused(422, "chain_empty", "chain"));
     }
     let mut chain = Chain {
@@ -381,17 +376,7 @@ fn checked(posted: &Save, base: &config::Config) -> Result<Chain, Refusal> {
             if m.is_empty() || m.chars().count() > MODEL_CHARS || !m.chars().all(allowed) {
                 return Err(refused(422, "model", field("model")));
             }
-            let priced = match p {
-                Provider::Openai {
-                    base_url, model, ..
-                } => match model_rule(p, base_url, model) {
-                    "fixed" => false,
-                    "free" => config::is_free(m),
-                    _ => true,
-                },
-                Provider::Cli { .. } => true,
-            };
-            if !priced {
+            if !p.model_rule().allows(m) {
                 return Err(refused(422, "paid_model", field("model")));
             }
             chain.model.insert(e.name.clone(), m.clone());
@@ -764,6 +749,57 @@ mod tests {
             Some("[inject]\nsession_start = false\n")
         );
         assert!(!config::inject(home.path()).unwrap().session_start);
+    }
+
+    /// A chain with no entry in use already, by hand or with no entries at all, does not stop
+    /// the rest of the settings from saving; turning off the last one in use does (cubic on #94).
+    #[test]
+    fn a_chain_with_none_in_use_still_saves_the_rest() {
+        let names: Vec<String> = (show(home_with(None).path())["chain"].as_array().unwrap())
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_owned())
+            .collect();
+        let all_off = format!("[chain]\noff = {names:?}\n");
+        for text in ["providers = []\n", all_off.as_str()] {
+            let home = home_with(Some(text));
+            let shown = show(home.path());
+            let saved = save_to(
+                &home,
+                &posted(&shown, |v| v["inject"]["session_start"] = json!(false)),
+            )
+            .unwrap_or_else(|r| panic!("{text}: {r:?}"));
+            assert_eq!(saved["inject"]["session_start"], false, "{text}");
+            assert!(file(&home).unwrap().starts_with(text), "{text}");
+        }
+    }
+
+    /// `[chain]` changes both entries of one name, so the page's rows of that name must agree.
+    #[test]
+    fn two_entries_of_one_name_take_the_same_values() {
+        let entry = "[[providers]]\nkind = \"cli\"\nname = \"a\"\ncli = \"claude\"\n";
+        let text = format!("{entry}\n{entry}");
+        let home = home_with(Some(&text));
+        let shown = show(home.path());
+        let r = save_to(
+            &home,
+            &posted(&shown, |v| v["chain"][0]["timeout_s"] = json!(60)),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (r.status, r.code, r.field),
+            (422, "shared_name", "chain.a".into())
+        );
+        assert_eq!(file(&home).as_deref(), Some(text.as_str()));
+        let saved = save_to(
+            &home,
+            &posted(&shown, |v| {
+                for e in v["chain"].as_array_mut().unwrap() {
+                    e["timeout_s"] = json!(60);
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(saved["chain"][1]["effective_timeout_s"], 60);
     }
 
     /// A file that does not parse: no form, and no save.

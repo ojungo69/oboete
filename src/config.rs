@@ -330,6 +330,16 @@ impl Provider {
             Provider::Openai { limits, .. } | Provider::Cli { limits, .. } => limits,
         }
     }
+    /// Which models `[chain] model` may set on it (#94).
+    pub(crate) fn model_rule(&self) -> ModelRule {
+        match self {
+            Provider::Openai { limits, .. } if limits.is_paid() => ModelRule::Fixed,
+            Provider::Openai {
+                base_url, model, ..
+            } if openrouter_free(base_url, model) => ModelRule::Free,
+            _ => ModelRule::Any,
+        }
+    }
     /// Its tier (spec 1.4): 3 paid, 2 subscription, 1 free or local. The highest tier's
     /// derivation of a claim is the active one (MUST-M18).
     pub fn tier(&self) -> i64 {
@@ -721,36 +731,30 @@ fn overlay(cfg: &mut Config) {
     for p in providers.iter_mut() {
         let name = p.name().to_owned();
         let set = chain.model.get(&name);
+        let rule = p.model_rule();
         let (Provider::Openai { timeout_s, .. } | Provider::Cli { timeout_s, .. }) = p;
         if let Some(&s) = chain.timeout_s.get(&name) {
             *timeout_s = s;
         }
         match p {
             Provider::Openai {
-                base_url,
                 model,
                 daily_budget,
-                limits,
                 ..
             } => {
                 if let Some(&n) = chain.daily_budget.get(&name) {
                     *daily_budget = Some(n);
                 }
-                // Only a model whose price the entry knows: an entry's prices are its model's,
-                // and OpenRouter bills a model that is not `:free` outside the monthly USD cap
-                // (#94, revision 1; cubic on #94).
-                if let Some(m) = set {
-                    if limits.is_paid() {
-                        warnings.push(format!(
-                            "[chain] model: \"{name}\" keeps its model, as its prices are its model's: set another model with its prices in [[providers]]"
-                        ));
-                    } else if openrouter_free(base_url, model) && !is_free(m) {
-                        warnings.push(format!(
-                            "[chain] model: \"{m}\" is not a :free model, and OpenRouter may bill it outside the monthly USD cap, so \"{name}\" keeps its model"
-                        ));
-                    } else {
-                        model.clone_from(m);
-                    }
+                // Only a model whose price the entry knows (`ModelRule`).
+                match set {
+                    Some(m) if rule.allows(m) => model.clone_from(m),
+                    Some(_) if rule == ModelRule::Fixed => warnings.push(format!(
+                        "[chain] model: \"{name}\" keeps its model, as its prices are its model's: set another model with its prices in [[providers]]"
+                    )),
+                    Some(m) => warnings.push(format!(
+                        "[chain] model: \"{m}\" is not a :free model, and OpenRouter may bill it outside the monthly USD cap, so \"{name}\" keeps its model"
+                    )),
+                    None => {}
                 }
             }
             Provider::Cli {
@@ -777,8 +781,29 @@ fn overlay(cfg: &mut Config) {
     }
 }
 
+/// Which models `[chain] model` may set on an entry: none on one with prices, as its prices are
+/// its model's; only `:free` ones on an OpenRouter `:free` entry, as OpenRouter bills the others
+/// outside the monthly USD cap (#94, revision 1; cubic on #94); else any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ModelRule {
+    Fixed,
+    Free,
+    Any,
+}
+
+impl ModelRule {
+    pub(crate) fn allows(self, model: &str) -> bool {
+        match self {
+            ModelRule::Fixed => false,
+            ModelRule::Free => is_free(model),
+            ModelRule::Any => true,
+        }
+    }
+}
+
 /// An OpenRouter `:free` model, by the URL as written in any case (#238).
-pub(crate) fn openrouter_free(base_url: &str, model: &str) -> bool {
+fn openrouter_free(base_url: &str, model: &str) -> bool {
     base_url
         .trim()
         .trim_end_matches('/')
@@ -786,7 +811,7 @@ pub(crate) fn openrouter_free(base_url: &str, model: &str) -> bool {
         && is_free(model)
 }
 
-pub(crate) fn is_free(model: &str) -> bool {
+fn is_free(model: &str) -> bool {
     model.to_ascii_lowercase().ends_with(":free")
 }
 
