@@ -102,7 +102,9 @@ fn doctor_prints_inject_and_chain_as_they_apply() {
     );
     let providers = text.split_once("providers (chain order):").unwrap().1;
     let mut lines = providers.lines();
-    lines.find(|l| l.trim_start().starts_with("a "));
+    lines
+        .find(|l| l.trim_start().starts_with("a "))
+        .unwrap_or_else(|| panic!("no a line in {text}"));
     let detail = lines.next().unwrap_or_default();
     assert!(detail.trim_start().starts_with("off, "), "{text}");
     assert!(

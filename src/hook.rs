@@ -1245,10 +1245,8 @@ mod tests {
         )
         .unwrap();
         let cut = shown("t2").unwrap().chars().count();
-        assert!(
-            (fence + 1_000 - line..=fence + 1_000).contains(&cut),
-            "{cut}"
-        );
+        let low = (fence + 1_000).saturating_sub(line);
+        assert!((low..=fence + 1_000).contains(&cut), "{cut}");
         std::fs::write(
             home.path().join("config.toml"),
             "[inject]\nsession_start = false\n",

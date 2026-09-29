@@ -679,8 +679,16 @@ fn overlay(cfg: &mut Config) {
     for p in providers.iter() {
         *counts.entry(p.name().to_owned()).or_default() += 1;
     }
+    let names = |name: &String| {
+        chain.order.contains(name)
+            || chain.off.contains(name)
+            || chain.daily_budget.contains_key(name)
+            || chain.timeout_s.contains_key(name)
+            || chain.model.contains_key(name)
+    };
     for (name, n) in &counts {
-        if *n > 1 {
+        // Only where `[chain]` names it: otherwise the repeat changes nothing.
+        if *n > 1 && names(name) {
             warnings.push(format!(
                 "{n} chain entries are named \"{name}\": [chain] changes each of them"
             ));
@@ -1390,6 +1398,13 @@ model = { gone = "m" }
             ["2 chain entries are named \"c\": [chain] changes each of them"]
         );
         assert!(cfg.providers.iter().all(|p| timeout(p) == 9));
+        // `[chain]` not naming it: no warning (OpenCodeReview on #267).
+        let cfg = load_text(&format!("[chain]\noff = [\"groq\"]\n{entry}{entry}"));
+        assert!(
+            cfg.warnings.iter().all(|w| !w.contains("named \"c\"")),
+            "{:?}",
+            cfg.warnings
+        );
         // A key `[chain]` does not have is refused, with its line: a misspelled `off` would
         // keep calling the entry.
         let dir = tempfile::tempdir().unwrap();
