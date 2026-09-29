@@ -19,6 +19,32 @@ pub struct Config {
     /// What every paid entry together may spend in a calendar month (owner decision 5: USD 5).
     #[serde(default = "default_paid_usd_per_month", deserialize_with = "usd")]
     pub paid_usd_per_month: f64,
+    /// `[chain]`: the user's changes to the chain by entry name, applied by `load()` (#94).
+    #[serde(default)]
+    pub chain: ChainOverlay,
+    /// What `load()` ignored or doubts in the chain, one line each, for doctor.
+    #[serde(skip)]
+    pub warnings: Vec<String>,
+}
+
+/// `[chain]` (#94): changes to the chain by entry name, over the built-in chain or the user's
+/// `[[providers]]`, so later changes to the defaults still reach every value the user did not
+/// set. Unknown keys are refused: a misspelled `off` would keep calling an entry turned off.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChainOverlay {
+    /// Entries put first, in this order; the rest keep their place after them.
+    #[serde(default)]
+    pub order: Vec<String>,
+    /// Entries turned off: kept in the list, never called.
+    #[serde(default)]
+    pub off: Vec<String>,
+    #[serde(default)]
+    pub daily_budget: std::collections::BTreeMap<String, u32>,
+    #[serde(default)]
+    pub timeout_s: std::collections::BTreeMap<String, u64>,
+    #[serde(default)]
+    pub model: std::collections::BTreeMap<String, String>,
 }
 
 fn default_paid_usd_per_month() -> f64 {
@@ -144,6 +170,9 @@ pub enum Provider {
     /// OpenAI-compatible chat completions with `response_format: json_schema`.
     Openai {
         name: String,
+        /// Off (`[chain] off`): listed by doctor, never called.
+        #[serde(default = "default_true")]
+        on: bool,
         base_url: String,
         /// File whose second line is the API key (owner convention: ~/X_KEY.md). None = no auth.
         #[serde(default)]
@@ -177,6 +206,8 @@ pub enum Provider {
     /// A subscription CLI run headless (`agy`, `claude`, `grok`, `codex`).
     Cli {
         name: String,
+        #[serde(default = "default_true")]
+        on: bool,
         /// Which CLI; decides the argument shape.
         cli: String,
         #[serde(default)]
@@ -322,6 +353,12 @@ impl Provider {
             Provider::Cli { .. } => false,
         }
     }
+    /// Whether the chain calls it (`[chain] off` turns it off).
+    pub fn on(&self) -> bool {
+        match self {
+            Provider::Openai { on, .. } | Provider::Cli { on, .. } => *on,
+        }
+    }
 }
 
 fn default_budget() -> u32 {
@@ -375,6 +412,7 @@ fn openai(
 ) -> Provider {
     Provider::Openai {
         name: name.into(),
+        on: true,
         base_url: base_url.into(),
         key_file: Some(home_dir().join(key)),
         model: model.into(),
@@ -414,6 +452,7 @@ fn gemini() -> Provider {
 fn cli(name: &str, model: Option<&str>) -> Provider {
     Provider::Cli {
         name: name.into(),
+        on: true,
         cli: name.into(),
         model: model.map(Into::into),
         daily_budget: no_daily_cap(),
@@ -570,6 +609,8 @@ pub fn load(home: &Path) -> Result<Config> {
             embedding: Embedding::default(),
             gemini: None,
             paid_usd_per_month: default_paid_usd_per_month(),
+            chain: ChainOverlay::default(),
+            warnings: Vec::new(),
         });
     }
     let text =
@@ -590,6 +631,7 @@ pub fn load(home: &Path) -> Result<Config> {
         };
         cfg.providers.insert(at, gemini());
     }
+    overlay(&mut cfg);
     // A CLI's subscription pays for it, and its answer has no cap to price; prices are for HTTP.
     if let Some(p) = cfg
         .providers
@@ -615,6 +657,224 @@ pub fn load(home: &Path) -> Result<Config> {
         ),
     }
     Ok(cfg)
+}
+
+/// `load()` for the callers that build a chain (the worker, `recurate`): the entries turned off
+/// are not in it.
+pub fn load_chain(home: &Path) -> Result<Config> {
+    let mut cfg = load(home)?;
+    cfg.providers.retain(Provider::on);
+    Ok(cfg)
+}
+
+/// `[chain]` over the chain as built so far. A name that matches no entry is ignored with a
+/// warning, so a default renamed upstream does not stop curation; nothing here fails `load()`,
+/// which would stop it.
+fn overlay(cfg: &mut Config) {
+    let Config {
+        providers,
+        chain,
+        warnings,
+        ..
+    } = cfg;
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for p in providers.iter() {
+        *counts.entry(p.name().to_owned()).or_default() += 1;
+    }
+    for (name, n) in &counts {
+        if *n > 1 {
+            warnings.push(format!(
+                "{n} chain entries are named \"{name}\": [chain] changes each of them"
+            ));
+        }
+    }
+    for (key, list) in [("order", &mut chain.order), ("off", &mut chain.off)] {
+        let mut seen = std::collections::BTreeSet::new();
+        let before = list.len();
+        list.retain(|n| seen.insert(n.clone()));
+        if list.len() < before {
+            warnings.push(format!(
+                "[chain] {key} names an entry more than once: the first one counts"
+            ));
+        }
+    }
+    let named = (chain.order.iter().map(|n| ("order", n)))
+        .chain(chain.off.iter().map(|n| ("off", n)))
+        .chain(chain.daily_budget.keys().map(|n| ("daily_budget", n)))
+        .chain(chain.timeout_s.keys().map(|n| ("timeout_s", n)))
+        .chain(chain.model.keys().map(|n| ("model", n)));
+    for (key, name) in named {
+        if !counts.contains_key(name) {
+            warnings.push(format!(
+                "[chain] {key}: no chain entry is named \"{name}\", so it is ignored"
+            ));
+        }
+    }
+    // Stable: the entries `order` does not name keep their order after the ones it does.
+    providers.sort_by_key(|p| {
+        (chain.order.iter())
+            .position(|n| n == p.name())
+            .unwrap_or(usize::MAX)
+    });
+    for p in providers.iter_mut() {
+        let name = p.name().to_owned();
+        let set = chain.model.get(&name);
+        match p {
+            Provider::Openai {
+                on,
+                base_url,
+                model,
+                daily_budget,
+                timeout_s,
+                limits,
+                ..
+            } => {
+                // OpenRouter bills the owner's credits for a model that is not `:free`, and an
+                // entry without prices is outside the monthly USD cap (#94, revision 1).
+                if let Some(m) = set
+                    && openrouter_free(base_url, model)
+                    && !is_free(m)
+                    && !limits.is_paid()
+                {
+                    warnings.push(format!(
+                        "[chain] model puts \"{m}\" on \"{name}\", an OpenRouter :free entry without prices: OpenRouter may bill it, and the monthly USD cap does not count it"
+                    ));
+                }
+                *on &= !chain.off.contains(&name);
+                if let Some(&n) = chain.daily_budget.get(&name) {
+                    *daily_budget = Some(n);
+                }
+                if let Some(&s) = chain.timeout_s.get(&name) {
+                    *timeout_s = s;
+                }
+                if let Some(m) = set {
+                    model.clone_from(m);
+                }
+            }
+            Provider::Cli {
+                on,
+                model,
+                daily_budget,
+                timeout_s,
+                ..
+            } => {
+                *on &= !chain.off.contains(&name);
+                if let Some(&n) = chain.daily_budget.get(&name) {
+                    *daily_budget = n;
+                }
+                if let Some(&s) = chain.timeout_s.get(&name) {
+                    *timeout_s = s;
+                }
+                if let Some(m) = set {
+                    *model = Some(m.clone());
+                }
+            }
+        }
+    }
+    if !providers.is_empty() && !providers.iter().any(Provider::on) {
+        warnings.push(
+            "every chain entry is off, so nothing is curated: to stop curation, set [summary] curate = false instead".into(),
+        );
+    }
+}
+
+/// An OpenRouter `:free` model, by the URL as written in any case (#238's rule).
+// ponytail: #238's `budget_from_key` has the same test; fold them together once both are on main.
+fn openrouter_free(base_url: &str, model: &str) -> bool {
+    (base_url.trim().trim_end_matches('/')).eq_ignore_ascii_case("https://openrouter.ai/api/v1")
+        && is_free(model)
+}
+
+fn is_free(model: &str) -> bool {
+    model.to_ascii_lowercase().ends_with(":free")
+}
+
+/// Doctor's line under a chain entry (#94): off, its calls a day and timeout as they apply, and
+/// its model when `[chain]` sets it.
+pub fn doctor_line(p: &Provider, chain: &ChainOverlay) -> String {
+    let (timeout_s, model) = match p {
+        Provider::Openai {
+            timeout_s, model, ..
+        } => (*timeout_s, Some(model.as_str())),
+        Provider::Cli {
+            timeout_s, model, ..
+        } => (*timeout_s, model.as_deref()),
+    };
+    let mut parts = Vec::new();
+    if !p.on() {
+        parts.push("off".to_owned());
+    }
+    parts.push(match p.daily_budget() {
+        n if n == no_daily_cap() => "no cap of calls a day".to_owned(),
+        n => format!("{n} calls a day"),
+    });
+    parts.push(format!("timeout {timeout_s} s"));
+    if let Some(m) = model.filter(|_| chain.model.contains_key(p.name())) {
+        parts.push(format!("model {m} (set in [chain])"));
+    }
+    format!("    {}", parts.join(", "))
+}
+
+/// `[inject]` (#94): what the hook injects at a session start.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Inject {
+    #[serde(default = "default_true")]
+    pub session_start: bool,
+    /// The manifest's size in characters, 1,000 to 6,000: it is stored rendered at 6,000.
+    #[serde(default = "default_session_start_chars")]
+    pub session_start_chars: usize,
+}
+
+impl Default for Inject {
+    fn default() -> Self {
+        Self {
+            session_start: true,
+            session_start_chars: default_session_start_chars(),
+        }
+    }
+}
+
+fn default_session_start_chars() -> usize {
+    crate::consumer::manifest::CAP
+}
+
+/// `home`'s `[inject]`, by its own parse: a mistake in the file falls back to the defaults with a
+/// line on stderr, and stops neither recording nor curation.
+pub fn inject(home: &Path) -> Inject {
+    let path = home.join("config.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Inject::default(),
+        Err(e) => {
+            eprintln!(
+                "oboete: [inject] defaults used: read {}: {e}",
+                path.display()
+            );
+            return Inject::default();
+        }
+    };
+    parse_inject(&text).unwrap_or_else(|e| {
+        eprintln!("oboete: [inject] defaults used: {e:#}");
+        Inject::default()
+    })
+}
+
+fn parse_inject(text: &str) -> Result<Inject> {
+    #[derive(Deserialize)]
+    struct File {
+        #[serde(default)]
+        inject: Inject,
+    }
+    let i = toml::from_str::<File>(text)
+        .map_err(|e| toml_error(text, &e))?
+        .inject;
+    anyhow::ensure!(
+        (1_000..=crate::consumer::manifest::CAP).contains(&i.session_start_chars),
+        "[inject] session_start_chars is 1000 to {}",
+        crate::consumer::manifest::CAP
+    );
+    Ok(i)
 }
 
 /// `[redaction]` (spec 1.5, 6.4): rules the user adds to the built-in ones, which cannot be
@@ -698,6 +958,10 @@ pub struct CaptureConfig {
     _gemini: serde::de::IgnoredAny,
     #[serde(default, rename = "paid_usd_per_month")]
     _paid_usd_per_month: serde::de::IgnoredAny,
+    #[serde(default, rename = "chain")]
+    _chain: serde::de::IgnoredAny,
+    #[serde(default, rename = "inject")]
+    _inject: serde::de::IgnoredAny,
 }
 
 pub fn load_capture(home: &Path) -> Result<CaptureConfig> {
@@ -795,6 +1059,10 @@ paid_usd_per_month = 2.5
 [backup]
 [redaction]
 [capture]
+[inject]
+session_start = false
+[chain]
+off = ["codex"]
 "#;
         let c: Config = toml::from_str(text).unwrap();
         assert_eq!(c.paid_usd_per_month, 2.5);
@@ -968,6 +1236,293 @@ model = "haiku"
         )
         .unwrap();
         assert!(load(dir).is_err());
+    }
+
+    fn load_text(text: &str) -> Config {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), text).unwrap();
+        load(dir.path()).unwrap()
+    }
+
+    fn find<'a>(cfg: &'a Config, name: &str) -> &'a Provider {
+        cfg.providers.iter().find(|p| p.name() == name).unwrap()
+    }
+
+    fn timeout(p: &Provider) -> u64 {
+        match p {
+            Provider::Openai { timeout_s, .. } | Provider::Cli { timeout_s, .. } => *timeout_s,
+        }
+    }
+
+    fn model(p: &Provider) -> Option<&str> {
+        match p {
+            Provider::Openai { model, .. } => Some(model),
+            Provider::Cli { model, .. } => model.as_deref(),
+        }
+    }
+
+    /// #94: `[chain]` changes the built-in chain by name, and every entry and value it does not
+    /// name stays the built-in one, so later changes to the defaults still reach them.
+    #[test]
+    fn chain_changes_the_built_in_chain_by_name() {
+        let cfg = load_text(
+            r#"
+[chain]
+order = ["claude", "groq-qwen"]
+off = ["codex", "groq-20b"]
+daily_budget = { groq = 50, claude = 7 }
+timeout_s = { nim = 200, claude = 100 }
+model = { claude = "sonnet", groq = "openai/gpt-oss-20b" }
+"#,
+        );
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+        let names: Vec<_> = cfg.providers.iter().map(Provider::name).collect();
+        assert_eq!(
+            names,
+            [
+                "claude",
+                "groq-qwen",
+                "groq",
+                "groq-20b",
+                "openrouter",
+                "nim",
+                "opencode-go",
+                "codex"
+            ]
+        );
+        let off: Vec<_> = (cfg.providers.iter())
+            .filter(|p| !p.on())
+            .map(Provider::name)
+            .collect();
+        assert_eq!(off, ["groq-20b", "codex"]);
+        let claude = find(&cfg, "claude");
+        assert_eq!(
+            (claude.daily_budget(), timeout(claude), model(claude)),
+            (7, 100, Some("sonnet"))
+        );
+        let groq = find(&cfg, "groq");
+        assert_eq!(
+            (groq.daily_budget(), timeout(groq), model(groq)),
+            (50, 90, Some("openai/gpt-oss-20b"))
+        );
+        assert_eq!(timeout(find(&cfg, "nim")), 200);
+        // Untouched entries are the built-in ones, extra, headers and timeouts included.
+        for p in default_providers() {
+            if ["openrouter", "opencode-go", "groq-qwen"].contains(&p.name()) {
+                assert_eq!(format!("{p:?}"), format!("{:?}", find(&cfg, p.name())));
+            }
+        }
+        // The chain the worker calls: without the entries turned off.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[chain]\noff = [\"codex\"]\n",
+        )
+        .unwrap();
+        let called: Vec<_> = (load_chain(dir.path()).unwrap().providers.iter())
+            .map(|p| p.name().to_owned())
+            .collect();
+        assert!(!called.contains(&"codex".to_owned()), "{called:?}");
+        assert_eq!(called.len(), default_providers().len() - 1);
+        assert!(!find(&load(dir.path()).unwrap(), "codex").on());
+    }
+
+    #[test]
+    fn chain_changes_a_hand_written_chain_too() {
+        let cfg = load_text(
+            r#"
+[chain]
+order = ["claude"]
+off = ["local"]
+daily_budget = { local = 3, claude = 4 }
+timeout_s = { local = 20 }
+model = { claude = "sonnet", local = "qwen3:14b" }
+[[providers]]
+kind = "openai"
+name = "local"
+base_url = "http://127.0.0.1:11434/v1"
+model = "qwen3:8b"
+headers = { "x-a" = "b" }
+[[providers]]
+kind = "openai"
+name = "other"
+base_url = "http://127.0.0.1:11435/v1"
+model = "m"
+[[providers]]
+kind = "cli"
+name = "claude"
+cli = "claude"
+"#,
+        );
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+        let names: Vec<_> = cfg.providers.iter().map(Provider::name).collect();
+        assert_eq!(names, ["claude", "local", "other"]);
+        let local = find(&cfg, "local");
+        assert!(!local.on());
+        assert_eq!(
+            (local.daily_budget(), timeout(local), model(local)),
+            (3, 20, Some("qwen3:14b"))
+        );
+        let Provider::Openai { headers, .. } = local else {
+            panic!("expected openai")
+        };
+        assert_eq!(headers["x-a"], "b");
+        let claude = find(&cfg, "claude");
+        assert_eq!(
+            (claude.daily_budget(), timeout(claude), model(claude)),
+            (4, 300, Some("sonnet"))
+        );
+        let other = find(&cfg, "other");
+        assert_eq!((other.daily_budget(), timeout(other)), (300, 90));
+        assert!(other.on() && claude.on());
+    }
+
+    /// Names that match nothing, and names given twice, are warnings for doctor: a failed
+    /// `load()` would stop curation.
+    #[test]
+    fn unknown_and_repeated_chain_names_are_warnings_not_failures() {
+        let cfg = load_text(
+            r#"
+[chain]
+order = ["groq", "gone", "groq"]
+off = ["nim", "nim", "mistral"]
+daily_budget = { gone = 1 }
+timeout_s = { gone = 1 }
+model = { gone = "m" }
+"#,
+        );
+        assert_eq!(cfg.providers[0].name(), "groq");
+        assert!(!find(&cfg, "nim").on());
+        let w = cfg.warnings.join("\n");
+        for line in [
+            "[chain] order names an entry more than once",
+            "[chain] off names an entry more than once",
+            "[chain] order: no chain entry is named \"gone\"",
+            "[chain] off: no chain entry is named \"mistral\"",
+            "[chain] daily_budget: no chain entry is named \"gone\"",
+            "[chain] timeout_s: no chain entry is named \"gone\"",
+            "[chain] model: no chain entry is named \"gone\"",
+        ] {
+            assert!(w.contains(line), "{line}: {w}");
+        }
+        assert_eq!(cfg.warnings.len(), 7, "{w}");
+        // Two `[[providers]]` of one name: a warning, and `[chain]` changes both.
+        let entry = "[[providers]]\nkind = \"cli\"\nname = \"c\"\ncli = \"claude\"\n";
+        let cfg = load_text(&format!("[chain]\ntimeout_s = {{ c = 9 }}\n{entry}{entry}"));
+        assert_eq!(
+            cfg.warnings,
+            ["2 chain entries are named \"c\": [chain] changes each of them"]
+        );
+        assert!(cfg.providers.iter().all(|p| timeout(p) == 9));
+        // A key `[chain]` does not have is refused, with its line: a misspelled `off` would
+        // keep calling the entry.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[chain]\nof = [\"codex\"]\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load(dir.path()).unwrap_err());
+        assert!(err.contains("line 2"), "{err}");
+    }
+
+    #[test]
+    fn every_entry_off_is_a_warning_that_points_to_curate() {
+        let names: Vec<String> = default_providers()
+            .iter()
+            .map(|p| format!("\"{}\"", p.name()))
+            .collect();
+        let cfg = load_text(&format!("[chain]\noff = [{}]\n", names.join(", ")));
+        assert_eq!(cfg.providers.len(), names.len());
+        assert_eq!(cfg.warnings.len(), 1, "{:?}", cfg.warnings);
+        assert!(cfg.warnings[0].contains("[summary] curate = false"));
+        // One left on: no warning.
+        let cfg = load_text(&format!("[chain]\noff = [{}]\n", names[1..].join(", ")));
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+    }
+
+    /// Revision 1's cost rule for hand edits: a model that is not `:free` on an OpenRouter `:free`
+    /// entry without prices is billed outside the monthly USD cap.
+    #[test]
+    fn a_paid_model_on_a_free_openrouter_entry_is_a_warning() {
+        let warned = |text: &str| {
+            load_text(text)
+                .warnings
+                .iter()
+                .any(|w| w.contains("the monthly USD cap does not count it"))
+        };
+        assert!(warned(
+            "[chain]\nmodel = { openrouter = \"openai/gpt-6\" }\n"
+        ));
+        assert!(!warned(
+            "[chain]\nmodel = { openrouter = \"qwen/qwen3.8-27b:FREE\" }\n"
+        ));
+        assert!(!warned("[chain]\nmodel = { groq = \"openai/gpt-6\" }\n"));
+        let entry = "[[providers]]\nkind = \"openai\"\nname = \"o\"\nbase_url = \" https://OpenRouter.ai/api/v1/ \"\nmodel = \"m:free\"\n";
+        let paid = "[chain]\nmodel = { o = \"paid/m\" }\n";
+        assert!(warned(&format!("{paid}{entry}")));
+        // With prices, the cap counts its calls.
+        assert!(!warned(&format!(
+            "{paid}{entry}limits = {{ usd_per_mtok_in = 1.0 }}\n"
+        )));
+    }
+
+    #[test]
+    fn doctor_line_shows_what_applies_to_an_entry() {
+        let cfg = load_text(
+            "[chain]\noff = [\"codex\"]\nmodel = { claude = \"sonnet\" }\ndaily_budget = { groq = 5 }\n",
+        );
+        let line = |name: &str| doctor_line(find(&cfg, name), &cfg.chain);
+        assert_eq!(line("groq"), "    5 calls a day, timeout 90 s");
+        assert_eq!(
+            line("codex"),
+            "    off, no cap of calls a day, timeout 300 s"
+        );
+        assert_eq!(
+            line("claude"),
+            "    no cap of calls a day, timeout 300 s, model sonnet (set in [chain])"
+        );
+    }
+
+    #[test]
+    fn inject_reads_its_table_and_falls_back_to_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |text: &str| {
+            std::fs::write(dir.path().join("config.toml"), text).unwrap();
+            inject(dir.path())
+        };
+        assert_eq!(inject(dir.path()), Inject::default());
+        assert_eq!(
+            Inject::default(),
+            Inject {
+                session_start: true,
+                session_start_chars: 6_000
+            }
+        );
+        let set = at("[inject]\nsession_start = false\nsession_start_chars = 1000\n");
+        assert_eq!(
+            set,
+            Inject {
+                session_start: false,
+                session_start_chars: 1_000
+            }
+        );
+        assert_eq!(
+            at("[inject]\nsession_start_chars = 6000\n").session_start_chars,
+            6_000
+        );
+        // Out of range, the wrong type, an unknown key, a file that is not TOML: the defaults.
+        for bad in [
+            "[inject]\nsession_start = false\nsession_start_chars = 999\n",
+            "[inject]\nsession_start = false\nsession_start_chars = 6001\n",
+            "[inject]\nsession_start = \"no\"\n",
+            "[inject]\nsession_start = false\nsize = 2\n",
+            "[inject\n",
+        ] {
+            assert_eq!(at(bad), Inject::default(), "{bad}");
+        }
+        // Other tables are not its business.
+        assert!(!at("[chain]\noff = [\"x\"]\n[inject]\nsession_start = false\n").session_start);
     }
 
     #[test]

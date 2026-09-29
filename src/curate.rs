@@ -1345,7 +1345,7 @@ pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<Str
 
 /// `recurate`'s plan, and with `send` its sending, under the worker's lock when sending.
 fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> {
-    let cfg = crate::config::load(home)?;
+    let cfg = crate::config::load_chain(home)?;
     let rules = crate::capture::Settings::load(home)?.rules;
     // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
     let mut raw = crate::raw::open(home)?;

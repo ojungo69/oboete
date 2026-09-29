@@ -380,7 +380,8 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
         // curation on or off, a provider removed, a lower cap). A file that no longer loads (one
         // the owner is still editing) stops curation until it loads again, not the worker.
         // The rules are built only when curation is on: a worker with it off pays one read.
-        let loaded = crate::config::load(&home).and_then(|cfg| {
+        // Without the entries turned off: none of the chains below calls them.
+        let loaded = crate::config::load_chain(&home).and_then(|cfg| {
             if !cfg.summary.curate {
                 return Ok(None);
             }

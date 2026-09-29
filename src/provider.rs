@@ -3040,6 +3040,7 @@ mod tests {
         );
         let providers = [Provider::Openai {
             name: "stub".into(),
+            on: true,
             base_url: url,
             key_file: None,
             model: "m".into(),
@@ -3069,6 +3070,7 @@ mod tests {
     fn stub(url: String) -> Provider {
         Provider::Openai {
             name: "stub".into(),
+            on: true,
             base_url: url,
             key_file: None,
             model: "m".into(),
@@ -3316,6 +3318,7 @@ mod tests {
         }
         let missing_cli = Provider::Cli {
             name: "nocli".into(),
+            on: true,
             cli: "oboete-no-such-cli".into(),
             model: None,
             daily_budget: 10,
@@ -3364,6 +3367,7 @@ mod tests {
         let conn = crate::providers_db::open(home.path()).unwrap();
         let spent = Provider::Cli {
             name: "codex".into(),
+            on: true,
             cli: "codex".into(),
             model: None,
             daily_budget: 0,
@@ -3557,6 +3561,7 @@ mod tests {
         let (url, _) = serve_once(answer.into_bytes(), "");
         let agy = Provider::Cli {
             name: "agy".into(),
+            on: true,
             cli: "agy".into(),
             model: None,
             daily_budget: 10,

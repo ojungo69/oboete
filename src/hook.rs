@@ -309,6 +309,11 @@ fn checkout_manifest(
     labels: &Value,
     settings: &crate::capture::Settings,
 ) -> Option<String> {
+    // `[inject]` (#94): off, or a smaller size than the stored manifest's.
+    let inject = crate::config::inject(home);
+    if !inject.session_start {
+        return None;
+    }
     let (session, repo, branch) = crate::capture::checkout(labels, settings);
     let session = own_session(session, store);
     crate::consumer::manifest::text(
@@ -325,7 +330,7 @@ fn checkout_manifest(
     })
     .map(|t| {
         let gated = crate::redact::outbound_with(&t, &settings.rules);
-        crate::manifest::cut(&gated, crate::consumer::manifest::CAP)
+        crate::manifest::cut(&gated, inject.session_start_chars)
     })
 }
 
@@ -1189,6 +1194,64 @@ mod tests {
             json!({"session_id": "s3", "cwd": c, "source": "resume"}),
         );
         assert_eq!(resumed, "");
+    }
+
+    /// #94: `[inject]` cuts the manifest the hook shows at its size, or leaves it out.
+    #[test]
+    fn session_start_injects_the_manifest_at_the_configured_size_or_not_at_all() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
+        std::fs::write(cwd.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let c = cwd.path().to_string_lossy().into_owned();
+        let hook = |event: &str, payload: Value| {
+            let mut out = Vec::new();
+            let input = payload.to_string();
+            run_io(home.path(), "claude", event, input.as_bytes(), &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        for i in 0..12 {
+            let prompt = format!(
+                "今後は手順 {i} の前に必ず{}を確かめて",
+                "キャッシュと索引".repeat(8)
+            );
+            hook(
+                "UserPromptSubmit",
+                json!({"session_id": format!("s{i}"), "cwd": c, "prompt": prompt}),
+            );
+        }
+        crate::worker::run_once(home.path()).unwrap();
+        let shown = |session: &str| {
+            let out = hook(
+                "SessionStart",
+                json!({"session_id": session, "cwd": c, "source": "startup"}),
+            );
+            if out.is_empty() {
+                return None;
+            }
+            let v: Value = serde_json::from_str(out.trim()).unwrap();
+            let text = v["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap();
+            Some(text.chars().count())
+        };
+        let fence = crate::manifest::fenced("").chars().count();
+        let whole = shown("t1").unwrap();
+        assert!(whole > fence + 1_000, "{whole}");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[inject]\nsession_start_chars = 1000\n",
+        )
+        .unwrap();
+        let cut = shown("t2").unwrap();
+        assert!(cut <= fence + 1_000 && cut > fence, "{cut}");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[inject]\nsession_start = false\n",
+        )
+        .unwrap();
+        assert_eq!(shown("t3"), None);
+        assert_eq!(inject_text(home.path(), cwd.path(), Some("t4")), "");
     }
 
     #[test]
