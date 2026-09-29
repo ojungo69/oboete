@@ -229,9 +229,9 @@ The run: 4 rounds of B, C and A, each pass from a fresh copy of the prepared hom
 - **Verdict**: inconclusive, so neither ships. The rule was +6 on the sum, at most +2 owner-no records, and at most +10% prompt tokens. C is +0 and A +1, and both are +3 on the owner-no line.
 - **What moved** (B → C, B → A):
   - #254's first group, in both arms: d331「野良コンテナの判断は任せる」 1 → 4 and 1 → 3, d363 1 → 3 and 1 → 2, d365 0 → 0 and 0 → 1.
-  - d54「autocompactを50%にして」, a decision in all 4 of B's passes, 4 → 1 and 4 → 0: both arms drafted it as a proposal (3 and 4 passes).
+  - d54「autocompactを50%にして」 4 → 1 and 4 → 0. B's hits were a decision with status decided twice and an open item with status decided twice; C's and A's drafts were decisions with status proposed in 3 and 4 passes, each quoting the developer's own line (speaker user).
   - d112's deletion request 4 → 0 in C, as in #259's N (3 → 0), and 4 → 4 in A: the list at the prompt's end loses it, not #259's phrase.
-- **A reading, not tested**: weighing a typed line on its own terms brings in short rules and permissions (d331, d363) and moves a short request carried out in the window (d54) to a proposal. A variant would need to keep the line's own status (asked and done) while it is weighed.
+- **A reading, not tested**: weighing a typed line on its own terms brings in short rules and permissions (d331, d363) and moves a short request carried out in the window (d54) to a proposal. A variant would need to keep the line's own status (asked and done) while it is weighed. The prompt already defines decided as what the developer said, asked for or accepted, so a decision the developer asked for, drafted as proposed with speaker user, contradicts it.
 
 ### What the next M3 run needs
 
