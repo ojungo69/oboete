@@ -1663,7 +1663,9 @@ pub fn recurate_window(
 /// the left-out claim's: the same words of the same event. Not the same sentence, which can hold
 /// several claims (`claim_at` tells apart only claims of one kind), nor quotes that share a
 /// joining word or a start: a claim hidden by a wrong match is worse than two current claims of
-/// one line. A re-derivation keeps a supersede its active derivation has, wherever it quotes now,
+/// one line. For the same reason a claim restates only a sole left-out claim of its words, and a
+/// claim derived before beside it (then proposed, say) is a sibling, not a restatement. A
+/// re-derivation keeps a supersede its active derivation has, wherever it quotes now,
 /// or a second recuration would make both current again. Settled on both sides, as the gates'
 /// rules have it: a proposal supersedes
 /// nothing settled, and a global claim changes only by the owner (`anchored_in` has none). A
@@ -1707,18 +1709,28 @@ fn restate(
             continue;
         };
         let uid = crate::claims::uid(&n.kind, first);
-        let again = anchored.iter().any(|(u, _)| *u == uid);
-        for &(s, at) in &left {
-            let restates = if again {
-                had.exists(params![uid, s])?
-            } else {
-                same_words(at, first)
-            };
-            if restates {
-                n.supersedes.push(s.to_owned());
-                if serde_json::to_string(&n)?.len() > crate::raw::MAX_OP_BYTES {
-                    n.supersedes.pop();
+        let restated: Vec<&str> = if anchored.iter().any(|(u, _)| *u == uid) {
+            let mut kept = Vec::new();
+            for &(s, _) in &left {
+                if had.exists(params![uid, s])? {
+                    kept.push(s);
                 }
+            }
+            kept
+        } else {
+            // One claim restates one: two left-out claims of these words are two claims the
+            // first answer told apart, and which one this restates is not known.
+            let same: Vec<&str> = left
+                .iter()
+                .filter(|(_, at)| same_words(at, first))
+                .map(|&(s, _)| s)
+                .collect();
+            if same.len() == 1 { same } else { Vec::new() }
+        };
+        for s in restated {
+            n.supersedes.push(s.to_owned());
+            if serde_json::to_string(&n)?.len() > crate::raw::MAX_OP_BYTES {
+                n.supersedes.pop();
             }
         }
         *c = serde_json::to_value(n)?;
@@ -5564,6 +5576,28 @@ mod tests {
         assert_eq!(
             current_bodies(&k),
             ["Prefer stderr logs.", "Tabs, not spaces."]
+        );
+    }
+
+    /// #261: a claim restates one claim: when the answer leaves out two claims of the same words
+    /// (a decision and a done change), a third kind quoting them supersedes neither, since which
+    /// one it restates is not known (cubic on 10ff5b5).
+    #[test]
+    fn a_restatement_of_two_left_out_claims_of_its_words_supersedes_neither() {
+        let first = answer(vec![
+            drafted("c1", "decided", "Use tabs", "Tabs, not spaces."),
+            of_kind("change", drafted("c2", "done", "Use tabs", "Tabs are set.")),
+        ]);
+        let again = answer(vec![preference(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Prefer tabs.",
+        )]);
+        let (_home, k) = one_sentence("Use tabs.", vec![first, again]);
+        assert_eq!(
+            current_bodies(&k),
+            ["Prefer tabs.", "Tabs are set.", "Tabs, not spaces."]
         );
     }
 
