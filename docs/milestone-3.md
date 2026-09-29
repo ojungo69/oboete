@@ -7,7 +7,7 @@ The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and
 - Tasks 1 to 11 are merged. The last of them are recuration (#189), the crash harness (#190), and claude's built-in plugins turned off for a curator call (#191, Claude Code 2.1.283).
 - Task 12, the judge's first role ("shrink, never drop"), is behind `[summary] shrink` (#194), off by default. Its input clause passes on dev. Its recall clause fails for decisions by the rule declared before the run, 22 against 24 of 44 (below), a difference smaller than two runs of one arm showed (20 and 24); lessons and fixes are not measured. It stays off. Its second role (a veto on `decided` and `supersedes`) has no code: it waits on M3.
 - Task 13 has the lines below: M2 passes, Cost's Groq and OpenRouter budgets meet the line since 2026-09-29 but NIM's cannot be checked against it (NIM publishes no daily cap, below), a heavy day needs speed too, and M3 fails on the dev labels. The first dev tuning of the gates is merged: the owner's answer to `AskUserQuestion` is the owner's words (#195, #202, #209).
-- M3's typed decisions: #254's prompt shipped. #259 (the typed lines listed again) and #262 (a request carried out is the developer's decision) did not ship (below).
+- M3's typed decisions: #254's prompt shipped. #259 (the typed lines listed again), #262 (a request carried out is the developer's decision) and #271 (the list judged in place, or each typed line weighed before drafting) did not ship (below).
 - Since 2026-09-30 a done claim that quotes the owner's request counts as recalling the decision (the owner's answer to #262's question). Every arm rose by 0 to 5 labels, the best to 26 of 44 (carry2), and no conclusion changed (Counted again, below).
 
 ## M2 on the dev transcripts: passes
@@ -210,6 +210,28 @@ The owner's answer to #262's question: a claim with status done that quotes the 
   - The shrink: short-2 22 against whole3 24, as before, so it stays off.
   - Thinking: 24 with it off (nothink), 21 with it on (full), where it was 19.
   - #259 and #262, in hits over the 24 lasting typed labels at 4 passes per arm: #259 B 69, N 68 (−1, and d112 still went 3 → 0); #262 B 68, N 67 (−1). Neither ships. d352 is now recalled in all 4 of #262's N passes and 3 of its B passes.
+
+### Typed lines judged in place, or weighed one by one (#271)
+
+Two answers to #254's largest group of misses (a short typed line in a window of tool output, with no draft), each against main at 2f0bea9, declared in #271 before the run:
+
+- **C**: #259's list of the typed lines at the prompt's end, with "read each on its own" replaced by "Judge each where it stands, with the lines around it" (branch `curate/typed-context`).
+- **A**: no list; the answer starts with a `typed` array, one entry per `[user]` line (its id, whether a later session should follow it, and why), which no code reads (branch `curate/typed-accounting`).
+
+The run: 4 rounds of B, C and A, each pass from a fresh copy of the prepared home, main's harness copied once, the claude CLI on Haiku as the one curator.
+
+| | B | C | A |
+|---|---|---|---|
+| Hits over the 24 lasting typed labels (0 to 4 each) | 71 | 71 | 72 |
+| Owner-no records decided, 5 × 4 passes | 13 | 16 | 16 |
+| Prompt tokens, 4 passes (estimate) | 626,073 | 635,010 (+1.4%) | 625,820 (−0.0%) |
+
+- **Verdict**: inconclusive, so neither ships. The rule was +6 on the sum, at most +2 owner-no records, and at most +10% prompt tokens. C is +0 and A +1, and both are +3 on the owner-no line.
+- **What moved** (B → C, B → A):
+  - #254's first group, in both arms: d331「野良コンテナの判断は任せる」 1 → 4 and 1 → 3, d363 1 → 3 and 1 → 2, d365 0 → 0 and 0 → 1.
+  - d54「autocompactを50%にして」, a decision in all 4 of B's passes, 4 → 1 and 4 → 0: both arms drafted it as a proposal (3 and 4 passes).
+  - d112's deletion request 4 → 0 in C, as in #259's N (3 → 0), and 4 → 4 in A: the list at the prompt's end loses it, not #259's phrase.
+- **A reading, not tested**: weighing a typed line on its own terms brings in short rules and permissions (d331, d363) and moves a short request carried out in the window (d54) to a proposal. A variant would need to keep the line's own status (asked and done) while it is weighed.
 
 ### What the next M3 run needs
 
