@@ -335,10 +335,10 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
         ..Chain::default()
     };
     for e in &posted.chain {
-        let p = (base.providers.iter())
-            .find(|p| p.name() == e.name)
-            .ok_or_else(|| refused(422, "names", "chain"))?;
-        put_entry(e, p, &now.chain, &mut chain)?;
+        let ps: Vec<&Provider> = (base.providers.iter())
+            .filter(|p| p.name() == e.name)
+            .collect();
+        put_entry(e, &ps, &now.chain, &mut chain)?;
     }
     keep_unknown(&mut chain, &now.chain, &own);
     Ok(chain)
@@ -350,47 +350,49 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
 /// the rest of a save (cubic on #94).
 fn put_entry(
     e: &EntryIn,
-    p: &Provider,
+    ps: &[&Provider],
     now: &ChainOverlay,
     chain: &mut Chain,
 ) -> Result<(), Refusal> {
     let field = |key: &str| format!("chain.{}.{key}", e.name);
-    let (own_timeout, own_model) = match p {
-        Provider::Openai {
-            timeout_s, model, ..
-        } => (*timeout_s, Some(model.as_str())),
-        Provider::Cli {
-            timeout_s, model, ..
-        } => (*timeout_s, model.as_deref()),
+    // `[chain]` sets every entry of one name alike: a value is the entries' own only when it is
+    // each one's, and a model is set only when each one's rule allows it (Codex on #270).
+    let each = |f: &dyn Fn(&Provider) -> bool| ps.iter().all(|p| f(p));
+    let own_timeout = |p: &Provider| match p {
+        Provider::Openai { timeout_s, .. } | Provider::Cli { timeout_s, .. } => *timeout_s,
+    };
+    let own_model = |p: &Provider| match p {
+        Provider::Openai { model, .. } => Some(model.clone()),
+        Provider::Cli { model, .. } => model.clone(),
     };
     if let Some(n) = e.daily_budget {
-        let had = n == p.daily_budget() || now.daily_budget.get(&e.name) == Some(&n);
+        let had = each(&|p| p.daily_budget() == n) || now.daily_budget.get(&e.name) == Some(&n);
         if !had && !BUDGET.contains(&n) {
             return Err(refused(422, "range", field("daily_budget")));
         }
         // A budget from the key follows the key: any number typed is the user's.
-        if p.budget_from_key() || n != p.daily_budget() {
+        if !each(&|p| !p.budget_from_key() && p.daily_budget() == n) {
             chain.daily_budget.insert(e.name.clone(), n);
         }
     }
     if let Some(s) = e.timeout_s {
-        let had = s == own_timeout || now.timeout_s.get(&e.name) == Some(&s);
-        if !had && !TIMEOUT_S.contains(&s) {
+        let own = each(&|p| own_timeout(p) == s);
+        if !own && now.timeout_s.get(&e.name) != Some(&s) && !TIMEOUT_S.contains(&s) {
             return Err(refused(422, "range", field("timeout_s")));
         }
-        if s != own_timeout {
+        if !own {
             chain.timeout_s.insert(e.name.clone(), s);
         }
     }
     if let Some(m) = &e.model
-        && Some(m.as_str()) != own_model
+        && !each(&|p| own_model(p).as_ref() == Some(m))
     {
         let allowed = |c: char| c.is_ascii_alphanumeric() || "._:/@+-".contains(c);
         let fits = !m.is_empty() && m.chars().count() <= MODEL_CHARS && m.chars().all(allowed);
         if !fits && now.model.get(&e.name) != Some(m) {
             return Err(refused(422, "model", field("model")));
         }
-        if !p.model_rule().allows(m) {
+        if !each(&|p| p.model_rule().allows(m)) {
             return Err(refused(422, "paid_model", field("model")));
         }
         chain.model.insert(e.name.clone(), m.clone());
@@ -874,6 +876,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved["chain"][1]["effective_timeout_s"], 60);
+        // Their own values differ: a value equal to the first's is still written for both
+        // (Codex on #270).
+        let text = format!("{entry}timeout_s = 60\n\n{entry}timeout_s = 90\n");
+        let home = home_with(Some(&text));
+        let shown = show(home.path());
+        let saved = save_to(
+            &home,
+            &posted(&shown, |v| {
+                for e in v["chain"].as_array_mut().unwrap() {
+                    e["timeout_s"] = json!(60);
+                }
+            }),
+        )
+        .unwrap();
+        let timeouts: Vec<&Value> = (saved["chain"].as_array().unwrap().iter())
+            .map(|e| &e["effective_timeout_s"])
+            .collect();
+        assert_eq!(timeouts, [60, 60]);
     }
 
     /// A file that does not parse: no form, and no save.
