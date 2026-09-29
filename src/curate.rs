@@ -1566,7 +1566,11 @@ pub(crate) fn op_span(op: &Value) -> Option<Span> {
 /// checkpoint stays where it is (D2), its claims, which become new derivations of the same uids
 /// (MUST-M18), and a `retracted` derivation of each unsettled claim anchored in the window that
 /// the answer no longer gives, at its active derivation's tier so it is the active one (an owner
-/// correction still applies over it). One append. A window with no text to read is covered
+/// correction still applies over it). A settled one it no longer gives stays, since a curator's
+/// answers vary and `retracted` needs the user's words or the owner's correction; but a settled
+/// claim of the answer that restates it, of another uid (another kind) quoting its sentence where
+/// it starts, supersedes it (#261): the curator cannot, as it is not shown the window's own claims
+/// (#256), and both would be current. One append. A window with no text to read is covered
 /// without a call, as the curation phase covers one. `covers` names the part of a span curated
 /// through this window, from the span's start: that part is off the queue and no longer skipped,
 /// whatever windows it took, and a later run sends only the rest.
@@ -1595,9 +1599,13 @@ pub fn recurate_window(
         .filter_map(|c| serde_json::from_value::<crate::claims::ClaimOp>(c.clone()).ok())
         .filter_map(|c| Some(crate::claims::uid(&c.kind, c.evidence.first()?)))
         .collect();
+    let anchored = anchored_in(k, w)?;
+    let mut claims = claims;
+    restate(k, &anchored, &given, &mut claims)?;
     let recipe = op["provider"].as_str().unwrap_or("").to_owned();
-    let retracted: Vec<Value> = anchored_in(k, w)?
+    let retracted: Vec<Value> = anchored
         .into_iter()
+        .filter(|(_, c)| matches!(c.status.as_str(), "proposed" | "unverified"))
         .filter(|(uid, _)| !given.contains(uid))
         .enumerate()
         .map(|(i, (_, mut c))| {
@@ -1649,19 +1657,67 @@ pub fn recurate_window(
     Ok(Ok(counts))
 }
 
+/// Adds, to each settled claim of a recuration's answer that restates a settled claim of the
+/// window the answer leaves out (`recurate_window`), the left-out claim's uid (#261). A restatement
+/// is of a new uid, since one the window has is a re-derivation beside it, and its first quote
+/// starts where the left-out claim's does: its event, sentence and place in the sentence. A
+/// re-derivation keeps such a supersede its active derivation has, or a second recuration would
+/// make both current again. Settled on both sides, as the gates' rules have it: a proposal
+/// supersedes nothing settled, and a global claim changes only by the owner (`anchored_in` has
+/// none). An addition that would put a claim op over the op cap is left out: its append would
+/// stop the window.
+fn restate(
+    k: &Connection,
+    anchored: &[(String, crate::claims::ClaimOp)],
+    given: &std::collections::HashSet<String>,
+    claims: &mut [Value],
+) -> Result<()> {
+    let settled = |s: &str| matches!(s, "decided" | "done");
+    // ponytail: a lesson restated in its own sentence stays twice, since retiring a lesson needs
+    // the user's words (gates) and they are not known here; check them here if that matters.
+    let left: Vec<(&str, &crate::claims::Evidence)> = anchored
+        .iter()
+        .filter(|(uid, c)| settled(&c.status) && c.kind != "lesson" && !given.contains(uid))
+        .filter_map(|(uid, c)| Some((uid.as_str(), c.evidence.first()?)))
+        .collect();
+    if left.is_empty() {
+        return Ok(());
+    }
+    let mut had = k.prepare(
+        "SELECT 1 FROM claims c JOIN edges e ON e.op_device = c.op_device AND e.op_seq = c.op_seq
+         WHERE c.uid = ?1 AND e.to_uid = ?2",
+    )?;
+    let place = |e: &crate::claims::Evidence| (e.device.clone(), e.seq, e.sentence, e.claim_at);
+    for c in claims {
+        let mut n: crate::claims::ClaimOp = serde_json::from_value(c.clone())?;
+        let Some(first) = n.evidence.first().filter(|_| settled(&n.status)) else {
+            continue;
+        };
+        let uid = crate::claims::uid(&n.kind, first);
+        let again = anchored.iter().any(|(u, _)| *u == uid);
+        for &(s, at) in &left {
+            if place(at) == place(first) && (!again || had.exists(params![uid, s])?) {
+                n.supersedes.push(s.to_owned());
+                if serde_json::to_string(&n)?.len() > crate::raw::MAX_OP_BYTES {
+                    n.supersedes.pop();
+                }
+            }
+        }
+        *c = serde_json::to_value(n)?;
+    }
+    Ok(())
+}
+
 /// The active derivation of each claim whose first quote is in `w`, whole (inside its offsets where
 /// it starts or ends within a split event, so one part of an event never retracts another's, and a
-/// quote a later split cuts in two is in no part and not retracted), as a
-/// claim op with its uid: an unsettled one (`proposed`, `unverified`), not global (the owner's
-/// `pref add`, which no window shows). A settled claim stays when an answer leaves it out: a
-/// curator's answers vary, and `retracted` needs the user's words or the owner's correction.
+/// quote a later split cuts in two is in no part and not retracted), as a claim op with its uid
+/// and status: not a global one (the owner's `pref add`, which no window shows).
 fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims::ClaimOp)>> {
     let mut derivations = k.prepare(&format!(
-        "SELECT d.uid, d.op_device, d.op_seq, d.kind, d.speaker, d.scope, d.body, d.tier
+        "SELECT d.uid, d.op_device, d.op_seq, d.kind, d.speaker, d.scope, d.body, d.tier, d.status
          FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
          JOIN evidence q ON q.op_device = d.op_device AND q.op_seq = d.op_seq AND q.idx = 0
-         WHERE {}
-           AND d.status IN ('proposed', 'unverified') AND d.scope <> 'global'
+         WHERE {} AND d.scope <> 'global'
          ORDER BY d.anchor_seq, d.uid",
         crate::claims::IN_WINDOW
     ))?;
@@ -1678,7 +1734,7 @@ fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims:
                 crate::claims::ClaimOp {
                     id: String::new(),
                     kind: r.get(3)?,
-                    status: String::new(),
+                    status: r.get(8)?,
                     speaker: r.get(4)?,
                     scope: r.get(5)?,
                     body: r.get(6)?,
@@ -5389,6 +5445,146 @@ mod tests {
                 ("Tabs for indents.".to_owned(), status("proposed"))
             ]
         );
+    }
+
+    /// The bodies of the current claims `one_sentence` leaves, sorted: its prompt records no
+    /// checkout, so they are the claims of no repository.
+    fn current_bodies(k: &Connection) -> Vec<String> {
+        let mut bodies: Vec<String> = crate::claims::global(k)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.body)
+            .collect();
+        bodies.sort();
+        bodies
+    }
+
+    fn preference(id: &str, status: &str, quote: &str, body: &str) -> Value {
+        let mut c = drafted(id, status, quote, body);
+        c["kind"] = json!("preference");
+        c
+    }
+
+    fn answer(claims: Vec<Value>) -> Value {
+        json!({"claims": claims, "summary": "s"})
+    }
+
+    /// #261: a recuration that derives a settled decision of its window again as a preference,
+    /// from the same sentence, supersedes the decision, which it cannot name as it is not shown
+    /// the window's own claims (#256): one current claim, not two.
+    #[test]
+    fn a_recuration_that_restates_a_settled_claim_as_another_kind_supersedes_it() {
+        let first = answer(vec![drafted(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Tabs, not spaces.",
+        )]);
+        let again = answer(vec![preference(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Prefer tabs.",
+        )]);
+        let (_home, k) = one_sentence("Use tabs.", vec![first, again]);
+        assert_eq!(current_bodies(&k), ["Prefer tabs."]);
+    }
+
+    /// #261: the restatement is a re-derivation on the next recuration, and its active derivation
+    /// still supersedes the claim it restated.
+    #[test]
+    fn a_restatement_still_supersedes_after_another_recuration() {
+        let first = answer(vec![drafted(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Tabs, not spaces.",
+        )]);
+        let again = answer(vec![preference(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Prefer tabs.",
+        )]);
+        let (_home, k) = one_sentence("Use tabs.", vec![first, again.clone(), again]);
+        assert_eq!(current_bodies(&k), ["Prefer tabs."]);
+    }
+
+    /// #261: a recuration that leaves a settled claim of its window out keeps it. This held
+    /// before #261; it guards the restatement rule's reach.
+    #[test]
+    fn a_recuration_keeps_a_settled_claim_it_leaves_out() {
+        let first = answer(vec![
+            drafted("c1", "decided", "Use tabs", "Tabs, not spaces."),
+            drafted("c2", "decided", "Log to stderr", "Logs go to stderr."),
+        ]);
+        let again = answer(vec![drafted(
+            "c1",
+            "decided",
+            "Log to stderr",
+            "Log to stderr.",
+        )]);
+        let (_home, k) = one_sentence("Use tabs. Log to stderr.", vec![first, again]);
+        assert_eq!(current_bodies(&k), ["Log to stderr.", "Tabs, not spaces."]);
+    }
+
+    /// #261: a settled draft of another kind and a new uid, but from another sentence, restates
+    /// nothing: the settled claim whose sentence no draft quotes stays current. This held before
+    /// #261; it pins the rule to the left-out claim's sentence.
+    #[test]
+    fn a_settled_draft_from_another_sentence_supersedes_nothing() {
+        let first = answer(vec![drafted(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Tabs, not spaces.",
+        )]);
+        let again = answer(vec![preference(
+            "c1",
+            "decided",
+            "Log to stderr",
+            "Prefer stderr.",
+        )]);
+        let (_home, k) = one_sentence("Use tabs. Log to stderr.", vec![first, again]);
+        assert_eq!(current_bodies(&k), ["Prefer stderr.", "Tabs, not spaces."]);
+    }
+
+    /// #261: a proposal restating a settled claim (as the gates leave a lowered draft) supersedes
+    /// nothing settled, as the gates have it: both stay current.
+    #[test]
+    fn a_proposed_restatement_supersedes_nothing() {
+        let first = answer(vec![drafted(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Tabs, not spaces.",
+        )]);
+        let again = answer(vec![preference(
+            "c1",
+            "proposed",
+            "Use tabs",
+            "Maybe tabs.",
+        )]);
+        let (_home, k) = one_sentence("Use tabs.", vec![first, again]);
+        assert_eq!(current_bodies(&k), ["Maybe tabs.", "Tabs, not spaces."]);
+    }
+
+    /// #261: a re-derivation is not a restatement: a recuration that gives a decision again and
+    /// leaves out the settled preference beside it, from the same sentence, keeps both current.
+    #[test]
+    fn a_re_derivation_does_not_supersede_its_settled_sibling() {
+        let first = answer(vec![
+            drafted("c1", "decided", "Use tabs", "Tabs, not spaces."),
+            preference("c2", "decided", "Use tabs", "Prefer tabs."),
+        ]);
+        let again = answer(vec![drafted(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Tabs for indents.",
+        )]);
+        let (_home, k) = one_sentence("Use tabs.", vec![first, again]);
+        assert_eq!(current_bodies(&k), ["Prefer tabs.", "Tabs for indents."]);
     }
 
     /// A recuration that finds a claim earlier in the sentence leaves the uid of the claim it
