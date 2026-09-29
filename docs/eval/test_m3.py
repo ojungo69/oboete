@@ -14,3 +14,6 @@ def test_a_claim_is_the_decision_whose_quote_it_shares():
     assert shares('tabs in every file', 'tabs\nin every  file of it')
     assert shares('１', '１')
     assert not shares('１', '２')
+    # An empty quote is no one's.
+    assert not shares('', 'じゃあCCSを完全削除して。')
+    assert not shares(' ', 'x')
