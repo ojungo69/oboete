@@ -729,6 +729,21 @@ fn answers_a_question(body: &Value) -> bool {
     body["tool"] == "AskUserQuestion" && body["failed"] != true
 }
 
+/// Whether the owner answered a question in `agent`'s `session` on this device strictly between
+/// two seqs: an answer is a turn too, as a window's gates read it (#198).
+fn answered_between(
+    raw: &Raw,
+    agent: &str,
+    session: &str,
+    after: i64,
+    before: i64,
+) -> Result<bool> {
+    Ok(raw
+        .events_between(agent, session, "tool", after, before)?
+        .iter()
+        .any(|e| answers_a_question(&serde_json::from_str(&e.body).unwrap_or_default())))
+}
+
 /// The owner's answers in an `AskUserQuestion` call, and the notes they added to them: the
 /// values of `answers` and each annotation's `notes`, from its output as JSON. A question's text
 /// (a key of `answers`) and an option's `preview` are the assistant's. Only the output: a quote is
@@ -1063,6 +1078,8 @@ struct Request {
     prompt: String,
     shown_in: Vec<(String, crate::claims::Claim)>,
     carried_uids: Carried,
+    /// The sessions shown a reply's options, with their labels (`Offered`).
+    offered: Vec<(String, Vec<String>)>,
 }
 
 /// The request for window `w`: its text, the candidates of each of its repositories (found by
@@ -1103,15 +1120,22 @@ fn request(
         }
         shown.push(block);
     }
-    let (carried_text, mut carried_uids) = carried(raw, k, rules, w)?;
-    // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing.
+    let (carried_text, mut carried_uids, offered) = carried(raw, k, rules, w)?;
+    // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing,
+    // and options cut from it are picked by nothing.
     let (carried_text, shown) = fit(&carried_text, &shown, summary.window_tokens / 5);
     carried_uids.retain(|(_, _, c)| carries(&carried_text, &c.uid));
     shown_in.retain(|(_, c)| shows(&shown, &c.uid));
+    let offered = offered
+        .into_iter()
+        .filter(|(_, head, _)| carried_text.lines().any(|l| l.starts_with(head.as_str())))
+        .map(|(key, _, labels)| (key, labels))
+        .collect();
     Ok(Request {
         prompt: prompt(&summary.language, &w.text, &shown, &carried_text),
         shown_in,
         carried_uids,
+        offered,
     })
 }
 
@@ -1133,8 +1157,15 @@ fn answered(
             Ok((summary, mut found, lost)) => {
                 keyed(k, &mut found)?;
                 let ended = ended_on_a_proposal(raw, k, w)?;
-                let gated =
-                    crate::gates::check(w, &req.shown_in, &req.carried_uids, &ended, found, rules);
+                let gated = crate::gates::check(
+                    w,
+                    &req.shown_in,
+                    &req.carried_uids,
+                    &ended,
+                    &req.offered,
+                    found,
+                    rules,
+                );
                 let (mut claims, mut over) = (Vec::new(), Vec::new());
                 for (d, evidence) in gated.kept {
                     let op = crate::claims::ClaimOp {
@@ -2063,14 +2094,10 @@ fn ended_on_a_proposal(raw: &Raw, k: &Connection, w: &Window) -> Result<Vec<Stri
             continue;
         };
         let clean = proposals.iter().all(|&(seq, t)| seq != last || !t);
-        // The owner's answer to a question is a turn too, as a window's gates read it (#198).
-        let answered = || -> Result<bool> {
-            Ok(raw
-                .events_between(agent, session, "tool", last, l.seq)?
-                .iter()
-                .any(|e| answers_a_question(&serde_json::from_str(&e.body).unwrap_or_default())))
-        };
-        if clean && raw.turns_between(agent, session, last, l.seq)? == 0 && !answered()? {
+        if clean
+            && raw.turns_between(agent, session, last, l.seq)? == 0
+            && !answered_between(raw, agent, session, last, l.seq)?
+        {
             out.push(l.key.clone());
         }
     }
@@ -2157,6 +2184,11 @@ fn searched(w: &Window, repo: &str) -> (String, String) {
 /// its repository: a draft of that session, anchored in that repository, may supersede them.
 type Carried = Vec<(String, Option<String>, crate::claims::Claim)>;
 
+/// The sessions whose first line answers a reply that listed options, each with the head of the
+/// options line its prompt carries (`fit` may cut the line) and the options' labels: a bare pick
+/// ("1") settles only one of them (`gates`, #252).
+type Offered = Vec<(String, String, Vec<String>)>;
+
 /// The line of its event a quote is in, through the line it ends in, trimmed, at most 200
 /// characters; `None` when the quote is a tool's (its line is often JSON, never the option list a reply numbers), the event is
 /// gone, or its text no longer holds the quote where the evidence says.
@@ -2199,6 +2231,100 @@ fn quoted_line(raw: &Raw, e: &crate::claims::Evidence, rules: &Rules) -> Result<
     Ok(Some(part.replace(['\n', '\r'], " ").trim().to_owned()))
 }
 
+/// The options a reply lists, on one line, with their labels: two or more of its lines that start
+/// with a number (`1.`, `１．`, `2)`, `①`) or a letter (`A.`, `b)`), at most 4, each at most 60
+/// characters, masked as the whole reply is; `None` when it lists fewer or the event is not a
+/// reply. Short: `fit` keeps the carried lines up to the first that does not fit, and cuts all
+/// after it.
+fn options_of(
+    raw: &Raw,
+    device: &str,
+    seq: i64,
+    rules: &Rules,
+) -> Result<Option<(String, Vec<String>)>> {
+    let Some(r) = raw.after(device, seq - 1, 1)?.into_iter().next() else {
+        return Ok(None);
+    };
+    let (Item::Event(event), true) = (&r.item, r.seq == seq) else {
+        return Ok(None);
+    };
+    if event.kind != "reply" {
+        return Ok(None);
+    }
+    let Some(text) = long_text(event) else {
+        return Ok(None);
+    };
+    let Some(hidden) = crate::redact::hidden(&text, rules) else {
+        return Ok(None);
+    };
+    let (mut options, mut labels, mut at) = (Vec::new(), Vec::new(), 0);
+    for line in text.split_inclusive('\n') {
+        let start = at + line.len() - line.trim_start().len();
+        at += line.len();
+        let option = line.trim();
+        let Some(label) = option_label(option).filter(|_| options.len() < 4) else {
+            continue;
+        };
+        labels.push(label);
+        let end = start
+            + option
+                .char_indices()
+                .nth(60)
+                .map_or(option.len(), |(i, _)| i);
+        let part = crate::redact::outbound_range(&text, start..end, Some(&hidden), rules);
+        options.push(part.replace(['\n', '\r'], " ").trim().to_owned());
+    }
+    Ok((options.len() >= 2).then(|| (options.join(" / "), labels)))
+}
+
+/// The label of the option a line starts, as a pick names it ("1" for `１．`, "2" for `②`, "b"
+/// for `Ｂ）`): one or two digits or one letter (a full-width one as its ASCII one), then `.` or
+/// `)` and whitespace or the line's end, or `．` not before a digit, or `）`; or a circled number.
+/// Markdown's `#` and `*` before it are skipped.
+pub(crate) fn option_label(line: &str) -> Option<String> {
+    // A full-width digit or letter as its ASCII one, as a pick's words are (`gates::picks`).
+    let ascii = |c: char| match c {
+        '０'..='９' | 'Ａ'..='Ｚ' | 'ａ'..='ｚ' => {
+            char::from_u32(u32::from(c) - 0xfee0).unwrap_or(c)
+        }
+        c => c,
+    };
+    let line = line.trim_start_matches(['#', '*', ' ']);
+    let digits: String = line
+        .chars()
+        .map(ascii)
+        .take_while(char::is_ascii_digit)
+        .collect();
+    let (label, mut rest) = match digits.chars().count() {
+        n @ (1 | 2) => (digits, line.chars().skip(n)),
+        0 => {
+            let first = line.chars().next()?;
+            if ('①'..='⑳').contains(&first) {
+                return Some((u32::from(first) - u32::from('①') + 1).to_string());
+            }
+            let letter = ascii(first);
+            if !letter.is_ascii_alphabetic() {
+                return None;
+            }
+            (
+                letter.to_ascii_lowercase().to_string(),
+                line.chars().skip(1),
+            )
+        }
+        _ => return None,
+    };
+    let marked = match rest.next() {
+        // `1.5x`, `1.0.0` and `e.g.` are not options: an ASCII mark is followed by whitespace, as a
+        // markdown list's is.
+        Some('.' | ')') => rest.next().is_none_or(char::is_whitespace),
+        // Japanese writes `１．項目` with none, but `１．２倍` is a number.
+        Some('．') => rest.next().is_none_or(|c| !ascii(c).is_ascii_digit()),
+        Some('）') => true,
+        _ => false,
+    };
+    marked.then_some(label)
+}
+
 /// What each session of the window carries in from before it (spec 3.1, 3.3; D12), as text for
 /// the prompt: its goal (its first prompt, through the gate, 200 characters), the claims its
 /// previous window left proposed, so that an acceptance in this window can point at them, its
@@ -2207,7 +2333,12 @@ fn quoted_line(raw: &Raw, e: &crate::claims::Evidence, rules: &Rules) -> Result<
 /// open items. Every value goes through the gate before it is shown.
 // ponytail: a child session (a subagent) starts with nothing of its parent's until capture
 // records the link.
-fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(String, Carried)> {
+fn carried(
+    raw: &Raw,
+    k: &Connection,
+    rules: &Rules,
+    w: &Window,
+) -> Result<(String, Carried, Offered)> {
     // On one line: `fit` keeps or cuts a line whole, and no text can start a line `carries` reads.
     let gate = |t: &str| crate::redact::outbound_with(t, rules).replace(['\n', '\r'], " ");
     // Each session with every repository its lines are in: an agent may change checkout.
@@ -2275,6 +2406,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
     // session's acceptance answers.
     let (mut out, mut settled, mut open) = (String::new(), String::new(), String::new());
     let mut uids: Carried = Vec::new();
+    let mut offered: Offered = Vec::new();
     for (key, repos) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
         let previous = raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset))?;
@@ -2288,6 +2420,8 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
         // Proposals first: they are what an acceptance in this window answers. The assistant's
         // own before the rest (inferred, a tool's), since `fit` cuts from the end (#244).
         let mut proposals: Vec<(bool, String, Option<String>, crate::claims::Claim)> = Vec::new();
+        // The carried proposals' evidence on this window's device, with their repositories.
+        let mut ends: Vec<(i64, Option<String>)> = Vec::new();
         for op in previous.iter().filter(|o| o.kind == OpKind::Claim) {
             let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(op.body.clone()) else {
                 continue;
@@ -2321,6 +2455,9 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                         .map(|l| format!(" (from: {l})"))
                         .unwrap_or_default();
                     let line = format!("proposed before {uid}{place}: {}{from}", gate(&tip.body));
+                    if first.device == w.device {
+                        ends.push((first.seq, repo.clone()));
+                    }
                     proposals.push((tip.speaker != "assistant proposal", line, repo, tip));
                 }
             }
@@ -2329,6 +2466,31 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
         for (_, line, repo, tip) in proposals {
             lines.push(line);
             uids.push((key.to_owned(), repo, tip));
+        }
+        // The options of the reply the session's first line here answers, the developer's with
+        // no turn or answer to a question between them, in the same repository (as an acceptance
+        // is, `gates`): a bare "1" names one, and the proposal's quote may not (#244, d107: the
+        // reply's recommendation was quoted, its "1." line was not). The newest carried proposal
+        // that is a reply's: one quoted from a later tool output has no options.
+        ends.sort_by_key(|&(seq, _)| std::cmp::Reverse(seq));
+        ends.dedup_by_key(|(seq, _)| *seq);
+        if let Some(l) = w.lines.iter().find(|l| l.key == key)
+            && matches!(l.role, Role::User)
+        {
+            for (seq, repo) in ends {
+                if l.repo != repo
+                    || raw.turns_between(agent, session, seq, l.seq)? != 0
+                    || answered_between(raw, agent, session, seq, l.seq)?
+                {
+                    continue;
+                }
+                if let Some((options, labels)) = options_of(raw, &w.device, seq, rules)? {
+                    let head = format!("options in the reply just before {}:", l.id);
+                    lines.push(format!("{head} {options}"));
+                    offered.push((key.to_owned(), head, labels));
+                    break;
+                }
+            }
         }
         // The session's own, in its repositories, before the cap: other sessions' newer claims
         // never hide one.
@@ -2368,7 +2530,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
     }
     out.push_str(&settled);
     out.push_str(&open);
-    Ok((out, uids))
+    Ok((out, uids, offered))
 }
 
 /// The curator's prompt: what to extract and how, then everything taken from the record (the
@@ -2394,9 +2556,10 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          tool result.\n\
          - scope: repo.\n\
          - body: one or two concrete sentences (names, paths, numbers), at most 1,000 characters.\n\
-         - quote: 5 to 200 characters copied exactly from one line, the one that shows it (the \
-         developer's own line for decided): from its prompt, reply or tool output, never from \
-         a tool's input; never text shown as [REDACTED].\n\
+         - quote: 5 to 200 characters copied exactly from one line (all of a shorter line, such \
+         as a bare \"1\" that picks an option), the one that shows it (the developer's own line \
+         for decided): from its prompt, reply or tool output, never from a tool's input; never \
+         text shown as [REDACTED].\n\
          - line: that line's id.\n\
          - supersedes: the ids of claims in your answer, or the uids of kept or carried claims, \
          that this one changes, reverses or cancels (the developer chose another way, dropped or \
@@ -3998,7 +4161,7 @@ mod tests {
         let dev = raw.device().to_owned();
         let rules = Rules::default();
         let w = next_window(&raw, &dev, 100_000, &rules).unwrap().unwrap();
-        let (text, _) = carried(&raw, &k, &rules, &w).unwrap();
+        let (text, ..) = carried(&raw, &k, &rules, &w).unwrap();
         // Each under its own repository, as the window's headings name them.
         for (repo, body) in [
             ("r", "The importer drops empty lines."),
@@ -4039,7 +4202,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.from_seq, before + 1);
-        let (text, uids) = carried(&raw, &k, &rules, &w).unwrap();
+        let (text, uids, _) = carried(&raw, &k, &rules, &w).unwrap();
         let decided: Vec<&str> = text
             .lines()
             .filter(|l| l.starts_with("decided before "))
@@ -4091,7 +4254,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((w.from_seq, w.from_offset), (seq, Some(split)));
-        let (text, _) = carried(&raw, &k, &rules, &w).unwrap();
+        let (text, ..) = carried(&raw, &k, &rules, &w).unwrap();
         let decided: Vec<&str> = text
             .lines()
             .filter(|l| l.starts_with("decided before "))
@@ -6018,8 +6181,6 @@ mod tests {
         assert_eq!(accepted.body["status"], "decided");
     }
 
-    /// #244: a carried proposal shows the line of the reply it was quoted from, so that a bare
-    /// "1" names it: an option's number is outside the quote.
     /// The quoted line is masked in the whole text before it is cut to 200 characters, so a
     /// secret the cut splits is not shown in part, and a quote further into its line than that is
     /// shown with the 200 characters that end with it (CodeRabbit on #247).
@@ -6107,6 +6268,172 @@ mod tests {
         );
     }
 
+    /// A bare option number is shorter than a quote's usual 5 characters: quoted whole, as the
+    /// prompt now allows, it is the user's pick and settles the carried option it names (#244,
+    /// d107), through the options the window's prompt carried in (`gates::picks_an_option`). Cut
+    /// from the prompt by the budget, they settle nothing.
+    #[test]
+    fn a_bare_option_number_quoted_whole_settles_the_carried_option() {
+        let options = "Two ways:\n1. **Cache the parsed files**\n2. **Parse in parallel**";
+        let first = [
+            prompt("Build the importer."),
+            event("reply", json!({"assistant": options})),
+        ];
+        let proposal = |id: &str, quote: &str, body: &str| {
+            json!({"id": id, "kind": "decision", "status": "proposed",
+                "speaker": "assistant proposal", "scope": "repo", "body": body,
+                "quote": quote, "line": "L2", "supersedes": []})
+        };
+        let answer = |more: &str| {
+            json!({"claims": [
+                proposal("c1", "Cache the parsed files", &format!("Cache parsed files.{more}")),
+                proposal("c2", "Parse in parallel", &format!("Parse in parallel.{more}"))],
+                "summary": "s"})
+        };
+        let pick = |p: &str| {
+            let uid = p
+                .lines()
+                .filter(|l| l.contains(": Cache parsed files."))
+                .find_map(|l| l.strip_prefix("proposed before ")?.split(':').next())
+                .unwrap()
+                .to_owned();
+            json!({"claims": [{"id": "c1", "kind": "decision", "status": "decided",
+                "speaker": "user", "scope": "repo", "body": "Cache the parsed files.",
+                "quote": "1", "line": "L1", "supersedes": [uid]}], "summary": "s"})
+        };
+        let (_, ops) = two_windows(&first, answer(""), &[prompt("1")], pick);
+        let picked = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+        assert_eq!(picked.body["evidence"][0]["quote"], "1");
+        assert_eq!(picked.body["status"], "decided");
+        assert_eq!(picked.body["supersedes"].as_array().unwrap().len(), 1);
+        let long = " Keep the cache warm between runs.".repeat(25);
+        let (sent, ops) = two_windows(&first, answer(&long), &[prompt("1")], pick);
+        assert!(!sent[1].contains("options in the reply"), "{}", sent[1]);
+        let picked = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+        assert_eq!(picked.body["status"], "proposed");
+    }
+
+    /// #244, d107: the reply numbered its options and the proposal quoted its recommendation, so
+    /// the carried proposal named no number. A window that opens with the developer's answer to
+    /// that reply is shown the reply's options, masked in the whole reply before each is cut to
+    /// 60 characters; one that opens with a tool's line, or in another repository, is not.
+    #[test]
+    fn a_window_that_answers_a_reply_is_shown_its_options() {
+        let ghp = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
+        let reply = format!(
+            "Three ways:\n\n1. **Cache the parsed files** (recommended)\n   Fast.\n\
+             2) **Parse in parallel** {} {ghp}\nC. Stream the rows\n\n\
+             My proposal: cache the parsed files first. Shall I go ahead?",
+            "b".repeat(30)
+        );
+        let first = [
+            prompt("Build the importer."),
+            event("reply", json!({"assistant": reply})),
+        ];
+        let answer = json!({"claims": [{"id": "c1", "kind": "decision", "status": "proposed",
+            "speaker": "assistant proposal", "scope": "repo", "body": "Cache parsed files.",
+            "quote": "cache the parsed files first", "line": "L2", "supersedes": []}],
+            "summary": "s"});
+        let none = |_: &str| json!({"claims": [], "summary": "s"});
+        let (sent, _) = two_windows(&first, answer.clone(), &[prompt("１")], none);
+        let options = sent[1]
+            .lines()
+            .find(|l| l.starts_with("options in the reply just before "))
+            .unwrap_or_else(|| panic!("{}", sent[1]));
+        let parse = format!("2) **Parse in parallel** {} [REDACTED]", "b".repeat(30));
+        assert_eq!(
+            options,
+            format!(
+                "options in the reply just before L1: 1. **Cache the parsed files** \
+                 (recommended) / {parse} / C. Stream the rows"
+            )
+        );
+        let (sent, _) = two_windows(&first, answer.clone(), &[tool("ls"), prompt("1")], none);
+        assert!(!sent[1].contains("options in the reply"), "{}", sent[1]);
+        let elsewhere = Event {
+            repo: Some("elsewhere".into()),
+            ..prompt("1")
+        };
+        let (sent, _) = two_windows(&first, answer.clone(), &[elsewhere], none);
+        assert!(sent[1].contains("proposed before "), "{}", sent[1]);
+        assert!(!sent[1].contains("options in the reply"), "{}", sent[1]);
+        // The owner answered a question after the reply: "1" answers that, not the options.
+        let asked = event(
+            "tool",
+            json!({"tool": "AskUserQuestion", "input": {"questions": []},
+                "output": {"answers": {"Which store?": "SQLite"}}, "failed": false}),
+        );
+        let with_answer = [first[0].clone(), first[1].clone(), asked];
+        let (sent, _) = two_windows(&with_answer, answer.clone(), &[prompt("1")], none);
+        assert!(sent[1].contains("proposed before "), "{}", sent[1]);
+        assert!(!sent[1].contains("options in the reply"), "{}", sent[1]);
+        // A proposal quoted from a later tool output has no options; the reply's are shown.
+        let with_tool = [
+            first[0].clone(),
+            first[1].clone(),
+            tool("plan: stream the parsed rows"),
+        ];
+        let from_tool = json!({"id": "c2", "kind": "decision", "status": "proposed",
+            "speaker": "assistant inferred", "scope": "repo", "body": "Stream the parsed rows.",
+            "quote": "stream the parsed rows", "line": "L3", "supersedes": []});
+        let mut both = answer.clone();
+        both["claims"].as_array_mut().unwrap().push(from_tool);
+        let (sent, _) = two_windows(&with_tool, both, &[prompt("1")], none);
+        assert!(
+            sent[1].contains("options in the reply just before L1: 1."),
+            "{}",
+            sent[1]
+        );
+        // Turns after the reply: the developer's line answers the last of them, not the options.
+        let later = [
+            first[0].clone(),
+            first[1].clone(),
+            prompt("Also add logs."),
+            event("reply", json!({"assistant": "Done."})),
+        ];
+        let (sent, _) = two_windows(&later, answer, &[prompt("1")], none);
+        assert!(sent[1].contains("proposed before "), "{}", sent[1]);
+        assert!(!sent[1].contains("options in the reply"), "{}", sent[1]);
+    }
+
+    /// Labelled as a pick names the option (`gates::picks`).
+    #[test]
+    fn an_option_starts_with_a_number_or_a_letter_and_its_mark() {
+        for (line, label) in [
+            ("1. a", "1"),
+            ("１．a", "1"),
+            ("2) a", "2"),
+            ("10. a", "10"),
+            ("① a", "1"),
+            ("⑫ a", "12"),
+            ("A. a", "a"),
+            ("b) a", "b"),
+            ("**1. a**", "1"),
+            ("### ２） a", "2"),
+            ("Ａ．設計案", "a"),
+            ("ｂ）小さく", "b"),
+        ] {
+            assert_eq!(option_label(line).as_deref(), Some(label), "{line}");
+        }
+        for line in [
+            "e.g. a",
+            "2026. a",
+            "1 a",
+            "- 1. a",
+            "Fast.",
+            "a",
+            "",
+            "1.5x a",
+            "1.0.0",
+            "１．２倍の速度向上",
+            "１．１ 設計",
+        ] {
+            assert_eq!(option_label(line), None, "{line}");
+        }
+    }
+
+    /// #244: a carried proposal shows the line of the reply it was quoted from, so that a bare
+    /// "1" names it: an option's number is outside the quote.
     #[test]
     fn a_carried_proposal_shows_its_reply_line_and_a_fact_is_not_carried() {
         let options = "Two ways:\n1. **Cache the parsed files**\n2. **Parse in parallel**";
