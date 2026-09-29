@@ -304,8 +304,7 @@ impl Provider {
     pub fn budget_from_key(&self) -> bool {
         matches!(self, Provider::Openai {
                 base_url, model, daily_budget: None, subscription: false, ..
-            } if base_url.trim().trim_end_matches('/').eq_ignore_ascii_case(OPENROUTER)
-                && model.to_ascii_lowercase().ends_with(":free"))
+            } if openrouter_free(base_url, model))
     }
     pub fn daily_budget(&self) -> u32 {
         match self {
@@ -673,6 +672,7 @@ pub fn load_chain(home: &Path) -> Result<Config> {
 fn overlay(cfg: &mut Config) {
     let Config {
         providers,
+        summary,
         chain,
         warnings,
         ..
@@ -771,17 +771,19 @@ fn overlay(cfg: &mut Config) {
             }
         }
     }
-    if !providers.is_empty() && !providers.iter().any(Provider::on) {
+    if summary.curate && !providers.is_empty() && !providers.iter().any(Provider::on) {
         warnings.push(
             "every chain entry is off, so nothing is curated: to stop curation, set [summary] curate = false instead".into(),
         );
     }
 }
 
-/// An OpenRouter `:free` model, by the URL as written in any case (#238's rule).
-// ponytail: #238's `budget_from_key` has the same test; fold them together once both are on main.
+/// An OpenRouter `:free` model, by the URL as written in any case (#238).
 fn openrouter_free(base_url: &str, model: &str) -> bool {
-    (base_url.trim().trim_end_matches('/')).eq_ignore_ascii_case("https://openrouter.ai/api/v1")
+    base_url
+        .trim()
+        .trim_end_matches('/')
+        .eq_ignore_ascii_case(OPENROUTER)
         && is_free(model)
 }
 
@@ -790,7 +792,8 @@ fn is_free(model: &str) -> bool {
 }
 
 /// Doctor's line under a chain entry (#94): off, its calls a day and timeout as they apply, and
-/// its model when `[chain]` sets it.
+/// its model when `[chain]` sets it. A budget from the entry's key is on the entry's own line
+/// (#238), not here.
 pub fn doctor_line(p: &Provider, chain: &ChainOverlay) -> String {
     let (timeout_s, model) = match p {
         Provider::Openai {
@@ -804,10 +807,12 @@ pub fn doctor_line(p: &Provider, chain: &ChainOverlay) -> String {
     if !p.on() {
         parts.push("off".to_owned());
     }
-    parts.push(match p.daily_budget() {
-        n if n == no_daily_cap() => "no cap of calls a day".to_owned(),
-        n => format!("{n} calls a day"),
-    });
+    if !p.budget_from_key() {
+        parts.push(match p.daily_budget() {
+            n if n == no_daily_cap() => "no cap of calls a day".to_owned(),
+            n => format!("{n} calls a day"),
+        });
+    }
     parts.push(format!("timeout {timeout_s} s"));
     if let Some(m) = model.filter(|_| chain.model.contains_key(p.name())) {
         parts.push(format!("model {m} (set in [chain])"));
@@ -815,7 +820,9 @@ pub fn doctor_line(p: &Provider, chain: &ChainOverlay) -> String {
     format!("    {}", parts.join(", "))
 }
 
-/// `[inject]` (#94): what the hook injects at a session start.
+/// `[inject]` (#94): the manifest the hooks inject, wherever an agent takes it: at a session
+/// start, at the first event of an agent without one (grok, agy), after a Cursor compaction, and
+/// through `oboete inject` (OpenCode, pi).
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Inject {
@@ -1432,13 +1439,19 @@ model = { gone = "m" }
             .iter()
             .map(|p| format!("\"{}\"", p.name()))
             .collect();
-        let cfg = load_text(&format!("[chain]\noff = [{}]\n", names.join(", ")));
+        let off = |names: &[String], curate: bool| {
+            load_text(&format!(
+                "[summary]\ncurate = {curate}\n[chain]\noff = [{}]\n",
+                names.join(", ")
+            ))
+        };
+        let cfg = off(&names, true);
         assert_eq!(cfg.providers.len(), names.len());
         assert_eq!(cfg.warnings.len(), 1, "{:?}", cfg.warnings);
         assert!(cfg.warnings[0].contains("[summary] curate = false"));
-        // One left on: no warning.
-        let cfg = load_text(&format!("[chain]\noff = [{}]\n", names[1..].join(", ")));
-        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+        // One left on, or curation off already: no warning.
+        assert!(off(&names[1..], true).warnings.is_empty());
+        assert!(off(&names, false).warnings.is_empty());
     }
 
     /// Revision 1's cost rule for hand edits: a model that is not `:free` on an OpenRouter `:free`
@@ -1481,6 +1494,13 @@ model = { gone = "m" }
         assert_eq!(
             line("claude"),
             "    no cap of calls a day, timeout 300 s, model sonnet (set in [chain])"
+        );
+        // Its key's budget is on its own line (#238): 10 here would be only the placeholder.
+        assert!(find(&cfg, "openrouter").budget_from_key());
+        assert!(
+            !line("openrouter").contains("calls a day"),
+            "{}",
+            line("openrouter")
         );
     }
 

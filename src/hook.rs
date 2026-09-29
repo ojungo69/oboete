@@ -1230,21 +1230,24 @@ mod tests {
                 return None;
             }
             let v: Value = serde_json::from_str(out.trim()).unwrap();
-            let text = v["hookSpecificOutput"]["additionalContext"]
-                .as_str()
-                .unwrap();
-            Some(text.chars().count())
+            let text = v["hookSpecificOutput"]["additionalContext"].as_str();
+            Some(text.unwrap().to_owned())
         };
         let fence = crate::manifest::fenced("").chars().count();
         let whole = shown("t1").unwrap();
-        assert!(whole > fence + 1_000, "{whole}");
+        assert!(whole.chars().count() > fence + 1_000, "{whole}");
+        // The cut ends at a line's end: it drops at most one line of the text below the size.
+        let line = whole.lines().map(|l| l.chars().count() + 1).max().unwrap();
         std::fs::write(
             home.path().join("config.toml"),
             "[inject]\nsession_start_chars = 1000\n",
         )
         .unwrap();
-        let cut = shown("t2").unwrap();
-        assert!(cut <= fence + 1_000 && cut > fence, "{cut}");
+        let cut = shown("t2").unwrap().chars().count();
+        assert!(
+            (fence + 1_000 - line..=fence + 1_000).contains(&cut),
+            "{cut}"
+        );
         std::fs::write(
             home.path().join("config.toml"),
             "[inject]\nsession_start = false\n",

@@ -1927,11 +1927,11 @@ pub fn doctor(home: &Path) -> Result<()> {
     let inject = config::inject(home);
     if inject.session_start {
         println!(
-            "injection: at session start, up to {} characters",
+            "injection: the manifest, up to {} characters",
             inject.session_start_chars
         );
     } else {
-        println!("injection: none at session start");
+        println!("injection: off, no manifest is shown to an agent");
     }
     // `[chain]` as it applies, under each entry's line.
     let cfg = config::load(home)?;

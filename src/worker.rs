@@ -1061,6 +1061,51 @@ mod tests {
         );
     }
 
+    /// #94: the worker's chain leaves out an entry `[chain] off` turns off, and a window held under
+    /// that chain is tried again once the entry is on.
+    #[test]
+    fn the_workers_chain_leaves_out_an_entry_turned_off() {
+        let home = tempfile::tempdir().unwrap();
+        let device = {
+            let mut raw = raw::open(home.path()).unwrap();
+            raw.append(&raw::test_event("a")).unwrap();
+            raw.device().to_owned()
+        };
+        let config = |off: &str| {
+            let entry = |name: &str| {
+                format!(
+                    "[[providers]]\nkind = \"openai\"\nname = \"{name}\"\n\
+                     base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\ndaily_budget = 0\n"
+                )
+            };
+            let text = format!(
+                "[summary]\ncurate = true\n{}{}[chain]\noff = [{off}]\n",
+                entry("first"),
+                entry("second")
+            );
+            std::fs::write(home.path().join("config.toml"), text).unwrap();
+        };
+        let held = || {
+            let db = crate::providers_db::open(home.path()).unwrap();
+            let p = crate::providers_db::pending_of(&db, &device).unwrap();
+            p.expect("the phase did not run").reason
+        };
+        config("\"first\"");
+        run(home.path(), 0).unwrap();
+        let without = held();
+        assert!(
+            without.contains("second: 0/0") && !without.contains("first"),
+            "{without}"
+        );
+        config("");
+        run(home.path(), 0).unwrap();
+        let with = held();
+        assert!(
+            with.contains("first: 0/0") && with.contains("second: 0/0"),
+            "{with}"
+        );
+    }
+
     /// A worker that stays up reads the config again for each window: turning curation on or
     /// off takes effect without a new worker, and a config that no longer loads turns it off.
     #[test]
