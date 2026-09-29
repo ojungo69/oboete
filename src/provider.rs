@@ -277,16 +277,13 @@ impl<'a> Chain<'a> {
                 continue;
             }
             if let Provider::Openai {
-                key_file: Some(key_file),
-                base_url,
-                ..
+                key_file, base_url, ..
             } = p
             {
                 // The entry's own URL, where its key already goes: `budget_from_key` holds it to
                 // OpenRouter's.
-                let url = || format!("{}/key", base_url.trim_end_matches('/'));
-                refresh_key_limit(conn, p, db::now_ms(), key_file, |key| {
-                    free_limit(&url(), key)
+                refresh_key_limit(conn, p, db::now_ms(), key_file.as_deref(), |key| {
+                    free_limit(&format!("{}/key", base_url.trim_end_matches('/')), key)
                 })?;
             }
             let tokens = f64::from(est) * budget::factor(conn, &name)?;
@@ -579,18 +576,19 @@ fn unfence(content: &str) -> &str {
 
 /// Reads `p`'s key limit again when its last read no longer holds, for an entry whose budget is
 /// its key's (#238): after a day, after an hour when it failed, and at once for another key in
-/// `key_file`, whose limit is its own. `read` is the read itself, given the key.
+/// `key_file`, or none, whose limit is not the last one's. `read` is the read itself, given the
+/// key.
 fn refresh_key_limit(
     conn: &Connection,
     p: &Provider,
     now: i64,
-    key_file: &Path,
+    key_file: Option<&Path>,
     read: impl FnOnce(&str) -> Option<u32>,
 ) -> Result<()> {
     if !p.budget_from_key() {
         return Ok(());
     }
-    let key = config::read_key(key_file).ok();
+    let key = key_file.and_then(|f| config::read_key(f).ok());
     let sha = key.as_deref().map_or(String::new(), |k| {
         crate::curate::sha256_hex(k)[..16].to_owned()
     });
@@ -2604,7 +2602,7 @@ mod tests {
                 .map(|(l, at, _)| (l, at))
         };
         let refresh = |now, read: &dyn Fn(&str) -> Option<u32>| {
-            refresh_key_limit(&conn, &p, now, &key_file, read).unwrap()
+            refresh_key_limit(&conn, &p, now, Some(&key_file), read).unwrap()
         };
         key("key-a");
         let t0 = 1_000_000_000_000;
@@ -2624,9 +2622,15 @@ mod tests {
         std::fs::write(&key_file, "# no key on line 2\n").unwrap();
         refresh(t2 + 1, &unread);
         assert_eq!(last(), Some((None, t2 + 1)));
+        // An entry whose key file is taken out of its config keeps no earlier key's limit.
+        key("key-c");
+        refresh(t2 + 2, &|_| Some(1000));
+        assert_eq!(last(), Some((Some(1000), t2 + 2)));
+        refresh_key_limit(&conn, &p, t2 + 3, None, unread).unwrap();
+        assert_eq!(last(), Some((None, t2 + 3)));
         let own: Provider =
             toml::from_str(&format!("name = \"own\"\n{free}daily_budget = 30\n")).unwrap();
-        refresh_key_limit(&conn, &own, t2, &key_file, unread).unwrap();
+        refresh_key_limit(&conn, &own, t2, Some(&key_file), unread).unwrap();
         assert_eq!(providers_db::key_limit(&conn, "own").unwrap(), None);
     }
 
