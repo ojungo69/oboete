@@ -417,6 +417,18 @@ const TIP: &str = "a.status <> 'retracted'
       JOIN claims x ON x.op_device = e.op_device AND x.op_seq = e.op_seq
       WHERE e.to_uid = a.uid AND x.uid <> a.uid)";
 
+/// Whether `uid`'s first quote (its active derivation's) starts before `offset` in its record: in
+/// the part of a split record that an earlier window read.
+pub fn quoted_before(k: &Connection, uid: &str, offset: i64) -> Result<bool> {
+    Ok(k.query_row(
+        "SELECT e.offset < ?2 FROM claims c
+         JOIN evidence e ON e.op_device = c.op_device AND e.op_seq = c.op_seq AND e.idx = 0
+         WHERE c.uid = ?1",
+        rusqlite::params![uid, offset],
+        |r| r.get(0),
+    )?)
+}
+
 /// When `uid` is a current claim, its repository (`None` for one anchored outside any) and its
 /// active derivation.
 pub fn tip(k: &Connection, uid: &str) -> Result<Option<(Option<String>, Claim)>> {

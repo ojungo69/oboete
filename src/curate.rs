@@ -2017,7 +2017,7 @@ fn ended_on_a_proposal(raw: &Raw, k: &Connection, w: &Window) -> Result<Vec<Stri
 /// At most this many candidates a window is shown.
 const CANDIDATES: usize = 20;
 
-/// At most this many of a session's decisions its later windows carry, the newest first.
+/// At most this many of a session's decided claims its later windows carry, the newest first.
 const CARRIED_DECISIONS: usize = 20;
 
 /// Candidates a window may supersede (MUST-M3): up to `CANDIDATES` current claims of `repo` that
@@ -2097,7 +2097,7 @@ type Carried = Vec<(String, Option<String>, crate::claims::Claim)>;
 /// What each session of the window carries in from before it (spec 3.1, 3.3; D12), as text for
 /// the prompt: its goal (its first prompt, through the gate, 200 characters), the claims its
 /// previous window left proposed, so that an acceptance in this window can point at them, its
-/// decisions from before this window, so that a reversal here is linked as if in one window
+/// decided claims from before this window, so that a reversal here is linked as if in one window
 /// (spec 3.3; 17 of the 19 overturns of M3's dev labels are within one session, #222), and its
 /// open items. Every value goes through the gate before it is shown.
 // ponytail: a child session (a subagent) starts with nothing of its parent's until capture
@@ -2165,13 +2165,27 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                 }
             }
         }
+        // Before this window: on its device, in an earlier record, or in the part of its split
+        // first record that the previous window read.
+        let before_window = |c: &crate::claims::Claim| -> Result<bool> {
+            Ok(c.device == w.device
+                && (c.seq < w.from_seq
+                    || c.seq == w.from_seq
+                        && match w.from_offset {
+                            Some(from) => crate::claims::quoted_before(k, &c.uid, from)?,
+                            None => false,
+                        }))
+        };
         let (mut decided, mut items) = (Vec::new(), Vec::new());
         for repo in repos {
             for c in crate::claims::current(k, repo)? {
-                if c.kind == "decision" && c.status == "decided" && c.seq < w.from_seq {
+                // An open item is carried as one, whatever its status.
+                if c.kind == "open item" {
+                    if c.status != "done" {
+                        items.push((repo, c));
+                    }
+                } else if c.status == "decided" && before_window(&c)? {
                     decided.push((repo, c));
-                } else if c.kind == "open item" && c.status != "done" {
-                    items.push((repo, c));
                 }
             }
         }
@@ -3814,6 +3828,8 @@ mod tests {
         let mut ops: Vec<_> = (0..=CARRIED_DECISIONS)
             .map(|i| kept(&mut raw, "s", "r", &format!("Decision {i} of the session.")))
             .collect();
+        // The newest is a preference: any decided claim is carried.
+        ops[CARRIED_DECISIONS].1["kind"] = "preference".into();
         ops.push(kept(&mut raw, "t", "r", "Another session's decision."));
         raw.append_ops(&ops).unwrap();
         let before = CARRIED_DECISIONS as i64 + 2;
@@ -3844,6 +3860,48 @@ mod tests {
         assert!(!text.contains("A decision in the window."), "{text}");
         assert_eq!(uids.len(), CARRIED_DECISIONS);
         assert!(uids.iter().all(|(_, _, c)| carries(&text, &c.uid)));
+    }
+
+    /// A window that starts inside a split record carries a decision quoted in the part the
+    /// previous window read, and not one quoted in its own part.
+    #[test]
+    fn a_decision_in_the_part_of_a_split_record_read_before_is_carried() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let text = format!(
+            "{}Use Postgres. {}Use SQLite.",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        let (kind, template) = kept(&mut raw, "s", "r", &text);
+        let seq = template["evidence"][0]["seq"].as_i64().unwrap();
+        let quoted = |quote: &str, sentence: i64| {
+            let mut op = template.clone();
+            op["body"] = quote.into();
+            op["evidence"][0]["offset"] = text.find(quote).unwrap().into();
+            op["evidence"][0]["length"] = quote.len().into();
+            op["evidence"][0]["sentence"] = sentence.into();
+            op["evidence"][0]["quote"] = quote.into();
+            (kind, op)
+        };
+        let ops = [quoted("Use Postgres.", 0), quoted("Use SQLite.", 1)];
+        raw.append_ops(&ops).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let dev = raw.device().to_owned();
+        let rules = Rules::default();
+        let split = text.find('b').unwrap() as i64;
+        let w = window_at(&raw, &dev, (seq, Some(split)), None, 100_000.into(), &rules)
+            .unwrap()
+            .unwrap();
+        assert_eq!((w.from_seq, w.from_offset), (seq, Some(split)));
+        let (text, _) = carried(&raw, &k, &rules, &w).unwrap();
+        let decided: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("decided before "))
+            .collect();
+        assert_eq!(decided.len(), 1, "{text}");
+        assert!(decided[0].ends_with(": Use Postgres."), "{text}");
     }
 
     /// A candidate the budget cut from the prompt, or never shown, is superseded by nothing; the
