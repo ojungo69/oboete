@@ -468,6 +468,7 @@ def score(binary, name):
         st = state(d['id'])
         out['decisions'].setdefault(key, {}).setdefault(st, 0)
         out['decisions'][key][st] += 1
+        out.setdefault('items', {})[d['id']] = st
         if key == 'yes' and d['id'] not in MOMENTARY:
             lasting[st] += 1
     for p in pairs:
