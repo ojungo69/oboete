@@ -1654,7 +1654,7 @@ pub fn doctor(home: &Path) -> Result<()> {
             unhealthy.push("a store cannot be read (see above)");
         }
     }
-    let mut checked = None;
+    let mut damage = None;
     if home.join("knowledge.db").exists() {
         section(
             &mut unhealthy,
@@ -1682,18 +1682,18 @@ pub fn doctor(home: &Path) -> Result<()> {
                     println!("  {l}");
                 }
                 // The search indexes against their text, which the worker's check leaves out.
-                checked = Some(crate::db::quick_check(&k, "knowledge.db"));
+                match crate::db::quick_check(&k, "knowledge.db") {
+                    Ok(()) => println!("  knowledge.db quick_check: ok"),
+                    Err(e) if crate::backup::damaged(&e) => damage = Some(e),
+                    Err(e) => return Err(e),
+                }
                 Ok(())
             })(),
         );
     }
-    match checked {
-        Some(Ok(())) => println!("  knowledge.db quick_check: ok"),
-        Some(Err(e)) => {
-            println!("  {e:#}; `oboete rebuild` builds it again from raw.db");
-            unhealthy.push("knowledge.db is damaged (see above)");
-        }
-        None => {}
+    if let Some(e) = damage {
+        println!("  {e:#}; `oboete rebuild` builds it again from raw.db");
+        unhealthy.push("knowledge.db is damaged (see above)");
     }
     let (backup, backup_well) = crate::backup::doctor(home);
     for l in &backup {
