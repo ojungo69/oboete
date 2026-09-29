@@ -1663,8 +1663,8 @@ pub fn recurate_window(
 /// the left-out claim's: the same words of the same event. Not the same sentence, which can hold
 /// several claims (`claim_at` tells apart only claims of one kind), nor quotes that share a
 /// joining word or a start: a claim hidden by a wrong match is worse than two current claims of
-/// one line. For the same reason a claim restates only a sole left-out claim of its words, and a
-/// claim derived before beside it (then proposed, say) is a sibling, not a restatement. A
+/// one line. For the same reason a claim restates only a sole current left-out claim of its words,
+/// and a claim derived before beside it (then proposed, say) is a sibling, not a restatement. A
 /// re-derivation keeps a supersede its active derivation has, wherever it quotes now,
 /// or a second recuration would make both current again. Settled on both sides, as the gates'
 /// rules have it: a proposal supersedes
@@ -1682,7 +1682,12 @@ fn restate(
     // ponytail: a lesson restated in its own sentence stays twice, since retiring a lesson needs
     // the user's words (gates) and they are not known here; check them here if that matters.
     let mut corrected = k.prepare("SELECT 1 FROM corrections WHERE uid = ?1")?;
-    let mut left: Vec<(&str, &crate::claims::Evidence)> = Vec::new();
+    // Another uid's active derivation supersedes it: `claims::TIPS`'s test.
+    let mut replaced = k.prepare(
+        "SELECT 1 FROM edges e JOIN claims x ON x.op_device = e.op_device AND x.op_seq = e.op_seq
+         WHERE e.to_uid = ?1 AND x.uid <> ?1",
+    )?;
+    let mut left: Vec<(&str, &crate::claims::Evidence, bool)> = Vec::new();
     for (uid, c) in anchored {
         if settled(&c.status)
             && c.kind != "lesson"
@@ -1690,7 +1695,7 @@ fn restate(
             && !corrected.exists([uid])?
             && let Some(first) = c.evidence.first()
         {
-            left.push((uid.as_str(), first));
+            left.push((uid.as_str(), first, !replaced.exists([uid])?));
         }
     }
     if left.is_empty() {
@@ -1711,29 +1716,33 @@ fn restate(
         let uid = crate::claims::uid(&n.kind, first);
         let restated: Vec<&str> = if anchored.iter().any(|(u, _)| *u == uid) {
             let mut kept = Vec::new();
-            for &(s, _) in &left {
+            for &(s, _, _) in &left {
                 if had.exists(params![uid, s])? {
                     kept.push(s);
                 }
             }
             kept
         } else {
-            // One claim restates one: two left-out claims of these words are two claims the
-            // first answer told apart, and which one this restates is not known.
+            // One claim restates one: two current left-out claims of these words are two claims
+            // an answer told apart, and which one this restates is not known. One a claim of
+            // these words superseded before is not a second claim (Codex on 8e23d67).
             let same: Vec<&str> = left
                 .iter()
-                .filter(|(_, at)| same_words(at, first))
-                .map(|&(s, _)| s)
+                .filter(|(_, at, tip)| *tip && same_words(at, first))
+                .map(|&(s, _, _)| s)
                 .collect();
             if same.len() == 1 { same } else { Vec::new() }
         };
+        let before = n.supersedes.len();
         for s in restated {
             n.supersedes.push(s.to_owned());
             if serde_json::to_string(&n)?.len() > crate::raw::MAX_OP_BYTES {
                 n.supersedes.pop();
             }
         }
-        *c = serde_json::to_value(n)?;
+        if n.supersedes.len() > before {
+            *c = serde_json::to_value(n)?;
+        }
     }
     Ok(())
 }
@@ -5732,6 +5741,31 @@ mod tests {
         )]);
         let (_home, k) = one_sentence("Use tabs.", vec![first, again.clone(), again]);
         assert_eq!(current_bodies(&k), ["Prefer tabs."]);
+    }
+
+    /// #261: a claim restated twice, as a preference and then as a change, leaves one current
+    /// claim: the decision the preference superseded is no second claim of those words for the
+    /// change to choose between (Codex on 8e23d67).
+    #[test]
+    fn a_claim_restated_twice_leaves_one_current_claim() {
+        let first = answer(vec![drafted(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Tabs, not spaces.",
+        )]);
+        let again = answer(vec![preference(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Prefer tabs.",
+        )]);
+        let third = answer(vec![of_kind(
+            "change",
+            drafted("c1", "done", "Use tabs", "Tabs are set."),
+        )]);
+        let (_home, k) = one_sentence("Use tabs.", vec![first, again, third]);
+        assert_eq!(current_bodies(&k), ["Tabs are set."]);
     }
 
     /// #261: a recuration that leaves a settled claim of its window out keeps it. This held
