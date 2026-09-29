@@ -898,7 +898,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
   - Setup takes their defaults without asking. At the end, it prints the file path and each default it took.
   - `oboete setup --advanced` asks them one by one. An allowlist value is read from a hidden prompt and stored only as its SHA-256 (§6.4).
   - doctor prints the effective values.
-  - A settings page in the viewer is LATER.
+  - A settings page in the viewer: milestone 4 by owner decision of 2026-09-27 (as claude-mem's, #94), built now, alongside milestone 3, by owner decision of 2026-09-30. It edits injection on/off and size, capture detail, and the chain's order, on/off, daily budget, timeout and model per entry, as `[inject]`, `[capture]` and `[chain]` in `config.toml`; API keys stay in `key_file` paths.
 - **After setup**: three checks run.
   - the curator isolation check for each chosen CLI (section 6);
   - the per-agent status table (live-verified / implemented / unverified, MUST-M10);
@@ -1381,7 +1381,7 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A46 | The tier line quotes line 52 of the Anthropic policy page; its 2026-09-25 withdrawal is reversed; Claude's reading that oboete's path is line 52's is kept out of the setup line | 7.2 | Whether the setup line quotes line 52, and how the spec reads it |
 | A47 | OpenCode Go's tier line: usage policy, own-internal-use clause, prompts pass through | 7.2 | The wording of Go's tier line |
 | A48 | The terms of codex, agy and OpenCode Go are checked before release, as a release-gate item | 7.2, 7.7 | Whether release waits for the terms check |
-| A49 | Owner decision 16's remaining settings are `config.toml` keys: defaults taken and printed, `setup --advanced`, shown by doctor; a viewer settings page later | 7.2 | How settings are set |
+| A49 | Owner decision 16's remaining settings are `config.toml` keys: defaults taken and printed, `setup --advanced`, shown by doctor; a viewer settings page at milestone 4 (owner, 2026-09-27), built now alongside milestone 3 (owner, 2026-09-30; #94) | 7.2 | How settings are set |
 | A50 | Setup's UI is in English and does not follow the locale | 7.2 | Whether setup is localized |
 | A51 | Every release is first a pre-release run by the dogfood user (`oboete update --pre`) | 7.3 | The release channel |
 | A52 | Additions to MUST-M17: step 0 worker lock, free-space check, row-rewriting migrations as worker jobs, copy-back after a restore | 7.3 | The update steps |
