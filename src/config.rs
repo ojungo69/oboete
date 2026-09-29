@@ -404,9 +404,11 @@ fn cli(name: &str, model: Option<&str>) -> Provider {
 }
 
 /// Default chain, the owner's order of 2026-09-27: free first (the three Groq strict-schema models
-/// in separate 8k-TPM buckets, OpenRouter free, Mistral, then NIM, which never answered in the
-/// owner's calls), then the flat-rate OpenCode Go, then the coding subscriptions, codex and
-/// claude. The subscription CLIs run their cheap models (claude Haiku, codex gpt-6-luna), as
+/// in separate 8k-TPM buckets, OpenRouter free, then NIM, which never answered in the owner's
+/// calls), then the flat-rate OpenCode Go, then the coding subscriptions, codex and claude.
+/// Mistral is not in it (owner, 2026-09-29): the owner's workspace allows no requests a minute,
+/// so the entry only spent a refused call each time the chain reached it (#233); a key whose free
+/// plan is on can be configured. The subscription CLIs run their cheap models (claude Haiku, codex gpt-6-luna), as
 /// claude-mem does on the Claude subscription: curation spends the quota the owner codes with.
 /// Gemini is not in it: its free tier uses the input to train and lets people review it
 /// (ai.google.dev/gemini-api/terms); a paid Gemini key can be configured. agy is not in
@@ -508,15 +510,6 @@ fn default_providers() -> Vec<Provider> {
             10,
             false,
             serde_json::json!({"models": ["qwen/qwen3.8-27b:free"], "provider": {"require_parameters": true}}),
-        ),
-        openai(
-            "mistral",
-            "https://api.mistral.ai/v1",
-            "MISTRAL_API_KEY.md",
-            "mistral-small-latest",
-            300,
-            true,
-            serde_json::json!({}),
         ),
         nim,
         opencode_go,
@@ -795,20 +788,19 @@ paid_usd_per_month = 2.5
                 "groq-20b",
                 "groq-qwen",
                 "openrouter",
-                "mistral",
                 "nim",
                 "opencode-go",
                 "codex",
                 "claude"
             ]
         );
-        match &cfg.providers[5] {
+        match &cfg.providers[4] {
             Provider::Openai { extra, .. } => {
                 assert_eq!(extra["chat_template_kwargs"]["enable_thinking"], false)
             }
             _ => panic!("expected nim"),
         }
-        match &cfg.providers[6] {
+        match &cfg.providers[5] {
             Provider::Openai { headers, .. } => {
                 assert_eq!(headers["x-opencode-session"], "oboete")
             }
