@@ -895,39 +895,57 @@ impl Raw {
         let Some(seq) = seq else {
             return Ok(Vec::new());
         };
-        // Down from the newest: the recurations of a part of the worker's window come after it,
-        // and the windows before it (another part of a split event) end where it starts.
-        let mut stmt = self.conn.prepare(
-            "SELECT batch, COALESCE(json_extract(body, '$.recurate'), 0),
-                    json_extract(body, '$.from_seq'), COALESCE(json_extract(body, '$.from_offset'), 0),
-                    json_extract(body, '$.to_seq'), COALESCE(json_extract(body, '$.to_offset'), ?3)
+        // A window op's range as positions (seq, offset): its first byte and past its last.
+        let range =
+            "json_extract(body, '$.from_seq'), COALESCE(json_extract(body, '$.from_offset'), 0),
+            json_extract(body, '$.to_seq'), COALESCE(json_extract(body, '$.to_offset'), ?3)";
+        type Range = ((i64, i64), (i64, i64));
+        let range_at = |r: &rusqlite::Row, i: usize| -> rusqlite::Result<Range> {
+            Ok(((r.get(i)?, r.get(i + 1)?), (r.get(i + 2)?, r.get(i + 3)?)))
+        };
+        // Down from the newest window op that covered the event to the first the worker cut: its
+        // recurations come after it, and the windows before it (another part of a split event)
+        // end where it starts. With none the worker cut left (a recuration cut the records
+        // another way), the recuration that ends last.
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT op_seq, COALESCE(json_extract(body, '$.recurate'), 0), {range}
              FROM ops WHERE device = ?1 AND type = 'window'
                AND json_extract(body, '$.from_seq') <= ?2
                AND json_extract(body, '$.to_seq') >= ?2
-             ORDER BY op_seq DESC",
-        )?;
+             ORDER BY op_seq DESC"
+        ))?;
         let mut rows = stmt.query(params![self.device, seq, i64::MAX])?;
-        let (mut windows, mut cut) = (Vec::new(), None);
+        let (mut cut, mut stand_in) = (None, None);
         while let Some(r) = rows.next()? {
-            let range: ((i64, i64), (i64, i64)) = ((r.get(2)?, r.get(3)?), (r.get(4)?, r.get(5)?));
-            if range.1 > start {
+            let at: (i64, Range) = (r.get(0)?, range_at(r, 2)?);
+            if at.1.1 > start {
                 continue;
             }
-            windows.push((r.get::<_, i64>(0)?, range));
             if !r.get::<_, bool>(1)? {
-                cut = Some(range);
+                cut = Some(at);
                 break;
             }
+            if stand_in.is_none_or(|(_, s): (i64, Range)| at.1.1 > s.1) {
+                stand_in = Some(at);
+            }
         }
-        // With none the worker cut left (a recuration cut the records another way), the
-        // recuration that ends last.
-        let Some((from, to)) = cut.or_else(|| windows.iter().map(|w| w.1).max_by_key(|r| r.1))
-        else {
+        let Some((since, (cut_from, cut_to))) = cut.or(stand_in) else {
             return Ok(Vec::new());
         };
+        // It and every later recuration of a part of it, whether or not that part holds the
+        // event, newest first.
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT batch, {range}
+             FROM ops WHERE device = ?1 AND type = 'window' AND op_seq >= ?2
+               AND json_extract(body, '$.from_seq') <= ?4
+               AND json_extract(body, '$.to_seq') >= ?5
+             ORDER BY op_seq DESC"
+        ))?;
+        let mut rows = stmt.query(params![self.device, since, i64::MAX, cut_to.0, cut_from.0])?;
         let mut ops = Vec::new();
-        for (batch, range) in windows {
-            if range.0 < to && from < range.1 {
+        while let Some(r) = rows.next()? {
+            let (batch, (first, end)): (i64, Range) = (r.get(0)?, range_at(r, 1)?);
+            if first < cut_to && cut_from < end && end <= start {
                 ops.extend(
                     self.ops_after(&self.device, batch - 1, MAX_BATCH_OPS)?
                         .into_iter()
@@ -1685,6 +1703,11 @@ mod tests {
         assert_eq!(previous(&raw, (5, None)), ["r4", "w3"]);
         // Event 3 curated again on its own, and the window at event 4 after it.
         window(&mut raw, [Some(3), None, Some(3), None], true, "r3");
+        assert_eq!(previous(&raw, (4, None)), ["r3"]);
+        // A recuration of a part that does not hold the session's latest event is the window's too.
+        assert_eq!(previous(&raw, (5, None)), ["r3", "r4", "w3"]);
+        // One that runs into the window at event 4 is not before it.
+        window(&mut raw, [Some(2), Some(50), Some(4), None], true, "r24");
         assert_eq!(previous(&raw, (4, None)), ["r3"]);
     }
 }
