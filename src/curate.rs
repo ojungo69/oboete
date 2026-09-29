@@ -6098,8 +6098,6 @@ mod tests {
         assert_eq!(accepted.body["status"], "decided");
     }
 
-    /// #244: a carried proposal shows the line of the reply it was quoted from, so that a bare
-    /// "1" names it: an option's number is outside the quote.
     /// The quoted line is masked in the whole text before it is cut to 200 characters, so a
     /// secret the cut splits is not shown in part, and a quote further into its line than that is
     /// shown with the 200 characters that end with it (CodeRabbit on #247).
@@ -6284,6 +6282,8 @@ mod tests {
         }
     }
 
+    /// #244: a carried proposal shows the line of the reply it was quoted from, so that a bare
+    /// "1" names it: an option's number is outside the quote.
     #[test]
     fn a_carried_proposal_shows_its_reply_line_and_a_fact_is_not_carried() {
         let options = "Two ways:\n1. **Cache the parsed files**\n2. **Parse in parallel**";
