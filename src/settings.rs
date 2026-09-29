@@ -67,11 +67,15 @@ fn utf8(bytes: Option<&[u8]>) -> Option<&str> {
     bytes.map_or(Some(""), |b| std::str::from_utf8(b).ok())
 }
 
-/// The file as every reader of it parses it, or none when one of them would refuse it.
+/// The file as every reader of it parses it, or none when one of them would refuse it: the
+/// curators, capture and its redaction rules, injection, and backups (Codex on #270).
 fn parsed(path: &Path, text: &str) -> Option<(config::Config, config::Capture, config::Inject)> {
+    let capture = config::parse_capture(Some(text)).ok()?;
+    crate::redact::Rules::new(&capture.redaction).ok()?;
+    crate::backup::location(text).ok()?;
     Some((
         config::from_text(path, text).ok()?,
-        config::parse_capture(Some(text)).ok()?.capture,
+        capture.capture,
         config::parse_inject(text).ok()?,
     ))
 }
@@ -1102,6 +1106,9 @@ mod tests {
             "[chain]\noff = 3\n",
             "[inject]\nsession_start = \"no\"\n",
             "[summary\n",
+            // Read by backups and by capture's redaction alone (Codex on #270).
+            "[backup]\ndir = 3\n",
+            "[redaction]\nextra_rules = [{ id = \"a\", regex = '(' }]\n",
         ] {
             let home = home_with(Some(text));
             let shown = show(home.path());
