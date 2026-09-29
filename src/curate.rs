@@ -836,17 +836,22 @@ pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims:
     if quote.is_empty() {
         return None;
     }
-    // As the line shows it: the quote itself, or else the stretch of the line that holds the
-    // quote's characters but for whitespace (a line break written as a space, a space added).
-    let quote = if line.text.contains(quote) {
-        quote
-    } else {
-        spaced(&line.text, quote)?
+    // Where the event's text has it, outside what the window hides.
+    let anchor = |quote: &str| {
+        source.text.match_indices(quote).find(|&(i, _)| {
+            let (s, e) = (source.start + i, source.start + i + quote.len());
+            !source.hidden.iter().any(|&(hs, he)| hs < e && s < he)
+        })
     };
-    let (at, _) = source.text.match_indices(quote).find(|&(i, _)| {
-        let (s, e) = (source.start + i, source.start + i + quote.len());
-        !source.hidden.iter().any(|&(hs, he)| hs < e && s < he)
-    })?;
+    // As the line shows it: the quote itself, or else a stretch of the line that holds the quote's
+    // characters but for whitespace (a line break written as a space, a space added), the first
+    // that is anchored: the line also shows a tool's input, which is not the event's text.
+    let (at, quote) = line
+        .text
+        .contains(quote)
+        .then(|| anchor(quote))
+        .flatten()
+        .or_else(|| spaced(&line.text, quote).find_map(anchor))?;
     let as_i64 = |n: usize| i64::try_from(n).ok();
     Some(crate::claims::Evidence {
         device: window.device.clone(),
@@ -859,23 +864,27 @@ pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims:
     })
 }
 
-/// The first stretch of `text` whose characters other than whitespace are `quote`'s, in order and
-/// with nothing else between them, from the first of them to the last; `None` when there is none.
-fn spaced<'a>(text: &'a str, quote: &str) -> Option<&'a str> {
+/// The stretches of `text` whose characters other than whitespace are `quote`'s, in order and with
+/// nothing else between them, each from the first of them to the last, in `text`'s order.
+fn spaced<'a>(text: &'a str, quote: &str) -> impl Iterator<Item = &'a str> {
     let want: Vec<char> = quote.chars().filter(|c| !c.is_whitespace()).collect();
     let have: Vec<(usize, char)> = text
         .char_indices()
         .filter(|(_, c)| !c.is_whitespace())
         .collect();
-    if want.is_empty() {
-        return None;
-    }
-    let at = have
-        .windows(want.len())
-        .position(|w| w.iter().map(|&(_, c)| c).eq(want.iter().copied()))?;
-    let (start, _) = have[at];
-    let (last, c) = have[at + want.len() - 1];
-    Some(&text[start..last + c.len_utf8()])
+    let n = want.len();
+    let starts = if n == 0 {
+        0
+    } else {
+        (have.len() + 1).saturating_sub(n)
+    };
+    (0..starts).filter_map(move |at| {
+        let w = &have[at..at + n];
+        w.iter().map(|&(_, c)| c).eq(want.iter().copied()).then(|| {
+            let ((start, _), (last, c)) = (w[0], w[n - 1]);
+            &text[start..last + c.len_utf8()]
+        })
+    })
 }
 
 /// The index in `window.lines` of the line a curator names. Models write `L4` as `4`, `[L4]` or
@@ -2775,6 +2784,29 @@ mod tests {
         let (_, found, lost) = located(&w, &answer).unwrap();
         assert!(lost.is_empty());
         assert_eq!(found[0].0.quote, "tabs\nin every  file");
+    }
+
+    /// A line shows a tool's input, which is not the event's text: a quote the line holds in the
+    /// input, as written or but for whitespace, is anchored in the output that holds it but for
+    /// whitespace (Codex on #248).
+    #[test]
+    fn a_quote_the_line_shows_in_a_tools_input_is_anchored_in_its_output() {
+        let (_h, mut raw, dev) = store();
+        for input in [
+            "echo 'stream the parsed rows'",
+            "echo 'stream  the parsed rows'",
+        ] {
+            let body = json!({"tool": "Bash", "input": input,
+                "output": "stream the\nparsed rows", "failed": false});
+            raw.append(&event("tool", body)).unwrap();
+        }
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        for line in ["L1", "L2"] {
+            let e = locate(&w, line, "stream the parsed rows").unwrap_or_else(|| panic!("{line}"));
+            assert_eq!(e.quote, "stream the\nparsed rows", "{line}");
+        }
     }
 
     #[test]
