@@ -2199,6 +2199,67 @@ fn quoted_line(raw: &Raw, e: &crate::claims::Evidence, rules: &Rules) -> Result<
     Ok(Some(part.replace(['\n', '\r'], " ").trim().to_owned()))
 }
 
+/// The options a reply lists, on one line: two or more of its lines that start with a number
+/// (`1.`, `１．`, `2)`, `①`) or a letter (`A.`, `b)`), at most 6, each at most 80 characters,
+/// masked as the whole reply is; `None` when it lists fewer or the event is not a reply.
+fn options_of(raw: &Raw, device: &str, seq: i64, rules: &Rules) -> Result<Option<String>> {
+    let Some(r) = raw.after(device, seq - 1, 1)?.into_iter().next() else {
+        return Ok(None);
+    };
+    let (Item::Event(event), true) = (&r.item, r.seq == seq) else {
+        return Ok(None);
+    };
+    if event.kind != "reply" {
+        return Ok(None);
+    }
+    let Some(text) = long_text(event) else {
+        return Ok(None);
+    };
+    let Some(hidden) = crate::redact::hidden(&text, rules) else {
+        return Ok(None);
+    };
+    let (mut options, mut at) = (Vec::new(), 0);
+    for line in text.split_inclusive('\n') {
+        let start = at + line.len() - line.trim_start().len();
+        at += line.len();
+        let option = line.trim();
+        if options.len() == 6 || !is_option(option) {
+            continue;
+        }
+        let end = start
+            + option
+                .char_indices()
+                .nth(80)
+                .map_or(option.len(), |(i, _)| i);
+        let part = crate::redact::outbound_range(&text, start..end, Some(&hidden), rules);
+        options.push(part.replace(['\n', '\r'], " ").trim().to_owned());
+    }
+    Ok((options.len() >= 2).then(|| options.join(" / ")))
+}
+
+/// Whether a line starts an option: one or two digits and `.`, `)`, `．` or `）`, a circled
+/// number, or one letter and `.` or `)` and a space; markdown's `#` and `*` before it are skipped.
+fn is_option(line: &str) -> bool {
+    let line = line.trim_start_matches(['#', '*', ' ']);
+    let digits = line
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || ('０'..='９').contains(c))
+        .count();
+    let mut after = line.chars().skip(digits);
+    match digits {
+        1 | 2 => matches!(after.next(), Some('.' | ')' | '．' | '）')),
+        0 => {
+            let mut c = line.chars();
+            match (c.next(), c.next(), c.next()) {
+                (Some(n), ..) if ('①'..='⑳').contains(&n) => true,
+                (Some(l), Some('.' | ')'), Some(' ')) => l.is_ascii_alphabetic(),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 /// What each session of the window carries in from before it (spec 3.1, 3.3; D12), as text for
 /// the prompt: its goal (its first prompt, through the gate, 200 characters), the claims its
 /// previous window left proposed, so that an acceptance in this window can point at them, its
@@ -2288,6 +2349,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
         // Proposals first: they are what an acceptance in this window answers. The assistant's
         // own before the rest (inferred, a tool's), since `fit` cuts from the end (#244).
         let mut proposals: Vec<(bool, String, Option<String>, crate::claims::Claim)> = Vec::new();
+        let mut latest: Option<(String, i64)> = None;
         for op in previous.iter().filter(|o| o.kind == OpKind::Claim) {
             let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(op.body.clone()) else {
                 continue;
@@ -2322,6 +2384,9 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                         .unwrap_or_default();
                     let line = format!("proposed before {uid}{place}: {}{from}", gate(&tip.body));
                     proposals.push((tip.speaker != "assistant proposal", line, repo, tip));
+                    if latest.as_ref().is_none_or(|(_, seq)| first.seq > *seq) {
+                        latest = Some((first.device.clone(), first.seq));
+                    }
                 }
             }
         }
@@ -2329,6 +2394,20 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
         for (_, line, repo, tip) in proposals {
             lines.push(line);
             uids.push((key.to_owned(), repo, tip));
+        }
+        // The options of the reply the session's first line here answers, the developer's with
+        // nothing between them: a bare "1" names one, and the proposal's quote may not (#244,
+        // d107: the reply's recommendation was quoted, its "1." line was not).
+        if let Some((device, seq)) = latest
+            && let Some(l) = w.lines.iter().find(|l| l.key == key)
+            && matches!(l.role, Role::User)
+            && raw.turns_between(agent, session, seq, l.seq)? == 0
+            && let Some(options) = options_of(raw, &device, seq, rules)?
+        {
+            lines.push(format!(
+                "options in the reply just before {}: {options}",
+                l.id
+            ));
         }
         // The session's own, in its repositories, before the cap: other sessions' newer claims
         // never hide one.
@@ -6142,6 +6221,67 @@ mod tests {
         assert_eq!(picked.body["evidence"][0]["quote"], "1");
         assert_eq!(picked.body["status"], "decided");
         assert_eq!(picked.body["supersedes"].as_array().unwrap().len(), 1);
+    }
+
+    /// #244, d107: the reply numbered its options and the proposal quoted its recommendation, so
+    /// the carried proposal named no number. A window that opens with the developer's answer to
+    /// that reply is shown the reply's options, masked in the whole reply before each is cut to
+    /// 80 characters; one that opens with a tool's line is not.
+    #[test]
+    fn a_window_that_answers_a_reply_is_shown_its_options() {
+        let ghp = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
+        let reply = format!(
+            "Three ways:\n\n1. **Cache the parsed files** (recommended)\n   Fast.\n\
+             2) **Parse in parallel** {} {ghp}\nC. Stream the rows\n\n\
+             My proposal: cache the parsed files first. Shall I go ahead?",
+            "b".repeat(45)
+        );
+        let first = [
+            prompt("Build the importer."),
+            event("reply", json!({"assistant": reply})),
+        ];
+        let answer = json!({"claims": [{"id": "c1", "kind": "decision", "status": "proposed",
+            "speaker": "assistant proposal", "scope": "repo", "body": "Cache parsed files.",
+            "quote": "cache the parsed files first", "line": "L2", "supersedes": []}],
+            "summary": "s"});
+        let none = |_: &str| json!({"claims": [], "summary": "s"});
+        let (sent, _) = two_windows(&first, answer.clone(), &[prompt("１")], none);
+        let options = sent[1]
+            .lines()
+            .find(|l| l.starts_with("options in the reply just before "))
+            .unwrap_or_else(|| panic!("{}", sent[1]));
+        let parse = format!("2) **Parse in parallel** {} [REDACTED]", "b".repeat(45));
+        assert_eq!(
+            options,
+            format!(
+                "options in the reply just before L1: 1. **Cache the parsed files** \
+                 (recommended) / {parse} / C. Stream the rows"
+            )
+        );
+        let (sent, _) = two_windows(&first, answer.clone(), &[tool("ls"), prompt("1")], none);
+        assert!(!sent[1].contains("options in the reply"), "{}", sent[1]);
+        // Turns after the reply: the developer's line answers the last of them, not the options.
+        let later = [
+            first[0].clone(),
+            first[1].clone(),
+            prompt("Also add logs."),
+            event("reply", json!({"assistant": "Done."})),
+        ];
+        let (sent, _) = two_windows(&later, answer, &[prompt("1")], none);
+        assert!(sent[1].contains("proposed before "), "{}", sent[1]);
+        assert!(!sent[1].contains("options in the reply"), "{}", sent[1]);
+    }
+
+    #[test]
+    fn an_option_starts_with_a_number_or_a_letter_and_its_mark() {
+        for line in [
+            "1. a", "１．a", "2) a", "10. a", "① a", "A. a", "b) a", "**1. a**", "### 2. a",
+        ] {
+            assert!(is_option(line), "{line}");
+        }
+        for line in ["e.g. a", "2026. a", "1 a", "- 1. a", "Fast.", "a", ""] {
+            assert!(!is_option(line), "{line}");
+        }
     }
 
     #[test]
