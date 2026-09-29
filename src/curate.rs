@@ -11,7 +11,7 @@ use crate::provider::{AnswerCheck, ChainFailed, ChainResult, Fallback, Skip};
 use crate::providers_db::{self, Pending};
 use crate::raw::{Event, Item, OpKind, Raw};
 use crate::redact::Rules;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
@@ -1419,7 +1419,13 @@ pub fn send_plan(
                 Ok((c, r)) => {
                     sent.windows += 1;
                     (sent.claims, sent.retracted) = (sent.claims + c, sent.retracted + r);
-                    crate::worker::drain(raw, k, consumers)?;
+                    crate::worker::drain(raw, k, consumers).with_context(|| {
+                        format!(
+                            "records {}-{} were curated again ({} window(s) in this run), but \
+                             their claims were not read in",
+                            w.from_seq, w.to_seq, sent.windows
+                        )
+                    })?;
                 }
                 Err(why) => {
                     sent.failed

@@ -868,9 +868,10 @@ impl Raw {
     /// (milestone 3 Task 7, D12): the last window the worker cut that covered this device's latest
     /// event of `agent`'s `session` before the window starting at `from` (seq and offset) that has
     /// text (a resumed session's `start` is covered on its own, by a window that holds none of its
-    /// lines). Its claims and those of every later recuration quoted inside it (#240), newest
-    /// first. A window that ends past `from` is not a previous one: it is the one starting there,
-    /// curated before and now again. Per session, since sessions interleave: another session's
+    /// lines), up to `from` when a recuration cuts the records another way. Its claims and those
+    /// of every later window op quoted inside it (#240): the newest window first, each window's
+    /// claims in the order it wrote them. The window starting at `from`, curated before and now
+    /// again, is not a previous one. Per session, since sessions interleave: another session's
     /// window may come between.
     pub fn previous_window_ops(
         &self,
@@ -898,9 +899,8 @@ impl Raw {
         };
         // Down from the newest window op that covered the event to the first the worker cut: its
         // recurations come after it, and the windows before it (another part of a split event)
-        // end where it starts. With none the worker cut left (a recuration cut the records
-        // another way), the recuration that ends last. Ranges as positions (seq, offset): the
-        // first byte, and past the last.
+        // end where it starts. Ranges as positions (seq, offset): the first byte, and past the
+        // last.
         let mut stmt = self.conn.prepare(
             "SELECT op_seq, COALESCE(json_extract(body, '$.recurate'), 0),
                     json_extract(body, '$.from_seq'), COALESCE(json_extract(body, '$.from_offset'), 0),
@@ -911,22 +911,21 @@ impl Raw {
              ORDER BY op_seq DESC",
         )?;
         let mut rows = stmt.query(params![self.device, seq, i64::MAX])?;
-        type At = (i64, ((i64, i64), (i64, i64)));
-        let (mut cut, mut stand_in) = (None, None);
+        let mut cut = None;
         while let Some(r) = rows.next()? {
-            let at: At = (r.get(0)?, ((r.get(2)?, r.get(3)?), (r.get(4)?, r.get(5)?)));
-            if at.1.1 > start {
+            let (first, end): ((i64, i64), (i64, i64)) =
+                ((r.get(2)?, r.get(3)?), (r.get(4)?, r.get(5)?));
+            // The window starting at `from` is this one, curated before; one that runs past it
+            // (a recuration cut the records another way) is the previous window up to it.
+            if first >= start {
                 continue;
             }
             if !r.get::<_, bool>(1)? {
-                cut = Some(at);
+                cut = Some((r.get::<_, i64>(0)?, (first, end.min(start))));
                 break;
             }
-            if stand_in.is_none_or(|(_, s): At| at.1.1 > s.1) {
-                stand_in = Some(at);
-            }
         }
-        let Some((since, (cut_from, cut_to))) = cut.or(stand_in) else {
+        let Some((since, (cut_from, cut_to))) = cut else {
             return Ok(Vec::new());
         };
         // Its claims, and those every later window op quoted inside it: a recuration of a part
@@ -1671,11 +1670,10 @@ mod tests {
         assert_eq!(raw.curation_checkpoint(&dev).unwrap(), (7, Some(120)));
     }
 
-    /// A session's previous window (#240) is the one the worker cut before the window at `from`:
-    /// not a recuration of another part of a split event, nor the window at `from` curated before.
-    /// Its claims come with those of every later recuration quoted inside it, newest first; a
-    /// recuration that cut the records its own way stands in for it when the worker's runs past
-    /// `from`.
+    /// A session's previous window (#240) is the one the worker cut before the window at `from`,
+    /// up to `from` when it runs past it: not a recuration of another part of a split event, nor
+    /// the window at `from` curated before. Its claims come with those of every later window op
+    /// quoted inside it, the newest window first.
     #[test]
     fn the_previous_window_is_the_workers_with_the_recurations_of_its_parts() {
         let home = tempfile::tempdir().unwrap();
@@ -1741,21 +1739,22 @@ mod tests {
             &[("r4", 4, 0)],
         );
         assert_eq!(previous(&raw, (5, None)), ["r4", "w3"]);
-        // Event 3 curated again on its own, and the window at event 4 after it.
+        // Event 3 curated again on its own; then event 4 alone, whose previous window is the
+        // worker's 3-4 up to event 4.
         window(
             &mut raw,
             [Some(3), None, Some(3), None],
             true,
             &[("r3", 3, 0)],
         );
-        assert_eq!(previous(&raw, (4, None)), ["r3"]);
+        assert_eq!(previous(&raw, (4, None)), ["r3", "w3"]);
         // A recuration of a part that does not hold the session's latest event is the window's too.
         assert_eq!(previous(&raw, (5, None)), ["r3", "r4", "w3"]);
         // Recurations cut another way, over the window's start or into the window at 4: only
         // what they quoted inside the previous window.
         let across = [("r23 before", 2, 60), ("r23", 3, 5), ("r23 after", 4, 0)];
         window(&mut raw, [Some(2), Some(50), Some(4), None], true, &across);
-        assert_eq!(previous(&raw, (4, None)), ["r23", "r3"]);
+        assert_eq!(previous(&raw, (4, None)), ["r23", "r3", "w3"]);
         assert_eq!(
             previous(&raw, (5, None)),
             ["r23", "r23 after", "r3", "r4", "w3"]
