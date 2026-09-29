@@ -601,6 +601,9 @@ mod tests {
                 crate::db::utc(2)
             )
         );
+        providers_db::set_key_limit(&db, "o", Some(0), 3, k).unwrap();
+        assert_eq!(daily(&db, &p).unwrap(), 0);
+        assert!(admit(&db, &p, 10.0, 5.0, &[]).unwrap().is_some());
         providers_db::set_key_limit(&db, "o", Some(5), 3, k).unwrap();
         call(&db, "o", None, 10, 10);
         let r = admit(&db, &p, 10.0, 5.0, &[]).unwrap().unwrap();

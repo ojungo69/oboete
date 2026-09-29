@@ -636,8 +636,8 @@ pub(crate) fn budget_keys(providers: &[Provider]) -> Vec<String> {
 }
 
 /// The `:free` model requests a day that `key` may make, as OpenRouter's GET /api/v1/key at `url`
-/// answers (`data.free_model_daily_requests.limit`, 2026-09-30); None on any failure, and for a
-/// limit of 0, which leaves nothing to take a fifth of: the entry keeps its default. The key
+/// answers (`data.free_model_daily_requests.limit`, 2026-09-30); None on any failure. A limit of 0
+/// is a limit, as one under 5 is: a fifth of it is 0, and the entry is skipped. The key
 /// goes only to `url`, which answers itself (no redirect is followed), and nothing of the answer
 /// is kept but that number.
 fn free_limit(url: &str, key: &str) -> Option<u32> {
@@ -659,9 +659,7 @@ fn free_limit(url: &str, key: &str) -> Option<u32> {
         return None;
     }
     let v: Value = serde_json::from_slice(&raw).ok()?;
-    let limit = v["data"]["free_model_daily_requests"]["limit"]
-        .as_u64()
-        .filter(|&n| n > 0)?;
+    let limit = v["data"]["free_model_daily_requests"]["limit"].as_u64()?;
     Some(u32::try_from(limit).unwrap_or(u32::MAX))
 }
 
@@ -2702,10 +2700,6 @@ mod tests {
             ("200 OK", json!({"data": {"limit": null}})),
             (
                 "200 OK",
-                json!({"data": {"free_model_daily_requests": {"limit": 0}}}),
-            ),
-            (
-                "200 OK",
                 json!({"data": {"free_model_daily_requests": {"limit": "1000"}}}),
             ),
             (
@@ -2716,6 +2710,10 @@ mod tests {
             let (url, _sent) = serve(status, body.to_string().into_bytes(), "");
             assert_eq!(free_limit(&url, key), None, "{status} {body}");
         }
+        // A limit of 0 is a limit: a fifth of it skips the entry.
+        let zero = json!({"data": {"free_model_daily_requests": {"limit": 0}}});
+        let (url, _sent) = serve("200 OK", zero.to_string().into_bytes(), "");
+        assert_eq!(free_limit(&url, key), Some(0));
         // A redirect is not followed, even to an answer with a limit.
         let (there, _sent) = serve("200 OK", answer.to_string().into_bytes(), "");
         let to: &'static str = Box::leak(format!("Location: {there}/key\r\n").into_boxed_str());
