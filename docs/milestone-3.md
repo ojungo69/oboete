@@ -8,6 +8,7 @@ The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and
 - Task 12, the judge's first role ("shrink, never drop"), is behind `[summary] shrink` (#194), off by default. Its input clause passes on dev. Its recall clause fails for decisions by the rule declared before the run, 22 against 24 of 44 (below), a difference smaller than two runs of one arm showed (20 and 24); lessons and fixes are not measured. It stays off. Its second role (a veto on `decided` and `supersedes`) has no code: it waits on M3.
 - Task 13 has the lines below: M2 passes, Cost's Groq and OpenRouter budgets meet the line since 2026-09-29 but NIM's cannot be checked against it (NIM publishes no daily cap, below), a heavy day needs speed too, and M3 fails on the dev labels. The first dev tuning of the gates is merged: the owner's answer to `AskUserQuestion` is the owner's words (#195, #202, #209).
 - M3's typed decisions: #254's prompt shipped. #259 (the typed lines listed again) and #262 (a request carried out is the developer's decision) did not ship (below).
+- Since 2026-09-30 a done claim that quotes the owner's request counts as recalling the decision (the owner's answer to #262's question). Every arm rose by 0 to 5 labels, the best to 26 of 44 (carry2), and no conclusion changed (Counted again, below).
 
 ## M2 on the dev transcripts: passes
 
@@ -181,7 +182,34 @@ The second group of #259's breakdown is a request that an agent carried out in t
   - One label moved by 3 (d363, 0 → 3).
   - So one label losing 3 hits is within run-to-run noise at 4 passes. #259's rejection rested on that rule: d112 went 3 → 0. Its sum, +3, was under its +8 in any case.
   - A rule declared for the next run should not reject on one label alone, or it needs more passes.
-- **A question about the metric**: M3 counts a claim with status decided. A done claim that quotes the owner's request records that the change was asked for and made. Whether that counts as recalling the owner's decision depends on what "remembering my decision" means to the owner. The curator's prompt cannot settle it.
+- **A question about the metric**: M3 counts a claim with status decided. A done claim that quotes the owner's request records that the change was asked for and made. Whether that counts as recalling the owner's decision depends on what "remembering my decision" means to the owner. The curator's prompt cannot settle it. The owner answered on 2026-09-30 (next section).
+
+### Counted again: a request the owner made and an agent carried out (2026-09-30)
+
+The owner's answer to #262's question: a claim with status done that quotes the owner's own words counts, since the owner asked for it and it was done. The harness now counts such a claim as recalling its label, and as shown as current where the label is overturned or an owner-no record (docs/spike/m3-dev.md). Every arm's home was scored again with it; each keeps its earlier score as `score-decided-only.json`.
+
+| Arm | Recall (of 44) | Recall, lasting (of 41) | Overturned, still current (of 19) | Owner-no records shown as decided (of 5) | Done claims quoting the owner |
+|---|---|---|---|---|---|
+| whole | 11 (10) | 11 (10) | 2 | 4 | 16 |
+| short | 13 | 13 | 2 | 1 | 2 |
+| full | 21 (19) | 20 (18) | 8 (7) | 1 | 9 |
+| nothink | 24 | 24 | 10 (9) | 4 (3) | 8 |
+| whole-2 | 22 (20) | 22 (20) | 9 | 3 | 12 |
+| short-2 | 22 | 22 | 7 | 3 (1) | 9 |
+| whole3 | 24 | 24 | 10 | 3 (2) | 10 |
+| cand1 | 25 (23) | 24 (22) | 12 | 3 (2) | 23 |
+| cand2 | 23 (21) | 22 (20) | 11 | 2 (1) | 17 |
+| carry1 | 22 (21) | 22 (21) | 8 | 4 (3) | 12 |
+| carry2 | 26 (21) | 24 (19) | 10 | 4 | 19 |
+
+(In brackets, the count before, where it moved. The compatible pairs dropped did not move.)
+
+- **What moved**: recall rose by 0 to 5 labels, and the best is carry2's 26 of 44 (59%; the line is 80%). carry1 and carry2, one binary, now differ by 4 (22 and 26), and whole-2 and whole3 by 2 (22 and 24): run to run, as before.
+- **The conclusions hold**:
+  - M3 fails: recall 26 of 44 at best, and 7 to 12 of the 19 overturned decisions still current.
+  - The shrink: short-2 22 against whole3 24, as before, so it stays off.
+  - Thinking: 24 with it off (nothink), 21 with it on (full), where it was 19.
+  - #259 and #262, in hits over the 24 lasting typed labels at 4 passes per arm: #259 B 69, N 68 (−1, and d112 still went 3 → 0); #262 B 68, N 67 (−1). Neither ships. d352 is now recalled in all 4 of #262's N passes and 3 of its B passes.
 
 ### What the next M3 run needs
 
