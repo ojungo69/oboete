@@ -2643,7 +2643,7 @@ mod tests {
     }
 
     /// Every record so far curated, as the windows that derived `kept`'s claims left them: the
-    /// next window starts after them, and none of their claims is its own (`claims::OWN`).
+    /// next window starts after them, and none of their claims is its own (`claims::IN_WINDOW`).
     fn curated_so_far(raw: &mut Raw) {
         let op = serde_json::json!({"from_seq": 1, "from_offset": null,
             "to_seq": raw.max_seq().unwrap(), "to_offset": null, "outcome": "curated"});

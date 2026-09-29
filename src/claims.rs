@@ -425,7 +425,8 @@ pub fn quoted_before(k: &Connection, uid: &str, offset: i64) -> Result<bool> {
 /// window: on the window's `:device`, in its records `:from_seq` to `:to_seq`, and in a split
 /// record in the window's part (`:from_offset`, `:to_offset`, NULL for a whole record). A
 /// recuration of the window retracts what it leaves out of these (`curate::anchored_in`) and reads
-/// the claims without them (`OWN`, #249), so both use this one span; `window_params` binds it.
+/// the claims without them (`before_window`, #249), so both use this one span; `window_params`
+/// binds it.
 pub(crate) const IN_WINDOW: &str = "d.anchor_device = :device
         AND d.anchor_seq BETWEEN :from_seq AND :to_seq
         AND (q.seq <> :from_seq OR :from_offset IS NULL OR q.offset >= :from_offset)
