@@ -835,6 +835,29 @@ mod tests {
         assert!(quarantined(p, "knowledge.db"));
     }
 
+    #[test]
+    fn doctor_names_the_rebuild_for_a_damaged_table_it_reads() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let (root, size): (i64, i64) = crate::knowledge::open(p)
+            .unwrap()
+            .query_row(
+                "SELECT rootpage, (SELECT page_size FROM pragma_page_size)
+                 FROM sqlite_schema WHERE name = 'rewinds'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let (root, size) = (root as u64, size as usize);
+        overwrite(
+            &p.join("knowledge.db"),
+            (root - 1) * size as u64,
+            &vec![0xA5; size],
+        );
+        let e = crate::setup::doctor(p).unwrap_err().to_string();
+        assert!(e.contains("knowledge.db is damaged"), "{e}");
+    }
+
     /// raw.db of `n` events, one segment exported after each `per` of them.
     fn segmented(p: &Path, n: usize, per: usize) {
         let mut raw = raw::open(p).unwrap();
