@@ -1889,19 +1889,21 @@ mod tests {
                 "scope": "repo", "body": "b", "quote": "q", "line": "L1", "supersedes": [],
                 "why": ""})
         };
-        let ok = serde_json::json!({"claims": [claim("decision")], "summary": "s"});
+        let ok = serde_json::json!({"typed": [], "claims": [claim("decision")], "summary": "s"});
         assert!(fits(&ok, &schema));
         // Valid JSON, wrong keys: what a free model without strict schema support returned.
         let other = serde_json::json!({"issue": "x", "resolution": "y", "decision": "z"});
         assert!(!fits(&other, &schema));
         let mut item_missing_body = claim("decision");
         item_missing_body.as_object_mut().unwrap().remove("body");
-        let item_missing_body = serde_json::json!({"claims": [item_missing_body], "summary": "s"});
+        let item_missing_body =
+            serde_json::json!({"typed": [], "claims": [item_missing_body], "summary": "s"});
         assert!(!fits(&item_missing_body, &schema));
-        let summary_not_text = serde_json::json!({"claims": [], "summary": 3});
+        let summary_not_text = serde_json::json!({"typed": [], "claims": [], "summary": 3});
         assert!(!fits(&summary_not_text, &schema));
         // Kinds outside the enum are mapped later (the claims consumer), not refused here.
-        let odd_kind = serde_json::json!({"claims": [claim("Decision")], "summary": ""});
+        let odd_kind =
+            serde_json::json!({"typed": [], "claims": [claim("Decision")], "summary": ""});
         assert!(fits(&odd_kind, &schema));
     }
 
