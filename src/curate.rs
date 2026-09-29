@@ -1656,45 +1656,41 @@ pub fn recurate_window(
 /// `pref add`, which no window shows). A settled claim stays when an answer leaves it out: a
 /// curator's answers vary, and `retracted` needs the user's words or the owner's correction.
 fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims::ClaimOp)>> {
-    let mut derivations = k.prepare(
+    let mut derivations = k.prepare(&format!(
         "SELECT d.uid, d.op_device, d.op_seq, d.kind, d.speaker, d.scope, d.body, d.tier
          FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
-         JOIN evidence e ON e.op_device = d.op_device AND e.op_seq = d.op_seq AND e.idx = 0
-         WHERE d.anchor_device = ?1 AND d.anchor_seq BETWEEN ?2 AND ?3
-           AND (e.seq <> ?2 OR ?4 IS NULL OR e.offset >= ?4)
-           AND (e.seq <> ?3 OR ?5 IS NULL OR e.offset + e.length <= ?5)
+         JOIN evidence q ON q.op_device = d.op_device AND q.op_seq = d.op_seq AND q.idx = 0
+         WHERE {}
            AND d.status IN ('proposed', 'unverified') AND d.scope <> 'global'
          ORDER BY d.anchor_seq, d.uid",
-    )?;
+        crate::claims::IN_WINDOW
+    ))?;
     let mut evidence = k.prepare(
         "SELECT device, seq, offset, length, sentence, quote, claim_at FROM evidence
          WHERE op_device = ?1 AND op_seq = ?2 ORDER BY idx",
     )?;
     let rows: Vec<(String, String, i64, crate::claims::ClaimOp)> = derivations
-        .query_map(
-            params![w.device, w.from_seq, w.to_seq, w.from_offset, w.to_offset],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    crate::claims::ClaimOp {
-                        id: String::new(),
-                        kind: r.get(3)?,
-                        status: String::new(),
-                        speaker: r.get(4)?,
-                        scope: r.get(5)?,
-                        body: r.get(6)?,
-                        evidence: Vec::new(),
-                        supersedes: Vec::new(),
-                        recipe: String::new(),
-                        tier: r.get(7)?,
-                        why: String::new(),
-                        tainted: false,
-                    },
-                ))
-            },
-        )?
+        .query_map(&crate::claims::window_params(w)[..], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                crate::claims::ClaimOp {
+                    id: String::new(),
+                    kind: r.get(3)?,
+                    status: String::new(),
+                    speaker: r.get(4)?,
+                    scope: r.get(5)?,
+                    body: r.get(6)?,
+                    evidence: Vec::new(),
+                    supersedes: Vec::new(),
+                    recipe: String::new(),
+                    tier: r.get(7)?,
+                    why: String::new(),
+                    tainted: false,
+                },
+            ))
+        })?
         .collect::<rusqlite::Result<_>>()?;
     let mut out = Vec::new();
     for (uid, op_device, op_seq, mut c) in rows {

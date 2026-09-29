@@ -421,28 +421,47 @@ pub fn quoted_before(k: &Connection, uid: &str, offset: i64) -> Result<bool> {
     )?)
 }
 
-/// Claim `c` (a row of `claims`) is one of window `?2` to `?6`'s own: its active derivation is
-/// anchored in the window's records on its device, and in a split record in the window's part (as
-/// `curate::anchored_in` reads a window). A recuration of the window replaces its own.
-const OWN: &str = "EXISTS (
-      SELECT 1 FROM derivations d
-      JOIN evidence q ON q.op_device = d.op_device AND q.op_seq = d.op_seq AND q.idx = 0
-      WHERE d.op_device = c.op_device AND d.op_seq = c.op_seq
-        AND d.anchor_device = ?2 AND d.anchor_seq BETWEEN ?3 AND ?4
-        AND (q.seq <> ?3 OR ?5 IS NULL OR q.offset >= ?5)
-        AND (q.seq <> ?4 OR ?6 IS NULL OR q.offset + q.length <= ?6))";
+/// Derivation `d`, with its first quote `q` (its `evidence` row of `idx = 0`), is anchored in a
+/// window: on the window's `:device`, in its records `:from_seq` to `:to_seq`, and in a split
+/// record in the window's part (`:from_offset`, `:to_offset`, NULL for a whole record). A
+/// recuration of the window retracts what it leaves out of these (`curate::anchored_in`) and reads
+/// the claims without them (`OWN`, #249), so both use this one span; `window_params` binds it.
+pub(crate) const IN_WINDOW: &str = "d.anchor_device = :device
+        AND d.anchor_seq BETWEEN :from_seq AND :to_seq
+        AND (q.seq <> :from_seq OR :from_offset IS NULL OR q.offset >= :from_offset)
+        AND (q.seq <> :to_seq OR :to_offset IS NULL OR q.offset + q.length <= :to_offset)";
 
-/// Claim `a` (a row of the `active` view) as window `?2` to `?6` found it before it was curated
-/// (#249): not one of the window's own claims (`OWN`), and no active derivation of another uid
-/// supersedes or retracts it but the window's own. A window curated for the first time has none.
+/// `IN_WINDOW`'s parameters for window `w`.
+pub(crate) fn window_params(
+    w: &crate::curate::Window,
+) -> [(&'static str, &dyn rusqlite::ToSql); 5] {
+    [
+        (":device", &w.device),
+        (":from_seq", &w.from_seq),
+        (":to_seq", &w.to_seq),
+        (":from_offset", &w.from_offset),
+        (":to_offset", &w.to_offset),
+    ]
+}
+
+/// Claim `a` (a row of the `active` view) as the window of `IN_WINDOW` found it before it was
+/// curated (#249): not one of the window's own claims (its active derivation anchored in the
+/// window), and no active derivation of another uid supersedes or retracts it but the window's
+/// own, which a recuration replaces. A window curated for the first time has none.
 fn before_window() -> String {
+    // Claim `c`'s active derivation is anchored in the window.
+    let own = format!(
+        "EXISTS (SELECT 1 FROM derivations d
+           JOIN evidence q ON q.op_device = d.op_device AND q.op_seq = d.op_seq AND q.idx = 0
+           WHERE d.op_device = c.op_device AND d.op_seq = c.op_seq AND {IN_WINDOW})"
+    );
     format!(
         "a.status <> 'retracted'
-         AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.uid = a.uid AND {OWN})
+         AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.uid = a.uid AND {own})
          AND NOT EXISTS (
            SELECT 1 FROM edges e
            JOIN claims c ON c.op_device = e.op_device AND c.op_seq = e.op_seq
-           WHERE e.to_uid = a.uid AND c.uid <> a.uid AND NOT {OWN})"
+           WHERE e.to_uid = a.uid AND c.uid <> a.uid AND NOT {own})"
     )
 }
 
@@ -459,17 +478,14 @@ pub fn tip(
         &format!(
             "SELECT a.repo, a.uid, a.kind, a.status, a.speaker, a.scope, a.body, a.valid_from,
                     a.anchor_device, a.anchor_seq
-             FROM active a WHERE a.uid = ?1 AND {}",
+             FROM active a WHERE a.uid = :uid AND {}",
             before_window()
         ),
-        rusqlite::params![
-            uid,
-            w.device,
-            w.from_seq,
-            w.to_seq,
-            w.from_offset,
-            w.to_offset
-        ],
+        &[
+            &window_params(w)[..],
+            &[(":uid", &uid as &dyn rusqlite::ToSql)],
+        ]
+        .concat()[..],
         |r| {
             let claim = Claim {
                 uid: r.get(1)?,
@@ -507,18 +523,15 @@ pub fn current_before(k: &Connection, repo: &str, w: &crate::curate::Window) -> 
         &format!(
             "SELECT a.uid, a.kind, a.status, a.speaker, a.scope, a.body, a.valid_from,
                     a.anchor_device, a.anchor_seq
-             FROM active a WHERE a.repo = ?1 AND {}
+             FROM active a WHERE a.repo = :repo AND {}
              ORDER BY a.valid_from, a.anchor_device, a.anchor_seq, a.uid",
             before_window()
         ),
-        rusqlite::params![
-            repo,
-            w.device,
-            w.from_seq,
-            w.to_seq,
-            w.from_offset,
-            w.to_offset
-        ],
+        &[
+            &window_params(w)[..],
+            &[(":repo", &repo as &dyn rusqlite::ToSql)],
+        ]
+        .concat()[..],
     )
 }
 
