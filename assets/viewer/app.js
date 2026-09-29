@@ -616,9 +616,10 @@ async function saveSettings(button) {
     return;
   }
   const mine = form;
-  const fields = button.form;
+  // The whole panel, the language picker too: what is typed, or drawn again in another language,
+  // while the save is on its way would not survive its answer.
+  const fields = button.closest('.settings');
   button.disabled = true;
-  // What is typed while the save is on its way would not survive its answer.
   fields.inert = true;
   try {
     // 'same-origin': under the document's no-referrer policy a same-origin POST would carry
