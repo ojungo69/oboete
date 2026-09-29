@@ -2394,9 +2394,10 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          tool result.\n\
          - scope: repo.\n\
          - body: one or two concrete sentences (names, paths, numbers), at most 1,000 characters.\n\
-         - quote: 5 to 200 characters copied exactly from one line, the one that shows it (the \
-         developer's own line for decided): from its prompt, reply or tool output, never from \
-         a tool's input; never text shown as [REDACTED].\n\
+         - quote: 5 to 200 characters copied exactly from one line (all of a shorter line, such \
+         as a bare \"1\" that picks an option), the one that shows it (the developer's own line \
+         for decided): from its prompt, reply or tool output, never from a tool's input; never \
+         text shown as [REDACTED].\n\
          - line: that line's id.\n\
          - supersedes: the ids of claims in your answer, or the uids of kept or carried claims, \
          that this one changes, reverses or cancels (the developer chose another way, dropped or \
@@ -6105,6 +6106,42 @@ mod tests {
             far.ends_with(&format!("(from: {})", "p".repeat(200))),
             "{far}"
         );
+    }
+
+    /// A bare option number is shorter than a quote's usual 5 characters: quoted whole, as the
+    /// prompt now allows, it is the user's decision and settles the carried option it picks
+    /// (#244, d107). The gates already keep it; this holds them to it.
+    #[test]
+    fn a_bare_option_number_quoted_whole_settles_the_carried_option() {
+        let options = "Two ways:\n1. **Cache the parsed files**\n2. **Parse in parallel**";
+        let first = [
+            prompt("Build the importer."),
+            event("reply", json!({"assistant": options})),
+        ];
+        let proposal = |id: &str, quote: &str, body: &str| {
+            json!({"id": id, "kind": "decision", "status": "proposed",
+                "speaker": "assistant proposal", "scope": "repo", "body": body,
+                "quote": quote, "line": "L2", "supersedes": []})
+        };
+        let answer = json!({"claims": [
+            proposal("c1", "Cache the parsed files", "Cache parsed files."),
+            proposal("c2", "Parse in parallel", "Parse in parallel.")], "summary": "s"});
+        let pick = |p: &str| {
+            let uid = p
+                .lines()
+                .filter(|l| l.contains(": Cache parsed files."))
+                .find_map(|l| l.strip_prefix("proposed before ")?.split(':').next())
+                .unwrap()
+                .to_owned();
+            json!({"claims": [{"id": "c1", "kind": "decision", "status": "decided",
+                "speaker": "user", "scope": "repo", "body": "Cache the parsed files.",
+                "quote": "1", "line": "L1", "supersedes": [uid]}], "summary": "s"})
+        };
+        let (_, ops) = two_windows(&first, answer, &[prompt("1")], pick);
+        let picked = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+        assert_eq!(picked.body["evidence"][0]["quote"], "1");
+        assert_eq!(picked.body["status"], "decided");
+        assert_eq!(picked.body["supersedes"].as_array().unwrap().len(), 1);
     }
 
     #[test]
