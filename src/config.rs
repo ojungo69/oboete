@@ -266,11 +266,13 @@ impl Provider {
         }
     }
     /// Whether its calls a day are a fifth of what its own key may request (#238): an entry of
-    /// OpenRouter's `:free` models with no `daily_budget` of the owner's. OpenRouter gives each
-    /// account its own daily limit on them, by the credits it has bought.
+    /// OpenRouter's `:free` models with no `daily_budget` of the owner's, and not a subscription
+    /// (which has no cap). OpenRouter gives each account its own daily limit on them, by the
+    /// credits it has bought.
     pub fn budget_from_key(&self) -> bool {
-        matches!(self, Provider::Openai { base_url, model, daily_budget: None, .. }
-            if base_url.trim_end_matches('/') == OPENROUTER && model.ends_with(":free"))
+        matches!(self, Provider::Openai {
+                base_url, model, daily_budget: None, subscription: false, ..
+            } if base_url.trim_end_matches('/') == OPENROUTER && model.ends_with(":free"))
     }
     pub fn daily_budget(&self) -> u32 {
         match self {
@@ -365,7 +367,7 @@ fn openai(
     base_url: &str,
     key: &str,
     model: &str,
-    daily_budget: u32,
+    daily_budget: Option<u32>,
     retry_429: bool,
     extra: serde_json::Value,
 ) -> Provider {
@@ -374,7 +376,7 @@ fn openai(
         base_url: base_url.into(),
         key_file: Some(home_dir().join(key)),
         model: model.into(),
-        daily_budget: Some(daily_budget),
+        daily_budget,
         timeout_s: default_timeout(),
         retry_429,
         extra: extra.as_object().cloned().unwrap_or_default(),
@@ -394,7 +396,7 @@ fn gemini() -> Provider {
         "https://generativelanguage.googleapis.com/v1beta/openai",
         "GEMINI_API_KEY.md",
         "gemini-3.1-flash-lite",
-        30,
+        Some(30),
         true,
         serde_json::json!({}),
     );
@@ -439,7 +441,7 @@ fn default_providers() -> Vec<Provider> {
         "glm-5.3-flash",
         // No cap of calls a day (owner decision 30): the owner's Go account does not fall back to
         // a paid Zen balance past its limits (the owner, 2026-09-28).
-        no_daily_cap(),
+        Some(no_daily_cap()),
         true,
         serde_json::json!({}),
     );
@@ -463,7 +465,7 @@ fn default_providers() -> Vec<Provider> {
         "NVIDIA_NIM_KEY.md",
         // NIM retires nemotron-3-super on 2026-10-03: its answers carry that `deprecation` (#233).
         "nvidia/nemotron-3-ultra-550b-a55b",
-        500,
+        Some(500),
         true,
         // Nemotron reasons before it answers, and the reasoning counts against max_tokens: on a
         // full-size window super stopped at 2000 tokens mid-JSON (finish_reason "length"), which
@@ -478,20 +480,17 @@ fn default_providers() -> Vec<Provider> {
     if let Provider::Openai { timeout_s, .. } = &mut nim {
         *timeout_s = 160;
     }
-    let mut openrouter = openai(
+    let openrouter = openai(
         "openrouter",
         OPENROUTER,
         "OPENROUTER_API_KEY.md",
         "nvidia/nemotron-3-super-120b-a12b:free",
-        OPENROUTER_FREE_BUDGET,
+        // Unset: its calls a day are a fifth of what its key may request, and a fifth of the
+        // least OpenRouter gives any account until that is read (#238).
+        None,
         false,
         serde_json::json!({"models": ["qwen/qwen3.8-27b:free"], "provider": {"require_parameters": true}}),
     );
-    // Unset: its calls a day are a fifth of what its key may request, and a fifth of the least
-    // OpenRouter gives any account until that is read (#238).
-    if let Provider::Openai { daily_budget, .. } = &mut openrouter {
-        *daily_budget = None;
-    }
     let mut chain = vec![
         openai(
             "groq",
@@ -499,7 +498,7 @@ fn default_providers() -> Vec<Provider> {
             "GROQ_API_KEY.md",
             "openai/gpt-oss-120b",
             // A fifth of Groq free's 1,000 requests a day per model: the cost line (spec 8.2).
-            200,
+            Some(200),
             true,
             // Reasoning tokens count against Groq's 200,000 tokens a day. Low effort cut them from
             // 533 to 9 (20b) and 386 to 75 (120b) on a short window, with valid JSON (2026-09-27).
@@ -510,7 +509,7 @@ fn default_providers() -> Vec<Provider> {
             groq,
             "GROQ_API_KEY.md",
             "openai/gpt-oss-20b",
-            200,
+            Some(200),
             true,
             // Reasoning tokens count against Groq's 200,000 tokens a day. Low effort cut them from
             // 533 to 9 (20b) and 386 to 75 (120b) on a short window, with valid JSON (2026-09-27).
@@ -524,7 +523,7 @@ fn default_providers() -> Vec<Provider> {
             groq,
             "GROQ_API_KEY.md",
             "qwen/qwen3.8-27b",
-            200,
+            Some(200),
             true,
             serde_json::json!({"reasoning_effort": "none"}),
         ),
@@ -749,7 +748,8 @@ mod tests {
     use super::*;
 
     /// #238: the default OpenRouter entry takes its budget from its key, 10 until that is read.
-    /// An entry with the owner's own budget, a model that is not free, or another URL does not.
+    /// An entry with the owner's own budget, a subscription, a model that is not free, or another
+    /// URL does not.
     #[test]
     fn only_an_openrouter_free_entry_without_a_budget_takes_its_keys() {
         let dir = tempfile::tempdir().unwrap();
@@ -766,6 +766,9 @@ mod tests {
         let own = entry(&format!("{free}daily_budget = 30\n"));
         assert!(!own.budget_from_key());
         assert_eq!(own.daily_budget(), 30);
+        let subscription = entry(&format!("{free}subscription = true\n"));
+        assert!(!subscription.budget_from_key());
+        assert_eq!(subscription.daily_budget(), u32::MAX);
         assert!(
             !entry("base_url = \"https://openrouter.ai/api/v1\"\nmodel = \"m\"\n")
                 .budget_from_key()

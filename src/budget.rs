@@ -55,11 +55,15 @@ const UNDECLARED_OUTPUT: u32 = 1_250;
 /// A ceiling check keeps this share of the ceiling free: the estimate is not exact.
 const CEILING_SHARE: f64 = 0.95;
 
+/// A read of a key's own limit (#238) holds a day; one that failed is tried again after an hour.
+pub(crate) const KEY_READ_HOLDS_MS: i64 = providers_db::DAY_MS;
+pub(crate) const KEY_READ_RETRY_MS: i64 = 3_600_000;
+
 /// `p`'s calls a day. An entry whose budget is its key's (`Provider::budget_from_key`) takes a
 /// fifth of the limit its key's last read gave, and its default until a read gives one (#238).
 pub fn daily(db: &Connection, p: &Provider) -> Result<u32> {
     if p.budget_from_key()
-        && let Some((Some(limit), _)) = providers_db::key_limit(db, p.name())?
+        && let Some((Some(limit), _, _)) = providers_db::key_limit(db, p.name())?
     {
         return Ok(limit / 5);
     }
@@ -74,12 +78,12 @@ pub fn key_budget(db: Option<&Connection>, p: &Provider) -> Result<String> {
         None => (None, p.daily_budget()),
     };
     Ok(match read {
-        Some((Some(limit), at)) => format!(
+        Some((Some(limit), at, _)) => format!(
             "{budget} calls a day, a fifth of the {limit} free-model requests a day its key has (read {})",
             crate::db::utc(at)
         ),
-        Some((None, at)) => format!(
-            "{budget} calls a day: reading its key's own limit failed at {}",
+        Some((None, at, _)) => format!(
+            "{budget} calls a day: the read of its key's own limit at {} gave none",
             crate::db::utc(at)
         ),
         None => format!("{budget} calls a day until its key's own limit is read"),
@@ -102,10 +106,17 @@ pub fn admit(
     let (used, oldest) = providers_db::calls_in_a_day(db, name)?;
     let budget = daily(db, p)?;
     if used >= budget {
+        let mut until = providers_db::out_of_the_day(oldest.unwrap_or(now));
+        // A key whose limit its last read did not give: the next read may raise the budget.
+        if p.budget_from_key()
+            && let Some((None, at, _)) = providers_db::key_limit(db, name)?
+        {
+            until = until.min(at + KEY_READ_RETRY_MS);
+        }
         return Ok(Some(Refusal {
             outcome: "budget",
             detail: format!("{used}/{budget} calls in 24 hours"),
-            skip: Skip::Budget(providers_db::out_of_the_day(oldest.unwrap_or(now))),
+            skip: Skip::Budget(until),
         }));
     }
     // The answer counts against the same limits as the prompt (Groq's TPM is input and output
@@ -535,7 +546,7 @@ mod tests {
             "10 calls a day until its key's own limit is read"
         );
         assert_eq!(said(Some(&db)), said(None));
-        providers_db::set_key_limit(&db, "o", Some(1000), 1).unwrap();
+        providers_db::set_key_limit(&db, "o", Some(1000), 1, "k").unwrap();
         assert_eq!(daily(&db, &p).unwrap(), 200);
         assert_eq!(
             said(Some(&db)),
@@ -547,19 +558,33 @@ mod tests {
         let own: Provider =
             toml::from_str(&format!("name = \"o\"\n{free}daily_budget = 30\n")).unwrap();
         assert_eq!(daily(&db, &own).unwrap(), 30);
-        providers_db::set_key_limit(&db, "o", None, 2).unwrap();
+        providers_db::set_key_limit(&db, "o", None, 2, "k").unwrap();
         assert_eq!(daily(&db, &p).unwrap(), 10);
         assert_eq!(
             said(Some(&db)),
             format!(
-                "10 calls a day: reading its key's own limit failed at {}",
+                "10 calls a day: the read of its key's own limit at {} gave none",
                 crate::db::utc(2)
             )
         );
-        providers_db::set_key_limit(&db, "o", Some(5), 3).unwrap();
+        providers_db::set_key_limit(&db, "o", Some(5), 3, "k").unwrap();
         call(&db, "o", None, 10, 10);
         let r = admit(&db, &p, 10.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(r.detail, "1/1 calls in 24 hours");
+        let Skip::Budget(day) = r.skip else {
+            panic!("{:?}", r.skip)
+        };
+        // After a failed read, the refusal holds until the read is tried again, not for the day.
+        let at = crate::db::now_ms();
+        providers_db::set_key_limit(&db, "o", None, at, "k").unwrap();
+        (0..9).for_each(|_| call(&db, "o", None, 10, 10));
+        let r = admit(&db, &p, 10.0, 5.0, &[]).unwrap().unwrap();
+        assert_eq!(r.detail, "10/10 calls in 24 hours");
+        let Skip::Budget(until) = r.skip else {
+            panic!("{:?}", r.skip)
+        };
+        assert_eq!(until, at + KEY_READ_RETRY_MS);
+        assert!(until < day);
     }
 
     #[test]

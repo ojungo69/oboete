@@ -72,7 +72,8 @@ CREATE TABLE IF NOT EXISTS pending(
 CREATE TABLE IF NOT EXISTS key_limits(
   provider TEXT PRIMARY KEY,
   free_daily INTEGER,
-  read_at INTEGER NOT NULL                -- unix ms of the last read, failed or not
+  read_at INTEGER NOT NULL,               -- unix ms of the last read, failed or not
+  key_sha TEXT NOT NULL                   -- which key it read: SHA-256's first 16 hex digits, '' for none
 );
 -- A session's digest that every provider failed (milestone 3 Task 9), as `pending` is for a
 -- window: it counts only for the same request, and after D11's three attempts it is given up
@@ -289,14 +290,14 @@ pub fn calls_in_a_day(conn: &Connection, provider: &str) -> Result<(u32, Option<
     )?)
 }
 
-/// The last read of `provider`'s key limit (#238): the limit it gave, None when it failed, and
-/// when it was.
-pub fn key_limit(conn: &Connection, provider: &str) -> Result<Option<(Option<u32>, i64)>> {
+/// The last read of `provider`'s key limit (#238): the limit it gave, None when it failed, when
+/// it was, and which key it read (`key_limits.key_sha`).
+pub fn key_limit(conn: &Connection, provider: &str) -> Result<Option<(Option<u32>, i64, String)>> {
     Ok(conn
         .query_row(
-            "SELECT free_daily, read_at FROM key_limits WHERE provider=?1",
+            "SELECT free_daily, read_at, key_sha FROM key_limits WHERE provider=?1",
             [provider],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?)
 }
@@ -306,11 +307,13 @@ pub fn set_key_limit(
     provider: &str,
     free_daily: Option<u32>,
     at: i64,
+    key_sha: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO key_limits(provider, free_daily, read_at) VALUES(?1,?2,?3)
-         ON CONFLICT(provider) DO UPDATE SET free_daily=excluded.free_daily, read_at=excluded.read_at",
-        params![provider, free_daily, at],
+        "INSERT INTO key_limits(provider, free_daily, read_at, key_sha) VALUES(?1,?2,?3,?4)
+         ON CONFLICT(provider) DO UPDATE SET free_daily=excluded.free_daily,
+           read_at=excluded.read_at, key_sha=excluded.key_sha",
+        params![provider, free_daily, at, key_sha],
     )?;
     Ok(())
 }
