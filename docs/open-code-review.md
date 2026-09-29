@@ -113,11 +113,17 @@ a fault of the model itself. It is tried only once.
 
 ## Triggers and limits
 
-- Non-draft PRs whose head branch belongs to this repository run on open, push,
-  reopen, and transition from draft to ready for review.
-- Fork PRs do not consume quota automatically. A maintainer can review any open,
-  non-draft PR from **Actions > OpenCodeReview > Run workflow**, selecting the
-  default branch and supplying the PR number. For example:
+- Non-draft PRs whose head branch belongs to this repository run on open, reopen,
+  and transition from draft to ready for review, not on each push: every run is
+  paid through the owner's DeepSeek key (US$0.03 to 0.08 measured, an estimated
+  US$0.15 to 0.18 for the largest PR), and a run on every push came to an estimated
+  US$20 to 60 a month. The owner chose on
+  2026-09-29 to review a PR when it opens and after the push taken as its last,
+  run by hand, as CodeRabbit is. While Codex or cubic cannot review (a usage
+  limit), run it after each push instead.
+- A maintainer can review any open, non-draft PR, a fork's too (fork PRs do not
+  consume quota automatically), from **Actions > OpenCodeReview > Run workflow**,
+  selecting the default branch and supplying the PR number. For example:
 
   ```sh
   gh workflow run open-code-review.yml --ref main -f pr_number=123
@@ -131,8 +137,9 @@ a fault of the model itself. It is tried only once.
   cancelled if that queue is full. Other applications or repositories using the
   same keys are outside this queue.
 - At the start of a queued job, the workflow fetches the current PR metadata.
-  Automatic reviews skip closed/draft PRs and superseded head/base snapshots.
-  Manual reviews use the current head and still reject closed/draft PRs.
+  Automatic reviews skip closed/draft PRs; one that waited in the queue past a
+  push reviews the current head, as manual reviews do, since no push queues a
+  review of its own. Manual reviews reject closed/draft PRs.
 - Each attempt reviews one file group at a time, with a 600-second LLM request
   timeout and a 6,000,000-token budget. The CLI multiplies the fifteen-minute task
   setting by the three rounds of explicit `high` review effort, giving each file
