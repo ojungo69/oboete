@@ -149,10 +149,12 @@ struct Piece {
 }
 
 /// A repository as a window shows it: through the gate, a local path (no origin) as its folder,
-/// with either platform's separator.
+/// with either platform's separator, on one line (a heading's name never starts a line that
+/// `shows` or `carries` reads).
 fn repo_name(repo: &str, rules: &Rules) -> String {
     let repo = crate::redact::outbound_with(repo, rules);
-    repo.rsplit(['/', '\\']).next().unwrap_or(&repo).to_owned()
+    let name = repo.rsplit(['/', '\\']).next().unwrap_or(&repo);
+    name.replace(['\n', '\r'], " ")
 }
 
 /// The context a window's prompt adds, in whole lines from the start of each part, within `room`
@@ -1824,7 +1826,7 @@ fn within_op_cap(mut op: Value) -> Value {
     // many repositories can show thousands.
     let mut size = op.to_string().len();
     if size > crate::raw::MAX_OP_BYTES
-        && let Some(shown) = op["candidates"].as_array_mut()
+        && let Some(shown) = op.get_mut("candidates").and_then(Value::as_array_mut)
     {
         // A uid leaves with its comma (the last one has none); the count adds its key and digits.
         let count = |cut: u64| r#","candidates_cut":"#.len() + cut.to_string().len();
@@ -1846,7 +1848,13 @@ fn within_op_cap(mut op: Value) -> Value {
         } else {
             "dropped"
         };
-        if op[list].as_array_mut().and_then(Vec::pop).is_none() {
+        // `get_mut`: an op without the list is not given one.
+        if op
+            .get_mut(list)
+            .and_then(Value::as_array_mut)
+            .and_then(Vec::pop)
+            .is_none()
+        {
             break;
         }
         cut += 1;
@@ -5229,6 +5237,12 @@ mod tests {
         assert!(carries(&text, &y));
         assert!(!carries(&text, &x));
         assert!(carries(&format!("### s\nopen item {x} in r: b\n"), &x));
+        // A repository's name is one line too: its heading cannot start either line.
+        let rules = Rules::default();
+        assert_eq!(
+            repo_name(&format!("/w/r\n{x}: b"), &rules),
+            format!("r {x}: b")
+        );
     }
 
     /// Candidates over the op cap are cut from the end of their list, before the gates' lists.
@@ -5259,6 +5273,9 @@ mod tests {
         let base = json!({"outcome": "curated", "dropped": [["c1", ""]], "candidates": ["u"]});
         let reason = "r".repeat(crate::raw::MAX_OP_BYTES - base.to_string().len());
         let op = json!({"outcome": "curated", "dropped": [["c1", reason]], "candidates": ["u"]});
+        assert_eq!(within_op_cap(op.clone()), op);
+        // An op over the cap with none of the lists is given none of them.
+        let op = json!({"outcome": "skipped", "summary": "x".repeat(crate::raw::MAX_OP_BYTES)});
         assert_eq!(within_op_cap(op.clone()), op);
     }
 
