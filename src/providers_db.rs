@@ -304,15 +304,23 @@ pub fn last_calls(conn: &Connection, n: u32) -> Result<Vec<String>> {
 
 pub const DAY_MS: i64 = 86_400_000;
 
+/// A call that was sent and not refused with an HTTP error status (`http 429: …`): it may have used
+/// tokens it did not report (a timeout, a dropped connection, an answer without a full usage block).
+const SENT_NOT_REFUSED: &str = "bytes_out > 0
+    AND outcome IN ('ok','invalid','error','empty','prose','shape','over_cap','unanchored')
+    AND COALESCE(detail, '') NOT GLOB 'http [0-9][0-9][0-9]*'";
+
 /// Tokens (prompt plus completion) `provider` reported since `since`, and when its oldest call
-/// since then that used any was made: one that reported tokens or sent a request (a refusal row
-/// neither sent nor used any, so its age frees nothing).
+/// since then that the token budget counts was made: one that reported tokens or was sent and not
+/// refused (our refusal or an HTTP error used none, so its age frees nothing).
 pub fn tokens_since(conn: &Connection, provider: &str, since: i64) -> Result<(i64, Option<i64>)> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), 0),
-                MIN(CASE WHEN COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0) > 0
-                          OR bytes_out > 0 THEN ts END)
-         FROM provider_calls WHERE provider=?1 AND ts>=?2",
+        &format!(
+            "SELECT COALESCE(SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), 0),
+                    MIN(CASE WHEN COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0) > 0
+                              OR ({SENT_NOT_REFUSED}) THEN ts END)
+             FROM provider_calls WHERE provider=?1 AND ts>=?2"
+        ),
         params![provider, since],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
@@ -333,18 +341,16 @@ pub fn next_month() -> i64 {
     chrono_free_month_start(chrono_free_month_start(now_ms()) + 32 * DAY_MS)
 }
 
-/// What `provider`'s sent calls since `start` may have used beyond the usage they reported: the
-/// estimate of each call with no prompt count, and the number of calls with no completion count
-/// (a timeout, a dropped connection, an answer without a full usage block). A response with an
-/// HTTP error status (`http 429: …`) used none.
+/// What `provider`'s calls since `start` that were sent and not refused may have used beyond the
+/// usage they reported: the estimate of each call with no prompt count, and the number of calls
+/// with no completion count.
 pub fn unmetered(conn: &Connection, provider: &str, start: i64) -> Result<(i64, i64)> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(CASE WHEN prompt_tokens IS NULL THEN est_tokens END), 0),
-                COALESCE(SUM(completion_tokens IS NULL), 0)
-         FROM provider_calls
-         WHERE provider=?1 AND ts>=?2 AND bytes_out > 0
-           AND outcome IN ('ok','invalid','error','empty','prose','shape','over_cap','unanchored')
-           AND COALESCE(detail, '') NOT GLOB 'http [0-9][0-9][0-9]*'",
+        &format!(
+            "SELECT COALESCE(SUM(CASE WHEN prompt_tokens IS NULL THEN est_tokens END), 0),
+                    COALESCE(SUM(completion_tokens IS NULL), 0)
+             FROM provider_calls WHERE provider=?1 AND ts>=?2 AND {SENT_NOT_REFUSED}"
+        ),
         params![provider, start],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?)

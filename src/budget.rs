@@ -455,9 +455,26 @@ mod tests {
             call(&db, "p", None, 5000, 1000);
             aged(ago * hour);
         }
-        // A refusal older than the counted call sent nothing: its age frees no token.
+        // A refusal and a 429 older than the counted call used no token: their age frees none.
         refusal(&db, "p");
         aged(23 * hour + hour / 2);
+        record(
+            &db,
+            &Call {
+                provider: "p",
+                role: "curator",
+                span: "s",
+                outcome: "wait",
+                ms: 1,
+                detail: Some("http 429: slow down"),
+                bytes_out: 1,
+                est_tokens: Some(900),
+                usage: Usage::default(),
+                usd: None,
+            },
+        )
+        .unwrap();
+        aged(23 * hour + hour / 4);
         // 6,000 in the 24 hours: 2,700 in and 1,250 reserved fit in the 4,000 left, 2,800 do not.
         assert!(admit(&db, &p, 2700.0, 5.0, &[]).unwrap().is_none());
         let r = admit(&db, &p, 2800.0, 5.0, &[]).unwrap().unwrap();
