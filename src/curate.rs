@@ -203,6 +203,14 @@ fn shows(shown: &str, uid: &str) -> bool {
     shown.contains(&format!("\n{uid}: "))
 }
 
+/// Whether the fitted carried context lists `uid`'s own line, a proposal or an open item: a uid
+/// quoted in another line is not its line (`carried` keeps each on one line).
+fn carries(carried: &str, uid: &str) -> bool {
+    ["proposed before", "open item"]
+        .iter()
+        .any(|line| carried.contains(&format!("\n{line} {uid}")))
+}
+
 /// Bytes of records read at a time while a window is cut, at least one record (spec 3.1: pages
 /// bounded by events and bytes).
 const PAGE_BYTES: usize = 4 << 20;
@@ -1055,7 +1063,7 @@ fn request(
     let (carried_text, mut carried_uids) = carried(raw, k, rules, w)?;
     // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing.
     let (carried_text, shown) = fit(&carried_text, &shown, summary.window_tokens / 5);
-    carried_uids.retain(|(_, _, c)| carried_text.contains(c.uid.as_str()));
+    carried_uids.retain(|(_, _, c)| carries(&carried_text, &c.uid));
     shown_in.retain(|(_, c)| shows(&shown, &c.uid));
     Ok(Request {
         prompt: prompt(&summary.language, &w.text, &shown, &carried_text),
@@ -1818,13 +1826,13 @@ fn within_op_cap(mut op: Value) -> Value {
     if size > crate::raw::MAX_OP_BYTES
         && let Some(shown) = op["candidates"].as_array_mut()
     {
-        // A uid leaves with its comma; the count adds its key and digits.
+        // A uid leaves with its comma (the last one has none); the count adds its key and digits.
         let count = |cut: u64| r#","candidates_cut":"#.len() + cut.to_string().len();
         let mut cut = 0u64;
         while size + count(cut) > crate::raw::MAX_OP_BYTES
             && let Some(uid) = shown.pop()
         {
-            size -= uid.to_string().len() + 1;
+            size -= uid.to_string().len() + usize::from(!shown.is_empty());
             cut += 1;
         }
         if cut > 0 {
@@ -2082,7 +2090,8 @@ type Carried = Vec<(String, Option<String>, crate::claims::Claim)>;
 // ponytail: a child session (a subagent) starts with nothing of its parent's until capture
 // records the link.
 fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(String, Carried)> {
-    let gate = |t: &str| crate::redact::outbound_with(t, rules);
+    // On one line: `fit` keeps or cuts a line whole, and no text can start a line `carries` reads.
+    let gate = |t: &str| crate::redact::outbound_with(t, rules).replace(['\n', '\r'], " ");
     // Each session with every repository its lines are in: an agent may change checkout.
     let mut sessions: Vec<(&str, Vec<&str>)> = Vec::new();
     for l in &w.lines {
@@ -3741,6 +3750,8 @@ mod tests {
         }
         // The session moved to another checkout: its items there are carried too.
         ops.push(open(&mut raw, "s", "q", "The parser needs a fuzz test."));
+        // A body over two lines is carried on one.
+        ops.push(open(&mut raw, "s", "r", "Two lines:\nopen item next"));
         // Done: resolved work is not an open item.
         let (kind, mut done) = open(&mut raw, "s", "r", "The flaky retry is fixed now.");
         done["status"] = "done".into();
@@ -3756,6 +3767,7 @@ mod tests {
         for (repo, body) in [
             ("r", "The importer drops empty lines."),
             ("q", "The parser needs a fuzz test."),
+            ("r", "Two lines: open item next"),
         ] {
             let item = |l: &str| {
                 l.starts_with("open item ") && l.ends_with(&format!(" in {repo}: {body}"))
@@ -5212,6 +5224,11 @@ mod tests {
         );
         assert_eq!(shown.lines().count(), 2);
         assert!(!shows(&shown, &x));
+        // Carried the same way: by its own proposal or open-item line.
+        let text = format!("### s\nproposed before {y} in r: the note names {x} here\n");
+        assert!(carries(&text, &y));
+        assert!(!carries(&text, &x));
+        assert!(carries(&format!("### s\nopen item {x} in r: b\n"), &x));
     }
 
     /// Candidates over the op cap are cut from the end of their list, before the gates' lists.
