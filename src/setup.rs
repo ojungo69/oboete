@@ -1924,14 +1924,16 @@ pub fn doctor(home: &Path) -> Result<()> {
             AGENTS.join(", ")
         ),
     }
-    let inject = config::inject(home);
-    if inject.session_start {
-        println!(
+    match config::inject(home) {
+        Ok(i) if i.session_start => println!(
             "injection: the manifest, up to {} characters",
-            inject.session_start_chars
-        );
-    } else {
-        println!("injection: off, no manifest is shown to an agent");
+            i.session_start_chars
+        ),
+        Ok(_) => println!("injection: off, no manifest is shown to an agent"),
+        Err(e) => {
+            println!("injection: settings are wrong, so nothing is injected: {e:#}");
+            unhealthy.push("injection settings are wrong");
+        }
     }
     // `[chain]` as it applies, under each entry's line.
     let cfg = config::load(home)?;

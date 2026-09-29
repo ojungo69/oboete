@@ -309,11 +309,12 @@ fn checkout_manifest(
     labels: &Value,
     settings: &crate::capture::Settings,
 ) -> Option<String> {
-    // `[inject]` (#94): off, or a smaller size than the stored manifest's.
-    let inject = crate::config::inject(home);
-    if !inject.session_start {
-        return None;
-    }
+    // `[inject]` (#94): off, or a smaller size than the stored manifest's. Settings that do not
+    // read inject nothing, as capture settings that do not read record nothing.
+    let inject = crate::config::inject(home)
+        .inspect_err(|e| eprintln!("oboete: nothing injected: {e:#}"))
+        .ok()
+        .filter(|i| i.session_start)?;
     let (session, repo, branch) = crate::capture::checkout(labels, settings);
     let session = own_session(session, store);
     crate::consumer::manifest::text(
@@ -1255,6 +1256,14 @@ mod tests {
         .unwrap();
         assert_eq!(shown("t3"), None);
         assert_eq!(inject_text(home.path(), cwd.path(), Some("t4")), "");
+        // A wrong `[inject]` injects nothing, not the defaults: its owner may have turned it off.
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[inject]\nsession_start = \"false\"\n",
+        )
+        .unwrap();
+        assert_eq!(shown("t5"), None);
+        assert_eq!(inject_text(home.path(), cwd.path(), Some("t6")), "");
     }
 
     #[test]

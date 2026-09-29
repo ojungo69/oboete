@@ -119,4 +119,9 @@ fn doctor_prints_inject_and_chain_as_they_apply() {
         "{off}"
     );
     assert!(!off.contains("warning:"), "{off}");
+    let wrong = doctor(&format!("{entries}[inject]\nsession_start = \"false\"\n"));
+    assert!(
+        wrong.contains("injection: settings are wrong, so nothing is injected"),
+        "{wrong}"
+    );
 }

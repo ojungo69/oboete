@@ -689,16 +689,6 @@ fn overlay(cfg: &mut Config) {
             ));
         }
     }
-    for (key, list) in [("order", &mut chain.order), ("off", &mut chain.off)] {
-        let mut seen = std::collections::BTreeSet::new();
-        let before = list.len();
-        list.retain(|n| seen.insert(n.clone()));
-        if list.len() < before {
-            warnings.push(format!(
-                "[chain] {key} names an entry more than once: the first one counts"
-            ));
-        }
-    }
     let named = (chain.order.iter().map(|n| ("order", n)))
         .chain(chain.off.iter().map(|n| ("off", n)))
         .chain(chain.daily_budget.keys().map(|n| ("daily_budget", n)))
@@ -720,22 +710,21 @@ fn overlay(cfg: &mut Config) {
     for p in providers.iter_mut() {
         let name = p.name().to_owned();
         let set = chain.model.get(&name);
+        let (Provider::Openai { on, timeout_s, .. } | Provider::Cli { on, timeout_s, .. }) = p;
+        *on &= !chain.off.contains(&name);
+        if let Some(&s) = chain.timeout_s.get(&name) {
+            *timeout_s = s;
+        }
         match p {
             Provider::Openai {
-                on,
                 base_url,
                 model,
                 daily_budget,
-                timeout_s,
                 limits,
                 ..
             } => {
-                *on &= !chain.off.contains(&name);
                 if let Some(&n) = chain.daily_budget.get(&name) {
                     *daily_budget = Some(n);
-                }
-                if let Some(&s) = chain.timeout_s.get(&name) {
-                    *timeout_s = s;
                 }
                 // Only a model whose price the entry knows: an entry's prices are its model's,
                 // and OpenRouter bills a model that is not `:free` outside the monthly USD cap
@@ -755,18 +744,12 @@ fn overlay(cfg: &mut Config) {
                 }
             }
             Provider::Cli {
-                on,
                 model,
                 daily_budget,
-                timeout_s,
                 ..
             } => {
-                *on &= !chain.off.contains(&name);
                 if let Some(&n) = chain.daily_budget.get(&name) {
                     *daily_budget = n;
-                }
-                if let Some(&s) = chain.timeout_s.get(&name) {
-                    *timeout_s = s;
                 }
                 if let Some(m) = set {
                     *model = Some(m.clone());
@@ -827,12 +810,10 @@ pub fn doctor_line(p: &Provider, chain: &ChainOverlay) -> String {
 /// start, at the first event of an agent without one (grok, agy), after a Cursor compaction, and
 /// through `oboete inject` (OpenCode, pi).
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct Inject {
-    #[serde(default = "default_true")]
     pub session_start: bool,
     /// The manifest's size in characters, 1,000 to 6,000: it is stored rendered at 6,000.
-    #[serde(default = "default_session_start_chars")]
     pub session_start_chars: usize,
 }
 
@@ -840,34 +821,21 @@ impl Default for Inject {
     fn default() -> Self {
         Self {
             session_start: true,
-            session_start_chars: default_session_start_chars(),
+            session_start_chars: crate::consumer::manifest::CAP,
         }
     }
 }
 
-fn default_session_start_chars() -> usize {
-    crate::consumer::manifest::CAP
-}
-
-/// `home`'s `[inject]`, by its own parse: a mistake in the file falls back to the defaults with a
-/// line on stderr, and stops neither recording nor curation.
-pub fn inject(home: &Path) -> Inject {
+/// `home`'s `[inject]`, by its own parse, so a mistake elsewhere in the file stops neither
+/// recording nor this. A mistake in `[inject]` itself is an error, which injects nothing: the
+/// defaults would show the manifest to a user who turned it off (cubic on #94).
+pub fn inject(home: &Path) -> Result<Inject> {
     let path = home.join("config.toml");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Inject::default(),
-        Err(e) => {
-            eprintln!(
-                "oboete: [inject] defaults used: read {}: {e}",
-                path.display()
-            );
-            return Inject::default();
-        }
-    };
-    parse_inject(&text).unwrap_or_else(|e| {
-        eprintln!("oboete: [inject] defaults used: {e:#}");
-        Inject::default()
-    })
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_inject(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Inject::default()),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
 }
 
 fn parse_inject(text: &str) -> Result<Inject> {
@@ -1405,8 +1373,6 @@ model = { gone = "m" }
         assert!(!find(&cfg, "nim").on());
         let w = cfg.warnings.join("\n");
         for line in [
-            "[chain] order names an entry more than once",
-            "[chain] off names an entry more than once",
             "[chain] order: no chain entry is named \"gone\"",
             "[chain] off: no chain entry is named \"mistral\"",
             "[chain] daily_budget: no chain entry is named \"gone\"",
@@ -1415,7 +1381,8 @@ model = { gone = "m" }
         ] {
             assert!(w.contains(line), "{line}: {w}");
         }
-        assert_eq!(cfg.warnings.len(), 7, "{w}");
+        // A name repeated in `order` or `off` changes nothing: the first counts.
+        assert_eq!(cfg.warnings.len(), 5, "{w}");
         // Two `[[providers]]` of one name: a warning, and `[chain]` changes both.
         let entry = "[[providers]]\nkind = \"cli\"\nname = \"c\"\ncli = \"claude\"\n";
         let cfg = load_text(&format!("[chain]\ntimeout_s = {{ c = 9 }}\n{entry}{entry}"));
@@ -1531,13 +1498,13 @@ model = { gone = "m" }
     }
 
     #[test]
-    fn inject_reads_its_table_and_falls_back_to_the_defaults() {
+    fn inject_reads_its_table_and_refuses_a_wrong_one() {
         let dir = tempfile::tempdir().unwrap();
         let at = |text: &str| {
             std::fs::write(dir.path().join("config.toml"), text).unwrap();
             inject(dir.path())
         };
-        assert_eq!(inject(dir.path()), Inject::default());
+        assert_eq!(inject(dir.path()).unwrap(), Inject::default());
         assert_eq!(
             Inject::default(),
             Inject {
@@ -1547,28 +1514,32 @@ model = { gone = "m" }
         );
         let set = at("[inject]\nsession_start = false\nsession_start_chars = 1000\n");
         assert_eq!(
-            set,
+            set.unwrap(),
             Inject {
                 session_start: false,
                 session_start_chars: 1_000
             }
         );
         assert_eq!(
-            at("[inject]\nsession_start_chars = 6000\n").session_start_chars,
+            at("[inject]\nsession_start_chars = 6000\n")
+                .unwrap()
+                .session_start_chars,
             6_000
         );
-        // Out of range, the wrong type, an unknown key, a file that is not TOML: the defaults.
+        // Out of range, the wrong type, an unknown key, a file that is not TOML: an error, never
+        // the defaults, which would inject for a user who turned it off.
         for bad in [
             "[inject]\nsession_start = false\nsession_start_chars = 999\n",
             "[inject]\nsession_start = false\nsession_start_chars = 6001\n",
-            "[inject]\nsession_start = \"no\"\n",
-            "[inject]\nsession_start = false\nsize = 2\n",
-            "[inject\n",
+            "[inject]\nsession_start = \"false\"\n",
+            "[inject]\nsesion_start = false\n",
+            "[inject]\nsession_start = false\n[inject\n",
         ] {
-            assert_eq!(at(bad), Inject::default(), "{bad}");
+            assert!(at(bad).is_err(), "{bad}");
         }
         // Other tables are not its business.
-        assert!(!at("[chain]\noff = [\"x\"]\n[inject]\nsession_start = false\n").session_start);
+        let other = at("[chain]\noff = 3\n[inject]\nsession_start = false\n");
+        assert!(!other.unwrap().session_start);
     }
 
     #[test]
