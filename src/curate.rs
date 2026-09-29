@@ -3234,7 +3234,7 @@ mod tests {
             tried.set(tried.get() + 1);
             Err(went_past(&[(
                 "groq",
-                "spent: 0/0 calls today",
+                "spent: 0/0 calls in 24 hours",
                 Skip::Budget(tomorrow),
             )]))
         };

@@ -268,16 +268,16 @@ pub fn set_rate(conn: &Connection, provider: &str, r: RateLeft) -> Result<()> {
     Ok(())
 }
 
-/// Requests sent to `provider` since the last UTC midnight (the per-provider daily budget window).
-/// A 429 that was waited out still counts: the budget bounds our requests, not our successes.
-pub fn calls_today(conn: &Connection, provider: &str) -> Result<u32> {
-    let day_ms: i64 = 86_400_000;
-    let midnight = now_ms() / day_ms * day_ms;
+/// Requests sent to `provider` in the last 24 hours, and when the oldest of them was sent: the
+/// per-provider daily budget counts a rolling day, as Groq counts its own (docs/milestone-1.md), so
+/// it holds in any 24 hours, UTC days included. A 429 that was waited out still counts: the budget
+/// bounds our requests, not our successes.
+pub fn calls_in_a_day(conn: &Connection, provider: &str) -> Result<(u32, Option<i64>)> {
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM provider_calls WHERE provider=?1 AND ts>=?2
+        "SELECT COUNT(*), MIN(ts) FROM provider_calls WHERE provider=?1 AND ts>=?2
            AND outcome IN ('ok','error','invalid','wait','empty','prose','shape','over_cap','unanchored')",
-        params![provider, midnight],
-        |r| r.get(0),
+        params![provider, now_ms() - DAY_MS],
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
 }
 
@@ -302,15 +302,33 @@ pub fn last_calls(conn: &Connection, n: u32) -> Result<Vec<String>> {
     Ok(rows)
 }
 
-const DAY_MS: i64 = 86_400_000;
+pub const DAY_MS: i64 = 86_400_000;
 
-/// Tokens (prompt plus completion) `provider` reported since the last UTC midnight.
-pub fn tokens_today(conn: &Connection, provider: &str) -> Result<i64> {
+/// When a call made at `ts` has left the rolling day that `calls_in_a_day` and `tokens_since`
+/// count (`ts >= now - DAY_MS`): one ms after it is exactly a day old.
+pub fn out_of_the_day(ts: i64) -> i64 {
+    ts + DAY_MS + 1
+}
+
+/// A call that was sent and not refused with an HTTP error status (`http 429: …`): it may have used
+/// tokens it did not report (a timeout, a dropped connection, an answer without a full usage block).
+const SENT_NOT_REFUSED: &str = "bytes_out > 0
+    AND outcome IN ('ok','invalid','error','empty','prose','shape','over_cap','unanchored')
+    AND COALESCE(detail, '') NOT GLOB 'http [0-9][0-9][0-9]*'";
+
+/// Tokens (prompt plus completion) `provider` reported since `since`, and when its oldest call
+/// since then that the token budget counts was made: one that reported tokens or was sent and not
+/// refused (our refusal or an HTTP error used none, so its age frees nothing).
+pub fn tokens_since(conn: &Connection, provider: &str, since: i64) -> Result<(i64, Option<i64>)> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), 0)
-         FROM provider_calls WHERE provider=?1 AND ts>=?2",
-        params![provider, now_ms() / DAY_MS * DAY_MS],
-        |r| r.get(0),
+        &format!(
+            "SELECT COALESCE(SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), 0),
+                    MIN(CASE WHEN COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0) > 0
+                              OR ({SENT_NOT_REFUSED}) THEN ts END)
+             FROM provider_calls WHERE provider=?1 AND ts>=?2"
+        ),
+        params![provider, since],
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
 }
 
@@ -324,33 +342,21 @@ pub fn usd_this_month(conn: &Connection) -> Result<f64> {
     )?)
 }
 
-/// The last UTC midnight, for `unmetered`.
-pub fn today() -> i64 {
-    now_ms() / DAY_MS * DAY_MS
-}
-
-/// When the daily counts start again: the next UTC midnight.
-pub fn next_day() -> i64 {
-    today() + DAY_MS
-}
-
 /// When the monthly spend starts again: the first of the next UTC month.
 pub fn next_month() -> i64 {
     chrono_free_month_start(chrono_free_month_start(now_ms()) + 32 * DAY_MS)
 }
 
-/// What `provider`'s sent calls since `start` may have used beyond the usage they reported: the
-/// estimate of each call with no prompt count, and the number of calls with no completion count
-/// (a timeout, a dropped connection, an answer without a full usage block). A response with an
-/// HTTP error status (`http 429: …`) used none.
+/// What `provider`'s calls since `start` that were sent and not refused may have used beyond the
+/// usage they reported: the estimate of each call with no prompt count, and the number of calls
+/// with no completion count.
 pub fn unmetered(conn: &Connection, provider: &str, start: i64) -> Result<(i64, i64)> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(CASE WHEN prompt_tokens IS NULL THEN est_tokens END), 0),
-                COALESCE(SUM(completion_tokens IS NULL), 0)
-         FROM provider_calls
-         WHERE provider=?1 AND ts>=?2 AND bytes_out > 0
-           AND outcome IN ('ok','invalid','error','empty','prose','shape','over_cap','unanchored')
-           AND COALESCE(detail, '') NOT GLOB 'http [0-9][0-9][0-9]*'",
+        &format!(
+            "SELECT COALESCE(SUM(CASE WHEN prompt_tokens IS NULL THEN est_tokens END), 0),
+                    COALESCE(SUM(completion_tokens IS NULL), 0)
+             FROM provider_calls WHERE provider=?1 AND ts>=?2 AND {SENT_NOT_REFUSED}"
+        ),
         params![provider, start],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?)

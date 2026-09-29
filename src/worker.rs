@@ -1047,7 +1047,11 @@ mod tests {
             .unwrap()
             .expect("the phase did not run");
         assert_eq!((p.hold.as_str(), p.from_seq, p.to_seq), ("budget", 1, 2));
-        assert!(p.reason.contains("spent: 0/0 calls today"), "{}", p.reason);
+        assert!(
+            p.reason.contains("spent: 0/0 calls in 24 hours"),
+            "{}",
+            p.reason
+        );
     }
 
     /// A worker that stays up reads the config again for each window: turning curation on or
