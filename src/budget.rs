@@ -75,6 +75,17 @@ fn key_read(db: &Connection, p: &Provider) -> Result<Option<(Option<u32>, i64, S
     Ok(providers_db::key_limit(db, p.name())?.filter(|(_, _, of)| *of == now))
 }
 
+/// When the key read `read` stops holding and the next is due (#238): a day after one that gave a
+/// limit, an hour after one that gave none.
+pub(crate) fn read_due(read: &(Option<u32>, i64, String)) -> i64 {
+    read.1
+        + if read.0.is_some() {
+            KEY_READ_HOLDS_MS
+        } else {
+            KEY_READ_RETRY_MS
+        }
+}
+
 /// `daily` for an entry whose key's last read is `read`.
 fn daily_after(p: &Provider, read: &Option<(Option<u32>, i64, String)>) -> u32 {
     match read {
@@ -121,14 +132,18 @@ pub fn admit(
     // ponytail: a key's budget (#238) counts the entry's calls, not its key's. Two entries on one
     // OpenRouter key take a fifth each, and a replaced key's calls count for a day. Record the
     // key_id with each call and count by it if an entry ever shares its key; the default has one.
-    let budget = daily(db, p)?;
+    let read = if p.budget_from_key() {
+        key_read(db, p)?
+    } else {
+        None
+    };
+    let budget = daily_after(p, &read);
     if used >= budget {
         let mut until = providers_db::out_of_the_day(oldest.unwrap_or(now));
-        // A key whose limit its last read did not give: the next read may raise the budget.
-        if p.budget_from_key()
-            && let Some((None, at, _)) = key_read(db, p)?
-        {
-            until = until.min(at + KEY_READ_RETRY_MS);
+        // The next read of a key's limit may raise the budget: the refusal lasts until it is due,
+        // so the chain, which a refused window waits out, runs the read then.
+        if let Some(read) = &read {
+            until = until.min(read_due(read));
         }
         return Ok(Some(Refusal {
             outcome: "budget",
@@ -604,23 +619,29 @@ mod tests {
         providers_db::set_key_limit(&db, "o", Some(0), 3, k).unwrap();
         assert_eq!(daily(&db, &p).unwrap(), 0);
         assert!(admit(&db, &p, 10.0, 5.0, &[]).unwrap().is_some());
-        providers_db::set_key_limit(&db, "o", Some(5), 3, k).unwrap();
+        // A refusal lasts until the next read of the key's limit is due, if that comes before the
+        // oldest call leaves the day: the read may raise the budget (Codex on 53b7277). A read
+        // that gave a limit is due after a day, one that gave none after an hour.
+        let now = crate::db::now_ms();
+        let hour = 3_600_000;
         call(&db, "o", None, 10, 10);
-        let r = admit(&db, &p, 10.0, 5.0, &[]).unwrap().unwrap();
-        assert_eq!(r.detail, "1/1 calls in 24 hours");
-        let Skip::Budget(day) = r.skip else {
-            panic!("{:?}", r.skip)
+        let refused = |read_at: i64, limit: Option<u32>| {
+            providers_db::set_key_limit(&db, "o", limit, read_at, k).unwrap();
+            let r = admit(&db, &p, 10.0, 5.0, &[]).unwrap().unwrap();
+            let Skip::Budget(until) = r.skip else {
+                panic!("{:?}", r.skip)
+            };
+            (r.detail, until)
         };
-        // After a failed read, the refusal holds until the read is tried again, not for the day.
-        let at = crate::db::now_ms();
-        providers_db::set_key_limit(&db, "o", None, at, k).unwrap();
+        let (detail, day) = refused(now, Some(5));
+        assert_eq!(detail, "1/1 calls in 24 hours");
+        assert!(day > now + 23 * hour, "{day}");
+        let at = now - 20 * hour;
+        assert_eq!(refused(at, Some(5)).1, at + KEY_READ_HOLDS_MS);
         (0..9).for_each(|_| call(&db, "o", None, 10, 10));
-        let r = admit(&db, &p, 10.0, 5.0, &[]).unwrap().unwrap();
-        assert_eq!(r.detail, "10/10 calls in 24 hours");
-        let Skip::Budget(until) = r.skip else {
-            panic!("{:?}", r.skip)
-        };
-        assert_eq!(until, at + KEY_READ_RETRY_MS);
+        let (detail, until) = refused(now, None);
+        assert_eq!(detail, "10/10 calls in 24 hours");
+        assert_eq!(until, now + KEY_READ_RETRY_MS);
         assert!(until < day);
     }
 

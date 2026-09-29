@@ -149,7 +149,8 @@ pub enum Provider {
         #[serde(default)]
         key_file: Option<PathBuf>,
         model: String,
-        /// Unset: 300 calls a day, or none for a subscription (owner decision 30).
+        /// Unset: 300 calls a day, none for a subscription (owner decision 30), and a fifth of its
+        /// key's own limit for an OpenRouter `:free` entry, 10 until that is read (#238).
         #[serde(default)]
         daily_budget: Option<u32>,
         #[serde(default = "default_timeout")]

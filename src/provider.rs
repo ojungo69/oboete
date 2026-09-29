@@ -589,17 +589,11 @@ fn refresh_key_limit(
     }
     let key = key_file.and_then(|f| config::read_key(f).ok());
     let sha = key_id(key.as_deref());
-    if let Some((limit, at, of)) = providers_db::key_limit(conn, p.name())?
-        && of == sha
+    if let Some(read) = providers_db::key_limit(conn, p.name())?
+        && read.2 == sha
+        && now < budget::read_due(&read)
     {
-        let holds = if limit.is_some() {
-            budget::KEY_READ_HOLDS_MS
-        } else {
-            budget::KEY_READ_RETRY_MS
-        };
-        if now - at < holds {
-            return Ok(());
-        }
+        return Ok(());
     }
     let limit = key.as_deref().and_then(read);
     providers_db::set_key_limit(conn, p.name(), limit, now, &sha)

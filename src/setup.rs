@@ -1963,7 +1963,10 @@ pub fn doctor(home: &Path) -> Result<()> {
             };
             format!(
                 "; {}",
-                said.unwrap_or_else(|e| format!("its budget is unreadable: {e:#}"))
+                said.unwrap_or_else(|e| {
+                    unhealthy.push("a key's budget is unreadable");
+                    format!("its budget is unreadable: {e:#}")
+                })
             )
         } else {
             String::new()
