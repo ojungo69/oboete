@@ -5647,4 +5647,76 @@ mod tests {
         let accepted = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
         assert_eq!(accepted.body["supersedes"].as_array().unwrap().len(), 1);
     }
+
+    /// Spec 3.3 (#240): a session's previous window that was curated again carries what its
+    /// recuration left proposed, not what the recuration retracted, and an acceptance in the next
+    /// window supersedes it.
+    #[test]
+    fn a_recurated_windows_proposals_are_carried_into_the_sessions_next_window() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&prompt("Build the importer.")).unwrap();
+        raw.append(&event(
+            "reply",
+            json!({"assistant": "Maybe cache the parsed files? Or parse them in parallel?"}),
+        ))
+        .unwrap();
+        let proposal = |body: &str, quote: &str| {
+            json!({"id": "c1", "kind": "decision", "status": "proposed",
+                "speaker": "assistant proposal", "scope": "repo", "body": body,
+                "quote": quote, "line": "L2", "supersedes": []})
+        };
+        let sent = std::cell::RefCell::new(Vec::new());
+        let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            sent.borrow_mut().push(p.to_owned());
+            let claims = match sent.borrow().len() {
+                1 => json!([proposal("Cache parsed files.", "cache the parsed files")]),
+                // The recuration drafts another proposal and retracts the first.
+                2 => json!([proposal("Parse in parallel.", "parse them in parallel")]),
+                _ => match p.split("proposed before ").nth(1) {
+                    Some(carried) => json!([{"id": "c1", "kind": "decision",
+                        "status": "decided", "speaker": "user", "scope": "repo",
+                        "body": "Parse in parallel.", "quote": "Yes", "line": "L1",
+                        "supersedes": [&carried[..64]]}]),
+                    None => json!([]),
+                },
+            };
+            Ok(ChainResult {
+                output: json!({"claims": claims, "summary": "s"}),
+                ..answered("fake")
+            })
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
+        let windows = span_windows(&raw, &Span::records(1, 2), WINDOW_TOKENS, &rules).unwrap();
+        let done = recurate_window(
+            &mut raw,
+            &k,
+            &rules,
+            &summary,
+            &mut chain,
+            &windows[0],
+            None,
+        );
+        assert_eq!(done.unwrap(), Ok((1, 1)));
+        consume(&raw, &mut k);
+        raw.append(&prompt("Yes.")).unwrap();
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
+        let sent = sent.borrow();
+        let carried: Vec<&str> = sent[2]
+            .lines()
+            .filter(|l| l.starts_with("proposed before "))
+            .collect();
+        assert_eq!(carried.len(), 1, "{}", sent[2]);
+        assert!(carried[0].ends_with(": Parse in parallel."), "{}", sent[2]);
+        let uid = &carried[0]["proposed before ".len()..][..64];
+        let ops = raw.ops_after(raw.device(), 0, 20).unwrap();
+        let accepted = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+        assert_eq!(accepted.body["supersedes"], json!([uid]));
+        // A bare "yes" is decided only as the answer to the proposal the previous window ended on.
+        assert_eq!(accepted.body["status"], "decided");
+    }
 }

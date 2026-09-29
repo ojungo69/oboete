@@ -864,11 +864,11 @@ impl Raw {
         })
     }
 
-    /// The ops appended with the last window op (not a recuration) that covered this device's
-    /// latest event of `agent`'s `session` before seq `before` that has text (a resumed session's
-    /// `start` is covered on its own, by a window that holds none of its lines): the session's
-    /// previous window,
-    /// whose proposals its next window carries (milestone 3 Task 7, D12). Per session, since
+    /// The ops appended with the last window op that covered this device's latest event of
+    /// `agent`'s `session` before seq `before` that has text (a resumed session's `start` is
+    /// covered on its own, by a window that holds none of its lines): the session's previous
+    /// window, whose proposals its next window carries (milestone 3 Task 7, D12). A recuration of
+    /// it is the last, so what the recuration left proposed is carried (#240). Per session, since
     /// sessions interleave: another session's window may come between.
     pub fn previous_window_ops(&self, agent: &str, session: &str, before: i64) -> Result<Vec<Op>> {
         use rusqlite::OptionalExtension;
@@ -890,7 +890,6 @@ impl Raw {
             .conn
             .query_row(
                 "SELECT batch FROM ops WHERE device = ?1 AND type = 'window'
-                   AND COALESCE(json_extract(body, '$.recurate'), 0) = 0
                    AND json_extract(body, '$.from_seq') <= ?2
                    AND json_extract(body, '$.to_seq') >= ?2
                  ORDER BY op_seq DESC LIMIT 1",
