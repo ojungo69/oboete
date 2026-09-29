@@ -344,124 +344,114 @@ async function showStats(repo) {
 // English. The server sends codes, and the page puts them in words.
 
 const LANGS = ['en', 'ja'];
+// Each string in the languages of LANGS, in that order.
 const TEXT = {
-  en: {
-    heading: 'Settings',
-    language: 'Language',
-    lead: 'These settings are kept in config.toml in the oboete home. They apply from the next session start or the next curation window; nothing needs a restart.',
-    inject_h: 'Handing memory to agents',
-    inject_desc: 'The summary of your memory that an agent is given when a session starts.',
-    inject_on: 'Give agents the summary of your memory',
-    inject_chars: 'Size in characters (1,000 to 6,000)',
-    capture_h: 'Recording',
-    capture_desc: 'What is recorded from each session.',
-    store_prompts: 'Keep the text of your prompts',
-    tool_output: 'Output of tools',
-    tool_full: 'Keep it whole (the start and end when very long)',
-    tool_head_tail: 'Keep only the start and end',
-    chain_h: 'Curators',
-    chain_desc: 'The curators are asked in this order. An empty field follows the curator\'s own value, shown in grey.',
-    col_order: 'Order',
-    col_on: 'Use',
-    col_name: 'Curator',
-    col_model: 'Model',
-    col_budget: 'Calls a day',
-    col_timeout: 'Timeout (s)',
-    up: 'Move up',
-    down: 'Move down',
-    key_ok: 'Key found',
-    key_missing: 'Key file not found',
-    key_none: 'No key needed',
-    key_on_path: 'Installed',
-    key_not_on_path: 'Not installed',
-    key_file: 'Key file: {path}',
-    from_key: 'From its key: a fifth of the key\'s daily limit ({n} now)',
-    no_cap: 'No cap',
-    model_fixed: 'This curator has prices for its model, so its model is changed in [[providers]] together with its prices.',
-    model_free: 'Only models whose names end in :free.',
-    save: 'Save',
-    saved: 'Saved.',
-    warnings_h: 'Notes on config.toml',
-    file_error: 'config.toml has a mistake, so this page shows no settings. Run `oboete doctor` to see the line.',
-    stale: 'config.toml was changed elsewhere. The page now shows its current values; please make your change again.',
-    range: 'This value is out of range.',
-    names: 'The list of curators has changed. Please reload the page.',
-    model: 'A model name uses letters, digits and . _ : / @ + - (200 characters at most).',
-    paid_model: 'This model could be billed outside the monthly limit, so it cannot be set here.',
-    chain_empty: 'Please keep at least one curator in use. To stop curation, set [summary] curate = false.',
-    shared_name: 'Two curators share a name, and config.toml changes both together. Please give both rows the same values.',
-    file_invalid: 'config.toml has a mistake, so this page cannot change it. Run `oboete doctor` to see the line.',
-    type: 'The page sent a value of the wrong kind. Please reload the page.',
-    bad_request: 'The request was not understood. Please reload the page.',
-    too_large: 'The request is too large.',
-    write_failed: 'config.toml could not be written.',
-    unauthorized: 'This page needs the full address printed by `oboete view` (it carries the access key after #).',
-    forbidden: 'Please open the viewer through the address `oboete view` prints.',
-    other: 'Saving failed ({status}).',
-  },
-  ja: {
-    heading: '設定',
-    language: '言語',
-    lead: 'ここでの設定は、oboete のホームにある config.toml に保存されます。次のセッションの開始時か、次の要約から反映されます。再起動は必要ありません。',
-    inject_h: '記憶の受け渡し',
-    inject_desc: 'セッションの開始時に、エージェントへ渡す記憶のまとめです。',
-    inject_on: 'エージェントに記憶のまとめを渡す',
-    inject_chars: '大きさ(文字数、1,000〜6,000)',
-    capture_h: '記録',
-    capture_desc: '各セッションから記録する内容です。',
-    store_prompts: 'プロンプトの本文を保存する',
-    tool_output: 'ツールの出力',
-    tool_full: 'すべて残す(非常に長いときは先頭と末尾)',
-    tool_head_tail: '先頭と末尾だけ残す',
-    chain_h: '要約役',
-    chain_desc: '要約役は上から順に使われます。空欄の項目は、その要約役の既定の値(灰色で表示)に従います。',
-    col_order: '順番',
-    col_on: '使う',
-    col_name: '要約役',
-    col_model: 'モデル',
-    col_budget: '1 日の回数',
-    col_timeout: '待ち時間(秒)',
-    up: '上へ移動',
-    down: '下へ移動',
-    key_ok: 'キーがあります',
-    key_missing: 'キーのファイルが見つかりません',
-    key_none: 'キーは不要です',
-    key_on_path: 'インストール済み',
-    key_not_on_path: 'インストールされていません',
-    key_file: 'キーのファイル: {path}',
-    from_key: 'キーから決まります: キーの 1 日の上限の 5 分の 1(現在 {n} 回)',
-    no_cap: '上限なし',
-    model_fixed: 'この要約役にはモデルの料金が設定されているため、モデルは [[providers]] で料金と一緒に変更してください。',
-    model_free: '名前が :free で終わるモデルだけ設定できます。',
-    save: '保存',
-    saved: '保存しました。',
-    warnings_h: 'config.toml についての注意',
-    file_error: 'config.toml に誤りがあるため、設定を表示できません。`oboete doctor` で該当する行を確認してください。',
-    stale: 'config.toml がほかの場所で変更されました。現在の値を表示し直しましたので、もう一度変更してください。',
-    range: 'この値は範囲外です。',
-    names: '要約役の一覧が変わりました。ページを再読み込みしてください。',
-    model: 'モデル名に使えるのは英数字と . _ : / @ + - だけです(200 文字まで)。',
-    paid_model: 'このモデルは月の上限の外で課金されるおそれがあるため、ここでは設定できません。',
-    chain_empty: '要約役を少なくとも 1 つは使う設定にしてください。要約を止めるには、[summary] curate = false を設定します。',
-    shared_name: '同じ名前の要約役が 2 つあり、config.toml では両方が一緒に変わります。両方の行を同じ値にしてください。',
-    file_invalid: 'config.toml に誤りがあるため、この画面からは変更できません。`oboete doctor` で該当する行を確認してください。',
-    type: '画面から誤った種類の値が送られました。ページを再読み込みしてください。',
-    bad_request: '要求を処理できませんでした。ページを再読み込みしてください。',
-    too_large: '要求が大きすぎます。',
-    write_failed: 'config.toml に書き込めませんでした。',
-    unauthorized: 'このページは `oboete view` が表示するアドレス全体(# の後ろのアクセスキーを含む)で開いてください。',
-    forbidden: '`oboete view` が表示するアドレスから開いてください。',
-    other: '保存できませんでした({status})。',
-  },
+  heading: ['Settings', '設定'],
+  language: ['Language', '言語'],
+  lead: [
+    'These settings are kept in config.toml in the oboete home. They apply from the next session start or the next curation window; nothing needs a restart.',
+    'ここでの設定は、oboete のホームにある config.toml に保存されます。次のセッションの開始時か、次の要約から反映されます。再起動は必要ありません。',
+  ],
+  inject_h: ['Handing memory to agents', '記憶の受け渡し'],
+  inject_desc: [
+    'The summary of your memory that an agent is given when a session starts.',
+    'セッションの開始時に、エージェントへ渡す記憶のまとめです。',
+  ],
+  inject_on: ['Give agents the summary of your memory', 'エージェントに記憶のまとめを渡す'],
+  inject_chars: ['Size in characters (1,000 to 6,000)', '大きさ(文字数、1,000〜6,000)'],
+  capture_h: ['Recording', '記録'],
+  capture_desc: ['What is recorded from each session.', '各セッションから記録する内容です。'],
+  store_prompts: ['Keep the text of your prompts', 'プロンプトの本文を保存する'],
+  tool_output: ['Output of tools', 'ツールの出力'],
+  tool_full: ['Keep it whole (the start and end when very long)', 'すべて残す(非常に長いときは先頭と末尾)'],
+  tool_head_tail: ['Keep only the start and end', '先頭と末尾だけ残す'],
+  chain_h: ['Curators', '要約役'],
+  chain_desc: [
+    'The curators are asked in this order. An empty field follows the curator\'s own value, shown in grey.',
+    '要約役は上から順に使われます。空欄の項目は、その要約役の既定の値(灰色で表示)に従います。',
+  ],
+  col_order: ['Order', '順番'],
+  col_on: ['Use', '使う'],
+  col_name: ['Curator', '要約役'],
+  col_model: ['Model', 'モデル'],
+  col_budget: ['Calls a day', '1 日の回数'],
+  col_timeout: ['Timeout (s)', '待ち時間(秒)'],
+  up: ['Move up', '上へ移動'],
+  down: ['Move down', '下へ移動'],
+  key_ok: ['Key found', 'キーがあります'],
+  key_missing: ['Key file not found', 'キーのファイルが見つかりません'],
+  key_none: ['No key needed', 'キーは不要です'],
+  key_on_path: ['Installed', 'インストール済み'],
+  key_not_on_path: ['Not installed', 'インストールされていません'],
+  key_file: ['Key file: {path}', 'キーのファイル: {path}'],
+  from_key: [
+    'From its key: a fifth of the key\'s daily limit ({n} now)',
+    'キーから決まります: キーの 1 日の上限の 5 分の 1(現在 {n} 回)',
+  ],
+  no_cap: ['No cap', '上限なし'],
+  model_fixed: [
+    'This curator has prices for its model, so its model is changed in [[providers]] together with its prices.',
+    'この要約役にはモデルの料金が設定されているため、モデルは [[providers]] で料金と一緒に変更してください。',
+  ],
+  model_free: ['Only models whose names end in :free.', '名前が :free で終わるモデルだけ設定できます。'],
+  save: ['Save', '保存'],
+  saved: ['Saved.', '保存しました。'],
+  warnings_h: ['Notes on config.toml', 'config.toml についての注意'],
+  file_error: [
+    'config.toml has a mistake, so this page shows no settings. Run `oboete doctor` to see the line.',
+    'config.toml に誤りがあるため、設定を表示できません。`oboete doctor` で該当する行を確認してください。',
+  ],
+  stale: [
+    'config.toml was changed elsewhere. The page now shows its current values; please make your change again.',
+    'config.toml がほかの場所で変更されました。現在の値を表示し直しましたので、もう一度変更してください。',
+  ],
+  range: ['This value is out of range.', 'この値は範囲外です。'],
+  names: ['The list of curators has changed. Please reload the page.', '要約役の一覧が変わりました。ページを再読み込みしてください。'],
+  model: [
+    'A model name uses letters, digits and . _ : / @ + - (200 characters at most).',
+    'モデル名に使えるのは英数字と . _ : / @ + - だけです(200 文字まで)。',
+  ],
+  paid_model: [
+    'This model could be billed outside the monthly limit, so it cannot be set here.',
+    'このモデルは月の上限の外で課金されるおそれがあるため、ここでは設定できません。',
+  ],
+  chain_empty: [
+    'Please keep at least one curator in use. To stop curation, set [summary] curate = false.',
+    '要約役を少なくとも 1 つは使う設定にしてください。要約を止めるには、[summary] curate = false を設定します。',
+  ],
+  shared_name: [
+    'Two curators share a name, and config.toml changes both together. Please give both rows the same values.',
+    '同じ名前の要約役が 2 つあり、config.toml では両方が一緒に変わります。両方の行を同じ値にしてください。',
+  ],
+  file_invalid: [
+    'config.toml has a mistake, so this page cannot change it. Run `oboete doctor` to see the line.',
+    'config.toml に誤りがあるため、この画面からは変更できません。`oboete doctor` で該当する行を確認してください。',
+  ],
+  type: [
+    'The page sent a value of the wrong kind. Please reload the page.',
+    '画面から誤った種類の値が送られました。ページを再読み込みしてください。',
+  ],
+  bad_request: ['The request was not understood. Please reload the page.', '要求を処理できませんでした。ページを再読み込みしてください。'],
+  too_large: ['The request is too large.', '要求が大きすぎます。'],
+  write_failed: ['config.toml could not be written.', 'config.toml に書き込めませんでした。'],
+  unauthorized: [
+    'This page needs the full address printed by `oboete view` (it carries the access key after #).',
+    'このページは `oboete view` が表示するアドレス全体(# の後ろのアクセスキーを含む)で開いてください。',
+  ],
+  forbidden: [
+    'Please open the viewer through the address `oboete view` prints.',
+    '`oboete view` が表示するアドレスから開いてください。',
+  ],
+  other: ['Saving failed ({status}).', '保存できませんでした({status})。'],
 };
 
 const stored = recall('oboete-lang', '');
-let lang = LANGS.includes(stored) ? stored : (navigator.language || '').toLowerCase().startsWith('ja') ? 'ja' : 'en';
+const browserLang = (navigator.language || '').toLowerCase().startsWith('ja') ? 'ja' : 'en';
+let lang = LANGS.includes(stored) ? stored : browserLang;
 
-// A string of the current language; `{name}` takes vars.name. A key a language lacks is English.
+// A string of the current language; `{name}` takes vars.name.
 function t(key, vars = {}) {
-  const table = Object.hasOwn(TEXT[lang], key) ? TEXT[lang] : TEXT.en;
-  const text = Object.hasOwn(table, key) ? table[key] : key;
+  const text = Object.hasOwn(TEXT, key) ? TEXT[key][LANGS.indexOf(lang)] : key;
   return text.replace(/\{(\w+)\}/g, (_, k) => (Object.hasOwn(vars, k) ? String(vars[k]) : ''));
 }
 
@@ -580,13 +570,16 @@ function chainRow(r, i, redraw) {
 
 // The save's body, or the field a value is wrong in.
 function saveBody() {
-  const whole = (v, min, max) => (/^\d+$/.test(v.trim()) && Number(v) >= min && Number(v) <= max ? Number(v) : NaN);
+  const whole = (v, min, max) => (/^\d+$/.test(v.trim()) && Number(v) >= min && Number(v) <= max ? Number(v) : Number.NaN);
   const chars = whole(form.inject.session_start_chars, 1000, 6000);
   if (Number.isNaN(chars)) return { field: 'inject.session_start_chars' };
   const chain = [];
   for (const r of form.chain) {
     // Empty follows the curator's own value; a value config.toml has already stays as it is.
-    const optional = (v, had, min, max) => (v.trim() === '' ? null : v.trim() === String(had) ? had : whole(v, min, max));
+    const optional = (v, had, min, max) => {
+      if (v.trim() === '') return null;
+      return v.trim() === String(had) ? had : whole(v, min, max);
+    };
     const daily = optional(r.edit.daily_budget, r.daily_budget, 1, 100000);
     if (Number.isNaN(daily)) return { field: `chain.${r.name}.daily_budget` };
     const timeout = optional(r.edit.timeout_s, r.timeout_s, 5, 900);
@@ -718,7 +711,7 @@ function drawSettings() {
   formEl.noValidate = true;
   formEl.addEventListener('submit', (e) => {
     e.preventDefault();
-    saveSettings(save);
+    void saveSettings(save);
   });
   panel.append(el('p', 'lead', t('lead')), formEl);
   draw(t('heading'), [], [panel]);

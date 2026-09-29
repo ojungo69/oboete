@@ -288,6 +288,7 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
 }
 
 /// `[chain]` as the page asks for it, over the entries `base` has.
+#[derive(Default)]
 struct Chain {
     order: Vec<String>,
     off: Vec<String>,
@@ -304,13 +305,13 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
     if !(1_000..=crate::consumer::manifest::CAP).contains(&chars) {
         return Err(refused(422, "range", "inject.session_start_chars"));
     }
-    let mut names: Vec<&str> = posted.chain.iter().map(|e| e.name.as_str()).collect();
-    let mut own: Vec<&str> = base.providers.iter().map(Provider::name).collect();
-    let order = names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
-    let base_order: Vec<String> = own.iter().map(|n| (*n).to_owned()).collect();
-    names.sort_unstable();
-    own.sort_unstable();
-    if names != own {
+    let order: Vec<String> = posted.chain.iter().map(|e| e.name.clone()).collect();
+    let own: Vec<&str> = base.providers.iter().map(Provider::name).collect();
+    fn sorted(mut v: Vec<&str>) -> Vec<&str> {
+        v.sort_unstable();
+        v
+    }
+    if sorted(order.iter().map(String::as_str).collect()) != sorted(own.clone()) {
         return Err(refused(422, "names", "chain"));
     }
     // `[chain]` changes every entry of one name alike, so two of one name take the same values.
@@ -326,70 +327,80 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
         return Err(refused(422, "chain_empty", "chain"));
     }
     let mut chain = Chain {
-        order: if order == base_order {
-            Vec::new()
-        } else {
-            order
-        },
         off: (posted.chain.iter())
             .filter(|e| !e.on)
             .map(|e| e.name.clone())
             .collect(),
-        daily_budget: Default::default(),
-        timeout_s: Default::default(),
-        model: Default::default(),
+        order: if order == own { Vec::new() } else { order },
+        ..Chain::default()
     };
     for e in &posted.chain {
-        let field = |key: &str| format!("chain.{}.{key}", e.name);
         let p = (base.providers.iter())
             .find(|p| p.name() == e.name)
             .ok_or_else(|| refused(422, "names", "chain"))?;
-        // A value the entry or the file has already is the user's, in range or not: only a new
-        // one is checked, so it does not block the rest of a save (cubic on #94).
-        if let Some(n) = e.daily_budget {
-            let had = n == p.daily_budget() || now.chain.daily_budget.get(&e.name) == Some(&n);
-            if !had && !BUDGET.contains(&n) {
-                return Err(refused(422, "range", field("daily_budget")));
-            }
-            // A budget from the key follows the key: any number typed is the user's.
-            if p.budget_from_key() || n != p.daily_budget() {
-                chain.daily_budget.insert(e.name.clone(), n);
-            }
+        put_entry(e, p, &now.chain, &mut chain)?;
+    }
+    keep_unknown(&mut chain, &now.chain, &own);
+    Ok(chain)
+}
+
+/// Puts one entry's calls a day, timeout and model into `chain`: a new value is checked, and one
+/// equal to the entry's own is left out, so it keeps following later changes to the defaults. A
+/// value the entry or the file has already is the user's, in range or not, so it does not block
+/// the rest of a save (cubic on #94).
+fn put_entry(
+    e: &EntryIn,
+    p: &Provider,
+    now: &ChainOverlay,
+    chain: &mut Chain,
+) -> Result<(), Refusal> {
+    let field = |key: &str| format!("chain.{}.{key}", e.name);
+    let (own_timeout, own_model) = match p {
+        Provider::Openai {
+            timeout_s, model, ..
+        } => (*timeout_s, Some(model.as_str())),
+        Provider::Cli {
+            timeout_s, model, ..
+        } => (*timeout_s, model.as_deref()),
+    };
+    if let Some(n) = e.daily_budget {
+        let had = n == p.daily_budget() || now.daily_budget.get(&e.name) == Some(&n);
+        if !had && !BUDGET.contains(&n) {
+            return Err(refused(422, "range", field("daily_budget")));
         }
-        let (own_timeout, own_model) = match p {
-            Provider::Openai {
-                timeout_s, model, ..
-            } => (*timeout_s, Some(model.as_str())),
-            Provider::Cli {
-                timeout_s, model, ..
-            } => (*timeout_s, model.as_deref()),
-        };
-        if let Some(s) = e.timeout_s {
-            let had = s == own_timeout || now.chain.timeout_s.get(&e.name) == Some(&s);
-            if !had && !TIMEOUT_S.contains(&s) {
-                return Err(refused(422, "range", field("timeout_s")));
-            }
-            if s != own_timeout {
-                chain.timeout_s.insert(e.name.clone(), s);
-            }
-        }
-        if let Some(m) = &e.model
-            && Some(m.as_str()) != own_model
-        {
-            let allowed = |c: char| c.is_ascii_alphanumeric() || "._:/@+-".contains(c);
-            let had = now.chain.model.get(&e.name) == Some(m);
-            if !had && (m.is_empty() || m.chars().count() > MODEL_CHARS || !m.chars().all(allowed))
-            {
-                return Err(refused(422, "model", field("model")));
-            }
-            if !p.model_rule().allows(m) {
-                return Err(refused(422, "paid_model", field("model")));
-            }
-            chain.model.insert(e.name.clone(), m.clone());
+        // A budget from the key follows the key: any number typed is the user's.
+        if p.budget_from_key() || n != p.daily_budget() {
+            chain.daily_budget.insert(e.name.clone(), n);
         }
     }
-    // A name `[chain]` has and no entry has (doctor warns of it) is not the page's: it stays as
-    // it is, and does not make a save rewrite its key (cubic on #94).
+    if let Some(s) = e.timeout_s {
+        let had = s == own_timeout || now.timeout_s.get(&e.name) == Some(&s);
+        if !had && !TIMEOUT_S.contains(&s) {
+            return Err(refused(422, "range", field("timeout_s")));
+        }
+        if s != own_timeout {
+            chain.timeout_s.insert(e.name.clone(), s);
+        }
+    }
+    if let Some(m) = &e.model
+        && Some(m.as_str()) != own_model
+    {
+        let allowed = |c: char| c.is_ascii_alphanumeric() || "._:/@+-".contains(c);
+        let fits = !m.is_empty() && m.chars().count() <= MODEL_CHARS && m.chars().all(allowed);
+        if !fits && now.model.get(&e.name) != Some(m) {
+            return Err(refused(422, "model", field("model")));
+        }
+        if !p.model_rule().allows(m) {
+            return Err(refused(422, "paid_model", field("model")));
+        }
+        chain.model.insert(e.name.clone(), m.clone());
+    }
+    Ok(())
+}
+
+/// A name `[chain]` has and no entry has (doctor warns of it) is not the page's: it stays as it
+/// is, and does not make a save rewrite its key (cubic on #94).
+fn keep_unknown(chain: &mut Chain, now: &ChainOverlay, own: &[&str]) {
     fn keep<V: Clone>(
         to: &mut std::collections::BTreeMap<String, V>,
         now: &std::collections::BTreeMap<String, V>,
@@ -400,14 +411,13 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
     let unknown = |n: &str| !own.contains(&n);
     chain
         .order
-        .extend(now.chain.order.iter().filter(|n| unknown(n)).cloned());
+        .extend(now.order.iter().filter(|n| unknown(n)).cloned());
     chain
         .off
-        .extend(now.chain.off.iter().filter(|n| unknown(n)).cloned());
-    keep(&mut chain.daily_budget, &now.chain.daily_budget, &unknown);
-    keep(&mut chain.timeout_s, &now.chain.timeout_s, &unknown);
-    keep(&mut chain.model, &now.chain.model, &unknown);
-    Ok(chain)
+        .extend(now.off.iter().filter(|n| unknown(n)).cloned());
+    keep(&mut chain.daily_budget, &now.daily_budget, &unknown);
+    keep(&mut chain.timeout_s, &now.timeout_s, &unknown);
+    keep(&mut chain.model, &now.model, &unknown);
 }
 
 /// Sets `table.key`, making the table (a `[table]`, not an inline one) when it is missing.
