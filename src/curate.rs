@@ -1585,7 +1585,7 @@ pub fn recurate_window(
     covers: Option<&Span>,
 ) -> Result<std::result::Result<(usize, usize), String>> {
     crate::claims::schema(k)?;
-    let (mut op, claims) = if w.text.is_empty() {
+    let (mut op, mut claims) = if w.text.is_empty() {
         (json!({"outcome": "covered"}), Vec::new())
     } else {
         let req = request(raw, k, rules, summary, w)?;
@@ -1600,7 +1600,6 @@ pub fn recurate_window(
         .filter_map(|c| Some(crate::claims::uid(&c.kind, c.evidence.first()?)))
         .collect();
     let anchored = anchored_in(k, w)?;
-    let mut claims = claims;
     restate(k, &anchored, &given, &mut claims)?;
     let recipe = op["provider"].as_str().unwrap_or("").to_owned();
     let retracted: Vec<Value> = anchored
