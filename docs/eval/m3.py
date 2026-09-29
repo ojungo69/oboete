@@ -429,12 +429,18 @@ def score(binary, name):
     with open(f'{h}/map.json') as f:
         where = json.load(f)
     decisions, pairs, drafts = labels()
-    # Each active claim with the quotes its active derivation has, by the seq each is in.
+    # Each active claim with the quotes its active derivation has, by the seq each is in. A done
+    # claim quoting the owner's own words recalls the owner's decision as a decided one does: a
+    # request the window carried out (owner, 2026-09-30).
     claims = {}
-    for uid, status, seq, quote in k.execute(
-            "SELECT a.uid, a.status, e.seq, e.quote FROM active a JOIN claims c ON c.uid = a.uid "
+    for uid, status, speaker, seq, quote in k.execute(
+            "SELECT a.uid, a.status, a.speaker, e.seq, e.quote FROM active a "
+            "JOIN claims c ON c.uid = a.uid "
             "JOIN evidence e ON e.op_device = c.op_device AND e.op_seq = c.op_seq"):
+        if status == 'done' and speaker == 'user':
+            status = 'done by request'
         claims.setdefault(uid, [status, {}])[1].setdefault(seq, []).append(quote)
+    recalls = ('decided', 'done by request')
     quote_of = {i: d['quote'] for i, d in drafts.items()} | {d['id']: d['quote'] for d in decisions}
     labeled = {}
     for i, w in where.items():
@@ -454,9 +460,9 @@ def score(binary, name):
                        for s, qs in seqs.items())]
         if not mine:
             return 'none'
-        if any(st == 'decided' and u not in superseded for u, st in mine):
+        if any(st in recalls and u not in superseded for u, st in mine):
             return 'current'
-        if any(st == 'decided' for _, st in mine):
+        if any(st in recalls for _, st in mine):
             return 'decided, superseded'
         if any(u in superseded for u, _ in mine):
             return 'superseded'
@@ -485,7 +491,8 @@ def score(binary, name):
         out['pairs'].setdefault(key, {}).setdefault(st, 0)
         out['pairs'][key][st] += 1
     decided = sum(1 for st, _ in claims.values() if st == 'decided')
-    out['claims'] = {'active': len(claims), 'decided': decided}
+    requested = sum(1 for st, _ in claims.values() if st == 'done by request')
+    out['claims'] = {'active': len(claims), 'decided': decided, 'done by request': requested}
     yes = out['decisions'].get('yes', {})
     out['recall'] = f'{yes.get("current", 0) + yes.get("decided, superseded", 0)} of {sum(yes.values())}'
     # Without the instructions for the moment, which the memory is not meant to keep.

@@ -93,7 +93,8 @@ Two more arms ran on the #195 binary without the shrink and with merged spans (n
 ## Definitions for scoring (fixed before any live number)
 
 - A labeled decision is **recalled** when an active claim (the `active` view) has status `decided` and has an evidence quote in the record its label maps to.
-- **Shown as current**: an active claim with status `decided` that no active derivation supersedes (no `edges` row from an active derivation to its uid).
+  - Since 2026-09-30 a claim with status `done` and speaker `user` recalls it as well (owner decision; `done by request` in `score.json`). It is a request the window carried out, and a later session reads that the developer asked for it and that it was made. #262 showed that the curator keeps such a request as done whatever its prompt says. Every arm in docs/milestone-3.md was scored again under this rule, and each arm's earlier `score.json` is kept beside it as `score-decided-only.json`.
+- **Shown as current**: an active claim that recalls, as above, and that no active derivation supersedes (no `edges` row from an active derivation to its uid).
 - **Overturn pair** (the owner said "overturns"): the earlier decision's matched claims are counted as (a) still current, (b) superseded, (c) retracted, or (d) never derived. The 0% hard line applies to (a); (d) is reported as a recall miss.
 - **Control pair** (the owner said "compatible"): the earlier decision must stay in (a). A control dropped counts against the 2% line.
 - **Recall** counts the owner's yes (45). The panel's yes on the owner's 判断できない items (8) is reported apart, because the panel's κ on decisions was about 0 (docs/milestone-1.md).
