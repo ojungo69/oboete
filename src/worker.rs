@@ -1281,6 +1281,9 @@ mod tests {
 
     #[test]
     fn a_second_worker_exits_at_once() {
+        // The lock is held on purpose: found held at once, not after the wait for one just dropped
+        // (its 20 sleeps ran past the bound below on a loaded macOS runner).
+        let _contending = contending();
         let home = tempfile::tempdir().unwrap();
         let _held = lock(home.path()).unwrap().expect("the first lock");
         assert!(lock(home.path()).unwrap().is_none());
