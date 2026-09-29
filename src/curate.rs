@@ -11,7 +11,7 @@ use crate::provider::{AnswerCheck, ChainFailed, ChainResult, Fallback, Skip};
 use crate::providers_db::{self, Pending};
 use crate::raw::{Event, Item, OpKind, Raw};
 use crate::redact::Rules;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
@@ -1276,7 +1276,7 @@ fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> 
     let rules = crate::capture::Settings::load(home)?.rules;
     // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
     let mut raw = crate::raw::open(home)?;
-    let k = crate::knowledge::open(home)?;
+    let mut k = crate::knowledge::open(home)?;
     crate::claims::schema(&k)?;
     let device = raw.device().to_owned();
     let checkpoint = raw.curation_checkpoint(&device)?;
@@ -1357,7 +1357,16 @@ fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> 
             .check(check)
             .run("curator", span, prompt, &schema())
     };
-    let sent = send_plan(&mut raw, &k, &rules, &cfg.summary, &mut curator, &plan)?;
+    let mut consumers = crate::worker::consumers(home);
+    let sent = send_plan(
+        &mut raw,
+        &mut k,
+        &mut consumers,
+        &rules,
+        &cfg.summary,
+        &mut curator,
+        &plan,
+    )?;
     out.push_str(&format!(
         "{} window(s) curated again: {} claim(s), {} retracted\n",
         sent.windows, sent.claims, sent.retracted
@@ -1382,10 +1391,13 @@ pub struct Sent {
 
 /// Each span's windows in order, each naming the part of its span curated so far. A span stops
 /// at the first window every provider goes past: the chain is spent, and the windows after it
-/// would spend it again; the next run starts there.
+/// would spend it again; the next run starts there. The consumers run after each window, as the
+/// worker runs them between its windows: the next window reads the claims this one derived, the
+/// proposals it carries among them, as they stand now (review on #243).
 pub fn send_plan(
     raw: &mut Raw,
-    k: &Connection,
+    k: &mut Connection,
+    consumers: &mut [Box<dyn crate::worker::Consumer>],
     rules: &Rules,
     summary: &Summary,
     curator: &mut Curator,
@@ -1407,6 +1419,13 @@ pub fn send_plan(
                 Ok((c, r)) => {
                     sent.windows += 1;
                     (sent.claims, sent.retracted) = (sent.claims + c, sent.retracted + r);
+                    crate::worker::drain(raw, k, consumers).with_context(|| {
+                        format!(
+                            "records {}-{} were curated again ({} window(s) in this run), but \
+                             their claims were not read in",
+                            w.from_seq, w.to_seq, sent.windows
+                        )
+                    })?;
                 }
                 Err(why) => {
                     sent.failed
@@ -1974,9 +1993,8 @@ fn ended_on_a_proposal(raw: &Raw, k: &Connection, w: &Window) -> Result<Vec<Stri
         }
         seen.push(&l.key);
         let (agent, session) = l.key.split_once('\u{0}').unwrap_or((&l.key, ""));
-        let before = w.from_seq + i64::from(w.from_offset.is_some());
         let mut proposals = Vec::new();
-        for op in raw.previous_window_ops(agent, session, before)? {
+        for op in raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset))? {
             let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(op.body) else {
                 continue;
             };
@@ -2172,9 +2190,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
     let mut uids: Carried = Vec::new();
     for (key, repos) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
-        // A window that starts inside an event: its first part was in the previous window.
-        let before = w.from_seq + i64::from(w.from_offset.is_some());
-        let previous = raw.previous_window_ops(agent, session, before)?;
+        let previous = raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset))?;
         let mut lines = Vec::new();
         if let Some(e) = raw.first_prompt(agent, session)?
             && let Some(goal) = long_text(&e)
@@ -3586,9 +3602,11 @@ mod tests {
     }
 
     fn consume(raw: &Raw, k: &mut Connection) {
-        let mut consumers: Vec<Box<dyn crate::worker::Consumer>> =
-            vec![Box::new(crate::consumer::claims::Claims)];
-        crate::worker::drain(raw, k, &mut consumers).unwrap();
+        crate::worker::drain(raw, k, &mut claims_consumer()).unwrap();
+    }
+
+    fn claims_consumer() -> Vec<Box<dyn crate::worker::Consumer>> {
+        vec![Box::new(crate::consumer::claims::Claims)]
     }
 
     /// MUST-M3: the candidates are the repository's current claims that the window's text finds,
@@ -4456,7 +4474,16 @@ mod tests {
             Ok(answered("fake"))
         };
         let plan = [(span.clone(), parts.clone())];
-        let sent = send_plan(&mut raw, &k, &rules, &summary, &mut second_fails, &plan).unwrap();
+        let sent = send_plan(
+            &mut raw,
+            &mut k,
+            &mut claims_consumer(),
+            &rules,
+            &summary,
+            &mut second_fails,
+            &plan,
+        )
+        .unwrap();
         assert_eq!((sent.windows, sent.failed.len()), (1, 1));
         consume(&raw, &mut k);
         let queued: i64 = k
@@ -4468,7 +4495,16 @@ mod tests {
             .unwrap();
         assert_eq!(queued, 1);
         let mut none = |_: &str, _: &str, _: &AnswerCheck| Ok(answered("fake"));
-        let sent = send_plan(&mut raw, &k, &rules, &summary, &mut none, &plan).unwrap();
+        let sent = send_plan(
+            &mut raw,
+            &mut k,
+            &mut claims_consumer(),
+            &rules,
+            &summary,
+            &mut none,
+            &plan,
+        )
+        .unwrap();
         assert_eq!(sent.windows, parts.len());
         consume(&raw, &mut k);
         let left: i64 = k
@@ -4577,7 +4613,16 @@ mod tests {
             Ok(answered("fake"))
         };
         let plan = [(span.clone(), windows.clone())];
-        let sent = send_plan(&mut raw, &k, &rules, &summary, &mut second_fails, &plan).unwrap();
+        let sent = send_plan(
+            &mut raw,
+            &mut k,
+            &mut claims_consumer(),
+            &rules,
+            &summary,
+            &mut second_fails,
+            &plan,
+        )
+        .unwrap();
         assert_eq!((sent.windows, sent.failed.len(), calls.get()), (1, 1, 2));
         let first = windows.iter().find(|w| w.to_seq == 1).unwrap();
         let ops = raw.ops_after(raw.device(), 0, 100).unwrap();
@@ -4602,7 +4647,16 @@ mod tests {
         assert_eq!(again.len(), 2);
         let mut none = |_: &str, _: &str, _: &AnswerCheck| Ok(answered("fake"));
         let plan = [(rest, again)];
-        let sent = send_plan(&mut raw, &k, &rules, &summary, &mut none, &plan).unwrap();
+        let sent = send_plan(
+            &mut raw,
+            &mut k,
+            &mut claims_consumer(),
+            &rules,
+            &summary,
+            &mut none,
+            &plan,
+        )
+        .unwrap();
         assert_eq!((sent.windows, sent.failed.len()), (2, 0));
         consume(&raw, &mut k);
         assert!(queued(&k).is_empty());
@@ -5646,5 +5700,154 @@ mod tests {
         let ops = raw.ops_after(raw.device(), 0, 20).unwrap();
         let accepted = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
         assert_eq!(accepted.body["supersedes"].as_array().unwrap().len(), 1);
+    }
+
+    /// Spec 3.3 (#240): a session's previous window that was curated again carries what its
+    /// recuration left proposed, not what the recuration retracted, and an acceptance in the next
+    /// window supersedes it.
+    #[test]
+    fn a_recurated_windows_proposals_are_carried_into_the_sessions_next_window() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&prompt("Build the importer.")).unwrap();
+        raw.append(&event(
+            "reply",
+            json!({"assistant": "Maybe cache the parsed files? Or parse them in parallel?"}),
+        ))
+        .unwrap();
+        let proposal = |body: &str, quote: &str| {
+            json!({"id": "c1", "kind": "decision", "status": "proposed",
+                "speaker": "assistant proposal", "scope": "repo", "body": body,
+                "quote": quote, "line": "L2", "supersedes": []})
+        };
+        let sent = std::cell::RefCell::new(Vec::new());
+        let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            sent.borrow_mut().push(p.to_owned());
+            let claims = match sent.borrow().len() {
+                1 => json!([proposal("Cache parsed files.", "cache the parsed files")]),
+                // The recuration drafts another proposal and retracts the first.
+                2 => json!([proposal("Parse in parallel.", "parse them in parallel")]),
+                _ => match p.split("proposed before ").nth(1) {
+                    Some(carried) => json!([{"id": "c1", "kind": "decision",
+                        "status": "decided", "speaker": "user", "scope": "repo",
+                        "body": "Parse in parallel.", "quote": "Yes", "line": "L1",
+                        "supersedes": [&carried[..64]]}]),
+                    None => json!([]),
+                },
+            };
+            Ok(ChainResult {
+                output: json!({"claims": claims, "summary": "s"}),
+                ..answered("fake")
+            })
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
+        let windows = span_windows(&raw, &Span::records(1, 2), WINDOW_TOKENS, &rules).unwrap();
+        let done = recurate_window(
+            &mut raw,
+            &k,
+            &rules,
+            &summary,
+            &mut chain,
+            &windows[0],
+            None,
+        );
+        assert_eq!(done.unwrap(), Ok((1, 1)));
+        consume(&raw, &mut k);
+        raw.append(&prompt("Yes.")).unwrap();
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
+        let sent = sent.borrow();
+        let carried: Vec<&str> = sent[2]
+            .lines()
+            .filter(|l| l.starts_with("proposed before "))
+            .collect();
+        assert_eq!(carried.len(), 1, "{}", sent[2]);
+        assert!(carried[0].ends_with(": Parse in parallel."), "{}", sent[2]);
+        let uid = &carried[0]["proposed before ".len()..][..64];
+        let ops = raw.ops_after(raw.device(), 0, 20).unwrap();
+        let accepted = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+        assert_eq!(accepted.body["supersedes"], json!([uid]));
+        // A bare "yes" is decided only as the answer to the proposal the previous window ended on.
+        assert_eq!(accepted.body["status"], "decided");
+    }
+
+    /// One recuration run over a span of two windows (review on #243): the consumers run between
+    /// them, so the second window carries the proposal the first window's recuration just
+    /// drafted, not the one it just retracted, and a bare "Yes." there supersedes it.
+    #[test]
+    fn a_recuration_run_carries_what_its_previous_window_just_drafted() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        let proposal = |body: &str, quote: &str| {
+            json!({"id": "c1", "kind": "decision", "status": "proposed",
+                "speaker": "assistant proposal", "scope": "repo", "body": body,
+                "quote": quote, "line": "L2", "supersedes": []})
+        };
+        let sent = std::cell::RefCell::new(Vec::new());
+        let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            sent.borrow_mut().push(p.to_owned());
+            let claims = match sent.borrow().len() {
+                1 => json!([proposal("Cache parsed files.", "cache the parsed files")]),
+                // The first window curated again: another proposal, and the first is retracted.
+                3 => json!([proposal("Parse in parallel.", "parse them in parallel")]),
+                4 => match p.split("proposed before ").nth(1) {
+                    Some(carried) => json!([{"id": "c1", "kind": "decision",
+                        "status": "decided", "speaker": "user", "scope": "repo",
+                        "body": "Parse in parallel.", "quote": "Yes", "line": "L1",
+                        "supersedes": [&carried[..64]]}]),
+                    None => json!([]),
+                },
+                _ => json!([]),
+            };
+            Ok(ChainResult {
+                output: json!({"claims": claims, "summary": "s"}),
+                ..answered("fake")
+            })
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        raw.append(&prompt("Build the importer.")).unwrap();
+        raw.append(&event(
+            "reply",
+            json!({"assistant": "Maybe cache the parsed files? Or parse them in parallel?"}),
+        ))
+        .unwrap();
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
+        raw.append(&prompt("Yes.")).unwrap();
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
+        // Both windows curated again in one run, cut as the worker cut them.
+        let windows = [Span::records(1, 2), Span::records(3, 3)]
+            .iter()
+            .flat_map(|s| span_windows(&raw, s, WINDOW_TOKENS, &rules).unwrap())
+            .collect();
+        let plan = [(Span::records(1, 3), windows)];
+        let mut consumers = claims_consumer();
+        let done = send_plan(
+            &mut raw,
+            &mut k,
+            &mut consumers,
+            &rules,
+            &summary,
+            &mut chain,
+            &plan,
+        );
+        assert_eq!(done.unwrap().windows, 2);
+        let sent = sent.borrow();
+        let carried: Vec<&str> = sent[3]
+            .lines()
+            .filter(|l| l.starts_with("proposed before "))
+            .collect();
+        assert_eq!(carried.len(), 1, "{}", sent[3]);
+        assert!(carried[0].ends_with(": Parse in parallel."), "{}", sent[3]);
+        let ops = raw.ops_after(raw.device(), 0, 40).unwrap();
+        let accepted = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+        let uid = &carried[0]["proposed before ".len()..][..64];
+        assert_eq!(accepted.body["supersedes"], json!([uid]));
+        assert_eq!(accepted.body["status"], "decided");
     }
 }
