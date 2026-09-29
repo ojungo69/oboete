@@ -2115,7 +2115,7 @@ type Carried = Vec<(String, Option<String>, crate::claims::Claim)>;
 /// The line of its event a quote starts in, trimmed, at most 200 characters; `None` when the
 /// quote is a tool's (its line is often JSON, never the option list a reply numbers), the event is
 /// gone, or its text no longer holds the quote where the evidence says.
-fn quoted_line(raw: &Raw, e: &crate::claims::Evidence) -> Result<Option<String>> {
+fn quoted_line(raw: &Raw, e: &crate::claims::Evidence, rules: &Rules) -> Result<Option<String>> {
     let Some(r) = raw.after(&e.device, e.seq - 1, 1)?.into_iter().next() else {
         return Ok(None);
     };
@@ -2136,7 +2136,20 @@ fn quoted_line(raw: &Raw, e: &crate::claims::Evidence) -> Result<Option<String>>
     }
     let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
     let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
-    Ok(Some(text[start..end].trim().chars().take(200).collect()))
+    // 200 characters from the line's start, where an option's number is, or, for a quote that
+    // ends further in, the 200 that end with it.
+    let from = text[start..at + len]
+        .char_indices()
+        .rev()
+        .nth(199)
+        .map_or(start, |(i, _)| start + i);
+    let to = text[from..end]
+        .char_indices()
+        .nth(200)
+        .map_or(end, |(i, _)| from + i);
+    // Masked as the whole text is: a secret the cut splits is hidden, not shown in part.
+    let part = crate::redact::outbound_part(&text, from..to, rules);
+    Ok(Some(part.replace(['\n', '\r'], " ").trim().to_owned()))
 }
 
 /// What each session of the window carries in from before it (spec 3.1, 3.3; D12), as text for
@@ -2256,9 +2269,9 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                     let place = place.unwrap_or_default();
                     // The line it was quoted from, as the reply wrote it: an option's number is
                     // what a bare answer ("1") names (#244).
-                    let from = quoted_line(raw, first)?
+                    let from = quoted_line(raw, first, rules)?
                         .filter(|l| l != first.quote.trim())
-                        .map(|l| format!(" (from: {})", gate(&l)))
+                        .map(|l| format!(" (from: {l})"))
                         .unwrap_or_default();
                     let line = format!("proposed before {uid}{place}: {}{from}", gate(&tip.body));
                     proposals.push((tip.speaker != "assistant proposal", line, repo, tip));
@@ -5907,6 +5920,47 @@ mod tests {
 
     /// #244: a carried proposal shows the line of the reply it was quoted from, so that a bare
     /// "1" names it: an option's number is outside the quote.
+    /// The quoted line is masked in the whole text before it is cut to 200 characters, so a
+    /// secret the cut splits is not shown in part, and a quote further into its line than that is
+    /// shown with the 200 characters that end with it (CodeRabbit on #247).
+    #[test]
+    fn a_quoted_line_is_masked_before_its_cut_and_ends_with_a_far_quote() {
+        let ghp = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
+        let near = format!(
+            "1. **Cache the parsed files** {} {ghp} and more",
+            "a".repeat(160)
+        );
+        let far = format!("2. {} **Parse in parallel**", "b".repeat(300));
+        let first = [
+            prompt("Build the importer."),
+            event(
+                "reply",
+                json!({"assistant": format!("Two ways:\n{near}\n{far}")}),
+            ),
+        ];
+        let proposal = |id: &str, quote: &str, body: &str| {
+            json!({"id": id, "kind": "decision", "status": "proposed",
+                "speaker": "assistant proposal", "scope": "repo", "body": body,
+                "quote": quote, "line": "L2", "supersedes": []})
+        };
+        let answer = json!({"claims": [
+            proposal("c1", "Cache the parsed files", "Cache parsed files."),
+            proposal("c2", "Parse in parallel", "Parse in parallel.")], "summary": "s"});
+        let none = |_: &str| json!({"claims": [], "summary": "s"});
+        let (sent, _) = two_windows(&first, answer, &[prompt("1")], none);
+        let carried: Vec<&str> = sent[1]
+            .lines()
+            .filter(|l| l.starts_with("proposed before "))
+            .collect();
+        assert_eq!(carried.len(), 2, "{}", sent[1]);
+        assert!(!sent[1].contains("ghp_"), "{}", sent[1]);
+        let far = carried
+            .iter()
+            .find(|l| l.contains(": Parse in parallel."))
+            .unwrap();
+        assert!(far.ends_with(" **Parse in parallel)"), "{far}");
+    }
+
     #[test]
     fn a_carried_proposal_shows_its_reply_line_and_a_fact_is_not_carried() {
         let options = "Two ways:\n1. **Cache the parsed files**\n2. **Parse in parallel**";
