@@ -112,7 +112,11 @@ pub(crate) fn quick_check(conn: &Connection, name: &str) -> Result<()> {
 pub(crate) fn quick_check_without_vtabs(path: &Path, name: &str) -> Result<()> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open {}", path.display()))?;
-    // SAFETY: the handle is this live connection's, and a null list keeps no module.
+    // The stores' connections wait 2 s (`wal`); rusqlite's own default is 5 s.
+    conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
+    // SAFETY: the handle is this live connection's, and a null list keeps no module, FTS5's
+    // included, which is what leaves the search indexes out. It must come before any statement
+    // uses a virtual table: one already connected keeps its module, and the check would run it.
     let rc = unsafe { rusqlite::ffi::sqlite3_drop_modules(conn.handle(), std::ptr::null_mut()) };
     anyhow::ensure!(rc == rusqlite::ffi::SQLITE_OK, "{name}: drop modules: {rc}");
     quick_check(&conn, name)

@@ -836,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_names_the_rebuild_for_a_damaged_table_it_reads() {
+    fn doctor_finds_a_damaged_table_before_it_reads_it() {
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
         let (root, size): (i64, i64) = crate::knowledge::open(p)
