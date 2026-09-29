@@ -190,7 +190,8 @@ impl Viewer {
             let mut headers = [httparse::EMPTY_HEADER; 64];
             let mut req = httparse::Request::new(&mut headers);
             match req.parse(&buf) {
-                Ok(httparse::Status::Complete(at)) => {
+                // A head is at most `MAX_HEAD` however its reads fell (#53).
+                Ok(httparse::Status::Complete(at)) if at <= MAX_HEAD => {
                     let method = req.method.unwrap_or("");
                     let pairs: Vec<(&str, &str)> = req
                         .headers
@@ -1079,6 +1080,38 @@ mod tests {
         c.read_to_string(&mut out).unwrap();
         assert!(out.starts_with("HTTP/1.1 200 OK\r\n"), "{out}");
         assert!(!crate::config::inject(&home).unwrap().session_start);
+        server.join().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A head over `MAX_HEAD` is refused even when it completes in the read that crosses the cap
+    /// (OpenCodeReview on #270; #53).
+    #[test]
+    fn a_head_over_the_cap_is_refused_however_its_reads_fall() {
+        let (dir, mut v) = viewer("head-cap");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        v.port = listener.local_addr().unwrap().port();
+        let port = v.port;
+        let server = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            v.serve(s);
+        });
+        let start = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Pad: ");
+        let first = format!("{start}{}", "a".repeat(MAX_HEAD - 1 - start.len()));
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(first.as_bytes()).unwrap();
+        c.flush().unwrap();
+        // One byte under the cap is read and still partial; the rest completes the head past it.
+        std::thread::sleep(Duration::from_millis(200));
+        c.write_all(format!("{}\r\n\r\n", "a".repeat(1000)).as_bytes())
+            .unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).unwrap();
+        assert!(
+            out.starts_with("HTTP/1.1 400 "),
+            "{}",
+            &out[..out.len().min(80)]
+        );
         server.join().unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }

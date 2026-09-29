@@ -35,6 +35,7 @@ fn invalid() -> Refusal {
     refused(422, "file_invalid", "")
 }
 
+const CHARS: std::ops::RangeInclusive<usize> = 1_000..=crate::consumer::manifest::CAP;
 const BUDGET: std::ops::RangeInclusive<u32> = 1..=100_000;
 const TIMEOUT_S: std::ops::RangeInclusive<u64> = 5..=900;
 const MODEL_CHARS: usize = 200;
@@ -104,6 +105,12 @@ pub fn show(home: &Path) -> Value {
         },
         "chain": chain,
         "warnings": cfg.warnings,
+        // The page checks and words its fields by these, so they are stated once.
+        "ranges": {
+            "session_start_chars": [CHARS.start(), CHARS.end()],
+            "daily_budget": [BUDGET.start(), BUDGET.end()],
+            "timeout_s": [TIMEOUT_S.start(), TIMEOUT_S.end()],
+        },
     })
 }
 
@@ -302,7 +309,7 @@ struct Chain {
 /// the file as it applies before the save.
 fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result<Chain, Refusal> {
     let chars = posted.inject.session_start_chars;
-    if !(1_000..=crate::consumer::manifest::CAP).contains(&chars) {
+    if !CHARS.contains(&chars) {
         return Err(refused(422, "range", "inject.session_start_chars"));
     }
     let order: Vec<String> = posted.chain.iter().map(|e| e.name.clone()).collect();

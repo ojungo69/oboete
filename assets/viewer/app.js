@@ -358,7 +358,7 @@ const TEXT = {
     'セッションの開始時に、エージェントへ渡す記憶のまとめです。',
   ],
   inject_on: ['Give agents the summary of your memory', 'エージェントに記憶のまとめを渡す'],
-  inject_chars: ['Size in characters (1,000 to 6,000)', '大きさ(文字数、1,000〜6,000)'],
+  inject_chars: ['Size in characters ({min} to {max})', '大きさ(文字数、{min}〜{max})'],
   capture_h: ['Recording', '記録'],
   capture_desc: ['What is recorded from each session.', '各セッションから記録する内容です。'],
   store_prompts: ['Keep the text of your prompts', 'プロンプトの本文を保存する'],
@@ -470,6 +470,7 @@ function formOf(s) {
       edit: { on: e.on, daily_budget: text(e.daily_budget), timeout_s: text(e.timeout_s), model: text(e.model) },
     })),
     warnings: s.warnings,
+    ranges: s.ranges,
   };
 }
 
@@ -528,8 +529,10 @@ function chainRow(r, i, redraw) {
     const to = i + d;
     [form.chain[i], form.chain[to]] = [form.chain[to], form.chain[i]];
     redraw();
-    // Keep the keyboard on the row that moved.
-    document.querySelector(`[data-move="${to}:${d}"]`)?.focus();
+    // Keep the keyboard on the row that moved. At the top or the bottom its arrow this way is
+    // disabled and takes no focus, so the other one does.
+    const same = document.querySelector(`[data-move="${to}:${d}"]`);
+    (same && !same.disabled ? same : document.querySelector(`[data-move="${to}:${-d}"]`))?.focus();
   };
   const arrow = (d, glyph, label) => {
     const b = el('button', 'quiet small', glyph);
@@ -550,12 +553,10 @@ function chainRow(r, i, redraw) {
   model.setAttribute('aria-label', `${t('col_model')}: ${r.name}`);
   model.disabled = r.model_rule === 'fixed';
   const budget = input('number', r.edit.daily_budget, r.effective_daily_budget === null ? t('no_cap') : String(r.effective_daily_budget), `chain.${r.name}.daily_budget`, (v) => { r.edit.daily_budget = v; });
-  budget.min = '1';
-  budget.max = '100000';
+  [budget.min, budget.max] = form.ranges.daily_budget;
   budget.setAttribute('aria-label', `${t('col_budget')}: ${r.name}`);
   const timeout = input('number', r.edit.timeout_s, String(r.effective_timeout_s), `chain.${r.name}.timeout_s`, (v) => { r.edit.timeout_s = v; });
-  timeout.min = '5';
-  timeout.max = '900';
+  [timeout.min, timeout.max] = form.ranges.timeout_s;
   timeout.setAttribute('aria-label', `${t('col_timeout')}: ${r.name}`);
   const modelNote = { fixed: t('model_fixed'), free: t('model_free') }[r.model_rule];
   tr.append(
@@ -571,7 +572,7 @@ function chainRow(r, i, redraw) {
 // The save's body, or the field a value is wrong in.
 function saveBody() {
   const whole = (v, min, max) => (/^\d+$/.test(v.trim()) && Number(v) >= min && Number(v) <= max ? Number(v) : Number.NaN);
-  const chars = whole(form.inject.session_start_chars, 1000, 6000);
+  const chars = whole(form.inject.session_start_chars, ...form.ranges.session_start_chars);
   if (Number.isNaN(chars)) return { field: 'inject.session_start_chars' };
   const chain = [];
   for (const r of form.chain) {
@@ -580,9 +581,9 @@ function saveBody() {
       if (v.trim() === '') return null;
       return v.trim() === String(had) ? had : whole(v, min, max);
     };
-    const daily = optional(r.edit.daily_budget, r.daily_budget, 1, 100000);
+    const daily = optional(r.edit.daily_budget, r.daily_budget, ...form.ranges.daily_budget);
     if (Number.isNaN(daily)) return { field: `chain.${r.name}.daily_budget` };
-    const timeout = optional(r.edit.timeout_s, r.timeout_s, 5, 900);
+    const timeout = optional(r.edit.timeout_s, r.timeout_s, ...form.ranges.timeout_s);
     if (Number.isNaN(timeout)) return { field: `chain.${r.name}.timeout_s` };
     chain.push({ name: r.name, on: r.edit.on, daily_budget: daily, timeout_s: timeout, model: r.edit.model.trim() || null });
   }
@@ -638,6 +639,8 @@ async function saveSettings(button) {
     }
     const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
     const code = answer.code || byStatus[res.status] || 'other';
+    // An inert form takes no focus, and the refused field is to be reached.
+    fields.inert = false;
     if (answer.field) markInvalid(answer.field);
     setStatus(t(code, { status: res.status }), true);
   } catch (e) {
@@ -669,9 +672,9 @@ function drawSettings() {
     return;
   }
   const f = form;
-  const chars = input('number', f.inject.session_start_chars, '6000', 'inject.session_start_chars', (v) => { f.inject.session_start_chars = v; });
-  chars.min = '1000';
-  chars.max = '6000';
+  const chars = input('number', f.inject.session_start_chars, '', 'inject.session_start_chars', (v) => { f.inject.session_start_chars = v; });
+  const [least, most] = f.ranges.session_start_chars;
+  [chars.min, chars.max] = [least, most];
   const tool = el('select', null, ...['full', 'head-tail'].map((v) => {
     const o = el('option', null, t(v === 'full' ? 'tool_full' : 'tool_head_tail'));
     o.value = v;
@@ -694,7 +697,7 @@ function drawSettings() {
       el('h3', null, t('inject_h')),
       el('p', 'desc', t('inject_desc')),
       el('label', 'check', checkbox(f.inject.session_start, (v) => { f.inject.session_start = v; }), t('inject_on')),
-      el('label', 'field', el('span', null, t('inject_chars')), chars)),
+      el('label', 'field', el('span', null, t('inject_chars', { min: least.toLocaleString('en-US'), max: most.toLocaleString('en-US') })), chars)),
     el('section', null,
       el('h3', null, t('capture_h')),
       el('p', 'desc', t('capture_desc')),
