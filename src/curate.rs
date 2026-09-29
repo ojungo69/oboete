@@ -2112,8 +2112,8 @@ fn searched(w: &Window, repo: &str) -> (String, String) {
 /// its repository: a draft of that session, anchored in that repository, may supersede them.
 type Carried = Vec<(String, Option<String>, crate::claims::Claim)>;
 
-/// The line of its event a quote starts in, trimmed, at most 200 characters; `None` when the
-/// quote is a tool's (its line is often JSON, never the option list a reply numbers), the event is
+/// The line of its event a quote is in, through the line it ends in, trimmed, at most 200
+/// characters; `None` when the quote is a tool's (its line is often JSON, never the option list a reply numbers), the event is
 /// gone, or its text no longer holds the quote where the evidence says.
 fn quoted_line(raw: &Raw, e: &crate::claims::Evidence, rules: &Rules) -> Result<Option<String>> {
     let Some(r) = raw.after(&e.device, e.seq - 1, 1)?.into_iter().next() else {
@@ -2135,7 +2135,9 @@ fn quoted_line(raw: &Raw, e: &crate::claims::Evidence, rules: &Rules) -> Result<
         return Ok(None);
     }
     let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
-    let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+    let end = text[at + len..]
+        .find('\n')
+        .map_or(text.len(), |i| at + len + i);
     // 200 characters from the line's start, where an option's number is, or, for a quote that
     // ends further in, the 200 that end with it.
     let from = text[start..at + len]
@@ -5959,6 +5961,52 @@ mod tests {
             .find(|l| l.contains(": Parse in parallel."))
             .unwrap();
         assert!(far.ends_with(" **Parse in parallel)"), "{far}");
+    }
+
+    /// A quote may span a line break (a window's line is an event, and #248 anchors a quote that
+    /// has a space where the event has a line break): its line runs through the line the quote
+    /// ends in, and a long quote does not put the start of its 200 characters past the line's end.
+    #[test]
+    fn a_quote_across_a_line_break_shows_the_lines_it_spans() {
+        let long = "p".repeat(250);
+        let options =
+            format!("Two ways:\n1. **Cache the\nparsed files** first\n2. **Parse in\n{long}**");
+        let first = [
+            prompt("Build the importer."),
+            event("reply", json!({"assistant": options})),
+        ];
+        let proposal = |id: &str, quote: &str, body: &str| {
+            json!({"id": id, "kind": "decision", "status": "proposed",
+                "speaker": "assistant proposal", "scope": "repo", "body": body,
+                "quote": quote, "line": "L2", "supersedes": []})
+        };
+        let answer = json!({"claims": [
+            proposal("c1", "Cache the\nparsed files", "Cache parsed files."),
+            proposal("c2", &format!("Parse in\n{long}"), "Parse in parallel.")],
+            "summary": "s"});
+        let none = |_: &str| json!({"claims": [], "summary": "s"});
+        let (sent, _) = two_windows(&first, answer, &[prompt("1")], none);
+        let carried: Vec<&str> = sent[1]
+            .lines()
+            .filter(|l| l.starts_with("proposed before "))
+            .collect();
+        assert_eq!(carried.len(), 2, "{}", sent[1]);
+        let near = carried
+            .iter()
+            .find(|l| l.contains(": Cache parsed files."))
+            .unwrap();
+        assert!(
+            near.ends_with("(from: 1. **Cache the parsed files** first)"),
+            "{near}"
+        );
+        let far = carried
+            .iter()
+            .find(|l| l.contains(": Parse in parallel."))
+            .unwrap();
+        assert!(
+            far.ends_with(&format!("(from: {})", "p".repeat(200))),
+            "{far}"
+        );
     }
 
     #[test]
