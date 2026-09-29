@@ -2713,8 +2713,9 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str, typed
          - why: for a change, the reason the lines give for it, copied exactly from one line; \
          empty when they give none, and for every other kind.\n\
          Skip routine tool noise and what the code itself shows. The developer's typed lines \
-         are listed again at the end: read each on its own, since a short one among long tool \
-         output can state a decision, a rule, a permission or a fact about their setup. Keep \
+         are listed again at the end so that none is missed: a short one among long tool output \
+         can state a decision, a rule, a permission or a fact about their setup. Judge each \
+         where it stands, with the lines around it. Keep \
          what should still change what an agent does in a later session: a request that stops \
          mattering with this session (one step, a link to click once, waiting on this change's \
          review) is not a claim, but \
