@@ -1812,12 +1812,24 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
 fn within_op_cap(mut op: Value) -> Value {
     let len = |op: &Value, list: &str| op[list].as_array().map_or(0, Vec::len);
     // The shown candidates go first, from the end of the list: an audit, where the gates' lists
-    // say what the window's claims were held to.
-    let mut cut = 0u64;
-    while op.to_string().len() > crate::raw::MAX_OP_BYTES && len(&op, "candidates") > 0 {
-        op["candidates"].as_array_mut().and_then(Vec::pop);
-        cut += 1;
-        op["candidates_cut"] = cut.into();
+    // say what the window's claims were held to. Counted, not serialized per uid: a window over
+    // many repositories can show thousands.
+    let mut size = op.to_string().len();
+    if size > crate::raw::MAX_OP_BYTES
+        && let Some(shown) = op["candidates"].as_array_mut()
+    {
+        // A uid leaves with its comma; the count adds its key and digits.
+        let count = |cut: u64| r#","candidates_cut":"#.len() + cut.to_string().len();
+        let mut cut = 0u64;
+        while size + count(cut) > crate::raw::MAX_OP_BYTES
+            && let Some(uid) = shown.pop()
+        {
+            size -= uid.to_string().len() + 1;
+            cut += 1;
+        }
+        if cut > 0 {
+            op["candidates_cut"] = cut.into();
+        }
     }
     let mut cut = 0u64;
     while op.to_string().len() > crate::raw::MAX_OP_BYTES {
@@ -5216,8 +5228,21 @@ mod tests {
             2000
         );
         assert_eq!(kept[0], json!(format!("{:064}", 0)));
+        // As many as fit: one more back is over the cap.
+        let mut more = op.clone();
+        more["candidates"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(format!("{:064}", kept.len())));
+        more["candidates_cut"] = (2000 - kept.len() as u64 - 1).into();
+        assert!(more.to_string().len() > crate::raw::MAX_OP_BYTES);
         assert_eq!(op["dropped"], json!([["c1", "r"]]));
         assert!(op.get("cut").is_none());
+        // An op at the cap keeps every candidate.
+        let base = json!({"outcome": "curated", "dropped": [["c1", ""]], "candidates": ["u"]});
+        let reason = "r".repeat(crate::raw::MAX_OP_BYTES - base.to_string().len());
+        let op = json!({"outcome": "curated", "dropped": [["c1", reason]], "candidates": ["u"]});
+        assert_eq!(within_op_cap(op.clone()), op);
     }
 
     /// The cap holds for the op as appended: an op that fits only before its range is added is
