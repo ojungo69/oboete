@@ -122,8 +122,9 @@ fn doctor_prints_inject_and_chain_as_they_apply() {
     );
     assert!(!off.contains("warning:"), "{off}");
     let wrong = doctor(&format!("{entries}[inject]\nsession_start = \"false\"\n"));
+    // With the file it is about, as the capture line gives it (OpenCodeReview on #267).
     assert!(
-        wrong.contains("injection: settings are wrong, so nothing is injected"),
+        wrong.contains("injection: settings are wrong, so nothing is injected: parse "),
         "{wrong}"
     );
 }

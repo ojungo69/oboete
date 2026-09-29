@@ -679,9 +679,9 @@ fn overlay(cfg: &mut Config) {
     for p in providers.iter() {
         *counts.entry(p.name().to_owned()).or_default() += 1;
     }
-    let names = |name: &String| {
-        chain.order.contains(name)
-            || chain.off.contains(name)
+    let names = |name: &str| {
+        chain.order.iter().any(|n| n == name)
+            || chain.off.iter().any(|n| n == name)
             || chain.daily_budget.contains_key(name)
             || chain.timeout_s.contains_key(name)
             || chain.model.contains_key(name)
@@ -839,7 +839,7 @@ impl Default for Inject {
 pub fn inject(home: &Path) -> Result<Inject> {
     let path = home.join("config.toml");
     match std::fs::read_to_string(&path) {
-        Ok(text) => parse_inject(&text),
+        Ok(text) => parse_inject(&text).with_context(|| format!("parse {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Inject::default()),
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
     }
