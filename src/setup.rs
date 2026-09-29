@@ -1924,14 +1924,27 @@ pub fn doctor(home: &Path) -> Result<()> {
             AGENTS.join(", ")
         ),
     }
+    match config::inject(home) {
+        Ok(i) if i.session_start => println!(
+            "injection: the manifest, up to {} characters",
+            i.session_start_chars
+        ),
+        Ok(_) => println!("injection: off, no manifest is shown to an agent"),
+        Err(e) => {
+            println!("injection: settings are wrong, so nothing is injected: {e:#}");
+            unhealthy.push("injection settings are wrong");
+        }
+    }
+    // `[chain]` as it applies, under each entry's line.
+    let cfg = config::load(home)?;
     println!("providers (chain order):");
     // Read, not made: the worker makes providers.db.
     let calls = home
         .join("providers.db")
         .exists()
         .then(|| crate::providers_db::open(home));
-    for p in config::load(home)?.providers {
-        let state = match &p {
+    for p in &cfg.providers {
+        let state = match p {
             config::Provider::Openai {
                 key_file, model, ..
             } => match key_file {
@@ -1958,8 +1971,8 @@ pub fn doctor(home: &Path) -> Result<()> {
         let budget = if p.budget_from_key() {
             let said = match &calls {
                 Some(Err(e)) => Err(anyhow::anyhow!("providers.db does not open: {e:#}")),
-                Some(Ok(db)) => crate::budget::key_budget(Some(db), &p),
-                None => crate::budget::key_budget(None, &p),
+                Some(Ok(db)) => crate::budget::key_budget(Some(db), p),
+                None => crate::budget::key_budget(None, p),
             };
             format!(
                 "; {}",
@@ -1975,6 +1988,10 @@ pub fn doctor(home: &Path) -> Result<()> {
             String::new()
         };
         println!("  {:<11} {state}{budget}", p.name());
+        println!("{}", config::doctor_line(p, &cfg.chain));
+    }
+    for w in &cfg.warnings {
+        println!("  warning: {w}");
     }
     if capture.is_err() {
         unhealthy.push("capture settings are wrong");

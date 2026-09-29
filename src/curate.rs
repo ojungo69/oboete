@@ -1345,7 +1345,7 @@ pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<Str
 
 /// `recurate`'s plan, and with `send` its sending, under the worker's lock when sending.
 fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> {
-    let cfg = crate::config::load(home)?;
+    let cfg = crate::config::load_chain(home)?;
     let rules = crate::capture::Settings::load(home)?.rules;
     // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
     let mut raw = crate::raw::open(home)?;
@@ -4923,6 +4923,34 @@ mod tests {
         assert!(recurate(home.path(), other, false).is_err());
         let queued = recurate(home.path(), Again::Queued, false).unwrap();
         assert_eq!(queued, "nothing to curate again\n");
+    }
+
+    /// #94: `oboete recurate` plans with the chain `[chain]` leaves: a paid entry turned off is
+    /// not priced.
+    #[test]
+    fn recurate_plans_without_an_entry_turned_off() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _) = open(home.path());
+        raw.append(&prompt("We use tabs.")).unwrap();
+        let op = json!({"from_seq": 1, "from_offset": null, "to_seq": 1, "to_offset": null,
+            "outcome": "curated", "elided": []});
+        raw.append_ops(&[(OpKind::Window, op)]).unwrap();
+        let span = Again::Span(raw.device().to_owned(), Span::records(1, 1));
+        drop(raw);
+        let config = |chain: &str| {
+            let text = format!(
+                "[[providers]]\nkind = \"openai\"\nname = \"paid\"\n\
+                 base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\
+                 limits = {{ usd_per_mtok_in = 1.0, usd_per_mtok_out = 1.0 }}\n{chain}"
+            );
+            std::fs::write(home.path().join("config.toml"), text).unwrap();
+        };
+        config("");
+        let priced = recurate(home.path(), span.clone(), false).unwrap();
+        assert!(priced.contains("at most USD"), "{priced}");
+        config("[chain]\noff = [\"paid\"]\n");
+        let off = recurate(home.path(), span, false).unwrap();
+        assert!(off.contains("no paid entry in the chain"), "{off}");
     }
 
     /// Task 11: an event a window split is recurated part by part: a part retracts only the
