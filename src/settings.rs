@@ -83,7 +83,11 @@ pub fn show(home: &Path) -> Value {
         return json!({"version": "none", "error": "file_invalid"});
     };
     let version = version(bytes.as_deref());
-    let Some((cfg, capture, inject)) = utf8(bytes.as_deref()).and_then(|t| parsed(&path, t)) else {
+    let read = utf8(bytes.as_deref()).and_then(|t| {
+        let doc = t.parse::<toml_edit::DocumentMut>().ok()?;
+        Some((parsed(&path, t)?, alone(&path, &doc)?))
+    });
+    let Some(((cfg, capture, inject), alone)) = read else {
         return json!({"version": version, "error": "file_invalid"});
     };
     // Read, not made: the worker makes providers.db.
@@ -110,7 +114,17 @@ pub fn show(home: &Path) -> Value {
             let same: Vec<&Provider> = (cfg.providers.iter())
                 .filter(|p| p.name() == name)
                 .collect();
-            entry(&same, &cfg.chain, applied.contains(name), db.as_ref())
+            // Of several entries of one name, the strictest rule, each taken from the entry
+            // without `[chain]`, as a save checks it (OpenCodeReview on #270).
+            let rules: Vec<_> = (alone.providers.iter())
+                .filter(|p| p.name() == name)
+                .map(Provider::model_rule)
+                .collect();
+            let rule = [config::ModelRule::Fixed, config::ModelRule::Free]
+                .into_iter()
+                .find(|r| rules.contains(r))
+                .unwrap_or(config::ModelRule::Any);
+            entry(&same, &cfg.chain, applied.contains(name), rule, db.as_ref())
         })
         .collect();
     json!({
@@ -148,15 +162,11 @@ fn entry(
     same: &[&Provider],
     chain: &ChainOverlay,
     applied: bool,
+    rule: config::ModelRule,
     db: Option<&Connection>,
 ) -> Value {
     let p = same[0];
     let name = p.name();
-    // Of several entries of one name, the strictest rule: a model is set only where each allows it.
-    let rule = [config::ModelRule::Fixed, config::ModelRule::Free]
-        .into_iter()
-        .find(|r| same.iter().any(|q| q.model_rule() == *r))
-        .unwrap_or(config::ModelRule::Any);
     let (kind, key, key_file, model, timeout_s) = match p {
         Provider::Openai {
             key_file,
@@ -269,12 +279,7 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
     let text = utf8(was.as_deref()).ok_or_else(invalid)?;
     let (now, capture, inject) = parsed(&path, text).ok_or_else(invalid)?;
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| invalid())?;
-    // Each entry as it is without `[chain]`: what a value equal to its own is compared with.
-    let base = {
-        let mut b = doc.clone();
-        b.remove("chain");
-        config::from_text(&path, &b.to_string()).map_err(|_| invalid())?
-    };
+    let base = alone(&path, &doc).ok_or_else(invalid)?;
     let chain = checked(&posted, &base, &now)?;
     // The order changes when the chain's does, not when `order` would be spelled another way.
     let reordered = !(posted.chain.iter().map(|e| e.name.as_str())).eq(names(&now.providers));
@@ -321,6 +326,14 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
         .commit()
         .map_err(|_| refused(500, "write_failed", ""))?;
     Ok(show(home))
+}
+
+/// Each entry as it is without `[chain]`: what a value equal to its own is compared with, and
+/// what its model rule is taken from.
+fn alone(path: &Path, doc: &toml_edit::DocumentMut) -> Option<config::Config> {
+    let mut b = doc.clone();
+    b.remove("chain");
+    config::from_text(path, &b.to_string()).ok()
 }
 
 /// The entries' names, each once, in the order of its first entry.
@@ -959,6 +972,21 @@ mod tests {
         )
         .unwrap();
         assert!(config::load(home.path()).unwrap().chain.model.is_empty());
+    }
+
+    /// The rule shown is the entry's own, without `[chain]`, as a save checks it: an OpenRouter
+    /// entry of a paid model that `[chain]` gives a `:free` one still takes any model
+    /// (OpenCodeReview on #270).
+    #[test]
+    fn the_rule_shown_is_the_entrys_own() {
+        let text = "[chain]\nmodel = { o = \"m:free\" }\n\n[[providers]]\nkind = \"openai\"\n\
+                    name = \"o\"\nbase_url = \"https://openrouter.ai/api/v1\"\nmodel = \"paid/m\"\n";
+        let home = home_with(Some(text));
+        let row = &show(home.path())["chain"][0];
+        assert_eq!(
+            (&row["model"], &row["model_rule"]),
+            (&json!("m:free"), &json!("any"))
+        );
     }
 
     /// A key whose value changes keeps the comment after it (cubic on #270).
