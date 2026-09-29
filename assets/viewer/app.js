@@ -384,6 +384,10 @@ const TEXT = {
   key_on_path: ['Installed', 'インストール済み'],
   key_not_on_path: ['Not installed', 'インストールされていません'],
   key_file: ['Key file: {path}', 'キーのファイル: {path}'],
+  entries: [
+    '{n} curators share this name in config.toml, and these settings change all of them.',
+    'config.toml でこの名前の要約役が {n} つあり、ここでの設定はすべてに反映されます。',
+  ],
   from_key: [
     'From its key: a fifth of the key\'s daily limit ({n} now)',
     'キーから決まります: キーの 1 日の上限の 5 分の 1(現在 {n} 回)',
@@ -418,10 +422,6 @@ const TEXT = {
   chain_empty: [
     'Please keep at least one curator in use. To stop curation, set [summary] curate = false.',
     '要約役を少なくとも 1 つは使う設定にしてください。要約を止めるには、[summary] curate = false を設定します。',
-  ],
-  shared_name: [
-    'Two curators share a name, and config.toml changes both together. Please give both rows the same values.',
-    '同じ名前の要約役が 2 つあり、config.toml では両方が一緒に変わります。両方の行を同じ値にしてください。',
   ],
   file_invalid: [
     'config.toml has a mistake, so this page cannot change it. Run `oboete doctor` to see the line.',
@@ -551,7 +551,8 @@ function chainRow(r, i, redraw) {
   on.setAttribute('aria-label', `${t('col_on')}: ${r.name}`);
   const model = input('text', r.edit.model, r.effective_model ?? '', `chain.${r.name}.model`, (v) => { r.edit.model = v; });
   model.setAttribute('aria-label', `${t('col_model')}: ${r.name}`);
-  model.disabled = r.model_rule === 'fixed';
+  // A curator with prices keeps its model; a model config.toml sets already can still be emptied.
+  model.disabled = r.model_rule === 'fixed' && !r.model;
   const budget = input('number', r.edit.daily_budget, r.effective_daily_budget === null ? t('no_cap') : String(r.effective_daily_budget), `chain.${r.name}.daily_budget`, (v) => { r.edit.daily_budget = v; });
   [budget.min, budget.max] = form.ranges.daily_budget;
   budget.setAttribute('aria-label', `${t('col_budget')}: ${r.name}`);
@@ -562,7 +563,7 @@ function chainRow(r, i, redraw) {
   tr.append(
     el('td', null, el('span', 'move', arrow(-1, '↑', t('up')), arrow(1, '↓', t('down')))),
     el('td', null, on),
-    el('td', null, el('span', 'entry-name', r.name), ...keyState(r)),
+    el('td', null, el('span', 'entry-name', r.name), ...keyState(r), r.entries > 1 ? note(t('entries', { n: r.entries })) : null),
     el('td', null, model, modelNote ? note(modelNote) : null),
     el('td', null, budget, r.budget_from_key && !r.edit.daily_budget ? note(t('from_key', { n: r.effective_daily_budget })) : null),
     el('td', null, timeout));

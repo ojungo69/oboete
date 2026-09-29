@@ -103,8 +103,15 @@ pub fn show(home: &Path) -> Value {
         })
         .map(Provider::name)
         .collect();
-    let chain: Vec<Value> = (cfg.providers.iter())
-        .map(|p| entry(p, &cfg.chain, applied.contains(p.name()), db.as_ref()))
+    // One row per name, as `[chain]` sets every entry of a name alike.
+    let chain: Vec<Value> = names(&cfg.providers)
+        .into_iter()
+        .map(|name| {
+            let same: Vec<&Provider> = (cfg.providers.iter())
+                .filter(|p| p.name() == name)
+                .collect();
+            entry(&same, &cfg.chain, applied.contains(name), db.as_ref())
+        })
         .collect();
     json!({
         "version": version,
@@ -137,8 +144,19 @@ fn tool_output(t: ToolOutput) -> &'static str {
 /// One chain entry for the page. `key` is the key file's state as doctor words it; its path is
 /// shown so the user knows where the key goes, and its contents are never read into the answer
 /// (a budget from the key reads it inside the process, to fingerprint it).
-fn entry(p: &Provider, chain: &ChainOverlay, applied: bool, db: Option<&Connection>) -> Value {
+fn entry(
+    same: &[&Provider],
+    chain: &ChainOverlay,
+    applied: bool,
+    db: Option<&Connection>,
+) -> Value {
+    let p = same[0];
     let name = p.name();
+    // Of several entries of one name, the strictest rule: a model is set only where each allows it.
+    let rule = [config::ModelRule::Fixed, config::ModelRule::Free]
+        .into_iter()
+        .find(|r| same.iter().any(|q| q.model_rule() == *r))
+        .unwrap_or(config::ModelRule::Any);
     let (kind, key, key_file, model, timeout_s) = match p {
         Provider::Openai {
             key_file,
@@ -179,13 +197,14 @@ fn entry(p: &Provider, chain: &ChainOverlay, applied: bool, db: Option<&Connecti
     };
     json!({
         "name": name,
+        "entries": same.len(),
         "kind": kind,
         "on": !chain.turns_off(name),
         "key": key,
         "key_file": key_file,
         "model": chain.model.get(name).filter(|_| applied),
         "effective_model": model,
-        "model_rule": p.model_rule(),
+        "model_rule": rule,
         "daily_budget": chain.daily_budget.get(name),
         "effective_daily_budget": (budget != config::no_daily_cap()).then_some(budget),
         "budget_from_key": p.budget_from_key(),
@@ -218,8 +237,8 @@ struct CaptureIn {
     tool_output: ToolOutput,
 }
 
-/// An entry's values; `None` follows the entry's own value.
-#[derive(Deserialize, PartialEq)]
+/// A name's values; `None` follows the entries' own value.
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EntryIn {
     name: String,
@@ -258,8 +277,7 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
     };
     let chain = checked(&posted, &base, &now)?;
     // The order changes when the chain's does, not when `order` would be spelled another way.
-    let reordered = !(posted.chain.iter().map(|e| e.name.as_str()))
-        .eq(now.providers.iter().map(Provider::name));
+    let reordered = !(posted.chain.iter().map(|e| e.name.as_str())).eq(names(&now.providers));
     let i = &posted.inject;
     if i.session_start != inject.session_start {
         put(&mut doc, "inject", "session_start", i.session_start.into());
@@ -305,6 +323,15 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
     Ok(show(home))
 }
 
+/// The entries' names, each once, in the order of its first entry.
+fn names(providers: &[Provider]) -> Vec<&str> {
+    let mut seen = std::collections::BTreeSet::new();
+    (providers.iter())
+        .map(Provider::name)
+        .filter(|n| seen.insert(*n))
+        .collect()
+}
+
 /// `[chain]` as the page asks for it, over the entries `base` has.
 #[derive(Default)]
 struct Chain {
@@ -323,20 +350,15 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
     if !CHARS.contains(&chars) {
         return Err(refused(422, "range", "inject.session_start_chars"));
     }
+    // Each name once, as the page shows it.
     let order: Vec<String> = posted.chain.iter().map(|e| e.name.clone()).collect();
-    let own: Vec<&str> = base.providers.iter().map(Provider::name).collect();
+    let own = names(&base.providers);
     fn sorted(mut v: Vec<&str>) -> Vec<&str> {
         v.sort_unstable();
         v
     }
     if sorted(order.iter().map(String::as_str).collect()) != sorted(own.clone()) {
         return Err(refused(422, "names", "chain"));
-    }
-    // `[chain]` changes every entry of one name alike, so two of one name take the same values.
-    for (i, e) in posted.chain.iter().enumerate() {
-        if posted.chain[..i].iter().any(|d| d.name == e.name && d != e) {
-            return Err(refused(422, "shared_name", format!("chain.{}", e.name)));
-        }
     }
     // Turning off the last entry in use. A chain with none in use already (all off by hand, or no
     // entries) is not this save's doing, so the rest of the settings still save (cubic on #94).
@@ -876,55 +898,41 @@ mod tests {
         assert_eq!(chain.model["old"], "m x");
     }
 
-    /// `[chain]` changes both entries of one name, so the page's rows of that name must agree.
+    /// `[chain]` sets every entry of one name alike, so the page has one row per name, and a
+    /// value is the entries' own only when it is each one's (Codex on #270).
     #[test]
-    fn two_entries_of_one_name_take_the_same_values() {
+    fn entries_of_one_name_are_one_row() {
         let entry = "[[providers]]\nkind = \"cli\"\nname = \"a\"\ncli = \"claude\"\n";
-        let text = format!("{entry}\n{entry}");
-        let home = home_with(Some(&text));
-        let shown = show(home.path());
-        let r = save_to(
-            &home,
-            &posted(&shown, |v| v["chain"][0]["timeout_s"] = json!(60)),
-        )
-        .unwrap_err();
-        assert_eq!(
-            (r.status, r.code, r.field),
-            (422, "shared_name", "chain.a".into())
-        );
-        assert_eq!(file(&home).as_deref(), Some(text.as_str()));
-        let saved = save_to(
-            &home,
-            &posted(&shown, |v| {
-                for e in v["chain"].as_array_mut().unwrap() {
-                    e["timeout_s"] = json!(60);
-                }
-            }),
-        )
-        .unwrap();
-        assert_eq!(saved["chain"][1]["effective_timeout_s"], 60);
-        // Their own values differ: a value equal to the first's is still written for both
-        // (Codex on #270).
         let text = format!("{entry}timeout_s = 60\n\n{entry}timeout_s = 90\n");
         let home = home_with(Some(&text));
         let shown = show(home.path());
-        let saved = save_to(
+        assert_eq!(shown["chain"].as_array().unwrap().len(), 1);
+        assert_eq!(shown["chain"][0]["entries"], 2);
+        let r = save_to(
             &home,
             &posted(&shown, |v| {
-                for e in v["chain"].as_array_mut().unwrap() {
-                    e["timeout_s"] = json!(60);
-                }
+                let row = v["chain"][0].clone();
+                v["chain"].as_array_mut().unwrap().push(row);
             }),
         )
+        .unwrap_err();
+        assert_eq!((r.status, r.code), (422, "names"));
+        save_to(
+            &home,
+            &posted(&shown, |v| v["chain"][0]["timeout_s"] = json!(60)),
+        )
         .unwrap();
-        let timeouts: Vec<&Value> = (saved["chain"].as_array().unwrap().iter())
-            .map(|e| &e["effective_timeout_s"])
+        let timeouts: Vec<u64> = (config::load(home.path()).unwrap().providers.iter())
+            .map(|p| match p {
+                Provider::Openai { timeout_s, .. } | Provider::Cli { timeout_s, .. } => *timeout_s,
+            })
             .collect();
         assert_eq!(timeouts, [60, 60]);
     }
 
-    /// Two entries of one name whose rules differ: `[chain]`'s model applies to one of them, both
-    /// rows show it, and a save that leaves it keeps it (Codex on #270).
+    /// A priced entry and a CLI entry of one name: one row with the stricter rule and `[chain]`'s
+    /// model, which applies to the CLI entry. A save that leaves the model keeps it, and one that
+    /// empties it removes it (Codex and CodeRabbit on #270).
     #[test]
     fn a_shared_name_shows_one_model_and_keeps_it() {
         let text = "[chain]\nmodel = { a = \"x\" }\n\n[[providers]]\nkind = \"openai\"\nname = \"a\"\n\
@@ -933,17 +941,24 @@ mod tests {
                     [[providers]]\nkind = \"cli\"\nname = \"a\"\ncli = \"claude\"\n";
         let home = home_with(Some(text));
         let shown = show(home.path());
-        let models: Vec<&Value> = (shown["chain"].as_array().unwrap().iter())
-            .map(|e| &e["model"])
-            .collect();
-        assert_eq!(models, ["x", "x"]);
-        let saved = save_to(
+        let row = &shown["chain"][0];
+        assert_eq!(
+            (&row["model"], &row["model_rule"]),
+            (&json!("x"), &json!("fixed"))
+        );
+        save_to(
             &home,
             &posted(&shown, |v| v["inject"]["session_start"] = json!(false)),
         )
         .unwrap();
-        assert_eq!(saved["inject"]["session_start"], false);
         assert_eq!(config::load(home.path()).unwrap().chain.model["a"], "x");
+        let shown = show(home.path());
+        save_to(
+            &home,
+            &posted(&shown, |v| v["chain"][0]["model"] = Value::Null),
+        )
+        .unwrap();
+        assert!(config::load(home.path()).unwrap().chain.model.is_empty());
     }
 
     /// A key whose value changes keeps the comment after it (cubic on #270).
