@@ -2278,43 +2278,51 @@ fn options_of(
 }
 
 /// The label of the option a line starts, as a pick names it ("1" for `１．`, "2" for `②`, "b"
-/// for `B)`): one or two digits and `.` or `)` and a space, or `．` or `）`, a circled number, or
-/// one letter and `.` or `)` and a space; markdown's `#` and `*` before it are skipped.
+/// for `Ｂ）`): one or two digits or one letter (a full-width one as its ASCII one), then `.` or
+/// `)` and whitespace or the line's end, or `．` not before a digit, or `）`; or a circled number.
+/// Markdown's `#` and `*` before it are skipped.
 pub(crate) fn option_label(line: &str) -> Option<String> {
+    // A full-width digit or letter as its ASCII one, as a pick's words are (`gates::picks`).
+    let ascii = |c: char| match c {
+        '０'..='９' | 'Ａ'..='Ｚ' | 'ａ'..='ｚ' => {
+            char::from_u32(u32::from(c) - 0xfee0).unwrap_or(c)
+        }
+        c => c,
+    };
     let line = line.trim_start_matches(['#', '*', ' ']);
     let digits: String = line
         .chars()
-        .take_while(|c| c.is_ascii_digit() || ('０'..='９').contains(c))
-        // A full-width digit as its ASCII one.
-        .map(|c| match c {
-            '０'..='９' => char::from_u32(u32::from(c) - 0xfee0).unwrap_or(c),
-            c => c,
-        })
+        .map(ascii)
+        .take_while(char::is_ascii_digit)
         .collect();
-    let mut after = line.chars().skip(digits.len());
-    let marked = match digits.len() {
-        // `1.5x` and `1.0.0` are not options: an ASCII mark is followed by whitespace, as a
-        // markdown list's is; Japanese writes `１．項目` with none.
-        1 | 2 => match after.next() {
-            Some('.' | ')') => after.next().is_none_or(char::is_whitespace),
-            Some('．' | '）') => true,
-            _ => false,
-        },
+    let (label, mut rest) = match digits.chars().count() {
+        n @ (1 | 2) => (digits, line.chars().skip(n)),
         0 => {
-            let mut c = line.chars();
-            return match (c.next(), c.next(), c.next()) {
-                (Some(n), ..) if ('①'..='⑳').contains(&n) => {
-                    Some((u32::from(n) - u32::from('①') + 1).to_string())
-                }
-                (Some(l), Some('.' | ')'), Some(' ')) if l.is_ascii_alphabetic() => {
-                    Some(l.to_ascii_lowercase().to_string())
-                }
-                _ => None,
-            };
+            let first = line.chars().next()?;
+            if ('①'..='⑳').contains(&first) {
+                return Some((u32::from(first) - u32::from('①') + 1).to_string());
+            }
+            let letter = ascii(first);
+            if !letter.is_ascii_alphabetic() {
+                return None;
+            }
+            (
+                letter.to_ascii_lowercase().to_string(),
+                line.chars().skip(1),
+            )
         }
+        _ => return None,
+    };
+    let marked = match rest.next() {
+        // `1.5x`, `1.0.0` and `e.g.` are not options: an ASCII mark is followed by whitespace, as a
+        // markdown list's is.
+        Some('.' | ')') => rest.next().is_none_or(char::is_whitespace),
+        // Japanese writes `１．項目` with none, but `１．２倍` is a number.
+        Some('．') => rest.next().is_none_or(|c| !ascii(c).is_ascii_digit()),
+        Some('）') => true,
         _ => false,
     };
-    marked.then_some(digits)
+    marked.then_some(label)
 }
 
 /// What each session of the window carries in from before it (spec 3.1, 3.3; D12), as text for
@@ -6402,11 +6410,23 @@ mod tests {
             ("b) a", "b"),
             ("**1. a**", "1"),
             ("### ２） a", "2"),
+            ("Ａ．設計案", "a"),
+            ("ｂ）小さく", "b"),
         ] {
             assert_eq!(option_label(line).as_deref(), Some(label), "{line}");
         }
         for line in [
-            "e.g. a", "2026. a", "1 a", "- 1. a", "Fast.", "a", "", "1.5x a", "1.0.0",
+            "e.g. a",
+            "2026. a",
+            "1 a",
+            "- 1. a",
+            "Fast.",
+            "a",
+            "",
+            "1.5x a",
+            "1.0.0",
+            "１．２倍の速度向上",
+            "１．１ 設計",
         ] {
             assert_eq!(option_label(line), None, "{line}");
         }
