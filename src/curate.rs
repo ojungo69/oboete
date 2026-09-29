@@ -2113,7 +2113,8 @@ fn searched(w: &Window, repo: &str) -> (String, String) {
 type Carried = Vec<(String, Option<String>, crate::claims::Claim)>;
 
 /// The line of its event a quote starts in, trimmed, at most 200 characters; `None` when the
-/// event is gone or its text no longer holds the quote where the evidence says.
+/// quote is a tool's (its line is often JSON, never the option list a reply numbers), the event is
+/// gone, or its text no longer holds the quote where the evidence says.
 fn quoted_line(raw: &Raw, e: &crate::claims::Evidence) -> Result<Option<String>> {
     let Some(r) = raw.after(&e.device, e.seq - 1, 1)?.into_iter().next() else {
         return Ok(None);
@@ -2121,6 +2122,9 @@ fn quoted_line(raw: &Raw, e: &crate::claims::Evidence) -> Result<Option<String>>
     let (Item::Event(event), true) = (&r.item, r.seq == e.seq) else {
         return Ok(None);
     };
+    if event.kind == "tool" {
+        return Ok(None);
+    }
     let Some(text) = long_text(event) else {
         return Ok(None);
     };
@@ -2230,7 +2234,11 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                 continue;
             };
             let (kind, status) = crate::claims::normalize(&c.kind, &c.status);
-            if status == "proposed" && session_of(&first.device, first.seq)?.as_deref() == Some(key)
+            // A fact is not accepted: a proposed one is a result the gates lowered (#244), which
+            // would take the place of a proposal when `fit` cuts.
+            if status == "proposed"
+                && kind != "repo fact"
+                && session_of(&first.device, first.seq)?.as_deref() == Some(key)
             {
                 let uid = crate::claims::uid(kind, first);
                 // Its active derivation, once, while that is still a current proposal: a sibling
@@ -5895,27 +5903,40 @@ mod tests {
     /// #244: a carried proposal shows the line of the reply it was quoted from, so that a bare
     /// "1" names it: an option's number is outside the quote.
     #[test]
-    fn a_carried_proposal_shows_the_line_its_option_number_is_on() {
+    fn a_carried_proposal_shows_its_reply_line_and_a_fact_is_not_carried() {
         let options = "Two ways:\n1. **Cache the parsed files**\n2. **Parse in parallel**";
         let first = [
             prompt("Build the importer."),
             event("reply", json!({"assistant": options})),
+            tool("{\"plan\": \"stream the parsed rows\", \"then\": \"write the tests\"}"),
         ];
-        let proposal = |id: &str, quote: &str, body: &str| {
-            json!({"id": id, "kind": "decision", "status": "proposed",
+        let claim = |id: &str, kind: &str, quote: &str, line: &str, body: &str| {
+            json!({"id": id, "kind": kind, "status": "proposed",
                 "speaker": "assistant proposal", "scope": "repo", "body": body,
-                "quote": quote, "line": "L2", "supersedes": []})
+                "quote": quote, "line": line, "supersedes": []})
         };
         let answer = json!({"claims": [
-            proposal("c1", "Cache the parsed files", "Cache parsed files."),
-            proposal("c2", "Parse in parallel", "Parse in parallel.")], "summary": "s"});
+            claim("c1", "decision", "Cache the parsed files", "L2", "Cache parsed files."),
+            claim("c2", "decision", "Parse in parallel", "L2", "Parse in parallel."),
+            // A fact the gates lowered is nothing an acceptance settles.
+            claim("c3", "repo fact", "Two ways", "L2", "The importer can go two ways."),
+            // A tool's line is no option list: its text is not shown again.
+            claim("c4", "decision", "stream the parsed rows", "L3", "Stream the parsed rows.")],
+            "summary": "s"});
         let none = |_: &str| json!({"claims": [], "summary": "s"});
         let (sent, _) = two_windows(&first, answer, &[prompt("1")], none);
         let carried: Vec<&str> = sent[1]
             .lines()
             .filter(|l| l.starts_with("proposed before "))
             .collect();
-        assert_eq!(carried.len(), 2, "{}", sent[1]);
+        assert_eq!(carried.len(), 3, "{}", sent[1]);
+        assert!(
+            carried
+                .iter()
+                .any(|l| l.ends_with(": Stream the parsed rows.")),
+            "{}",
+            sent[1]
+        );
         let from = |body: &str, line: &str| {
             carried
                 .iter()
