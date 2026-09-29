@@ -102,12 +102,25 @@ whole-2 and whole3 are one arm run twice, on one binary with the same settings (
     - d462 ("問題なければ削減作業やって") and d46 ("cloudflared の digest を新しいものへ意図的に貼り替える"): drafted as open items the user proposed, not decisions.
     - d335 ("進めて ultrathink") and d200 (the next prompt asks for another change): not drafted.
     - d315 ("モデルを3.5じゃなくて3.6の方が良くない？"): drafted as a done change and lowered, since the turn asks ("done needs the user's words or a passing run").
-  - So what stops them now is the curator's drafting, not the carrying (#244).
+  - The curator's drafting stops them, and, as acc2 showed, the carrying too (#244).
+- **acc2**: 9c23129 (the carried line shows the reply's line it was quoted from, "(from: …)", and the prompt names a go-ahead as the user's decision and as a supersedes). 35 spans, 158,113 estimated tokens, all curated on the first try. None of the six is current.
+  - d107 answered no claim again. d462 was drafted as the user's proposal with the session goal's words, superseding nothing. d46's acceptance superseded the carried proposal but quoted a tool line in p-cipher-v2, and the gates take out a supersedes across repositories.
+  - The six acceptance windows curated again on a copy, with the eval wrapper now keeping each prompt: the carried lines stop at about 1,000 to 1,300 characters (half of a fifth of the window's tokens), and results the gates had lowered to proposed came first (d462: three prices; d46: four maintenance results), so the proposal the owner answered was cut. A quote from a tool line showed its line as JSON.
+- **acc3**: 819da5e (no repo fact carried, no tool line shown again). 35 spans, 157,047 estimated tokens. None of the six is current, but three acceptances supersede the proposal they answer: d462 and d46 drafted `proposed` by the curator, d315 drafted `decided` and lowered by the gates since the turn asks. In d46's prompt the cloudflared proposal was still cut from the carried lines, behind inferred results; it came as a candidate.
+- **acc4**: 76d45a2 (the assistant's own proposals carried first). 35 spans, 157,326 estimated tokens. d462 is current: "問題なければ削減作業やって" drafted `decided`, superseding the carried reduction plan.
+  - Every acceptance window's prompt now carries the proposal the owner answered: d107's OmniRoute option, d462's reduction plan, d335's order of the plans, and all four of d46's items.
+  - The other five, by label:
+    - d107: no claim; "１" is shorter than a quote may be (5 to 200 characters).
+    - d335: "進めて ultrathink" not drafted.
+    - d46: the curator quoted a tool line in p-cipher-v2 again, so its supersedes was taken out.
+    - d315: drafted `done` and lowered, since the turn asks.
+    - d200: not drafted; the owner's next prompt asks for another change, so nothing in the window accepts.
+  - One sample per arm: d462 was `proposed` in acc3 and `decided` in acc4, and d46's supersedes was kept in acc3 and taken out in acc4, so 1 of 6 against 0 of 6 is within run-to-run noise. What the arms show for certain is in the kept prompts: the proposal now reaches the acceptance's window.
 
 ### What the next M3 run needs
 
 1. The owner's answer on instructions for the moment, and the test labels.
-2. Supersedes: a window now carries its sessions' decided claims, so a same-session earlier decision is in the prompt; the cross-session pairs need the hybrid search (#222). Whether a record holding two labels counts per record or per label is the owner's call (asked on 2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window, and the curator does not draft the acceptance as a decision (#244).
+2. Supersedes: a window now carries its sessions' decided claims, so a same-session earlier decision is in the prompt; the cross-session pairs need the hybrid search (#222). Whether a record holding two labels counts per record or per label is the owner's call (asked on 2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and the curator drafts the acceptance as a decision in 1 of 6 (#244: a one-character answer cannot be quoted, a go-ahead is often drafted as a proposal or not at all, and a quote from another repository's tool line loses its supersedes).
 3. The quote match: whitespace-blind, then the paraphrases.
 4. The defaults as they would ship were run once (short-2): 22 of 44.
 5. Several runs of each arm (Run to run, above).
