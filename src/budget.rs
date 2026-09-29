@@ -102,17 +102,25 @@ pub fn key_budget(db: Option<&Connection>, p: &Provider) -> Result<String> {
         None => None,
     };
     let budget = daily_after(p, &read);
-    Ok(match read {
+    let mut said = match &read {
         Some((Some(limit), at, _)) => format!(
             "{budget} calls a day, a fifth of the {limit} free-model requests a day its key has (read {})",
-            crate::db::utc(at)
+            crate::db::utc(*at)
         ),
         Some((None, at, _)) => format!(
             "{budget} calls a day: the read of its key's own limit at {} gave none",
-            crate::db::utc(at)
+            crate::db::utc(*at)
         ),
         None => format!("{budget} calls a day until its key's own limit is read"),
-    })
+    };
+    // doctor runs no refresh: a read past due is what the next run replaces (Codex on 474d60c).
+    if read
+        .as_ref()
+        .is_some_and(|r| read_due(r) <= crate::db::now_ms())
+    {
+        said.push_str("; the next curation run reads it again");
+    }
+    Ok(said)
 }
 
 /// Whether `p` may take a request of `tokens` (calibrated) now. `ceiling_hit` is a ceiling a
@@ -585,12 +593,23 @@ mod tests {
             "10 calls a day until its key's own limit is read"
         );
         assert_eq!(said(Some(&db)), said(None));
-        providers_db::set_key_limit(&db, "o", Some(1000), 1, k).unwrap();
+        let read_at = crate::db::now_ms();
+        providers_db::set_key_limit(&db, "o", Some(1000), read_at, k).unwrap();
         assert_eq!(daily(&db, &p).unwrap(), 200);
         assert_eq!(
             said(Some(&db)),
             format!(
                 "200 calls a day, a fifth of the 1000 free-model requests a day its key has (read {})",
+                crate::db::utc(read_at)
+            )
+        );
+        // A read past due: doctor runs no refresh, and says the next run takes it again.
+        providers_db::set_key_limit(&db, "o", Some(1000), 1, k).unwrap();
+        assert_eq!(
+            said(Some(&db)),
+            format!(
+                "200 calls a day, a fifth of the 1000 free-model requests a day its key has (read {}); \
+                 the next curation run reads it again",
                 crate::db::utc(1)
             )
         );
@@ -607,13 +626,13 @@ mod tests {
         let own: Provider =
             toml::from_str(&format!("name = \"o\"\n{free}daily_budget = 30\n")).unwrap();
         assert_eq!(daily(&db, &own).unwrap(), 30);
-        providers_db::set_key_limit(&db, "o", None, 2, k).unwrap();
+        providers_db::set_key_limit(&db, "o", None, read_at, k).unwrap();
         assert_eq!(daily(&db, &p).unwrap(), 10);
         assert_eq!(
             said(Some(&db)),
             format!(
                 "10 calls a day: the read of its key's own limit at {} gave none",
-                crate::db::utc(2)
+                crate::db::utc(read_at)
             )
         );
         providers_db::set_key_limit(&db, "o", Some(0), 3, k).unwrap();

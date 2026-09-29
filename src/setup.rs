@@ -1964,7 +1964,10 @@ pub fn doctor(home: &Path) -> Result<()> {
             format!(
                 "; {}",
                 said.unwrap_or_else(|e| {
-                    unhealthy.push("a key's budget is unreadable");
+                    // A store that does not open is counted once, by its section above.
+                    if !matches!(calls, Some(Err(_))) {
+                        unhealthy.push("a key's budget is unreadable");
+                    }
                     format!("its budget is unreadable: {e:#}")
                 })
             )
