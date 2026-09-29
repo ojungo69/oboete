@@ -1925,13 +1925,11 @@ pub fn doctor(home: &Path) -> Result<()> {
         ),
     }
     println!("providers (chain order):");
-    // Read, not made: the worker makes providers.db, and the section above says what is wrong
-    // with one that does not open.
+    // Read, not made: the worker makes providers.db.
     let calls = home
         .join("providers.db")
         .exists()
-        .then(|| crate::providers_db::open(home).ok())
-        .flatten();
+        .then(|| crate::providers_db::open(home));
     for p in config::load(home)?.providers {
         let state = match &p {
             config::Provider::Openai {
@@ -1958,7 +1956,11 @@ pub fn doctor(home: &Path) -> Result<()> {
             }
         };
         let budget = if p.budget_from_key() {
-            let said = crate::budget::key_budget(calls.as_ref(), &p);
+            let said = match &calls {
+                Some(Err(e)) => Err(anyhow::anyhow!("providers.db does not open: {e:#}")),
+                Some(Ok(db)) => crate::budget::key_budget(Some(db), &p),
+                None => crate::budget::key_budget(None, &p),
+            };
             format!(
                 "; {}",
                 said.unwrap_or_else(|e| format!("its budget is unreadable: {e:#}"))

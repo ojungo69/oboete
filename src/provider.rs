@@ -313,7 +313,6 @@ impl<'a> Chain<'a> {
                 }
             }
             let (used, _) = providers_db::calls_in_a_day(conn, &name)?;
-            let daily = budget::daily(conn, p)?;
             let started = Instant::now();
             let forced = forced_fail.as_deref() == Some(name.as_str());
             let mut result = if forced {
@@ -325,7 +324,7 @@ impl<'a> Chain<'a> {
             if let Err(e) = &result
                 && e.status == Some(429)
                 && p.retry_429()
-                && used + 1 < daily
+                && used + 1 < budget::daily(conn, p)?
                 && let Some(wait) = e.retry_after_s
                 && wait <= MAX_WAIT_S
             {
@@ -613,17 +612,7 @@ fn refresh_key_limit(
 /// goes only to `url`, which answers itself (no redirect is followed), and nothing of the answer
 /// is kept but that number.
 fn free_limit(url: &str, key: &str) -> Option<u32> {
-    let mut agent = ureq::Agent::config_builder()
-        .timeout_global(Some(KEY_READ_TIMEOUT))
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .user_agent(concat!("oboete/", env!("CARGO_PKG_VERSION")));
-    // As `openai_compat`: a server on this machine (the tests') is never reached through a proxy.
-    if is_loopback(url) {
-        agent = agent.proxy(None);
-    }
-    let agent: ureq::Agent = agent.build().into();
-    let mut resp = agent
+    let mut resp = agent(url, KEY_READ_TIMEOUT, 0)
         .get(url)
         .header("Authorization", &format!("Bearer {key}"))
         .call()
@@ -647,6 +636,21 @@ fn free_limit(url: &str, key: &str) -> Option<u32> {
     Some(u32::try_from(limit).unwrap_or(u32::MAX))
 }
 
+/// An agent for requests to `url`: `timeout` in all, any status as an answer, at most
+/// `redirects` redirects, and a server on this machine (Ollama, the tests' servers) never reached
+/// through the environment's proxy.
+fn agent(url: &str, timeout: Duration, redirects: u32) -> ureq::Agent {
+    let mut config = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .http_status_as_error(false)
+        .max_redirects(redirects)
+        .user_agent(concat!("oboete/", env!("CARGO_PKG_VERSION")));
+    if is_loopback(url) {
+        config = config.proxy(None);
+    }
+    config.build().into()
+}
+
 #[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, as the tests pass them
 fn openai_compat(
     base_url: &str,
@@ -668,16 +672,8 @@ fn openai_compat(
         body[k] = v.clone();
     }
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let mut agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(timeout_s)))
-        .http_status_as_error(false)
-        .user_agent(concat!("oboete/", env!("CARGO_PKG_VERSION")));
-    // A provider on this machine (Ollama) is never reached through the environment's proxy.
-    if is_loopback(&url) {
-        agent = agent.proxy(None);
-    }
-    let agent: ureq::Agent = agent.build().into();
-    let mut req = agent.post(&url);
+    // ureq's own default of 10 redirects.
+    let mut req = agent(&url, Duration::from_secs(timeout_s), 10).post(&url);
     for (k, v) in headers {
         req = req.header(k, v);
     }

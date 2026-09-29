@@ -62,21 +62,28 @@ pub(crate) const KEY_READ_RETRY_MS: i64 = 3_600_000;
 /// `p`'s calls a day. An entry whose budget is its key's (`Provider::budget_from_key`) takes a
 /// fifth of the limit its key's last read gave, and its default until a read gives one (#238).
 pub fn daily(db: &Connection, p: &Provider) -> Result<u32> {
-    if p.budget_from_key()
-        && let Some((Some(limit), _, _)) = providers_db::key_limit(db, p.name())?
-    {
-        return Ok(limit / 5);
+    if !p.budget_from_key() {
+        return Ok(p.daily_budget());
     }
-    Ok(p.daily_budget())
+    Ok(daily_after(p, &providers_db::key_limit(db, p.name())?))
+}
+
+/// `daily` for an entry whose key's last read is `read`.
+fn daily_after(p: &Provider, read: &Option<(Option<u32>, i64, String)>) -> u32 {
+    match read {
+        Some((Some(limit), _, _)) => limit / 5,
+        _ => p.daily_budget(),
+    }
 }
 
 /// doctor's words for an entry whose budget is its key's (#238): the budget in use, and where it
 /// came from. `db` is None before providers.db exists.
 pub fn key_budget(db: Option<&Connection>, p: &Provider) -> Result<String> {
-    let (read, budget) = match db {
-        Some(db) => (providers_db::key_limit(db, p.name())?, daily(db, p)?),
-        None => (None, p.daily_budget()),
+    let read = match db {
+        Some(db) => providers_db::key_limit(db, p.name())?,
+        None => None,
     };
+    let budget = daily_after(p, &read);
     Ok(match read {
         Some((Some(limit), at, _)) => format!(
             "{budget} calls a day, a fifth of the {limit} free-model requests a day its key has (read {})",
