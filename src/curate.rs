@@ -1974,9 +1974,8 @@ fn ended_on_a_proposal(raw: &Raw, k: &Connection, w: &Window) -> Result<Vec<Stri
         }
         seen.push(&l.key);
         let (agent, session) = l.key.split_once('\u{0}').unwrap_or((&l.key, ""));
-        let before = w.from_seq + i64::from(w.from_offset.is_some());
         let mut proposals = Vec::new();
-        for op in raw.previous_window_ops(agent, session, before)? {
+        for op in raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset))? {
             let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(op.body) else {
                 continue;
             };
@@ -2172,9 +2171,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
     let mut uids: Carried = Vec::new();
     for (key, repos) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
-        // A window that starts inside an event: its first part was in the previous window.
-        let before = w.from_seq + i64::from(w.from_offset.is_some());
-        let previous = raw.previous_window_ops(agent, session, before)?;
+        let previous = raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset))?;
         let mut lines = Vec::new();
         if let Some(e) = raw.first_prompt(agent, session)?
             && let Some(goal) = long_text(&e)

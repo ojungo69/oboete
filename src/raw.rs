@@ -864,14 +864,23 @@ impl Raw {
         })
     }
 
-    /// The ops appended with the last window op that covered this device's latest event of
-    /// `agent`'s `session` before seq `before` that has text (a resumed session's `start` is
-    /// covered on its own, by a window that holds none of its lines): the session's previous
-    /// window, whose proposals its next window carries (milestone 3 Task 7, D12). A recuration of
-    /// it is the last, so what the recuration left proposed is carried (#240). Per session, since
-    /// sessions interleave: another session's window may come between.
-    pub fn previous_window_ops(&self, agent: &str, session: &str, before: i64) -> Result<Vec<Op>> {
+    /// The ops of the session's previous window, whose proposals its next window carries
+    /// (milestone 3 Task 7, D12): the last window the worker cut that covered this device's latest
+    /// event of `agent`'s `session` before the window starting at `from` (seq and offset) that has
+    /// text (a resumed session's `start` is covered on its own, by a window that holds none of its
+    /// lines), and every recuration of a part of it (#240), newest first. A window that ends past
+    /// `from` is not a previous one: it is the one starting there, curated before and now again.
+    /// Per session, since sessions interleave: another session's window may come between.
+    pub fn previous_window_ops(
+        &self,
+        agent: &str,
+        session: &str,
+        from: (i64, Option<i64>),
+    ) -> Result<Vec<Op>> {
         use rusqlite::OptionalExtension;
+        // A window that starts inside an event: its first part was in the previous window.
+        let before = from.0 + i64::from(from.1.is_some());
+        let start = (from.0, from.1.unwrap_or(0));
         // Down the primary key from `before`: the session's latest event is usually close.
         let seq: Option<i64> = self
             .conn
@@ -886,25 +895,47 @@ impl Raw {
         let Some(seq) = seq else {
             return Ok(Vec::new());
         };
-        let batch: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT batch FROM ops WHERE device = ?1 AND type = 'window'
-                   AND json_extract(body, '$.from_seq') <= ?2
-                   AND json_extract(body, '$.to_seq') >= ?2
-                 ORDER BY op_seq DESC LIMIT 1",
-                params![self.device, seq],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let Some(batch) = batch else {
+        // Down from the newest: the recurations of a part of the worker's window come after it,
+        // and the windows before it (another part of a split event) end where it starts.
+        let mut stmt = self.conn.prepare(
+            "SELECT batch, COALESCE(json_extract(body, '$.recurate'), 0),
+                    json_extract(body, '$.from_seq'), COALESCE(json_extract(body, '$.from_offset'), 0),
+                    json_extract(body, '$.to_seq'), COALESCE(json_extract(body, '$.to_offset'), ?3)
+             FROM ops WHERE device = ?1 AND type = 'window'
+               AND json_extract(body, '$.from_seq') <= ?2
+               AND json_extract(body, '$.to_seq') >= ?2
+             ORDER BY op_seq DESC",
+        )?;
+        let mut rows = stmt.query(params![self.device, seq, i64::MAX])?;
+        let (mut windows, mut cut) = (Vec::new(), None);
+        while let Some(r) = rows.next()? {
+            let range: ((i64, i64), (i64, i64)) = ((r.get(2)?, r.get(3)?), (r.get(4)?, r.get(5)?));
+            if range.1 > start {
+                continue;
+            }
+            windows.push((r.get::<_, i64>(0)?, range));
+            if !r.get::<_, bool>(1)? {
+                cut = Some(range);
+                break;
+            }
+        }
+        // With none the worker cut left (a recuration cut the records another way), the
+        // recuration that ends last.
+        let Some((from, to)) = cut.or_else(|| windows.iter().map(|w| w.1).max_by_key(|r| r.1))
+        else {
             return Ok(Vec::new());
         };
-        Ok(self
-            .ops_after(&self.device, batch - 1, MAX_BATCH_OPS)?
-            .into_iter()
-            .take_while(|o| o.batch == batch)
-            .collect())
+        let mut ops = Vec::new();
+        for (batch, range) in windows {
+            if range.0 < to && from < range.1 {
+                ops.extend(
+                    self.ops_after(&self.device, batch - 1, MAX_BATCH_OPS)?
+                        .into_iter()
+                        .take_while(|o| o.batch == batch),
+                );
+            }
+        }
+        Ok(ops)
     }
 
     /// D1: this device's ops after `op_seq` as backup lines, from `max_bytes` of lines on only
@@ -1614,5 +1645,46 @@ mod tests {
         raw.append_ops(&[(OpKind::Claim, serde_json::json!({"text": "c"}))])
             .unwrap();
         assert_eq!(raw.curation_checkpoint(&dev).unwrap(), (7, Some(120)));
+    }
+
+    /// A session's previous window (#240) is the one the worker cut before the window at `from`,
+    /// with every recuration of a part of it, newest first; not a recuration of another part of
+    /// a split event, nor the window at `from` curated before; a recuration that cut the records
+    /// its own way stands in for it.
+    #[test]
+    fn the_previous_window_is_the_workers_with_the_recurations_of_its_parts() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        for i in 1..=4 {
+            raw.append(&test_event(&format!("line {i}"))).unwrap();
+        }
+        let window = |raw: &mut Raw, span: [Option<i64>; 4], recurate: bool, text: &str| {
+            let op = serde_json::json!({"from_seq": span[0], "from_offset": span[1],
+                "to_seq": span[2], "to_offset": span[3], "recurate": recurate});
+            let claim = serde_json::json!({"text": text});
+            raw.append_ops(&[(OpKind::Window, op), (OpKind::Claim, claim)])
+                .unwrap();
+        };
+        let previous = |raw: &Raw, from: (i64, Option<i64>)| -> Vec<String> {
+            let ops = raw.previous_window_ops("claude", "s", from).unwrap();
+            ops.into_iter()
+                .filter(|o| o.kind == OpKind::Claim)
+                .map(|o| o.body["text"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        // Event 2 is split at offset 50; its first part is curated again after the worker went on.
+        window(&mut raw, [Some(1), None, Some(2), Some(50)], false, "w1");
+        window(&mut raw, [Some(2), Some(50), Some(2), None], false, "w2");
+        window(&mut raw, [Some(3), None, Some(4), None], false, "w3");
+        window(&mut raw, [Some(1), None, Some(2), Some(50)], true, "r1");
+        assert_eq!(previous(&raw, (3, None)), ["w2"]);
+        // The window at event 2's offset 50 curated again: its previous window is the first part.
+        assert_eq!(previous(&raw, (2, Some(50))), ["r1", "w1"]);
+        // A part of the worker's window curated again: the rest of the window is still its own.
+        window(&mut raw, [Some(4), None, Some(4), None], true, "r4");
+        assert_eq!(previous(&raw, (5, None)), ["r4", "w3"]);
+        // Event 3 curated again on its own, and the window at event 4 after it.
+        window(&mut raw, [Some(3), None, Some(3), None], true, "r3");
+        assert_eq!(previous(&raw, (4, None)), ["r3"]);
     }
 }
