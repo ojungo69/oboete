@@ -845,13 +845,19 @@ pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims:
     };
     // As the line shows it: the quote itself, or else a stretch of the line that holds the quote's
     // characters but for whitespace (a line break written as a space, a space added), the first
-    // that is anchored: the line also shows a tool's input, which is not the event's text.
+    // that is anchored: the line also shows a tool's input, which is not the event's text. A
+    // stretch is looked for once: a repetitive line has many that read the same.
+    let mut tried = std::collections::HashSet::new();
     let (at, quote) = line
         .text
         .contains(quote)
         .then(|| anchor(quote))
         .flatten()
-        .or_else(|| spaced(&line.text, quote).find_map(anchor))?;
+        .or_else(|| {
+            spaced(&line.text, quote)
+                .filter(|q| tried.insert(*q))
+                .find_map(anchor)
+        })?;
     let as_i64 = |n: usize| i64::try_from(n).ok();
     Some(crate::claims::Evidence {
         device: window.device.clone(),
