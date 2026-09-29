@@ -263,14 +263,16 @@ def item_records(raw, where, item):
     seq = where[item]['seq']
     if where[item]['who'] != 'assistant_accepted':
         return {seq}
-    kind, session = raw.execute('SELECT kind, session FROM records WHERE seq = ?', (seq,)).fetchone()
+    kind, device, agent, session = raw.execute(
+        'SELECT kind, device, agent, session FROM records WHERE seq = ?', (seq,)).fetchone()
+    same = 'device = ? AND agent = ? AND session = ?'
     if kind == 'prompt':
-        other = "SELECT max(seq) FROM records WHERE session = ? AND kind = 'reply' AND seq < ?"
+        other = f"SELECT max(seq) FROM records WHERE {same} AND kind = 'reply' AND seq < ?"
     elif kind == 'reply':
-        other = "SELECT min(seq) FROM records WHERE session = ? AND kind = 'prompt' AND seq > ?"
+        other = f"SELECT min(seq) FROM records WHERE {same} AND kind = 'prompt' AND seq > ?"
     else:
         return {seq}
-    (other,) = raw.execute(other, (session, seq)).fetchone()
+    (other,) = raw.execute(other, (device, agent, session, seq)).fetchone()
     return {seq, other} - {None}
 
 
