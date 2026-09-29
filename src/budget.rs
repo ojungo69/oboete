@@ -111,6 +111,9 @@ pub fn admit(
     let now = crate::db::now_ms();
     // A rolling day, as `limits.daily_tokens` below: until the oldest call counted leaves it.
     let (used, oldest) = providers_db::calls_in_a_day(db, name)?;
+    // ponytail: a key's budget (#238) counts the entry's calls, not its key's. Two entries on one
+    // OpenRouter key take a fifth each, and a replaced key's calls count for a day. Record the
+    // key_id with each call and count by it if an entry ever shares its key; the default has one.
     let budget = daily(db, p)?;
     if used >= budget {
         let mut until = providers_db::out_of_the_day(oldest.unwrap_or(now));
