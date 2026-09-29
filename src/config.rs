@@ -170,8 +170,9 @@ pub enum Provider {
     /// OpenAI-compatible chat completions with `response_format: json_schema`.
     Openai {
         name: String,
-        /// Off (`[chain] off`): listed by doctor, never called.
-        #[serde(default = "default_true")]
+        /// Off (`[chain] off`): listed by doctor, never called. Not a `[[providers]]` key, so
+        /// `[chain] off` alone turns an entry off and on (cubic on #94).
+        #[serde(skip_deserializing, default = "default_true")]
         on: bool,
         base_url: String,
         /// File whose second line is the API key (owner convention: ~/X_KEY.md). None = no auth.
@@ -206,7 +207,7 @@ pub enum Provider {
     /// A subscription CLI run headless (`agy`, `claude`, `grok`, `codex`).
     Cli {
         name: String,
-        #[serde(default = "default_true")]
+        #[serde(skip_deserializing, default = "default_true")]
         on: bool,
         /// Which CLI; decides the argument shape.
         cli: String,
@@ -729,17 +730,6 @@ fn overlay(cfg: &mut Config) {
                 limits,
                 ..
             } => {
-                // OpenRouter bills the owner's credits for a model that is not `:free`, and an
-                // entry without prices is outside the monthly USD cap (#94, revision 1).
-                if let Some(m) = set
-                    && openrouter_free(base_url, model)
-                    && !is_free(m)
-                    && !limits.is_paid()
-                {
-                    warnings.push(format!(
-                        "[chain] model puts \"{m}\" on \"{name}\", an OpenRouter :free entry without prices: OpenRouter may bill it, and the monthly USD cap does not count it"
-                    ));
-                }
                 *on &= !chain.off.contains(&name);
                 if let Some(&n) = chain.daily_budget.get(&name) {
                     *daily_budget = Some(n);
@@ -747,8 +737,21 @@ fn overlay(cfg: &mut Config) {
                 if let Some(&s) = chain.timeout_s.get(&name) {
                     *timeout_s = s;
                 }
+                // Only a model whose price the entry knows: an entry's prices are its model's,
+                // and OpenRouter bills a model that is not `:free` outside the monthly USD cap
+                // (#94, revision 1; cubic on #94).
                 if let Some(m) = set {
-                    model.clone_from(m);
+                    if limits.is_paid() {
+                        warnings.push(format!(
+                            "[chain] model: \"{name}\" keeps its model, as its prices are its model's: set another model with its prices in [[providers]]"
+                        ));
+                    } else if openrouter_free(base_url, model) && !is_free(m) {
+                        warnings.push(format!(
+                            "[chain] model: \"{m}\" is not a :free model, and OpenRouter may bill it outside the monthly USD cap, so \"{name}\" keeps its model"
+                        ));
+                    } else {
+                        model.clone_from(m);
+                    }
                 }
             }
             Provider::Cli {
@@ -814,7 +817,7 @@ pub fn doctor_line(p: &Provider, chain: &ChainOverlay) -> String {
         });
     }
     parts.push(format!("timeout {timeout_s} s"));
-    if let Some(m) = model.filter(|_| chain.model.contains_key(p.name())) {
+    if let Some(m) = model.filter(|m| chain.model.get(p.name()).is_some_and(|c| c == m)) {
         parts.push(format!("model {m} (set in [chain])"));
     }
     format!("    {}", parts.join(", "))
@@ -1454,30 +1457,53 @@ model = { gone = "m" }
         assert!(off(&names, false).warnings.is_empty());
     }
 
-    /// Revision 1's cost rule for hand edits: a model that is not `:free` on an OpenRouter `:free`
-    /// entry without prices is billed outside the monthly USD cap.
+    /// `[chain] model` sets no model whose price the entry does not know: a model that is not
+    /// `:free` on an OpenRouter `:free` entry (OpenRouter bills it, outside the monthly USD cap),
+    /// or any model on an entry with prices (they are its model's). Each is a warning (revision 1;
+    /// cubic on #94).
     #[test]
-    fn a_paid_model_on_a_free_openrouter_entry_is_a_warning() {
-        let warned = |text: &str| {
-            load_text(text)
-                .warnings
-                .iter()
-                .any(|w| w.contains("the monthly USD cap does not count it"))
+    fn chain_sets_no_model_that_changes_the_price() {
+        let set = |text: &str, name: &str| {
+            let cfg = load_text(text);
+            (model(find(&cfg, name)).map(str::to_owned), cfg.warnings)
         };
-        assert!(warned(
-            "[chain]\nmodel = { openrouter = \"openai/gpt-6\" }\n"
-        ));
-        assert!(!warned(
-            "[chain]\nmodel = { openrouter = \"qwen/qwen3.8-27b:FREE\" }\n"
-        ));
-        assert!(!warned("[chain]\nmodel = { groq = \"openai/gpt-6\" }\n"));
+        let (m, w) = set(
+            "[chain]\nmodel = { openrouter = \"openai/gpt-6\" }\n",
+            "openrouter",
+        );
+        assert_ne!(m.as_deref(), Some("openai/gpt-6"));
+        assert!(w.iter().any(|w| w.contains("not a :free model")), "{w:?}");
+        let (m, w) = set(
+            "[chain]\nmodel = { openrouter = \"qwen/qwen3.8-27b:FREE\" }\n",
+            "openrouter",
+        );
+        assert_eq!(m.as_deref(), Some("qwen/qwen3.8-27b:FREE"));
+        assert!(w.is_empty(), "{w:?}");
+        let (m, w) = set("[chain]\nmodel = { groq = \"openai/gpt-6\" }\n", "groq");
+        assert_eq!(m.as_deref(), Some("openai/gpt-6"));
+        assert!(w.is_empty(), "{w:?}");
         let entry = "[[providers]]\nkind = \"openai\"\nname = \"o\"\nbase_url = \" https://OpenRouter.ai/api/v1/ \"\nmodel = \"m:free\"\n";
         let paid = "[chain]\nmodel = { o = \"paid/m\" }\n";
-        assert!(warned(&format!("{paid}{entry}")));
-        // With prices, the cap counts its calls.
-        assert!(!warned(&format!(
+        let (m, w) = set(&format!("{paid}{entry}"), "o");
+        assert_eq!(m.as_deref(), Some("m:free"));
+        assert!(w.iter().any(|w| w.contains("not a :free model")), "{w:?}");
+        let (m, w) = set(
+            &format!("{paid}{entry}limits = {{ usd_per_mtok_in = 1.0 }}\n"),
+            "o",
+        );
+        assert_eq!(m.as_deref(), Some("m:free"));
+        assert!(
+            w.iter().any(|w| w.contains("its prices are its model's")),
+            "{w:?}"
+        );
+        // Doctor names a model `[chain]` set, not one it asked for and did not set.
+        let cfg = load_text(&format!(
             "{paid}{entry}limits = {{ usd_per_mtok_in = 1.0 }}\n"
-        )));
+        ));
+        assert!(!doctor_line(find(&cfg, "o"), &cfg.chain).contains("set in [chain]"));
+        // `on` is not a `[[providers]]` key: `[chain] off` alone turns an entry off.
+        let cfg = load_text(&format!("{entry}on = false\n"));
+        assert!(find(&cfg, "o").on());
     }
 
     #[test]
