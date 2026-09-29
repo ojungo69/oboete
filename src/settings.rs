@@ -344,8 +344,11 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
         let p = (base.providers.iter())
             .find(|p| p.name() == e.name)
             .ok_or_else(|| refused(422, "names", "chain"))?;
+        // A value the entry or the file has already is the user's, in range or not: only a new
+        // one is checked, so it does not block the rest of a save (cubic on #94).
         if let Some(n) = e.daily_budget {
-            if !BUDGET.contains(&n) {
+            let had = n == p.daily_budget() || now.chain.daily_budget.get(&e.name) == Some(&n);
+            if !had && !BUDGET.contains(&n) {
                 return Err(refused(422, "range", field("daily_budget")));
             }
             // A budget from the key follows the key: any number typed is the user's.
@@ -362,7 +365,8 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
             } => (*timeout_s, model.as_deref()),
         };
         if let Some(s) = e.timeout_s {
-            if !TIMEOUT_S.contains(&s) {
+            let had = s == own_timeout || now.chain.timeout_s.get(&e.name) == Some(&s);
+            if !had && !TIMEOUT_S.contains(&s) {
                 return Err(refused(422, "range", field("timeout_s")));
             }
             if s != own_timeout {
@@ -373,7 +377,9 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
             && Some(m.as_str()) != own_model
         {
             let allowed = |c: char| c.is_ascii_alphanumeric() || "._:/@+-".contains(c);
-            if m.is_empty() || m.chars().count() > MODEL_CHARS || !m.chars().all(allowed) {
+            let had = now.chain.model.get(&e.name) == Some(m);
+            if !had && (m.is_empty() || m.chars().count() > MODEL_CHARS || !m.chars().all(allowed))
+            {
                 return Err(refused(422, "model", field("model")));
             }
             if !p.model_rule().allows(m) {
@@ -382,6 +388,25 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
             chain.model.insert(e.name.clone(), m.clone());
         }
     }
+    // A name `[chain]` has and no entry has (doctor warns of it) is not the page's: it stays as
+    // it is, and does not make a save rewrite its key (cubic on #94).
+    fn keep<V: Clone>(
+        to: &mut std::collections::BTreeMap<String, V>,
+        now: &std::collections::BTreeMap<String, V>,
+        unknown: &dyn Fn(&str) -> bool,
+    ) {
+        to.extend((now.iter().filter(|(n, _)| unknown(n))).map(|(n, v)| (n.clone(), v.clone())));
+    }
+    let unknown = |n: &str| !own.contains(&n);
+    chain
+        .order
+        .extend(now.chain.order.iter().filter(|n| unknown(n)).cloned());
+    chain
+        .off
+        .extend(now.chain.off.iter().filter(|n| unknown(n)).cloned());
+    keep(&mut chain.daily_budget, &now.chain.daily_budget, &unknown);
+    keep(&mut chain.timeout_s, &now.chain.timeout_s, &unknown);
+    keep(&mut chain.model, &now.chain.model, &unknown);
     Ok(chain)
 }
 
@@ -771,6 +796,45 @@ mod tests {
             assert_eq!(saved["inject"]["session_start"], false, "{text}");
             assert!(file(&home).unwrap().starts_with(text), "{text}");
         }
+    }
+
+    /// What is not the page's stays as the file has it: a name no entry has, and a value out of
+    /// the page's range that the user wrote by hand (cubic on #94).
+    #[test]
+    fn a_save_keeps_what_is_not_the_pages() {
+        let text = "[chain]\noff = [\"gone\"]\ndaily_budget = { old = 20, groq = 200000 }\n\
+                    timeout_s = { groq = 1200 }\nmodel = { old = \"m x\" }\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        assert_eq!(at(&shown, "groq")["timeout_s"], 1200);
+        let saved = save_to(
+            &home,
+            &posted(&shown, |v| v["inject"]["session_start"] = json!(false)),
+        )
+        .unwrap();
+        assert_eq!(saved["inject"]["session_start"], false);
+        assert!(file(&home).unwrap().starts_with(text), "{:?}", file(&home));
+        let shown = show(home.path());
+        save_to(
+            &home,
+            &posted(&shown, |v| {
+                for e in v["chain"].as_array_mut().unwrap() {
+                    match e["name"].as_str().unwrap() {
+                        "groq-20b" => e["daily_budget"] = json!(50),
+                        "nim" => e["on"] = json!(false),
+                        _ => {}
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let chain = &config::load(home.path()).unwrap().chain;
+        assert_eq!(chain.off, ["nim", "gone"]);
+        assert_eq!(chain.daily_budget["old"], 20);
+        assert_eq!(chain.daily_budget["groq"], 200_000);
+        assert_eq!(chain.daily_budget["groq-20b"], 50);
+        assert_eq!(chain.timeout_s["groq"], 1200);
+        assert_eq!(chain.model["old"], "m x");
     }
 
     /// `[chain]` changes both entries of one name, so the page's rows of that name must agree.

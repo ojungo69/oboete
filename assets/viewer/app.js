@@ -585,10 +585,11 @@ function saveBody() {
   if (Number.isNaN(chars)) return { field: 'inject.session_start_chars' };
   const chain = [];
   for (const r of form.chain) {
-    const optional = (v, min, max) => (v.trim() === '' ? null : whole(v, min, max));
-    const daily = optional(r.edit.daily_budget, 1, 100000);
+    // Empty follows the curator's own value; a value config.toml has already stays as it is.
+    const optional = (v, had, min, max) => (v.trim() === '' ? null : v.trim() === String(had) ? had : whole(v, min, max));
+    const daily = optional(r.edit.daily_budget, r.daily_budget, 1, 100000);
     if (Number.isNaN(daily)) return { field: `chain.${r.name}.daily_budget` };
-    const timeout = optional(r.edit.timeout_s, 5, 900);
+    const timeout = optional(r.edit.timeout_s, r.timeout_s, 5, 900);
     if (Number.isNaN(timeout)) return { field: `chain.${r.name}.timeout_s` };
     chain.push({ name: r.name, on: r.edit.on, daily_budget: daily, timeout_s: timeout, model: r.edit.model.trim() || null });
   }
@@ -617,7 +618,11 @@ async function saveSettings(button) {
     setStatus(t('range'), true);
     return;
   }
+  const mine = form;
+  const fields = button.form;
   button.disabled = true;
+  // What is typed while the save is on its way would not survive its answer.
+  fields.inert = true;
   try {
     // 'same-origin': under the document's no-referrer policy a same-origin POST would carry
     // `Origin: null`, which the viewer refuses.
@@ -630,8 +635,8 @@ async function saveSettings(button) {
     });
     const answer = (res.headers.get('content-type') || '').startsWith('application/json') ? await res.json() : {};
     const current = res.status === 409 ? await api('settings') : null;
-    // Moved to another tab while saving: that tab keeps its view.
-    if (view !== 'settings') return;
+    // Moved to another tab, or the values were loaded again, while saving: what is shown stays.
+    if (view !== 'settings' || form !== mine) return;
     if (res.ok || current) {
       form = formOf(current || answer);
       drawSettings();
@@ -646,6 +651,7 @@ async function saveSettings(button) {
     setStatus(e.message, true);
   } finally {
     button.disabled = false;
+    fields.inert = false;
   }
 }
 
