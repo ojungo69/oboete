@@ -66,6 +66,14 @@ CREATE TABLE IF NOT EXISTS pending(
   since INTEGER NOT NULL,                 -- when the window first waited
   prompt TEXT NOT NULL                    -- the SHA-256 of the request the attempts were on, with who was asked
 );
+-- What an entry's own key may request a day, where its budget is a fifth of that (#238): the
+-- `:free` model requests OpenRouter's GET /api/v1/key gives. NULL when the read failed or its
+-- answer had no limit.
+CREATE TABLE IF NOT EXISTS key_limits(
+  provider TEXT PRIMARY KEY,
+  free_daily INTEGER,
+  read_at INTEGER NOT NULL                -- unix ms of the last read, failed or not
+);
 -- A session's digest that every provider failed (milestone 3 Task 9), as `pending` is for a
 -- window: it counts only for the same request, and after D11's three attempts it is given up
 -- until the request changes (the session's newer records, its claims, who is asked).
@@ -279,6 +287,32 @@ pub fn calls_in_a_day(conn: &Connection, provider: &str) -> Result<(u32, Option<
         params![provider, now_ms() - DAY_MS],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
+}
+
+/// The last read of `provider`'s key limit (#238): the limit it gave, None when it failed, and
+/// when it was.
+pub fn key_limit(conn: &Connection, provider: &str) -> Result<Option<(Option<u32>, i64)>> {
+    Ok(conn
+        .query_row(
+            "SELECT free_daily, read_at FROM key_limits WHERE provider=?1",
+            [provider],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+pub fn set_key_limit(
+    conn: &Connection,
+    provider: &str,
+    free_daily: Option<u32>,
+    at: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO key_limits(provider, free_daily, read_at) VALUES(?1,?2,?3)
+         ON CONFLICT(provider) DO UPDATE SET free_daily=excluded.free_daily, read_at=excluded.read_at",
+        params![provider, free_daily, at],
+    )?;
+    Ok(())
 }
 
 /// The newest `n` calls, one line each, for doctor.

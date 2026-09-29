@@ -38,6 +38,10 @@ const BREAKER_AFTER: u32 = 3;
 const COOLDOWN_BREAKER: Duration = Duration::from_secs(30 * 60);
 /// Longest rest a subscription's own reset can set: a weekly window resets within 7 days.
 const MAX_SUBSCRIPTION_REST: Duration = Duration::from_secs(8 * 24 * 3600);
+/// A read of a key's own limit (#238) holds a day; one that failed is tried again after an hour.
+const KEY_READ_HOLDS_MS: i64 = providers_db::DAY_MS;
+const KEY_READ_RETRY_MS: i64 = 3_600_000;
+const KEY_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// A subscription at its line that names no reset rests this long, and is then asked again.
 const REST_WITHOUT_RESET: Duration = Duration::from_secs(3600);
 /// Longest cooldown of a 429 that names no reset, reached by doubling from `COOLDOWN_429`.
@@ -274,6 +278,14 @@ impl<'a> Chain<'a> {
                 skip(why, Skip::Wait(state.down_until));
                 continue;
             }
+            if let Provider::Openai {
+                key_file: Some(key_file),
+                ..
+            } = p
+            {
+                let url = || format!("{}/key", config::OPENROUTER);
+                refresh_key_limit(conn, p, db::now_ms(), || free_limit(&url(), key_file))?;
+            }
             let tokens = f64::from(est) * budget::factor(conn, &name)?;
             let admit = budget::admit(conn, p, tokens, self.paid_usd_per_month, &ceiling_hit)?;
             if let Some(refusal) = admit {
@@ -301,6 +313,7 @@ impl<'a> Chain<'a> {
                 }
             }
             let (used, _) = providers_db::calls_in_a_day(conn, &name)?;
+            let daily = budget::daily(conn, p)?;
             let started = Instant::now();
             let forced = forced_fail.as_deref() == Some(name.as_str());
             let mut result = if forced {
@@ -312,7 +325,7 @@ impl<'a> Chain<'a> {
             if let Err(e) = &result
                 && e.status == Some(429)
                 && p.retry_429()
-                && used + 1 < p.daily_budget()
+                && used + 1 < daily
                 && let Some(wait) = e.retry_after_s
                 && wait <= MAX_WAIT_S
             {
@@ -559,6 +572,67 @@ fn unfence(content: &str) -> &str {
         .or_else(|| t.strip_prefix("```"))
         .and_then(|rest| rest.strip_suffix("```"))
         .map_or(t, str::trim)
+}
+
+/// Reads `p`'s key limit again when its last read no longer holds, for an entry whose budget is
+/// its key's (#238). `read` is the read itself.
+fn refresh_key_limit(
+    conn: &Connection,
+    p: &Provider,
+    now: i64,
+    read: impl FnOnce() -> Option<u32>,
+) -> Result<()> {
+    if !p.budget_from_key() {
+        return Ok(());
+    }
+    if let Some((limit, at)) = providers_db::key_limit(conn, p.name())? {
+        let holds = if limit.is_some() {
+            KEY_READ_HOLDS_MS
+        } else {
+            KEY_READ_RETRY_MS
+        };
+        if now - at < holds {
+            return Ok(());
+        }
+    }
+    providers_db::set_key_limit(conn, p.name(), read(), now)
+}
+
+/// The `:free` model requests a day that `key_file`'s key may make, as OpenRouter's GET
+/// /api/v1/key at `url` answers (`data.free_model_daily_requests.limit`, 2026-09-30); None on any
+/// failure. The key goes only to `url`, which answers itself (no redirect is followed), and
+/// nothing of the answer is kept but that number.
+fn free_limit(url: &str, key_file: &Path) -> Option<u32> {
+    let key = config::read_key(key_file).ok()?;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(KEY_READ_TIMEOUT))
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .user_agent(concat!("oboete/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into();
+    let mut resp = agent
+        .get(url)
+        .header("Authorization", &format!("Bearer {key}"))
+        .call()
+        .ok()?;
+    if resp.status() != 200 {
+        return None;
+    }
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(resp.body_mut().as_reader(), MAX_RESPONSE_BYTES + 1),
+        &mut raw,
+    )
+    .ok()?;
+    if raw.len() as u64 > MAX_RESPONSE_BYTES {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(&raw).ok()?;
+    let limit = v["data"]["free_model_daily_requests"]["limit"]
+        .as_u64()
+        .filter(|&n| n > 0)?;
+    Some(u32::try_from(limit).unwrap_or(u32::MAX))
 }
 
 #[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, as the tests pass them
@@ -2495,6 +2569,79 @@ mod tests {
         assert_eq!(usage_cli("grok", "{}"), Usage::default());
         let huge = json!({"usage": {"input_tokens": i64::MAX, "cache_read_input_tokens": 1}});
         assert_eq!(usage_cli("claude", &huge.to_string()).prompt, None);
+    }
+
+    /// #238: a key's limit is read again only when its last read no longer holds, a day after it
+    /// gave one and an hour after it failed; an entry with the owner's own budget never reads it.
+    #[test]
+    fn a_keys_limit_is_read_again_only_when_its_last_read_no_longer_holds() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let free =
+            "kind = \"openai\"\nbase_url = \"https://openrouter.ai/api/v1\"\nmodel = \"m:free\"\n";
+        let p: Provider = toml::from_str(&format!("name = \"o\"\n{free}")).unwrap();
+        let unread = || -> Option<u32> { panic!("read while the last read holds") };
+        let last = || providers_db::key_limit(&conn, "o").unwrap();
+        let t0 = 1_000_000_000_000;
+        refresh_key_limit(&conn, &p, t0, || Some(1000)).unwrap();
+        refresh_key_limit(&conn, &p, t0 + KEY_READ_HOLDS_MS - 1, unread).unwrap();
+        assert_eq!(last(), Some((Some(1000), t0)));
+        let t1 = t0 + KEY_READ_HOLDS_MS;
+        refresh_key_limit(&conn, &p, t1, || None).unwrap();
+        refresh_key_limit(&conn, &p, t1 + KEY_READ_RETRY_MS - 1, unread).unwrap();
+        assert_eq!(last(), Some((None, t1)));
+        let t2 = t1 + KEY_READ_RETRY_MS;
+        refresh_key_limit(&conn, &p, t2, || Some(50)).unwrap();
+        assert_eq!(last(), Some((Some(50), t2)));
+        let own: Provider =
+            toml::from_str(&format!("name = \"own\"\n{free}daily_budget = 30\n")).unwrap();
+        refresh_key_limit(&conn, &own, t2, unread).unwrap();
+        assert_eq!(providers_db::key_limit(&conn, "own").unwrap(), None);
+    }
+
+    /// #238: the limit is `data.free_model_daily_requests.limit` of the answer to a GET sent with
+    /// the key; any other answer, and a key file without a key, give none.
+    #[test]
+    fn a_keys_free_limit_is_read_from_its_answer() {
+        let home = tempfile::tempdir().unwrap();
+        let key_file = home.path().join("KEY.md");
+        std::fs::write(&key_file, "# a test key\ntest-key-238\n").unwrap();
+        let answer = json!({"data": {"free_model_daily_requests": {"used": 3, "limit": 1000, "remaining": 997}}});
+        let (url, sent) = serve("200 OK", answer.to_string().into_bytes(), "");
+        assert_eq!(free_limit(&format!("{url}/key"), &key_file), Some(1000));
+        let sent = sent.recv().unwrap();
+        assert!(sent.starts_with("GET /key "), "{sent}");
+        assert!(
+            sent.to_lowercase()
+                .contains("authorization: bearer test-key-238\r\n"),
+            "{sent}"
+        );
+        for (status, body) in [
+            ("200 OK", json!({"data": {"limit": null}})),
+            (
+                "200 OK",
+                json!({"data": {"free_model_daily_requests": {"limit": 0}}}),
+            ),
+            (
+                "200 OK",
+                json!({"data": {"free_model_daily_requests": {"limit": "1000"}}}),
+            ),
+            (
+                "401 Unauthorized",
+                json!({"data": {"free_model_daily_requests": {"limit": 1000}}}),
+            ),
+        ] {
+            let (url, _sent) = serve(status, body.to_string().into_bytes(), "");
+            assert_eq!(free_limit(&url, &key_file), None, "{status} {body}");
+        }
+        // A redirect is not followed, even to an answer with a limit.
+        let (there, _sent) = serve("200 OK", answer.to_string().into_bytes(), "");
+        let to: &'static str = Box::leak(format!("Location: {there}/key\r\n").into_boxed_str());
+        let (url, _sent) = serve("302 Found", Vec::new(), to);
+        assert_eq!(free_limit(&url, &key_file), None);
+        // Nothing listens there: without a key, nothing is sent.
+        std::fs::write(&key_file, "# no key on line 2\n").unwrap();
+        assert_eq!(free_limit("http://127.0.0.1:9/key", &key_file), None);
     }
 
     /// D10, D11: each provider gone past says whether time, a budget reset or the owner will let

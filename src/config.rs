@@ -265,6 +265,13 @@ impl Provider {
             Provider::Openai { name, .. } | Provider::Cli { name, .. } => name,
         }
     }
+    /// Whether its calls a day are a fifth of what its own key may request (#238): an entry of
+    /// OpenRouter's `:free` models with no `daily_budget` of the owner's. OpenRouter gives each
+    /// account its own daily limit on them, by the credits it has bought.
+    pub fn budget_from_key(&self) -> bool {
+        matches!(self, Provider::Openai { base_url, model, daily_budget: None, .. }
+            if base_url.trim_end_matches('/') == OPENROUTER && model.ends_with(":free"))
+    }
     pub fn daily_budget(&self) -> u32 {
         match self {
             Provider::Openai {
@@ -273,6 +280,8 @@ impl Provider {
                 ..
             } => daily_budget.unwrap_or(if *subscription {
                 no_daily_cap()
+            } else if self.budget_from_key() {
+                OPENROUTER_FREE_BUDGET
             } else {
                 default_budget()
             }),
@@ -314,6 +323,12 @@ impl Provider {
 fn default_budget() -> u32 {
     300
 }
+/// OpenRouter's API.
+pub const OPENROUTER: &str = "https://openrouter.ai/api/v1";
+/// A fifth of the 50 requests a day that OpenRouter gives all `:free` models of an account that
+/// bought less than 10 credits (1,000 after that; openrouter.ai/docs/api/reference/limits,
+/// 2026-09-29): the cost line (spec 8.2) for any account, until its key's own limit is read.
+const OPENROUTER_FREE_BUDGET: u32 = 10;
 /// A `daily_budget` no day reaches. A subscription stops at its own limits instead: a cooldown
 /// until their reset (spec 3.1, Claude decision C1).
 fn no_daily_cap() -> u32 {
@@ -463,6 +478,20 @@ fn default_providers() -> Vec<Provider> {
     if let Provider::Openai { timeout_s, .. } = &mut nim {
         *timeout_s = 160;
     }
+    let mut openrouter = openai(
+        "openrouter",
+        OPENROUTER,
+        "OPENROUTER_API_KEY.md",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        OPENROUTER_FREE_BUDGET,
+        false,
+        serde_json::json!({"models": ["qwen/qwen3.8-27b:free"], "provider": {"require_parameters": true}}),
+    );
+    // Unset: its calls a day are a fifth of what its key may request, and a fifth of the least
+    // OpenRouter gives any account until that is read (#238).
+    if let Provider::Openai { daily_budget, .. } = &mut openrouter {
+        *daily_budget = None;
+    }
     let mut chain = vec![
         openai(
             "groq",
@@ -499,18 +528,7 @@ fn default_providers() -> Vec<Provider> {
             true,
             serde_json::json!({"reasoning_effort": "none"}),
         ),
-        openai(
-            "openrouter",
-            "https://openrouter.ai/api/v1",
-            "OPENROUTER_API_KEY.md",
-            "nvidia/nemotron-3-super-120b-a12b:free",
-            // A fifth of the 50 requests a day that OpenRouter gives all `:free` models of an
-            // account that bought less than 10 credits (1,000 after that; openrouter.ai/docs/api/
-            // reference/limits, 2026-09-29): the cost line (spec 8.2) for any account.
-            10,
-            false,
-            serde_json::json!({"models": ["qwen/qwen3.8-27b:free"], "provider": {"require_parameters": true}}),
-        ),
+        openrouter,
         nim,
         opencode_go,
         cli("codex", Some("gpt-6-luna")),
@@ -729,6 +747,33 @@ pub fn read_key(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #238: the default OpenRouter entry takes its budget from its key, 10 until that is read.
+    /// An entry with the owner's own budget, a model that is not free, or another URL does not.
+    #[test]
+    fn only_an_openrouter_free_entry_without_a_budget_takes_its_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = load(dir.path()).unwrap();
+        let openrouter = cfg.providers.iter().find(|p| p.name() == "openrouter");
+        assert!(openrouter.is_some_and(Provider::budget_from_key));
+        assert_eq!(openrouter.map(Provider::daily_budget), Some(10));
+        let entry = |rest: &str| {
+            toml::from_str::<Provider>(&format!("kind = \"openai\"\nname = \"o\"\n{rest}")).unwrap()
+        };
+        let free = "base_url = \"https://openrouter.ai/api/v1/\"\nmodel = \"m:free\"\n";
+        assert!(entry(free).budget_from_key());
+        assert_eq!(entry(free).daily_budget(), 10);
+        let own = entry(&format!("{free}daily_budget = 30\n"));
+        assert!(!own.budget_from_key());
+        assert_eq!(own.daily_budget(), 30);
+        assert!(
+            !entry("base_url = \"https://openrouter.ai/api/v1\"\nmodel = \"m\"\n")
+                .budget_from_key()
+        );
+        let elsewhere = entry("base_url = \"https://example.com/api/v1\"\nmodel = \"m:free\"\n");
+        assert!(!elsewhere.budget_from_key());
+        assert_eq!(elsewhere.daily_budget(), 300);
+    }
 
     #[test]
     fn every_key_config_reads_leaves_capture_working() {

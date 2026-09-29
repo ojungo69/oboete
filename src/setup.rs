@@ -1925,6 +1925,13 @@ pub fn doctor(home: &Path) -> Result<()> {
         ),
     }
     println!("providers (chain order):");
+    // Read, not made: the worker makes providers.db, and the section above says what is wrong
+    // with one that does not open.
+    let calls = home
+        .join("providers.db")
+        .exists()
+        .then(|| crate::providers_db::open(home).ok())
+        .flatten();
     for p in config::load(home)?.providers {
         let state = match &p {
             config::Provider::Openai {
@@ -1950,7 +1957,16 @@ pub fn doctor(home: &Path) -> Result<()> {
                 }
             }
         };
-        println!("  {:<11} {state}", p.name());
+        let budget = if p.budget_from_key() {
+            let said = crate::budget::key_budget(calls.as_ref(), &p);
+            format!(
+                "; {}",
+                said.unwrap_or_else(|e| format!("its budget is unreadable: {e:#}"))
+            )
+        } else {
+            String::new()
+        };
+        println!("  {:<11} {state}{budget}", p.name());
     }
     if capture.is_err() {
         unhealthy.push("capture settings are wrong");
