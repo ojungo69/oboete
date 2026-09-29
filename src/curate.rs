@@ -2568,10 +2568,17 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          only adds to or details them, or is about something else.\n\
          - why: for a change, the reason the lines give for it, copied exactly from one line; \
          empty when they give none, and for every other kind.\n\
-         Skip routine tool noise and what the code itself shows. When nothing is worth \
+         Skip routine tool noise and what the code itself shows. Keep what should still change \
+         what an agent does in a later session: a request that stops mattering with this \
+         session (one step, a URL to open, waiting on this change's review) is not a claim, but \
+         a go-ahead is the decision it accepts; a rule, permission, limit or fact about the setup \
+         that the developer states, even as a request or in passing, is a decision or \
+         preference, with a limit's end date in its body; work the developer leaves for a new \
+         session is a decided open item. When nothing is worth \
          remembering, return an empty claims array. Before you answer, check each claim against \
          the kept and carried claims below, and fill its supersedes as defined above.\n\
-         The summary is 2-4 sentences: what was worked on, what was decided, what is still open.\n\
+         The summary is 2-4 sentences: what the developer asked for, what was worked on, what \
+         was decided, what is still open.\n\
          Write every body and the summary in {language}.\n\n\
          {fence}\n{text}\n## Kept claims these lines may replace or reverse (uid: body)\n\
          {candidates}\n## Carried from earlier in each session\n{carried}\n{fence}"
