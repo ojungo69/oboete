@@ -445,10 +445,14 @@ fn keep_unknown(chain: &mut Chain, now: &ChainOverlay, own: &[&str]) {
     keep(&mut chain.model, &now.model, &unknown);
 }
 
-/// Sets `table.key`, making the table (a `[table]`, not an inline one) when it is missing.
-fn put(doc: &mut toml_edit::DocumentMut, table: &str, key: &str, value: toml_edit::Value) {
+/// Sets `table.key`, making the table (a `[table]`, not an inline one) when it is missing. A value
+/// replaced keeps the spacing and comment around it (cubic on #270).
+fn put(doc: &mut toml_edit::DocumentMut, table: &str, key: &str, mut value: toml_edit::Value) {
     if !doc.contains_key(table) {
         doc.insert(table, toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    if let Some(old) = doc[table].get(key).and_then(toml_edit::Item::as_value) {
+        *value.decor_mut() = old.decor().clone();
     }
     doc[table][key] = toml_edit::Item::Value(value);
 }
@@ -940,6 +944,36 @@ mod tests {
         .unwrap();
         assert_eq!(saved["inject"]["session_start"], false);
         assert_eq!(config::load(home.path()).unwrap().chain.model["a"], "x");
+    }
+
+    /// A key whose value changes keeps the comment after it (cubic on #270).
+    #[test]
+    fn a_changed_key_keeps_its_comment() {
+        let text = "[chain]\noff = [\"groq\"] # paused until Friday\n\n[inject]\n\
+                    session_start_chars = 3000 # short\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        save_to(
+            &home,
+            &posted(&shown, |v| {
+                v["inject"]["session_start_chars"] = json!(4000);
+                for e in v["chain"].as_array_mut().unwrap() {
+                    if e["name"] == "nim" {
+                        e["on"] = json!(false);
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let saved = file(&home).unwrap();
+        assert!(
+            saved.contains("off = [\"groq\", \"nim\"] # paused until Friday"),
+            "{saved}"
+        );
+        assert!(
+            saved.contains("session_start_chars = 4000 # short"),
+            "{saved}"
+        );
     }
 
     /// A file that does not parse: no form, and no save.
