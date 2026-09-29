@@ -2123,7 +2123,52 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
         }
     }
     let session_of = |device: &str, seq: i64| raw.session_key(device, seq);
-    let (mut out, mut open) = (String::new(), String::new());
+    // Before this window: on its device, in an earlier record, or in the part of its split first
+    // record that the previous window read.
+    let before_window = |c: &crate::claims::Claim| -> Result<bool> {
+        Ok(c.device == w.device
+            && (c.seq < w.from_seq
+                || c.seq == w.from_seq
+                    && match w.from_offset {
+                        Some(from) => crate::claims::quoted_before(k, &c.uid, from)?,
+                        None => false,
+                    }))
+    };
+    // The claims a session may carry, read once for the window rather than once per session, each
+    // with its session: the decided ones from before the window, and the open items (carried as
+    // such, whatever their status). The newest first, in `current`'s order across repositories.
+    let mut repos: Vec<&str> = Vec::new();
+    for r in sessions.iter().flat_map(|(_, rs)| rs) {
+        if !repos.contains(r) {
+            repos.push(r);
+        }
+    }
+    let (mut decided, mut items) = (Vec::new(), Vec::new());
+    for repo in repos {
+        for c in crate::claims::current(k, repo)? {
+            let list = if c.kind == "open item" {
+                if c.status == "done" {
+                    continue;
+                }
+                &mut items
+            } else if c.status == "decided" && before_window(&c)? {
+                &mut decided
+            } else {
+                continue;
+            };
+            list.push((repo, session_of(&c.device, c.seq)?, c));
+        }
+    }
+    type Tip<'a> = (&'a str, Option<String>, crate::claims::Claim);
+    let newest = |(_, _, a): &Tip, (_, _, b): &Tip| {
+        (b.valid_from, &b.device, b.seq, &b.uid).cmp(&(a.valid_from, &a.device, a.seq, &a.uid))
+    };
+    decided.sort_by(newest);
+    items.sort_by(newest);
+    // Every session's goal and proposals, then every session's decided claims, then its open
+    // items: `fit` cuts from the end, so a session's many claims never cut the proposal another
+    // session's acceptance answers.
+    let (mut out, mut settled, mut open) = (String::new(), String::new(), String::new());
     let mut uids: Carried = Vec::new();
     for (key, repos) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
@@ -2137,8 +2182,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             let goal: String = gate(&goal).chars().take(200).collect();
             lines.push(format!("goal: {goal}"));
         }
-        // Proposals first: they are what an acceptance in this window answers, and the context
-        // is cut from its end (`fit`).
+        // Proposals first: they are what an acceptance in this window answers.
         for op in previous.iter().filter(|o| o.kind == OpKind::Claim) {
             let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(op.body.clone()) else {
                 continue;
@@ -2165,54 +2209,25 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                 }
             }
         }
-        // Before this window: on its device, in an earlier record, or in the part of its split
-        // first record that the previous window read.
-        let before_window = |c: &crate::claims::Claim| -> Result<bool> {
-            Ok(c.device == w.device
-                && (c.seq < w.from_seq
-                    || c.seq == w.from_seq
-                        && match w.from_offset {
-                            Some(from) => crate::claims::quoted_before(k, &c.uid, from)?,
-                            None => false,
-                        }))
-        };
-        let (mut decided, mut items) = (Vec::new(), Vec::new());
-        for repo in repos {
-            for c in crate::claims::current(k, repo)? {
-                // An open item is carried as one, whatever its status.
-                if c.kind == "open item" {
-                    if c.status != "done" {
-                        items.push((repo, c));
-                    }
-                } else if c.status == "decided" && before_window(&c)? {
-                    decided.push((repo, c));
-                }
-            }
-        }
-        // The newest first, in `current`'s order across the repositories; the session's own only,
-        // before the cap, so other sessions' newer claims never hide one.
-        let newest = |(_, a): &(&str, crate::claims::Claim),
-                      (_, b): &(&str, crate::claims::Claim)| {
-            (b.valid_from, &b.device, b.seq, &b.uid).cmp(&(a.valid_from, &a.device, a.seq, &a.uid))
-        };
-        decided.sort_by(newest);
-        items.sort_by(newest);
-        let mut open_lines = Vec::new();
+        // The session's own, in its repositories, before the cap: other sessions' newer claims
+        // never hide one.
+        let (mut decided_lines, mut open_lines) = (Vec::new(), Vec::new());
         for (list, line, cap, out) in [
-            (decided, "decided before", CARRIED_DECISIONS, &mut lines),
-            (items, "open item", 50, &mut open_lines),
+            (
+                &decided,
+                "decided before",
+                CARRIED_DECISIONS,
+                &mut decided_lines,
+            ),
+            (&items, "open item", 50, &mut open_lines),
         ] {
-            let mut shown = 0;
-            for (c_repo, c) in list {
-                if shown == cap {
-                    break;
-                }
-                if session_of(&c.device, c.seq)?.as_deref() == Some(key) {
-                    let place = repo_name(c_repo, rules);
-                    out.push(format!("{line} {} in {place}: {}", c.uid, gate(&c.body)));
-                    uids.push((key.to_owned(), Some(c_repo.to_owned()), c));
-                    shown += 1;
-                }
+            let own = list
+                .iter()
+                .filter(|(repo, s, _)| s.as_deref() == Some(key) && repos.contains(repo));
+            for (c_repo, _, c) in own.take(cap) {
+                let place = repo_name(c_repo, rules);
+                out.push(format!("{line} {} in {place}: {}", c.uid, gate(&c.body)));
+                uids.push((key.to_owned(), Some((*c_repo).to_owned()), c.clone()));
             }
         }
         // As the window's own heading names the session, so the curator can pair them.
@@ -2220,13 +2235,17 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             .chars()
             .take(HEADING_CHARS)
             .collect();
-        for (part, lines) in [(&mut out, lines), (&mut open, open_lines)] {
+        for (part, lines) in [
+            (&mut out, lines),
+            (&mut settled, decided_lines),
+            (&mut open, open_lines),
+        ] {
             if !lines.is_empty() {
                 part.push_str(&format!("### {heading}\n{}\n", lines.join("\n")));
             }
         }
     }
-    // Every session's goal and proposals before any session's open items: `fit` cuts from the end.
+    out.push_str(&settled);
     out.push_str(&open);
     Ok((out, uids))
 }
@@ -3900,8 +3919,8 @@ mod tests {
             .lines()
             .filter(|l| l.starts_with("decided before "))
             .collect();
-        assert_eq!(decided.len(), 1, "{text}");
-        assert!(decided[0].ends_with(": Use Postgres."), "{text}");
+        assert_eq!(decided.len(), 1);
+        assert!(decided[0].ends_with(": Use Postgres."));
     }
 
     /// A candidate the budget cut from the prompt, or never shown, is superseded by nothing; the
@@ -4958,10 +4977,11 @@ mod tests {
         }
     }
 
-    /// Every session's proposals come before any session's open items: open items of the first
-    /// session never cut the proposal a later session's acceptance answers.
+    /// Every session's proposals come before any session's decided claims, and those before any
+    /// session's open items: the first session's claims never cut the proposal a later session's
+    /// acceptance answers.
     #[test]
-    fn every_sessions_proposals_are_carried_before_open_items() {
+    fn every_sessions_proposals_are_carried_before_its_other_claims() {
         // One repository: open items are carried from the repositories of the session's lines.
         let prompt = |t: &str| Event {
             repo: Some("r".into()),
@@ -5002,12 +5022,23 @@ mod tests {
             "cache the parsed files",
             json!([]),
         ));
+        claims.extend((0..2).map(|i| {
+            json!({"id": format!("d{i}"), "kind": "decision", "status": "decided",
+                "speaker": "user", "scope": "repo", "body": format!("Fix item {i} first."),
+                "quote": format!("Item {i} is broken"), "line": "L1", "supersedes": []})
+        }));
         let answer = json!({"claims": claims, "summary": "s"});
         let none = |_: &str| json!({"claims": [], "summary": "s"});
         let second = [prompt("Go on."), other(prompt("Yes."))];
         let (sent, _) = two_windows(&first, answer, &second, none);
-        assert!(sent[1].contains("open item "), "{}", sent[1]);
-        assert!(sent[1].contains("proposed before "), "{}", sent[1]);
+        let at = |line: &str| sent[1].find(line).unwrap_or(usize::MAX);
+        assert!(
+            at("proposed before ") < at("decided before "),
+            "{}",
+            sent[1]
+        );
+        assert!(at("decided before ") < at("open item "), "{}", sent[1]);
+        assert!(at("open item ") < usize::MAX, "{}", sent[1]);
     }
 
     /// A draft whose claim op the record cannot hold is no claim: the window is still covered.
