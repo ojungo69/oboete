@@ -304,6 +304,12 @@ pub fn last_calls(conn: &Connection, n: u32) -> Result<Vec<String>> {
 
 pub const DAY_MS: i64 = 86_400_000;
 
+/// When a call made at `ts` has left the rolling day that `calls_in_a_day` and `tokens_since`
+/// count (`ts >= now - DAY_MS`): one ms after it is exactly a day old.
+pub fn out_of_the_day(ts: i64) -> i64 {
+    ts + DAY_MS + 1
+}
+
 /// A call that was sent and not refused with an HTTP error status (`http 429: …`): it may have used
 /// tokens it did not report (a timeout, a dropped connection, an answer without a full usage block).
 const SENT_NOT_REFUSED: &str = "bytes_out > 0

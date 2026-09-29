@@ -2546,7 +2546,7 @@ mod tests {
         let &&Skip::Budget(until) = &skips[2] else {
             panic!("{skips:?}")
         };
-        assert!((before..=after).contains(&(until - providers_db::DAY_MS)));
+        assert!((before..=after).contains(&(until - providers_db::DAY_MS - 1)));
         assert_eq!(
             [skips[0], skips[1], skips[3]],
             [&Skip::Owner, &Skip::Wait(cool_until), &Skip::Failed]

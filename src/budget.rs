@@ -73,7 +73,7 @@ pub fn admit(
         return Ok(Some(Refusal {
             outcome: "budget",
             detail: format!("{used}/{} calls in 24 hours", p.daily_budget()),
-            skip: Skip::Budget(oldest.unwrap_or(now) + providers_db::DAY_MS),
+            skip: Skip::Budget(providers_db::out_of_the_day(oldest.unwrap_or(now))),
         }));
     }
     // The answer counts against the same limits as the prompt (Groq's TPM is input and output
@@ -134,7 +134,7 @@ pub fn admit(
                 outcome: "budget",
                 detail: format!("{used:.0}/{daily} tokens in 24 hours"),
                 // When the oldest call counted leaves the 24 hours.
-                skip: Skip::Budget(oldest.unwrap_or(now) + providers_db::DAY_MS),
+                skip: Skip::Budget(providers_db::out_of_the_day(oldest.unwrap_or(now))),
             }));
         }
     }
@@ -482,7 +482,7 @@ mod tests {
         let Skip::Budget(until) = r.skip else {
             panic!("{:?}", r.skip)
         };
-        assert_eq!(until, now - 23 * hour + providers_db::DAY_MS);
+        assert_eq!(until, now - 23 * hour + providers_db::DAY_MS + 1);
     }
 
     /// The call budget counts a rolling day too, and waits until its oldest call leaves it.
@@ -510,7 +510,7 @@ mod tests {
         let Skip::Budget(until) = r.skip else {
             panic!("{:?}", r.skip)
         };
-        assert_eq!(until, now - 23 * hour + providers_db::DAY_MS);
+        assert_eq!(until, now - 23 * hour + providers_db::DAY_MS + 1);
     }
 
     #[test]
