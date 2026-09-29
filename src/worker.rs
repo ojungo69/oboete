@@ -411,7 +411,13 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
                 .run("curator", span, prompt, &crate::curate::schema())
         };
         // Who is asked and within what caps: a window held under other ones is tried again now.
-        let chain = format!("{:?} {}", cfg.providers, cfg.paid_usd_per_month);
+        // That includes the key an entry's budget comes from (#238): another has its own limit.
+        let chain = format!(
+            "{:?} {} {:?}",
+            cfg.providers,
+            cfg.paid_usd_per_month,
+            crate::provider::budget_keys(&cfg.providers)
+        );
         let windows =
             crate::curate::run_phase(raw, k, db, &rules, &cfg.summary, &chain, &mut curator)?;
         // The same chain, as the digest role (Task 9): spec 1.4 lets each role have its own, and

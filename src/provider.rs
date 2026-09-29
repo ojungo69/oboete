@@ -588,9 +588,7 @@ fn refresh_key_limit(
         return Ok(());
     }
     let key = key_file.and_then(|f| config::read_key(f).ok());
-    let sha = key.as_deref().map_or(String::new(), |k| {
-        crate::curate::sha256_hex(k)[..16].to_owned()
-    });
+    let sha = key_id(key.as_deref());
     if let Some((limit, at, of)) = providers_db::key_limit(conn, p.name())?
         && of == sha
     {
@@ -605,6 +603,31 @@ fn refresh_key_limit(
     }
     let limit = key.as_deref().and_then(read);
     providers_db::set_key_limit(conn, p.name(), limit, now, &sha)
+}
+
+/// Which key `key` is, without the key: the first 16 hex digits of its SHA-256, empty for none.
+fn key_id(key: Option<&str>) -> String {
+    key.map_or(String::new(), |k| {
+        crate::curate::sha256_hex(k)[..16].to_owned()
+    })
+}
+
+/// Which keys the entries whose budget is their key's (#238) hold now, as `key_id`s: part of who
+/// is asked, since another key has its own limit.
+pub(crate) fn budget_keys(providers: &[Provider]) -> Vec<String> {
+    providers
+        .iter()
+        .filter(|p| p.budget_from_key())
+        .map(|p| match p {
+            Provider::Openai { key_file, .. } => key_id(
+                key_file
+                    .as_deref()
+                    .and_then(|f| config::read_key(f).ok())
+                    .as_deref(),
+            ),
+            Provider::Cli { .. } => String::new(),
+        })
+        .collect()
 }
 
 /// The `:free` model requests a day that `key` may make, as OpenRouter's GET /api/v1/key at `url`
@@ -2628,6 +2651,30 @@ mod tests {
             toml::from_str(&format!("name = \"own\"\n{free}daily_budget = 30\n")).unwrap();
         refresh_key_limit(&conn, &own, t2, Some(&key_file), unread).unwrap();
         assert_eq!(providers_db::key_limit(&conn, "own").unwrap(), None);
+    }
+
+    /// #238: who is asked includes which key an entry's budget comes from, so a window held under
+    /// one key is tried again with another; an entry with the owner's own budget adds nothing.
+    #[test]
+    fn the_key_a_budget_comes_from_is_part_of_who_is_asked() {
+        let home = tempfile::tempdir().unwrap();
+        let key_file = home.path().join("KEY.md");
+        let entry = |extra: &str| -> Provider {
+            toml::from_str(&format!(
+                "kind = \"openai\"\nname = \"o\"\nbase_url = \"https://openrouter.ai/api/v1\"\n\
+                 model = \"m:free\"\nkey_file = {key_file:?}\n{extra}"
+            ))
+            .unwrap()
+        };
+        let asked = |k: &str| {
+            std::fs::write(&key_file, format!("# a test key\n{k}\n")).unwrap();
+            budget_keys(&[entry("")])
+        };
+        let (a, b) = (asked("key-a"), asked("key-b"));
+        assert_eq!(a.len(), 1);
+        assert_ne!(a, b);
+        assert!(!a[0].contains("key-a"));
+        assert!(budget_keys(&[entry("daily_budget = 30\n")]).is_empty());
     }
 
     /// #238: the limit is `data.free_model_daily_requests.limit` of the answer to a GET sent with
