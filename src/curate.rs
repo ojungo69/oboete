@@ -149,10 +149,12 @@ struct Piece {
 }
 
 /// A repository as a window shows it: through the gate, a local path (no origin) as its folder,
-/// with either platform's separator.
+/// with either platform's separator, on one line (a heading's name never starts a line that
+/// `shows` or `carries` reads).
 fn repo_name(repo: &str, rules: &Rules) -> String {
     let repo = crate::redact::outbound_with(repo, rules);
-    repo.rsplit(['/', '\\']).next().unwrap_or(&repo).to_owned()
+    let name = repo.rsplit(['/', '\\']).next().unwrap_or(&repo);
+    name.replace(['\n', '\r'], " ")
 }
 
 /// The context a window's prompt adds, in whole lines from the start of each part, within `room`
@@ -189,6 +191,26 @@ fn fit(carried: &str, shown: &[String], room: u32) -> (String, String) {
         kept[i] = text;
     }
     (carried, kept.concat())
+}
+
+/// A candidate as the prompt lists it: one line, so `fit` keeps or cuts it whole, and no body
+/// can start a line that `shows` would take for another candidate's.
+fn candidate_line(uid: &str, body: &str) -> String {
+    format!("{uid}: {}\n", body.replace(['\n', '\r'], " "))
+}
+
+/// Whether the fitted candidates list `uid`'s own line (`uid: body`): a uid quoted in another
+/// claim's body is not its line.
+fn shows(shown: &str, uid: &str) -> bool {
+    shown.contains(&format!("\n{uid}: "))
+}
+
+/// Whether the fitted carried context lists `uid`'s own line, a proposal or an open item: a uid
+/// quoted in another line is not its line (`carried` keeps each on one line).
+fn carries(carried: &str, uid: &str) -> bool {
+    ["proposed before", "open item"]
+        .iter()
+        .any(|line| carried.contains(&format!("\n{line} {uid}")))
 }
 
 /// Bytes of records read at a time while a window is cut, at least one record (spec 3.1: pages
@@ -1032,10 +1054,9 @@ fn request(
         }
         let mut block = format!("### in {}\n", repo_name(repo, rules));
         for c in found {
-            block.push_str(&format!(
-                "{}: {}\n",
-                c.uid,
-                crate::redact::outbound_with(&c.body, rules)
+            block.push_str(&candidate_line(
+                &c.uid,
+                &crate::redact::outbound_with(&c.body, rules),
             ));
             shown_in.push((repo.to_owned(), c));
         }
@@ -1044,8 +1065,8 @@ fn request(
     let (carried_text, mut carried_uids) = carried(raw, k, rules, w)?;
     // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing.
     let (carried_text, shown) = fit(&carried_text, &shown, summary.window_tokens / 5);
-    carried_uids.retain(|(_, _, c)| carried_text.contains(c.uid.as_str()));
-    shown_in.retain(|(_, c)| shown.contains(c.uid.as_str()));
+    carried_uids.retain(|(_, _, c)| carries(&carried_text, &c.uid));
+    shown_in.retain(|(_, c)| shows(&shown, &c.uid));
     Ok(Request {
         prompt: prompt(&summary.language, &w.text, &shown, &carried_text),
         shown_in,
@@ -1103,8 +1124,11 @@ fn answered(
                     .chain(gated.dropped)
                     .chain(over)
                     .collect();
+                // The candidates the prompt showed, in its order: what this window could
+                // supersede, kept for an audit of the gates and for measurement (#222).
+                let shown: Vec<&str> = req.shown_in.iter().map(|(_, c)| c.uid.as_str()).collect();
                 let op = json!({"outcome": "curated", "provider": r.provider, "summary": summary,
-                    "dropped": dropped, "lowered": gated.lowered});
+                    "dropped": dropped, "lowered": gated.lowered, "candidates": shown});
                 Ok((op, claims))
             }
             // Counted like a provider that failed: no answer this window can use.
@@ -1797,6 +1821,26 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
 /// last entry until the op fits, and `cut` says how many went, so the append never fails.
 fn within_op_cap(mut op: Value) -> Value {
     let len = |op: &Value, list: &str| op[list].as_array().map_or(0, Vec::len);
+    // The shown candidates go first, from the end of the list: an audit, where the gates' lists
+    // say what the window's claims were held to. Counted, not serialized per uid: a window over
+    // many repositories can show thousands.
+    let mut size = op.to_string().len();
+    if size > crate::raw::MAX_OP_BYTES
+        && let Some(shown) = op.get_mut("candidates").and_then(Value::as_array_mut)
+    {
+        // A uid leaves with its comma (the last one has none); the count adds its key and digits.
+        let count = |cut: u64| r#","candidates_cut":"#.len() + cut.to_string().len();
+        let mut cut = 0u64;
+        while size + count(cut) > crate::raw::MAX_OP_BYTES
+            && let Some(uid) = shown.pop()
+        {
+            size -= uid.to_string().len() + usize::from(!shown.is_empty());
+            cut += 1;
+        }
+        if cut > 0 {
+            op["candidates_cut"] = cut.into();
+        }
+    }
     let mut cut = 0u64;
     while op.to_string().len() > crate::raw::MAX_OP_BYTES {
         let list = if len(&op, "lowered") >= len(&op, "dropped") {
@@ -1804,7 +1848,13 @@ fn within_op_cap(mut op: Value) -> Value {
         } else {
             "dropped"
         };
-        if op[list].as_array_mut().and_then(Vec::pop).is_none() {
+        // `get_mut`: an op without the list is not given one.
+        if op
+            .get_mut(list)
+            .and_then(Value::as_array_mut)
+            .and_then(Vec::pop)
+            .is_none()
+        {
             break;
         }
         cut += 1;
@@ -2048,7 +2098,8 @@ type Carried = Vec<(String, Option<String>, crate::claims::Claim)>;
 // ponytail: a child session (a subagent) starts with nothing of its parent's until capture
 // records the link.
 fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(String, Carried)> {
-    let gate = |t: &str| crate::redact::outbound_with(t, rules);
+    // On one line: `fit` keeps or cuts a line whole, and no text can start a line `carries` reads.
+    let gate = |t: &str| crate::redact::outbound_with(t, rules).replace(['\n', '\r'], " ");
     // Each session with every repository its lines are in: an agent may change checkout.
     let mut sessions: Vec<(&str, Vec<&str>)> = Vec::new();
     for l in &w.lines {
@@ -3707,6 +3758,8 @@ mod tests {
         }
         // The session moved to another checkout: its items there are carried too.
         ops.push(open(&mut raw, "s", "q", "The parser needs a fuzz test."));
+        // A body over two lines is carried on one.
+        ops.push(open(&mut raw, "s", "r", "Two lines:\nopen item next"));
         // Done: resolved work is not an open item.
         let (kind, mut done) = open(&mut raw, "s", "r", "The flaky retry is fixed now.");
         done["status"] = "done".into();
@@ -3722,6 +3775,7 @@ mod tests {
         for (repo, body) in [
             ("r", "The importer drops empty lines."),
             ("q", "The parser needs a fuzz test."),
+            ("r", "Two lines: open item next"),
         ] {
             let item = |l: &str| {
                 l.starts_with("open item ") && l.ends_with(&format!(" in {repo}: {body}"))
@@ -3803,6 +3857,21 @@ mod tests {
             .collect();
         assert_eq!(kept.len(), 1);
         assert!(sent.contains(kept[0]));
+        // The window op lists the candidates the prompt showed, in their order, and no other.
+        let window = ops.iter().rev().find(|o| o.kind == OpKind::Window).unwrap();
+        let listed: Vec<&str> = window.body["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let in_prompt: Vec<&str> = found
+            .iter()
+            .map(String::as_str)
+            .filter(|u| sent.contains(u))
+            .collect();
+        assert!(!in_prompt.is_empty() && in_prompt.len() < found.len());
+        assert_eq!(listed, in_prompt);
     }
 
     /// A window of two repositories: a draft of one supersedes only that repository's candidates,
@@ -5146,6 +5215,68 @@ mod tests {
             listed as u64 + op["cut"].as_u64().unwrap(),
             4 * MAX_CLAIMS as u64
         );
+    }
+
+    /// A candidate's line is `uid: body` in the fitted list; its uid quoted inside another's body
+    /// does not count as shown.
+    #[test]
+    fn a_candidate_is_shown_only_by_its_own_line() {
+        let (x, y) = ("a".repeat(64), "b".repeat(64));
+        let shown = format!("### in r\n{y}: the note names {x}: here\n");
+        assert!(shows(&shown, &y));
+        assert!(!shows(&shown, &x));
+        // A body that would start a line with another's uid is listed on its own line.
+        let shown = format!(
+            "### in r\n{}",
+            candidate_line(&y, &format!("a note\n{x}: b"))
+        );
+        assert_eq!(shown.lines().count(), 2);
+        assert!(!shows(&shown, &x));
+        // Carried the same way: by its own proposal or open-item line.
+        let text = format!("### s\nproposed before {y} in r: the note names {x} here\n");
+        assert!(carries(&text, &y));
+        assert!(!carries(&text, &x));
+        assert!(carries(&format!("### s\nopen item {x} in r: b\n"), &x));
+        // A repository's name is one line too: its heading cannot start either line.
+        let rules = Rules::default();
+        assert_eq!(
+            repo_name(&format!("/w/r\n{x}: b"), &rules),
+            format!("r {x}: b")
+        );
+    }
+
+    /// Candidates over the op cap are cut from the end of their list, before the gates' lists.
+    #[test]
+    fn the_candidates_list_is_cut_first_to_the_op_cap() {
+        let uids: Vec<String> = (0..2000).map(|i| format!("{i:064}")).collect();
+        let op = json!({"outcome": "curated", "dropped": [["c1", "r"]], "lowered": [],
+            "candidates": uids});
+        let op = within_op_cap(op);
+        assert!(op.to_string().len() <= crate::raw::MAX_OP_BYTES);
+        let kept = op["candidates"].as_array().unwrap();
+        assert_eq!(
+            kept.len() as u64 + op["candidates_cut"].as_u64().unwrap(),
+            2000
+        );
+        assert_eq!(kept[0], json!(format!("{:064}", 0)));
+        // As many as fit: one more back is over the cap.
+        let mut more = op.clone();
+        more["candidates"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(format!("{:064}", kept.len())));
+        more["candidates_cut"] = (2000 - kept.len() as u64 - 1).into();
+        assert!(more.to_string().len() > crate::raw::MAX_OP_BYTES);
+        assert_eq!(op["dropped"], json!([["c1", "r"]]));
+        assert!(op.get("cut").is_none());
+        // An op at the cap keeps every candidate.
+        let base = json!({"outcome": "curated", "dropped": [["c1", ""]], "candidates": ["u"]});
+        let reason = "r".repeat(crate::raw::MAX_OP_BYTES - base.to_string().len());
+        let op = json!({"outcome": "curated", "dropped": [["c1", reason]], "candidates": ["u"]});
+        assert_eq!(within_op_cap(op.clone()), op);
+        // An op over the cap with none of the lists is given none of them.
+        let op = json!({"outcome": "skipped", "summary": "x".repeat(crate::raw::MAX_OP_BYTES)});
+        assert_eq!(within_op_cap(op.clone()), op);
     }
 
     /// The cap holds for the op as appended: an op that fits only before its range is added is
