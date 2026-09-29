@@ -833,13 +833,31 @@ fn grouped(pieces: &[Piece]) -> (String, Vec<Line>) {
 pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims::Evidence> {
     let line = &window.lines[line_index(window, line)?];
     let source = line.source.as_ref()?;
-    if quote.is_empty() || !line.text.contains(quote) {
+    if quote.is_empty() {
         return None;
     }
-    let (at, _) = source.text.match_indices(quote).find(|&(i, _)| {
-        let (s, e) = (source.start + i, source.start + i + quote.len());
-        !source.hidden.iter().any(|&(hs, he)| hs < e && s < he)
-    })?;
+    // Where the event's text has it, outside what the window hides.
+    let anchor = |quote: &str| {
+        source.text.match_indices(quote).find(|&(i, _)| {
+            let (s, e) = (source.start + i, source.start + i + quote.len());
+            !source.hidden.iter().any(|&(hs, he)| hs < e && s < he)
+        })
+    };
+    // As the line shows it: the quote itself, or else a stretch of the line that holds the quote's
+    // characters but for whitespace (a line break written as a space, a space added), the first
+    // that is anchored: the line also shows a tool's input, which is not the event's text. A
+    // stretch is looked for once: a repetitive line has many that read the same.
+    let mut tried = std::collections::HashSet::new();
+    let (at, quote) = line
+        .text
+        .contains(quote)
+        .then(|| anchor(quote))
+        .flatten()
+        .or_else(|| {
+            spaced(&line.text, quote)
+                .filter(|q| tried.insert(*q))
+                .find_map(anchor)
+        })?;
     let as_i64 = |n: usize| i64::try_from(n).ok();
     Some(crate::claims::Evidence {
         device: window.device.clone(),
@@ -849,6 +867,29 @@ pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims:
         sentence: as_i64(source.sentence(at))?,
         quote: quote.to_owned(),
         claim_at: None,
+    })
+}
+
+/// The stretches of `text` whose characters other than whitespace are `quote`'s, in order and with
+/// nothing else between them, each from the first of them to the last, in `text`'s order.
+fn spaced<'a>(text: &'a str, quote: &str) -> impl Iterator<Item = &'a str> {
+    let want: Vec<char> = quote.chars().filter(|c| !c.is_whitespace()).collect();
+    let have: Vec<(usize, char)> = text
+        .char_indices()
+        .filter(|(_, c)| !c.is_whitespace())
+        .collect();
+    let n = want.len();
+    let starts = if n == 0 {
+        0
+    } else {
+        (have.len() + 1).saturating_sub(n)
+    };
+    (0..starts).filter_map(move |at| {
+        let w = &have[at..at + n];
+        w.iter().map(|&(_, c)| c).eq(want.iter().copied()).then(|| {
+            let ((start, _), (last, c)) = (w[0], w[n - 1]);
+            &text[start..last + c.len_utf8()]
+        })
     })
 }
 
@@ -1900,9 +1941,13 @@ fn located(
     let (summary, drafts) = parse(answer)?;
     let any = !drafts.is_empty();
     let (mut found, mut lost) = (Vec::new(), Vec::new());
-    for d in drafts {
+    for mut d in drafts {
         match line_index(w, &d.line).zip(locate(w, &d.line, &d.quote)) {
-            Some((i, e)) => found.push((d, e, i)),
+            // As the line shows it, which the gates read its sentence from.
+            Some((i, e)) => {
+                d.quote = e.quote.clone();
+                found.push((d, e, i));
+            }
             None => lost.push(d.id),
         }
     }
@@ -2775,6 +2820,59 @@ mod tests {
             assert!(got.windows(2).all(|w| w[0] < w[1]), "{n}");
             assert_eq!(got[0], 0);
             assert!(got[got.len() - 1] >= n - n.div_ceil(64), "{n}: {got:?}");
+        }
+    }
+
+    /// A quote that differs from its line only in whitespace (a line break written as a space, a
+    /// space added or dropped) is anchored to the line's own text, which it then quotes: 30 of
+    /// nothink's 263 unanchored drafts were such (docs/milestone-3.md).
+    #[test]
+    fn a_quote_that_differs_only_in_whitespace_is_anchored_to_the_lines_text() {
+        let (_h, mut raw, dev) = store();
+        let said = "Use tabs\nin every  file of the importer, キャッシュを消した。";
+        raw.append(&prompt(said)).unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        for (quote, line) in [
+            ("tabs in every file", "tabs\nin every  file"),
+            ("キャッシュ を消した", "キャッシュを消した"),
+        ] {
+            let e = locate(&w, "L1", quote).unwrap();
+            assert_eq!(e.quote, line);
+            let at = usize::try_from(e.offset).unwrap();
+            assert_eq!(&said[at..at + e.quote.len()], line);
+        }
+        assert_eq!(locate(&w, "L1", "tabs in any file"), None);
+        // The draft quotes the line's text too: the gates find its sentence there.
+        let answer = json!({"claims": [{"id": "c1", "kind": "decision", "status": "decided",
+            "speaker": "user", "scope": "repo", "body": "b", "quote": "tabs in every file",
+            "line": "L1", "supersedes": []}], "summary": "s"});
+        let (_, found, lost) = located(&w, &answer).unwrap();
+        assert!(lost.is_empty());
+        assert_eq!(found[0].0.quote, "tabs\nin every  file");
+    }
+
+    /// A line shows a tool's input, which is not the event's text: a quote the line holds in the
+    /// input, as written or but for whitespace, is anchored in the output that holds it but for
+    /// whitespace (Codex on #248).
+    #[test]
+    fn a_quote_the_line_shows_in_a_tools_input_is_anchored_in_its_output() {
+        let (_h, mut raw, dev) = store();
+        for input in [
+            "echo 'stream the parsed rows'",
+            "echo 'stream  the parsed rows'",
+        ] {
+            let body = json!({"tool": "Bash", "input": input,
+                "output": "stream the\nparsed rows", "failed": false});
+            raw.append(&event("tool", body)).unwrap();
+        }
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        for line in ["L1", "L2"] {
+            let e = locate(&w, line, "stream the parsed rows").unwrap_or_else(|| panic!("{line}"));
+            assert_eq!(e.quote, "stream the\nparsed rows", "{line}");
         }
     }
 
