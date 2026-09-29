@@ -946,8 +946,9 @@ impl Raw {
             .collect::<rusqlite::Result<_>>()?;
         let inside = |o: &Op| {
             let e = &o.body["evidence"][0];
-            matches!((e["seq"].as_i64(), e["offset"].as_i64(), e["length"].as_i64()),
-                (Some(s), Some(f), Some(n)) if cut_from <= (s, f) && (s, f + n) <= cut_to)
+            e["device"].as_str() == Some(self.device.as_str())
+                && matches!((e["seq"].as_i64(), e["offset"].as_i64(), e["length"].as_i64()),
+                    (Some(s), Some(f), Some(n)) if cut_from <= (s, f) && (s, f + n) <= cut_to)
         };
         let mut ops = Vec::new();
         for batch in batches {
@@ -1683,18 +1684,20 @@ mod tests {
             raw.append(&test_event(&format!("line {i}"))).unwrap();
         }
         // A window op and its claims, each quoted at (seq, offset) for 5 bytes.
-        let window =
-            |raw: &mut Raw, span: [Option<i64>; 4], recurate: bool, claims: &[(&str, i64, i64)]| {
-                let op = serde_json::json!({"from_seq": span[0], "from_offset": span[1],
+        let window = |raw: &mut Raw,
+                      span: [Option<i64>; 4],
+                      recurate: bool,
+                      claims: &[(&str, i64, i64)]| {
+            let op = serde_json::json!({"from_seq": span[0], "from_offset": span[1],
                 "to_seq": span[2], "to_offset": span[3], "recurate": recurate});
-                let mut ops = vec![(OpKind::Window, op)];
-                for (text, seq, offset) in claims {
-                    let claim = serde_json::json!({"text": text,
-                    "evidence": [{"seq": seq, "offset": offset, "length": 5}]});
-                    ops.push((OpKind::Claim, claim));
-                }
-                raw.append_ops(&ops).unwrap();
-            };
+            let mut ops = vec![(OpKind::Window, op)];
+            for (text, seq, offset) in claims {
+                let claim = serde_json::json!({"text": text, "evidence": [{"device": raw.device(),
+                    "seq": seq, "offset": offset, "length": 5}]});
+                ops.push((OpKind::Claim, claim));
+            }
+            raw.append_ops(&ops).unwrap();
+        };
         let previous = |raw: &Raw, from: (i64, Option<i64>)| -> Vec<String> {
             let ops = raw.previous_window_ops("claude", "s", from).unwrap();
             ops.into_iter()
@@ -1756,6 +1759,23 @@ mod tests {
         assert_eq!(
             previous(&raw, (5, None)),
             ["r23", "r23 after", "r3", "r4", "w3"]
+        );
+        // A quote of another device's record is in no window of this device, whatever its seq.
+        let op = serde_json::json!({"from_seq": 3, "from_offset": null, "to_seq": 4,
+            "to_offset": null, "recurate": true});
+        let quote = |device: &str, text: &str| {
+            let e = serde_json::json!({"device": device, "seq": 3, "offset": 10, "length": 5});
+            (
+                OpKind::Claim,
+                serde_json::json!({"text": text, "evidence": [e]}),
+            )
+        };
+        let (here, other) = (quote(raw.device(), "r34"), quote("other", "elsewhere"));
+        raw.append_ops(&[(OpKind::Window, op), other, here])
+            .unwrap();
+        assert_eq!(
+            previous(&raw, (5, None)),
+            ["r34", "r23", "r23 after", "r3", "r4", "w3"]
         );
     }
 }

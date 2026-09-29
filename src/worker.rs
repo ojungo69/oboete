@@ -53,8 +53,8 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
 
 /// Runs each consumer from its checkpoint until none moves; each step and its checkpoint move
 /// share one knowledge.db transaction. A step may move its checkpoint back (the rescan starting
-/// again under new rules).
-#[cfg(test)] // the worker checks the backup deadline between passes
+/// again under new rules). The worker's own loop runs `pass` itself: it checks the backup
+/// deadline between passes.
 pub fn drain(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<()> {
     while pass(raw, k, consumers)? {}
     Ok(())
@@ -129,7 +129,7 @@ pub fn drained(home: &Path) -> Result<Option<Lock>> {
     let mut k = crate::backup::open_knowledge(home)?;
     let mut consumers = consumers(home);
     checkpoint::rewind(&raw, &k, &mut consumers)?;
-    while pass(&raw, &mut k, &mut consumers)? {}
+    drain(&raw, &mut k, &mut consumers)?;
     Ok(Some(held))
 }
 
