@@ -1106,7 +1106,8 @@ fn request(
     for repo in repos {
         let (said, rest) = searched(w, repo);
         // Under the repository's name, as the window's headings show it.
-        let found = candidates(k, repo, &said, &rest)?;
+        let current = crate::claims::current_before(k, repo, w)?;
+        let found = candidates(k, &current, repo, &said, &rest)?;
         if found.is_empty() {
             continue;
         }
@@ -1655,45 +1656,41 @@ pub fn recurate_window(
 /// `pref add`, which no window shows). A settled claim stays when an answer leaves it out: a
 /// curator's answers vary, and `retracted` needs the user's words or the owner's correction.
 fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims::ClaimOp)>> {
-    let mut derivations = k.prepare(
+    let mut derivations = k.prepare(&format!(
         "SELECT d.uid, d.op_device, d.op_seq, d.kind, d.speaker, d.scope, d.body, d.tier
          FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
-         JOIN evidence e ON e.op_device = d.op_device AND e.op_seq = d.op_seq AND e.idx = 0
-         WHERE d.anchor_device = ?1 AND d.anchor_seq BETWEEN ?2 AND ?3
-           AND (e.seq <> ?2 OR ?4 IS NULL OR e.offset >= ?4)
-           AND (e.seq <> ?3 OR ?5 IS NULL OR e.offset + e.length <= ?5)
+         JOIN evidence q ON q.op_device = d.op_device AND q.op_seq = d.op_seq AND q.idx = 0
+         WHERE {}
            AND d.status IN ('proposed', 'unverified') AND d.scope <> 'global'
          ORDER BY d.anchor_seq, d.uid",
-    )?;
+        crate::claims::IN_WINDOW
+    ))?;
     let mut evidence = k.prepare(
         "SELECT device, seq, offset, length, sentence, quote, claim_at FROM evidence
          WHERE op_device = ?1 AND op_seq = ?2 ORDER BY idx",
     )?;
     let rows: Vec<(String, String, i64, crate::claims::ClaimOp)> = derivations
-        .query_map(
-            params![w.device, w.from_seq, w.to_seq, w.from_offset, w.to_offset],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    crate::claims::ClaimOp {
-                        id: String::new(),
-                        kind: r.get(3)?,
-                        status: String::new(),
-                        speaker: r.get(4)?,
-                        scope: r.get(5)?,
-                        body: r.get(6)?,
-                        evidence: Vec::new(),
-                        supersedes: Vec::new(),
-                        recipe: String::new(),
-                        tier: r.get(7)?,
-                        why: String::new(),
-                        tainted: false,
-                    },
-                ))
-            },
-        )?
+        .query_map(&crate::claims::window_params(w)[..], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                crate::claims::ClaimOp {
+                    id: String::new(),
+                    kind: r.get(3)?,
+                    status: String::new(),
+                    speaker: r.get(4)?,
+                    scope: r.get(5)?,
+                    body: r.get(6)?,
+                    evidence: Vec::new(),
+                    supersedes: Vec::new(),
+                    recipe: String::new(),
+                    tier: r.get(7)?,
+                    why: String::new(),
+                    tainted: false,
+                },
+            ))
+        })?
         .collect::<rusqlite::Result<_>>()?;
     let mut out = Vec::new();
     for (uid, op_device, op_seq, mut c) in rows {
@@ -2084,7 +2081,7 @@ fn ended_on_a_proposal(raw: &Raw, k: &Connection, w: &Window) -> Result<Vec<Stri
                 && c.status == "proposed"
                 && c.speaker == "assistant proposal"
                 && raw.session_key(&e.device, e.seq)?.as_deref() == Some(l.key.as_str())
-                && crate::claims::tip(k, &crate::claims::uid(kind, e))?
+                && crate::claims::tip(k, &crate::claims::uid(kind, e), w)?
                     .is_some_and(|(repo, t)| t.status == "proposed" && repo == l.repo)
             {
                 proposals.push((e.seq, c.tainted));
@@ -2110,8 +2107,9 @@ const CANDIDATES: usize = 20;
 /// At most this many of a session's decided claims its later windows carry, the newest first.
 const CARRIED_DECISIONS: usize = 20;
 
-/// Candidates a window may supersede (MUST-M3): up to `CANDIDATES` current claims of `repo` that
-/// the full text index finds for its lines, the whole repository, every window. `said` (the
+/// Candidates a window may supersede (MUST-M3): up to `CANDIDATES` of `current`, `repo`'s current
+/// claims as the window sees them (`claims::current_before`), that the full text index finds for
+/// its lines, the whole repository, every window. `said` (the
 /// owner's and the assistant's lines, where decisions are made and turned over) is searched first,
 /// and `rest` (tool text, envelopes) fills the places it leaves: about 97% of a window is tool
 /// text, and one search over all of it asked mostly for words of tool output, so an earlier
@@ -2121,11 +2119,11 @@ const CARRIED_DECISIONS: usize = 20;
 // repositories hold tens of thousands.
 pub fn candidates(
     k: &Connection,
+    current: &[crate::claims::Claim],
     repo: &str,
     said: &str,
     rest: &str,
 ) -> Result<Vec<crate::claims::Claim>> {
-    let current = crate::claims::current(k, repo)?;
     // The repository's own matches only, ranked, read until `CANDIDATES` are current: another
     // repository's better matches never crowd them out.
     let mut st = k.prepare(
@@ -2381,7 +2379,7 @@ fn carried(
     }
     let (mut decided, mut items) = (Vec::new(), Vec::new());
     for repo in repos {
-        for c in crate::claims::current(k, repo)? {
+        for c in crate::claims::current_before(k, repo, w)? {
             let list = if c.kind == "open item" {
                 if c.status == "done" {
                     continue;
@@ -2439,7 +2437,7 @@ fn carried(
                 let uid = crate::claims::uid(kind, first);
                 // Its active derivation, once, while that is still a current proposal: a sibling
                 // or a later window may have settled or reworded it.
-                if let Some((repo, tip)) = crate::claims::tip(k, &uid)?
+                if let Some((repo, tip)) = crate::claims::tip(k, &uid, w)?
                     && tip.status == "proposed"
                     && !uids.iter().any(|(_, _, u)| u.uid == uid)
                     && !proposals.iter().any(|(.., u)| u.uid == uid)
@@ -2648,6 +2646,14 @@ mod tests {
     fn close(raw: &mut Raw, w: &Window) {
         let op = serde_json::json!({"from_seq": w.from_seq, "from_offset": w.from_offset,
             "to_seq": w.to_seq, "to_offset": w.to_offset, "outcome": "curated"});
+        raw.append_ops(&[(OpKind::Window, op)]).unwrap();
+    }
+
+    /// Every record so far curated, as the windows that derived `kept`'s claims left them: the
+    /// next window starts after them, and none of their claims is its own (`claims::IN_WINDOW`).
+    fn curated_so_far(raw: &mut Raw) {
+        let op = serde_json::json!({"from_seq": 1, "from_offset": null,
+            "to_seq": raw.max_seq().unwrap(), "to_offset": null, "outcome": "curated"});
         raw.append_ops(&[(OpKind::Window, op)]).unwrap();
     }
 
@@ -2976,7 +2982,14 @@ mod tests {
         raw.append_ops(&[op]).unwrap();
         let mut k = crate::knowledge::open(home.path()).unwrap();
         consume(&raw, &mut k);
-        let found = candidates(&k, "a", "./x\0./y\0 Sessions leave Postgres", "").unwrap();
+        let found = candidates(
+            &k,
+            &crate::claims::current(&k, "a").unwrap(),
+            "a",
+            "./x\0./y\0 Sessions leave Postgres",
+            "",
+        )
+        .unwrap();
         assert_eq!(found.len(), 1);
     }
 
@@ -3965,7 +3978,14 @@ mod tests {
         raw.append_ops(&crowd).unwrap();
         let mut k = crate::knowledge::open(home.path()).unwrap();
         consume(&raw, &mut k);
-        let found = candidates(&k, "r", "Should sessions move out of Postgres?", "").unwrap();
+        let found = candidates(
+            &k,
+            &crate::claims::current(&k, "r").unwrap(),
+            "r",
+            "Should sessions move out of Postgres?",
+            "",
+        )
+        .unwrap();
         let bodies: Vec<&str> = found.iter().map(|c| c.body.as_str()).collect();
         assert_eq!(bodies, ["We store sessions in Postgres."]);
     }
@@ -4013,7 +4033,11 @@ mod tests {
         let shown: Vec<&str> = req.shown_in.iter().map(|(_, c)| c.body.as_str()).collect();
         assert!(shown.contains(&earlier), "{shown:?}");
         assert_eq!(shown.len(), 20, "tool text fills the places left");
-        assert!(!candidates(&k, "a", "", &log).unwrap().is_empty());
+        assert!(
+            !candidates(&k, &crate::claims::current(&k, "a").unwrap(), "a", "", &log)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// An approved plan is the owner's words, though its line is a tool's: it is searched with the
@@ -4125,6 +4149,7 @@ mod tests {
         consume(&raw, &mut k);
         let found = candidates(
             &k,
+            &crate::claims::current(&k, "a").unwrap(),
             "a",
             "Keep sessions in Postgres.",
             "grep: sessions stay in Postgres; the importer reads dd.mm.yyyy dates",
@@ -4165,6 +4190,15 @@ mod tests {
         raw.append_ops(&ops).unwrap();
         let mut k = crate::knowledge::open(home.path()).unwrap();
         consume(&raw, &mut k);
+        // The session's next window, in both of its checkouts.
+        curated_so_far(&mut raw);
+        for repo in ["r", "q"] {
+            let e = Event {
+                repo: Some(repo.into()),
+                ..prompt("Next step.")
+            };
+            raw.append(&e).unwrap();
+        }
         let dev = raw.device().to_owned();
         let rules = Rules::default();
         let w = next_window(&raw, &dev, 100_000, &rules).unwrap().unwrap();
@@ -4284,6 +4318,7 @@ mod tests {
             })
             .collect();
         raw.append_ops(&ops).unwrap();
+        curated_so_far(&mut raw);
         let mut k = crate::knowledge::open(home.path()).unwrap();
         consume(&raw, &mut k);
         let all: Vec<String> = crate::claims::current(&k, "a")
@@ -4311,11 +4346,17 @@ mod tests {
             .clone();
         // The candidates the phase finds, as it finds them: more than the budget shows.
         let (said, rest) = searched(&w, "a");
-        let found: Vec<String> = candidates(&k, "a", &said, &rest)
-            .unwrap()
-            .into_iter()
-            .map(|c| c.uid)
-            .collect();
+        let found: Vec<String> = candidates(
+            &k,
+            &crate::claims::current(&k, "a").unwrap(),
+            "a",
+            &said,
+            &rest,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|c| c.uid)
+        .collect();
         assert!(found.len() > 10 && found.iter().all(|u| all.contains(u)));
         let sent = std::cell::RefCell::new(String::new());
         let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
@@ -4367,6 +4408,7 @@ mod tests {
         let (mut raw, db) = open(home.path());
         let op = kept(&mut raw, "s1", "a", "We store sessions in Postgres.");
         raw.append_ops(&[op]).unwrap();
+        curated_so_far(&mut raw);
         let mut k = crate::knowledge::open(home.path()).unwrap();
         consume(&raw, &mut k);
         let old = crate::claims::current(&k, "a").unwrap()[0].uid.clone();
@@ -4375,8 +4417,12 @@ mod tests {
             repo: Some(repo.into()),
             ..prompt(text)
         };
-        raw.append(&in_repo("s2", "a", "Sessions leave Postgres for SQLite."))
-            .unwrap();
+        raw.append(&in_repo(
+            "s2",
+            "a",
+            "Sessions leave Postgres for SQLite. We keep one file.",
+        ))
+        .unwrap();
         raw.append(&in_repo("s3", "b", "Sessions leave Postgres here too."))
             .unwrap();
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
@@ -4402,7 +4448,7 @@ mod tests {
             // Repository b: neither a's candidate nor a's sibling.
             draft("c2", "Sessions leave Postgres here too", json!([old, "c1"])),
             // Repository a: its sibling.
-            draft("c3", "We store sessions in Postgres", json!(["c1"]))], "summary": "s"});
+            draft("c3", "We keep one file", json!(["c1"]))], "summary": "s"});
         let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
             Ok(ChainResult {
                 output: answer.clone(),
@@ -4426,6 +4472,17 @@ mod tests {
         answer: Value,
         second: &[Event],
         then: impl Fn(&str) -> Value,
+    ) -> (Vec<String>, Vec<crate::raw::Op>) {
+        curated(first, answer, second, then, false)
+    }
+
+    /// `two_windows`, and with `again` the second window curated again, `then` answering it too.
+    fn curated(
+        first: &[Event],
+        answer: Value,
+        second: &[Event],
+        then: impl Fn(&str) -> Value,
+        again: bool,
     ) -> (Vec<String>, Vec<crate::raw::Op>) {
         let home = tempfile::tempdir().unwrap();
         let (mut raw, db) = open(home.path());
@@ -4451,8 +4508,199 @@ mod tests {
             run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
             consume(&raw, &mut k);
         }
+        if again {
+            let from = first.len() as i64 + 1;
+            let span = Span::records(from, from + second.len() as i64 - 1);
+            let w = span_windows(&raw, &span, WINDOW_TOKENS, &rules).unwrap();
+            recurate_window(&mut raw, &k, &rules, &summary, &mut chain, &w[0], None)
+                .unwrap()
+                .unwrap();
+            consume(&raw, &mut k);
+        }
         let ops = raw.ops_after(raw.device(), 0, 20).unwrap();
         (sent.into_inner(), ops)
+    }
+
+    /// #249 in a split record: a window that starts or ends inside a record takes as its own only
+    /// the claims quoted in its part. What the other part's claims superseded stays superseded.
+    #[test]
+    fn a_split_records_other_part_still_supersedes_for_a_recuration() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _db) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        let postgres = kept(&mut raw, "s0", "a", "Keep sessions in Postgres.");
+        let stdout = kept(&mut raw, "s0", "a", "Log to stdout.");
+        let text = format!(
+            "Move sessions to SQLite.\n{}Log to stderr.",
+            "Some filler here.\n".repeat(30)
+        );
+        let seq = raw
+            .append(&Event {
+                repo: Some("a".into()),
+                ..prompt(&text)
+            })
+            .unwrap();
+        let device = raw.device().to_owned();
+        let over = |quote: &str, target: &(OpKind, Value)| {
+            let target: crate::claims::ClaimOp = serde_json::from_value(target.1.clone()).unwrap();
+            let at = text.find(quote).unwrap() as i64;
+            let evidence = crate::claims::Evidence {
+                device: device.clone(),
+                seq,
+                offset: at,
+                length: quote.len() as i64,
+                sentence: at,
+                quote: quote.into(),
+                claim_at: None,
+            };
+            let op = crate::claims::ClaimOp {
+                body: quote.into(),
+                evidence: vec![evidence],
+                supersedes: vec![crate::claims::uid("decision", &target.evidence[0])],
+                ..target
+            };
+            (OpKind::Claim, serde_json::to_value(op).unwrap())
+        };
+        let ops = [
+            postgres.clone(),
+            stdout.clone(),
+            over("Move sessions to SQLite", &postgres),
+            over("Log to stderr", &stdout),
+        ];
+        raw.append_ops(&ops).unwrap();
+        consume(&raw, &mut k);
+        let parts = span_windows(&raw, &Span::records(seq, seq), 80, &Rules::default()).unwrap();
+        let (first, last) = (&parts[0], parts.last().unwrap());
+        assert!(
+            first.to_offset.is_some() && last.from_offset.is_some(),
+            "{}",
+            parts.len()
+        );
+        // Each part's own claim is left out; the other part's stands, and so does what it
+        // superseded.
+        let current = |w: &Window| -> Vec<String> {
+            let mut c: Vec<String> = crate::claims::current_before(&k, "a", w)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.body)
+                .collect();
+            c.sort();
+            c
+        };
+        assert_eq!(
+            current(first),
+            ["Keep sessions in Postgres.", "Log to stderr"]
+        );
+        assert_eq!(current(last), ["Log to stdout.", "Move sessions to SQLite"]);
+    }
+
+    /// #249: a window curated again is shown what its earlier answer superseded, since its own
+    /// earlier claims are what the recuration replaces: the proposal an acceptance settled is
+    /// carried again and settled again, and the decision an overturn turned over is shown again
+    /// and turned over again.
+    #[test]
+    fn a_recurated_window_sees_what_its_earlier_answer_superseded() {
+        let in_a = |e: Event| Event {
+            repo: Some("a".into()),
+            ..e
+        };
+        let claim =
+            |status: &str, speaker: &str, quote: &str, line: &str, supersedes: Vec<&str>| {
+                json!({"claims": [{"id": "c1", "kind": "decision", "status": status,
+                "speaker": speaker, "scope": "repo", "body": format!("{quote}."),
+                "quote": quote, "line": line, "supersedes": supersedes}], "summary": "s"})
+            };
+        let named = |p: &str, head: &str| -> Vec<String> {
+            p.lines()
+                .filter_map(|l| Some(l.strip_prefix(head)?.split([' ', ':']).next()?.to_owned()))
+                .collect()
+        };
+        let last = |ops: &[crate::raw::Op]| {
+            let op = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+            let n = op.body["supersedes"].as_array().unwrap().len();
+            (op.body["status"].as_str().unwrap().to_owned(), n)
+        };
+        let first = [
+            in_a(prompt("Build the importer.")),
+            in_a(event(
+                "reply",
+                json!({"assistant": "I suggest caching the parsed files. Shall I?"}),
+            )),
+        ];
+        let proposal = claim(
+            "proposed",
+            "assistant proposal",
+            "caching the parsed files",
+            "L2",
+            vec![],
+        );
+        let accept = |p: &str| {
+            let uids = named(p, "proposed before ");
+            claim(
+                "decided",
+                "user",
+                "はい",
+                "L1",
+                uids.iter().map(String::as_str).collect(),
+            )
+        };
+        let (sent, ops) = curated(&first, proposal, &[in_a(prompt("はい"))], accept, true);
+        assert!(sent[2].contains("proposed before "), "{}", sent[2]);
+        assert_eq!(last(&ops), ("decided".to_owned(), 1));
+        let first = [in_a(prompt("Keep sessions in Postgres."))];
+        let kept = claim("decided", "user", "Keep sessions in Postgres", "L1", vec![]);
+        let overturn = |p: &str| {
+            let uids = named(p, "decided before ");
+            let quote = "move sessions to SQLite";
+            claim(
+                "decided",
+                "user",
+                quote,
+                "L1",
+                uids.iter().map(String::as_str).collect(),
+            )
+        };
+        let second = [in_a(prompt("Now move sessions to SQLite instead."))];
+        let (sent, ops) = curated(&first, kept.clone(), &second, overturn, true);
+        assert!(sent[2].contains("decided before "), "{}", sent[2]);
+        assert_eq!(last(&ops), ("decided".to_owned(), 1));
+        // Another session's overturn finds it among the candidates, and not the window's own
+        // earlier claim, which the recuration replaces.
+        let shown = |p: &str, body: &str| -> Vec<String> {
+            p.lines()
+                .filter_map(|l| l.strip_suffix(&format!(": {body}")))
+                .filter(|uid| uid.len() == 64)
+                .map(str::to_owned)
+                .collect()
+        };
+        let overturn = |p: &str| {
+            let uids = shown(p, "Keep sessions in Postgres.");
+            let quote = "move sessions to SQLite";
+            claim(
+                "decided",
+                "user",
+                quote,
+                "L1",
+                uids.iter().map(String::as_str).collect(),
+            )
+        };
+        let second = [Event {
+            session: "s2".into(),
+            ..in_a(prompt("Now move sessions to SQLite, out of Postgres."))
+        }];
+        let (sent, ops) = curated(&first, kept, &second, overturn, true);
+        assert_eq!(
+            shown(&sent[2], "Keep sessions in Postgres.").len(),
+            1,
+            "{}",
+            sent[2]
+        );
+        assert!(
+            shown(&sent[2], "move sessions to SQLite.").is_empty(),
+            "{}",
+            sent[2]
+        );
+        assert_eq!(last(&ops), ("decided".to_owned(), 1));
     }
 
     /// Task 11: a span sent again is cut at its end: the curator reads none of the records after
@@ -5923,6 +6171,7 @@ mod tests {
         let (mut raw, db) = open(home.path());
         let op = kept(&mut raw, "s1", "r", "We store sessions in Postgres.");
         raw.append_ops(&[op]).unwrap();
+        curated_so_far(&mut raw);
         let mut k = crate::knowledge::open(home.path()).unwrap();
         consume(&raw, &mut k);
         raw.append(&Event {
