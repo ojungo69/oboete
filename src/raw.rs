@@ -864,13 +864,14 @@ impl Raw {
         })
     }
 
-    /// The ops of the session's previous window, whose proposals its next window carries
+    /// The claim ops of the session's previous window, whose proposals its next window carries
     /// (milestone 3 Task 7, D12): the last window the worker cut that covered this device's latest
     /// event of `agent`'s `session` before the window starting at `from` (seq and offset) that has
     /// text (a resumed session's `start` is covered on its own, by a window that holds none of its
-    /// lines), and every recuration of a part of it (#240), newest first. A window that ends past
-    /// `from` is not a previous one: it is the one starting there, curated before and now again.
-    /// Per session, since sessions interleave: another session's window may come between.
+    /// lines). Its claims and those of every later recuration quoted inside it (#240), newest
+    /// first. A window that ends past `from` is not a previous one: it is the one starting there,
+    /// curated before and now again. Per session, since sessions interleave: another session's
+    /// window may come between.
     pub fn previous_window_ops(
         &self,
         agent: &str,
@@ -895,29 +896,25 @@ impl Raw {
         let Some(seq) = seq else {
             return Ok(Vec::new());
         };
-        // A window op's range as positions (seq, offset): its first byte and past its last.
-        let range =
-            "json_extract(body, '$.from_seq'), COALESCE(json_extract(body, '$.from_offset'), 0),
-            json_extract(body, '$.to_seq'), COALESCE(json_extract(body, '$.to_offset'), ?3)";
-        type Range = ((i64, i64), (i64, i64));
-        let range_at = |r: &rusqlite::Row, i: usize| -> rusqlite::Result<Range> {
-            Ok(((r.get(i)?, r.get(i + 1)?), (r.get(i + 2)?, r.get(i + 3)?)))
-        };
         // Down from the newest window op that covered the event to the first the worker cut: its
         // recurations come after it, and the windows before it (another part of a split event)
         // end where it starts. With none the worker cut left (a recuration cut the records
-        // another way), the recuration that ends last.
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT op_seq, COALESCE(json_extract(body, '$.recurate'), 0), {range}
+        // another way), the recuration that ends last. Ranges as positions (seq, offset): the
+        // first byte, and past the last.
+        let mut stmt = self.conn.prepare(
+            "SELECT op_seq, COALESCE(json_extract(body, '$.recurate'), 0),
+                    json_extract(body, '$.from_seq'), COALESCE(json_extract(body, '$.from_offset'), 0),
+                    json_extract(body, '$.to_seq'), COALESCE(json_extract(body, '$.to_offset'), ?3)
              FROM ops WHERE device = ?1 AND type = 'window'
                AND json_extract(body, '$.from_seq') <= ?2
                AND json_extract(body, '$.to_seq') >= ?2
-             ORDER BY op_seq DESC"
-        ))?;
+             ORDER BY op_seq DESC",
+        )?;
         let mut rows = stmt.query(params![self.device, seq, i64::MAX])?;
+        type At = (i64, ((i64, i64), (i64, i64)));
         let (mut cut, mut stand_in) = (None, None);
         while let Some(r) = rows.next()? {
-            let at: (i64, Range) = (r.get(0)?, range_at(r, 2)?);
+            let at: At = (r.get(0)?, ((r.get(2)?, r.get(3)?), (r.get(4)?, r.get(5)?)));
             if at.1.1 > start {
                 continue;
             }
@@ -925,33 +922,41 @@ impl Raw {
                 cut = Some(at);
                 break;
             }
-            if stand_in.is_none_or(|(_, s): (i64, Range)| at.1.1 > s.1) {
+            if stand_in.is_none_or(|(_, s): At| at.1.1 > s.1) {
                 stand_in = Some(at);
             }
         }
         let Some((since, (cut_from, cut_to))) = cut.or(stand_in) else {
             return Ok(Vec::new());
         };
-        // It and every later recuration of a part of it, whether or not that part holds the
-        // event, newest first.
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT batch, {range}
-             FROM ops WHERE device = ?1 AND type = 'window' AND op_seq >= ?2
-               AND json_extract(body, '$.from_seq') <= ?4
-               AND json_extract(body, '$.to_seq') >= ?5
-             ORDER BY op_seq DESC"
-        ))?;
-        let mut rows = stmt.query(params![self.device, since, i64::MAX, cut_to.0, cut_from.0])?;
+        // Its claims, and those every later window op quoted inside it: a recuration of a part
+        // of it holding the event or not, or one that cut the records another way. By the first
+        // quote, as the claim's uid is, whole, as `curate::anchored_in` reads a window's.
+        let batches: Vec<i64> = self
+            .conn
+            .prepare(
+                "SELECT batch FROM ops WHERE device = ?1 AND type = 'window' AND op_seq >= ?2
+                   AND json_extract(body, '$.from_seq') <= ?3
+                   AND json_extract(body, '$.to_seq') >= ?4
+                 ORDER BY op_seq DESC",
+            )?
+            .query_map(params![self.device, since, cut_to.0, cut_from.0], |r| {
+                r.get(0)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let inside = |o: &Op| {
+            let e = &o.body["evidence"][0];
+            matches!((e["seq"].as_i64(), e["offset"].as_i64(), e["length"].as_i64()),
+                (Some(s), Some(f), Some(n)) if cut_from <= (s, f) && (s, f + n) <= cut_to)
+        };
         let mut ops = Vec::new();
-        while let Some(r) = rows.next()? {
-            let (batch, (first, end)): (i64, Range) = (r.get(0)?, range_at(r, 1)?);
-            if first < cut_to && cut_from < end && end <= start {
-                ops.extend(
-                    self.ops_after(&self.device, batch - 1, MAX_BATCH_OPS)?
-                        .into_iter()
-                        .take_while(|o| o.batch == batch),
-                );
-            }
+        for batch in batches {
+            ops.extend(
+                self.ops_after(&self.device, batch - 1, MAX_BATCH_OPS)?
+                    .into_iter()
+                    .take_while(|o| o.batch == batch)
+                    .filter(|o| o.kind == OpKind::Claim && inside(o)),
+            );
         }
         Ok(ops)
     }
@@ -1665,10 +1670,11 @@ mod tests {
         assert_eq!(raw.curation_checkpoint(&dev).unwrap(), (7, Some(120)));
     }
 
-    /// A session's previous window (#240) is the one the worker cut before the window at `from`,
-    /// with every recuration of a part of it, newest first; not a recuration of another part of
-    /// a split event, nor the window at `from` curated before; a recuration that cut the records
-    /// its own way stands in for it.
+    /// A session's previous window (#240) is the one the worker cut before the window at `from`:
+    /// not a recuration of another part of a split event, nor the window at `from` curated before.
+    /// Its claims come with those of every later recuration quoted inside it, newest first; a
+    /// recuration that cut the records its own way stands in for it when the worker's runs past
+    /// `from`.
     #[test]
     fn the_previous_window_is_the_workers_with_the_recurations_of_its_parts() {
         let home = tempfile::tempdir().unwrap();
@@ -1676,38 +1682,80 @@ mod tests {
         for i in 1..=4 {
             raw.append(&test_event(&format!("line {i}"))).unwrap();
         }
-        let window = |raw: &mut Raw, span: [Option<i64>; 4], recurate: bool, text: &str| {
-            let op = serde_json::json!({"from_seq": span[0], "from_offset": span[1],
+        // A window op and its claims, each quoted at (seq, offset) for 5 bytes.
+        let window =
+            |raw: &mut Raw, span: [Option<i64>; 4], recurate: bool, claims: &[(&str, i64, i64)]| {
+                let op = serde_json::json!({"from_seq": span[0], "from_offset": span[1],
                 "to_seq": span[2], "to_offset": span[3], "recurate": recurate});
-            let claim = serde_json::json!({"text": text});
-            raw.append_ops(&[(OpKind::Window, op), (OpKind::Claim, claim)])
-                .unwrap();
-        };
+                let mut ops = vec![(OpKind::Window, op)];
+                for (text, seq, offset) in claims {
+                    let claim = serde_json::json!({"text": text,
+                    "evidence": [{"seq": seq, "offset": offset, "length": 5}]});
+                    ops.push((OpKind::Claim, claim));
+                }
+                raw.append_ops(&ops).unwrap();
+            };
         let previous = |raw: &Raw, from: (i64, Option<i64>)| -> Vec<String> {
             let ops = raw.previous_window_ops("claude", "s", from).unwrap();
             ops.into_iter()
-                .filter(|o| o.kind == OpKind::Claim)
                 .map(|o| o.body["text"].as_str().unwrap().to_owned())
                 .collect()
         };
         // Event 2 is split at offset 50; its first part is curated again after the worker went on.
-        window(&mut raw, [Some(1), None, Some(2), Some(50)], false, "w1");
-        window(&mut raw, [Some(2), Some(50), Some(2), None], false, "w2");
-        window(&mut raw, [Some(3), None, Some(4), None], false, "w3");
-        window(&mut raw, [Some(1), None, Some(2), Some(50)], true, "r1");
+        window(
+            &mut raw,
+            [Some(1), None, Some(2), Some(50)],
+            false,
+            &[("w1", 1, 0)],
+        );
+        window(
+            &mut raw,
+            [Some(2), Some(50), Some(2), None],
+            false,
+            &[("w2", 2, 60)],
+        );
+        window(
+            &mut raw,
+            [Some(3), None, Some(4), None],
+            false,
+            &[("w3", 3, 0)],
+        );
+        // A quote a split cuts in two is in neither part, as `curate::anchored_in` reads it.
+        window(
+            &mut raw,
+            [Some(1), None, Some(2), Some(50)],
+            true,
+            &[("r1", 1, 0), ("r1 cut", 2, 48)],
+        );
         assert_eq!(previous(&raw, (3, None)), ["w2"]);
         // The window at event 2's offset 50 curated again: its previous window is the first part.
         assert_eq!(previous(&raw, (2, Some(50))), ["r1", "w1"]);
         // A part of the worker's window curated again: the rest of the window is still its own.
-        window(&mut raw, [Some(4), None, Some(4), None], true, "r4");
+        window(
+            &mut raw,
+            [Some(4), None, Some(4), None],
+            true,
+            &[("r4", 4, 0)],
+        );
         assert_eq!(previous(&raw, (5, None)), ["r4", "w3"]);
         // Event 3 curated again on its own, and the window at event 4 after it.
-        window(&mut raw, [Some(3), None, Some(3), None], true, "r3");
+        window(
+            &mut raw,
+            [Some(3), None, Some(3), None],
+            true,
+            &[("r3", 3, 0)],
+        );
         assert_eq!(previous(&raw, (4, None)), ["r3"]);
         // A recuration of a part that does not hold the session's latest event is the window's too.
         assert_eq!(previous(&raw, (5, None)), ["r3", "r4", "w3"]);
-        // One that runs into the window at event 4 is not before it.
-        window(&mut raw, [Some(2), Some(50), Some(4), None], true, "r24");
-        assert_eq!(previous(&raw, (4, None)), ["r3"]);
+        // Recurations cut another way, over the window's start or into the window at 4: only
+        // what they quoted inside the previous window.
+        let across = [("r23 before", 2, 60), ("r23", 3, 5), ("r23 after", 4, 0)];
+        window(&mut raw, [Some(2), Some(50), Some(4), None], true, &across);
+        assert_eq!(previous(&raw, (4, None)), ["r23", "r3"]);
+        assert_eq!(
+            previous(&raw, (5, None)),
+            ["r23", "r23 after", "r3", "r4", "w3"]
+        );
     }
 }
