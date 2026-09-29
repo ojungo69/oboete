@@ -1670,7 +1670,8 @@ pub fn recurate_window(
 /// rules have it: a proposal supersedes
 /// nothing settled, and a global claim changes only by the owner (`anchored_in` has none). A
 /// claim the owner corrected is left as it is: the correction applies by uid (MUST-M21), and a
-/// restatement in the curator's words would hide it. An addition that would put a claim op over
+/// restatement in the curator's words would hide it. Such a claim, and a lesson, still count as
+/// claims of their words when a match is sole or not. An addition that would put a claim op over
 /// the op cap is left out: its append would stop the window.
 fn restate(
     k: &Connection,
@@ -1687,18 +1688,20 @@ fn restate(
         "SELECT 1 FROM edges e JOIN claims x ON x.op_device = e.op_device AND x.op_seq = e.op_seq
          WHERE e.to_uid = ?1 AND x.uid <> ?1",
     )?;
-    let mut left: Vec<(&str, &crate::claims::Evidence, bool)> = Vec::new();
+    // Each settled claim the answer leaves out: whether it is current, and whether this rule may
+    // supersede it (not a lesson or a claim the owner corrected, which still count as claims of
+    // their words).
+    let mut left: Vec<(&str, &crate::claims::Evidence, bool, bool)> = Vec::new();
     for (uid, c) in anchored {
         if settled(&c.status)
-            && c.kind != "lesson"
             && !given.contains(uid)
-            && !corrected.exists([uid])?
             && let Some(first) = c.evidence.first()
         {
-            left.push((uid.as_str(), first, !replaced.exists([uid])?));
+            let open = c.kind != "lesson" && !corrected.exists([uid])?;
+            left.push((uid.as_str(), first, !replaced.exists([uid])?, open));
         }
     }
-    if left.is_empty() {
+    if !left.iter().any(|&(_, _, _, open)| open) {
         return Ok(());
     }
     let mut had = k.prepare(
@@ -1716,22 +1719,26 @@ fn restate(
         let uid = crate::claims::uid(&n.kind, first);
         let restated: Vec<&str> = if anchored.iter().any(|(u, _)| *u == uid) {
             let mut kept = Vec::new();
-            for &(s, _, _) in &left {
-                if had.exists(params![uid, s])? {
+            for &(s, _, _, open) in &left {
+                if open && had.exists(params![uid, s])? {
                     kept.push(s);
                 }
             }
             kept
         } else {
             // One claim restates one: two current left-out claims of these words are two claims
-            // an answer told apart, and which one this restates is not known. One a claim of
-            // these words superseded before is not a second claim (Codex on 8e23d67).
-            let same: Vec<&str> = left
+            // an answer told apart, and which one this restates is not known, whether or not this
+            // rule may supersede the other (Codex on 471b1bc). One a claim of these words
+            // superseded before is not a second claim (Codex on 8e23d67).
+            let same: Vec<(&str, bool)> = left
                 .iter()
-                .filter(|(_, at, tip)| *tip && same_words(at, first))
-                .map(|&(s, _, _)| s)
+                .filter(|(_, at, tip, _)| *tip && same_words(at, first))
+                .map(|&(s, _, _, open)| (s, open))
                 .collect();
-            if same.len() == 1 { same } else { Vec::new() }
+            match same[..] {
+                [(s, true)] => vec![s],
+                _ => Vec::new(),
+            }
         };
         let before = n.supersedes.len();
         for s in restated {
@@ -5703,6 +5710,57 @@ mod tests {
         )]);
         let (_home, k) = one_sentence("Use tabs.", vec![first, again]);
         assert_eq!(current_bodies(&k), ["Prefer tabs.", "Tabs, not spaces."]);
+    }
+
+    /// #261: a claim the rule may not supersede still makes a match ambiguous: a preference over
+    /// the words of a decision and a lesson restates one of the two, and which is not known, so
+    /// the decision stays current (Codex on 471b1bc). The same for a claim the owner corrected.
+    #[test]
+    fn a_protected_claim_of_the_same_words_leaves_the_restatement_ambiguous() {
+        let two = |second: Value| {
+            answer(vec![
+                drafted("c1", "decided", "Use tabs", "Tabs, not spaces."),
+                second,
+            ])
+        };
+        let again = || {
+            answer(vec![preference(
+                "c1",
+                "decided",
+                "Use tabs",
+                "Prefer tabs.",
+            )])
+        };
+        let lesson = of_kind(
+            "lesson",
+            drafted("c2", "decided", "Use tabs", "Tabs avoid the diff noise."),
+        );
+        let (_home, k) = one_sentence("Use tabs.", vec![two(lesson), again()]);
+        assert_eq!(
+            current_bodies(&k),
+            [
+                "Prefer tabs.",
+                "Tabs avoid the diff noise.",
+                "Tabs, not spaces."
+            ]
+        );
+        let done = of_kind("change", drafted("c2", "done", "Use tabs", "Tabs are set."));
+        let (_home, k) = one_sentence_then("Use tabs.", vec![two(done), again()], |k| {
+            k.execute(
+                "INSERT INTO corrections(op_device, op_seq, ts, uid, status, body)
+                 VALUES('owner', 1, 1, ?1, NULL, 'Tabs are set, width 4.')",
+                [uid_of(k, "Tabs are set.")],
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            current_bodies(&k),
+            [
+                "Prefer tabs.",
+                "Tabs are set, width 4.",
+                "Tabs, not spaces."
+            ]
+        );
     }
 
     /// #261: a done change restated as the developer's decision (#262's prompt) is superseded by
