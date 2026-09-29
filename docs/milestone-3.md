@@ -40,26 +40,28 @@ A heavy day, measured: the owner's transcripts of the last 90 days (3,870 files 
 
 The line: recall of the owner's decisions 80% or more, no overturned decision shown as current (0%), and at most 2% of compatible earlier decisions dropped. Eight arms were run eleven times (whole-2 and whole3 are one arm run twice, and so are cand1 and cand2, and carry1 and carry2), with one live entry (claude haiku), over the windows that hold a label (docs/spike/m3-dev.md has the harness and the definitions, fixed before any live number).
 
-| Arm | Binary | Shrink | Thinking | Recall (of 44) | Overturned, still current (of 19) | Compatible, dropped (of 25) | Owner-no records shown as decided (of 5) | Decided claims |
-|---|---|---|---|---|---|---|---|---|
-| whole | #194 + #191 | off | on | 10 | 2 | 0 | 4 | 65 |
-| short | #194 + #191 | on | on | 13 | 3 | 0 | 1 | 57 |
-| full | #195 (the owner's picks are the user's words) | off | on | 19 | 8 | 1 | 1 | 95 |
-| nothink | #195 | off | off | 24 | 9 | 1 | 3 | 122 |
-| whole-2 | main at ce805a4 (#219) | off | off | 20 | 9 | 1 | 3 | 176 |
-| short-2 | main at ce805a4 (#219) | on | off | 22 | 7 | 1 | 1 | 142 |
-| whole3 | main at ce805a4 (#219) | off | off | 24 | 10 | 1 | 2 | 163 |
-| cand1 | main at 21eadd3 (#237) | off | off | 23 | 12 | 2 | 2 | 111 |
-| cand2 | main at 21eadd3 (#237) | off | off | 21 | 11 | 1 | 1 | 164 |
-| carry1 | a session's decisions carried (16ad856) | off | off | 21 | 9 | 1 | 3 | 111 |
-| carry2 | a session's decisions carried (16ad856) | off | off | 21 | 10 | 3 | 4 | 126 |
+| Arm | Binary | Shrink | Thinking | Recall (of 44) | Recall, lasting (of 41) | Overturned, still current (of 19) | Compatible, dropped (of 25) | Owner-no records shown as decided (of 5) | Decided claims |
+|---|---|---|---|---|---|---|---|---|---|
+| whole | #194 + #191 | off | on | 10 | 10 | 2 | 0 | 4 | 65 |
+| short | #194 + #191 | on | on | 13 | 13 | 2 | 0 | 1 | 57 |
+| full | #195 (the owner's picks are the user's words) | off | on | 19 | 18 | 7 | 1 | 1 | 95 |
+| nothink | #195 | off | off | 24 | 24 | 9 | 1 | 3 | 122 |
+| whole-2 | main at ce805a4 (#219) | off | off | 20 | 20 | 9 | 1 | 3 | 176 |
+| short-2 | main at ce805a4 (#219) | on | off | 22 | 22 | 7 | 1 | 1 | 142 |
+| whole3 | main at ce805a4 (#219) | off | off | 24 | 24 | 10 | 1 | 2 | 163 |
+| cand1 | main at 21eadd3 (#237) | off | off | 23 | 22 | 12 | 2 | 2 | 111 |
+| cand2 | main at 21eadd3 (#237) | off | off | 21 | 20 | 11 | 1 | 1 | 164 |
+| carry1 | a session's decisions carried (16ad856) | off | off | 21 | 21 | 8 | 1 | 3 | 111 |
+| carry2 | a session's decisions carried (16ad856) | off | off | 21 | 19 | 10 | 3 | 4 | 126 |
+
+Scored per decision since 2026-09-29 (the owner left the call to Claude): on a record that holds several labeled items (11 records do), a claim is the item's whose quote it shares text with, and one sharing none is every item's, as all of a record's claims were before. Re-scored, only one pair moved: d105 and d106 are one prompt ("じゃあCCSを完全削除して。あと、fccをxai oauthに対応させたい。"), both overturned by d111, and short, full and carry1 each show it overturned now (3, 8 and 9 before). "Recall, lasting" leaves out the three instructions for the moment (below); the line is read on all 44, as the owner labeled them.
 
 whole and short cut 114 spans, and some of them shared a record, so that record's window was sent twice and the second pass retracted the first pass's claims: 1 overlap and 23 claims retracted in whole, 5 overlaps and 202 retracted in short. Their rows are kept here, but they do not measure what they were meant to. full and nothink cut 109 spans, merged so that none shares a record (#196's commit), and retracted none. whole-2 and short-2 cut 113 and 109 spans the same way, with none shared. short-2 retracted none. whole-2 retracted 22 claims, all in one span (seq 29865 to 29867, 4 windows): its first send got a prose answer for one window, the harness sent the span again, and the second answers replaced the first for the 3 windows that had one. Each window still ends with the claims of one answer. One span of whole-2 (seq 30261) was refused three times (unanchored). It holds none of the 44 labels, but it holds the earlier side of two overturn pairs (d105 and d106, both overturned by d111), which whole-2 counts as never derived rather than still current. whole3 is whole-2 run again from a clean home (review on #218): the harness no longer sends a span again once some of its windows were curated (ebe288e), so the arm is one pass, as short-2 is. It cut the same 113 spans and retracted none. It was stopped once, after 87 of the 113 spans, while it waited out the curator's cooldown with no call in flight, and went on from there (eab7397). One of its spans (seq 42955) was refused three times, and one of the two windows of another (seq 29872) answered prose and was left. Neither holds any of the 44 labels or a pair the lines count. cand1, cand2, carry1 and carry2 cut the same 113 spans, none shared, and retracted none. A span refused three times is left: none in cand1 and carry2, seq 30011 in cand2, and seq 17217 to 17219 and 30011 in carry1. Seq 30011 holds d100 and seq 17217 to 17219 holds d335, so those rows miss them. The table is `m3.py score`; the counts by kind, the drop classes and the records below were read after the fact with one-off queries over the same homes.
 
 - **The owner's picks in `AskUserQuestion`** (#195): 11 of the 13 labels that are such picks reached `decided` in full, and none did in whole or short. That is the whole of the gain from whole to full (the typed prompts went from 10 to 8 of 28, run to run).
 - **Recall by kind**, nothink: picks 10 of 13, typed prompts 14 of 28, accepted proposals quoted from the assistant's reply 0 of 3 (0 in every arm; the live pass curated only one of an acceptance's two windows, see Accepted proposals across two windows).
-- **Instructions for the moment.** About 10 of the 44 labels are instructions whose effect ends with the session ("新セッションで実装する", "ブラウザ開かないからurl教えて", "codex-reviewが未実行ならそれだけ実行して"); this list is mine, not the owner's. Every arm recalled at most two of them. Without them, recall is 23 of 34 (68%) in nothink, 22 of 34 (65%) in whole3 and 19 of 34 (56%) in full: still under 80%. Whether they count is the owner's call (below).
-- **Overturns fail the 0% line** once recall rises: 8 and 9 of 19 in full and nothink, 10 in whole3, 12 and 11 on main at 21eadd3 (cand1, cand2), and 9 and 10 with a session's decisions carried (carry1, carry2), a difference inside what two runs of one arm differ by. The curator does write `supersedes` (28 to 59 active edges per arm), but not for these pairs. 17 of the 19 pairs are in one session and 2 across sessions (d123 to d361, d490 to d187); several share one earlier record, so one missed supersede counts more than once (the per-record definition).
+- **Instructions for the moment.** The owner left the call to Claude on 2026-09-29, with claude-mem as the reference. claude-mem keeps every prompt verbatim and records outcomes (what was learned, built, fixed, deployed or configured, its code mode in 13.28.0), with no rule for an ask that ends with the session; of the 12 labels a first pass took for such asks, the owner's claude-mem database holds 11 as the raw prompt, and only one of them (d335) also became an observation. The rule, fixed before scoring: a label counts unless it no longer applies in a later session. A limit with an end (d446, d217), a hand-off to a new session (d130, d360, d333: work left), a go-ahead (the decision it accepts: d462, d335, d146, d380), a standing permission and an environment fact (d427, d365) apply later; three do not (d300, d332, d351), where the earlier count said about 10. The memory need not keep those three: the window's summary and the raw record keep what was asked.
+- **Overturns fail the 0% line** once recall rises: 7 and 9 of 19 in full and nothink, 10 in whole3, 12 and 11 on main at 21eadd3 (cand1, cand2), and 8 and 10 with a session's decisions carried (carry1, carry2), a difference inside what two runs of one arm differ by. The curator does write `supersedes` (28 to 59 active edges per arm), but not for these pairs. 17 of the 19 pairs are in one session and 2 across sessions (d123 to d361, d490 to d187); several share one earlier record, so one missed supersede still counts once per pair.
 - **Why, read after the fact.** An earlier decision reaches a later window only as a candidate: up to 20 current claims of the repository that the full-text index finds for 64 trigrams spread over the window's text. What a session carries in is its goal, its previous window's proposals and its open items, not its decisions, so the harness's stub-covered windows do not hide it. Replaying that search for the 9 pairs left current in nothink (with the window's records standing in for its rendered text, and the index as it ended):
   - 54 to 63 of the 64 trigrams came from tool text in every later window, so the search mostly looks for words of tool output;
   - in 3 pairs (d151, d176, d142 as the earlier side) the earlier decision matched none of them and was not shown;
@@ -126,8 +128,8 @@ whole-2 and whole3 are one arm run twice, on one binary with the same settings (
 
 ### What the next M3 run needs
 
-1. The owner's answer on instructions for the moment, and the test labels.
-2. Supersedes: a window now carries its sessions' decided claims, so a same-session earlier decision is in the prompt; the cross-session pairs need the hybrid search (#222). Whether a record holding two labels counts per record or per label is the owner's call (asked on 2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and with the reply's options carried, 2 of 6 acceptances settle their proposal (acc6: d462 and d107; #244: a go-ahead is often drafted as a proposal or not at all, or quotes another line than the owner's, and a quote from another repository's tool line loses its supersedes).
+1. The test labels, classed by the same rule (instructions for the moment, above).
+2. Supersedes: a window now carries its sessions' decided claims, so a same-session earlier decision is in the prompt; the cross-session pairs need the hybrid search (#222). A record holding two labels is scored per decision (2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and with the reply's options carried, 2 of 6 acceptances settle their proposal (acc6: d462 and d107; #244: a go-ahead is often drafted as a proposal or not at all, or quotes another line than the owner's, and a quote from another repository's tool line loses its supersedes).
 3. The quote match: whitespace-blind, then the paraphrases.
 4. The defaults as they would ship were run once (short-2): 22 of 44.
 5. Several runs of each arm (Run to run, above).
@@ -145,5 +147,4 @@ Not measured. The window is the smallest size that passes M2, M3 and M6 on the d
 
 ## What needs the owner
 
-1. Whether an instruction for the moment ("新セッションで実装する", "url教えて") counts as a decision the memory keeps. About 10 of the 44 dev labels are such instructions, and the curator keeps almost none; without them recall is 68% at best, with them 55%. It sets what M3 measures, and the test labels follow it.
-2. M3's test labels (plan, "What needs the owner", item 1).
+1. M3's test labels (plan, "What needs the owner", item 1). The owner's answers of 2026-09-29 settled the rest: instructions for the moment and per-decision scoring are Claude's call (above), OpenCodeReview runs when a PR opens and on its last push (#250), and Mistral leaves the default chain (#251).

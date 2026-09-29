@@ -385,6 +385,23 @@ def live(binary, name, send, tool=None, accepted=False):
     print(f'{len(todo)} spans, about {tokens} tokens this pass; log {log}')
 
 
+# Instructions for the moment: asks whose effect ends with the session, which the memory does not
+# keep as decisions (the owner left the call to Claude on 2026-09-29, docs/milestone-3.md). Fixed by
+# one rule before scoring, "does it still apply in a later session?": a limit with an end, a
+# hand-off to a new session, a go-ahead (the decision it accepts) and a standing permission do.
+MOMENTARY = {'d300', 'd332', 'd351'}
+
+
+def shares(a, b, n=8):
+    """Whether two quotes share a stretch of text, whitespace aside: n characters, or the whole of
+    the shorter one."""
+    a, b = ''.join(a.split()), ''.join(b.split())
+    if len(a) > len(b):
+        a, b = b, a
+    n = min(n, len(a))
+    return any(a[i:i + n] in b for i in range(len(a) - n + 1))
+
+
 def score(binary, name):
     """M3 on the labeled items, by the definitions of docs/spike/m3-dev.md. Counts only."""
     h = home(binary, name)
@@ -392,12 +409,27 @@ def score(binary, name):
     with open(f'{h}/map.json') as f:
         where = json.load(f)
     decisions, pairs, drafts = labels()
-    # Each active claim with the seqs its active derivation quotes.
+    # Each active claim with the quotes its active derivation has, by the seq each is in.
     claims = {}
-    for uid, status, seq in k.execute(
-            "SELECT a.uid, a.status, e.seq FROM active a JOIN claims c ON c.uid = a.uid "
+    for uid, status, seq, quote in k.execute(
+            "SELECT a.uid, a.status, e.seq, e.quote FROM active a JOIN claims c ON c.uid = a.uid "
             "JOIN evidence e ON e.op_device = c.op_device AND e.op_seq = c.op_seq"):
-        claims.setdefault(uid, [status, set()])[1].add(seq)
+        claims.setdefault(uid, [status, {}])[1].setdefault(seq, []).append(quote)
+    quote_of = {i: d['quote'] for i, d in drafts.items()} | {d['id']: d['quote'] for d in decisions}
+    labeled = {}
+    for i, w in where.items():
+        if w['seq'] is not None:
+            labeled.setdefault(w['seq'], []).append(i)
+
+    def its(item, seq, quotes):
+        """Whether a claim's quotes in record `seq` are the item's. Per decision (owner, 2026-09-29):
+        on a record that holds several labeled items, a quote sharing text with some of them is
+        theirs alone; one sharing none is every item's, as a record's claims all were before."""
+        on = labeled.get(seq, [])
+        if seq != where[item]['seq'] or len(on) < 2:
+            return True
+        hit = {i for i in on for q in quotes if shares(q, quote_of[i])}
+        return not hit or item in hit
     superseded = {u for (u,) in k.execute(
         "SELECT e.to_uid FROM edges e JOIN claims c ON c.op_device = e.op_device AND c.op_seq = e.op_seq "
         "WHERE e.type = 'supersedes'")}
@@ -406,7 +438,8 @@ def score(binary, name):
 
     def state(item):
         at = item_records(raw, where, item)
-        mine = [(u, st) for u, (st, seqs) in claims.items() if at & seqs]
+        mine = [(u, st) for u, (st, seqs) in claims.items()
+                if any(s in at and its(item, s, qs) for s, qs in seqs.items())]
         if not mine:
             return 'none'
         if any(st == 'decided' and u not in superseded for u, st in mine):
@@ -420,6 +453,7 @@ def score(binary, name):
         return 'other:' + ','.join(sorted({st for _, st in mine}))
 
     out = {'decisions': {}, 'pairs': {}}
+    lasting = collections.Counter()
     for d in decisions:
         if where[d['id']]['seq'] is None:
             continue
@@ -427,6 +461,8 @@ def score(binary, name):
         st = state(d['id'])
         out['decisions'].setdefault(key, {}).setdefault(st, 0)
         out['decisions'][key][st] += 1
+        if key == 'yes' and d['id'] not in MOMENTARY:
+            lasting[st] += 1
     for p in pairs:
         if where[p['earlier']]['seq'] is None or where[p['later']]['seq'] is None:
             continue
@@ -439,6 +475,8 @@ def score(binary, name):
     out['claims'] = {'active': len(claims), 'decided': decided}
     yes = out['decisions'].get('yes', {})
     out['recall'] = f'{yes.get("current", 0) + yes.get("decided, superseded", 0)} of {sum(yes.values())}'
+    # Without the instructions for the moment, which the memory is not meant to keep.
+    out['recall lasting'] = f'{lasting["current"] + lasting["decided, superseded"]} of {sum(lasting.values())}'
     with open(f'{h}/score.json', 'w') as f:
         json.dump(out, f, indent=1)
     print(json.dumps(out, indent=1, ensure_ascii=False))
