@@ -1078,6 +1078,8 @@ struct Request {
     prompt: String,
     shown_in: Vec<(String, crate::claims::Claim)>,
     carried_uids: Carried,
+    /// The sessions shown a reply's options, with their labels (`Offered`).
+    offered: Vec<(String, Vec<String>)>,
 }
 
 /// The request for window `w`: its text, the candidates of each of its repositories (found by
@@ -1118,15 +1120,22 @@ fn request(
         }
         shown.push(block);
     }
-    let (carried_text, mut carried_uids) = carried(raw, k, rules, w)?;
-    // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing.
+    let (carried_text, mut carried_uids, offered) = carried(raw, k, rules, w)?;
+    // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing,
+    // and options cut from it are picked by nothing.
     let (carried_text, shown) = fit(&carried_text, &shown, summary.window_tokens / 5);
     carried_uids.retain(|(_, _, c)| carries(&carried_text, &c.uid));
     shown_in.retain(|(_, c)| shows(&shown, &c.uid));
+    let offered = offered
+        .into_iter()
+        .filter(|(_, head, _)| carried_text.lines().any(|l| l.starts_with(head.as_str())))
+        .map(|(key, _, labels)| (key, labels))
+        .collect();
     Ok(Request {
         prompt: prompt(&summary.language, &w.text, &shown, &carried_text),
         shown_in,
         carried_uids,
+        offered,
     })
 }
 
@@ -1148,8 +1157,15 @@ fn answered(
             Ok((summary, mut found, lost)) => {
                 keyed(k, &mut found)?;
                 let ended = ended_on_a_proposal(raw, k, w)?;
-                let gated =
-                    crate::gates::check(w, &req.shown_in, &req.carried_uids, &ended, found, rules);
+                let gated = crate::gates::check(
+                    w,
+                    &req.shown_in,
+                    &req.carried_uids,
+                    &ended,
+                    &req.offered,
+                    found,
+                    rules,
+                );
                 let (mut claims, mut over) = (Vec::new(), Vec::new());
                 for (d, evidence) in gated.kept {
                     let op = crate::claims::ClaimOp {
@@ -2168,6 +2184,11 @@ fn searched(w: &Window, repo: &str) -> (String, String) {
 /// its repository: a draft of that session, anchored in that repository, may supersede them.
 type Carried = Vec<(String, Option<String>, crate::claims::Claim)>;
 
+/// The sessions whose first line answers a reply that listed options, each with the head of the
+/// options line its prompt carries (`fit` may cut the line) and the options' labels: a bare pick
+/// ("1") settles only one of them (`gates`, #252).
+type Offered = Vec<(String, String, Vec<String>)>;
+
 /// The line of its event a quote is in, through the line it ends in, trimmed, at most 200
 /// characters; `None` when the quote is a tool's (its line is often JSON, never the option list a reply numbers), the event is
 /// gone, or its text no longer holds the quote where the evidence says.
@@ -2210,11 +2231,17 @@ fn quoted_line(raw: &Raw, e: &crate::claims::Evidence, rules: &Rules) -> Result<
     Ok(Some(part.replace(['\n', '\r'], " ").trim().to_owned()))
 }
 
-/// The options a reply lists, on one line: two or more of its lines that start with a number
-/// (`1.`, `１．`, `2)`, `①`) or a letter (`A.`, `b)`), at most 4, each at most 60 characters,
-/// masked as the whole reply is; `None` when it lists fewer or the event is not a reply. Short:
-/// `fit` keeps the carried lines up to the first that does not fit, and cuts all after it.
-fn options_of(raw: &Raw, device: &str, seq: i64, rules: &Rules) -> Result<Option<String>> {
+/// The options a reply lists, on one line, with their labels: two or more of its lines that start
+/// with a number (`1.`, `１．`, `2)`, `①`) or a letter (`A.`, `b)`), at most 4, each at most 60
+/// characters, masked as the whole reply is; `None` when it lists fewer or the event is not a
+/// reply. Short: `fit` keeps the carried lines up to the first that does not fit, and cuts all
+/// after it.
+fn options_of(
+    raw: &Raw,
+    device: &str,
+    seq: i64,
+    rules: &Rules,
+) -> Result<Option<(String, Vec<String>)>> {
     let Some(r) = raw.after(device, seq - 1, 1)?.into_iter().next() else {
         return Ok(None);
     };
@@ -2230,14 +2257,15 @@ fn options_of(raw: &Raw, device: &str, seq: i64, rules: &Rules) -> Result<Option
     let Some(hidden) = crate::redact::hidden(&text, rules) else {
         return Ok(None);
     };
-    let (mut options, mut at) = (Vec::new(), 0);
+    let (mut options, mut labels, mut at) = (Vec::new(), Vec::new(), 0);
     for line in text.split_inclusive('\n') {
         let start = at + line.len() - line.trim_start().len();
         at += line.len();
         let option = line.trim();
-        if options.len() == 4 || !is_option(option) {
+        let Some(label) = option_label(option).filter(|_| options.len() < 4) else {
             continue;
-        }
+        };
+        labels.push(label);
         let end = start
             + option
                 .char_indices()
@@ -2246,20 +2274,25 @@ fn options_of(raw: &Raw, device: &str, seq: i64, rules: &Rules) -> Result<Option
         let part = crate::redact::outbound_range(&text, start..end, Some(&hidden), rules);
         options.push(part.replace(['\n', '\r'], " ").trim().to_owned());
     }
-    Ok((options.len() >= 2).then(|| options.join(" / ")))
+    Ok((options.len() >= 2).then(|| (options.join(" / "), labels)))
 }
 
-/// Whether a line starts an option: one or two digits and `.` or `)` and a space, or `．` or `）`,
-/// a circled number, or one letter and `.` or `)` and a space; markdown's `#` and `*` before it
-/// are skipped.
-fn is_option(line: &str) -> bool {
+/// The label of the option a line starts, as a pick names it ("1" for `１．`, "2" for `②`, "b"
+/// for `B)`): one or two digits and `.` or `)` and a space, or `．` or `）`, a circled number, or
+/// one letter and `.` or `)` and a space; markdown's `#` and `*` before it are skipped.
+pub(crate) fn option_label(line: &str) -> Option<String> {
     let line = line.trim_start_matches(['#', '*', ' ']);
-    let digits = line
+    let digits: String = line
         .chars()
         .take_while(|c| c.is_ascii_digit() || ('０'..='９').contains(c))
-        .count();
-    let mut after = line.chars().skip(digits);
-    match digits {
+        // A full-width digit as its ASCII one.
+        .map(|c| match c {
+            '０'..='９' => char::from_u32(u32::from(c) - 0xfee0).unwrap_or(c),
+            c => c,
+        })
+        .collect();
+    let mut after = line.chars().skip(digits.len());
+    let marked = match digits.len() {
         // `1.5x` and `1.0.0` are not options: an ASCII mark is followed by whitespace, as a
         // markdown list's is; Japanese writes `１．項目` with none.
         1 | 2 => match after.next() {
@@ -2269,14 +2302,19 @@ fn is_option(line: &str) -> bool {
         },
         0 => {
             let mut c = line.chars();
-            match (c.next(), c.next(), c.next()) {
-                (Some(n), ..) if ('①'..='⑳').contains(&n) => true,
-                (Some(l), Some('.' | ')'), Some(' ')) => l.is_ascii_alphabetic(),
-                _ => false,
-            }
+            return match (c.next(), c.next(), c.next()) {
+                (Some(n), ..) if ('①'..='⑳').contains(&n) => {
+                    Some((u32::from(n) - u32::from('①') + 1).to_string())
+                }
+                (Some(l), Some('.' | ')'), Some(' ')) if l.is_ascii_alphabetic() => {
+                    Some(l.to_ascii_lowercase().to_string())
+                }
+                _ => None,
+            };
         }
         _ => false,
-    }
+    };
+    marked.then_some(digits)
 }
 
 /// What each session of the window carries in from before it (spec 3.1, 3.3; D12), as text for
@@ -2287,7 +2325,12 @@ fn is_option(line: &str) -> bool {
 /// open items. Every value goes through the gate before it is shown.
 // ponytail: a child session (a subagent) starts with nothing of its parent's until capture
 // records the link.
-fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(String, Carried)> {
+fn carried(
+    raw: &Raw,
+    k: &Connection,
+    rules: &Rules,
+    w: &Window,
+) -> Result<(String, Carried, Offered)> {
     // On one line: `fit` keeps or cuts a line whole, and no text can start a line `carries` reads.
     let gate = |t: &str| crate::redact::outbound_with(t, rules).replace(['\n', '\r'], " ");
     // Each session with every repository its lines are in: an agent may change checkout.
@@ -2355,6 +2398,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
     // session's acceptance answers.
     let (mut out, mut settled, mut open) = (String::new(), String::new(), String::new());
     let mut uids: Carried = Vec::new();
+    let mut offered: Offered = Vec::new();
     for (key, repos) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
         let previous = raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset))?;
@@ -2432,11 +2476,10 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                 {
                     continue;
                 }
-                if let Some(options) = options_of(raw, &w.device, seq, rules)? {
-                    lines.push(format!(
-                        "options in the reply just before {}: {options}",
-                        l.id
-                    ));
+                if let Some((options, labels)) = options_of(raw, &w.device, seq, rules)? {
+                    let head = format!("options in the reply just before {}:", l.id);
+                    lines.push(format!("{head} {options}"));
+                    offered.push((key.to_owned(), head, labels));
                     break;
                 }
             }
@@ -2479,7 +2522,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
     }
     out.push_str(&settled);
     out.push_str(&open);
-    Ok((out, uids))
+    Ok((out, uids, offered))
 }
 
 /// The curator's prompt: what to extract and how, then everything taken from the record (the
@@ -4110,7 +4153,7 @@ mod tests {
         let dev = raw.device().to_owned();
         let rules = Rules::default();
         let w = next_window(&raw, &dev, 100_000, &rules).unwrap().unwrap();
-        let (text, _) = carried(&raw, &k, &rules, &w).unwrap();
+        let (text, ..) = carried(&raw, &k, &rules, &w).unwrap();
         // Each under its own repository, as the window's headings name them.
         for (repo, body) in [
             ("r", "The importer drops empty lines."),
@@ -4151,7 +4194,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.from_seq, before + 1);
-        let (text, uids) = carried(&raw, &k, &rules, &w).unwrap();
+        let (text, uids, _) = carried(&raw, &k, &rules, &w).unwrap();
         let decided: Vec<&str> = text
             .lines()
             .filter(|l| l.starts_with("decided before "))
@@ -4203,7 +4246,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((w.from_seq, w.from_offset), (seq, Some(split)));
-        let (text, _) = carried(&raw, &k, &rules, &w).unwrap();
+        let (text, ..) = carried(&raw, &k, &rules, &w).unwrap();
         let decided: Vec<&str> = text
             .lines()
             .filter(|l| l.starts_with("decided before "))
@@ -6218,8 +6261,9 @@ mod tests {
     }
 
     /// A bare option number is shorter than a quote's usual 5 characters: quoted whole, as the
-    /// prompt now allows, it is the user's decision and settles the carried option it picks
-    /// (#244, d107). The gates already keep it; this holds them to it.
+    /// prompt now allows, it is the user's pick and settles the carried option it names (#244,
+    /// d107), through the options the window's prompt carried in (`gates::picks_an_option`). Cut
+    /// from the prompt by the budget, they settle nothing.
     #[test]
     fn a_bare_option_number_quoted_whole_settles_the_carried_option() {
         let options = "Two ways:\n1. **Cache the parsed files**\n2. **Parse in parallel**";
@@ -6232,9 +6276,12 @@ mod tests {
                 "speaker": "assistant proposal", "scope": "repo", "body": body,
                 "quote": quote, "line": "L2", "supersedes": []})
         };
-        let answer = json!({"claims": [
-            proposal("c1", "Cache the parsed files", "Cache parsed files."),
-            proposal("c2", "Parse in parallel", "Parse in parallel.")], "summary": "s"});
+        let answer = |more: &str| {
+            json!({"claims": [
+                proposal("c1", "Cache the parsed files", &format!("Cache parsed files.{more}")),
+                proposal("c2", "Parse in parallel", &format!("Parse in parallel.{more}"))],
+                "summary": "s"})
+        };
         let pick = |p: &str| {
             let uid = p
                 .lines()
@@ -6246,11 +6293,16 @@ mod tests {
                 "speaker": "user", "scope": "repo", "body": "Cache the parsed files.",
                 "quote": "1", "line": "L1", "supersedes": [uid]}], "summary": "s"})
         };
-        let (_, ops) = two_windows(&first, answer, &[prompt("1")], pick);
+        let (_, ops) = two_windows(&first, answer(""), &[prompt("1")], pick);
         let picked = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
         assert_eq!(picked.body["evidence"][0]["quote"], "1");
         assert_eq!(picked.body["status"], "decided");
         assert_eq!(picked.body["supersedes"].as_array().unwrap().len(), 1);
+        let long = " Keep the cache warm between runs.".repeat(25);
+        let (sent, ops) = two_windows(&first, answer(&long), &[prompt("1")], pick);
+        assert!(!sent[1].contains("options in the reply"), "{}", sent[1]);
+        let picked = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+        assert_eq!(picked.body["status"], "proposed");
     }
 
     /// #244, d107: the reply numbered its options and the proposal quoted its recommendation, so
@@ -6336,17 +6388,27 @@ mod tests {
         assert!(!sent[1].contains("options in the reply"), "{}", sent[1]);
     }
 
+    /// Labelled as a pick names the option (`gates::picks`).
     #[test]
     fn an_option_starts_with_a_number_or_a_letter_and_its_mark() {
-        for line in [
-            "1. a", "１．a", "2) a", "10. a", "① a", "A. a", "b) a", "**1. a**", "### 2. a",
+        for (line, label) in [
+            ("1. a", "1"),
+            ("１．a", "1"),
+            ("2) a", "2"),
+            ("10. a", "10"),
+            ("① a", "1"),
+            ("⑫ a", "12"),
+            ("A. a", "a"),
+            ("b) a", "b"),
+            ("**1. a**", "1"),
+            ("### ２） a", "2"),
         ] {
-            assert!(is_option(line), "{line}");
+            assert_eq!(option_label(line).as_deref(), Some(label), "{line}");
         }
         for line in [
             "e.g. a", "2026. a", "1 a", "- 1. a", "Fast.", "a", "", "1.5x a", "1.0.0",
         ] {
-            assert!(!is_option(line), "{line}");
+            assert_eq!(option_label(line), None, "{line}");
         }
     }
 

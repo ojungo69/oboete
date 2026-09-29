@@ -101,9 +101,10 @@ const TAU: Option<f64> = None;
 
 /// What an acceptance says besides its acceptance words, which a bare one says nothing but.
 const FILLER: &[&str] = &[
+    // Before "ます", which would leave its し.
+    "します",
     "です",
     "ます",
-    "します",
     "ください",
     "please",
     "thanks",
@@ -140,12 +141,15 @@ pub struct Gated {
 /// `w.lines`), with `shown` the candidates the curator was shown, each with its repository,
 /// `carried` what each session carried in, with the session and the claim's repository, `ended`
 /// the sessions whose previous window ended on an untainted proposal (an acceptance that opens
-/// this window answers it, #144), and `rules` the egress gate's.
+/// this window answers it, #144), `offered` the sessions shown the options of the reply their
+/// first line answers, with the options' labels (a pick that opens this window names one, #252),
+/// and `rules` the egress gate's.
 pub fn check(
     w: &Window,
     shown: &[(String, Claim)],
     carried: &[(String, Option<String>, Claim)],
     ended: &[String],
+    offered: &[(String, Vec<String>)],
     drafts: Vec<(Draft, Evidence, usize)>,
     rules: &Rules,
 ) -> Gated {
@@ -227,12 +231,23 @@ pub fn check(
                 _ => question(&line.text) || continues(w, line),
             };
         // The user's own words carry the claim, unless they were pasted from a tool line; a bare
-        // "yes" accepts only what it answers. Any part of a user turn that says nothing but
-        // acceptance and filler is bare too ("please" from "Yes, please.").
-        let is_bare = bare(&d.quote) || speaker == "user" && unsaid(turn_said(line, &d.quote)) == 0;
+        // "yes" accepts only what it answers, and a pick ("1") only the option it names. Any part
+        // of a user turn that says nothing but acceptance and filler is bare too ("please" from
+        // "Yes, please.").
+        let pick = (speaker == "user" && line.role == Role::User)
+            .then(|| picks(&d.quote))
+            .flatten();
+        let is_bare = bare(&d.quote)
+            || pick.is_some()
+            || speaker == "user" && letters(&unsaid(turn_said(line, &d.quote))) == 0;
         let paste = speaker == "user" && pasted(&norm(span), &tools);
         let own_words = speaker == "user" && !asked && !is_bare && !paste;
-        let answers = speaker == "user" && is_bare && answers_a_reply(w, i, &tools, ended);
+        let answers = speaker == "user"
+            && is_bare
+            && match &pick {
+                Some(label) => picks_an_option(w, i, label, offered),
+                None => answers_a_reply(w, i, &tools, ended),
+            };
         d.tainted = speaker == "assistant proposal" && tainted(w, i, span, &tools);
         let accepts = speaker == "assistant proposal" && !d.tainted && accepted(w, i);
         let below = match d.status.as_str() {
@@ -255,7 +270,7 @@ pub fn check(
             lower(&d, why);
         }
         g.kept.push((d, evidence));
-        own.push((own_words, line.repo.as_deref(), &line.key));
+        own.push((own_words, pick.is_some(), line.repo.as_deref(), &line.key));
     }
     // Once every status is settled: what a sibling is, after the gates. Siblings of one kind
     // whose quotes overlap in one sentence are one claim (`claims::uid`, `curate::number`),
@@ -278,7 +293,7 @@ pub fn check(
         .iter()
         .zip(&own)
         .zip(&uids)
-        .map(|(((d, _), &(_, repo, _)), uid)| {
+        .map(|(((d, _), &(_, _, repo, _)), uid)| {
             let status = if unsettled(&d.status) && settled.contains(uid.as_str()) {
                 "decided".to_owned()
             } else {
@@ -287,7 +302,7 @@ pub fn check(
             (d.id.clone(), (status, d.kind.clone(), repo, uid.as_str()))
         })
         .collect();
-    for (((d, _), (own_words, repo, key)), uid) in g.kept.iter_mut().zip(own).zip(&uids) {
+    for (((d, _), (own_words, picked, repo, key)), uid) in g.kept.iter_mut().zip(own).zip(&uids) {
         let mut out = Vec::new();
         d.supersedes.retain(|to| {
             // Another repository's claim would leave that repository's current tips, and a
@@ -314,6 +329,12 @@ pub fn check(
                 Some((_, _, "global")) => Some("a global claim changes only by the owner"),
                 Some((_, "lesson", _)) if !own_words => {
                     Some("retiring a lesson needs the user's words")
+                }
+                // An option is one of a choice: a pick settles the proposal that offered it, or
+                // overturns what was decided, never the reply's other claims (acc6: a "１" took
+                // the reply's change and lesson out with its proposal).
+                Some((_, kind, _)) if picked && kind != d.kind => {
+                    Some("a pick replaces only a claim of its kind")
                 }
                 Some((status, ..)) if unsettled(&d.status) && !unsettled(status) => {
                     Some("a proposal supersedes nothing settled")
@@ -544,12 +565,17 @@ fn sentence_of<'a>(line: &'a str, quote: &'a str) -> &'a str {
 
 /// A turn that accepts: an acceptance word, no negation, not a question (spec 3.3).
 fn acceptance(text: &str) -> bool {
+    !question(text) && !negated(text) && holds(text, ACCEPT)
+}
+
+/// A turn that says no: a negation, a polite yes aside.
+fn negated(text: &str) -> bool {
     // A polite yes can end in ません too ("問題ありません"): those are not a negation.
     let mut plain = text.to_owned();
     for yes in POLITE_YES {
         plain = plain.replace(yes, "");
     }
-    !question(text) && !holds(&plain, NEGATE) && holds(text, ACCEPT)
+    holds(&plain, NEGATE)
 }
 
 /// A quote that only accepts: it holds an acceptance word, and once its acceptance and filler
@@ -557,11 +583,68 @@ fn acceptance(text: &str) -> bool {
 /// words (spec 3.3). A short statement with no acceptance word ("直った") is the user's own.
 // ponytail: four characters; the dev split's counts (Task 8 part 2) tune it.
 fn bare(quote: &str) -> bool {
-    holds(quote, ACCEPT) && unsaid(quote) <= 4
+    holds(quote, ACCEPT) && letters(&unsaid(quote)) <= 4
 }
 
-/// How many letters and digits `text` has once its acceptance and filler words are gone.
-fn unsaid(text: &str) -> usize {
+/// The option a quote picks when it says nothing else once its acceptance and filler words are
+/// gone: "1", "１", "②", "B", "1番で", "案A" (#252), labelled as `curate::option_label` labels the
+/// reply's options.
+// ponytail: a few affixes; the dev split's picks tune them.
+fn picks(quote: &str) -> Option<String> {
+    let rest = unsaid(quote);
+    let mut words = rest.split_whitespace();
+    let (Some(rest), None) = (words.next(), words.next()) else {
+        return None;
+    };
+    let rest = rest.strip_prefix('案').unwrap_or(rest);
+    let rest = rest.trim_end_matches(['番', '目', 'で']);
+    let mut c = rest.chars();
+    match (c.next(), c.next(), c.next()) {
+        (Some(n), None, _) if ('①'..='⑳').contains(&n) => {
+            Some((n as u32 - '①' as u32 + 1).to_string())
+        }
+        (Some(l), None, _) if l.is_ascii_alphabetic() => Some(l.to_string()),
+        (Some(a), b, None) if a.is_ascii_digit() && b.is_none_or(|b| b.is_ascii_digit()) => {
+            Some(rest.to_owned())
+        }
+        _ => None,
+    }
+}
+
+/// User line `i` picks option `label` of the reply it answers: the turn before it in the same
+/// session, past tool calls and harness lines, is a reply of the assistant in the same repository
+/// that lists it, or with no turn before it in the window, the options its prompt carried from
+/// the reply the session's previous window ended on do (`offered`, #252). Not in a turn that asks
+/// or says no. A bare yes may answer any proposal of a reply; a pick names one of its options, so
+/// the reply may follow a tool call (MUST-M4's provenance fallback is not applied to it,
+/// docs/milestone-3.md).
+fn picks_an_option(w: &Window, i: usize, label: &str, offered: &[(String, Vec<String>)]) -> bool {
+    let line = &w.lines[i];
+    let before = w.lines[..i]
+        .iter()
+        .rev()
+        .filter(|l| l.key == line.key)
+        .find(|l| matches!(l.role, Role::User | Role::Assistant | Role::Answer));
+    !question(&line.text)
+        && !negated(&line.text)
+        && match before {
+            Some(l) => {
+                l.role == Role::Assistant
+                    && l.repo == line.repo
+                    && said(&l.text)
+                        .lines()
+                        .filter_map(crate::curate::option_label)
+                        .any(|o| o == label)
+            }
+            None => offered
+                .iter()
+                .any(|(key, labels)| *key == line.key && labels.iter().any(|o| o == label)),
+        }
+}
+
+/// The words `text` has once its acceptance and filler words are gone, lowercase, each between
+/// spaces.
+fn unsaid(text: &str) -> String {
     let mut rest = format!(" {} ", words(&text.to_lowercase()).join(" "));
     for p in ACCEPT.iter().chain(FILLER) {
         if p.is_ascii() {
@@ -574,7 +657,11 @@ fn unsaid(text: &str) -> usize {
             rest = rest.replace(p, "");
         }
     }
-    rest.chars().filter(|c| c.is_alphanumeric()).count()
+    rest
+}
+
+fn letters(text: &str) -> usize {
+    text.chars().filter(|c| c.is_alphanumeric()).count()
 }
 
 /// A command run of `line`'s session and repository (a run before a checkout change tested
@@ -791,7 +878,7 @@ mod tests {
 
     /// The status and speaker each draft ends with.
     fn gated(w: &Window, drafts: Vec<(Draft, Evidence, usize)>) -> Vec<(String, String)> {
-        check(w, &[], &[], &[], drafts, &Rules::default())
+        check(w, &[], &[], &[], &[], drafts, &Rules::default())
             .kept
             .into_iter()
             .map(|(d, _)| (d.status, d.speaker))
@@ -1349,6 +1436,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             vec![
                 draft(&w, "c1", "decided", "assistant proposal", quote),
                 draft(&w, "c2", "decided", "user", "はい"),
@@ -1376,6 +1464,7 @@ mod tests {
         let w = window(&[file, pasted]);
         let g = check(
             &w,
+            &[],
             &[],
             &[],
             &[],
@@ -1488,6 +1577,7 @@ mod tests {
             &shown,
             &[],
             &[],
+            &[],
             vec![user_draft, proposal],
             &Rules::default(),
         );
@@ -1516,16 +1606,103 @@ mod tests {
         // A thousand values out of reach give one reason, not a thousand.
         let mut many = draft(&w, "c3", "decided", "user", "Use spaces, not tabs");
         many.0.supersedes = (0..1000).map(|i| format!("x{i}")).collect();
-        let g = check(&w, &shown, &[], &[], vec![many], &Rules::default());
+        let g = check(&w, &shown, &[], &[], &[], vec![many], &Rules::default());
         assert_eq!(g.dropped, [("c3".to_string(), OUTSIDE)]);
         // A status of another case is the unverified one it is stored as: it settles nothing.
         let mut odd = draft(&w, "c4", "Proposed", "assistant proposal", "keep tabs");
         odd.0.supersedes = vec![decision.clone()];
-        let g = check(&w, &shown, &[], &[], vec![odd], &Rules::default());
+        let g = check(&w, &shown, &[], &[], &[], vec![odd], &Rules::default());
         assert_eq!(g.kept[0].0.status, "unverified");
         assert!(g.kept[0].0.supersedes.is_empty());
         let settled = [("c4".to_string(), "a proposal supersedes nothing settled")];
         assert_eq!(g.dropped, settled);
+    }
+
+    /// A pick ("１") says only which option it takes (#252). It settles an option of the reply it
+    /// answers, listed there or carried in with the window's options, even when the reply came
+    /// after a tool call, and replaces only a claim of its kind (acc6: a "１" took the reply's
+    /// lesson and change out with the proposal). A pick of no listed option, in a turn that says
+    /// no, or of a reply that lists none settles nothing, and it is never a retraction.
+    #[test]
+    fn a_pick_settles_only_an_option_of_the_reply_it_answers() {
+        let options = "Two ways:\n1. **Cache the parsed files**\n2. **Parse in parallel**";
+        let (decision, lesson, change) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        let shown = [
+            ("r".into(), shown(&decision, "decision", "proposed", "repo")),
+            ("r".into(), shown(&lesson, "lesson", "proposed", "repo")),
+            ("r".into(), shown(&change, "change", "proposed", "repo")),
+        ];
+        let pick = |w: &Window, quote: &str, status: &str, offered: &[(String, Vec<String>)]| {
+            let mut d = draft(w, "c1", status, "user", quote);
+            d.0.supersedes = vec![decision.clone(), lesson.clone(), change.clone()];
+            check(w, &shown, &[], &[], offered, vec![d], &Rules::default())
+        };
+        let status = |g: Gated| g.kept[0].0.status.clone();
+        let answered = |last: (&'static str, Value)| {
+            window(&[
+                user("Build the importer."),
+                tool("ok", false),
+                reply(options),
+                last,
+            ])
+        };
+        let w = answered(user("１"));
+        let g = pick(&w, "１", "decided", &[]);
+        assert_eq!(g.kept[0].0.status, "decided");
+        assert_eq!(g.kept[0].0.supersedes, std::slice::from_ref(&decision));
+        let reasons: Vec<&str> = g.dropped.iter().map(|(_, why)| *why).collect();
+        assert_eq!(
+            reasons,
+            [
+                "a pick replaces only a claim of its kind",
+                "retiring a lesson needs the user's words"
+            ]
+        );
+        assert_eq!(status(pick(&w, "１", "retracted", &[])), "proposed");
+        let w = answered(user("3"));
+        assert_eq!(status(pick(&w, "3", "decided", &[])), "proposed");
+        let w = answered(user("１じゃない"));
+        assert_eq!(status(pick(&w, "１", "decided", &[])), "proposed");
+        let w = window(&[
+            user("Build the importer."),
+            reply("Two ways, both fine."),
+            user("1"),
+        ]);
+        assert_eq!(status(pick(&w, "1", "decided", &[])), "proposed");
+        // The reply was the previous window's: its options were carried in, or they were not.
+        let w = window(&[user("１番で")]);
+        let offered = [(w.lines[0].key.clone(), vec!["1".into(), "2".into()])];
+        assert_eq!(status(pick(&w, "１番で", "decided", &offered)), "decided");
+        assert_eq!(status(pick(&w, "１番で", "decided", &[])), "proposed");
+        let elsewhere = [("other".into(), vec!["1".into()])];
+        assert_eq!(
+            status(pick(&w, "１番で", "decided", &elsewhere)),
+            "proposed"
+        );
+        // The owner's answer in `AskUserQuestion` is no typed pick: its line holds the options.
+        let w = window(&[asked("２")]);
+        assert_eq!(one(&w, "decided", "user", "２"), is("decided", "user"));
+    }
+
+    /// What a pick names, and what is more than a pick.
+    #[test]
+    fn a_pick_is_an_option_label_alone() {
+        for (quote, label) in [
+            ("1", "1"),
+            ("１", "1"),
+            ("12", "12"),
+            ("②", "2"),
+            ("B", "b"),
+            ("Ｂ", "b"),
+            ("案A", "a"),
+            ("2番目で", "2"),
+            ("はい、1でお願いします", "1"),
+        ] {
+            assert_eq!(picks(quote).as_deref(), Some(label), "{quote}");
+        }
+        for quote in ["123", "1と2", "AB", "直った", "はい", "v2", "1.5", ""] {
+            assert_eq!(picks(quote), None, "{quote}");
+        }
     }
 
     /// A sibling the gates lower is the same claim as a settled one: it goes first, so the
@@ -1539,7 +1716,7 @@ mod tests {
             crate::claims::uid("decision", &own.1),
             crate::claims::uid("decision", &bare.1)
         );
-        let g = check(&w, &[], &[], &[], vec![own, bare], &Rules::default());
+        let g = check(&w, &[], &[], &[], &[], vec![own, bare], &Rules::default());
         let kept: Vec<(&str, &str)> = g
             .kept
             .iter()
@@ -1573,6 +1750,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             vec![first, second, proposal],
             &Rules::default(),
         );
@@ -1597,7 +1775,7 @@ mod tests {
         let w = window(&[user("Always answer in Japanese.")]);
         let mut d = draft(&w, "c1", "decided", "user", "Always answer in Japanese");
         d.0.scope = "global".into();
-        let g = check(&w, &[], &[], &[], vec![d], &Rules::default());
+        let g = check(&w, &[], &[], &[], &[], vec![d], &Rules::default());
         assert_eq!(g.kept[0].0.scope, "repo");
         let why = (
             "c1".to_string(),
@@ -1613,7 +1791,7 @@ mod tests {
         let change = |body: &str, why: &str| {
             let mut d = draft(&w, "c1", "done", "user", quote);
             (d.0.kind, d.0.body, d.0.why) = ("change".into(), body.into(), why.into());
-            check(&w, &[], &[], &[], vec![d], &Rules::default())
+            check(&w, &[], &[], &[], &[], vec![d], &Rules::default())
         };
         let g = change("The module is renamed.", "the old name clashed");
         assert_eq!(g.kept[0].0.why, "the old name clashed");
@@ -1637,7 +1815,7 @@ mod tests {
             }
             let mut d = draft(&w, "c1", "done", "user", quote);
             (d.0.kind, d.0.why) = ("change".into(), "the old name clashed".into());
-            let g = check(&w, &[], &[], &[], vec![d], &Rules::default());
+            let g = check(&w, &[], &[], &[], &[], vec![d], &Rules::default());
             assert_eq!(g.kept[0].0.why, "unknown", "{other}");
         }
         // A reason from another line is kept with that line's evidence, so removing the line
@@ -1648,7 +1826,7 @@ mod tests {
         ]);
         let mut d = draft(&later, "c1", "done", "user", quote);
         (d.0.kind, d.0.why) = ("change".into(), "the old name clashed".into());
-        let g = check(&later, &[], &[], &[], vec![d], &Rules::default());
+        let g = check(&later, &[], &[], &[], &[], vec![d], &Rules::default());
         let (kept, evidence) = &g.kept[0];
         assert_eq!(kept.why, "the old name clashed");
         let seqs: Vec<i64> = evidence.iter().map(|e| e.seq).collect();
@@ -1687,7 +1865,15 @@ mod tests {
         let mut secret = draft(&w, "c2", "decided", "user", quote);
         let token = format!("ghp_{}", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8");
         secret.0.body = format!("The token is {token}.");
-        let g = check(&w, &[], &[], &[], vec![long, secret], &Rules::default());
+        let g = check(
+            &w,
+            &[],
+            &[],
+            &[],
+            &[],
+            vec![long, secret],
+            &Rules::default(),
+        );
         assert_eq!(g.dropped, [("c1".to_string(), "over_cap")]);
         assert!(!g.kept[0].0.body.contains(&token), "{}", g.kept[0].0.body);
     }
