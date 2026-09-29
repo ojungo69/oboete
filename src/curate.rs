@@ -1682,6 +1682,8 @@ fn restate(
     // ponytail: a lesson restated in its own sentence stays twice, since retiring a lesson needs
     // the user's words (gates) and they are not known here; check them here if that matters.
     let mut corrected = k.prepare("SELECT 1 FROM corrections WHERE uid = ?1")?;
+    // Its status as the owner corrected it (Codex on bf3327f).
+    let mut status = k.prepare("SELECT status FROM active WHERE uid = ?1")?;
     // Another uid's active derivation supersedes it: `claims::TIPS`'s test.
     let mut replaced = k.prepare(
         "SELECT 1 FROM edges e JOIN claims x ON x.op_device = e.op_device AND x.op_seq = e.op_seq
@@ -1692,8 +1694,8 @@ fn restate(
     // their words).
     let mut left: Vec<(&str, &crate::claims::Evidence, bool, bool)> = Vec::new();
     for (uid, c) in anchored {
-        if settled(&c.status)
-            && !given.contains(uid)
+        if !given.contains(uid)
+            && settled(&status.query_row([uid], |r| r.get::<_, String>(0))?)
             && let Some(first) = c.evidence.first()
         {
             let open = c.kind != "lesson" && !corrected.exists([uid])?;
@@ -1710,8 +1712,13 @@ fn restate(
     let same_words = |a: &crate::claims::Evidence, b: &crate::claims::Evidence| {
         (&a.device, a.seq, a.offset, a.length) == (&b.device, b.seq, b.offset, b.length)
     };
-    for c in claims {
-        let mut n: crate::claims::ClaimOp = serde_json::from_value(c.clone())?;
+    // The claims each uid of the answer restates. An answer can draft one claim twice
+    // (overlapping quotes of one kind, `keyed`), and its last draft is the active derivation, so
+    // every settled draft of the uid carries them (Codex on bf3327f).
+    let mut restates: std::collections::HashMap<String, Vec<&str>> = Default::default();
+    let mut drafts = Vec::new();
+    for (i, c) in claims.iter().enumerate() {
+        let n: crate::claims::ClaimOp = serde_json::from_value(c.clone())?;
         let Some(first) = n.evidence.first().filter(|_| settled(&n.status)) else {
             continue;
         };
@@ -1739,15 +1746,27 @@ fn restate(
                 _ => Vec::new(),
             }
         };
-        let before = n.supersedes.len();
+        let all = restates.entry(uid.clone()).or_default();
         for s in restated {
+            if !all.contains(&s) {
+                all.push(s);
+            }
+        }
+        drafts.push((i, n, uid));
+    }
+    for (i, mut n, uid) in drafts {
+        let before = n.supersedes.len();
+        for &s in &restates[&uid] {
+            if n.supersedes.iter().any(|x| x == s) {
+                continue;
+            }
             n.supersedes.push(s.to_owned());
             if serde_json::to_string(&n)?.len() > crate::raw::MAX_OP_BYTES {
                 n.supersedes.pop();
             }
         }
         if n.supersedes.len() > before {
-            *c = serde_json::to_value(n)?;
+            claims[i] = serde_json::to_value(n)?;
         }
     }
     Ok(())
@@ -5760,6 +5779,76 @@ mod tests {
                 "Tabs, not spaces."
             ]
         );
+    }
+
+    /// #261: a claim counts by its status as the owner corrected it: a done change the owner
+    /// retracted is no second claim of its words, and a proposal the owner decided is one
+    /// (Codex on bf3327f).
+    #[test]
+    fn a_claim_counts_by_the_status_the_owner_gave_it() {
+        let two = |second: Value| {
+            answer(vec![
+                drafted("c1", "decided", "Use tabs", "Tabs, not spaces."),
+                second,
+            ])
+        };
+        let again = || {
+            answer(vec![preference(
+                "c1",
+                "decided",
+                "Use tabs",
+                "Prefer tabs.",
+            )])
+        };
+        let corrected = |body: &'static str, status: &'static str| {
+            move |k: &Connection| {
+                k.execute(
+                    "INSERT INTO corrections(op_device, op_seq, ts, uid, status, body)
+                     VALUES('owner', 1, 1, ?1, ?2, NULL)",
+                    [uid_of(k, body), status.to_owned()],
+                )
+                .unwrap();
+            }
+        };
+        let done = of_kind("change", drafted("c2", "done", "Use tabs", "Tabs are set."));
+        let (_home, k) = one_sentence_then(
+            "Use tabs.",
+            vec![two(done), again()],
+            corrected("Tabs are set.", "retracted"),
+        );
+        assert_eq!(current_bodies(&k), ["Prefer tabs."]);
+        let proposed = of_kind(
+            "change",
+            drafted("c2", "proposed", "Use tabs", "Switch to tabs."),
+        );
+        let (_home, k) = one_sentence_then(
+            "Use tabs.",
+            vec![two(proposed), again()],
+            corrected("Switch to tabs.", "decided"),
+        );
+        assert_eq!(
+            current_bodies(&k),
+            ["Prefer tabs.", "Switch to tabs.", "Tabs, not spaces."]
+        );
+    }
+
+    /// #261: an answer that drafts one claim twice (overlapping quotes of one kind, one uid) has
+    /// its later draft as the active derivation, so each draft carries the supersede, not only
+    /// the one that quotes the restated claim's words (Codex on bf3327f).
+    #[test]
+    fn a_restatement_drafted_twice_supersedes_from_its_active_draft() {
+        let first = answer(vec![drafted(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Tabs, not spaces.",
+        )]);
+        let again = answer(vec![
+            preference("c1", "decided", "Use tabs", "Prefer tabs."),
+            preference("c2", "decided", "Use tabs and", "Prefer tabs, always."),
+        ]);
+        let (_home, k) = one_sentence("Use tabs and log to stderr.", vec![first, again]);
+        assert_eq!(current_bodies(&k), ["Prefer tabs, always."]);
     }
 
     /// #261: a done change restated as the developer's decision (#262's prompt) is superseded by
