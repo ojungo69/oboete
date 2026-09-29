@@ -1568,9 +1568,9 @@ pub(crate) fn op_span(op: &Value) -> Option<Span> {
 /// the answer no longer gives, at its active derivation's tier so it is the active one (an owner
 /// correction still applies over it). A settled one it no longer gives stays, since a curator's
 /// answers vary and `retracted` needs the user's words or the owner's correction; but a settled
-/// claim of the answer that restates it, of another uid (another kind) quoting its sentence where
-/// it starts, supersedes it (#261): the curator cannot, as it is not shown the window's own claims
-/// (#256), and both would be current. One append. A window with no text to read is covered
+/// claim of the answer that restates it, of another uid (another kind) quoting the same words,
+/// supersedes it (#261): the curator cannot, as it is not shown the window's own claims (#256),
+/// and both would be current. One append. A window with no text to read is covered
 /// without a call, as the curation phase covers one. `covers` names the part of a span curated
 /// through this window, from the span's start: that part is off the queue and no longer skipped,
 /// whatever windows it took, and a later run sends only the rest.
@@ -1660,12 +1660,14 @@ pub fn recurate_window(
 /// Adds, to each settled claim of a recuration's answer that restates a settled claim of the
 /// window the answer leaves out (`recurate_window`), the left-out claim's uid (#261). A restatement
 /// is of a new uid, since one the window has is a re-derivation beside it, and its first quote
-/// starts where the left-out claim's does: its event, sentence and place in the sentence. A
-/// re-derivation keeps such a supersede its active derivation has, or a second recuration would
-/// make both current again. Settled on both sides, as the gates' rules have it: a proposal
-/// supersedes nothing settled, and a global claim changes only by the owner (`anchored_in` has
-/// none). An addition that would put a claim op over the op cap is left out: its append would
-/// stop the window.
+/// overlaps the left-out claim's in the same event: the same words, not only the same sentence,
+/// which can hold several claims (`claim_at` tells apart only claims of one kind). A re-derivation
+/// keeps such a supersede its active derivation has, or a second recuration would make both
+/// current again. Settled on both sides, as the gates' rules have it: a proposal supersedes
+/// nothing settled, and a global claim changes only by the owner (`anchored_in` has none). A
+/// claim the owner corrected is left as it is: the correction applies by uid (MUST-M21), and a
+/// restatement in the curator's words would hide it. An addition that would put a claim op over
+/// the op cap is left out: its append would stop the window.
 fn restate(
     k: &Connection,
     anchored: &[(String, crate::claims::ClaimOp)],
@@ -1675,11 +1677,18 @@ fn restate(
     let settled = |s: &str| matches!(s, "decided" | "done");
     // ponytail: a lesson restated in its own sentence stays twice, since retiring a lesson needs
     // the user's words (gates) and they are not known here; check them here if that matters.
-    let left: Vec<(&str, &crate::claims::Evidence)> = anchored
-        .iter()
-        .filter(|(uid, c)| settled(&c.status) && c.kind != "lesson" && !given.contains(uid))
-        .filter_map(|(uid, c)| Some((uid.as_str(), c.evidence.first()?)))
-        .collect();
+    let mut corrected = k.prepare("SELECT 1 FROM corrections WHERE uid = ?1")?;
+    let mut left: Vec<(&str, &crate::claims::Evidence)> = Vec::new();
+    for (uid, c) in anchored {
+        if settled(&c.status)
+            && c.kind != "lesson"
+            && !given.contains(uid)
+            && !corrected.exists([uid])?
+            && let Some(first) = c.evidence.first()
+        {
+            left.push((uid.as_str(), first));
+        }
+    }
     if left.is_empty() {
         return Ok(());
     }
@@ -1687,7 +1696,12 @@ fn restate(
         "SELECT 1 FROM claims c JOIN edges e ON e.op_device = c.op_device AND e.op_seq = c.op_seq
          WHERE c.uid = ?1 AND e.to_uid = ?2",
     )?;
-    let place = |e: &crate::claims::Evidence| (e.device.clone(), e.seq, e.sentence, e.claim_at);
+    let overlap = |a: &crate::claims::Evidence, b: &crate::claims::Evidence| {
+        a.device == b.device
+            && a.seq == b.seq
+            && a.offset < b.offset + b.length
+            && b.offset < a.offset + a.length
+    };
     for c in claims {
         let mut n: crate::claims::ClaimOp = serde_json::from_value(c.clone())?;
         let Some(first) = n.evidence.first().filter(|_| settled(&n.status)) else {
@@ -1696,7 +1710,7 @@ fn restate(
         let uid = crate::claims::uid(&n.kind, first);
         let again = anchored.iter().any(|(u, _)| *u == uid);
         for &(s, at) in &left {
-            if place(at) == place(first) && (!again || had.exists(params![uid, s])?) {
+            if overlap(at, first) && (!again || had.exists(params![uid, s])?) {
                 n.supersedes.push(s.to_owned());
                 if serde_json::to_string(&n)?.len() > crate::raw::MAX_OP_BYTES {
                     n.supersedes.pop();
@@ -5355,6 +5369,15 @@ mod tests {
     /// A sentence's claims, curated from `answers` in turn: the first by the phase, each later
     /// one by a recuration of the same window, with the consumers run after each.
     fn one_sentence(text: &str, answers: Vec<Value>) -> (tempfile::TempDir, Connection) {
+        one_sentence_then(text, answers, |_| {})
+    }
+
+    /// `one_sentence`, with `between` run on knowledge.db after the first curation.
+    fn one_sentence_then(
+        text: &str,
+        answers: Vec<Value>,
+        between: impl FnOnce(&Connection),
+    ) -> (tempfile::TempDir, Connection) {
         let home = tempfile::tempdir().unwrap();
         let (mut raw, db) = open(home.path());
         let mut k = crate::knowledge::open(home.path()).unwrap();
@@ -5369,6 +5392,7 @@ mod tests {
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
         run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
         consume(&raw, &mut k);
+        between(&k);
         let span = Span::records(1, 1);
         while !answers.borrow().is_empty() {
             let w = span_windows(&raw, &span, WINDOW_TOKENS, &rules).unwrap();
@@ -5460,8 +5484,11 @@ mod tests {
     }
 
     fn preference(id: &str, status: &str, quote: &str, body: &str) -> Value {
-        let mut c = drafted(id, status, quote, body);
-        c["kind"] = json!("preference");
+        of_kind("preference", drafted(id, status, quote, body))
+    }
+
+    fn of_kind(kind: &str, mut c: Value) -> Value {
+        c["kind"] = json!(kind);
         c
     }
 
@@ -5488,6 +5515,92 @@ mod tests {
         )]);
         let (_home, k) = one_sentence("Use tabs.", vec![first, again]);
         assert_eq!(current_bodies(&k), ["Prefer tabs."]);
+    }
+
+    /// #261: a sentence can hold several claims. A restatement supersedes the one whose words it
+    /// quotes, not another claim of the sentence the answer leaves out (review of 62223fe: the
+    /// first claim of each kind in a sentence has no `claim_at`, so the sentence alone matched the
+    /// wrong one).
+    #[test]
+    fn a_restatement_supersedes_only_the_claim_whose_words_it_quotes() {
+        let first = answer(vec![
+            drafted("c1", "decided", "Use tabs", "Tabs, not spaces."),
+            drafted("c2", "decided", "log to stderr", "Logs go to stderr."),
+        ]);
+        let again = answer(vec![preference(
+            "c1",
+            "decided",
+            "log to stderr",
+            "Prefer stderr logs.",
+        )]);
+        let (_home, k) = one_sentence("Use tabs and log to stderr.", vec![first, again]);
+        assert_eq!(
+            current_bodies(&k),
+            ["Prefer stderr logs.", "Tabs, not spaces."]
+        );
+    }
+
+    /// #261: a claim the owner corrected is not superseded by a restatement: the correction
+    /// applies by uid (MUST-M21), and the curator's words would hide it.
+    #[test]
+    fn a_restatement_leaves_an_owner_corrected_claim_current() {
+        let first = answer(vec![drafted(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Tabs, not spaces.",
+        )]);
+        let again = answer(vec![preference(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Prefer tabs.",
+        )]);
+        let (_home, k) = one_sentence_then("Use tabs.", vec![first, again], |k| {
+            k.execute(
+                "INSERT INTO corrections(op_device, op_seq, ts, uid, status, body)
+                 VALUES('owner', 1, 1, ?1, NULL, 'Tabs, width 4.')",
+                [uid_of(k, "Tabs, not spaces.")],
+            )
+            .unwrap();
+        });
+        assert_eq!(current_bodies(&k), ["Prefer tabs.", "Tabs, width 4."]);
+    }
+
+    /// #261: a settled lesson is not superseded by a restatement: retiring a lesson needs the
+    /// user's words (the gates), which this rule does not check.
+    #[test]
+    fn a_restatement_leaves_a_settled_lesson_current() {
+        let first = answer(vec![of_kind(
+            "lesson",
+            drafted("c1", "decided", "Use tabs", "Tabs, not spaces."),
+        )]);
+        let again = answer(vec![preference(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Prefer tabs.",
+        )]);
+        let (_home, k) = one_sentence("Use tabs.", vec![first, again]);
+        assert_eq!(current_bodies(&k), ["Prefer tabs.", "Tabs, not spaces."]);
+    }
+
+    /// #261: a done change restated as the developer's decision (#262's prompt) is superseded by
+    /// it: settled is done as well as decided.
+    #[test]
+    fn a_done_change_restated_as_a_decision_is_superseded() {
+        let first = answer(vec![of_kind(
+            "change",
+            drafted("c1", "done", "Use tabs", "Tabs are set."),
+        )]);
+        let again = answer(vec![drafted(
+            "c1",
+            "decided",
+            "Use tabs",
+            "Use tabs; they are set.",
+        )]);
+        let (_home, k) = one_sentence("Use tabs.", vec![first, again]);
+        assert_eq!(current_bodies(&k), ["Use tabs; they are set."]);
     }
 
     /// #261: the restatement is a re-derivation on the next recuration, and its active derivation
