@@ -8,6 +8,7 @@ The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and
 - Task 12, the judge's first role ("shrink, never drop"), is behind `[summary] shrink` (#194), off by default. Its input clause passes on dev. Its recall clause fails for decisions by the rule declared before the run, 22 against 24 of 44 (below), a difference smaller than two runs of one arm showed (20 and 24); lessons and fixes are not measured. It stays off. Its second role (a veto on `decided` and `supersedes`) has no code: it waits on M3.
 - Task 13 has the lines below: M2 passes, Cost's Groq and OpenRouter budgets meet the line since 2026-09-29 but NIM's cannot be checked against it (NIM publishes no daily cap, below), a heavy day needs speed too, and M3 fails on the dev labels. The first dev tuning of the gates is merged: the owner's answer to `AskUserQuestion` is the owner's words (#195, #202, #209).
 - M3's typed decisions: #254's prompt shipped. #259 (the typed lines listed again) and #262 (a request carried out is the developer's decision) did not ship (below).
+- Since 2026-09-30 a done claim that quotes the owner's request counts as recalling the decision (the owner's answer to #262's question). Every arm rose by 0 to 5 labels, the best to 26 of 44 (carry2), and no conclusion changed (Counted again, below).
 
 ## M2 on the dev transcripts: passes
 
@@ -40,7 +41,7 @@ A heavy day, measured: the owner's transcripts of the last 90 days (3,870 files 
 
 ## M3 on the dev labels: fails
 
-The line: recall of the owner's decisions 80% or more, no overturned decision shown as current (0%), and at most 2% of compatible earlier decisions dropped. Eight arms were run eleven times (whole-2 and whole3 are one arm run twice, and so are cand1 and cand2, and carry1 and carry2), with one live entry (claude haiku), over the windows that hold a label (docs/spike/m3-dev.md has the harness and the definitions, fixed before any live number).
+The line: recall of the owner's decisions 80% or more, no overturned decision shown as current (0%), and at most 2% of compatible earlier decisions dropped. Eight arms were run eleven times (whole-2 and whole3 are one arm run twice, and so are cand1 and cand2, and carry1 and carry2), with one live entry (claude haiku), over the windows that hold a label (docs/spike/m3-dev.md has the harness and the definitions, fixed before any live number). The table counts claims with status decided only, as every arm was scored until 2026-09-30; Counted again, below, has each arm with a done claim quoting the owner's request counted too.
 
 | Arm | Binary | Shrink | Thinking | Recall (of 44) | Recall, lasting (of 41) | Overturned, still current (of 19) | Compatible, dropped (of 25) | Owner-no records shown as decided (of 5) | Decided claims |
 |---|---|---|---|---|---|---|---|---|---|
@@ -58,7 +59,7 @@ The line: recall of the owner's decisions 80% or more, no overturned decision sh
 
 Scored per decision since 2026-09-29 (the owner left the call to Claude): on a record that holds several labeled items (11 records do), a claim is the item's whose quote it shares text with, and one sharing none is every item's, as all of a record's claims were before. Re-scored, only one pair moved: d105 and d106 are one prompt ("じゃあCCSを完全削除して。あと、fccをxai oauthに対応させたい。"), both overturned by d111, and short, full and carry1 each show it overturned now (3, 8 and 9 before). "Recall, lasting" leaves out the three instructions for the moment (below); the line is read on all 44, as the owner labeled them.
 
-whole and short cut 114 spans, and some of them shared a record, so that record's window was sent twice and the second pass retracted the first pass's claims: 1 overlap and 23 claims retracted in whole, 5 overlaps and 202 retracted in short. Their rows are kept here, but they do not measure what they were meant to. full and nothink cut 109 spans, merged so that none shares a record (#196's commit), and retracted none. whole-2 and short-2 cut 113 and 109 spans the same way, with none shared. short-2 retracted none. whole-2 retracted 22 claims, all in one span (seq 29865 to 29867, 4 windows): its first send got a prose answer for one window, the harness sent the span again, and the second answers replaced the first for the 3 windows that had one. Each window still ends with the claims of one answer. One span of whole-2 (seq 30261) was refused three times (unanchored). It holds none of the 44 labels, but it holds the earlier side of two overturn pairs (d105 and d106, both overturned by d111), which whole-2 counts as never derived rather than still current. whole3 is whole-2 run again from a clean home (review on #218): the harness no longer sends a span again once some of its windows were curated (ebe288e), so the arm is one pass, as short-2 is. It cut the same 113 spans and retracted none. It was stopped once, after 87 of the 113 spans, while it waited out the curator's cooldown with no call in flight, and went on from there (eab7397). One of its spans (seq 42955) was refused three times, and one of the two windows of another (seq 29872) answered prose and was left. Neither holds any of the 44 labels or a pair the lines count. cand1, cand2, carry1 and carry2 cut the same 113 spans, none shared, and retracted none. A span refused three times is left: none in cand1 and carry2, seq 30011 in cand2, and seq 17217 to 17219 and 30011 in carry1. Seq 30011 holds d100 and seq 17217 to 17219 holds d335, so those rows miss them. The table is `m3.py score`; the counts by kind, the drop classes and the records below were read after the fact with one-off queries over the same homes.
+whole and short cut 114 spans, and some of them shared a record, so that record's window was sent twice and the second pass retracted the first pass's claims: 1 overlap and 23 claims retracted in whole, 5 overlaps and 202 retracted in short. Their rows are kept here, but they do not measure what they were meant to. full and nothink cut 109 spans, merged so that none shares a record (#196's commit), and retracted none. whole-2 and short-2 cut 113 and 109 spans the same way, with none shared. short-2 retracted none. whole-2 retracted 22 claims, all in one span (seq 29865 to 29867, 4 windows): its first send got a prose answer for one window, the harness sent the span again, and the second answers replaced the first for the 3 windows that had one. Each window still ends with the claims of one answer. One span of whole-2 (seq 30261) was refused three times (unanchored). It holds none of the 44 labels, but it holds the earlier side of two overturn pairs (d105 and d106, both overturned by d111), which whole-2 counts as never derived rather than still current. whole3 is whole-2 run again from a clean home (review on #218): the harness no longer sends a span again once some of its windows were curated (ebe288e), so the arm is one pass, as short-2 is. It cut the same 113 spans and retracted none. It was stopped once, after 87 of the 113 spans, while it waited out the curator's cooldown with no call in flight, and went on from there (eab7397). One of its spans (seq 42955) was refused three times, and one of the two windows of another (seq 29872) answered prose and was left. Neither holds any of the 44 labels or a pair the lines count. cand1, cand2, carry1 and carry2 cut the same 113 spans, none shared, and retracted none. A span refused three times is left: none in cand1 and carry2, seq 30011 in cand2, and seq 17217 to 17219 and 30011 in carry1. Seq 30011 holds d100 and seq 17217 to 17219 holds d335, so those rows miss them. The table is `m3.py score` as it was before 2026-09-30 (each home keeps that score as `score-decided-only.json`); the counts by kind, the drop classes and the records below were read after the fact with one-off queries over the same homes.
 
 - **The owner's picks in `AskUserQuestion`** (#195): 11 of the 13 labels that are such picks reached `decided` in full, and none did in whole or short. That is the whole of the gain from whole to full (the typed prompts went from 10 to 8 of 28, run to run).
 - **Recall by kind**, nothink: picks 10 of 13, typed prompts 14 of 28, accepted proposals quoted from the assistant's reply 0 of 3 (0 in every arm; the live pass curated only one of an acceptance's two windows, see Accepted proposals across two windows).
@@ -181,7 +182,34 @@ The second group of #259's breakdown is a request that an agent carried out in t
   - One label moved by 3 (d363, 0 → 3).
   - So one label losing 3 hits is within run-to-run noise at 4 passes. #259's rejection rested on that rule: d112 went 3 → 0. Its sum, +3, was under its +8 in any case.
   - A rule declared for the next run should not reject on one label alone, or it needs more passes.
-- **A question about the metric**: M3 counts a claim with status decided. A done claim that quotes the owner's request records that the change was asked for and made. Whether that counts as recalling the owner's decision depends on what "remembering my decision" means to the owner. The curator's prompt cannot settle it.
+- **A question about the metric**: M3 counts a claim with status decided. A done claim that quotes the owner's request records that the change was asked for and made. Whether that counts as recalling the owner's decision depends on what "remembering my decision" means to the owner. The curator's prompt cannot settle it. The owner answered on 2026-09-30 (next section).
+
+### Counted again: a request the owner made and an agent carried out (2026-09-30)
+
+The owner's answer to #262's question: a claim with status done that quotes the owner's own words counts, since the owner asked for it and it was done. The harness now counts such a claim as recalling its label, and as shown as current where the label is overturned or an owner-no record (docs/spike/m3-dev.md). Every arm's home was scored again with it; each keeps its earlier score as `score-decided-only.json`.
+
+| Arm | Recall (of 44) | Recall, lasting (of 41) | Overturned, still current (of 19) | Owner-no records shown as decided (of 5) | Done claims quoting the owner |
+|---|---|---|---|---|---|
+| whole | 11 (10) | 11 (10) | 2 | 4 | 16 |
+| short | 13 | 13 | 2 | 1 | 2 |
+| full | 21 (19) | 20 (18) | 8 (7) | 1 | 9 |
+| nothink | 24 | 24 | 10 (9) | 4 (3) | 8 |
+| whole-2 | 22 (20) | 22 (20) | 9 | 3 | 12 |
+| short-2 | 22 | 22 | 7 | 3 (1) | 9 |
+| whole3 | 24 | 24 | 10 | 3 (2) | 10 |
+| cand1 | 25 (23) | 24 (22) | 12 | 3 (2) | 23 |
+| cand2 | 23 (21) | 22 (20) | 11 | 2 (1) | 17 |
+| carry1 | 22 (21) | 22 (21) | 8 | 4 (3) | 12 |
+| carry2 | 26 (21) | 24 (19) | 10 | 4 | 19 |
+
+(In brackets, the count before, where it moved. The compatible pairs dropped did not move.)
+
+- **What moved**: recall rose by 0 to 5 labels, and the best is carry2's 26 of 44 (59%; the line is 80%). carry1 and carry2, one binary, now differ by 4 (22 and 26), and whole-2 and whole3 by 2 (22 and 24): run to run, as before.
+- **The conclusions hold**:
+  - M3 fails: recall 26 of 44 at best, and 7 to 12 of the 19 overturned decisions still current.
+  - The shrink: short-2 22 against whole3 24, as before, so it stays off.
+  - Thinking: 24 with it off (nothink), 21 with it on (full), where it was 19.
+  - #259 and #262, in hits over the 24 lasting typed labels at 4 passes per arm: #259 B 69, N 68 (−1, and d112 still went 3 → 0); #262 B 68, N 67 (−1). Neither ships. d352 is now recalled in all 4 of #262's N passes and 3 of its B passes.
 
 ### What the next M3 run needs
 
