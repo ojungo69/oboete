@@ -523,8 +523,9 @@ pub fn open_raw(home: &Path) -> Result<Raw> {
 /// knowledge.db for the worker: a damaged one is quarantined and started empty. Every consumer
 /// then rebuilds from seq 0 (spec 1.7); raw.db and the segments are not touched.
 pub fn open_knowledge(home: &Path) -> Result<rusqlite::Connection> {
-    let checked = crate::knowledge::open(home)
-        .and_then(|k| crate::db::quick_check(&k, "knowledge.db").map(|()| k));
+    let checked = crate::knowledge::open(home).and_then(|k| {
+        crate::db::quick_check_without_vtabs(&home.join("knowledge.db"), "knowledge.db").map(|()| k)
+    });
     match checked {
         Ok(k) => Ok(k),
         Err(e) if damaged(&e) => {
@@ -542,7 +543,7 @@ pub fn open_knowledge(home: &Path) -> Result<rusqlite::Connection> {
 /// An open or `quick_check` error that says the file is damaged: SQLite's corrupt or not a
 /// database, or a check that ran and reported a problem (the one error that is no
 /// `rusqlite::Error`). Busy, permission and the like are not.
-fn damaged(e: &anyhow::Error) -> bool {
+pub(crate) fn damaged(e: &anyhow::Error) -> bool {
     corrupt(e)
         || (e
             .chain()
@@ -796,6 +797,65 @@ mod tests {
         assert_eq!(std::fs::read(&seg).unwrap(), seg_bytes);
         let hits = crate::search::raw(p, "zq007x", None, 5).unwrap();
         assert_eq!(hits.first().map(|h| h.seq), Some(8));
+    }
+
+    #[test]
+    fn a_knowledge_db_opens_without_checking_its_search_indexes_against_their_text() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("note zq001x kept")).unwrap();
+        drop(raw);
+        crate::worker::run_once(p).unwrap();
+        let k = crate::knowledge::open(p).unwrap();
+        k.execute("DELETE FROM raw_fts_content", []).unwrap(); // the index keeps its terms
+        assert!(crate::db::quick_check(&k, "knowledge.db").is_err());
+        drop(k);
+        open_knowledge(p).unwrap();
+        assert!(!quarantined(p, "knowledge.db"));
+        let e = crate::setup::doctor(p).unwrap_err().to_string();
+        assert!(e.contains("knowledge.db is damaged"), "{e}");
+    }
+
+    #[test]
+    fn a_knowledge_db_whose_two_tables_share_a_page_is_rebuilt() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        drop(crate::knowledge::open(p).unwrap());
+        rusqlite::Connection::open(p.join("knowledge.db"))
+            .unwrap()
+            .execute_batch(
+                "PRAGMA writable_schema = ON;
+                 UPDATE sqlite_schema SET rootpage =
+                   (SELECT rootpage FROM sqlite_schema WHERE name = 'checkpoints')
+                 WHERE name = 'rewinds';",
+            )
+            .unwrap();
+        open_knowledge(p).unwrap();
+        assert!(quarantined(p, "knowledge.db"));
+    }
+
+    #[test]
+    fn doctor_finds_a_damaged_table_before_it_reads_it() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let (root, size): (i64, i64) = crate::knowledge::open(p)
+            .unwrap()
+            .query_row(
+                "SELECT rootpage, (SELECT page_size FROM pragma_page_size)
+                 FROM sqlite_schema WHERE name = 'rewinds'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let (root, size) = (root as u64, size as usize);
+        overwrite(
+            &p.join("knowledge.db"),
+            (root - 1) * size as u64,
+            &vec![0xA5; size],
+        );
+        let e = crate::setup::doctor(p).unwrap_err().to_string();
+        assert!(e.contains("knowledge.db is damaged"), "{e}");
     }
 
     /// raw.db of `n` events, one segment exported after each `per` of them.

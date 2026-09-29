@@ -1654,6 +1654,7 @@ pub fn doctor(home: &Path) -> Result<()> {
             unhealthy.push("a store cannot be read (see above)");
         }
     }
+    let mut damage = None;
     if home.join("knowledge.db").exists() {
         section(
             &mut unhealthy,
@@ -1666,8 +1667,18 @@ pub fn doctor(home: &Path) -> Result<()> {
                 } else {
                     None
                 };
-                // MUST-M14: raw lost commits that a consumer had processed; its output was rewound.
                 let k = crate::knowledge::open(home)?;
+                // The whole check first, the search indexes against their text too (the worker's
+                // check leaves them out): damage stops the reads below before they name the rebuild.
+                match crate::db::quick_check(&k, "knowledge.db") {
+                    Ok(()) => println!("  knowledge.db quick_check: ok"),
+                    Err(e) if crate::backup::damaged(&e) => {
+                        damage = Some(e);
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                }
+                // MUST-M14: raw lost commits that a consumer had processed; its output was rewound.
                 let (n, last): (i64, Option<String>) = k.query_row(
                     "SELECT COUNT(*), strftime('%Y-%m-%d %H:%M', MAX(ts) / 1000, 'unixepoch', 'localtime') FROM rewinds",
                     [],
@@ -1683,6 +1694,10 @@ pub fn doctor(home: &Path) -> Result<()> {
                 Ok(())
             })(),
         );
+    }
+    if let Some(e) = damage {
+        println!("  {e:#}; `oboete rebuild` builds it again from raw.db");
+        unhealthy.push("knowledge.db is damaged (see above)");
     }
     let (backup, backup_well) = crate::backup::doctor(home);
     for l in &backup {

@@ -103,6 +103,25 @@ pub(crate) fn quick_check(conn: &Connection, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The whole `quick_check` of the file at `path` but for the virtual tables' own checks, on a
+/// connection of its own: FTS5 answers any quick_check with its whole-index check (it ignores
+/// isQuick), about 10 s at every worker start on a 70,000-record home, where this takes half a
+/// second. The connection's modules are dropped before it reads the schema, and SQLite leaves out
+/// a virtual table whose module it does not have; every b-tree (the shadow tables' too), the
+/// freelist and each page's one owner are still checked. doctor runs the whole check.
+pub(crate) fn quick_check_without_vtabs(path: &Path, name: &str) -> Result<()> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("open {}", path.display()))?;
+    // The stores' connections wait 2 s (`wal`); rusqlite's own default is 5 s.
+    conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
+    // SAFETY: the handle is this live connection's, and a null list keeps no module, FTS5's
+    // included, which is what leaves the search indexes out. It must come before any statement
+    // uses a virtual table: one already connected keeps its module, and the check would run it.
+    let rc = unsafe { rusqlite::ffi::sqlite3_drop_modules(conn.handle(), std::ptr::null_mut()) };
+    anyhow::ensure!(rc == rusqlite::ffi::SQLITE_OK, "{name}: drop modules: {rc}");
+    quick_check(&conn, name)
+}
+
 pub(crate) fn wal(conn: &Connection, synchronous: &str) -> Result<()> {
     conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
     // Switching a file to WAL takes an exclusive lock that the busy handler does not cover:
