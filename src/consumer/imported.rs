@@ -15,7 +15,9 @@ pub struct Imported;
 const BATCH: usize = 500;
 
 /// A document per op: a restore's rewind removes exactly the rows of the ops it lost, and a
-/// document two devices imported is kept once per op (readers show it once per uid).
+/// document two devices imported is kept once per op (readers show it once per uid). The index
+/// keeps no copy of the text, which `imported` holds (a quarter of the store on claude-mem's
+/// history): a hit is read back through its rowid.
 pub fn schema(k: &Connection) -> Result<()> {
     k.execute_batch(
         "CREATE TABLE IF NOT EXISTS imported(
@@ -25,7 +27,8 @@ pub fn schema(k: &Connection) -> Result<()> {
            body TEXT NOT NULL, UNIQUE (op_device, op_seq)
          );
          CREATE INDEX IF NOT EXISTS imported_uid ON imported(uid);
-         CREATE VIRTUAL TABLE IF NOT EXISTS imported_fts USING fts5(text, tokenize='trigram');",
+         CREATE VIRTUAL TABLE IF NOT EXISTS imported_fts
+           USING fts5(text, tokenize='trigram', content='', contentless_delete=1);",
     )?;
     Ok(())
 }
