@@ -16,17 +16,34 @@ use std::time::{Duration, Instant};
 /// D4) reads every device that has ops, and counts in op_seqs.
 pub trait Consumer {
     fn name(&self) -> &'static str;
+    /// Whether it consumes the op log (milestone 3 D4) rather than this device's records: the
+    /// three methods below follow from it.
+    fn reads_ops(&self) -> bool {
+        false
+    }
     /// The devices `step` is called for.
     fn devices(&self, raw: &Raw) -> Result<Vec<String>> {
-        Ok(vec![raw.device().to_owned()])
+        if self.reads_ops() {
+            raw.op_devices()
+        } else {
+            Ok(vec![raw.device().to_owned()])
+        }
     }
     /// The highest checkpoint `device` allows: a checkpoint above it lost its commits (MUST-M14).
     fn top(&self, raw: &Raw, device: &str) -> Result<i64> {
-        raw.max_seq_of(device)
+        if self.reads_ops() {
+            raw.max_op_seq_of(device)
+        } else {
+            raw.max_seq_of(device)
+        }
     }
-    /// Where its checkpoints are kept: `checkpoint::SEQS`, or `checkpoint::OPS` for op_seqs.
+    /// Where its checkpoints are kept: `checkpoint::OPS` for op_seqs, else `checkpoint::SEQS`.
     fn checkpoints(&self) -> &'static str {
-        checkpoint::SEQS
+        if self.reads_ops() {
+            checkpoint::OPS
+        } else {
+            checkpoint::SEQS
+        }
     }
     fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64>;
     fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()>;
@@ -671,14 +688,8 @@ mod tests {
         fn name(&self) -> &'static str {
             "ops-seen"
         }
-        fn devices(&self, raw: &Raw) -> Result<Vec<String>> {
-            raw.op_devices()
-        }
-        fn top(&self, raw: &Raw, device: &str) -> Result<i64> {
-            raw.max_op_seq_of(device)
-        }
-        fn checkpoints(&self) -> &'static str {
-            checkpoint::OPS
+        fn reads_ops(&self) -> bool {
+            true
         }
         fn step(&mut self, raw: &Raw, _: &Connection, device: &str, after: i64) -> Result<i64> {
             Ok(raw

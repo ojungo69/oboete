@@ -4,7 +4,6 @@
 
 use crate::claims::{ClaimOp, CorrectionOp, Evidence, normalize, schema, uid};
 use crate::curate::Span;
-use crate::knowledge::checkpoint;
 use crate::raw::{Item, Op, OpKind, Raw};
 use crate::worker::Consumer;
 use anyhow::Result;
@@ -31,16 +30,8 @@ impl Consumer for Claims {
         "claims"
     }
 
-    fn devices(&self, raw: &Raw) -> Result<Vec<String>> {
-        raw.op_devices()
-    }
-
-    fn top(&self, raw: &Raw, device: &str) -> Result<i64> {
-        raw.max_op_seq_of(device)
-    }
-
-    fn checkpoints(&self) -> &'static str {
-        checkpoint::OPS
+    fn reads_ops(&self) -> bool {
+        true
     }
 
     fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64> {

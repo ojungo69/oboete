@@ -3,7 +3,6 @@
 //! it, with a trigram index over its title and body. Curation reads records, never these ops, and
 //! nothing injects them.
 
-use crate::knowledge::checkpoint;
 use crate::raw::{ImportDoc, OpKind, Raw};
 use crate::worker::Consumer;
 use anyhow::Result;
@@ -38,16 +37,8 @@ impl Consumer for Imported {
         "imported"
     }
 
-    fn devices(&self, raw: &Raw) -> Result<Vec<String>> {
-        raw.op_devices()
-    }
-
-    fn top(&self, raw: &Raw, device: &str) -> Result<i64> {
-        raw.max_op_seq_of(device)
-    }
-
-    fn checkpoints(&self) -> &'static str {
-        checkpoint::OPS
+    fn reads_ops(&self) -> bool {
+        true
     }
 
     fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64> {
@@ -56,9 +47,9 @@ impl Consumer for Imported {
         let Some(last) = ops.last().map(|o| o.op_seq) else {
             return Ok(after);
         };
-        for op in ops.iter().filter(|o| o.kind == OpKind::Import) {
+        for op in ops.into_iter().filter(|o| o.kind == OpKind::Import) {
             // An op this version cannot read stays in raw, unread.
-            let Ok(d) = serde_json::from_value::<ImportDoc>(op.body.clone()) else {
+            let Ok(d) = serde_json::from_value::<ImportDoc>(op.body) else {
                 continue;
             };
             k.execute(
