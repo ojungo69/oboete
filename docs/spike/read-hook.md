@@ -5,7 +5,7 @@
 - **Cold:** before any consumer has run on the replayed events. For a checkout the worker has never built, SessionStart shows nothing (spec 4.2: the hook runs before the worker is up).
 - **Warm:** after `worker::drained` has run every consumer.
 
-Each arm spawns 30 `oboete hook claude SessionStart` and 30 `oboete hook claude UserPromptSubmit` processes, as an agent runs them: the write with its fsync, the read of what is injected, and the worker-lock attempt. It also times 30 in-process reads of what SessionStart shows (`hook::inject_text`, `oboete inject`'s text). This process holds the worker lock, so the hooks start no worker.
+Each arm spawns 30 `oboete hook claude SessionStart` and 30 `oboete hook claude UserPromptSubmit` processes, as an agent runs them: the write with its fsync, the read of what is injected, and the worker-lock attempt. It also times 30 in-process reads of what SessionStart shows (`hook::inject_text`, `oboete inject`'s text). This process holds the worker lock, so the hooks start no worker. What each arm's hooks record is forgotten after it (tombstones, applied by the next drain), so neither the warm arm nor a later run on the same home sees a start at the time of the run as the checkout's newest event. The runs below were taken before that change: their warm manifest was as of the time of the run, not of the fixture's last event.
 
 These numbers are a baseline and decide nothing. SessionStart shows the manifest and the current decisions, as milestone 3 left it. The read-hook line is set once in Task 12, from the first measurement of the delivered SessionStart's warm path on the slowest machine (spec 8.2, Read hook row).
 
