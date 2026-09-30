@@ -279,7 +279,7 @@ The user settings in 1.5 change what is recorded: capture exclusion per repo or 
 ### 3.4 Current claims and corrections
 
 - Current = chain tips.
-- Delivery (4.4, 4.6, 4.10) also lists a decision or preference, decided, whose only end is a curator link from a later decided or done claim of the owner's, the later first, as claude-mem lists its observations (owner decision 31). The link is kept and shown in the viewer, and delivery drops the earlier claim by it only once such links pass M3's control line (8.2). Chain tips stay the store's current state, which curation reads. A retraction with the owner's quote, a proposal accepted, an open item closed and an owner correction end the older claim as before.
+- Delivered = current, plus a decision or preference, decided, whose only end is a curator link from a later decided or done claim of the owner's (owner decision 31). Section 4 delivers these: the SessionStart packet and shortlist (4.1), SessionStart (4.4), per-prompt injection (4.6), re-injection after compaction (4.7), the manifest (4.9) and search's first rank (4.10). Delivery lists such a pair the later first, as claude-mem lists its observations. The link is kept and shown in the viewer, and delivery drops the earlier claim by it only once such links pass M3's control line (8.2). Chain tips stay the store's current state, which curation reads. A retraction with the owner's quote, a proposal accepted, an open item closed and an owner correction end the older claim as before.
 - Concurrent conflicts are resolved by (valid_from, device, seq), with a viewer flag and a clock-skew alarm.
 - Digests cite current claims and are not used when stale.
 - Re-derivation keeps uids (highest tier active).
@@ -305,7 +305,7 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
 
 ### 4.1 Principle: hooks only read, the worker computes ahead
 
-- The worker keeps per checkout a SessionStart packet (ranked current decisions, manifest, fresh digest), and per (session, checkout) a shortlist of about 50 relevant current claims. The shortlist is built in two stages: a provisional one from plain hybrid RRF, then the reranked, judge-scored one. It is refreshed at each Stop, every N events, when sync delivers new knowledge, and when the session moves to another checkout (RD/constraints-synthesis.md S4-6, S1-10).
+- The worker keeps per checkout a SessionStart packet (ranked delivered decisions (3.4), manifest, fresh digest), and per (session, checkout) a shortlist of about 50 relevant delivered claims. The shortlist is built in two stages: a provisional one from plain hybrid RRF, then the reranked, judge-scored one. It is refreshed at each Stop, every N events, when sync delivers new knowledge, and when the session moves to another checkout (RD/constraints-synthesis.md S4-6, S1-10).
 - Sync is done by the worker. Hooks never wait on the network and never embed a query.
 
 ### 4.2 What the hook does
@@ -327,7 +327,7 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
 - SessionStart injects:
   - explicit global preferences;
   - the checkout's manifest;
-  - current decisions, open items and lessons: about 10 with bodies, chosen by relation to the manifest and recency and listed newest first, so a later decision is read before an earlier one it may overturn (3.4, owner decision 31); the rest as a one-line index with get/search/timeline guidance;
+  - delivered decisions (3.4), open items and lessons: about 10 with bodies, chosen by relation to the manifest and recency and listed newest first, so a later decision is read before an earlier one it may overturn (3.4, owner decision 31); the rest as a one-line index with get/search/timeline guidance;
   - the digest, only if fresh.
 - The injection is fenced as data and attributed.
 
@@ -339,14 +339,14 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
 
 ### 4.6 Per-prompt injection
 
-- Only current claims are injected, never prompt text.
+- Only delivered claims (3.4) are injected, never prompt text.
 - The threshold is calibrated on about 100 no-answer and 100 false-premise questions.
 - Per-prompt injection is on by default only if the one-sided 95% upper bound of irrelevant injections is 10% or less (decision 12 of 2026-09-23 (proposal:36), read strictly; RD/constraints-synthesis.md S4-10) (set by measurement Inject at milestone 4).
 - The user may turn it on before it passes this line (1.5) (Claude; overrulable).
 
 ### 4.7 Compaction and resume
 
-- After compaction, open items and current claims are re-injected (deduplicated).
+- After compaction, open items and delivered claims (3.4) are re-injected (deduplicated).
 - No double injection on resume.
 - A per-agent table records status: live-verified / implemented / unverified.
 
@@ -358,7 +358,7 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
 ### 4.9 Manifest
 
 - The manifest is deterministic, per repo x branch x device.
-- Contents: risky git state first; last failing command; current decisions and open items; the agent's todo list; last prompt and reply; files touched; as-of and not-yet-curated count; other active sessions on the repo.
+- Contents: risky git state first; last failing command; delivered decisions (3.4) and open items; the agent's todo list; last prompt and reply; files touched; as-of and not-yet-curated count; other active sessions on the repo.
 - A fixed drop order applies under each agent's size cap.
 - Another device's manifest appears as a labelled block ("last worked on from <device>, 3 h ago": failing command, todo list, last prompt; never its git state). It appears only when that device has been idle over 30 minutes and its manifest is newer (RD/constraints-synthesis.md S4-13).
 
@@ -369,7 +369,7 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
 - The hybrid fuses the top 100 of each side (proposal §2.4 row 2; docs/pr-d.md D2 decision 2; issue #46).
 - Each vector records the embedder id and a hash of the text it was made from. A change to either re-embeds: the old vector is never returned, and a new one is made (issue #46).
 - When the embedder changes, a new generation of vectors is built in the background. Search uses the old generation until the new one covers every current document, then switches. A remote index switches only after its send queue has drained (issue #30 row 16; Claude; overrulable).
-- Current claims come first. Superseded claims are labelled and shown with history=true.
+- Delivered claims (3.4) come first. Other superseded claims are labelled and shown with history=true.
 - Search accepts since/until.
 - Results carry evidence-strength and repo labels.
 - A reranker runs on MCP, viewer and CLI (loaded by the worker) if it clears the evaluation line (set by measurement Rerank at milestone 4).
@@ -1480,7 +1480,7 @@ This appendix carries every acceptance test in issues #30, #46, #53, #54, #55 an
 | 30-15 | Size limits: a provider response is at most 1 MB, a summary at most 2,000 characters, an op at most 64 KB. The hub also refuses an op over the limit. | #30 row 15 (round 20) | 3 (response); 6 (op: the device's dead-letter and the hub's 413) | 1.4, 5.4, 6.5 | applies (response and op); superseded (summary) | Op: 5.4, "every op is at most 64 KB. The hub refuses a larger op with 413. The device moves it to a dead-letter list with the reason instead of retrying". Response: the 1 MB cap is in current code only (src/provider.rs:490, test `http_answers_are_parsed_and_capped` at :731). Summary: design B makes claims, not session summaries (3.2: "Claim kinds: decision, preference, lesson, fix (symptom, cause, fix, commit), open item, repo fact, change."), and 6.5 capped a claim's body without a number: "a body over a length cap is rejected". 6.5 now states the caps: claim body 1,000 characters, digest 2,000, provider response 1 MB (B.3 item 3). |
 | 30-16 | Switching the embedding generation: the `activate` op goes out only after the Vectorize send queue is empty. Documents that exist only on this device are searched in the old generation until the new one is ready. Documents made before and after the switch are embedded in the new generation. | #30 row 16 (rounds 5-6, 12) | 4 (local switch), 6 (Vectorize) | 4.10, 5.4 | applies | 5.4 states "vectors with embedder_id". If hub spike item 4 passes, "Vectorize is dropped" (8.3) and the Vectorize clause lapses. The local half stays: 7.1 lets the user change embeddings later with `oboete setup --embeddings`. The generation switch is now stated in 4.10 (B.3 item 4). |
 | 30-17 | Remote MCP: a repo without a grant is refused by `search`, `get` and `timeline`, with `all` and when named directly. | #30 row 17 (rounds 15, 16) | 6 | 5.13 | applies | 5.13: "Per-repo grants: search, get and timeline never cross grants, including `all` and direct ids (R09)." |
-| 30-18 | Automatic injection fences only observations and summaries as data and never includes the prompt's text. | #30 row 18 (round 15) | 4 | 4.4, 4.5, 4.6 | applies (fenced as data, no prompt text); superseded (what is injected) | Design B injects current claims, not observations and summaries. 4.6: "Only current claims are injected, never prompt text." 4.5: imported memories "are never injected or used as current". 4.4: "The injection is fenced as data and attributed." |
+| 30-18 | Automatic injection fences only observations and summaries as data and never includes the prompt's text. | #30 row 18 (round 15) | 4 | 4.4, 4.5, 4.6 | applies (fenced as data, no prompt text); superseded (what is injected) | Design B injects delivered claims (current ones, plus 3.4's owner decision 31 rule), not observations and summaries. 4.6: "Only delivered claims (3.4) are injected, never prompt text." 4.5: imported memories "are never injected or used as current". 4.4: "The injection is fenced as data and attributed." |
 | 30-19 | A preference applies to all repos only when stated explicitly with `oboete pref add` or in the viewer. | #30 row 19 (rounds 9-11) | 3 (viewer button at 5) | 3.3 | applies | 3.3: "Global scope comes only through `oboete pref add` or the viewer's "apply to all repos" button (decision 13 of 2026-09-23 (proposal:37)). A quote in conversation is never enough (RD/constraints-synthesis.md S3-20)." |
 | 30-20 | Repos a session actually touched are added to its set from tool working directories and file paths (relative, absolute, `git -C` and the like). When a path cannot be classified and at least one exclusion exists, nothing is sent out. | #30 row 20 (round 21) | 2 (recording); 6 (send rule) | 2.4, 5.5 | applies | Was a gap. 2.4 stores one "repo (origin URL key)" per event, and 5.5 checks "against every repo a session touched". No settled text derived the set from tool paths or stopped sending on an unclassifiable path. PR-C2 records only each event's working directory; tool paths were left to PR-H (docs/pr-c.md C2 decision 3). Now stated in 5.5 (B.2 #30 item 1). |
 | 30-21 | When `oboete sync exclude` is told to delete, the hub withdraws, at the moment it receives the exclusion op, also the sessions of other devices that this device has not received yet (the exclusion op carries the "delete" intent). | #30 row 21 (round 21) | 6 | 5.5 | applies | 5.5: "The hub then purges that session's content as it would for a tombstone, including sessions from devices this one has not pulled yet." |
@@ -1543,7 +1543,7 @@ Both are dev-only checks in section 8. 8.1 allows the test split only once more,
 | Id | Test | Source | Milestone | Section | Status | Notes |
 |---|---|---|---|---|---|---|
 | 50c-a | Search evaluation (the E series) also checks short identifiers mixed with long words. | #50 comment, "(a)" | 4 (dev split only) | 8.2 | applies | The nearest settled text covers only the hub: 8.3, hub platform spike "Item 3 (trigram full-text in the DO, including 2-character queries)"; RD/hub-platform.md:123, "Trigram cannot match fewer than 3 characters". Nothing covered local search. Now a dev-only check under 8.2's table (B.2, #50 comment item 1). |
-| 50c-b | Search evaluation checks the effect of knowledge-first ordering when the question is what the user asked for earlier. | #50 comment, "(b)" | 4 (dev split only) | 8.2 | applies | 4.10: "Current claims come first." What the user asked for lives mostly in prompts, which that order puts below claims. Now a dev-only check under 8.2's table (B.2, #50 comment item 1). |
+| 50c-b | Search evaluation checks the effect of knowledge-first ordering when the question is what the user asked for earlier. | #50 comment, "(b)" | 4 (dev split only) | 8.2 | applies | 4.10: "Delivered claims (3.4) come first." What the user asked for lives mostly in prompts, which that order puts below claims. Now a dev-only check under 8.2's table (B.2, #50 comment item 1). |
 
 Row counts: #30 24, #46 3, #53 6, #54 7, #55 8, #50 comment 2 (50 rows).
 
