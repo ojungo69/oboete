@@ -1792,14 +1792,19 @@ pub fn send_plan(
     };
     for (span, ws) in plan {
         // Where the part curated so far starts: after a window that kept an excluded session's
-        // records back, which a later window's `covers` must not take in (Codex on #304).
+        // records back, which a later window's `covers` must not take in (Codex on #304), at the
+        // start of a record it split, which the queue lets go of only once one covers it whole
+        // (cubic on #304).
         let mut from = (span.from, span.from_offset);
         for (i, w) in ws.iter().enumerate() {
             let restart = |from: &mut (i64, Option<i64>)| {
                 if let Some(next) = ws.get(i + 1)
                     && !w.excluded.is_empty()
                 {
-                    *from = (next.from_seq, next.from_offset);
+                    *from = match w.to_offset {
+                        Some(_) => (w.to_seq, None),
+                        None => (next.from_seq, next.from_offset),
+                    };
                 }
             };
             // The egress gate (spec 5.5): a window cut under another list, or before a session
@@ -8239,14 +8244,15 @@ mod tests {
     const MIXED_CUT: u32 = 30;
 
     /// Codex on #304: a queued span keeps the records of an excluded session that its recuration
-    /// kept back, for a run after an undo.
+    /// kept back, for a run after an undo, and not a record split after them (cubic on #304).
     #[test]
     fn a_queued_span_keeps_an_excluded_sessions_records() {
         let home = tempfile::tempdir().unwrap();
         let (mut raw, db) = open(home.path());
         raw.append(&said("A secret.", "a", "github.com/o/secret", "hook"))
             .unwrap();
-        raw.append(&said("Open work.", "b", "github.com/o/open", "hook"))
+        let long = "Open work on the parser, one step at a time. ".repeat(20);
+        raw.append(&said(&long, "b", "github.com/o/open", "hook"))
             .unwrap();
         curate_all(&mut raw, &db);
         let dev = raw.device().to_owned();
@@ -8262,9 +8268,11 @@ mod tests {
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
         let span = Span::records(1, 2);
         let reading = Reading::now(&raw, Reads::Any).unwrap();
-        let windows = span_windows(&raw, &span, WINDOW_TOKENS, &rules, &reading).unwrap();
-        assert_eq!(windows.len(), 1);
+        let windows = span_windows(&raw, &span, 80, &rules, &reading).unwrap();
+        let split = windows.len();
+        assert!(split > 1, "{windows:?}");
         assert_eq!(windows[0].excluded, [1]);
+        assert!(windows[0].to_offset.is_some());
         let mut consumers = crate::worker::consumers(home.path());
         let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| Ok(answered("fake"));
         let plan = [(span, windows)];
@@ -8278,7 +8286,7 @@ mod tests {
             &plan,
         )
         .unwrap();
-        assert_eq!(sent.windows, 1);
+        assert_eq!(sent.windows, split);
         let queued: Vec<(i64, i64)> = k
             .prepare("SELECT from_seq, to_seq FROM recurate")
             .unwrap()
