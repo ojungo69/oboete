@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,11 @@ const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 16 * 1024;
 /// Head and body together: a slow sender holds its thread this long at most.
 const REQUEST_TIME: Duration = Duration::from_secs(5);
+/// The answer, all of it: a client that stops reading holds its thread this long at most.
+const ANSWER_TIME: Duration = Duration::from_secs(10);
+/// Connections served at once, before the token or after; one more is closed at once (#53). A
+/// browser keeps at most 6 to one host.
+const MAX_CONNECTIONS: usize = 32;
 const MAX_LIMIT: usize = 200;
 const SECURITY_HEADERS: &str = "Content-Security-Policy: default-src 'none'; script-src 'self'; \
     style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; \
@@ -44,6 +50,27 @@ struct Viewer {
     saving: Mutex<()>,
     /// The page `--open` gave the browser opener, removed by the first request with the token.
     opener: Mutex<Option<PathBuf>>,
+    /// Connections being served: at most `MAX_CONNECTIONS`.
+    live: AtomicUsize,
+}
+
+/// One of `MAX_CONNECTIONS`, given back when its connection's thread ends, however it ends.
+struct Slot(Arc<Viewer>);
+
+impl Slot {
+    fn take(v: &Arc<Viewer>) -> Option<Slot> {
+        if v.live.fetch_add(1, Ordering::SeqCst) < MAX_CONNECTIONS {
+            return Some(Slot(Arc::clone(v)));
+        }
+        v.live.fetch_sub(1, Ordering::SeqCst);
+        None
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.live.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// What a request's head leads to: an answer, or a settings save whose body of this many bytes
@@ -118,20 +145,46 @@ pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
         token: raw.iter().map(|b| format!("{b:02x}")).collect(),
         saving: Mutex::new(()),
         opener: Mutex::new(None),
+        live: AtomicUsize::new(0),
     });
     let url = format!("http://127.0.0.1:{port}/#t={}", viewer.token);
     println!("{url}\n(open it in a browser; Ctrl-C stops the viewer)");
     if open {
         viewer.open(home, &url, open_browser);
     }
+    accept(&listener, &viewer);
+    Ok(())
+}
+
+fn accept(listener: &TcpListener, viewer: &Arc<Viewer>) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        let v = Arc::clone(&viewer);
+        // Over the cap, the connection is dropped here: closed before a byte is read.
+        let Some(slot) = Slot::take(viewer) else {
+            continue;
+        };
         // A browser keeps idle pre-connected sockets open; one thread each keeps them from
         // stalling the rest.
-        std::thread::spawn(move || v.serve(stream));
+        std::thread::spawn(move || slot.0.serve(stream));
     }
-    Ok(())
+}
+
+/// Writes all of `out` within `within`, however slowly the client reads; false once the time is
+/// up, the client is gone, or the deadline cannot be set.
+fn send(stream: &mut TcpStream, out: &[u8], within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    let mut sent = 0;
+    while sent < out.len() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || stream.set_write_timeout(Some(left)).is_err() {
+            return false;
+        }
+        match stream.write(&out[sent..]) {
+            Ok(0) | Err(_) => return false,
+            Ok(n) => sent += n,
+        }
+    }
+    true
 }
 
 /// The page `--open` hands the browser opener: owner-only, it sends the browser on to the
@@ -276,7 +329,7 @@ impl Viewer {
                 self.save(&buf[at..at + len])
             }
         };
-        let _ = stream.write_all(&resp.bytes(head_only));
+        send(&mut stream, &resp.bytes(head_only), ANSWER_TIME);
     }
 
     /// The settings save goes through `save_gate`; every other request is answered by `route`.
@@ -729,6 +782,7 @@ mod tests {
             token: "t0k".into(),
             saving: Mutex::new(()),
             opener: Mutex::new(None),
+            live: AtomicUsize::new(0),
         };
         (dir, v)
     }
@@ -1261,6 +1315,73 @@ mod tests {
         );
         server.join().unwrap();
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #53: connections past `MAX_CONNECTIONS` are closed unread, idle ones before the token
+    /// included, and the viewer answers again once they go.
+    #[test]
+    fn connections_past_the_cap_are_closed_and_their_slots_come_back() {
+        let (dir, mut v) = viewer("conn-cap");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        v.port = listener.local_addr().unwrap().port();
+        let port = v.port;
+        let v = Arc::new(v);
+        let server = Arc::clone(&v);
+        std::thread::spawn(move || accept(&listener, &server));
+        let until = |held: usize| {
+            let started = Instant::now();
+            while v.live.load(Ordering::SeqCst) != held {
+                assert!(started.elapsed() < Duration::from_secs(2), "{held}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let get = || {
+            let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let head = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+            let _ = c.write_all(head.as_bytes());
+            let mut out = Vec::new();
+            let _ = c.read_to_end(&mut out);
+            String::from_utf8_lossy(&out).into_owned()
+        };
+        let idle: Vec<TcpStream> = (0..MAX_CONNECTIONS)
+            .map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap())
+            .collect();
+        until(MAX_CONNECTIONS);
+        assert_eq!(get(), "");
+        drop(idle);
+        until(0);
+        assert!(get().starts_with("HTTP/1.1 200 "));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #53: an answer to a client that stops reading is given up at its deadline; one that reads
+    /// gets all of it.
+    #[test]
+    fn an_answer_nobody_reads_is_given_up_at_its_deadline() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stalled = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (mut s, _) = listener.accept().unwrap();
+        let started = Instant::now();
+        // Far more than the two sockets' buffers hold.
+        assert!(!send(
+            &mut s,
+            &vec![b'a'; 64 << 20],
+            Duration::from_millis(300)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        drop((s, stalled));
+        let mut reader = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (mut s, _) = listener.accept().unwrap();
+        let read = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            reader.read_to_end(&mut out).unwrap();
+            out.len()
+        });
+        assert!(send(&mut s, &vec![b'a'; 8 << 20], Duration::from_secs(10)));
+        drop(s);
+        assert_eq!(read.join().unwrap(), 8 << 20);
     }
 
     #[test]
