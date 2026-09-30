@@ -533,7 +533,9 @@ fn put_entry(
         let s = (now.timeout_s.get(&e.name).copied())
             .filter(|&v| rounds_as(v))
             .unwrap_or(posted);
-        let own = each(&|p| rounds_as(own_timeout(p)));
+        // Against the file's value itself: an entry's own that only rounds as it does is another
+        // value, which leaving the file's out would switch to (cubic on #287).
+        let own = each(&|p| own_timeout(p) == s);
         if !own && now.timeout_s.get(&e.name) != Some(&s) && !TIMEOUT_S.contains(&s) {
             return Err(refused(422, "range", field("timeout_s")));
         }
@@ -1261,21 +1263,29 @@ mod tests {
     /// own value.
     #[test]
     fn a_timeout_past_2_53_survives_an_unrelated_save() {
-        let home = home_with(Some("[chain]\ntimeout_s = { groq = 9007199254740993 }\n"));
-        let shown = show(home.path());
-        let body = posted(&shown, |v| {
-            v["inject"]["session_start"] = json!(false);
-            for e in v["chain"].as_array_mut().unwrap() {
-                if e["name"] == "groq" {
-                    // What `JSON.parse` and then `JSON.stringify` make of it.
-                    e["timeout_s"] = json!(9_007_199_254_740_992_u64);
+        // The second: the entry's own value rounds as the file's `[chain]` one does (cubic on
+        // #287), so taking the posted number for the entry's own would drop the file's.
+        let own = "[[providers]]\nkind = \"openai\"\nname = \"groq\"\n\
+                   base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\
+                   timeout_s = 9007199254740992\n";
+        for rest in ["", own] {
+            let text = format!("[chain]\ntimeout_s = {{ groq = 9007199254740993 }}\n\n{rest}");
+            let home = home_with(Some(&text));
+            let shown = show(home.path());
+            let body = posted(&shown, |v| {
+                v["inject"]["session_start"] = json!(false);
+                for e in v["chain"].as_array_mut().unwrap() {
+                    if e["name"] == "groq" {
+                        // What `JSON.parse` and then `JSON.stringify` make of it.
+                        e["timeout_s"] = json!(9_007_199_254_740_992_u64);
+                    }
                 }
-            }
-        });
-        save_to(&home, &body).unwrap();
-        let after = file(&home).unwrap();
-        assert!(after.contains("groq = 9007199254740993"), "{after}");
-        assert!(!crate::config::inject(home.path()).unwrap().session_start);
+            });
+            save_to(&home, &body).unwrap();
+            let after = file(&home).unwrap();
+            assert!(after.contains("groq = 9007199254740993"), "{after}");
+            assert!(!crate::config::inject(home.path()).unwrap().session_start);
+        }
     }
 
     /// #274 item 2: a `[chain]` model no entry of its name can take is shown, as not applied, and
