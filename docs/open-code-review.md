@@ -12,9 +12,11 @@ It supplements the existing Rust CI and SonarCloud checks; it does not approve o
 ## Provider setup
 
 The primary is DeepSeek V4.1 Flash through OpenRouter (`deepseek/deepseek-v4.1-flash`),
-served by DeepSeek's own API with the owner's DeepSeek key, which the owner
+served first by DeepSeek's own API with the owner's DeepSeek key, which the owner
 registered in OpenRouter as a BYOK key (owner, 2026-09-29: "if OpenCodeReview is
-slow, use DeepSeek from OpenRouter, where I registered BYOK"). The fallback is the
+slow, use DeepSeek from OpenRouter, where I registered BYOK"), and by the model's
+other providers on OpenRouter when that fails (owner, 2026-09-30: "ほかの会社も使っていいよ",
+other companies may be used too). The fallback is the
 same model on NVIDIA NIM (`deepseek-ai/deepseek-v4.1-flash`), which costs nothing.
 Both use `high` reasoning effort (the owner lowered it from `max` on 2026-09-28).
 OCR's separate review effort is at its maximum, `high` (three review rounds); OCR
@@ -25,15 +27,24 @@ does not accept `max` for that setting.
   took 18 minutes and DeepSeek's API 9 minutes 16 seconds. A call took 18 seconds
   on NIM on average, 4 on DeepSeek's API (60 and 134 calls). NIM's gateway also
   answers 504 to a call still running at about 300 seconds (below).
-- **Routing.** `OCR_LLM_EXTRA_BODY` is `{"provider":{"only":["deepseek"],"allow_fallbacks":false}}`:
-  OpenRouter tries BYOK endpoints first, and this keeps it off the model's other
-  providers, which would spend OpenRouter credits. It does not keep a call off
-  OpenRouter's own DeepSeek endpoint when the BYOK key fails: OpenRouter tries its
-  shared capacity after the BYOK keys ([BYOK](https://openrouter.ai/docs/guides/overview/auth/byok)).
-  The BYOK key's option "Never use shared capacity for models this key applies to"
-  closes that route; a failed key then fails the primary, and the fallback runs on
-  NIM. A response shows the route: `"provider": "DeepSeek"` and `"is_byok": true`
-  in its usage.
+- **Routing.** `OCR_LLM_EXTRA_BODY` is
+  `{"provider":{"allow_fallbacks":true,"quantizations":["fp8","fp16","bf16","fp32","unknown"],"max_price":{"prompt":0.6,"completion":2.4}}}`.
+  OpenRouter always tries BYOK endpoints first
+  ([BYOK](https://openrouter.ai/docs/guides/overview/auth/byok)), so a call goes to
+  DeepSeek with the owner's key while it answers. When it fails, the call goes to
+  another provider of the model, which spends OpenRouter credits at that provider's
+  price (about USD 10 were left on 2026-09-30). The filters keep that off the
+  providers that serve the model quantized to fp4 (its listing names two) and off
+  any over twice DeepSeek's listed price (USD 0.30 per million input and 1.20 per
+  million output tokens, read 2026-09-30; every provider listed then was within
+  it). Keep DeepSeek's own endpoint within the filters: OpenRouter's documentation
+  does not say whether a BYOK endpoint that fails a filter is still tried, so a
+  price cap under DeepSeek's price, or `require_parameters` when that endpoint
+  lacks a parameter OCR sends, could move every call to OpenRouter credits. A
+  response shows the route: `"provider": "DeepSeek"` and
+  `"is_byok": true` in its usage. Until 2026-09-30 the value was
+  `{"provider":{"only":["deepseek"],"allow_fallbacks":false}}`, which kept every
+  call on DeepSeek's endpoints.
 - **Cost.** DeepSeek bills the owner's account at its price. OpenRouter charges 5%
   of the OpenRouter price for BYOK calls beyond a free monthly allowance
   ([BYOK](https://openrouter.ai/docs/guides/overview/auth/byok), read 2026-09-29), and
@@ -69,7 +80,7 @@ In the repository's **Settings > Secrets and variables > Actions**, configure:
 | Secret | `OCR_LLM_FALLBACK_URL` | `https://integrate.api.nvidia.com/v1/chat/completions`. Needed when `OCR_LLM_FALLBACK_MODEL` is set. |
 | Secret | `OCR_LLM_FALLBACK_AUTH_TOKEN` | NVIDIA NIM API key. Needed when `OCR_LLM_FALLBACK_MODEL` is set. |
 | Variable | `OCR_LLM_USE_ANTHROPIC` | `false`: both endpoints are OpenAI-compatible. |
-| Variable | `OCR_LLM_EXTRA_BODY` | `{"provider":{"only":["deepseek"],"allow_fallbacks":false}}`. Sent by the primary only. |
+| Variable | `OCR_LLM_EXTRA_BODY` | `{"provider":{"allow_fallbacks":true,"quantizations":["fp8","fp16","bf16","fp32","unknown"],"max_price":{"prompt":0.6,"completion":2.4}}}`. Sent by the primary only. |
 | Variable | `OCR_LLM_MODEL` | `deepseek/deepseek-v4.1-flash`. Set this last to enable the workflow. |
 | Variable | `OCR_LLM_FALLBACK_MODEL` | `deepseek-ai/deepseek-v4.1-flash`. Omit to disable fallback. |
 
@@ -107,9 +118,10 @@ not trigger another model or duplicate the comments. Inspect the summary's
 coverage and warnings. A failed primary CLI attempt does not publish its
 findings; they remain in the log, and the fallback publishes its own result.
 
-The fallback runs the same model elsewhere, so it covers an OpenRouter or
-DeepSeek outage, an empty DeepSeek balance and an invalid OpenRouter key, but not
-a fault of the model itself. It is tried only once.
+The fallback runs the same model elsewhere, so it covers an OpenRouter outage, an
+invalid OpenRouter key, and a DeepSeek outage or an empty DeepSeek balance that
+OpenRouter's other providers could not cover (no OpenRouter credits left, for
+example), but not a fault of the model itself. It is tried only once.
 
 ## Triggers and limits
 
