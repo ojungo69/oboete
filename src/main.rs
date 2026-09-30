@@ -217,6 +217,10 @@ enum Cmd {
         /// Only replay events of this agent: claude | codex | grok | agy | opencode | pi | cursor | all
         #[arg(long, default_value = "claude")]
         agent: String,
+        /// Also time N SessionStart and prompt hooks and N in-process reads of what SessionStart
+        /// shows, before and after the consumers are drained (milestone 4 Task 0)
+        #[arg(long, default_value_t = 0)]
+        read_sample: usize,
     },
 }
 
@@ -599,6 +603,15 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             spawn_sample,
             sizes,
             agent,
-        } => replay::run(&home, &fixture, repo_root, spawn_sample, &sizes, &agent),
+            read_sample,
+        } => replay::run(
+            &home,
+            &fixture,
+            repo_root,
+            spawn_sample,
+            &sizes,
+            &agent,
+            read_sample,
+        ),
     }
 }
