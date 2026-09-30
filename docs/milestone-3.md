@@ -262,6 +262,38 @@ A Codex session that another agent starts holds that agent's prompts: a `codex e
 - **What stays open**:
   - A session another agent started and the owner then resumes in the TUI keeps the agent's mark, and so does a `codex exec` run the owner starts in their own terminal (#276). Neither shows in the owner's 1,755 rollouts.
 
+### Which curator M3 is read on (2026-09-30)
+
+Owner decision 26 reads M3's lines per curator model: the cheapest model that passes becomes the default. Every dev arm so far ran one model, Haiku through the claude CLI (a subscription), so a difference between arms is the arm's and not the chain's. The chain as it ships puts the free API entries first (owner, 2026-09-27), and its first entry, Groq's gpt-oss-120b, has no M3 number yet (Claude; overrulable):
+
+- The dev arms keep running on Haiku.
+- Before the deciding run, each entry the defaults use first gets one dev pass on the typed set and one on the pairs, and the deciding run is read for the model the defaults would then put first.
+- Groq is not measured now. Its free tier allows 200,000 gpt-oss-120b tokens a day, cached ones aside (console.groq.com/docs/rate-limits, read 2026-09-30). The owner's own curation (the current binary) counted 179,516 of them in the 24 hours before 2026-09-30 11:40 JST, and 27,000 to 58,000 on each of the three days before. A dev pass is about 157,000 tokens on the typed set and 351,000 on the pairs (#278's B passes): the pairs are more than a day's allowance, and either would move the owner's curation off its first entry. Measuring it needs a paid tier or another key, which is the owner's call. (Of the owner's 48 Groq gpt-oss-120b calls that day, 37 answered and 11 failed: 9 as `json_validate_failed`, Groq's own check of the answer's JSON, one 413 and one 429; the chain went on to the next entry each time, and 7 more waited out a 429 of under a minute.)
+
+### Carried decisions weighed one by one (#278)
+
+Both failing lines rest on one behavior: the curator does not supersede an earlier decision that is already in its prompt. #278 asked for each one, declared before any live number:
+
+- **Arms**: B is main at aa85a49. P is branch `curate/overturn-accounting` (5e7d75d): the answer starts with `reversed`, one entry per carried `decided before` claim, in order (its uid, whether a line of the window changes, reverses or cancels it, and that line), and `parse` adds the uid to the supersedes of the drafts from that line.
+- **Run**: 4 passes of each arm over the 67 spans that hold either end of a pair the lines score (`m3.py live --pairs`), each from a fresh copy of `base273`, the claude CLI on Haiku. B and P ran side by side after B1's first 27 spans: a pass waits out the curator's cooldowns, and three unanchored answers in a row rest the claude entry for 30 minutes.
+- **Rule**: adopt when mean O(P) ≤ mean O(B) − 3, mean N(P) ≤ mean N(B) + 1, and total D(P) ≤ total D(B) + 2.
+
+| | B | P |
+|---|---|---|
+| Overturned, still current (O, of 19) | 9, 11, 10, 10 (mean 10) | 11, 10, 9, 10 (mean 10) |
+| Overturned, never derived (N) | 0, 0, 2, 2 (mean 1) | 1, 1, 1, 2 (mean 1.25) |
+| Compatible, dropped (D, of 25) | 6, 8, 8, 7 (total 29) | 11, 10, 8, 9 (total 38) |
+| Supersede edges a pass (mean) | 33.5 | 51.5 |
+
+- **Verdict**: not adopted. O did not move (10 against 10), and D rose by 9: P writes more supersede edges, and more of them drop a compatible decision.
+- **What P's `reversed` said**, for the 10 pairs both arms left current in every pass or nearly (from the saved prompts and answers):
+  - Named, but no edge (2 pairs): d142 → d156 and d176 → d177. `reversed` was true with the right line in 3 of 4 passes each. The drafts from that line quote the assistant's report (「`review-routing` スキルを書き換えて、外部レビューの既定を cubic にした。」) or the tool output around the owner's price list, the gates lower them to proposals, and "a proposal supersedes nothing settled" drops the edge, as in carry1 and carry2.
+  - Carried, not named (4 pairs): d143, d144 and d151, which the owner's 「今後cubic cliやcoderabbit cliのように簡単に使えて高精度なレビューツールになるなら残すけど、ならないなら全て消して」 (d153) overturns. In P1 and P2 the list named none of the carried decisions: in P1 its 7 entries were the window's 7 kept claims, in P2 its 5 were 3 kept claims and 2 carried open items. In P3 and P4 it answered false for all three: the line is conditional. d143 → d154 (「ローカルもGitHubも全部消す」) is not, and was false or missing in every pass.
+  - d105 and d106 → d111 (「改造fcc消して。また今度omnirouteで設定する」): carried in some passes; where P answered for them (P2), both false.
+  - Not carried (2 pairs): d123 → d361 and d490 → d187, across sessions and not among the window's kept claims either. d461 → d463 also stayed current in 1 pass of B and 3 of P.
+- **The uids**: of the 916 `reversed` entries over P's passes, 4 named a uid its prompt did not hold, and all 480 uids in `supersedes` over the 8 passes were in their prompts. The curator copies the 64-character uids; it applies them to the wrong claims.
+- **Reading**: asking for each carried decision moves nothing that the carried prompt did not. What stays current has the shapes carry1 and carry2 showed: a reversal drafted from a report or a tool line (the gates, by design), a line the curator judges as not reversing (d153's condition, d154, d111), and the pairs across sessions (#222). #286 measures the same B with sonnet as the curator, to tell whether the model is the lever for the middle group.
+
 ### What the next M3 run needs
 
 1. The test labels, classed by the same rule (instructions for the moment, above).
