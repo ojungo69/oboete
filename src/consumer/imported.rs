@@ -148,16 +148,20 @@ mod tests {
         assert_eq!(uid, "claude-mem:abc:o1");
     }
 
-    /// D5: a restore that lost ops takes their documents out with them, and only theirs.
+    /// D5: a restore that lost ops takes their documents out with them, and only theirs. The ops
+    /// that take their seqs read in again under the freed rowids, which the contentless index
+    /// takes back (OpenCodeReview on #305).
     #[test]
     fn a_rewind_removes_the_rows_of_the_lost_ops_only() {
         let home = tempfile::tempdir().unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
         raw.append_imports(vec![doc("o1", "Kept", "One.")]).unwrap();
         raw.append_imports(vec![doc("o2", "Lost", "Two.")]).unwrap();
+        raw.append_imports(vec![doc("o3", "Lost", "Three.")])
+            .unwrap();
         let k = crate::knowledge::open(home.path()).unwrap();
         let device = raw.device().to_owned();
-        assert_eq!(Imported.step(&raw, &k, &device, 0).unwrap(), 2);
+        assert_eq!(Imported.step(&raw, &k, &device, 0).unwrap(), 3);
         Imported.rewind(&k, &device, 1).unwrap();
         assert_eq!((count(&k, "imported"), count(&k, "imported_fts")), (1, 1));
         let left: String = k
@@ -168,5 +172,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(left, "Kept");
+        assert_eq!(Imported.step(&raw, &k, &device, 1).unwrap(), 3);
+        let found: Vec<String> = k
+            .prepare(
+                "SELECT i.source_id FROM imported_fts f JOIN imported i ON i.rowid = f.rowid
+                 WHERE imported_fts MATCH 'Three' ORDER BY i.rowid",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(found, ["o3"]);
+        k.execute(
+            "INSERT INTO imported_fts(imported_fts) VALUES('integrity-check')",
+            [],
+        )
+        .unwrap();
     }
 }

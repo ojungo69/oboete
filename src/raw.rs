@@ -857,11 +857,13 @@ impl Raw {
     }
 
     /// The `source_id`s of `source`'s documents imported so far, on any device: what an import
-    /// skips (D5).
+    /// skips (D5). An op without one, which this version cannot read, is passed over as the
+    /// consumer passes it (OpenCodeReview on #305).
     pub fn import_keys(&self, source: &str) -> Result<std::collections::HashSet<String>> {
         let mut st = self.conn.prepare(
             "SELECT json_extract(body, '$.source_id') FROM ops
-             WHERE type = 'import' AND json_extract(body, '$.source') = ?1",
+             WHERE type = 'import' AND json_extract(body, '$.source') = ?1
+               AND json_extract(body, '$.source_id') IS NOT NULL",
         )?;
         let rows = st.query_map([source], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1772,6 +1774,16 @@ mod tests {
         assert_eq!(ops.len(), 100);
         assert!(batches.len() > 1);
         assert!(batches.values().all(|&bytes| bytes <= MAX_BATCH_BYTES));
+    }
+
+    /// OpenCodeReview on #305: an import op without a source id is passed over, not an error.
+    #[test]
+    fn import_keys_pass_over_an_op_without_a_source_id() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let op = serde_json::json!({"source": "claude-mem"});
+        raw.append_ops(&[(OpKind::Import, op)]).unwrap();
+        assert!(raw.import_keys("claude-mem").unwrap().is_empty());
     }
 
     #[test]
