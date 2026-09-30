@@ -98,9 +98,9 @@ pub fn show(home: &Path) -> Value {
     let db = (home.join("providers.db").exists())
         .then(|| crate::providers_db::open(home).ok())
         .flatten();
-    // A `[chain]` model is shown where it applies to an entry of its name: one `load()` left
-    // unset everywhere (a model no entry of the name can price) is not the page's to keep, and a
-    // save without it removes it. Every entry of one name shows the same value (Codex on #270).
+    // Whether a `[chain]` model applies to an entry of its name: one `load()` left unset
+    // everywhere (a model no entry of the name can price) is shown as not applied, and a save
+    // that leaves it keeps it (#274). Every entry of one name shows the same value (Codex on #270).
     let applied: std::collections::BTreeSet<&str> = (cfg.providers.iter())
         .filter(|p| {
             let own = match p {
@@ -211,14 +211,46 @@ fn entry(
         Some(db) if p.budget_from_key() => crate::budget::daily(db, p).unwrap_or(p.daily_budget()),
         _ => p.daily_budget(),
     };
+    // The row shows the first entry's values: where entries of its name differ, it says so (#274).
+    let key_file_of = |p: &Provider| match p {
+        Provider::Openai { key_file, .. } => key_file.clone(),
+        Provider::Cli { .. } => None,
+    };
+    let model_of = |p: &Provider| match p {
+        Provider::Openai { model, .. } => Some(model.clone()),
+        Provider::Cli { model, .. } => model.clone(),
+    };
+    let timeout_of = |p: &Provider| match p {
+        Provider::Openai { timeout_s, .. } | Provider::Cli { timeout_s, .. } => *timeout_s,
+    };
+    let differs: Vec<&str> = [
+        (
+            "key_file",
+            same.iter().any(|q| key_file_of(q) != key_file_of(p)),
+        ),
+        ("model", same.iter().any(|q| model_of(q) != model_of(p))),
+        (
+            "daily_budget",
+            same.iter().any(|q| q.daily_budget() != p.daily_budget()),
+        ),
+        (
+            "timeout_s",
+            same.iter().any(|q| timeout_of(q) != timeout_of(p)),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(field, d)| d.then_some(field))
+    .collect();
     json!({
         "name": name,
         "entries": same.len(),
+        "differs": differs,
         "kind": kind,
         "on": !chain.turns_off(name),
         "key": key,
         "key_file": key_file,
-        "model": chain.model.get(name).filter(|_| applied),
+        "model": chain.model.get(name),
+        "model_applied": applied,
         "effective_model": model,
         "model_rule": rule,
         "daily_budget": chain.daily_budget.get(name),
@@ -494,8 +526,14 @@ fn put_entry(
             chain.daily_budget.insert(e.name.clone(), n);
         }
     }
-    if let Some(s) = e.timeout_s {
-        let own = each(&|p| own_timeout(p) == s);
+    if let Some(posted) = e.timeout_s {
+        // A number past 2^53 reaches the page rounded (a JSON number is a double there): one that
+        // rounds as the file's own does stands for it, kept as the file has it (#274).
+        let rounds_as = |v: u64| v as f64 == posted as f64;
+        let s = (now.timeout_s.get(&e.name).copied())
+            .filter(|&v| rounds_as(v))
+            .unwrap_or(posted);
+        let own = each(&|p| rounds_as(own_timeout(p)));
         if !own && now.timeout_s.get(&e.name) != Some(&s) && !TIMEOUT_S.contains(&s) {
             return Err(refused(422, "range", field("timeout_s")));
         }
@@ -1216,6 +1254,79 @@ mod tests {
         )
         .unwrap();
         assert!(config::load(home.path()).unwrap().chain.model.is_empty());
+    }
+
+    /// #274 item 1: a `[chain]` timeout past 2^53 reaches the page rounded, as a browser parses a
+    /// JSON number into a double. An unrelated save sends it back rounded, and the file keeps its
+    /// own value.
+    #[test]
+    fn a_timeout_past_2_53_survives_an_unrelated_save() {
+        let home = home_with(Some("[chain]\ntimeout_s = { groq = 9007199254740993 }\n"));
+        let shown = show(home.path());
+        let body = posted(&shown, |v| {
+            v["inject"]["session_start"] = json!(false);
+            for e in v["chain"].as_array_mut().unwrap() {
+                if e["name"] == "groq" {
+                    // What `JSON.parse` and then `JSON.stringify` make of it.
+                    e["timeout_s"] = json!(9_007_199_254_740_992_u64);
+                }
+            }
+        });
+        save_to(&home, &body).unwrap();
+        let after = file(&home).unwrap();
+        assert!(after.contains("groq = 9007199254740993"), "{after}");
+        assert!(!crate::config::inject(home.path()).unwrap().session_start);
+    }
+
+    /// #274 item 2: a `[chain]` model no entry of its name can take is shown, as not applied, and
+    /// a save that leaves it keeps it; one that empties it removes it.
+    #[test]
+    fn a_model_no_entry_takes_is_shown_and_kept() {
+        let text = "[chain]\nmodel = { a = \"x\" }\n\n[[providers]]\nkind = \"openai\"\nname = \"a\"\n\
+                    base_url = \"https://example.invalid/v1\"\nmodel = \"m\"\n\
+                    limits = { usd_per_mtok_in = 1.0 }\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        let row = &shown["chain"][0];
+        assert_eq!(
+            (
+                &row["model"],
+                &row["model_applied"],
+                &row["effective_model"]
+            ),
+            (&json!("x"), &json!(false), &json!("m"))
+        );
+        save_to(
+            &home,
+            &posted(&shown, |v| v["inject"]["session_start"] = json!(false)),
+        )
+        .unwrap();
+        assert!(file(&home).unwrap().contains("a = \"x\""));
+        let shown = show(home.path());
+        save_to(
+            &home,
+            &posted(&shown, |v| v["chain"][0]["model"] = Value::Null),
+        )
+        .unwrap();
+        assert!(!file(&home).unwrap().contains("a = \"x\""));
+    }
+
+    /// #274 item 3: the row shows the first entry's values, and says where entries of its name
+    /// differ.
+    #[test]
+    fn entries_of_one_name_say_where_they_differ() {
+        let keys = tempfile::tempdir().unwrap();
+        let (a, b) = (keys.path().join("A_KEY.md"), keys.path().join("B_KEY.md"));
+        let text = api_entries(&[("twin", &a), ("same", &a), ("same", &a)])
+            + &format!(
+                "[[providers]]\nkind = \"openai\"\nname = \"twin\"\n\
+                 base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"n\"\nkey_file = {:?}\n",
+                b.display().to_string()
+            );
+        let home = home_with(Some(&text));
+        let shown = show(home.path());
+        assert_eq!(at(&shown, "twin")["differs"], json!(["key_file", "model"]));
+        assert_eq!(at(&shown, "same")["differs"], json!([]));
     }
 
     /// The rule shown is the entry's own, without `[chain]`, as a save checks it: an OpenRouter

@@ -11,9 +11,13 @@ function el(tag, cls, ...children) {
   return e;
 }
 
-function setStatus(text, isError = false) {
+// The settings view's text is in the language chosen there, the rest of the page in English:
+// `textLang` marks which one the status line reads (#274).
+function setStatus(text, isError = false, textLang = null) {
   $('status').textContent = text;
   $('status').classList.toggle('error', isError);
+  if (textLang) $('status').lang = textLang;
+  else $('status').removeAttribute('lang');
 }
 
 async function api(name, params = {}, method = 'GET') {
@@ -250,6 +254,8 @@ function setView(name) {
 }
 
 function draw(heading, list, panel) {
+  // The page's own language; the settings view marks its heading with its own (#274).
+  $('heading').removeAttribute('lang');
   $('heading').replaceChildren(...(Array.isArray(heading) ? heading : [heading]));
   $('list').replaceChildren(...list);
   $('panel').replaceChildren(...panel);
@@ -456,6 +462,18 @@ const TEXT = {
     'この要約役にはモデルの料金が設定されているため、モデルは [[providers]] で料金と一緒に変更してください。',
   ],
   model_free: ['Only models whose names end in :free.', '名前が :free で終わるモデルだけ設定できます。'],
+  model_unapplied: [
+    'config.toml sets this model, but this curator cannot use it, so it is not applied.',
+    'config.toml でこのモデルが設定されていますが、この要約役では使えないため、適用されていません。',
+  ],
+  differs: [
+    'In config.toml they differ in: {what}. This row shows the first one\'s.',
+    'config.toml では次の点が異なります: {what}。この行には最初の要約役の値を表示しています。',
+  ],
+  differs_key_file: ['key file', 'キーのファイル'],
+  differs_model: ['model', 'モデル'],
+  differs_daily_budget: ['calls a day', '1 日の回数'],
+  differs_timeout_s: ['timeout', '待ち時間'],
   save: ['Save', '保存'],
   saved: ['Saved.', '保存しました。'],
   warnings_h: ['Notes on config.toml', 'config.toml についての注意'],
@@ -636,7 +654,7 @@ async function saveKey(name, field, button, state) {
     if (current) {
       form = formOf(current);
       drawSettings();
-      setStatus(t('stale'), true);
+      setStatus(t('stale'), true, lang);
       return;
     }
     if (res.ok) {
@@ -644,13 +662,13 @@ async function saveKey(name, field, button, state) {
       // stays, a key in another row included.
       for (const r of form.chain) if (r.name === answer.entry) r.key = answer.key;
       state.textContent = t(`key_${answer.key}`);
-      setStatus(t(answer.durable ? 'key_saved' : 'key_not_durable'), !answer.durable);
+      setStatus(t(answer.durable ? 'key_saved' : 'key_not_durable'), !answer.durable, lang);
       return;
     }
     const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
     fields.inert = false;
     if (answer.field) markInvalid(answer.field);
-    setStatus(t(answer.code || byStatus[res.status] || 'other', { status: res.status }), true);
+    setStatus(t(answer.code || byStatus[res.status] || 'other', { status: res.status }), true, lang);
   } catch (e) {
     setStatus(e.message, true);
   } finally {
@@ -698,8 +716,9 @@ function chainRow(r, i, redraw) {
   tr.append(
     el('td', null, el('span', 'move', arrow(-1, '↑', t('up')), arrow(1, '↓', t('down')))),
     el('td', null, on),
-    el('td', null, el('span', 'entry-name', r.name), ...keyState(r), r.entries > 1 ? note(t('entries', { n: r.entries })) : null),
-    el('td', null, model, modelNote ? note(modelNote) : null),
+    el('td', null, el('span', 'entry-name', r.name), ...keyState(r), r.entries > 1 ? note(t('entries', { n: r.entries })) : null,
+      r.differs.length ? note(t('differs', { what: r.differs.map((d) => t(`differs_${d}`)).join(lang === 'ja' ? '、' : ', ') })) : null),
+    el('td', null, model, modelNote ? note(modelNote) : null, r.model && !r.model_applied ? note(t('model_unapplied')) : null),
     el('td', null, budget, r.budget_from_key && !r.edit.daily_budget ? note(t('from_key', { n: r.effective_daily_budget })) : null),
     el('td', null, timeout));
   return tr;
@@ -747,7 +766,7 @@ async function saveSettings(button) {
   const { body, field } = saveBody();
   if (!body) {
     markInvalid(field);
-    setStatus(t('range'), true);
+    setStatus(t('range'), true, lang);
     return;
   }
   const mine = form;
@@ -773,7 +792,7 @@ async function saveSettings(button) {
     if (res.ok || current) {
       form = formOf(current || answer);
       drawSettings();
-      setStatus(t(current ? 'stale' : 'saved'), Boolean(current));
+      setStatus(t(current ? 'stale' : 'saved'), Boolean(current), lang);
       return;
     }
     const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
@@ -781,7 +800,7 @@ async function saveSettings(button) {
     // An inert form takes no focus, and the refused field is to be reached.
     fields.inert = false;
     if (answer.field) markInvalid(answer.field);
-    setStatus(t(code, { status: res.status }), true);
+    setStatus(t(code, { status: res.status }), true, lang);
   } catch (e) {
     setStatus(e.message, true);
   } finally {
@@ -807,7 +826,7 @@ function drawSettings() {
   panel.lang = lang;
   if (!form) {
     panel.append(el('p', 'text pending', t('file_error')));
-    draw(t('heading'), [], [panel]);
+    drawIn(panel);
     return;
   }
   const f = form;
@@ -856,7 +875,13 @@ function drawSettings() {
     void saveSettings(save);
   });
   panel.append(el('p', 'lead', t('lead')), formEl);
+  drawIn(panel);
+}
+
+// The settings view in its own language, its heading included (#274).
+function drawIn(panel) {
   draw(t('heading'), [], [panel]);
+  $('heading').lang = lang;
 }
 
 const LOADERS = new Map([
