@@ -1,0 +1,19 @@
+src/import.rs
+  s_59cfa7617c8511::t_b5742f3b1d4abf 77-78,80-94,97-98,101-125,128-129,133-150,152-170,172-173,176-199,201-211,214,216
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2b43b0c406114986797ead544f315e49d3606a03",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
