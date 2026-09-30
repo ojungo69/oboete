@@ -80,8 +80,8 @@ struct Emitter<W: Write> {
     /// The session's own id was read (the file name is only the fallback). A forked Codex
     /// rollout carries its parent's `session_meta` after its own.
     meta_seen: bool,
-    /// Who sent a Codex rollout's prompts, from its own `session_meta` (#273).
-    sender: Option<&'static str>,
+    /// Whether another agent sent a Codex rollout's prompts, from its own `session_meta` (#273).
+    agent_sent: Option<bool>,
     /// Prompts the prompt hook got when they were queued, not yet delivered as user records.
     queued: Vec<String>,
     stats: Stats,
@@ -166,8 +166,8 @@ impl<W: Write> Emitter<W> {
     fn prompt(&mut self, ts: &str, text: &str) -> Result<()> {
         self.stop(ts)?;
         let mut payload = json!({"prompt": text});
-        if let Some(sender) = self.sender {
-            payload["oboete_sender"] = json!(sender);
+        if let Some(sent) = self.agent_sent {
+            payload[crate::capture::AGENT_SENT] = json!(sent);
         }
         self.emit("UserPromptSubmit", ts, payload)
     }
@@ -427,7 +427,9 @@ fn claude_record<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>
 /// sub-agent's thread. The owner's TUI and VS Code sessions are `codex-tui`, and an originator not
 /// listed here stays the user's.
 pub(crate) fn codex_agent_sent(meta: &Value) -> bool {
-    meta["source"].is_object()
+    // A sub-agent's thread is the one `source` object seen: its shape, not any object, so a
+    // new object form of the owner's sessions stays the user's.
+    meta["source"].get("subagent").is_some()
         || matches!(meta["source"].as_str(), Some("exec" | "mcp"))
         || matches!(
             meta["originator"].as_str(),
@@ -447,7 +449,7 @@ fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
                 e.session = id.to_string();
             }
             if !e.meta_seen {
-                e.sender = Some(if codex_agent_sent(p) { "agent" } else { "user" });
+                e.agent_sent = Some(codex_agent_sent(p));
             }
             e.meta_seen = true;
             if e.cwd.is_none() {
@@ -608,7 +610,7 @@ pub fn convert(path: &Path, agent: &str, out: impl Write) -> Result<Stats> {
         cwd: None,
         started: false,
         meta_seen: false,
-        sender: None,
+        agent_sent: None,
         queued: Vec::new(),
         stats: Stats::default(),
         pending: Vec::new(),
@@ -935,10 +937,10 @@ mod tests {
         let sender = |path: &str| {
             let (v, _) = events(path, "codex");
             let prompt = v.iter().find(|e| e["event"] == "UserPromptSubmit").unwrap();
-            prompt["payload"]["oboete_sender"].clone()
+            prompt["payload"][crate::capture::AGENT_SENT].clone()
         };
-        assert_eq!(sender(rollout.to_str().unwrap()), "agent");
-        assert_eq!(sender("src/testdata/transcripts/codex-basic.jsonl"), "user");
+        assert_eq!(sender(rollout.to_str().unwrap()), true);
+        assert_eq!(sender("src/testdata/transcripts/codex-basic.jsonl"), false);
     }
 
     #[test]

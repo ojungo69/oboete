@@ -85,6 +85,10 @@ pub struct Captured {
     pub ledger: Vec<(String, redact::Finding)>,
 }
 
+/// The hook payload's mark of a prompt another agent sent (#273): set by the hook adapter from
+/// a Codex rollout, or by the transcript parser, and never by an agent.
+pub(crate) const AGENT_SENT: &str = "oboete_agent_sent";
+
 /// The events one hook call of a ported agent records: none for events that carry nothing.
 pub fn events(
     agent: &str,
@@ -113,7 +117,7 @@ pub fn events(
             // A prompt another agent sent, as the hook adapter or the transcript parser read it
             // (#273): never the developer's words.
             let sent = |mut body: Value| {
-                if payload["oboete_sender"] == "agent" {
+                if payload[AGENT_SENT] == true {
                     body["agent_sent"] = json!(true);
                 }
                 body

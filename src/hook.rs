@@ -541,11 +541,11 @@ fn adapt(
     // A transcript import says who sent the prompt; a live hook reads the rollout (#273).
     if agent == "codex"
         && event == "UserPromptSubmit"
-        && p.get("oboete_sender").is_none()
+        && p.get(crate::capture::AGENT_SENT).is_none()
         && str_field(payload, &["transcript_path"])
             .is_some_and(|t| rollout_agent_sent(Path::new(t)))
     {
-        p["oboete_sender"] = json!("agent");
+        p[crate::capture::AGENT_SENT] = json!(true);
     }
     Ok(vec![(event.into(), p)])
 }
@@ -3084,6 +3084,9 @@ mod tests {
         assert_eq!(sender("sub", Some(sub)), true);
         let typed = json!({"originator": "codex-tui", "source": "vscode"});
         assert_eq!(sender("tui", Some(typed)), Value::Null);
+        // Only a sub-agent's shape: another object form of the owner's session stays theirs.
+        let other = json!({"originator": "codex-tui", "source": {"ide": "vscode"}});
+        assert_eq!(sender("object", Some(other)), Value::Null);
         assert_eq!(sender("none", None), Value::Null);
         std::fs::remove_dir_all(&dir).ok();
     }
