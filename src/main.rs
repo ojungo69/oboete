@@ -607,8 +607,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 }
             };
             let mut raw = raw::open(&home)?;
-            let op = serde_json::json!({ "repo": repo, "undo": undo });
-            raw.append_ops(&[(raw::OpKind::Exclusion, op)])?;
+            raw.exclude(&repo, undo)?;
             let list = raw.exclusions()?;
             if undo {
                 println!("no longer excluded: {repo}");

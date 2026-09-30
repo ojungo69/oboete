@@ -299,12 +299,13 @@ impl Reads {
 
 /// What a window may hold besides its size (milestone 4 D6, D13): the sessions whose records go to
 /// no curator, since they touched an excluded repository (spec 5.5), and the records it reads.
+/// Each window of a pass holds a copy, so the lists are shared (OpenCodeReview on #304).
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Reading {
     /// The exclusion list the sessions come from, as `Raw::exclusions` read it.
-    pub exclusions: Vec<String>,
+    pub exclusions: std::sync::Arc<Vec<String>>,
     /// Each as `agent` NUL `session`, a window line's key.
-    pub excluded: std::collections::HashSet<String>,
+    pub excluded: std::sync::Arc<std::collections::HashSet<String>>,
     pub reads: Reads,
 }
 
@@ -314,8 +315,8 @@ impl Reading {
         let exclusions = raw.exclusions()?;
         let excluded = raw.sessions_in(&exclusions)?;
         Ok(Self {
-            exclusions,
-            excluded,
+            exclusions: exclusions.into(),
+            excluded: excluded.into(),
             reads,
         })
     }
@@ -414,9 +415,10 @@ pub(crate) fn window_at(
                 pieces.push(empty(r.seq));
                 continue;
             }
-            if reading
-                .excluded
-                .contains(&format!("{}\u{0}{}", e.agent, e.session))
+            if !reading.excluded.is_empty()
+                && reading
+                    .excluded
+                    .contains(&format!("{}\u{0}{}", e.agent, e.session))
             {
                 excluded.push(r.seq);
                 pieces.push(empty(r.seq));
@@ -7962,8 +7964,7 @@ mod tests {
     }
 
     fn exclude(raw: &mut Raw, repo: &str, undo: bool) {
-        let op = json!({"repo": repo, "undo": undo});
-        raw.append_ops(&[(OpKind::Exclusion, op)]).unwrap();
+        raw.exclude(repo, undo).unwrap();
     }
 
     /// The phase run until it has nothing left: the prompts it sent.

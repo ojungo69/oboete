@@ -807,25 +807,26 @@ impl Raw {
     /// consumer in between; with no hub, this device's list is the whole list.
     pub fn exclusions(&self) -> Result<Vec<String>> {
         // A device's ops in its own order (op_seq), its clock never going back in it, then every
-        // device's by that time: a clock set back never puts a newer op first (Codex on #304).
+        // device's by that clock: a clock set back never puts a newer op first, and an op
+        // `exclude` wrote comes after every op its store held (Codex on #304).
         let mut st = self.conn.prepare(
             "SELECT device, ts, body FROM ops WHERE type = 'exclusion' ORDER BY device, op_seq",
         )?;
-        let mut ops: Vec<(i64, String, usize, String)> = Vec::new();
+        let mut ops: Vec<(i64, String, usize, serde_json::Value)> = Vec::new();
         let (mut device, mut clock) = (String::new(), i64::MIN);
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         for (i, row) in rows.enumerate() {
             let (from, ts, body): (String, i64, String) = row?;
+            let v: serde_json::Value = serde_json::from_str(&body)?;
             if from != device {
                 (device, clock) = (from.clone(), i64::MIN);
             }
-            clock = clock.max(ts);
-            ops.push((clock, from, i, body));
+            clock = clock.max(v["clock"].as_i64().unwrap_or(ts));
+            ops.push((clock, from, i, v));
         }
-        ops.sort();
+        ops.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
         let mut out = std::collections::BTreeSet::new();
-        for (_, _, _, body) in ops {
-            let v: serde_json::Value = serde_json::from_str(&body)?;
+        for (_, _, _, v) in ops {
             let Some(repo) = v["repo"].as_str() else {
                 continue;
             };
@@ -836,6 +837,22 @@ impl Raw {
             }
         }
         Ok(out.into_iter().collect())
+    }
+
+    /// Appends an exclusion op, or its undo (spec 5.5, D13), with a clock past every exclusion op
+    /// this store holds, as a Lamport clock: it takes effect after each op its device had seen,
+    /// whatever the clocks of the devices that wrote them. A copied store keeps its old device's
+    /// ops under a new device (Codex on #304).
+    pub fn exclude(&mut self, repo: &str, undo: bool) -> Result<i64> {
+        let seen: Option<i64> = self.conn.query_row(
+            "SELECT MAX(COALESCE(json_extract(body, '$.clock'), ts)) FROM ops
+             WHERE type = 'exclusion'",
+            [],
+            |r| r.get(0),
+        )?;
+        let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
+        let op = serde_json::json!({ "repo": repo, "undo": undo, "clock": clock });
+        Ok(self.append_ops(&[(OpKind::Exclusion, op)])?[0])
     }
 
     /// The sessions, as `agent` NUL `session`, with a record in one of `repos`: what an excluded
@@ -1714,6 +1731,30 @@ mod tests {
             .execute("UPDATE ops SET ts = 0 WHERE op_seq = ?1", [last])
             .unwrap();
         assert_eq!(raw.exclusions().unwrap(), ["x"]);
+    }
+
+    /// Codex on #304: a copied store keeps the old device's ops under a new device, and an
+    /// exclusion appended there comes after every op it holds, even when the old device's clock
+    /// ran ahead of the new one's.
+    #[test]
+    fn an_exclusion_comes_after_every_op_a_copied_store_holds() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        raw.exclude("x", false).unwrap();
+        raw.exclude("x", true).unwrap();
+        raw.conn
+            .execute(
+                "UPDATE ops SET ts = ts + 3600000,
+                   body = json_set(body, '$.clock', json_extract(body, '$.clock') + 3600000)",
+                [],
+            )
+            .unwrap();
+        drop(raw);
+        let copy = tempfile::tempdir().unwrap();
+        std::fs::copy(home.path().join("raw.db"), copy.path().join("raw.db")).unwrap();
+        let mut other = open(copy.path()).unwrap();
+        other.exclude("x", false).unwrap();
+        assert_eq!(other.exclusions().unwrap(), ["x"]);
     }
 
     #[test]
