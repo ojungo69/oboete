@@ -36,10 +36,14 @@ does not accept `max` for that setting.
   DeepSeek on OpenRouter's key, then to another provider; the last two spend
   OpenRouter credits (about USD 10 were left on 2026-09-30). Without `order`
   (2026-09-30, 07:45Z to 12:55Z), a call the owner's key did not serve went to the
-  other providers balanced by price, the cheapest most often, and both code reviews
-  in that time used up their 45 minutes on both attempts (#290 on src/hook.rs,
+  other providers balanced by price: 8 probes with that value at 13:05Z went to
+  InferenceNet, Relace, Phala and Wafer, none to DeepSeek. The primary attempts of
+  both code reviews in that time used up their 45 minutes (#290 on src/hook.rs,
   #292 on src/curate.rs: 1,845,306 tokens in 45 minutes, where #287's review on
-  DeepSeek that morning used 6.1M in 20). The filters keep that off the
+  DeepSeek that morning used 6.1M in 20). Their NIM fallbacks did too, which is
+  NIM's own slowness (Why not NIM first, above), not the routing. With `order`,
+  #290's review took 5 minutes 38 seconds (2,622,085 tokens, 96% cached) and cost
+  USD 0.04 of credits. The filters keep that off the
   providers that serve the model quantized to fp4 (its listing names two) and off
   any over twice DeepSeek's listed price (USD 0.30 per million input and 1.20 per
   million output tokens, read 2026-09-30, twice the listing of 2026-09-29 under
