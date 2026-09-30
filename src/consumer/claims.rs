@@ -560,6 +560,38 @@ mod tests {
         raw::open(home).unwrap()
     }
 
+    /// #303: a reader waits only for tombstones the worker will apply. The anchors consumer steps
+    /// this device's records, so a copied home's old id's mask is never pending for it: a claim
+    /// quoting the rest of that record is shown, not hidden for good.
+    #[test]
+    fn a_mask_under_a_copied_homes_old_id_never_hides_a_claim() {
+        let home = tempfile::tempdir().unwrap();
+        let text = "Deploy to staging with token hunter2.";
+        let mut raw = as_device(home.path(), "dev-a");
+        let seq = raw.append(&event(text, 1)).unwrap();
+        let c = claim(
+            "c",
+            "decision",
+            "Deploy to staging.",
+            vec![quote("dev-a", seq, text, "Deploy to staging", 0)],
+        );
+        raw.append_ops(&[op(&c)]).unwrap();
+        raw.append_tombstone(Target::Range {
+            device: "dev-a".into(),
+            seq,
+            offset: text.find("hunter2").unwrap() as i64,
+            length: 7,
+        })
+        .unwrap();
+        let raw = as_device(home.path(), "dev-b");
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(bodies(&k), ["Deploy to staging."]);
+        let pending = crate::claims::Pending::read(&raw, &k).unwrap();
+        let uid = crate::claims::uid("decision", &c.evidence[0]);
+        assert!(!pending.touches(&k, &uid).unwrap());
+    }
+
     /// #249: the claims a window takes as its own are those quoted in its records on its device:
     /// another device's claim quoted in a record of the same seq still supersedes for it.
     #[test]

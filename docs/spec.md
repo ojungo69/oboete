@@ -280,7 +280,7 @@ The user settings in 1.5 change what is recorded: capture exclusion per repo or 
 ### 3.4 Current claims and corrections
 
 - Current = chain tips.
-- Delivered = current, plus a decision or preference, decided, whose only end is a curator link from a later decided or done claim of the owner's (owner decision 31). Section 4 delivers these: the SessionStart packet and shortlist (4.1), SessionStart (4.4), per-prompt injection (4.6), re-injection after compaction (4.7), the manifest (4.9) and search's first rank (4.10). Delivery lists such a pair the later first, as claude-mem lists its observations. The link is kept and shown in the viewer, and delivery drops the earlier claim by it only once such links pass M3's control line (8.2). Chain tips stay the store's current state, which curation reads. A retraction with the owner's quote, a proposal accepted, an open item closed and an owner correction end the older claim as before.
+- Delivered = current, plus a decision or preference, decided, whose only end is a curator link from a later decided or done claim of the owner's (owner decision 31). Section 4 delivers these: the SessionStart packet and shortlist (4.1), SessionStart (4.4), per-prompt injection (4.6), re-injection after compaction (4.7), the manifest (4.9) and search's first rank (4.10). Delivery lists such a pair the later first, as claude-mem lists its observations. The link is kept and shown in the viewer, and delivery drops the earlier claim by it only once such links pass M3's control line (8.2). Chain tips stay the store's current state, which curation reads. A retraction with the owner's quote, an open item closed, an owner correction and an acceptance, for the proposal it accepts, end the older claim as before. A later claim is the owner's when it is the user's own words, a proposal the user accepted, or a claim whose status the owner corrected, the claims a digest may cite (Claude; overrulable).
 - Concurrent conflicts are resolved by (valid_from, device, seq), with a viewer flag and a clock-skew alarm.
 - Digests cite current claims and are not used when stale.
 - Re-derivation keeps uids (highest tier active).
@@ -1280,7 +1280,7 @@ Local first: milestones 2-5 build everything one device needs, and all sync code
    - The worker/no-worker comparison's one-device half, on dev transcripts: the worker rule's read-hook line at SessionStart and MCP p95 with local embeddings. It needs no labels. Its propagation half needs sync and runs at milestone 6.
      - The consumers are the same code in either process model. So if milestone 6 reverses the verdict, only the lifecycle wrapper changes, not the pipeline.
    - The Transcript line, because the transcript import is built here (Claude; overrulable).
-   - MUST fixtures: MUST-M8, MUST-M9, MUST-M11, MUST-M12, MUST-M13, and owner decision 31's order: a SessionStart packet lists a later decision above an earlier one that a curator link ended, both with their dates.
+   - MUST fixtures: MUST-M8, MUST-M9, MUST-M11, MUST-M12, MUST-M13, and owner decision 31's order: until curator links pass M3's control line (3.4), a SessionStart packet lists a later decision above an earlier one that a curator link ended, both with their dates; once they pass it, it lists only the later one.
 5. **Forget and safety** (section 6):
    - Build: the four levels, the forget pipeline and `forget_jobs`, viewer writes (the environment allow-list comes at milestone 3).
    - Lines: M4 (local), M22 forget time at scale.
@@ -1431,6 +1431,7 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A87 | A read of stored memory is shown to the curator by its call, not its output | 3.1 | Whether memory-tool output can come back as new knowledge |
 | A88 | Milestone 4's deciding runs that read curated claims (M5's one-device lines, M6, Inject) wait for the default curator that milestone 3's deciding run fixes; its build, dev tuning and the test-split run do not (owner decision 32) | 8.4 | Whether milestone 4's held-out runs may go on today's curator, with a curator changed after them measured on fresh held-out transcripts, since the held-out transcripts decide once (8.1) |
 | A89 | The SessionStart packet's delivered decisions, preferences and digest are read at SessionStart from the worker's indexes; the worker stores them per checkout only if M22 shows that read past the read-hook line | 4.1 | Whether the worker also stores them per checkout, rebuilt after every op that changes them |
+| A90 | A later claim that keeps an earlier decision delivered is the owner's as a digest counts it: the user's words, a proposal the user accepted, or a claim whose status the owner corrected | 3.4 | Whether a link from an accepted proposal ends the earlier decision instead, as an assistant's own claim does |
 
 ## Appendix B. Acceptance tests carried from issues
 

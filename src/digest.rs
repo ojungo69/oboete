@@ -432,8 +432,13 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
 }
 
 /// `repo`'s newest digest, its lines' text, when every claim it cites is still a current claim of
-/// `repo` (spec 3.4: a stale digest is not used). Read only: `None` where no digest was kept.
-pub fn fresh(k: &Connection, repo: &str) -> Result<Option<Vec<String>>> {
+/// `repo` (spec 3.4: a stale digest is not used) and none is `hidden` (`claims::Pending`). Read
+/// only: `None` where no digest was kept.
+pub fn fresh(
+    k: &Connection,
+    repo: &str,
+    hidden: impl Fn(&str) -> Result<bool>,
+) -> Result<Option<Vec<String>>> {
     let kept = k
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'digests'",
@@ -469,7 +474,7 @@ pub fn fresh(k: &Connection, repo: &str) -> Result<Option<Vec<String>>> {
                 })
                 .optional()?;
             match now {
-                Some(v) if l.seen.get(i).is_none_or(|seen| *seen == v) => {}
+                Some(v) if l.seen.get(i).is_none_or(|seen| *seen == v) && !hidden(uid)? => {}
                 _ => return Ok(None),
             }
         }
@@ -623,7 +628,7 @@ mod tests {
         assert_eq!((phase, sent.len()), (Phase::Idle, 0));
         let k = crate::knowledge::open(home.path()).unwrap();
         assert_eq!(
-            fresh(&k, "r").unwrap().unwrap(),
+            fresh(&k, "r", |_| Ok(false)).unwrap().unwrap(),
             ["Tabs and Friday releases."]
         );
         // A session whose last record is not yet curated waits for it.
@@ -933,7 +938,7 @@ mod tests {
         crate::worker::run_once(home.path()).unwrap();
         let shown = || {
             let k = crate::knowledge::open(home.path()).unwrap();
-            fresh(&k, "r").unwrap()
+            fresh(&k, "r", |_| Ok(false)).unwrap()
         };
         assert_eq!(shown(), Some(vec!["Tabs.".to_owned()]));
         // The same claim (its uid) from a higher tier, in other words: now its active one.
