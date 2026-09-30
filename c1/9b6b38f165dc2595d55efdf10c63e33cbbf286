@@ -1,0 +1,33 @@
+docs/milestone-4.md
+  s_30d0ae67cebed9::t_08af59bc5b6be9 1-12
+src/consumer.rs
+  s_30d0ae67cebed9::t_51e77bc310336e 9
+src/consumer/imported.rs
+  s_30d0ae67cebed9::t_84cc7727397924 1-172
+src/db.rs
+  s_30d0ae67cebed9::t_dd29e9055d2489 670,708-709,721-722,734
+src/import.rs
+  s_30d0ae67cebed9::t_b270f45e15b0c1 1-6,8,16,37,43-48,56,103,148,179,183,228-270,304,407-420,422-424,426-431,434-438,441-445,449,452,454-455,457,459-466,469,471-479,481,483,485-486,488-513,515-516,518,524-525,527,529,532-533,535-583
+src/main.rs
+  s_30d0ae67cebed9::t_0d641269dfba79 484-485
+src/raw.rs
+  s_30d0ae67cebed9::t_151c1a5357dd1b 116-117,128,138,164-223,972-1004,1824-1899
+src/worker.rs
+  s_30d0ae67cebed9::t_b03f22d52ba217 48-49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c19b6b38f165dc2595d55efdf10c63e33cbbf286",
+  "prompts": {},
+  "sessions": {
+    "s_30d0ae67cebed9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c79fad97-efa9-40d6-9230-d12636d3a455",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
