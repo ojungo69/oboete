@@ -9,6 +9,7 @@ The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and
 - Task 13 has the lines below: M2 passes, Cost's Groq and OpenRouter budgets meet the line since 2026-09-29 but NIM's cannot be checked against it (NIM publishes no daily cap, below), a heavy day needs speed too, and M3 fails on the dev labels. The first dev tuning of the gates is merged: the owner's answer to `AskUserQuestion` is the owner's words (#195, #202, #209).
 - M3's typed decisions: #254's prompt shipped. #259 (the typed lines listed again), #262 (a request carried out is the developer's decision) and #271 (the list judged in place, or each typed line weighed before drafting) did not ship (below).
 - Since 2026-09-30 a done claim that quotes the owner's request counts as recalling the decision (the owner's answer to #262's question). Every arm rose by 0 to 5 labels, the best to 26 of 44 (carry2), and no conclusion changed (Counted again, below).
+- A prompt another agent sent is not the owner's since #275 (#273). On the typed set, owner-no records decided went from 13 to 0 over 4 passes, and the typed hits stayed within noise (A prompt another agent sent, below).
 
 ## M2 on the dev transcripts: passes
 
@@ -75,7 +76,7 @@ whole and short cut 114 spans, and some of them shared a record, so that record'
   - d153's window (the later side for d143, d144 and d151) superseded another claim. The decision is conditional ("…ならないなら全て消して").
   - So a prompt alone does not reach the 0% line. The shared records are scored per decision since 2026-09-29. A draft that stays a proposal (an assistant's report the owner has not accepted, or a change quoted from tool output) supersedes no decided claim. One the owner accepts is decided and can; since #240 the harness measures that path, and in these arms the curator drafted no acceptance as a decision (#244; the accepted-proposal arms below). The cross-session pairs need the hybrid search.
 - **The compatible pair dropped** in full, nothink and the three later arms is d121 to d361: the later decision ("このプロジェクトを破棄して…") superseded 案B. By the owner's labels 案B had already been replaced by d123, which d361 overturns. It counts as a drop by the definition; it is 1 of 25, 4%, over the 2% line. In the four arms of 2026-09-29, the claim that supersedes 案B is d123's ("App + 薄いWorkers受付"), as the owner's labels have it, and the pair still counts. cand1 and carry2 also dropped d291 to d293 (a later delegation rule superseding the runner-update rule). carry2 also dropped d413 to d436: "iMac は随時利用可能" superseded "M1 iMacを用意可能…明日から", a detail, not a change.
-- **Owner-no records**: the three in nothink (d71, d228, d410) are the three whole also showed. d71 is a long typed plan whose other sentences are rules; d228 and d410 are the assistant's reports of what it did, drafted as the user's decisions. Not a difference that thinking made. carry1 and carry2 showed 3 and 4, against 2 and 1 on main. d409 (a pasted review reply) was drafted as a decision in both carry arms and in neither main arm, and d228 in carry2. That is within what two runs of one arm differ by; it is watched in the next runs.
+- **Owner-no records**: the three in nothink (d71, d228, d410) are the three whole also showed. d71 is a long typed plan whose other sentences are rules; d228 and d410 are the assistant's reports of what it did, drafted as the user's decisions. Read again for #273: all three, and d409, are prompts another agent sent in a Codex session, which #275 no longer records as the owner's. Not a difference that thinking made. carry1 and carry2 showed 3 and 4, against 2 and 1 on main. d409 (a pasted review reply) was drafted as a decision in both carry arms and in neither main arm, and d228 in carry2. That is within what two runs of one arm differ by; it is watched in the next runs.
 - **What is not in the window**: drafts dropped because their quote is not in the window, nothink: 263 over 120 kept answers. 195 are paraphrases, 30 match once whitespace is removed, 15 quote a tool's input, 13 quote another record, 6 join two pieces with "...", 1 matches after NFKC normalization, and 3 could not be joined to their window's answer. A whitespace-blind match would keep the 30.
 
 ### Thinking (#193 item 3)
@@ -233,13 +234,42 @@ The run: 4 rounds of B, C and A, each pass from a fresh copy of the prepared hom
   - d112's deletion request 4 → 0 in C, as in #259's N (3 → 0), and 4 → 4 in A: the list at the prompt's end loses it, not #259's phrase.
 - **A reading, not tested**: weighing a typed line on its own terms brings in short rules and permissions (d331, d363) and moves a short request carried out in the window (d54) to a proposal. A variant would need to keep the line's own status (asked and done) while it is weighed. The prompt already defines decided as what the developer said, asked for or accepted, so a decision the developer asked for, drafted as proposed with speaker user, contradicts it.
 
+### A prompt another agent sent (#273, #275)
+
+A Codex session that another agent starts holds that agent's prompts: a `codex exec` run, or a session Claude Code's Codex plugin starts. Until #275 capture stored them as the owner's typed lines. So a claim quoting one had speaker user and counted as the owner's decision.
+- 4 of the 5 owner-no records are such prompts: d71, d228, d409 and d410. The owner said none of them is their decision, and this note had read them as a long plan, the assistant's reports and a pasted review reply.
+- None of the owner-yes labels is.
+- #275 marks such a prompt `agent_sent`, and curation shows it as `[agent prompt]` with the assistant's role, so a claim quoting it is never the user's.
+
+- **Run**:
+  - Arms: 4 passes of main with #275 (033d5b5) against #271's B arm (main at 2f0bea9), with the same harness copy and the claude CLI on Haiku.
+  - Base: the dev base's copy `base273`. Its 47 Codex prompt records from sessions another agent started carry `agent_sent`, as #275's capture writes it; the other 86 are the owner's.
+  - Why no new B arm: #275's later commits change the manifest and the live hook, not curation, and main's curation did not change between 2f0bea9 and #275.
+
+| | B | #275 |
+|---|---|---|
+| Hits over the 24 lasting typed labels (0 to 4 each) | 71 | 69 |
+| Owner-no records decided, 5 × 4 passes | 13 | 0 |
+| Claims with speaker user, decided or done, quoting an agent's prompt | 98 | 0 |
+| Decided claims per pass | 34, 41, 33, 34 | 18, 18, 18, 16 |
+| Prompt tokens, 4 passes (estimate) | 626,073 | 625,658 |
+
+- **Reading**:
+  - The owner-no line is clear of the four agent prompts. The fifth owner-no record (d212, a Claude reply in the owner's own session) was decided in no pass of either arm.
+  - The typed hits moved by 2, inside what two runs of one binary differ by (#262): d130, d211 and d435 lost one pass each and d215 gained one.
+  - About half of the decided claims per pass in B quoted agent prompts.
+- **Not measured here**: `decided` precision over all claims, which the M3 line reads on the test labels (100 claims the curator marked decided). The drop in decided claims per pass says where most of the lost precision was.
+- **What stays open**:
+  - A session another agent started and the owner then resumes in the TUI keeps the agent's mark, and so does a `codex exec` run the owner starts in their own terminal (#276). Neither shows in the owner's 1,755 rollouts.
+
 ### What the next M3 run needs
 
 1. The test labels, classed by the same rule (instructions for the moment, above).
 2. Supersedes: a window now carries its sessions' decided claims, so a same-session earlier decision is in the prompt; the cross-session pairs need the hybrid search (#222). A record holding two labels is scored per decision (2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and with the reply's options carried, 2 of 6 acceptances settle their proposal (acc6: d462 and d107; #244: a go-ahead is often drafted as a proposal or not at all, or quotes another line than the owner's, and a quote from another repository's tool line loses its supersedes).
 3. The quote match: the paraphrases (whitespace-blind matching is #248).
 4. The defaults as they would ship were run once (short-2): 22 of 44.
-5. Several runs of each arm (Run to run, above). At 4 passes per arm one label can move by 3 between two runs of one binary (#262), so a declared rule should not reject on one label alone.
+5. A base whose Codex prompts from sessions another agent started carry `agent_sent` (#275): a rebuilt base gets it from the transcript parser, and the frozen dev base's copy `base273` has it (the 47 records named by their rollouts).
+6. Several runs of each arm (Run to run, above). At 4 passes per arm one label can move by 3 between two runs of one binary (#262), so a declared rule should not reject on one label alone.
 
 ## Judge, role (a): the shrink: fails on decisions by the declared rule; off
 
