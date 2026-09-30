@@ -98,19 +98,6 @@ pub fn show(home: &Path) -> Value {
     let db = (home.join("providers.db").exists())
         .then(|| crate::providers_db::open(home).ok())
         .flatten();
-    // A `[chain]` model is shown where it applies to an entry of its name: one `load()` left
-    // unset everywhere (a model no entry of the name can price) is not the page's to keep, and a
-    // save without it removes it. Every entry of one name shows the same value (Codex on #270).
-    let applied: std::collections::BTreeSet<&str> = (cfg.providers.iter())
-        .filter(|p| {
-            let own = match p {
-                Provider::Openai { model, .. } => Some(model.as_str()),
-                Provider::Cli { model, .. } => model.as_deref(),
-            };
-            own.is_some() && cfg.chain.model.get(p.name()).map(String::as_str) == own
-        })
-        .map(Provider::name)
-        .collect();
     // One row per name, as `[chain]` sets every entry of a name alike.
     let chain: Vec<Value> = names(&cfg.providers)
         .into_iter()
@@ -128,7 +115,7 @@ pub fn show(home: &Path) -> Value {
                 .into_iter()
                 .find(|r| rules.contains(r))
                 .unwrap_or(config::ModelRule::Any);
-            entry(&same, &cfg.chain, applied.contains(name), rule, db.as_ref())
+            entry(&same, &cfg.chain, rule, db.as_ref())
         })
         .collect();
     json!({
@@ -167,7 +154,6 @@ fn tool_output(t: ToolOutput) -> &'static str {
 fn entry(
     same: &[&Provider],
     chain: &ChainOverlay,
-    applied: bool,
     rule: config::ModelRule,
     db: Option<&Connection>,
 ) -> Value {
@@ -207,18 +193,53 @@ fn entry(
             *timeout_s,
         ),
     };
-    let budget = match db {
-        Some(db) if p.budget_from_key() => crate::budget::daily(db, p).unwrap_or(p.daily_budget()),
-        _ => p.daily_budget(),
+    let budget_of = |q: &Provider| match db {
+        Some(db) if q.budget_from_key() => crate::budget::daily(db, q).unwrap_or(q.daily_budget()),
+        _ => q.daily_budget(),
     };
+    let budget = budget_of(p);
+    // Whether the row's entry takes the `[chain]` model: one `load()` left unset (a model the entry
+    // cannot price) is shown as not applied, and a save that leaves it keeps it (#274).
+    let applied = chain.model.get(name).map(String::as_str) == model;
+    // The row shows the first entry's values: where entries of its name use different ones (with
+    // `[chain]` applied), it says so (#274).
+    let key_file_of = |p: &Provider| match p {
+        Provider::Openai { key_file, .. } => key_file.clone(),
+        Provider::Cli { .. } => None,
+    };
+    let model_of = |p: &Provider| match p {
+        Provider::Openai { model, .. } => Some(model.clone()),
+        Provider::Cli { model, .. } => model.clone(),
+    };
+    let timeout_of = |p: &Provider| match p {
+        Provider::Openai { timeout_s, .. } | Provider::Cli { timeout_s, .. } => *timeout_s,
+    };
+    let differs: Vec<&str> = [
+        (
+            "key_file",
+            same.iter().any(|q| key_file_of(q) != key_file_of(p)),
+        ),
+        ("model", same.iter().any(|q| model_of(q) != model_of(p))),
+        // The calls a day each uses: a key's read limit is its own (cubic on #287).
+        ("daily_budget", same.iter().any(|q| budget_of(q) != budget)),
+        (
+            "timeout_s",
+            same.iter().any(|q| timeout_of(q) != timeout_of(p)),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(field, d)| d.then_some(field))
+    .collect();
     json!({
         "name": name,
         "entries": same.len(),
+        "differs": differs,
         "kind": kind,
         "on": !chain.turns_off(name),
         "key": key,
         "key_file": key_file,
-        "model": chain.model.get(name).filter(|_| applied),
+        "model": chain.model.get(name),
+        "model_applied": applied,
         "effective_model": model,
         "model_rule": rule,
         "daily_budget": chain.daily_budget.get(name),
@@ -494,7 +515,15 @@ fn put_entry(
             chain.daily_budget.insert(e.name.clone(), n);
         }
     }
-    if let Some(s) = e.timeout_s {
+    if let Some(posted) = e.timeout_s {
+        // A number past 2^53 reaches the page rounded (a JSON number is a double there): one that
+        // rounds as the file's own does stands for it, kept as the file has it (#274).
+        let rounds_as = |v: u64| v as f64 == posted as f64;
+        let s = (now.timeout_s.get(&e.name).copied())
+            .filter(|&v| rounds_as(v))
+            .unwrap_or(posted);
+        // Against the file's value itself: an entry's own that only rounds as it does is another
+        // value, which leaving the file's out would switch to (cubic on #287).
         let own = each(&|p| own_timeout(p) == s);
         if !own && now.timeout_s.get(&e.name) != Some(&s) && !TIMEOUT_S.contains(&s) {
             return Err(refused(422, "range", field("timeout_s")));
@@ -1216,6 +1245,140 @@ mod tests {
         )
         .unwrap();
         assert!(config::load(home.path()).unwrap().chain.model.is_empty());
+    }
+
+    /// #274 item 1: a `[chain]` timeout past 2^53 reaches the page rounded, as a browser parses a
+    /// JSON number into a double. An unrelated save sends it back rounded, and the file keeps its
+    /// own value.
+    #[test]
+    fn a_timeout_past_2_53_survives_an_unrelated_save() {
+        // The second: the entry's own value rounds as the file's `[chain]` one does (cubic on
+        // #287), so taking the posted number for the entry's own would drop the file's.
+        let own = "[[providers]]\nkind = \"openai\"\nname = \"groq\"\n\
+                   base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\
+                   timeout_s = 9007199254740992\n";
+        for rest in ["", own] {
+            let text = format!("[chain]\ntimeout_s = {{ groq = 9007199254740993 }}\n\n{rest}");
+            let home = home_with(Some(&text));
+            let shown = show(home.path());
+            let body = posted(&shown, |v| {
+                v["inject"]["session_start"] = json!(false);
+                for e in v["chain"].as_array_mut().unwrap() {
+                    if e["name"] == "groq" {
+                        // What `JSON.parse` and then `JSON.stringify` make of it.
+                        e["timeout_s"] = json!(9_007_199_254_740_992_u64);
+                    }
+                }
+            });
+            save_to(&home, &body).unwrap();
+            let after = file(&home).unwrap();
+            assert!(after.contains("groq = 9007199254740993"), "{after}");
+            assert!(!crate::config::inject(home.path()).unwrap().session_start);
+        }
+    }
+
+    /// #274 item 2: a `[chain]` model no entry of its name can take is shown, as not applied, and
+    /// a save that leaves it keeps it; one that empties it removes it.
+    #[test]
+    fn a_model_no_entry_takes_is_shown_and_kept() {
+        let text = "[chain]\nmodel = { a = \"x\" }\n\n[[providers]]\nkind = \"openai\"\nname = \"a\"\n\
+                    base_url = \"https://example.invalid/v1\"\nmodel = \"m\"\n\
+                    limits = { usd_per_mtok_in = 1.0 }\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        let row = &shown["chain"][0];
+        assert_eq!(
+            (
+                &row["model"],
+                &row["model_applied"],
+                &row["effective_model"]
+            ),
+            (&json!("x"), &json!(false), &json!("m"))
+        );
+        save_to(
+            &home,
+            &posted(&shown, |v| v["inject"]["session_start"] = json!(false)),
+        )
+        .unwrap();
+        assert!(file(&home).unwrap().contains("a = \"x\""));
+        let shown = show(home.path());
+        save_to(
+            &home,
+            &posted(&shown, |v| v["chain"][0]["model"] = Value::Null),
+        )
+        .unwrap();
+        assert!(!file(&home).unwrap().contains("a = \"x\""));
+    }
+
+    /// A `[chain]` model the row's entry cannot take is marked, though another entry of its name
+    /// takes it (cubic on #287): the row shows the first entry, and says the entries differ.
+    #[test]
+    fn a_model_the_rows_entry_does_not_take_is_marked() {
+        let entry = |model: &str, priced: &str| {
+            format!(
+                "[[providers]]\nkind = \"openai\"\nname = \"a\"\nbase_url = \"https://example.invalid/v1\"\n\
+                 model = \"{model}\"\n{priced}\n"
+            )
+        };
+        let text = format!(
+            "[chain]\nmodel = {{ a = \"x\" }}\n\n{}{}",
+            entry("m", "limits = { usd_per_mtok_in = 1.0 }"),
+            entry("n", "")
+        );
+        let home = home_with(Some(&text));
+        let row = &show(home.path())["chain"][0];
+        assert_eq!(
+            (&row["model"], &row["model_applied"], &row["differs"]),
+            (&json!("x"), &json!(false), &json!(["model"]))
+        );
+    }
+
+    /// Entries of one name whose calls a day come from their keys, one read and one not, use
+    /// different budgets, and the row says so (cubic on #287).
+    #[test]
+    fn entries_whose_keys_give_different_budgets_say_so() {
+        let keys = tempfile::tempdir().unwrap();
+        let (a, b) = (keys.path().join("A_KEY.md"), keys.path().join("B_KEY.md"));
+        std::fs::write(&a, "# a\nkey-a\n").unwrap();
+        std::fs::write(&b, "# b\nkey-b\n").unwrap();
+        let entry = |f: &std::path::Path| {
+            format!(
+                "[[providers]]\nkind = \"openai\"\nname = \"o\"\n\
+                 base_url = \"https://openrouter.ai/api/v1\"\nmodel = \"m:free\"\nkey_file = {:?}\n",
+                f.display().to_string()
+            )
+        };
+        let home = home_with(Some(&(entry(&a) + &entry(&b))));
+        let db = crate::providers_db::open(home.path()).unwrap();
+        let first = (config::load(home.path()).unwrap().providers.into_iter())
+            .next()
+            .unwrap();
+        let key = crate::provider::key_of(&first);
+        crate::providers_db::set_key_limit(&db, "o", Some(1000), crate::db::now_ms(), &key)
+            .unwrap();
+        let row = &show(home.path())["chain"][0];
+        assert_eq!(
+            (&row["effective_daily_budget"], &row["differs"]),
+            (&json!(200), &json!(["key_file", "daily_budget"]))
+        );
+    }
+
+    /// #274 item 3: the row shows the first entry's values, and says where entries of its name
+    /// differ.
+    #[test]
+    fn entries_of_one_name_say_where_they_differ() {
+        let keys = tempfile::tempdir().unwrap();
+        let (a, b) = (keys.path().join("A_KEY.md"), keys.path().join("B_KEY.md"));
+        let text = api_entries(&[("twin", &a), ("same", &a), ("same", &a)])
+            + &format!(
+                "[[providers]]\nkind = \"openai\"\nname = \"twin\"\n\
+                 base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"n\"\nkey_file = {:?}\n",
+                b.display().to_string()
+            );
+        let home = home_with(Some(&text));
+        let shown = show(home.path());
+        assert_eq!(at(&shown, "twin")["differs"], json!(["key_file", "model"]));
+        assert_eq!(at(&shown, "same")["differs"], json!([]));
     }
 
     /// The rule shown is the entry's own, without `[chain]`, as a save checks it: an OpenRouter
