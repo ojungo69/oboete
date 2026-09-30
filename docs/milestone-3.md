@@ -12,6 +12,7 @@ The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and
 - A prompt another agent sent is not the owner's since #275 (#273). On the typed set, owner-no records decided went from 13 to 0 over 4 passes, and the typed hits stayed within noise (A prompt another agent sent, below).
 - Overturns: #278 (each carried decision weighed in the curator's answer) did not ship: 10 of 19 stayed current in both arms. #286 (sonnet as the curator) left 8 and 7 current, but its read-out is withdrawn: a prompt carries a session's newest decided claims within about 500 estimated tokens (5 at most in its prompts), and for 9 of the 15 pairs it left current the earlier decision was not in the later window's prompt. The default curator stays Haiku. #291 (a narrow call that names the decisions a new one makes obsolete) and #292 (a window's whole context carried in) did not ship either (below).
 - Since owner decision 31 (2026-09-30) M3 counts overturns claude-mem's way: the later decision kept, where it counted the earlier one left current, and delivery lists both, the later first (The claude-mem way, below). `m3.py score` reports the overturn pairs whose later decision is kept, the distinct later decisions kept, and the control pairs whose earlier decision, kept as decided, a link ended (#295). On #278's B that is 15, 16, 15 and 11 of 19 pairs, 7, 8, 7 and 6 of 11 distinct later decisions: below the 0.80 the spec now asks of them too.
+- The owner's own claude-mem kept 24 of the 44 labeled decisions on a looser test than oboete's (21 on a stricter reading), where the Haiku arms keep 22 to 26 and Sonnet 28 and 31. Recall's 0.80 is above claude-mem's level (claude-mem on the same labels, below).
 
 ## M2 on the dev transcripts: passes
 
@@ -382,6 +383,20 @@ Read on #278's B (`later-recall.py` in `oboete-work/session-0930`), per pass, ov
 
 - The later decisions not kept: d177 in every pass (the owner's price list, quoted from a tool line, which the gates lower to a proposal), d187 (across sessions), d463 (no draft of the owner's in its window), d156 in B1 and B4 (an assistant's report), d192 in B3, and d111 in B4 (4 pairs).
 - Control pairs whose earlier decision, kept as decided, a link ended, of 25: 1, 2, 2 and 2 in B1 to B4, and 6 in #291's Q1 (1, 5, 3, 2 and 7 counting a link to the earlier decision's proposal). All but one are across sessions, where the candidates come from the repository-wide search. That is over the 2% the links must pass before delivery drops a decision by them (spec 3.4), so delivery keeps both.
+
+### claude-mem on the same labels (2026-09-30)
+
+What the owner's own claude-mem kept of the same 45 labeled decisions, 44 of them M3's recall set: the records claude-mem made for the prompt that holds each decision and for the next prompt, judged by the rubric in docs/spike/cmem-recall.md, fixed before any judge ran. Two Sonnet judges read each label's records on their own, Opus decided the 4 of 41 where they disagreed, and 4 labels had no claude-mem record for those prompts.
+
+| | claude-mem, the owner's | oboete, Haiku (whole3, nothink, cand1, cand2, carry1, carry2) | oboete, Sonnet (#286: S1, S2) |
+|---|---|---|---|
+| Kept, of M3's 44 | 24 | 22 to 26 | 31, 28 |
+| Lasting, of 41 | 22 | 22 to 24 | 29, 26 |
+
+- **Not the same test.** claude-mem's count is the looser one: a record of the next prompt counts, and so does an outcome that names the choice ("merged to main"), with no quote. Claude read the records cited for all 25 keeps; 3 hold only on that reading (d147, d291, d427), so a stricter one gives 21. oboete's count is a decided claim, or a done one by the owner's request, quoting the label's own record. The judges saw each record's fields cut to 300 characters, which works against claude-mem.
+- **Which claude-mem.** The owner's claude-mem made these records mostly with free OpenRouter models and Haiku (`generated_by_model`: step-3.7-flash, nemotron free, Haiku 4.5, gemma free and others), from the research copy of 2026-09-24.
+- **Run to run.** The six Haiku arms kept 35 of the 44 between them (Counted again, above, has their scores), and 14 in every arm. Read from their scores, the union of two arms keeps 25 to 33 (mean 28.7; 28 and 30 for the two binaries run twice), of three 28 to 35 (mean 31.2): two curations of a window reach about what Sonnet does in one, and all six together keep 35, one short of 0.80 (36 of 44). That is recall only; what the unions add to the decided claims the owner said no to is not measured.
+- **Reading.** Recall's 0.80 (36 of 44) is above what the owner's claude-mem keeps on the looser test. It is the line of the owner's 「できれば hindsight レベルの精度」, not claude-mem's level. A per-label comparison of the two needs one test for both and is not made here.
 
 ### What the next M3 run needs
 
