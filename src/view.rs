@@ -42,6 +42,8 @@ struct Viewer {
     token: String,
     /// Settings saves, one at a time.
     saving: Mutex<()>,
+    /// The page `--open` gave the browser opener, removed by the first request with the token.
+    opener: Mutex<Option<PathBuf>>,
 }
 
 /// What a request's head leads to: an answer, or a settings save whose body of this many bytes
@@ -115,11 +117,18 @@ pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
         port,
         token: raw.iter().map(|b| format!("{b:02x}")).collect(),
         saving: Mutex::new(()),
+        opener: Mutex::new(None),
     });
     let url = format!("http://127.0.0.1:{port}/#t={}", viewer.token);
     println!("{url}\n(open it in a browser; Ctrl-C stops the viewer)");
     if open {
-        open_browser(&url);
+        match opener_page(home, &url) {
+            Ok(page) => {
+                open_browser(&page);
+                *viewer.opener.lock().unwrap_or_else(|e| e.into_inner()) = Some(page);
+            }
+            Err(e) => eprintln!("(could not write the page for the browser: {e})"),
+        }
     }
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
@@ -131,15 +140,48 @@ pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
     Ok(())
 }
 
-/// Best effort. The address (token included) goes on the opener's command line, where this
-/// machine's users can read it for the opener's lifetime; the page is theirs anyway.
-fn open_browser(url: &str) {
+/// The page `--open` hands the browser opener: owner-only, it sends the browser on to the
+/// address, so that the token goes on no command line, where the machine's other users could
+/// read it while the opener runs (#269).
+fn opener_page(home: &Path, url: &str) -> std::io::Result<PathBuf> {
+    let page = home.join("view-open.html");
+    // Made anew, so it has this mode and is no link planted before.
+    let _ = std::fs::remove_file(&page);
+    let mut file = std::fs::OpenOptions::new();
+    file.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut file, 0o600);
+    file.open(&page)?.write_all(
+        format!(
+            "<!doctype html><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\">\
+             <meta http-equiv=\"refresh\" content=\"0;url={url}\"><title>oboete</title>\n"
+        )
+        .as_bytes(),
+    )?;
+    Ok(page)
+}
+
+/// Best effort.
+fn open_browser(page: &Path) {
     let wsl = std::fs::read_to_string("/proc/version")
         .is_ok_and(|v| v.to_ascii_lowercase().contains("microsoft"));
+    // A Windows browser under WSL reads the page by its Windows path; `wslview` takes either.
+    let page = wsl
+        .then(|| {
+            std::process::Command::new("wslpath")
+                .arg("-w")
+                .arg(page)
+                .output()
+        })
+        .and_then(Result::ok)
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().into())
+        .unwrap_or_else(|| page.as_os_str().to_owned());
     let openers: &[&[&str]] = if cfg!(target_os = "macos") {
         &[&["open"]]
     } else if cfg!(windows) {
-        &[&["cmd", "/C", "start", ""]]
+        // Not `cmd /C start`: cmd would split a path at a `&`.
+        &[&["explorer.exe"]]
     } else if wsl {
         &[&["wslview"], &["explorer.exe"]]
     } else {
@@ -148,7 +190,7 @@ fn open_browser(url: &str) {
     let launched = openers.iter().any(|o| {
         std::process::Command::new(o[0])
             .args(&o[1..])
-            .arg(url)
+            .arg(&page)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -346,6 +388,10 @@ impl Viewer {
         }
         if !self.token_ok(header("x-oboete-token")) {
             return Response::text(401, "missing or wrong token");
+        }
+        // The browser has the token: the page that took it there has done its work.
+        if let Some(page) = self.opener.lock().ok().and_then(|mut p| p.take()) {
+            let _ = std::fs::remove_file(page);
         }
         let q = params(query);
         let name = &path["/api/".len()..];
@@ -647,6 +693,7 @@ mod tests {
             port: 4321,
             token: "t0k".into(),
             saving: Mutex::new(()),
+            opener: Mutex::new(None),
         };
         (dir, v)
     }
@@ -657,6 +704,30 @@ mod tests {
     fn json_of(r: &Response) -> Value {
         assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
         serde_json::from_slice(&r.body).unwrap()
+    }
+
+    /// #269: `--open` hands the opener an owner-only page that sends the browser on to the
+    /// address, and the first request with the token removes it; one without leaves it.
+    #[test]
+    fn the_opener_page_carries_the_token_and_goes_once_the_browser_has_it() {
+        let (dir, v) = viewer("opener");
+        let url = "http://127.0.0.1:4321/#t=t0k";
+        let page = opener_page(&dir, url).unwrap();
+        let text = std::fs::read_to_string(&page).unwrap();
+        assert!(text.contains(&format!("content=\"0;url={url}\"")), "{text}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&page).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // Written again over one a stopped viewer left.
+        assert_eq!(opener_page(&dir, url).unwrap(), page);
+        *v.opener.lock().unwrap() = Some(page.clone());
+        assert_eq!(v.route("GET", "/api/repos", &[HOST]).status, 401);
+        assert!(page.exists());
+        assert_eq!(v.route("GET", "/api/repos", &[HOST, TOKEN]).status, 200);
+        assert!(!page.exists());
     }
 
     #[test]
