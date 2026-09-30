@@ -807,7 +807,8 @@ pub(crate) const TIPS: &str =
          WHERE e.to_uid = a.uid AND x.uid <> a.uid)";
 
 fn tips(k: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Claim>> {
-    let mut st = k.prepare(sql)?;
+    // Cached: `units` runs one lookup per later claim, and compiling the query costs more than it.
+    let mut st = k.prepare_cached(sql)?;
     let rows = st.query_map(params, |r| {
         Ok(Claim {
             uid: r.get(0)?,

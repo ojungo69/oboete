@@ -622,10 +622,10 @@ fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
     out
 }
 
-/// `s` on one line, cut to `n` characters.
-/// `s` on one line, cut to `n` characters at a space: a token is shown whole or not at all, so
-/// a rule added after the manifest was built still matches it at SessionStart's gate. A first
-/// token longer than `n` is left out, not cut.
+/// `s` on one line, cut to `n` characters at a space, or after a Japanese or Chinese clause mark
+/// (text in those languages has no spaces): a token is shown whole or not at all, so a rule added
+/// after the manifest was built still matches it at SessionStart's gate. A first token or clause
+/// longer than `n` is left out, not cut.
 fn one_line(s: &str, n: usize) -> String {
     let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
     match flat.char_indices().nth(n) {
@@ -633,7 +633,15 @@ fn one_line(s: &str, n: usize) -> String {
             let end = if c == ' ' {
                 at
             } else {
-                flat[..at].rfind(' ').unwrap_or(0)
+                flat[..at]
+                    .char_indices()
+                    .rev()
+                    .find_map(|(i, ch)| match ch {
+                        ' ' => Some(i),
+                        '、' | '。' | '，' | '！' | '？' => Some(i + ch.len_utf8()),
+                        _ => None,
+                    })
+                    .unwrap_or(0)
             };
             format!("{}…", &flat[..end])
         }
@@ -1735,6 +1743,13 @@ mod tests {
         assert_eq!(one_line("acme-123456", 4), "…"); // longer than the clip: left out
         assert_eq!(one_line("a  b\nc", 10), "a b c");
         assert_eq!(one_line("日本語 の本文です", 5), "日本語…");
+        // Text with no spaces is cut after a clause mark, never inside a clause.
+        assert_eq!(
+            one_line("鍵を分けた。次に山田太郎さんへ送る", 12),
+            "鍵を分けた。…"
+        );
+        assert_eq!(one_line("鍵を分けた、次に送る", 8), "鍵を分けた、…");
+        assert_eq!(one_line("山田太郎さんへ送る", 4), "…");
     }
 
     #[test]
