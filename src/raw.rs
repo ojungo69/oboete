@@ -175,12 +175,16 @@ const TITLE_BYTES: usize = 1 << 10;
 /// An error when the other fields alone are over the cap (cubic on the Task 3 PR).
 fn within_op_cap(mut doc: ImportDoc) -> Result<ImportDoc> {
     let size = |d: &ImportDoc| serde_json::to_string(d).map(|s| s.len());
-    let over = size(&doc)?.saturating_sub(MAX_OP_BYTES);
-    if over == 0 {
+    if size(&doc)? <= MAX_OP_BYTES {
         return Ok(doc);
     }
     if doc.title.len() > TITLE_BYTES {
         doc.title = clipped(&doc.title, TITLE_BYTES);
+    }
+    // What is over once the title is cut, which may be nothing (Codex on #305).
+    let over = size(&doc)?.saturating_sub(MAX_OP_BYTES);
+    if over == 0 {
+        return Ok(doc);
     }
     // Each byte cut takes at least one byte of JSON with it; escapes can take more.
     let mut keep = doc.body.len().saturating_sub(over + 128);
@@ -1735,6 +1739,15 @@ mod tests {
         assert!(op.body.to_string().len() <= MAX_OP_BYTES);
         let kept: ImportDoc = serde_json::from_value(op.body).unwrap();
         assert!(kept.title.ends_with("…[clipped, 100000 chars in full]"));
+        // A title that alone took the op over the cap leaves its body whole (Codex on #305).
+        let doc = ImportDoc {
+            title: "t".repeat(100_000),
+            ..import_doc(3, "b".repeat(1_000))
+        };
+        raw.append_imports(vec![doc]).unwrap();
+        let op = raw.ops_after(raw.device(), 1, 1).unwrap().remove(0);
+        let kept: ImportDoc = serde_json::from_value(op.body).unwrap();
+        assert_eq!(kept.body, "b".repeat(1_000));
         let doc = ImportDoc {
             session: "s".repeat(100_000),
             ..import_doc(2, "b".into())
