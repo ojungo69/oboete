@@ -8,6 +8,7 @@ Writes <out dir>/items.json (one entry per label: its words and its parts) and
 <out dir>/labels/<id>.part<k>.jsonl (the records, fields cut for length, at most 100,000
 characters a part). Dev only, read-only on the database."""
 import json, os, sqlite3, sys
+from datetime import datetime
 
 import m3
 from common import owner_only
@@ -19,6 +20,10 @@ def squash(t):
     return ''.join((t or '').split())
 
 
+def when(ts):
+    return datetime.fromisoformat(ts.replace('Z', '+00:00')).timestamp()
+
+
 def candidates(db, d):
     mems = [m for (m,) in db.execute(
         "SELECT memory_session_id FROM sdk_sessions WHERE content_session_id = ? AND memory_session_id IS NOT NULL",
@@ -26,11 +31,14 @@ def candidates(db, d):
     prompts = db.execute("SELECT prompt_number, prompt_text, created_at FROM user_prompts "
                          "WHERE content_session_id = ? ORDER BY prompt_number", (d['session'],)).fetchall()
     q = squash(d['quote'])
-    hit = [n for n, t, _ in prompts if q and (q in squash(t) or (squash(t)[:200] and squash(t)[:200] in q))]
+    # The prompt nearest the label's time when its words are in several (an instruction repeated
+    # later): claude-mem stamps a prompt up to about a second after the transcript does.
+    hit = sorted((abs(when(c) - when(d['ts'])), n) for n, t, c in prompts
+                 if q and (q in squash(t) or (squash(t)[:200] and squash(t)[:200] in q)))
     # A pick in AskUserQuestion or a line inside a longer turn is in no prompt's text: take the
     # session's last prompt before the label's time instead.
     before = [n for n, _, c in prompts if c <= d['ts']]
-    n = hit[0] if hit else (before[-1] if before else None)
+    n = hit[0][1] if hit else (before[-1] if before else None)
     rows = []
     if n is None:
         return rows
