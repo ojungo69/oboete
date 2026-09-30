@@ -45,11 +45,12 @@ pub struct Stats {
 
 /// Embed documents that have no vector yet (newest first) and index vectors that are not in
 /// `vec_docs` (new ones, and those a re-key dropped). `max_requests` = None ignores the daily cap
-/// (`oboete reindex`).
+/// (`oboete reindex`). `still` is asked before each request, which it stops with its error.
 pub fn backlog(
     conn: &mut Connection,
     cfg: &config::Embedding,
     max_requests: Option<u32>,
+    still: &dyn Fn() -> Result<()>,
 ) -> Result<Stats> {
     let (url, key) = endpoint(cfg)?;
     let cap = max_requests.map(|n| {
@@ -58,7 +59,7 @@ pub fn backlog(
                 .saturating_sub(db::calls_today(conn, CALLS).unwrap_or(u32::MAX)),
         )
     });
-    backlog_at(conn, &url, &key, cap)
+    backlog_at(conn, &url, &key, cap, still)
 }
 
 /// The model's URL and the token.
@@ -152,7 +153,13 @@ pub fn nearest(
     Ok(scored.into_iter().take(k).map(|(_, d)| d).collect())
 }
 
-fn backlog_at(conn: &mut Connection, url: &str, key: &str, cap: Option<u32>) -> Result<Stats> {
+fn backlog_at(
+    conn: &mut Connection,
+    url: &str,
+    key: &str,
+    cap: Option<u32>,
+    still: &dyn Fn() -> Result<()>,
+) -> Result<Stats> {
     let mut stats = Stats {
         indexed: index_pending(conn)?,
         ..Stats::default()
@@ -171,7 +178,7 @@ fn backlog_at(conn: &mut Connection, url: &str, key: &str, cap: Option<u32>) -> 
         }
         todo.sort_by_key(|(_, text)| text.chars().count());
         let before = stats.embedded;
-        embed_page(conn, url, key, cap, &todo, &mut stats)?;
+        embed_page(conn, url, key, cap, &todo, &mut stats, still)?;
         if stats.embedded == before {
             return Ok(stats);
         }
@@ -185,11 +192,13 @@ fn embed_page(
     cap: Option<u32>,
     todo: &[(String, String)],
     stats: &mut Stats,
+    still: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     for batch in batches(todo) {
         if cap.is_some_and(|n| stats.requests >= n) {
             break;
         }
+        still()?;
         let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
         let started = Instant::now();
         let result = run_model(url, key, &texts, BATCH_TIMEOUT);
@@ -448,17 +457,21 @@ pub fn reindex(home: &Path) -> Result<Stats> {
     );
     config::read_key(&cfg.embedding.key_file)?;
     // v1's store knows no exclusion list (spec 5.5), so nothing is embedded while a repository is
-    // on it (Codex on #304).
-    let excluded = crate::raw::open(home)?.exclusions()?;
-    anyhow::ensure!(
-        excluded.is_empty(),
-        "reindex embeds v1's store, which the exclusion list does not reach: it stops while {} \
-         is excluded",
-        excluded.join(", ")
-    );
+    // on it, read again before each request as the egress gate does (Codex on #304).
+    let still = || -> Result<()> {
+        let excluded = crate::raw::open(home)?.exclusions()?;
+        anyhow::ensure!(
+            excluded.is_empty(),
+            "reindex embeds v1's store, which the exclusion list does not reach: it stops while \
+             {} is excluded",
+            excluded.join(", ")
+        );
+        Ok(())
+    };
+    still()?;
     let mut conn = db::open(home)?;
     conn.execute_batch("DELETE FROM vec_docs; UPDATE embeddings SET indexed = 0;")?;
-    backlog(&mut conn, &cfg.embedding, None)
+    backlog(&mut conn, &cfg.embedding, None, &still)
 }
 
 #[cfg(test)]
@@ -583,7 +596,7 @@ mod tests {
         db::insert_prompt(&conn, "s", 2, "a second prompt").unwrap();
         let (url, hits) = model_server();
 
-        let stats = backlog_at(&mut conn, &url, "k", Some(5)).unwrap();
+        let stats = backlog_at(&mut conn, &url, "k", Some(5), &|| Ok(())).unwrap();
         assert_eq!((stats.embedded, stats.requests), (2, 1));
         let count = |conn: &Connection, sql: &str| -> i64 {
             conn.query_row(sql, [], |r| r.get(0)).unwrap()
@@ -607,7 +620,7 @@ mod tests {
             .sum();
         assert!((norm - 1.0).abs() < 1e-5);
         // A second run has nothing to embed and makes no request.
-        let stats = backlog_at(&mut conn, &url, "k", Some(5)).unwrap();
+        let stats = backlog_at(&mut conn, &url, "k", Some(5), &|| Ok(())).unwrap();
         assert_eq!((stats.embedded, stats.requests), (0, 0));
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         // The index answers within the repository's knowledge / prompt shard.
@@ -639,7 +652,7 @@ mod tests {
         .unwrap();
         assert_eq!(db::rekey_paths(&mut conn).unwrap(), 1);
         assert!(knn(&conn, &path_key).is_empty());
-        let stats = backlog_at(&mut conn, &url, "k", Some(5)).unwrap();
+        let stats = backlog_at(&mut conn, &url, "k", Some(5), &|| Ok(())).unwrap();
         assert_eq!((stats.indexed, stats.requests), (2, 0));
         assert_eq!(knn(&conn, "github.com/o/r").len(), 2);
 
@@ -650,7 +663,7 @@ mod tests {
 
         // The daily cap: no request when none is left.
         db::insert_prompt(&conn, "s", 3, "a third prompt").unwrap();
-        let stats = backlog_at(&mut conn, &url, "k", Some(0)).unwrap();
+        let stats = backlog_at(&mut conn, &url, "k", Some(0), &|| Ok(())).unwrap();
         assert_eq!((stats.embedded, stats.requests), (0, 0));
         drop(conn);
         std::fs::remove_dir_all(&dir).ok();
@@ -713,7 +726,7 @@ mod tests {
         std::fs::write(
             dir.path().join("config.toml"),
             format!(
-                "[embedding]\nprovider = \"workers-ai\"\naccount_id = \"a\"\nkey_file = \"{}\"\n",
+                "[embedding]\nprovider = \"workers-ai\"\naccount_id = \"a\"\nkey_file = '{}'\n",
                 key.display()
             ),
         )
@@ -724,6 +737,28 @@ mod tests {
         let err = reindex(dir.path()).unwrap_err().to_string();
         assert!(err.contains("github.com/o/secret is excluded"), "{err}");
         assert!(!dir.path().join("oboete.db").exists());
+    }
+
+    /// Codex on #304: an exclusion made while a reindex runs stops its next request.
+    #[test]
+    fn every_request_asks_still_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(dir.path()).unwrap();
+        db::upsert_session(&conn, "s", "claude", "/r", "/r", 1).unwrap();
+        // Two requests' worth.
+        for i in 1..=BATCH as i64 + 1 {
+            db::insert_prompt(&conn, "s", i, "a prompt").unwrap();
+        }
+        let (url, hits) = model_server();
+        let asked = std::cell::Cell::new(0);
+        let still = || {
+            asked.set(asked.get() + 1);
+            anyhow::ensure!(asked.get() == 1, "excluded now");
+            Ok(())
+        };
+        let err = backlog_at(&mut conn, &url, "k", None, &still).unwrap_err();
+        assert_eq!(err.to_string(), "excluded now");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
