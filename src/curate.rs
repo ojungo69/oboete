@@ -3032,7 +3032,11 @@ fn carried(
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
         let previous = raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset))?;
         let mut lines = Vec::new();
-        if let Some(e) = raw.first_prompt(agent, session)?
+        let reads = |source: &str| {
+            let class = (!crate::raw::is_live(source)).then(|| source.to_owned());
+            w.reading.reads.takes(&class)
+        };
+        if let Some(e) = raw.first_prompt(agent, session, reads)?
             && let Some(goal) = long_text(&e)
         {
             let goal: String = gate(&goal).chars().take(200).collect();
@@ -8566,6 +8570,36 @@ mod tests {
                 (5, 5, "curated".into()),
             ]
         );
+    }
+
+    /// Codex on #304: a window's goal is the first prompt its reading takes, so a live window's
+    /// is never an imported prompt of the same session, nor a `recurate --source` window's
+    /// another source's.
+    #[test]
+    fn a_windows_goal_is_a_prompt_its_reading_takes() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        for (text, source) in [
+            ("Transcript goal.", "transcript"),
+            ("From v1.", "oboete-v1"),
+            ("Live prompt.", "hook"),
+        ] {
+            raw.append(&said(text, "s", "github.com/o/open", source))
+                .unwrap();
+        }
+        let sent = curate_all(&mut raw, &db);
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("goal: Live prompt."));
+        assert!(!sent[0].contains("Transcript goal.") && !sent[0].contains("From v1."));
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let rules = Rules::default();
+        let reading = Reading::now(&raw, Reads::Source("oboete-v1".into())).unwrap();
+        let windows =
+            span_windows(&raw, &Span::records(2, 2), WINDOW_TOKENS, &rules, &reading).unwrap();
+        let (text, ..) = carried(&raw, &k, &rules, &windows[0]).unwrap();
+        assert!(text.contains("goal: From v1."));
+        assert!(!text.contains("Transcript goal."));
     }
 
     /// M2 with imported records among live ones: every seq is covered once, in order.

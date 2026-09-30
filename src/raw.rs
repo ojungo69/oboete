@@ -431,15 +431,27 @@ impl Raw {
         )?)
     }
 
-    /// The first prompt this device recorded in one agent's session, as `after` returns it: the
-    /// session's goal for the curator (milestone 3 Task 7). A scan by label, as `turns`.
-    pub fn first_prompt(&self, agent: &str, session: &str) -> Result<Option<Event>> {
-        let seq: Option<i64> = self.conn.query_row(
-            "SELECT MIN(seq) FROM records WHERE device = ?1 AND type = 'event' AND agent = ?2
-               AND session = ?3 AND kind = 'prompt'",
-            rusqlite::params![self.device, agent, session],
-            |r| r.get(0),
+    /// The first prompt this device recorded in one agent's session from a source `read` takes,
+    /// as `after` returns it: the session's goal for the curator (milestone 3 Task 7), from a
+    /// record its window may send (Codex on #304). A scan by label, as `turns`.
+    pub fn first_prompt(
+        &self,
+        agent: &str,
+        session: &str,
+        read: impl Fn(&str) -> bool,
+    ) -> Result<Option<Event>> {
+        let mut st = self.conn.prepare(
+            "SELECT seq, source FROM records WHERE device = ?1 AND type = 'event' AND agent = ?2
+               AND session = ?3 AND kind = 'prompt' ORDER BY seq",
         )?;
+        let mut rows = st.query(rusqlite::params![self.device, agent, session])?;
+        let mut seq = None;
+        while let Some(r) = rows.next()? {
+            if read(&r.get::<_, String>(1)?) {
+                seq = Some(r.get::<_, i64>(0)?);
+                break;
+            }
+        }
         let Some(seq) = seq else { return Ok(None) };
         Ok(self
             .after(&self.device, seq - 1, 1)?
@@ -467,13 +479,15 @@ impl Raw {
         Ok(labels.map(|(a, s)| format!("{}\u{0}{}", a.unwrap_or_default(), s.unwrap_or_default())))
     }
 
-    /// This device's newest `limit` event records, the newest first, by their labels alone (no
-    /// body): where the curation phase looks for a session whose digest is due (milestone 3 Task
-    /// 9). Down the primary key: sessions have no index (spec 1.6).
+    /// This device's newest `limit` live event records (the sources `is_live` names), the newest
+    /// first, by their labels alone (no body): where the curation phase looks for a session whose
+    /// digest is due (milestone 3 Task 9), so an import never pushes a live session out (Codex on
+    /// #304). Down the primary key: sessions have no index (spec 1.6).
     pub fn newest_labels(&self, limit: usize) -> Result<Vec<Labels>> {
         let mut st = self.conn.prepare(
             "SELECT agent, session, repo, seq, ts, kind FROM records
-             WHERE device = ?1 AND type = 'event' ORDER BY seq DESC LIMIT ?2",
+             WHERE device = ?1 AND type = 'event' AND source IN ('hook', 'replay')
+             ORDER BY seq DESC LIMIT ?2",
         )?;
         let rows = st.query_map(params![self.device, limit as i64], |r| {
             Ok(Labels {

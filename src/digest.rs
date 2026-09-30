@@ -631,6 +631,26 @@ mod tests {
         assert!(run(home.path(), Phase::Idle, &answer).1.is_empty());
     }
 
+    /// Codex on #304: imported records after a live session's last one never push it out of the
+    /// sessions the phase reads.
+    #[test]
+    fn imported_records_never_crowd_a_live_session_out_of_the_digest() {
+        let (home, uids) = home(&["Use tabs."], 1_000, true);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        for i in 0..RECENT {
+            let e = Event {
+                session: "imported".into(),
+                source: "transcript".into(),
+                ..test_event(&json!({ "prompt": format!("Imported {i}.") }).to_string())
+            };
+            raw.append(&e).unwrap();
+        }
+        drop(raw);
+        let answer = || lines(json!([{"text": "Tabs.", "uids": uids}]));
+        let (phase, sent) = run(home.path(), Phase::Idle, &answer);
+        assert_eq!((phase, sent.len()), (Phase::Covered, 1));
+    }
+
     /// D13: a session that touched an excluded repository gets no digest, and no call is made.
     #[test]
     fn an_excluded_session_gets_no_digest_call() {
