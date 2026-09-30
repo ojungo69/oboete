@@ -34,6 +34,28 @@ struct Session {
     project: String,
 }
 
+/// One import at a time on a home (Codex on #305): an import reads the source ids already
+/// imported before it appends, so two at once would both append what neither had seen. Held
+/// while the returned file is.
+pub fn lock(home: &Path) -> Result<std::fs::File> {
+    let state = home.join("state");
+    std::fs::create_dir_all(&state)?;
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(state.join("import.lock"))?;
+    match f.try_lock() {
+        Ok(()) => Ok(f),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            anyhow::bail!(
+                "another oboete import is running on this home: run it again when it ends"
+            )
+        }
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
 pub fn claude_mem(raw: &mut Raw, path: &Path) -> Result<Stats> {
     let src = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open {} read-only", path.display()))?;
@@ -581,5 +603,19 @@ mod tests {
         crate::worker::run_once(dir.path()).unwrap();
         let cwd = dir.path().join("free-mem");
         assert_eq!(hook::inject_text(dir.path(), &cwd, None), "");
+    }
+
+    /// Codex on #305: a second import on a home is refused while one runs.
+    #[test]
+    fn a_second_import_on_the_same_home_is_refused_while_one_runs() {
+        let home = tempfile::tempdir().unwrap();
+        let held = lock(home.path()).unwrap();
+        let refused = lock(home.path()).unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("another oboete import"),
+            "{refused:#}"
+        );
+        drop(held);
+        lock(home.path()).unwrap();
     }
 }
