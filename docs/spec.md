@@ -806,7 +806,7 @@ These limits are disclosed in MUST-M23's forget-limits doc and printed by forget
   - The new write actions (forget, mute, capture exclusion, corrections, "apply to all repos") are POST only.
   - They carry the token in a header (never a cookie, so a cross-site form cannot send it) and check Origin.
   - The settings page (#94) saves with `POST /api/settings`. Its head passes every check (one each of Host, token, an `Origin` of this viewer, the `application/json` media type, and a `Content-Length` of at most 16 KiB) before a byte of the body is read. The page's fetch sets `referrerPolicy: 'same-origin'`, as the document's `no-referrer` would send `Origin: null`, which the viewer refuses.
-  - Viewer writes assume a single-user host: while the opener that `--open` starts runs, another local user can read the token on its command line (#269).
+  - `--open` gives the browser opener an owner-only page (`view-open-<port>.html`: 0600 in the home, or on Windows in the user's local app data folder, as a Windows file takes its folder's ACL) that sends the browser on to the address, so the token is on no command line another local user could read; the first request with the token removes the page (#269).
   - forget from the viewer shows the same preview, including the resolved identity.
   - Viewer search follows the `--from-search` rule: when embeddings are remote, a search that leads to forget runs full-text only, so a secret typed into the search box is not sent to the embedder.
   - Ordinary viewer searches with remote embeddings send the query out, as MCP search does. MUST-M23's egress doc says so.
