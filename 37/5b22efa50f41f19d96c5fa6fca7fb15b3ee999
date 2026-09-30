@@ -1,0 +1,37 @@
+docs/milestone-4.md
+  s_59cfa7617c8511::t_e69f80e5cf8180 1-12
+src/consumer.rs
+  s_59cfa7617c8511::t_75d6b54236f1c2 9
+src/consumer/claims.rs
+  s_59cfa7617c8511::t_0f1b9300ed0e81 33-34
+src/consumer/digest.rs
+  s_59cfa7617c8511::t_a5e22b76bb21cf 20-21
+src/consumer/imported.rs
+  s_59cfa7617c8511::t_f759bd9ef95902 1-184
+src/db.rs
+  s_59cfa7617c8511::t_709c66c7192b0b 670,708-709,721-722,734
+src/import.rs
+  s_59cfa7617c8511::t_7db18a7542ef8f 1-6,8,16,37-59,65-70,77-94,97-98,101-125,128-129,133-150,152-170,172-173,176-199,201-211,214,216,260-302,336,439-452,454-456,458-463,466-470,473-477,481,484,486-487,489,491-498,501,503-511,513,515,517-536,538-545,547-548,550,556-557,559,561,564-626,628-629
+src/main.rs
+  s_59cfa7617c8511::t_a88d5b4bad3aca 488-490
+src/raw.rs
+  s_59cfa7617c8511::t_c9b20756469075 116-117,128,138,164-227,1007-1041,1885-1984
+src/worker.rs
+  s_59cfa7617c8511::t_93babf7f566c36 19-23,26-30,34-38,40,42-46,65-66,699-700
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "375b22efa50f41f19d96c5fa6fca7fb15b3ee999",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
