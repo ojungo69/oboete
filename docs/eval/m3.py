@@ -477,6 +477,10 @@ def score(binary, name):
 
     out = {'decisions': {}, 'pairs': {}}
     lasting = collections.Counter()
+    # Owner decision 31 (spec 8.2 M3): an overturn pair counts its later decision kept as the
+    # owner's, current or superseded; a control pair counts its earlier decision, kept as decided,
+    # ended by a link (a link to its proposal ends no decision that delivery lists).
+    later, later_pairs, linked = {}, collections.Counter(), collections.Counter()
     for d in decisions:
         if where[d['id']]['seq'] is None:
             continue
@@ -495,6 +499,11 @@ def score(binary, name):
         st = state(p['earlier'])
         out['pairs'].setdefault(key, {}).setdefault(st, 0)
         out['pairs'][key][st] += 1
+        if p['value'] == 'overturns':
+            later[p['later']] = state(p['later']) in ('current', 'decided, superseded')
+            later_pairs[later[p['later']]] += 1
+        elif p['value'] == 'compatible':
+            linked[st == 'decided, superseded'] += 1
     decided = sum(1 for st, _ in claims.values() if st == 'decided')
     requested = sum(1 for st, _ in claims.values() if st == 'done by request')
     out['claims'] = {'active': len(claims), 'decided': decided, 'done by request': requested}
@@ -502,6 +511,9 @@ def score(binary, name):
     out['recall'] = f'{yes.get("current", 0) + yes.get("decided, superseded", 0)} of {sum(yes.values())}'
     # Without the instructions for the moment, which the memory is not meant to keep.
     out['recall lasting'] = f'{lasting["current"] + lasting["decided, superseded"]} of {sum(lasting.values())}'
+    out['overturn pairs, later kept'] = f'{later_pairs[True]} of {sum(later_pairs.values())}'
+    out['later decisions kept'] = f'{sum(later.values())} of {len(later)}'
+    out['control pairs, decided earlier linked'] = f'{linked[True]} of {sum(linked.values())}'
     with open(f'{h}/score.json', 'w') as f:
         json.dump(out, f, indent=1)
     print(json.dumps(out, indent=1, ensure_ascii=False))
