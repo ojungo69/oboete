@@ -667,6 +667,7 @@ pub struct Observation {
     pub body: String,
 }
 
+#[cfg(test)]
 const FTS_INSERT: &str =
     "INSERT INTO fts(title, body, doc, kind, repo, ts) VALUES(?1,?2,?3,?4,?5,?6)";
 
@@ -704,7 +705,8 @@ pub fn doc_session(conn: &Connection, doc: &str) -> Result<Option<String>> {
 }
 
 /// Whether a source row was imported before (the document may since have been deleted).
-pub fn imported(conn: &Connection, source: &str, source_id: &str) -> Result<bool> {
+#[cfg(test)]
+fn imported(conn: &Connection, source: &str, source_id: &str) -> Result<bool> {
     Ok(conn
         .query_row(
             "SELECT 1 FROM imports WHERE source=?1 AND source_id=?2",
@@ -715,32 +717,9 @@ pub fn imported(conn: &Connection, source: &str, source_id: &str) -> Result<bool
         .is_some())
 }
 
-/// A session another memory tool recorded. An existing row (the same agent session captured by
-/// oboete itself) is left as it is.
-pub fn import_session(
-    conn: &Connection,
-    id: &str,
-    agent: &str,
-    repo: &str,
-    started_at: i64,
-    ended_at: Option<i64>,
-) -> Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO sessions(id, agent, repo, started_at, ended_at, last_event_at)
-         VALUES(?1,?2,?3,?4,?5,?6)",
-        params![
-            id,
-            agent,
-            repo,
-            started_at,
-            ended_at,
-            ended_at.unwrap_or(started_at)
-        ],
-    )?;
-    Ok(())
-}
-
 /// One document from another memory tool: `kind` is `prompt`, `summary` or an observation kind.
+/// v1's import sink, kept as a fixture for the readers' tests until milestone 4 moves them.
+#[cfg(test)]
 pub struct Doc<'a> {
     pub session_id: &'a str,
     pub repo: &'a str,
@@ -752,6 +731,7 @@ pub struct Doc<'a> {
 
 /// Store an imported document with its search row, and remember its source row in `imports` so
 /// a later import skips it (also after the developer deleted the document). False = seen before.
+#[cfg(test)]
 pub fn import_doc(conn: &Connection, source: &str, source_id: &str, d: &Doc) -> Result<bool> {
     if imported(conn, source, source_id)? {
         return Ok(false);

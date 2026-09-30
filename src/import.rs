@@ -1,10 +1,11 @@
-//! `oboete import claude-mem <db>`: copy claude-mem's observations, session summaries and
-//! prompts into this store (docs/pr-b.md, decision 2). Text passes the outbound gate on the way
-//! in, prompts go through the hook's own cleaning, and `imports` remembers every source row so a
-//! second run adds nothing. Repositories become `claude-mem:<project>`: claude-mem names a project,
-//! not a path, and mapping the names onto oboete's repository keys waits for PR-H.
+//! `oboete import claude-mem <db>`: claude-mem's observations, session summaries and prompts as
+//! `import` ops in raw.db (milestone 4 D5; docs/pr-b.md, decision 2). Text passes the outbound gate
+//! on the way in, prompts go through the hook's own cleaning, and the source ids already imported
+//! are read first, so a second run, or one after a run that stopped, adds nothing twice.
+//! Repositories become `claude-mem:<project>`: claude-mem names a project, not a path, and mapping
+//! the names onto oboete's repository keys waits for PR-H.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -12,7 +13,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::db::{self, Doc};
+use crate::raw::{ImportDoc, Raw};
 use crate::{curate, hook, redact};
 
 const SOURCE: &str = "claude-mem";
@@ -30,19 +31,21 @@ pub struct Stats {
 
 struct Session {
     id: String,
-    agent: String,
     project: String,
-    started: i64,
-    ended: Option<i64>,
 }
 
-pub fn claude_mem(conn: &mut Connection, path: &Path) -> Result<Stats> {
+pub fn claude_mem(raw: &mut Raw, path: &Path) -> Result<Stats> {
     let src = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open {} read-only", path.display()))?;
     // One read transaction: a consistent snapshot while claude-mem keeps writing.
     src.execute_batch("BEGIN")?;
     let source = source_name(&src)?;
-    let tx = conn.transaction()?;
+    let mut sink = Sink {
+        known: raw.import_keys(&source)?,
+        raw,
+        source: &source,
+        docs: Vec::new(),
+    };
     let mut stats = Stats::default();
 
     // Observations and summaries name claude-mem's own session id; prompts name the agent's.
@@ -50,9 +53,7 @@ pub fn claude_mem(conn: &mut Connection, path: &Path) -> Result<Stats> {
     let mut by_memory: HashMap<String, Session> = HashMap::new();
     let mut by_content: HashMap<String, Session> = HashMap::new();
     let mut stmt = src.prepare(
-        "SELECT memory_session_id, content_session_id, COALESCE(project, ''),
-                COALESCE(platform_source, 'claude'), COALESCE(started_at_epoch, 0), completed_at_epoch
-         FROM sdk_sessions",
+        "SELECT memory_session_id, content_session_id, COALESCE(project, '') FROM sdk_sessions",
     )?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
@@ -61,10 +62,7 @@ pub fn claude_mem(conn: &mut Connection, path: &Path) -> Result<Stats> {
         let session = || -> rusqlite::Result<Session> {
             Ok(Session {
                 id: content.clone(),
-                agent: r.get(3)?,
                 project: r.get(2)?,
-                started: r.get(4)?,
-                ended: r.get(5)?,
             })
         };
         if let Some(m) = memory {
@@ -102,11 +100,7 @@ pub fn claude_mem(conn: &mut Connection, path: &Path) -> Result<Stats> {
             title: &title,
             body: &body,
         };
-        count(
-            put(&tx, &source, row)?,
-            &mut stats.observations,
-            &mut stats.seen,
-        );
+        count(sink.put(row)?, &mut stats.observations, &mut stats.seen);
     }
     drop(rows);
     drop(stmt);
@@ -151,11 +145,7 @@ pub fn claude_mem(conn: &mut Connection, path: &Path) -> Result<Stats> {
             title: "",
             body: &body,
         };
-        count(
-            put(&tx, &source, row)?,
-            &mut stats.summaries,
-            &mut stats.seen,
-        );
+        count(sink.put(row)?, &mut stats.summaries, &mut stats.seen);
     }
     drop(rows);
     drop(stmt);
@@ -186,11 +176,11 @@ pub fn claude_mem(conn: &mut Connection, path: &Path) -> Result<Stats> {
             title: "",
             body: &body,
         };
-        count(put(&tx, &source, row)?, &mut stats.prompts, &mut stats.seen);
+        count(sink.put(row)?, &mut stats.prompts, &mut stats.seen);
     }
     drop(rows);
     drop(stmt);
-    tx.commit()?;
+    sink.flush()?;
     Ok(stats)
 }
 
@@ -235,42 +225,50 @@ struct Row<'a> {
     body: &'a str,
 }
 
-/// Store a row with its session. A row an earlier run imported is skipped before its session is
-/// written, so a session the developer deleted since does not come back empty. False = seen.
-fn put(tx: &Connection, source: &str, r: Row) -> Result<bool> {
-    if db::imported(tx, source, &r.key)? {
-        return Ok(false);
+/// Where rows go: import ops, appended every `raw::IMPORT_BATCH` documents, each append its own
+/// transaction, so a run that stops keeps what it appended.
+struct Sink<'a> {
+    raw: &'a mut Raw,
+    source: &'a str,
+    /// The source ids imported so far, by earlier runs and this one.
+    known: HashSet<String>,
+    docs: Vec<ImportDoc>,
+}
+
+impl Sink<'_> {
+    /// A row as an import op, with its session. False: imported before.
+    fn put(&mut self, r: Row) -> Result<bool> {
+        if !self.known.insert(r.key.clone()) {
+            return Ok(false);
+        }
+        let session = match r.session {
+            Some(s) => s.id.clone(),
+            // No session id at all: a session of its own, so unrelated rows do not merge.
+            None if r.session_id.is_empty() => format!("{}/{}", self.source, r.key),
+            // A session claude-mem no longer lists keeps its id.
+            None => r.session_id.to_owned(),
+        };
+        self.docs.push(ImportDoc {
+            uid: format!("{}:{}", self.source, r.key),
+            source: self.source.to_owned(),
+            source_id: r.key,
+            kind: r.kind.to_owned(),
+            repo: repo(r.project),
+            session,
+            ts: r.ts,
+            title: r.title.to_owned(),
+            body: r.body.to_owned(),
+        });
+        if self.docs.len() >= crate::raw::IMPORT_BATCH {
+            self.flush()?;
+        }
+        Ok(true)
     }
-    let (id, agent, project, started, ended) = match r.session {
-        Some(s) => (
-            s.id.clone(),
-            s.agent.as_str(),
-            s.project.as_str(),
-            s.started,
-            s.ended,
-        ),
-        // No session id at all: a session of its own, so unrelated rows do not merge.
-        None if r.session_id.is_empty() => (
-            format!("{source}/{}", r.key),
-            "claude",
-            r.project,
-            r.ts,
-            None,
-        ),
-        // A session claude-mem no longer lists keeps its id.
-        None => (r.session_id.to_string(), "claude", r.project, r.ts, None),
-    };
-    db::import_session(tx, &id, agent, &repo(project), started, ended)?;
-    let repo = repo(r.project);
-    let doc = Doc {
-        session_id: &id,
-        repo: &repo,
-        ts: r.ts,
-        kind: r.kind,
-        title: r.title,
-        body: r.body,
-    };
-    db::import_doc(tx, source, &r.key, &doc)
+
+    fn flush(&mut self) -> Result<()> {
+        self.raw.append_imports(std::mem::take(&mut self.docs))?;
+        Ok(())
+    }
 }
 
 fn repo(project: &str) -> String {
@@ -303,17 +301,8 @@ fn count(new: bool, added: &mut u64, seen: &mut u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raw::OpKind;
     use rusqlite::params;
-
-    fn tmp(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "oboete-import-{name}-{}-{}",
-            std::process::id(),
-            db::now_ms()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
 
     /// The columns of claude-mem's tables that the import reads.
     /// `created` is the database's first migration time, so two values stand for two databases.
@@ -415,164 +404,182 @@ mod tests {
         }
     }
 
-    #[test]
-    fn claude_mem_rows_arrive_gated_mapped_and_once() {
-        let dir = tmp("claude-mem");
-        let src = dir.join("claude-mem.db");
-        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
-        let mut conn = db::open(&dir).unwrap();
-        let stats = claude_mem(&mut conn, &src).unwrap();
-        assert_eq!(
-            (
-                stats.observations,
-                stats.summaries,
-                stats.prompts,
-                stats.seen,
-                stats.empty
-            ),
-            (6, 1, 1, 0, 2)
-        );
+    /// The import ops raw holds, in op order.
+    fn docs(raw: &Raw) -> Vec<ImportDoc> {
+        raw.ops_after(raw.device(), 0, 10_000)
+            .unwrap()
+            .into_iter()
+            .filter(|o| o.kind == OpKind::Import)
+            .map(|o| serde_json::from_value(o.body).unwrap())
+            .collect()
+    }
 
-        let obs: Vec<(String, String, String, String, String)> = conn
-            .prepare("SELECT session_id, repo, kind, title, body FROM observations ORDER BY id")
-            .unwrap()
-            .query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-            })
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
+    fn counts(s: &Stats) -> (u64, u64, u64, u64, u64) {
+        (s.observations, s.summaries, s.prompts, s.seen, s.empty)
+    }
+
+    #[test]
+    fn claude_mem_rows_arrive_gated_and_mapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        let stats = claude_mem(&mut raw, &src).unwrap();
+        assert_eq!(counts(&stats), (6, 1, 1, 0, 2));
+        let docs = docs(&raw);
+        let at = |id: &str| docs.iter().find(|d| d.source_id == id).unwrap();
+        let o10 = at("o10");
         assert_eq!(
-            obs[0],
             (
-                "agent-1".into(),
-                "claude-mem:free-mem".into(),
-                "decision".into(),
-                "Chose SQLite".into(),
-                "Because it is one file.\n- No server".into()
+                o10.session.as_str(),
+                o10.repo.as_str(),
+                o10.kind.as_str(),
+                o10.title.as_str(),
+                o10.body.as_str(),
+            ),
+            (
+                "agent-1",
+                "claude-mem:free-mem",
+                "decision",
+                "Chose SQLite",
+                "Because it is one file.\n- No server",
             )
         );
         assert_eq!(
-            (obs[1].2.as_str(), obs[1].4.as_str()),
+            (at("o11").kind.as_str(), at("o11").body.as_str()),
             ("discovery", "- Fact only")
         );
+        let gated = &at("o13").body;
         assert!(
-            !obs[2].4.contains("ghp_") && !obs[2].4.contains("client name"),
-            "{}",
-            obs[2].4
+            !gated.contains("ghp_") && !gated.contains("client name"),
+            "{gated}"
         );
-        assert!(obs[2].4.contains("[REDACTED]"));
-        assert_eq!((obs[3].0.as_str(), obs[3].3.as_str()), ("gone", "Orphan"));
-
-        let summary: String = conn
-            .query_row("SELECT body FROM summaries", [], |r| r.get(0))
-            .unwrap();
+        assert!(gated.contains("[REDACTED]"));
         assert_eq!(
-            summary,
+            (at("o14").session.as_str(), at("o14").title.as_str()),
+            ("gone", "Orphan")
+        );
+        // Rows without any session id are sessions of their own.
+        assert_eq!(at("o15").session, "claude-mem:b62f07076e19/o15");
+        assert_eq!(at("o16").session, "claude-mem:b62f07076e19/o16");
+        assert_eq!(
+            at("s20").body,
             "Request: Fix search\nLearned: FTS5 trigram\nCompleted: Shipped"
         );
-        let prompt: String = conn
-            .query_row("SELECT body FROM prompts", [], |r| r.get(0))
-            .unwrap();
+        let prompt = &at("p30").body;
         assert!(!prompt.contains("my name") && prompt.starts_with("How do I add"));
-
-        let sessions: Vec<(String, String, String)> = conn
-            .prepare("SELECT id, agent, repo FROM sessions ORDER BY id")
+        // The imported documents are searchable once the worker has read them in.
+        drop(raw);
+        crate::worker::run_once(dir.path()).unwrap();
+        let k = crate::knowledge::open(dir.path()).unwrap();
+        let found: Vec<String> = k
+            .prepare(
+                "SELECT i.uid FROM imported_fts f JOIN imported i ON i.rowid = f.rowid
+                 WHERE imported_fts MATCH 'trigram'",
+            )
             .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .query_map([], |r| r.get(0))
             .unwrap()
-            .collect::<Result<_, _>>()
+            .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert_eq!(sessions.len(), 4);
-        assert_eq!(
-            sessions[0],
-            (
-                "agent-1".into(),
-                "codex".into(),
-                "claude-mem:free-mem".into()
-            )
-        );
-        assert_eq!(
-            sessions[3],
-            ("gone".into(), "claude".into(), "claude-mem:free-mem".into())
-        );
-        let source = source_name(&Connection::open(&src).unwrap()).unwrap();
-        assert!(source.starts_with("claude-mem:"));
-        assert_eq!(sessions[1].0, format!("{source}/o15"));
-        assert_eq!(sessions[2].0, format!("{source}/o16"));
-        // Every document is searchable and traceable to its claude-mem row.
-        let hits = crate::search::search(&conn, "trigram", None, 10).unwrap();
-        let mapped: String = conn
-            .query_row(
-                "SELECT doc FROM imports WHERE source LIKE 'claude-mem:%' AND source_id='s20'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            hits.iter().map(|h| h.doc.as_str()).collect::<Vec<_>>(),
-            [mapped.as_str()]
-        );
-        let (fts, imports): (i64, i64) = conn
-            .query_row(
-                "SELECT (SELECT count(*) FROM fts), (SELECT count(*) FROM imports)",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!((fts, imports), (8, 8));
+        assert_eq!(found, ["claude-mem:b62f07076e19:s20"]);
+    }
 
-        // A second run adds nothing.
-        let again = claude_mem(&mut conn, &src).unwrap();
+    /// D5: a document keeps the uid v1's import gave it, `<source>:<o|s|p><id>`, the source named
+    /// by the database's first migration time, so v1's judgments map to it.
+    #[test]
+    fn the_source_name_and_uids_match_the_v1_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        claude_mem(&mut raw, &src).unwrap();
+        let mut uids: Vec<String> = docs(&raw).into_iter().map(|d| d.uid).collect();
+        uids.sort();
+        let want: Vec<String> = ["o10", "o11", "o13", "o14", "o15", "o16", "p30", "s20"]
+            .iter()
+            .map(|id| format!("claude-mem:b62f07076e19:{id}"))
+            .collect();
+        assert_eq!(uids, want);
+    }
+
+    #[test]
+    fn importing_twice_appends_nothing_the_second_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        claude_mem(&mut raw, &src).unwrap();
+        let ops = raw.max_op_seq_of(raw.device()).unwrap();
         assert_eq!(
-            (
-                again.observations,
-                again.summaries,
-                again.prompts,
-                again.seen
-            ),
-            (0, 0, 0, 8)
+            counts(&claude_mem(&mut raw, &src).unwrap()),
+            (0, 0, 0, 8, 2)
         );
-        let fts: i64 = conn
-            .query_row("SELECT count(*) FROM fts", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(fts, 8);
-
-        // A session the developer deleted stays deleted when the same database comes again.
-        assert!(db::delete_session(&mut conn, "gone").unwrap());
-        claude_mem(&mut conn, &src).unwrap();
-        let gone: i64 = conn
-            .query_row("SELECT count(*) FROM sessions WHERE id='gone'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(gone, 0);
-
-        // claude-mem pruning its first session does not rename the database.
+        // claude-mem pruning its sessions does not rename the database.
         Connection::open(&src)
             .unwrap()
             .execute("DELETE FROM sdk_sessions", [])
             .unwrap();
-        let pruned = claude_mem(&mut conn, &src).unwrap();
         assert_eq!(
-            (pruned.observations, pruned.summaries, pruned.prompts),
-            (0, 0, 0)
+            counts(&claude_mem(&mut raw, &src).unwrap()),
+            (0, 0, 0, 8, 2)
         );
-
+        assert_eq!(raw.max_op_seq_of(raw.device()).unwrap(), ops);
         // Another claude-mem database reuses the same row ids; its rows are not "seen".
-        let other = dir.join("other.db");
+        let other = dir.path().join("other.db");
         claude_mem_db(&other, "2026-06-26T18:19:21.955Z");
-        let second = claude_mem(&mut conn, &other).unwrap();
         assert_eq!(
-            (
-                second.observations,
-                second.summaries,
-                second.prompts,
-                second.seen
-            ),
-            (6, 1, 1, 0)
+            counts(&claude_mem(&mut raw, &other).unwrap()),
+            (6, 1, 1, 0, 2)
         );
-        drop(conn); // Windows removes no file that is open
-        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// D5: each append of `raw::IMPORT_BATCH` documents commits alone, so an import killed at one
+    /// keeps the appends before it, and the next run adds the rest, once.
+    #[test]
+    fn a_killed_import_resumes_without_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        let c = Connection::open(&src).unwrap();
+        for id in 100..1_300 {
+            c.execute(
+                "INSERT INTO observations VALUES(?1, 'mem-1', 'free-mem', 1500, 'change', 'Row', ?2, '')",
+                params![id, format!("Observation {id}.")],
+            )
+            .unwrap();
+        }
+        drop(c);
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        crate::crash::at(2);
+        let killed = claude_mem(&mut raw, &src);
+        crate::crash::off();
+        assert!(killed.is_err());
+        assert_eq!(docs(&raw).len(), crate::raw::IMPORT_BATCH);
+        let stats = claude_mem(&mut raw, &src).unwrap();
+        assert_eq!((stats.observations, stats.seen), (706, 500));
+        let mut ids: Vec<String> = docs(&raw).into_iter().map(|d| d.source_id).collect();
+        let all = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!((all, ids.len()), (1_208, 1_208));
+    }
+
+    /// D5: curation reads records and injection reads what curation made, so a home holding
+    /// only imported documents has nothing to curate and shows nothing.
+    #[test]
+    fn imported_documents_are_never_curated_or_injected() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        claude_mem(&mut raw, &src).unwrap();
+        let rules = crate::redact::Rules::default();
+        let window = curate::next_window(&raw, raw.device(), 100_000, &rules).unwrap();
+        assert!(window.is_none());
+        drop(raw);
+        crate::worker::run_once(dir.path()).unwrap();
+        let cwd = dir.path().join("free-mem");
+        assert_eq!(hook::inject_text(dir.path(), &cwd, None), "");
     }
 }

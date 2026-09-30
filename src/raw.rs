@@ -108,6 +108,8 @@ pub enum OpKind {
     Claim,
     Correction,
     Digest,
+    /// A document another memory tool kept (milestone 4 D5): an `ImportDoc`.
+    Import,
 }
 
 impl OpKind {
@@ -117,12 +119,19 @@ impl OpKind {
             OpKind::Claim => "claim",
             OpKind::Correction => "correction",
             OpKind::Digest => "digest",
+            OpKind::Import => "import",
         }
     }
     fn from_name(name: &str) -> Option<Self> {
-        [Self::Window, Self::Claim, Self::Correction, Self::Digest]
-            .into_iter()
-            .find(|k| k.name() == name)
+        [
+            Self::Window,
+            Self::Claim,
+            Self::Correction,
+            Self::Digest,
+            Self::Import,
+        ]
+        .into_iter()
+        .find(|k| k.name() == name)
     }
 }
 
@@ -136,6 +145,51 @@ pub struct Op {
     pub body: serde_json::Value,
     /// The first op_seq of the `append_ops` it came in: one window's ops share it.
     pub batch: i64,
+}
+
+/// A document another memory tool kept, as an `import` op's body (milestone 4 D5): a claude-mem
+/// observation, session summary or prompt. `uid` is `<source>:<source_id>`, as v1's import named
+/// it, so what was judged on v1's evaluation store maps to it. `ts` is unix ms.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ImportDoc {
+    pub uid: String,
+    pub source: String,
+    pub source_id: String,
+    pub kind: String,
+    pub repo: String,
+    pub session: String,
+    pub ts: i64,
+    pub title: String,
+    pub body: String,
+}
+
+/// Documents per `append_imports` append (D5).
+pub const IMPORT_BATCH: usize = 500;
+
+/// `doc` with its body clipped so that its op fits `MAX_OP_BYTES`, the marker saying how long it
+/// was, as a clipped tool output's does.
+fn within_op_cap(doc: ImportDoc) -> Result<ImportDoc> {
+    let size = serde_json::to_string(&doc)?.len();
+    if size <= MAX_OP_BYTES {
+        return Ok(doc);
+    }
+    let marker = format!("\n…[clipped, {} chars in full]", doc.body.chars().count());
+    // Each byte cut takes at least one byte of JSON with it; escapes can take more.
+    let mut keep = doc
+        .body
+        .len()
+        .saturating_sub(size - MAX_OP_BYTES + 2 * marker.len());
+    loop {
+        let cut = doc.body.floor_char_boundary(keep);
+        let clipped = ImportDoc {
+            body: format!("{}{marker}", &doc.body[..cut]),
+            ..doc.clone()
+        };
+        if serde_json::to_string(&clipped)?.len() <= MAX_OP_BYTES {
+            return Ok(clipped);
+        }
+        keep = cut * 9 / 10;
+    }
 }
 
 /// One ops row as stored: the body is JSON text.
@@ -781,6 +835,39 @@ impl Raw {
             [device],
             |r| r.get(0),
         )?)
+    }
+
+    /// The `source_id`s of `source`'s documents imported so far, on any device: what an import
+    /// skips (D5).
+    pub fn import_keys(&self, source: &str) -> Result<std::collections::HashSet<String>> {
+        let mut st = self.conn.prepare(
+            "SELECT json_extract(body, '$.source_id') FROM ops
+             WHERE type = 'import' AND json_extract(body, '$.source') = ?1",
+        )?;
+        let rows = st.query_map([source], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// `docs` as this device's `import` ops (D5), in appends of at most `IMPORT_BATCH` documents
+    /// and `MAX_BATCH_BYTES`, each its own batch: an import stopped midway keeps what it appended.
+    /// A body that would take its op over `MAX_OP_BYTES` is clipped with a marker. The ops
+    /// appended.
+    pub fn append_imports(&mut self, docs: Vec<ImportDoc>) -> Result<usize> {
+        let (mut batch, mut bytes, mut appended) = (Vec::new(), 0, 0);
+        for doc in docs {
+            let body = serde_json::to_value(within_op_cap(doc)?)?;
+            let size = body.to_string().len();
+            if batch.len() == IMPORT_BATCH || bytes + size > MAX_BATCH_BYTES {
+                appended += self.append_ops(&std::mem::take(&mut batch))?.len();
+                bytes = 0;
+            }
+            bytes += size;
+            batch.push((OpKind::Import, body));
+        }
+        if !batch.is_empty() {
+            appended += self.append_ops(&batch)?.len();
+        }
+        Ok(appended)
     }
 
     /// The devices that have ops (this one's, and from milestone 6 other devices' through sync),
@@ -1581,6 +1668,60 @@ mod tests {
             "the bodies were not compressed: {stored} bytes"
         );
         assert_eq!(raw.after_within(&dev, 0, 10, 1500).unwrap().len(), 1);
+    }
+
+    fn import_doc(id: usize, body: String) -> ImportDoc {
+        ImportDoc {
+            uid: format!("claude-mem:abc:o{id}"),
+            source: "claude-mem:abc".into(),
+            source_id: format!("o{id}"),
+            kind: "decision".into(),
+            repo: "claude-mem:r".into(),
+            session: "s".into(),
+            ts: 1,
+            title: "t".into(),
+            body,
+        }
+    }
+
+    /// D5: a body that would take its op over the cap is cut to fit, the marker saying how long
+    /// it was, JSON escapes counted.
+    #[test]
+    fn an_op_over_the_cap_is_clipped_with_a_marker() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let body = "a \"quoted\" line\n".repeat(8_000);
+        let chars = body.chars().count();
+        assert_eq!(raw.append_imports(vec![import_doc(1, body)]).unwrap(), 1);
+        let op = raw.ops_after(raw.device(), 0, 1).unwrap().remove(0);
+        assert!(op.body.to_string().len() <= MAX_OP_BYTES);
+        let kept: ImportDoc = serde_json::from_value(op.body).unwrap();
+        let marker = format!("\n…[clipped, {chars} chars in full]");
+        assert!(
+            kept.body.ends_with(&marker),
+            "{}",
+            &kept.body[kept.body.len() - 80..]
+        );
+        assert!(kept.body.starts_with("a \"quoted\" line\n"));
+    }
+
+    /// D5: large documents go in more than one append, each within the byte cap, and none lost.
+    #[test]
+    fn a_batch_of_large_documents_splits_under_the_byte_cap() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let docs: Vec<ImportDoc> = (0..100)
+            .map(|i| import_doc(i, "x".repeat(60_000)))
+            .collect();
+        assert_eq!(raw.append_imports(docs).unwrap(), 100);
+        let ops = raw.ops_after(raw.device(), 0, 1_000).unwrap();
+        let mut batches: std::collections::BTreeMap<i64, usize> = Default::default();
+        for op in &ops {
+            *batches.entry(op.batch).or_default() += op.body.to_string().len();
+        }
+        assert_eq!(ops.len(), 100);
+        assert!(batches.len() > 1);
+        assert!(batches.values().all(|&bytes| bytes <= MAX_BATCH_BYTES));
     }
 
     #[test]
