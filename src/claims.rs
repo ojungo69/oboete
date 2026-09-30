@@ -716,19 +716,22 @@ pub struct Pending {
 
 impl Pending {
     /// Read-only, as a hook reads: `k` is a knowledge.db the worker has run on.
+    /// Each consumer's own devices: a device it never steps has no checkpoint to be past.
     pub fn read(raw: &crate::raw::Raw, k: &Connection) -> Result<Self> {
+        use crate::consumer::claims::{Anchors, Claims};
         use crate::knowledge::checkpoint;
+        use crate::worker::Consumer;
         let mut p = Self::default();
-        for device in raw.op_devices()? {
-            let at = checkpoint::get_in(k, checkpoint::OPS, "claims", &device)?;
+        for device in Claims.devices(raw)? {
+            let at = checkpoint::get_in(k, Claims.checkpoints(), Claims.name(), &device)?;
             for body in raw.ops_of(crate::raw::OpKind::Correction, &device, at)? {
                 if let Some(uid) = body["uid"].as_str() {
                     p.uids.insert(uid.to_owned());
                 }
             }
         }
-        for device in raw.devices()? {
-            let at = checkpoint::get(k, "anchors", &device)?;
+        for device in Anchors.devices(raw)? {
+            let at = checkpoint::get_in(k, Anchors.checkpoints(), Anchors.name(), &device)?;
             p.records.extend(raw.tombstones_after(&device, at)?);
         }
         Ok(p)
@@ -760,7 +763,7 @@ impl Pending {
 /// `units` listed newest first, each by its newest claim (spec 4.4): a claim dated between the two
 /// claims of a pair never separates them.
 pub fn newest_first(units: &mut [Vec<Claim>]) {
-    units.sort_by(|a, b| b.first().map(newest).cmp(&a.first().map(newest)));
+    units.sort_by(|a, b| b.iter().map(newest).max().cmp(&a.iter().map(newest).max()));
 }
 
 /// `repo`'s current claims the owner backs, anchored on `device` at or before `seq`, the newest
