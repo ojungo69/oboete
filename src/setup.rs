@@ -434,7 +434,7 @@ fn resolve_links(file: &Path) -> PathBuf {
 /// The new content written and synced next to its target, not yet renamed over it. Everything
 /// that can fail (a read-only file or directory, a full disk) fails here, so several files can
 /// be staged first and committed together. Dropped uncommitted, the temp file goes.
-struct Staged {
+pub(crate) struct Staged {
     file: PathBuf,
     target: PathBuf,
     tmp: PathBuf,
@@ -442,7 +442,7 @@ struct Staged {
 }
 
 impl Staged {
-    fn commit(mut self) -> Result<()> {
+    pub(crate) fn commit(mut self) -> Result<()> {
         std::fs::rename(&self.tmp, &self.target)
             .with_context(|| format!("write {}", self.file.display()))?;
         self.done = true;
@@ -458,7 +458,7 @@ impl Drop for Staged {
     }
 }
 
-fn stage(file: &Path, text: &str) -> Result<Staged> {
+pub(crate) fn stage(file: &Path, text: &str) -> Result<Staged> {
     use std::io::Write;
     let target = resolve_links(file);
     refuse_read_only(&target)?;
@@ -2004,7 +2004,7 @@ pub fn doctor(home: &Path) -> Result<()> {
     Ok(())
 }
 
-fn on_path(bin: &str) -> bool {
+pub(crate) fn on_path(bin: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths)
             // Windows npm launchers use `.cmd`; WSL must not count Windows launchers.

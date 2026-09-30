@@ -38,15 +38,18 @@ struct Location {
 pub fn dir(home: &Path) -> Result<PathBuf> {
     let path = home.join("config.toml");
     let dir = match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str::<Settings>(&text)
+        Ok(text) => location(&text)
             .with_context(|| format!("{}: [backup]", path.display()))?
-            .backup
-            .dir
             .map(|d| home.join(d)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     };
     Ok(dir.unwrap_or_else(|| home.join("backups")))
+}
+
+/// `[backup] dir` as config.toml's text has it, as `dir` reads it.
+pub(crate) fn location(text: &str) -> Result<Option<PathBuf>> {
+    Ok(toml::from_str::<Settings>(text)?.backup.dir)
 }
 
 /// Records and ops are backed up alike, each in its own segments with its own cursor (milestone 3

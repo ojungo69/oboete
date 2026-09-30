@@ -330,6 +330,16 @@ impl Provider {
             Provider::Openai { limits, .. } | Provider::Cli { limits, .. } => limits,
         }
     }
+    /// Which models `[chain] model` may set on it (#94).
+    pub(crate) fn model_rule(&self) -> ModelRule {
+        match self {
+            Provider::Openai { limits, .. } if limits.is_paid() => ModelRule::Fixed,
+            Provider::Openai {
+                base_url, model, ..
+            } if openrouter_free(base_url, model) => ModelRule::Free,
+            _ => ModelRule::Any,
+        }
+    }
     /// Its tier (spec 1.4): 3 paid, 2 subscription, 1 free or local. The highest tier's
     /// derivation of a claim is the active one (MUST-M18).
     pub fn tier(&self) -> i64 {
@@ -368,7 +378,7 @@ pub const OPENROUTER: &str = "https://openrouter.ai/api/v1";
 const OPENROUTER_FREE_BUDGET: u32 = 10;
 /// A `daily_budget` no day reaches. A subscription stops at its own limits instead: a cooldown
 /// until their reset (spec 3.1, Claude decision C1).
-fn no_daily_cap() -> u32 {
+pub(crate) fn no_daily_cap() -> u32 {
     u32::MAX
 }
 fn default_timeout() -> u64 {
@@ -609,8 +619,14 @@ pub fn load(home: &Path) -> Result<Config> {
     }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let mut cfg: Config = toml::from_str(&text)
-        .map_err(|e| toml_error(&text, &e))
+    from_text(&path, &text)
+}
+
+/// `load()` on the text of the file at `path` (which only names it in errors): the settings
+/// page checks a file it is about to write with it.
+pub(crate) fn from_text(path: &Path, text: &str) -> Result<Config> {
+    let mut cfg: Config = toml::from_str(text)
+        .map_err(|e| toml_error(text, &e))
         .with_context(|| format!("parse {}", path.display()))?;
     if let Some(place) = cfg.gemini
         && !cfg.providers.iter().any(|p| p.name() == "gemini")
@@ -715,36 +731,30 @@ fn overlay(cfg: &mut Config) {
     for p in providers.iter_mut() {
         let name = p.name().to_owned();
         let set = chain.model.get(&name);
+        let rule = p.model_rule();
         let (Provider::Openai { timeout_s, .. } | Provider::Cli { timeout_s, .. }) = p;
         if let Some(&s) = chain.timeout_s.get(&name) {
             *timeout_s = s;
         }
         match p {
             Provider::Openai {
-                base_url,
                 model,
                 daily_budget,
-                limits,
                 ..
             } => {
                 if let Some(&n) = chain.daily_budget.get(&name) {
                     *daily_budget = Some(n);
                 }
-                // Only a model whose price the entry knows: an entry's prices are its model's,
-                // and OpenRouter bills a model that is not `:free` outside the monthly USD cap
-                // (#94, revision 1; cubic on #94).
-                if let Some(m) = set {
-                    if limits.is_paid() {
-                        warnings.push(format!(
-                            "[chain] model: \"{name}\" keeps its model, as its prices are its model's: set another model with its prices in [[providers]]"
-                        ));
-                    } else if openrouter_free(base_url, model) && !is_free(m) {
-                        warnings.push(format!(
-                            "[chain] model: \"{m}\" is not a :free model, and OpenRouter may bill it outside the monthly USD cap, so \"{name}\" keeps its model"
-                        ));
-                    } else {
-                        model.clone_from(m);
-                    }
+                // Only a model whose price the entry knows (`ModelRule`).
+                match set {
+                    Some(m) if rule.allows(m) => model.clone_from(m),
+                    Some(_) if rule == ModelRule::Fixed => warnings.push(format!(
+                        "[chain] model: \"{name}\" keeps its model, as its prices are its model's: set another model with its prices in [[providers]]"
+                    )),
+                    Some(m) => warnings.push(format!(
+                        "[chain] model: \"{m}\" is not a :free model, and OpenRouter may bill it outside the monthly USD cap, so \"{name}\" keeps its model"
+                    )),
+                    None => {}
                 }
             }
             Provider::Cli {
@@ -768,6 +778,27 @@ fn overlay(cfg: &mut Config) {
         warnings.push(
             "every chain entry is off, so nothing is curated: to stop curation, set [summary] curate = false instead".into(),
         );
+    }
+}
+
+/// Which models `[chain] model` may set on an entry: none on one with prices, as its prices are
+/// its model's; only `:free` ones on an OpenRouter `:free` entry, as OpenRouter bills the others
+/// outside the monthly USD cap (#94, revision 1; cubic on #94); else any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ModelRule {
+    Fixed,
+    Free,
+    Any,
+}
+
+impl ModelRule {
+    pub(crate) fn allows(self, model: &str) -> bool {
+        match self {
+            ModelRule::Fixed => false,
+            ModelRule::Free => is_free(model),
+            ModelRule::Any => true,
+        }
     }
 }
 
@@ -845,7 +876,7 @@ pub fn inject(home: &Path) -> Result<Inject> {
     }
 }
 
-fn parse_inject(text: &str) -> Result<Inject> {
+pub(crate) fn parse_inject(text: &str) -> Result<Inject> {
     #[derive(Deserialize)]
     struct File {
         #[serde(default)]
