@@ -2029,7 +2029,12 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
     // line, which the gates then hold to their rules (M3 experiment: overturns).
     if let Some(Value::Array(reversed)) = obj.get("reversed") {
         for r in reversed.iter().filter(|r| r["reversed"] == true) {
-            let (Some(uid), Some(line)) = (r["uid"].as_str(), r["line"].as_str()) else {
+            // A number is taken as its line's id, as a draft's is (`line_id`).
+            let line = match &r["line"] {
+                Value::Number(n) => n.to_string(),
+                l => l.as_str().unwrap_or_default().to_owned(),
+            };
+            let Some(uid) = r["uid"].as_str().filter(|_| !line.is_empty()) else {
                 continue;
             };
             for d in drafts.iter_mut().filter(|d| d.line == line) {
@@ -2699,7 +2704,8 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          one entry each: uid, its uid; reversed, true when a line here changes, reverses or \
          cancels it (the developer chose another way, dropped or removed what it set up, or \
          decided the opposite), else false; line, the id of that line when reversed, else empty. \
-         Each claim you draft from a line that reverses one lists its uid in supersedes.\n\
+         A line that reverses one gives a claim quoting it, and each claim you draft from that \
+         line lists the uid in its supersedes.\n\
          Extract the claims worth remembering in future sessions of these repositories. For each:\n\
          - id: c1, c2, ... unique in your answer.\n\
          - kind: decision, preference, lesson, fix, open item, repo fact or change.\n\
@@ -2799,11 +2805,13 @@ mod tests {
         };
         let answer = json!({"reversed": [
                 {"uid": "u1", "reversed": true, "line": "L2"},
-                {"uid": "u2", "reversed": false, "line": "L1"}],
-            "claims": [draft("c1", "L1"), draft("c2", "L2")], "summary": "s"});
+                {"uid": "u2", "reversed": false, "line": "L1"},
+                {"uid": "u3", "reversed": true, "line": 3}],
+            "claims": [draft("c1", "L1"), draft("c2", "L2"), draft("c3", "3")], "summary": "s"});
         let (_, drafts) = parse(&answer).unwrap();
         assert!(drafts[0].supersedes.is_empty());
         assert_eq!(drafts[1].supersedes, ["u1"]);
+        assert_eq!(drafts[2].supersedes, ["u3"]);
         assert_eq!(
             schema()["required"],
             json!(["reversed", "claims", "summary"])
