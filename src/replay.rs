@@ -97,7 +97,8 @@ pub fn run(
     let spawn_agent = if agent == "all" { "claude" } else { agent };
     // Hooks timed for their write alone record in a checkout of their own, so the fixture's
     // checkout, whose manifest the read arms show, keeps its last prompt and commands (Codex on
-    // #301). SessionStart reads the fixture's checkout, so it records there.
+    // #301). The warm SessionStarts read the fixture's checkout, so they record there, after
+    // the drain.
     let samples = match &held {
         Some(_) => {
             let s = home.join("sample-repo");
@@ -117,16 +118,35 @@ pub fn run(
     // the home before the worker is up (spec 4.2); warm, after the consumers are drained.
     let mut read = serde_json::Map::new();
     if let Some(cold) = held.take().filter(|_| read_sample > 0) {
+        // Cold SessionStarts record in the samples' checkout: a start on the fixture's checkout
+        // would be its newest event and move its manifest's as-of time to now (Codex on #301).
+        // Before the worker runs no checkout has a manifest, so the read is the same.
         read.insert(
             "cold".into(),
-            read_arm(home, &cold, &root_str, &samples, read_sample, spawn_agent)?,
+            read_arm(
+                home,
+                &cold,
+                &samples,
+                &root_str,
+                &samples,
+                read_sample,
+                spawn_agent,
+            )?,
         );
         drop(cold);
         drain_for_read(home)?;
         let warm = crate::worker::lock(home)?.context(busy)?;
         read.insert(
             "warm".into(),
-            read_arm(home, &warm, &root_str, &samples, read_sample, spawn_agent)?,
+            read_arm(
+                home,
+                &warm,
+                &root_str,
+                &root_str,
+                &samples,
+                read_sample,
+                spawn_agent,
+            )?,
         );
     }
     // 3. Backup export per segment (D11): each call seals one segment of at most
@@ -250,13 +270,14 @@ fn drain_for_read(home: &Path) -> Result<()> {
 }
 
 /// The read path's times on `home` as it stands: `n` spawned SessionStart hooks for the checkout
-/// at `root` and `n` prompt hooks in the checkout at `samples`, as the agent runs them (the write,
-/// the read of what is injected, the lock attempt), and `n` in-process reads of what SessionStart
-/// shows for `root`. The prompts are recorded away from `root`, whose last prompt the warm arm
-/// shows.
+/// at `starts` and `n` prompt hooks in the checkout at `samples`, as the agent runs them (the
+/// write, the read of what is injected, the lock attempt), and `n` in-process reads of what
+/// SessionStart shows for `root`. The prompts are recorded away from `root`, whose last prompt the
+/// warm arm shows.
 fn read_arm(
     home: &Path,
     held: &crate::worker::Lock,
+    starts: &str,
     root: &str,
     samples: &str,
     n: usize,
@@ -272,7 +293,7 @@ fn read_arm(
         let env = [(crate::capture::REPLAY_ENV, "1".to_owned())];
         time_spawns(home, held, n, agent, event, &payload.to_string(), &env)
     };
-    let (starts, printed) = hook("SessionStart", root, json!({"source": "startup"}))?;
+    let (started, printed) = hook("SessionStart", starts, json!({"source": "startup"}))?;
     let (prompts, _) = hook(
         "UserPromptSubmit",
         samples,
@@ -280,7 +301,7 @@ fn read_arm(
     )?;
     let (reads, chars) = read_in_process(home, Path::new(root), n);
     Ok(json!({
-        "session_start_ms": stats_ms(&starts),
+        "session_start_ms": stats_ms(&started),
         "session_start_printed_bytes": printed,
         "prompt_ms": stats_ms(&prompts),
         "read_in_process_us": {"p50": pct(&reads, 50), "p95": pct(&reads, 95),
