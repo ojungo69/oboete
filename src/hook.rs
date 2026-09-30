@@ -538,7 +538,36 @@ fn adapt(
     if agent == "codex" && event == "PostToolUse" && codex_call_failed(payload) {
         return Ok(vec![("PostToolUseFailure".into(), p)]);
     }
+    // A transcript import says who sent the prompt; a live hook reads the rollout (#273).
+    if agent == "codex"
+        && event == "UserPromptSubmit"
+        && p.get("oboete_sender").is_none()
+        && str_field(payload, &["transcript_path"]).is_some_and(|t| codex_agent_sent(Path::new(t)))
+    {
+        p["oboete_sender"] = json!("agent");
+    }
     Ok(vec![(event.into(), p)])
+}
+
+/// Whether another agent started the Codex session whose rollout is `path`, from its first line,
+/// the `session_meta` (about 23 KB with Codex's instructions, 0.158). One bounded read per
+/// prompt; a line over the cap or a file that cannot be read leaves the prompt the user's.
+fn codex_agent_sent(path: &Path) -> bool {
+    use std::io::BufRead;
+    const HEAD: u64 = 1 << 20;
+    let Ok(f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut line = Vec::new();
+    if std::io::BufReader::new(f.take(HEAD))
+        .read_until(b'\n', &mut line)
+        .is_err()
+    {
+        return false;
+    }
+    serde_json::from_slice::<Value>(&line).is_ok_and(|v| {
+        v["type"] == "session_meta" && crate::transcript::codex_agent_sent(&v["payload"])
+    })
 }
 
 /// Whether the Codex call a PostToolUse reports failed. Codex's hook input carries only the
@@ -614,9 +643,11 @@ fn grok_delivers(grok_hooks: &Path) -> bool {
 }
 
 /// Directories (under the home) where agents run housekeeping sessions of their own: Codex's
-/// memory consolidation works in `~/.codex/memories`. Only these are skipped; a repository the
-/// developer keeps elsewhere under `~/.codex` or `~/.claude` (a plugin, say) is real work.
-const HOUSEKEEPING_DIRS: &[&str] = &[".codex/memories"];
+/// memory consolidation works in `~/.codex/memories`, and claude-mem asks Claude through the
+/// Agent SDK in `~/.claude-mem/observer-sessions` (its prompts, not the owner's, #273). Only
+/// these are skipped; a repository the developer keeps elsewhere under `~/.codex` or `~/.claude`
+/// (a plugin, say) is real work.
+const HOUSEKEEPING_DIRS: &[&str] = &[".codex/memories", ".claude-mem/observer-sessions"];
 
 fn is_agent_internal(agent: &str, payload: &Value) -> bool {
     let Some(cwd) = agent_workspace(agent, payload)
@@ -2760,6 +2791,12 @@ mod tests {
         let plugin =
             json!({"cwd": home.join(".claude").join("plugins").join("p").to_string_lossy()});
         assert!(!is_agent_internal("claude", &plugin));
+        // claude-mem asks Claude through the Agent SDK there: its prompts, not the owner's (#273).
+        let observer = home.join(".claude-mem").join("observer-sessions");
+        assert!(is_agent_internal(
+            "claude",
+            &json!({"cwd": observer.to_string_lossy()})
+        ));
         assert!(!is_agent_internal("claude", &json!({})));
         let stores = tempfile::tempdir().unwrap();
         for agent in crate::setup::AGENTS {
@@ -3009,6 +3046,38 @@ mod tests {
             resolve_agent("opencode", &opencode, &installed),
             Some("opencode")
         );
+    }
+
+    /// #273: a prompt in a Codex session another agent started (`codex exec`, Claude Code's
+    /// Codex plugin, a sub-agent) is stored as the agent's, from the rollout's `session_meta`.
+    /// One the owner types in the TUI or VS Code, or with no rollout to read, stays the user's.
+    #[test]
+    fn a_codex_prompt_another_agent_sent_is_stored_as_the_agents() {
+        let dir = tmp("codexsender");
+        let sender = |id: &str, meta: Option<Value>| {
+            let mut payload = json!({"session_id": id, "cwd": dir.to_string_lossy(), "prompt": "Review the diff."});
+            if let Some(meta) = meta {
+                let rollout = dir.join(format!("{id}.jsonl"));
+                let line = json!({"type": "session_meta", "payload": meta});
+                std::fs::write(&rollout, format!("{line}\n")).unwrap();
+                payload["transcript_path"] = json!(rollout);
+            }
+            hook(&dir, "codex", "UserPromptSubmit", &payload);
+            let ev = recorded(&dir, "codex", id);
+            assert_eq!(ev.len(), 1, "{id}");
+            assert_eq!(ev[0].kind, "prompt", "{id}");
+            serde_json::from_str::<Value>(&ev[0].body).unwrap()["sender"].clone()
+        };
+        let exec = json!({"originator": "codex_exec", "source": "exec"});
+        assert_eq!(sender("exec", Some(exec)), "agent");
+        let plugin = json!({"originator": "Claude Code", "source": "vscode"});
+        assert_eq!(sender("plugin", Some(plugin)), "agent");
+        let sub = json!({"originator": "codex-tui", "source": {"subagent": {"thread_spawn": {}}}});
+        assert_eq!(sender("sub", Some(sub)), "agent");
+        let typed = json!({"originator": "codex-tui", "source": "vscode"});
+        assert_eq!(sender("tui", Some(typed)), Value::Null);
+        assert_eq!(sender("none", None), Value::Null);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

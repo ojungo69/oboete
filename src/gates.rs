@@ -889,6 +889,27 @@ mod tests {
         gated(w, vec![draft(w, "c1", status, speaker, quote)]).remove(0)
     }
 
+    /// #273: a prompt another agent sent is not the developer's words. It is shown as such, and
+    /// a claim quoting it is the assistant's proposal, which only the developer's acceptance
+    /// would decide.
+    #[test]
+    fn a_prompt_another_agent_sent_is_never_the_users_words() {
+        let asked = "Use npm run typecheck for the admin app.";
+        let w = window(&[
+            ("prompt", json!({"prompt": asked, "sender": "agent"})),
+            reply("Done: the admin app type-checks with npm run typecheck."),
+        ]);
+        assert!(
+            w.text.contains(&format!("[agent prompt] {asked}")),
+            "{}",
+            w.text
+        );
+        assert_eq!(
+            one(&w, "decided", "user", asked),
+            ("proposed".into(), "assistant proposal".into())
+        );
+    }
+
     fn is(status: &str, speaker: &str) -> (String, String) {
         (status.into(), speaker.into())
     }

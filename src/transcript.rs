@@ -80,6 +80,8 @@ struct Emitter<W: Write> {
     /// The session's own id was read (the file name is only the fallback). A forked Codex
     /// rollout carries its parent's `session_meta` after its own.
     meta_seen: bool,
+    /// Who sent a Codex rollout's prompts, from its own `session_meta` (#273).
+    sender: Option<&'static str>,
     /// Prompts the prompt hook got when they were queued, not yet delivered as user records.
     queued: Vec<String>,
     stats: Stats,
@@ -163,7 +165,11 @@ impl<W: Write> Emitter<W> {
 
     fn prompt(&mut self, ts: &str, text: &str) -> Result<()> {
         self.stop(ts)?;
-        self.emit("UserPromptSubmit", ts, json!({"prompt": text}))
+        let mut payload = json!({"prompt": text});
+        if let Some(sender) = self.sender {
+            payload["oboete_sender"] = json!(sender);
+        }
+        self.emit("UserPromptSubmit", ts, payload)
     }
 
     fn tool_use(&mut self, id: &str, name: &str, input: Value, ts: &str, agent_id: Option<&str>) {
@@ -416,6 +422,19 @@ fn claude_record<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>
     }
 }
 
+/// Whether another agent sent a Codex session's prompts, from its `session_meta` payload (#273):
+/// a `codex exec` run, a session Claude Code's Codex plugin started, Codex as an MCP server, or a
+/// sub-agent's thread. The owner's TUI and VS Code sessions are `codex-tui`, and an originator not
+/// listed here stays the user's.
+pub(crate) fn codex_agent_sent(meta: &Value) -> bool {
+    meta["source"].is_object()
+        || matches!(meta["source"].as_str(), Some("exec" | "mcp"))
+        || matches!(
+            meta["originator"].as_str(),
+            Some("codex_exec" | "Claude Code")
+        )
+}
+
 fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
     let ts = v["timestamp"].as_str().unwrap_or_default().to_string();
     let p = &v["payload"];
@@ -426,6 +445,9 @@ fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
                 && let Some(id) = p["id"].as_str()
             {
                 e.session = id.to_string();
+            }
+            if !e.meta_seen {
+                e.sender = Some(if codex_agent_sent(p) { "agent" } else { "user" });
             }
             e.meta_seen = true;
             if e.cwd.is_none() {
@@ -586,6 +608,7 @@ pub fn convert(path: &Path, agent: &str, out: impl Write) -> Result<Stats> {
         cwd: None,
         started: false,
         meta_seen: false,
+        sender: None,
         queued: Vec::new(),
         stats: Stats::default(),
         pending: Vec::new(),
@@ -885,6 +908,37 @@ mod tests {
         assert_eq!(v[6]["payload"]["tool_input"]["cmd"], "sleep 100");
         assert_eq!(v[6]["payload"]["interrupted"], true);
         assert_eq!(v[7]["payload"]["prompt"], "Try again with 100ms");
+    }
+
+    /// #273: a rollout another agent started (`codex exec` here) says its prompts are the
+    /// agent's, and one with no originator (the fixture) says they are the user's. Only the
+    /// rollout's own `session_meta` counts, not a forked parent's after it.
+    #[test]
+    fn a_codex_rollout_says_who_sent_its_prompts() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout.jsonl");
+        let meta = |id: &str, originator: &str, source: &str| {
+            json!({"timestamp": "2026-09-02T00:00:00.000Z", "type": "session_meta",
+                   "payload": {"id": id, "cwd": "/work/svc", "originator": originator,
+                               "source": source}})
+        };
+        let typed = json!({"timestamp": "2026-09-02T00:00:01.000Z", "type": "response_item",
+                           "payload": {"type": "message", "role": "user",
+                                       "content": [{"type": "input_text", "text": "Review the diff."}]}});
+        let lines = [
+            meta("44444444-4444-4444-8444-444444444444", "codex_exec", "exec"),
+            meta("55555555-5555-4555-8555-555555555555", "codex-tui", "cli"),
+            typed,
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&rollout, text).unwrap();
+        let sender = |path: &str| {
+            let (v, _) = events(path, "codex");
+            let prompt = v.iter().find(|e| e["event"] == "UserPromptSubmit").unwrap();
+            prompt["payload"]["oboete_sender"].clone()
+        };
+        assert_eq!(sender(rollout.to_str().unwrap()), "agent");
+        assert_eq!(sender("src/testdata/transcripts/codex-basic.jsonl"), "user");
     }
 
     #[test]

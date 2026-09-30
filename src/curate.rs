@@ -531,8 +531,21 @@ impl<'r> Prepared<'r> {
         };
         let gate = |s: &str| crate::redact::outbound_with(s, rules);
         let (head, role) = match e.kind.as_str() {
-            "prompt" if body["omitted"] == true => ("[user] (not stored)".into(), Role::User),
-            "prompt" => ("[user]".into(), Role::User),
+            "prompt" => {
+                // A prompt another agent sent is not the developer's words: the gates read its
+                // line as the assistant's (#273).
+                let (head, role) = if body["sender"] == "agent" {
+                    ("[agent prompt]", Role::Assistant)
+                } else {
+                    ("[user]", Role::User)
+                };
+                let omitted = if body["omitted"] == true {
+                    " (not stored)"
+                } else {
+                    ""
+                };
+                (format!("{head}{omitted}"), role)
+            }
             "envelope" => ("[harness]".into(), Role::Other),
             "reply" => ("[assistant]".into(), Role::Assistant),
             "compaction" if long.is_some() => ("[compaction summary]".into(), Role::Other),
@@ -2670,8 +2683,8 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          - kind: decision, preference, lesson, fix, open item, repo fact or change.\n\
          - status: decided (the developer said it, asked for it or accepted it), proposed \
          (suggested, not accepted), done, or retracted.\n\
-         - speaker: user (the developer's own words), assistant proposal, assistant inferred, or \
-         tool result.\n\
+         - speaker: user (the developer's own words, never an [agent prompt] line, which one \
+         agent sent another), assistant proposal, assistant inferred, or tool result.\n\
          - scope: repo.\n\
          - body: one or two concrete sentences (names, paths, numbers), at most 1,000 characters.\n\
          - quote: 5 to 200 characters copied exactly from one line (all of a shorter line, such \

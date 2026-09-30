@@ -110,18 +110,26 @@ pub fn events(
             if prompt.is_empty() {
                 return Vec::new();
             }
+            // A prompt another agent sent, as the hook adapter or the transcript parser read it
+            // (#273): never the developer's words.
+            let sent = |mut body: Value| {
+                if payload["oboete_sender"] == "agent" {
+                    body["sender"] = json!("agent");
+                }
+                body
+            };
             if !settings.store_prompts {
                 // The turn is still an event (Task 11 counts it), without what was typed.
                 return vec![capture(
                     agent,
                     kind,
-                    json!({"omitted": true}),
+                    sent(json!({"omitted": true})),
                     payload,
                     ts,
                     settings,
                 )];
             }
-            (kind, json!({"prompt": base64_runs(&prompt)}))
+            (kind, sent(json!({"prompt": base64_runs(&prompt)})))
         }
         "PostToolUse" | "PostToolUseFailure" => {
             let mut body = json!({
