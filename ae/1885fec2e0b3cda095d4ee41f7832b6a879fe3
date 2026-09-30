@@ -1,0 +1,23 @@
+docs/eval/cmem_candidates.py
+  s_30d0ae67cebed9::t_af91feb1b07c63 11,23-26,34-37,41
+docs/milestone-3.md
+  s_30d0ae67cebed9::t_636e322fa26349 15,393-394,396
+docs/spike/cmem-recall.md
+  s_30d0ae67cebed9::t_636e322fa26349 10,22-24,27,29,31-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ae1885fec2e0b3cda095d4ee41f7832b6a879fe3",
+  "prompts": {},
+  "sessions": {
+    "s_30d0ae67cebed9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c79fad97-efa9-40d6-9230-d12636d3a455",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
