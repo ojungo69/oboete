@@ -1,0 +1,19 @@
+src/replay.rs
+  s_30d0ae67cebed9::t_80dfbbaf8de1ce 25-29,103,220-227,438-462
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "31528adbb80d1331bd8d85a1bb5e64c3558dfe53",
+  "prompts": {},
+  "sessions": {
+    "s_30d0ae67cebed9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c79fad97-efa9-40d6-9230-d12636d3a455",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
