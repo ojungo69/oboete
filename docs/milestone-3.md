@@ -10,6 +10,7 @@ The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and
 - M3's typed decisions: #254's prompt shipped. #259 (the typed lines listed again), #262 (a request carried out is the developer's decision) and #271 (the list judged in place, or each typed line weighed before drafting) did not ship (below).
 - Since 2026-09-30 a done claim that quotes the owner's request counts as recalling the decision (the owner's answer to #262's question). Every arm rose by 0 to 5 labels, the best to 26 of 44 (carry2), and no conclusion changed (Counted again, below).
 - A prompt another agent sent is not the owner's since #275 (#273). On the typed set, owner-no records decided went from 13 to 0 over 4 passes, and the typed hits stayed within noise (A prompt another agent sent, below).
+- Overturns: #278 (each carried decision weighed in the curator's answer) did not ship: 10 of 19 stayed current in both arms. #286 (sonnet as the curator) left 8 and 7 current, but its read-out is withdrawn: a prompt carries a session's newest decided claims within about 500 estimated tokens (5 at most in its prompts), and for 9 of the 15 pairs it left current the earlier decision was not in the later window's prompt. The default curator stays Haiku, and the next arm is declared in its own issue (below).
 
 ## M2 on the dev transcripts: passes
 
@@ -262,10 +263,78 @@ A Codex session that another agent starts holds that agent's prompts: a `codex e
 - **What stays open**:
   - A session another agent started and the owner then resumes in the TUI keeps the agent's mark, and so does a `codex exec` run the owner starts in their own terminal (#276). Neither shows in the owner's 1,755 rollouts.
 
+### Which curator M3 is read on (2026-09-30)
+
+Owner decision 26 reads M3's lines per curator model: the cheapest model that passes becomes the default. Every dev arm before #286 ran one model, Haiku through the claude CLI (a subscription), so a difference between those arms is the arm's and not the chain's. #286 is the one diagnostic on another model (sonnet, on #278's B build). The chain as it ships puts the free API entries first (owner, 2026-09-27), and its first entry, Groq's gpt-oss-120b, has no M3 number yet (Claude; overrulable):
+
+- The dev arms keep running on Haiku; sonnet was run once, as a diagnostic (#286).
+- Before the deciding run, each entry the defaults use first gets one dev pass on the typed set and one on the pairs, and the deciding run is read for the model the defaults would then put first.
+- Groq is not measured now. Its free tier allows 200,000 gpt-oss-120b tokens a day, cached ones aside (console.groq.com/docs/rate-limits, read 2026-09-30). The owner's own curation (the current binary) counted 179,516 of them in the 24 hours before 2026-09-30 11:40 JST, and 27,000 to 58,000 on each of the three days before. A dev pass is about 157,000 tokens on the typed set and 351,000 on the pairs (#278's B passes): the pairs are more than a day's allowance, and either would move the owner's curation off its first entry. Measuring it needs a paid tier or another key, which is the owner's call. (Of the owner's 48 Groq gpt-oss-120b calls that day, 37 answered and 11 failed: 9 as `json_validate_failed`, Groq's own check of the answer's JSON, one 413 and one 429; the chain went on to the next entry each time, and 7 more waited out a 429 of under a minute.)
+
+### Carried decisions weighed one by one (#278)
+
+Both failing lines rest on one behavior: the curator does not supersede an earlier decision that is already in its prompt. #278 asked for each one, declared before any live number:
+
+- **Arms**: B is main at aa85a49. P is branch `curate/overturn-accounting` (5e7d75d): the answer starts with `reversed`, one entry per carried `decided before` claim, in order (its uid, whether a line of the window changes, reverses or cancels it, and that line), and `parse` adds the uid to the supersedes of the drafts from that line.
+- **Run**: 4 passes of each arm over the 67 spans that hold either end of a pair the lines score (`m3.py live --pairs`), each from a fresh copy of `base273`, the claude CLI on Haiku. B and P ran side by side after B1's first 27 spans: a pass waits out the curator's cooldowns, and three unanchored answers in a row rest the claude entry for 30 minutes.
+- **Rule**: adopt when mean O(P) ≤ mean O(B) − 3, mean N(P) ≤ mean N(B) + 1, and total D(P) ≤ total D(B) + 2.
+
+| | B | P |
+|---|---|---|
+| Overturned, still current (O, of 19) | 9, 11, 10, 10 (mean 10) | 11, 10, 9, 10 (mean 10) |
+| Overturned, never derived (N) | 0, 0, 2, 2 (mean 1) | 1, 1, 1, 2 (mean 1.25) |
+| Compatible, dropped (D, of 25) | 6, 8, 8, 7 (total 29) | 11, 10, 8, 9 (total 38) |
+| Supersede edges a pass (mean) | 33.5 | 51.5 |
+
+- **Verdict**: not adopted. O did not move (10 against 10), and D rose by 9: P writes more supersede edges, and more of them drop a compatible decision.
+- **What P's `reversed` said**, for the 10 pairs both arms left current in every pass or nearly (from the saved prompts and answers):
+  - Named, but no edge (2 pairs): d142 → d156 and d176 → d177. `reversed` was true for the earlier decision in 3 of 4 passes each (P3 named neither), but not with the line that holds the later decision. For d156 that line is the assistant's report (L3, 「`review-routing` スキルを書き換えて、外部レビューの既定を cubic にした。」), and P named L1 (P1, P2) or L2 (P4), both tool lines. For d177 it is the owner's price list (L1), and P named L2, a tool line, in 4 of its 5 true entries. The drafts from the lines P named quote tool output (for d142 「自作レビューCLIを全削除…」, for d177 lines such as 'staging: NOT NULL=105…') or the code block in the assistant's report, the gates lower them to proposals, and "a proposal supersedes nothing settled" drops the edge, as in carry1 and carry2.
+  - Carried, not named (4 pairs): d143, d144 and d151, which the owner's 「今後cubic cliやcoderabbit cliのように簡単に使えて高精度なレビューツールになるなら残すけど、ならないなら全て消して」 (d153) overturns. In P1 and P2 the list named none of the carried decisions: in P1 its 7 entries were the window's 7 kept claims, in P2 its 5 were 3 kept claims and 2 carried open items. In P3 and P4 it answered false for all three: the line is conditional. d143 → d154 (「ローカルもGitHubも全部消す」) is not, and was false or missing in every pass.
+  - d105 and d106 → d111 (「改造fcc消して。また今度omnirouteで設定する」): carried in some passes; where P answered for them (P2), both false.
+  - Not carried (2 pairs): d123 → d361 and d490 → d187, across sessions and not among the window's kept claims either. d461 → d463 also stayed current in 1 pass of B and 3 of P.
+- **The uids**: of the 916 `reversed` entries over P's passes, 4 named a uid its prompt did not hold, and all 480 uids in `supersedes` over the 8 passes were in their prompts. The curator copies the 64-character uids; it applies them to the wrong claims.
+- **Reading**: asking for each carried decision moves nothing that the carried prompt did not. What stays current has the shapes carry1 and carry2 showed: a reversal drafted from a report or a tool line (the gates, by design), a line the curator judges as not reversing (d153's condition, d154, d111), and the pairs across sessions (#222). #286 measures the same B with sonnet as the curator, to tell whether the model is the lever for the middle group.
+
+### Sonnet as the curator (#286)
+
+A diagnostic, declared in #286 before its first pass: #278's B exactly (main aa85a49, the same harness copy and base, the claude CLI with `--effort low` and thinking off, as shipped), with the live entry's model `sonnet` instead of `haiku`, over every labeled window (127 spans a pass), 2 passes. The read-out, not an adoption rule: the model is the lever if the mean of overturned decisions still current is 3 or fewer, and not the lever at 7 or more.
+
+| | S1 | S2 |
+|---|---|---|
+| Overturned, still current (of 19) | 8 | 7 |
+| Compatible, dropped (of 25) | 5 | 7 |
+| Recall (of 44, decided or done by the owner's request) | 31 | 28 |
+| Owner-no records shown as decided (of 5) | 0 | 0 |
+| Decided claims | 91 | 74 |
+| Median seconds a window | 7.5 | 7.4 |
+| Tokens a pass (estimate) | 710,170 | 710,542 |
+
+- **Read-out: withdrawn.** By the declared line a mean of 7.5 says the model is not the lever, but the line assumed the later window's prompt shows the earlier decision, and for 9 of the 15 pairs left current it did not (What a prompt carries, below). The default curator stays Haiku.
+- **Recall**: 29.5 on average (31 and 28), between #286's two declared lines (35 or more moves recall into the line's range, 28 or fewer does not), so it reads as neither. It is above the latest Haiku arms on every labeled window (21 to 26, Counted again, above) and below the line's 35. Those arms ran earlier binaries on the base before #275, and no Haiku arm ran #278's B over every labeled window, so the difference is not the model's alone.
+- **Left current in both passes** (7): d105 and d106 → d111, d142 → d156, d143, d144 and d151 → d153, and d143 → d154; d490 → d187 also in S1. Sonnet overturned d176 → d177 in both passes (its draft quoted the owner's price list), which Haiku left current in every pass of #278. It did not overturn d123 → d361: it kept d123 only as a proposal (no supersedes edge) in both passes, where Haiku had it as a decided, current claim in every pass of #278.
+- **d143 → d154 in S1** also met the gates: the window's draft of the owner's pick quoted it with its question (`"review-app をどこまで消す?":"ローカルもGitHubも全部消す"`). A question's text is the assistant's (#198), so the gates lowered the draft to a proposal ("the speaker is the quote's line", "a proposal from tool content needs the user's own words") and dropped its supersedes.
+- **Speed**: Sonnet answered faster than Haiku: 7.5 s at the median a window, against 12.4 to 13.3 s in #278's B passes.
+
+### What a prompt carries (2026-09-30)
+
+`fit` (src/curate.rs) gives a window's context `window_tokens / 5` estimated tokens, 1,000 at the default 5,000, and what the sessions carry in at most half of it, so a prompt carries a session's newest decided claims until about 500 tokens are used. It never reaches `CARRIED_DECISIONS` (20): a line's prefix and uid alone take about 25 of them. The room is sized for Groq's free tier: d154's prompt in S1 was about 6,525 estimated tokens (instructions 761, window 4,814, context 941), near Groq's 8,000 ceiling with the 1,250 reserved for the answer. `admit` checks each entry's ceiling, but `fit` sizes the prompt once for every entry.
+
+- Over S1's and S2's 277 prompts, none had more than 5 `decided before` lines, and 98 were within 130 tokens of the 500. d154's window carried 4 (462 of 500), and d143's claim was the session's 6th newest. The candidates had the other half: 5 claims, one of them (ab4958ea) also carried.
+- The candidates are what the window's text finds (full-text search), and a same-session overturn can share no words with the decision it overturns (d143's 「外部投稿なし」 wording fix and d154's 「ローカルもGitHubも全部消す」), so the carried list is what can show it.
+- Over the overturn pairs whose later window was sent and whose earlier decision was kept as decided ("shown": a decided claim of the earlier decision is in the later window's prompt, carried or as a candidate):
+
+| | Shown: overturned / left current | Not shown: overturned / left current |
+|---|---|---|
+| Haiku, #278's B2 to B4 | 7 / 25 | 3 / 6 |
+| Sonnet, #286's S1 and S2 | 5 / 6 | 1 / 9 |
+
+  B1 is left out: its log covers only the resumed part of its pass. Pairs whose earlier decision was kept as no decided claim at all (4, 7 and 5 in B2 to B4; 8 and 9 in S1 and S2) are not in it. In 2 of the 19 not-shown cases the claim's text was in the prompt under another uid (B2 d100 → d105, S2 d106 → d111).
+- **Reading**: most pairs Haiku left current were shown (25 of 31), which is what #278 read. Sonnet's were mostly not (9 of 15), so #286 cannot say whether the model is the lever. On the shown pairs Sonnet overturned 5 of 11 and Haiku 7 of 32: a hypothesis for a later arm, not a finding.
+
 ### What the next M3 run needs
 
 1. The test labels, classed by the same rule (instructions for the moment, above).
-2. Supersedes: a window now carries its sessions' decided claims, so a same-session earlier decision is in the prompt; the cross-session pairs need the hybrid search (#222). A record holding two labels is scored per decision (2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and with the reply's options carried, 2 of 6 acceptances settle their proposal (acc6: d462 and d107; #244: a go-ahead is often drafted as a proposal or not at all, or quotes another line than the owner's, and a quote from another repository's tool line loses its supersedes).
+2. Supersedes: a window carries a session's newest decided claims within about 500 estimated tokens, 5 at most in #286's prompts (What a prompt carries, above), and Haiku leaves most of the pairs it is shown current. The next arm is declared in its own issue before its run. The cross-session pairs need the hybrid search (#222). The same-session pairs Sonnet left current in both passes, and Haiku in nearly every pass, are d105 and d106 → d111, d142 → d156, d143, d144 and d151 → d153, and d143 → d154 (#278, #286). A record holding two labels is scored per decision (2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and with the reply's options carried, 2 of 6 acceptances settle their proposal (acc6: d462 and d107; #244: a go-ahead is often drafted as a proposal or not at all, or quotes another line than the owner's, and a quote from another repository's tool line loses its supersedes).
 3. The quote match: the paraphrases (whitespace-blind matching is #248).
 4. The defaults as they would ship were run once (short-2): 22 of 44.
 5. A base whose Codex prompts from sessions another agent started carry `agent_sent` (#275): a rebuilt base gets it from the transcript parser, and the frozen dev base's copy `base273` has it (the 47 records named by their rollouts).
