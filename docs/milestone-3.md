@@ -10,7 +10,8 @@ The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and
 - M3's typed decisions: #254's prompt shipped. #259 (the typed lines listed again), #262 (a request carried out is the developer's decision) and #271 (the list judged in place, or each typed line weighed before drafting) did not ship (below).
 - Since 2026-09-30 a done claim that quotes the owner's request counts as recalling the decision (the owner's answer to #262's question). Every arm rose by 0 to 5 labels, the best to 26 of 44 (carry2), and no conclusion changed (Counted again, below).
 - A prompt another agent sent is not the owner's since #275 (#273). On the typed set, owner-no records decided went from 13 to 0 over 4 passes, and the typed hits stayed within noise (A prompt another agent sent, below).
-- Overturns: #278 (each carried decision weighed in the curator's answer) did not ship: 10 of 19 stayed current in both arms. #286 (sonnet as the curator) left 8 and 7 current, but its read-out is withdrawn: a prompt carries a session's newest decided claims within about 500 estimated tokens (5 at most in its prompts), and for 9 of the 15 pairs it left current the earlier decision was not in the later window's prompt. The default curator stays Haiku, and the next arm is declared in its own issue (below).
+- Overturns: #278 (each carried decision weighed in the curator's answer) did not ship: 10 of 19 stayed current in both arms. #286 (sonnet as the curator) left 8 and 7 current, but its read-out is withdrawn: a prompt carries a session's newest decided claims within about 500 estimated tokens (5 at most in its prompts), and for 9 of the 15 pairs it left current the earlier decision was not in the later window's prompt. The default curator stays Haiku. #291 (a narrow call that names the decisions a new one makes obsolete) and #292 (a window's whole context carried in) did not ship either (below).
+- Since owner decision 31 (2026-09-30) M3 counts overturns claude-mem's way: the later decision kept, where it counted the earlier one left current, and delivery lists both, the later first (The claude-mem way, below). `m3.py score` reports the overturn pairs whose later decision is kept, the distinct later decisions kept, and the control pairs whose earlier decision a link ended (#295). On #278's B that is 15, 16, 15 and 11 of 19 pairs, 7, 8, 7 and 6 of 11 distinct later decisions: below the 0.80 the spec now asks of them too.
 
 ## M2 on the dev transcripts: passes
 
@@ -331,6 +332,41 @@ A diagnostic, declared in #286 before its first pass: #278's B exactly (main aa8
   B1 is left out: its log covers only the resumed part of its pass. Pairs whose earlier decision was kept as no decided claim at all (4, 7 and 5 in B2 to B4; 8 and 9 in S1 and S2) are not in it. In 2 of the 19 not-shown cases the claim's text was in the prompt under another uid (B2 d100 → d105, S2 d106 → d111).
 - **Reading**: most pairs Haiku left current were shown (25 of 31), which is what #278 read. Sonnet's were mostly not (9 of 15), so #286 cannot say whether the model is the lever. On the shown pairs Sonnet overturned 5 of 11 and Haiku 7 of 32: a hypothesis for a later arm, not a finding.
 
+### A narrow call for overturns (#291)
+
+Declared in #291 before its first pass: #278's B exactly, plus one narrow call after a window's gates (role `overturns`, branch `curate/overturn-check`, 3046387) when the window keeps a draft of the owner's and its session has current decided claims from before it: the call gets the new drafts and those claims (the newest 20), and each claim it names is added to the naming draft's supersedes. The rule: mean O ≤ 7, mean N ≤ 2, total D ≤ 31 and total W ≤ 3 over 4 passes (W: the lasting decisions recall counts that a link ended, no overturn pair ending them), and at most 2 in 20 of Q1's new edges naming an earlier decision that still applies after the new one, by Claude's reading.
+
+| | B1 to B4 (#278) | Q1 |
+|---|---|---|
+| Overturned, still current (O, of 19) | 9, 11, 10, 10 | 5 |
+| Overturned, never derived (N) | 0, 0, 2, 2 | 0 |
+| Compatible, dropped (D, of 25) | 6, 8, 8, 7 | 12 |
+| W | 0, 1, 0, 0 | 1 (d181) |
+| Supersede edges | 28, 36, 35, 35 | 50 |
+
+- **Verdict: not adopted.** The narrow call added 13 edges in Q1 (13 calls, none failed), and by Claude's reading 8 of them name a decision that still applies: the choice of codex as the main supplier took out the monthly budget and the permission to share data with a free tier, and 「rust化の方針OK」 took out d181's provider defaults and the shared-memory format. The rule allowed 2 in 20, so Q2 was stopped a third of the way through and Q3 and Q4 were not run. The lower O comes from edges like these.
+- **The question was too wide.** On the 7 narrow prompts Q1 sent first, 4 samples each, a stricter question (a budget, permission, limit, preference or goal stays when the new decision only chooses a tool, a step or a way) left 3 wrong of 6 edges on Haiku, 2 of 4 on Haiku thinking at effort high, and 0 of 2 on Sonnet at effort low. Two edges cannot show Sonnet's precision, and a production call on Sonnet waits on the owner's cost question.
+
+### A window's whole context carried in (#292)
+
+The owner lifted the budget on what a window carries in (「じゃあ制限しなくていいよ」, 2026-09-30). #292 sent each window everything its sessions carry in and every candidate, and asked again fitted, as before, when an entry refused the whole request as too big. Declared in #292 before its passes: not worse than B means D and W within B's range per pass (D ≤ 8, W ≤ 1) and N ≤ 2, with O expected flat on Haiku; two passes, each from a fresh copy of `base273`.
+
+| | B1 | B2 | B3 | B4 | C1 | C2 |
+|---|---|---|---|---|---|---|
+| Overturned, still current (O, of 19) | 9 | 11 | 10 | 10 | 12 | 11 |
+| Overturned, never derived (N) | 0 | 0 | 2 | 2 | 2 | 1 |
+| Compatible, dropped (D, of 25) | 6 | 8 | 8 | 7 | 9 | 9 |
+| Control pairs whose earlier decision a link ended (of 25) | 1 | 5 | 3 | 2 | 6 | 5 |
+| W | 0 | 1 | 0 | 0 | 1 | 0 |
+| Supersede edges | 28 | 36 | 35 | 35 | 42 | 42 |
+| Overturn pairs whose later decision is kept (of 19) | 15 | 16 | 15 | 11 | 10 | 15 |
+| Distinct later decisions kept (of 11) | 7 | 8 | 7 | 6 | 5 | 7 |
+| Estimated tokens a pass | (resumed part only) | 351,465 | 350,924 | 350,699 | 405,758 | 403,571 |
+
+- **Verdict: not adopted.** D was 9 in both passes. With the whole context Haiku linked more (42 edges against 28 to 36), ended more control decisions, spent about 15% more tokens a pass, and kept no more later decisions. `fit`'s budget stays.
+- **Prompt sizes** (C2's 70 prompts, saved while it ran alone): median 6,629 estimated tokens, 90th percentile 7,942, largest 8,573. 29 were over 6,750, the most Groq's free tier takes with 1,250 kept for the answer. The prompts carried at most 6 `decided before` lines, and 36 carried none: the lift mostly added open items, proposals and candidates, not decisions (C1's d111 window: 2 decisions and 5 open items, 22,071 characters).
+- Codex's P1 on #292 (the fitted retry calls an entry that already failed the whole request again) went with it. The branch `curate/whole-context` (4accfce) stays on GitHub, unmerged.
+
 ### The claude-mem way (2026-09-30)
 
 The owner's decision 31 (spec 0.1) takes claude-mem's way for overturned decisions. claude-mem marks none: its observer keeps every observation and its context lists them newest first (13.28.0's worker, read 2026-09-30). So delivery lists a decision that a curator link to a later decision ended, the later first (spec 3.4, 4.4). M3's overturn line counts the later decision kept, where it counted the earlier one left current (spec 8.2).
@@ -349,7 +385,7 @@ Read on #278's B (`later-recall.py` in `oboete-work/session-0930`), per pass, ov
 ### What the next M3 run needs
 
 1. The test labels, classed by the same rule (instructions for the moment, above).
-2. The later decisions kept (The claude-mem way, above), and the supersede links reported beside them. #292 carries a window's whole context, where `fit` carried 5 decisions at most in #286's prompts (What a prompt carries, above). The cross-session pairs need the hybrid search (#222). A record holding two labels is scored per decision (2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and with the reply's options carried, 2 of 6 acceptances settle their proposal (acc6: d462 and d107; #244: a go-ahead is often drafted as a proposal or not at all, or quotes another line than the owner's, and a quote from another repository's tool line loses its supersedes).
+2. The later decisions kept (The claude-mem way, above; `m3.py score` since #295), and the supersede links reported beside them. A window's whole context did not keep more of them on Haiku (#292, above). The cross-session pairs need the hybrid search (#222). A record holding two labels is scored per decision (2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and with the reply's options carried, 2 of 6 acceptances settle their proposal (acc6: d462 and d107; #244: a go-ahead is often drafted as a proposal or not at all, or quotes another line than the owner's, and a quote from another repository's tool line loses its supersedes).
 3. The quote match: the paraphrases (whitespace-blind matching is #248).
 4. The defaults as they would ship were run once (short-2): 22 of 44.
 5. A base whose Codex prompts from sessions another agent started carry `agent_sent` (#275): a rebuilt base gets it from the transcript parser, and the frozen dev base's copy `base273` has it (the 47 records named by their rollouts).
