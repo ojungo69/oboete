@@ -36,8 +36,8 @@ does not accept `max` for that setting.
   price (about USD 10 were left on 2026-09-30). The filters keep that off the
   providers that serve the model quantized to fp4 (its listing names two) and off
   any over twice DeepSeek's listed price (USD 0.30 per million input and 1.20 per
-  million output tokens, read 2026-09-30; every provider listed then was within
-  it). Keep DeepSeek's own endpoint within the filters: OpenRouter's documentation
+  million output tokens, read 2026-09-30, twice the listing of 2026-09-29 under
+  Cost; every provider listed then was within the cap). Keep DeepSeek's own endpoint within the filters: OpenRouter's documentation
   does not say whether a BYOK endpoint that fails a filter is still tried, so a
   price cap under DeepSeek's price, or `require_parameters` when that endpoint
   lacks a parameter OCR sends, could move every call to OpenRouter credits. A
@@ -51,7 +51,8 @@ does not accept `max` for that setting.
   charged nothing on these runs (`"cost": 0`). The measured seven-file review
   cost USD 0.10: the key's `byok_usage` rose by that much. It used 4,450,691
   tokens, 95% of them cached input, which DeepSeek prices at USD 0.003 per million
-  (USD 0.15 per million uncached, USD 0.60 per million output, OpenRouter's listing).
+  (USD 0.15 per million uncached, USD 0.60 per million output, OpenRouter's listing
+  on 2026-09-29; on 2026-09-30 it listed twice that: USD 0.006, 0.30 and 1.20).
   `byok_usage` in `GET https://openrouter.ai/api/v1/key` shows what reviews spend.
 - **Key.** An OpenRouter key can spend through every BYOK provider on its account,
   including ones billed after use. Give the workflow its own key, with a limit
