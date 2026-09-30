@@ -49,11 +49,13 @@ def candidates(db, d):
                 "WHERE memory_session_id = ? AND prompt_number IN (?, ?) ORDER BY id", (m, n, n + 1)):
             rows.append({'ref': f'obs:{i}', 'prompt': pn, 'type': typ, 'title': title, 'subtitle': sub,
                          'facts': cut(facts, 300), 'narrative': cut(narr, 300)})
-        for i, req, done, learned, nxt, notes, pn in db.execute(
-                "SELECT id, request, completed, learned, next_steps, notes, prompt_number FROM session_summaries "
-                "WHERE memory_session_id = ? AND prompt_number IN (?, ?) ORDER BY id", (m, n, n + 1)):
-            rows.append({'ref': f'sum:{i}', 'prompt': pn, 'request': cut(req, 300), 'completed': cut(done, 400),
-                         'learned': cut(learned, 300), 'next_steps': cut(nxt, 300), 'notes': cut(notes, 200)})
+        for i, req, inv, done, learned, nxt, notes, pn in db.execute(
+                "SELECT id, request, investigated, completed, learned, next_steps, notes, prompt_number "
+                "FROM session_summaries WHERE memory_session_id = ? AND prompt_number IN (?, ?) ORDER BY id",
+                (m, n, n + 1)):
+            rows.append({'ref': f'sum:{i}', 'prompt': pn, 'request': cut(req, 300), 'investigated': cut(inv, 300),
+                         'completed': cut(done, 400), 'learned': cut(learned, 300), 'next_steps': cut(nxt, 300),
+                         'notes': cut(notes, 200)})
     return rows
 
 
@@ -78,11 +80,11 @@ def main(db_path, out):
         paths = []
         for k, p in enumerate(parts):
             paths.append(f"{out}/labels/{d['id']}.part{k}.jsonl")
-            with open(paths[-1], 'w') as f:
+            with open(paths[-1], 'w', encoding='utf-8') as f:
                 f.writelines(p)
         items.append({'id': d['id'], 'quote': d['quote'], 'statement': d['statement'], 'topic': d['topic'],
                       'parts': paths})
-    with open(f'{out}/items.json', 'w') as f:
+    with open(f'{out}/items.json', 'w', encoding='utf-8') as f:
         json.dump(items, f, ensure_ascii=False, indent=0)
     print(f'{len(items)} labels, {sum(len(i["parts"]) for i in items)} parts, '
           f'no candidate: {[i["id"] for i in items if not i["parts"]]}')
