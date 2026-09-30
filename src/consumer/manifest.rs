@@ -35,8 +35,19 @@ pub const CAP: usize = 6_000;
 const CLIP: usize = 400;
 const FILES: usize = 10;
 const DIRECTIVES: usize = 10;
-/// Current decisions and open items shown, the newest first.
-const DECISIONS: usize = 15;
+/// Delivered claims SessionStart shows with their bodies, and at most this many more one line each
+/// (spec 4.4: about 10, then an index).
+const BODIES: usize = 10;
+const INDEX: usize = 20;
+/// The newest delivered claims SessionStart chooses from.
+// ponytail: an older claim reaches SessionStart only through search; a larger pool if M22's
+// scale check leaves room.
+const POOL: usize = 200;
+/// How much of a claim an index line shows.
+const BRIEF: usize = 80;
+/// The index's first line: where the rest is (spec 4.4).
+const TOOLS: &str = "`search` finds more of what is remembered here, `get` shows one in full by \
+                     its id, and `timeline` lists the earlier sessions.";
 const TODOS: usize = 20;
 const SESSIONS: usize = 5;
 /// ponytail: the owner lines a build reads (a negation older than these no longer matters); a
@@ -78,14 +89,11 @@ fn schema(k: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The manifest SessionStart shows for this checkout, if its records built one. Read-only: a
-/// hook never writes knowledge.db, and none is made when the worker has not run yet.
-/// None while the saved text may show what raw now hides (D8): a tombstone the worker has not
-/// applied yet, or a checkout still marked for a rebuild.
-/// None too when it was built under other redaction rules than `ruleset` (the version now): its
-/// fields were flattened and clipped, so a rule of another shape cannot be applied to it after.
-/// The session it is shown to is left out of "Other active sessions" (after a compaction the
-/// text was built while that session was running).
+/// What SessionStart shows for this checkout (spec 4.4, D4 of milestone 4's plan): the manifest
+/// its records built, with the delivered claims and the digest read from knowledge.db's indexes
+/// (`with_delivered`). Read-only: a hook never writes knowledge.db, and none is made when the
+/// worker has not run yet. The session it is shown to is left out of "Other active sessions"
+/// (after a compaction the text was built while that session was running).
 pub fn text(
     home: &Path,
     raw: &Raw,
@@ -94,21 +102,41 @@ pub fn text(
     session: &str,
     ruleset: &str,
 ) -> Result<Option<String>> {
-    let device = raw.device();
     let path = home.join("knowledge.db");
     if !path.exists() {
         return Ok(None);
     }
     let k = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let built = k
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'manifests'",
-            [],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if !built {
+    let manifest = stored(&k, raw, repo, branch, ruleset)?.map(|t| without_session(&t, session));
+    with_delivered(&k, raw, repo, manifest)
+}
+
+/// Whether knowledge.db has the table or view `name` (`kind`): absent until the worker has run
+/// this version's schema.
+fn exists(k: &Connection, kind: &str, name: &str) -> Result<bool> {
+    Ok(k.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2",
+        [kind, name],
+        |_| Ok(()),
+    )
+    .optional()?
+    .is_some())
+}
+
+/// The manifest the worker keeps for the checkout, if its records built one. None while the saved
+/// text may show what raw now hides (D8): a tombstone the worker has not applied yet, or a
+/// checkout still marked for a rebuild. None too when it was built under other redaction rules
+/// than `ruleset` (the version now): its fields were flattened and clipped, so a rule of another
+/// shape cannot be applied to it after.
+fn stored(
+    k: &Connection,
+    raw: &Raw,
+    repo: &str,
+    branch: &str,
+    ruleset: &str,
+) -> Result<Option<String>> {
+    let device = raw.device();
+    if !exists(k, "table", "manifests")? {
         return Ok(None);
     }
     let dirty = k
@@ -119,7 +147,7 @@ pub fn text(
         )
         .optional()?
         .is_some();
-    let at = crate::knowledge::checkpoint::get(&k, "manifest", device)?;
+    let at = crate::knowledge::checkpoint::get(k, "manifest", device)?;
     if dirty || !raw.tombstones_after(device, at)?.is_empty() {
         return Ok(None);
     }
@@ -130,65 +158,169 @@ pub fn text(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    text.filter(|(_, built)| built == ruleset)
-        .map(|(t, _)| with_decisions(&k, repo, &without_session(&t, session)))
-        .transpose()
+    Ok(text.filter(|(_, built)| built == ruleset).map(|(t, _)| t))
 }
 
-/// `text` with spec 4.9's current decisions and open items of `repo`, and after them its newest
-/// digest while every claim it cites is current (spec 4.4), read when the text is:
-/// claims come from curation, which runs while the owner is idle and appends no record this
-/// consumer steps on, so a section built with the text would miss the last session's decisions
-/// at the next SessionStart. Before the owner's directives (spec 4.9's order); the hook's cut then
-/// drops from the end. Unchanged where curation never ran (no claims table, read only).
-fn with_decisions(k: &Connection, repo: &str, text: &str) -> Result<String> {
-    let curated = k
-        .query_row(
-            // The view the queries read: absent until the worker has run this version's schema.
-            "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'active'",
-            [],
-            |_| Ok(()),
+/// Spec 4.4's SessionStart around the checkout's `manifest`: the global preferences first; the
+/// manifest, with `repo`'s delivered decisions, preferences, open items and lessons (spec 3.4) in
+/// its third place (spec 4.9's order) and the digest after them while it is fresh; last, the rest
+/// of the delivered claims one line each, after the tools that find more, so that the hook's cut
+/// drops them first. About 10 claims have bodies, chosen by the words they share with the
+/// manifest's files and last prompt, then by recency, each earlier claim with the later claim that
+/// ended it (`claims::units`), and listed newest first. A checkout with no manifest to show (a new
+/// branch, a dirty manifest, a tombstone not yet applied) still gets them (D4).
+/// Read when the text is (D3): claims come from curation, which runs while the owner is idle and
+/// appends no record this consumer steps on, so a section built with the text would miss the last
+/// session's decisions; and what the worker has not applied yet (`claims::Pending`) is left out.
+/// Unchanged where curation never ran (no claims view).
+fn with_delivered(
+    k: &Connection,
+    raw: &Raw,
+    repo: &str,
+    manifest: Option<String>,
+) -> Result<Option<String>> {
+    use crate::claims::{self, Claim};
+    if !exists(k, "view", "active")? {
+        return Ok(manifest);
+    }
+    let pending = claims::Pending::read(raw, k)?;
+    let hidden = |uid: &str| pending.touches(k, uid);
+    let mut prefs = Vec::new();
+    for c in claims::global(k)? {
+        if !hidden(&c.uid)? {
+            prefs.push(c);
+        }
+    }
+    let words = manifest.as_deref().map(terms).unwrap_or_default();
+    let mut ranked = claims::decisions(k, repo, POOL)?;
+    // Stable: among claims that share as many words, the newest first.
+    ranked.sort_by_cached_key(|c| std::cmp::Reverse(shared(&c.body, &words)));
+    let (mut bodies, rest) = claims::place(claims::units(k, &ranked, hidden)?, BODIES);
+    let (mut index, _) = claims::place(rest, INDEX);
+    claims::newest_first(&mut bodies);
+    claims::newest_first(&mut index);
+    let date = |c: &Claim| crate::db::utc(c.valid_from)[..10].to_owned();
+    // An earlier claim names the claim above it that ended it.
+    let full = |c: &Claim, unit: &[Claim]| {
+        let ended = c
+            .later
+            .as_ref()
+            .and_then(|l| unit.iter().find(|u| u.uid == *l))
+            .map(|l| format!(", superseded by the {} {} above", date(l), l.kind))
+            .unwrap_or_default();
+        format!(
+            "- {} {}{ended}: {}\n",
+            date(c),
+            c.kind,
+            one_line(&c.body, CLIP)
         )
-        .optional()?
-        .is_some();
-    if !curated {
-        return Ok(text.to_owned());
-    }
-    let lines: Vec<String> = crate::claims::decisions(k, repo, DECISIONS)?
-        .into_iter()
-        .map(|c| {
-            let date = &crate::db::utc(c.valid_from)[..10];
-            format!("- {date} {}: {}\n", c.kind, one_line(&c.body, CLIP))
-        })
-        .collect();
-    let mut section = String::new();
-    if !lines.is_empty() {
-        section = format!("## Current decisions and open items\n{}", lines.concat());
-    }
-    if let Some(digest) = crate::digest::fresh(k, repo)? {
-        let lines: Vec<String> = digest
+    };
+    let id = |uid: &str| uid.chars().take(12).collect::<String>();
+    let brief = |c: &Claim| {
+        let ended = c
+            .later
+            .as_ref()
+            .map(|l| format!(", superseded by {}", id(l)))
+            .unwrap_or_default();
+        format!(
+            "- {} {} {}{ended}: {}\n",
+            id(&c.uid),
+            date(c),
+            c.kind,
+            one_line(&c.body, BRIEF)
+        )
+    };
+    let section = |title: &str, lines: String| {
+        if lines.is_empty() {
+            String::new()
+        } else {
+            format!("## {title}\n{lines}")
+        }
+    };
+    let first = section(
+        "Global preferences",
+        prefs.iter().map(|c| full(c, &[])).collect(),
+    );
+    let mut middle = section(
+        "Decisions and open items",
+        bodies
+            .iter()
+            .flat_map(|u| u.iter().map(|c| full(c, u)))
+            .collect(),
+    );
+    if let Some(digest) = crate::digest::fresh(k, repo, hidden)? {
+        let lines: String = digest
             .iter()
             .map(|l| format!("- {}\n", one_line(l, CLIP)))
             .collect();
-        section.push_str(&format!(
-            "## Digest of the last session\n{}",
-            lines.concat()
-        ));
+        middle.push_str(&section("Digest of the last session", lines));
     }
-    if section.is_empty() {
-        return Ok(text.to_owned());
-    }
+    let last = if bodies.is_empty() && index.is_empty() {
+        String::new()
+    } else {
+        let lines: String = index.iter().flatten().map(brief).collect();
+        format!("## More from memory\n{TOOLS}\n{lines}")
+    };
+    let manifest = manifest.unwrap_or_default();
     let at = AFTER_DECISIONS
         .iter()
         .filter_map(|h| {
             let h = format!("## {h}\n");
-            text.match_indices(&h)
+            manifest
+                .match_indices(&h)
                 .map(|(i, _)| i)
-                .find(|&i| i == 0 || text[..i].ends_with('\n'))
+                .find(|&i| i == 0 || manifest[..i].ends_with('\n'))
         })
         .min()
-        .unwrap_or(text.len());
-    Ok(format!("{}{section}{}", &text[..at], &text[at..]))
+        .unwrap_or(manifest.len());
+    let text = format!(
+        "{first}{}{middle}{}{last}",
+        &manifest[..at],
+        &manifest[at..]
+    );
+    Ok((!text.is_empty()).then_some(text))
+}
+
+/// The words a claim may share with the checkout's manifest (D4): the names of the files touched
+/// and the last prompt's words of four letters or more, lowercased.
+// ponytail: words are ASCII letters, digits and `_`, so a prompt in Japanese gives only the ASCII
+// words in it; bigrams for CJK text if SessionStart's choice needs them.
+fn terms(manifest: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut section = "";
+    for line in manifest.lines() {
+        if let Some(h) = line.strip_prefix("## ") {
+            section = h;
+            continue;
+        }
+        let Some(item) = line.strip_prefix("- ") else {
+            continue;
+        };
+        let words: Vec<&str> = match section {
+            "Files touched" => item.rsplit(['/', '\\']).next().into_iter().collect(),
+            "Last exchange" => item
+                .strip_prefix("prompt: ")
+                .map(|p| {
+                    p.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => continue,
+        };
+        for w in words {
+            let w = w.to_lowercase();
+            if w.chars().count() >= 4 && !out.contains(&w) {
+                out.push(w);
+            }
+        }
+    }
+    out
+}
+
+/// How many of `terms` `body` holds.
+fn shared(body: &str, terms: &[String]) -> usize {
+    let body = body.to_lowercase();
+    terms.iter().filter(|t| body.contains(t.as_str())).count()
 }
 
 /// Spec 4.9's sections after the current decisions, in the manifest's words.
@@ -490,10 +622,10 @@ fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
     out
 }
 
-/// `s` on one line, cut to `n` characters.
-/// `s` on one line, cut to `n` characters at a space: a token is shown whole or not at all, so
-/// a rule added after the manifest was built still matches it at SessionStart's gate. A first
-/// token longer than `n` is left out, not cut.
+/// `s` on one line, cut to `n` characters at a space, or after a Japanese or Chinese clause mark
+/// (text in those languages has no spaces): a token is shown whole or not at all, so a rule added
+/// after the manifest was built still matches it at SessionStart's gate. A first token or clause
+/// longer than `n` is left out, not cut.
 fn one_line(s: &str, n: usize) -> String {
     let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
     match flat.char_indices().nth(n) {
@@ -501,7 +633,15 @@ fn one_line(s: &str, n: usize) -> String {
             let end = if c == ' ' {
                 at
             } else {
-                flat[..at].rfind(' ').unwrap_or(0)
+                flat[..at]
+                    .char_indices()
+                    .rev()
+                    .find_map(|(i, ch)| match ch {
+                        ' ' => Some(i),
+                        '、' | '。' | '，' | '！' | '？' => Some(i + ch.len_utf8()),
+                        _ => None,
+                    })
+                    .unwrap_or(0)
             };
             format!("{}…", &flat[..end])
         }
@@ -1340,9 +1480,10 @@ mod tests {
         assert!(!left);
     }
 
-    /// Spec 4.9: the repository's current decisions and open items, the newest first, read when
-    /// the text is: a superseded, retracted, merely proposed or other repository's claim is not
-    /// among them, and reading writes nothing.
+    /// Spec 4.4, 4.9: the repository's delivered decisions and open items, the newest first, read
+    /// when the text is: an earlier decision that a later decision of the owner ended is listed
+    /// after it, both dated (owner decision 31); a retracted, merely proposed or other
+    /// repository's claim is not among them, and reading writes nothing.
     #[test]
     fn the_manifest_lists_the_current_decisions_of_its_repo() {
         let home = tempfile::tempdir().unwrap();
@@ -1411,7 +1552,7 @@ mod tests {
             before
         );
         let section = text
-            .split("## Current decisions and open items\n")
+            .split("## Decisions and open items\n")
             .nth(1)
             .unwrap()
             .split("\n## ")
@@ -1420,11 +1561,12 @@ mod tests {
         assert_eq!(
             section,
             "- 1970-01-01 open item: The CI test is flaky.\n\
-             - 1970-01-01 decision: Use spaces instead."
+             - 1970-01-01 decision: Use spaces instead.\n\
+             - 1970-01-01 decision, superseded by the 1970-01-01 decision above: Use tabs."
         );
         // Before the owner's directives, as spec 4.9 orders them.
         assert!(
-            text.find("## Current decisions").unwrap()
+            text.find("## Decisions and open items").unwrap()
                 < text.find("## Owner's directives").unwrap()
         );
         // At most the limit, the newest first: the query stops there, not the caller.
@@ -1438,7 +1580,7 @@ mod tests {
         // Through the indexes, newest first: no scan of the claims, however many there are.
         let sql = format!(
             "EXPLAIN QUERY PLAN {} {}",
-            crate::claims::TIPS,
+            crate::claims::delivered("a.repo = ?1", crate::claims::LINKS_END_DECISIONS),
             crate::claims::DECIDED
         );
         let plan: Vec<String> = k
@@ -1601,6 +1743,13 @@ mod tests {
         assert_eq!(one_line("acme-123456", 4), "…"); // longer than the clip: left out
         assert_eq!(one_line("a  b\nc", 10), "a b c");
         assert_eq!(one_line("日本語 の本文です", 5), "日本語…");
+        // Text with no spaces is cut after a clause mark, never inside a clause.
+        assert_eq!(
+            one_line("鍵を分けた。次に山田太郎さんへ送る", 12),
+            "鍵を分けた。…"
+        );
+        assert_eq!(one_line("鍵を分けた、次に送る", 8), "鍵を分けた、…");
+        assert_eq!(one_line("山田太郎さんへ送る", 4), "…");
     }
 
     #[test]
@@ -1812,5 +1961,605 @@ mod tests {
         }
         worker::run_once(home.path()).unwrap();
         assert_eq!(manifest(home.path()).0, after); // the same records, the same bytes
+    }
+
+    const DAY: i64 = 86_400_000;
+
+    fn said(cwd: &Path, ts: i64, text: &str) -> Event {
+        ev("prompt", "s3", ts, cwd, serde_json::json!({"prompt": text}))
+    }
+
+    /// `op` as `speaker` said it.
+    fn by(mut op: (crate::raw::OpKind, Value), speaker: &str) -> (crate::raw::OpKind, Value) {
+        op.1["speaker"] = speaker.into();
+        op
+    }
+
+    /// The lines under `text`'s heading `title`.
+    fn lines_of(text: &str, title: &str) -> Vec<String> {
+        text.split(&format!("## {title}\n"))
+            .nth(1)
+            .map(|s| {
+                s.split("\n## ")
+                    .next()
+                    .unwrap()
+                    .lines()
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A home whose checkout (r, main) has `session`'s records and the claims `ops` makes, applied,
+    /// then a last prompt `prompt` when given (the words SessionStart ranks by). What SessionStart
+    /// shows.
+    fn start(
+        claims: impl FnOnce(&mut Raw, &Path) -> Vec<(crate::raw::OpKind, Value)>,
+        prompt: Option<&str>,
+    ) -> (tempfile::TempDir, tempfile::TempDir, String) {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let ops = claims(&mut store, cwd.path());
+        store.append_ops(&ops).unwrap();
+        if let Some(p) = prompt {
+            store.append(&said(cwd.path(), 100 * DAY, p)).unwrap();
+        }
+        worker::run_once(home.path()).unwrap();
+        let text = shown(home.path(), &store).unwrap();
+        (home, cwd, text)
+    }
+
+    /// Spec 3.4, owner decision 31 (#295 row 1): an earlier decision that a curator link from a
+    /// later decision of the owner ended is delivered after it, each with its date.
+    #[test]
+    fn an_earlier_decision_ended_by_a_later_owner_decision_is_delivered_after_it_with_both_dates() {
+        let (_h, _c, text) = start(
+            |store, cwd| {
+                let (tabs, old) = claimed(
+                    store,
+                    said(cwd, DAY, "Use tabs."),
+                    "decision",
+                    "decided",
+                    vec![],
+                );
+                let (spaces, _) = claimed(
+                    store,
+                    said(cwd, 3 * DAY, "Use spaces instead."),
+                    "decision",
+                    "decided",
+                    vec![old],
+                );
+                vec![tabs, spaces]
+            },
+            None,
+        );
+        assert_eq!(
+            lines_of(&text, "Decisions and open items"),
+            [
+                "- 1970-01-04 decision: Use spaces instead.",
+                "- 1970-01-02 decision, superseded by the 1970-01-04 decision above: Use tabs.",
+            ]
+        );
+    }
+
+    /// D1: only a curator link from a later claim the owner backs, decided or done, leaves the
+    /// earlier decision delivered: the user's own words, or a proposal the user accepted (Codex on
+    /// #303). One from a proposal still open, a retracted claim, an earlier claim or a claim the
+    /// owner does not back still ends it.
+    #[test]
+    fn a_link_from_a_proposal_a_retracted_claim_or_an_earlier_claim_delivers_nothing_new() {
+        let cases = [
+            ("proposed", "assistant proposal", 1),
+            ("retracted", "user", 1),
+            ("decided", "user", -1),
+            ("decided", "assistant", 1),
+            ("decided", "assistant proposal", 1),
+        ];
+        let (_h, _c, text) = start(
+            |store, cwd| {
+                let mut ops = Vec::new();
+                for (i, (status, speaker, after)) in (0_i64..).zip(cases) {
+                    let day = 10 * (i + 1);
+                    let (old, uid) = claimed(
+                        store,
+                        said(cwd, day * DAY, &format!("Old rule {i}.")),
+                        "decision",
+                        "decided",
+                        vec![],
+                    );
+                    let (new, _) = claimed(
+                        store,
+                        said(cwd, (day + after) * DAY, &format!("New rule {i}.")),
+                        "decision",
+                        status,
+                        vec![uid],
+                    );
+                    ops.extend([old, by(new, speaker)]);
+                }
+                ops
+            },
+            None,
+        );
+        let shown = lines_of(&text, "Decisions and open items").join("\n");
+        for ended in 0..4 {
+            assert!(!shown.contains(&format!("Old rule {ended}.")), "{shown}");
+        }
+        assert!(
+            shown.contains("New rule 2.") && shown.contains("New rule 3."),
+            "{shown}"
+        );
+        // The accepted proposal is the owner's later decision: the earlier one follows it.
+        assert!(
+            shown.contains(
+                "- 1970-02-21 decision: New rule 4.\n\
+                 - 1970-02-20 decision, superseded by the 1970-02-21 decision above: Old rule 4."
+            ),
+            "{shown}"
+        );
+    }
+
+    /// #261, #302 item 3: a restatement quotes the same words of the same event, so its link is
+    /// not from a later claim, and it ends the claim it restates as before.
+    #[test]
+    fn a_restatement_ends_a_claim_as_before() {
+        let (_h, _c, text) = start(
+            |store, cwd| {
+                let (old, uid) = claimed(
+                    store,
+                    said(cwd, DAY, "Keep the cache small."),
+                    "decision",
+                    "decided",
+                    vec![],
+                );
+                let mut again = old.clone();
+                again.1["id"] = "r1".into();
+                again.1["kind"] = "preference".into();
+                again.1["supersedes"] = serde_json::json!([uid]);
+                vec![old, again]
+            },
+            None,
+        );
+        assert_eq!(
+            lines_of(&text, "Decisions and open items"),
+            ["- 1970-01-02 preference: Keep the cache small."]
+        );
+    }
+
+    /// Review Focus 1 (#295 row 2): a pair takes two places. With one place left, the earlier
+    /// decision and the later one that ended it go to the index together, the later first, and the
+    /// next claim that fits takes the place. The earlier decision never stands alone.
+    #[test]
+    fn a_picked_earlier_claim_brings_its_later_claim_and_the_pair_takes_two_places() {
+        let (_h, _c, text) = start(
+            |store, cwd| {
+                let (early, old) = claimed(
+                    store,
+                    said(cwd, DAY, "Zebra builds use the old runner."),
+                    "decision",
+                    "decided",
+                    vec![],
+                );
+                let (later, _) = claimed(
+                    store,
+                    said(cwd, 30 * DAY, "Use the new runner."),
+                    "decision",
+                    "decided",
+                    vec![old],
+                );
+                let (short, _) = claimed(
+                    store,
+                    said(cwd, 5 * DAY, "Keep logs short."),
+                    "decision",
+                    "decided",
+                    vec![],
+                );
+                let mut ops = vec![early, later, short];
+                for day in 11..20 {
+                    let text = format!("Zebra rule {day}.");
+                    ops.push(
+                        claimed(
+                            store,
+                            said(cwd, day * DAY, &text),
+                            "decision",
+                            "decided",
+                            vec![],
+                        )
+                        .0,
+                    );
+                }
+                ops
+            },
+            // "zebra" is the only word it shares with them.
+            Some("What about zebra?"),
+        );
+        let bodies = lines_of(&text, "Decisions and open items");
+        assert_eq!(bodies.len(), 10, "{bodies:?}");
+        assert!(
+            bodies.iter().take(9).all(|l| l.contains("Zebra rule")),
+            "{bodies:?}"
+        );
+        assert_eq!(bodies[9], "- 1970-01-06 decision: Keep logs short.");
+        let more = lines_of(&text, "More from memory");
+        assert_eq!(more.len(), 3, "{more:?}");
+        assert!(
+            more[1].ends_with("1970-01-31 decision: Use the new runner."),
+            "{more:?}"
+        );
+        let later_id = more[1][2..14].to_owned();
+        assert!(
+            more[2].ends_with(&format!(
+                "1970-01-02 decision, superseded by {later_id}: Zebra builds use the old runner."
+            )),
+            "{more:?}"
+        );
+    }
+
+    /// Spec 3.4's switch (D2): once curator links end decisions, the earlier decision leaves
+    /// delivery as it does from the tips.
+    #[test]
+    fn with_links_ending_decisions_only_the_later_claim_is_delivered() {
+        let (home, _c, _text) = start(
+            |store, cwd| {
+                let (tabs, old) = claimed(
+                    store,
+                    said(cwd, DAY, "Use tabs."),
+                    "decision",
+                    "decided",
+                    vec![],
+                );
+                let (spaces, _) = claimed(
+                    store,
+                    said(cwd, 3 * DAY, "Use spaces instead."),
+                    "decision",
+                    "decided",
+                    vec![old],
+                );
+                vec![tabs, spaces]
+            },
+            None,
+        );
+        let k = rusqlite::Connection::open(home.path().join("knowledge.db")).unwrap();
+        let bodies = |links_end: bool| -> Vec<String> {
+            k.prepare(&crate::claims::delivered("a.repo = ?1", links_end))
+                .unwrap()
+                .query_map(["r"], |r| r.get(5))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let mut delivered = bodies(false);
+        delivered.sort();
+        assert_eq!(delivered, ["Use spaces instead.", "Use tabs."]);
+        assert_eq!(bodies(true), ["Use spaces instead."]);
+    }
+
+    /// Row 54-6: a decision and its retraction in different chunks: SessionStart never goes back
+    /// to before the retraction.
+    #[test]
+    fn a_retraction_in_another_chunk_never_brings_the_decision_back() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let (ship, uid) = claimed(
+            &mut store,
+            said(cwd.path(), DAY, "Ship the beta on Friday."),
+            "decision",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[ship]).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let text = shown(home.path(), &store).unwrap();
+        assert_eq!(
+            lines_of(&text, "Decisions and open items"),
+            ["- 1970-01-02 decision: Ship the beta on Friday."]
+        );
+        let (retract, _) = claimed(
+            &mut store,
+            said(
+                cwd.path(),
+                2 * DAY,
+                "Do not ship the beta on Friday after all.",
+            ),
+            "decision",
+            "retracted",
+            vec![uid],
+        );
+        store.append_ops(&[retract]).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let text = shown(home.path(), &store).unwrap();
+        assert!(!text.contains("## Decisions and open items"), "{text}");
+        assert!(!text.contains("## More from memory"), "{text}");
+    }
+
+    /// Spec 4.4: the owner's global preferences first, then about 10 claims with their bodies, and
+    /// the rest one line each after the tools that find more, last.
+    #[test]
+    fn global_preferences_come_first_and_about_ten_claims_have_bodies() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let ops: Vec<_> = (1..=12)
+            .map(|day| {
+                let text = format!("Rule {day:02}.");
+                claimed(
+                    &mut store,
+                    said(cwd.path(), day * DAY, &text),
+                    "decision",
+                    "decided",
+                    vec![],
+                )
+                .0
+            })
+            .collect();
+        store.append_ops(&ops).unwrap();
+        crate::claims::pref_add(home.path(), "Answer in Japanese.").unwrap();
+        worker::run_once(home.path()).unwrap();
+        let text = shown(home.path(), &store).unwrap();
+        assert!(text.starts_with("## Global preferences\n"), "{text}");
+        let prefs = lines_of(&text, "Global preferences");
+        assert_eq!(prefs.len(), 1);
+        assert!(
+            prefs[0].ends_with(" preference: Answer in Japanese."),
+            "{prefs:?}"
+        );
+        let bodies = lines_of(&text, "Decisions and open items");
+        assert_eq!(bodies.len(), 10);
+        assert_eq!(bodies[0], "- 1970-01-13 decision: Rule 12.");
+        assert_eq!(bodies[9], "- 1970-01-04 decision: Rule 03.");
+        let more = lines_of(&text, "More from memory");
+        assert_eq!(more[0], TOOLS);
+        assert_eq!(more.len(), 3);
+        assert!(
+            more[1].ends_with(" 1970-01-03 decision: Rule 02."),
+            "{more:?}"
+        );
+        assert!(
+            more[2].ends_with(" 1970-01-02 decision: Rule 01."),
+            "{more:?}"
+        );
+        assert!(text.ends_with(&format!("{}\n", more[2])));
+    }
+
+    /// Spec 4.4: claims are chosen by the words they share with the manifest's last prompt and
+    /// files, then by recency, and listed newest first whatever chose them.
+    #[test]
+    fn the_chosen_claims_are_listed_newest_first_whatever_chose_them() {
+        let (_h, _c, text) = start(
+            |store, cwd| {
+                let mut ops = vec![
+                    claimed(
+                        store,
+                        said(cwd, DAY, "Walrus names stay short."),
+                        "decision",
+                        "decided",
+                        vec![],
+                    )
+                    .0,
+                ];
+                for day in 2..=11 {
+                    let text = format!("Rule {day:02}.");
+                    ops.push(
+                        claimed(
+                            store,
+                            said(cwd, day * DAY, &text),
+                            "decision",
+                            "decided",
+                            vec![],
+                        )
+                        .0,
+                    );
+                }
+                ops
+            },
+            Some("Rename the walrus module"),
+        );
+        let bodies = lines_of(&text, "Decisions and open items");
+        assert_eq!(bodies.len(), 10);
+        assert_eq!(bodies[0], "- 1970-01-12 decision: Rule 11.");
+        assert_eq!(bodies[9], "- 1970-01-02 decision: Walrus names stay short.");
+        let more = lines_of(&text, "More from memory");
+        assert!(
+            more[1].ends_with(" 1970-01-03 decision: Rule 02."),
+            "{more:?}"
+        );
+    }
+
+    /// Spec 4.4: a pair is listed as one unit, dated by its later claim: a claim dated between the
+    /// two never separates them.
+    #[test]
+    fn a_claim_dated_between_a_pair_never_separates_it() {
+        let (_h, _c, text) = start(
+            |store, cwd| {
+                let (tabs, old) = claimed(
+                    store,
+                    said(cwd, DAY, "Use tabs."),
+                    "decision",
+                    "decided",
+                    vec![],
+                );
+                let (width, _) = claimed(
+                    store,
+                    said(cwd, 2 * DAY, "Keep lines under 100."),
+                    "decision",
+                    "decided",
+                    vec![],
+                );
+                let (spaces, _) = claimed(
+                    store,
+                    said(cwd, 3 * DAY, "Use spaces instead."),
+                    "decision",
+                    "decided",
+                    vec![old],
+                );
+                vec![tabs, width, spaces]
+            },
+            None,
+        );
+        assert_eq!(
+            lines_of(&text, "Decisions and open items"),
+            [
+                "- 1970-01-04 decision: Use spaces instead.",
+                "- 1970-01-02 decision, superseded by the 1970-01-04 decision above: Use tabs.",
+                "- 1970-01-03 decision: Keep lines under 100.",
+            ]
+        );
+    }
+
+    /// D4: a checkout with no manifest to show (here a branch with no records) still gets the
+    /// repository's delivered claims.
+    #[test]
+    fn a_checkout_with_claims_and_no_manifest_row_still_gets_them() {
+        let (home, _c, _text) = start(
+            |store, cwd| {
+                vec![
+                    claimed(
+                        store,
+                        said(cwd, DAY, "Use tabs."),
+                        "decision",
+                        "decided",
+                        vec![],
+                    )
+                    .0,
+                ]
+            },
+            None,
+        );
+        let store = raw::open(home.path()).unwrap();
+        let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+        let text = text(home.path(), &store, "r", "feature", "none", rules.version())
+            .unwrap()
+            .unwrap();
+        assert!(!text.contains("## As of"), "{text}");
+        assert_eq!(
+            lines_of(&text, "Decisions and open items"),
+            ["- 1970-01-02 decision: Use tabs."]
+        );
+    }
+
+    /// D3, #302 item 2: what raw holds and the worker has not applied yet is never shown: a claim
+    /// the owner retracted or corrected, and one that quotes a removed record, with the claim a
+    /// retracted one ended and a digest that cites one. Once the worker applies them, what they say
+    /// is shown.
+    #[test]
+    fn an_owner_retraction_the_worker_has_not_applied_is_not_shown() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let (tabs, old) = claimed(
+            &mut store,
+            said(cwd.path(), DAY, "Use tabs."),
+            "decision",
+            "decided",
+            vec![],
+        );
+        let (width, width_uid) = claimed(
+            &mut store,
+            said(cwd.path(), 2 * DAY, "Keep lines under 100."),
+            "decision",
+            "decided",
+            vec![],
+        );
+        let (spaces, spaces_uid) = claimed(
+            &mut store,
+            said(cwd.path(), 3 * DAY, "Use spaces instead."),
+            "decision",
+            "decided",
+            vec![old],
+        );
+        let (pin, _) = claimed(
+            &mut store,
+            said(cwd.path(), 4 * DAY, "Pin the toolchain."),
+            "decision",
+            "decided",
+            vec![],
+        );
+        let anchor = |op: &(crate::raw::OpKind, Value)| op.1["evidence"][0].clone();
+        let (spaces_at, width_at, pin_at) = (anchor(&spaces), anchor(&width), anchor(&pin));
+        store
+            .append_ops(&[
+                tabs,
+                width,
+                spaces,
+                pin,
+                digest("r", &[("Lines stay short.", &[&width_uid])]),
+            ])
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let text = shown(home.path(), &store).unwrap();
+        assert_eq!(lines_of(&text, "Decisions and open items").len(), 4);
+        assert_eq!(
+            lines_of(&text, "Digest of the last session"),
+            ["- Lines stay short."]
+        );
+        let correct = |uid: &str, at: &Value, status: Value, body: Value| {
+            let op = serde_json::json!({"uid": uid, "status": status, "body": body,
+                "anchor": {"device": at["device"], "seq": at["seq"]}});
+            (crate::raw::OpKind::Correction, op)
+        };
+        store
+            .append_ops(&[
+                correct(&spaces_uid, &spaces_at, "retracted".into(), Value::Null),
+                correct(
+                    &width_uid,
+                    &width_at,
+                    Value::Null,
+                    "Keep lines under 80.".into(),
+                ),
+            ])
+            .unwrap();
+        let device = store.device().to_owned();
+        store
+            .append_tombstone(Target::Record {
+                device,
+                seq: pin_at["seq"].as_i64().unwrap(),
+            })
+            .unwrap();
+        let text = shown(home.path(), &store).unwrap_or_default();
+        assert!(!text.contains("## Decisions and open items"), "{text}");
+        assert!(!text.contains("## Digest of the last session"), "{text}");
+        assert!(!text.contains("## More from memory"), "{text}");
+        worker::run_once(home.path()).unwrap();
+        let text = shown(home.path(), &store).unwrap();
+        assert_eq!(
+            lines_of(&text, "Decisions and open items"),
+            ["- 1970-01-03 decision: Keep lines under 80."]
+        );
+    }
+
+    /// Spec 4.9's drop order under an agent's size cap: the hook cuts from the end, so the index
+    /// goes first and the manifest's own sections stay.
+    #[test]
+    fn the_index_goes_first_under_the_size_cap() {
+        let (_h, _c, text) = start(
+            |store, cwd| {
+                (1..=14)
+                    .map(|day| {
+                        let text = format!("Rule {day:02}.");
+                        claimed(
+                            store,
+                            said(cwd, day * DAY, &text),
+                            "decision",
+                            "decided",
+                            vec![],
+                        )
+                        .0
+                    })
+                    .collect()
+            },
+            None,
+        );
+        let at = text.find("## More from memory").unwrap();
+        let cut = crate::manifest::cut(&text, at + 1);
+        assert!(!cut.contains("## More from memory"), "{cut}");
+        assert!(
+            cut.contains("## Files touched") && cut.contains("## As of"),
+            "{cut}"
+        );
     }
 }
