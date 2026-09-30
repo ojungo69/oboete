@@ -384,6 +384,64 @@ const TEXT = {
   key_on_path: ['Installed', 'インストール済み'],
   key_not_on_path: ['Not installed', 'インストールされていません'],
   key_file: ['Key file: {path}', 'キーのファイル: {path}'],
+  key_label: ['New key for {name}', '{name} の新しいキー'],
+  key_placeholder: ['Paste a new key', '新しいキーを貼り付け'],
+  key_save: ['Save key', 'キーを保存'],
+  key_saved: ['The key was saved in its file.', 'キーをファイルに保存しました。'],
+  key_not_durable: [
+    'The key was saved in its file, but the disk did not confirm the write. If the computer loses power soon, check the key file.',
+    'キーをファイルに保存しましたが、ディスクへの書き込みを確認できませんでした。この後すぐに電源が切れた場合は、キーのファイルを確認してください。',
+  ],
+  key_by_hand: [
+    'On this computer, set the key by editing its file.',
+    'このコンピューターでは、キーはファイルを直接編集して設定してください。',
+  ],
+  bad_key: [
+    'A key is 8 to 512 characters: letters, digits and . _ ~ + / = : - (no spaces).',
+    'キーは 8〜512 文字で、使えるのは英数字と . _ ~ + / = : - だけです(空白は使えません)。',
+  ],
+  bad_entry: ['This curator could not be found. Please reload the page.', 'この要約役が見つかりません。ページを再読み込みしてください。'],
+  no_entry: ['This curator could not be found. Please reload the page.', 'この要約役が見つかりません。ページを再読み込みしてください。'],
+  no_key_file: ['This curator has no key file in config.toml.', 'この要約役には config.toml でキーのファイルが設定されていません。'],
+  ambiguous: [
+    'Curators of this name use different key files, so please set each key by editing its file.',
+    'この名前の要約役がそれぞれ別のキーのファイルを使っているため、キーはファイルを直接編集して設定してください。',
+  ],
+  not_absolute: [
+    'To save a key here, write the key file in config.toml as a full path (starting with /).',
+    'この画面からキーを保存するには、config.toml のキーのファイルを / から始まる完全なパスで書いてください。',
+  ],
+  not_a_key_file: [
+    'This page writes only a key file whose name ends in _KEY.md.',
+    'この画面から書き込めるのは、名前が _KEY.md で終わるキーのファイルだけです。',
+  ],
+  protected: [
+    'This page does not write a key file inside the oboete folder.',
+    'oboete のフォルダの中にあるキーのファイルには、この画面から書き込みません。',
+  ],
+  no_dir: [
+    'The folder for the key file does not exist. Please create it first.',
+    'キーのファイルを置くフォルダがありません。先にフォルダを作成してください。',
+  ],
+  not_a_file: [
+    'The key file\'s path is not a plain file (it is a link or a folder, for example), so nothing was changed.',
+    'キーのファイルのパスが通常のファイルではない(リンクやフォルダなど)ため、何も変更しませんでした。',
+  ],
+  too_big: ['The key file is larger than 64 KiB, so nothing was changed.', 'キーのファイルが 64 KiB を超えているため、何も変更しませんでした。'],
+  not_utf8: ['The key file is not UTF-8 text, so nothing was changed.', 'キーのファイルが UTF-8 のテキストではないため、何も変更しませんでした。'],
+  not_private: [
+    'The key file is on a drive where it cannot be kept private (a Windows drive seen from WSL, for example), so it was not written.',
+    'キーのファイルが、ほかのユーザーから読めないように保てないドライブ(WSL から見た Windows のドライブなど)にあるため、書き込みませんでした。',
+  ],
+  changed: [
+    'The key file changed while the key was being saved, so it was not overwritten. Please try again.',
+    'キーの保存中にキーのファイルが変更されたため、上書きしませんでした。もう一度お試しください。',
+  ],
+  unsupported: [
+    'On this computer, set the key by editing its file.',
+    'このコンピューターでは、キーはファイルを直接編集して設定してください。',
+  ],
+  failed: ['The key file could not be written. It is as it was.', 'キーのファイルに書き込めませんでした。ファイルは元のままです。'],
   entries: [
     '{n} curators share this name in config.toml, and these settings change all of them.',
     'config.toml でこの名前の要約役が {n} つあり、ここでの設定はすべてに反映されます。',
@@ -471,6 +529,7 @@ function formOf(s) {
     })),
     warnings: s.warnings,
     ranges: s.ranges,
+    keyInput: s.key_input,
   };
 }
 
@@ -520,7 +579,82 @@ function note(text) {
 
 function keyState(r) {
   const state = el('span', 'note', t(`key_${r.key.replaceAll('-', '_')}`));
-  return r.key_file ? [state, note(t('key_file', { path: r.key_file }))] : [state];
+  if (!r.key_file) return [state];
+  return [state, note(t('key_file', { path: r.key_file })), form.keyInput ? keyField(r) : note(t('key_by_hand'))];
+}
+
+// A new key for the row's key file (#94 part 3). What is typed leaves the page only in the
+// request's body, and the field is emptied before the request goes. A text field masked by CSS,
+// not a password field: a browser offers to save a password field's typed value once the field
+// leaves the page after a request, and this page redraws. `autocomplete` off keeps the value out
+// of form history and saved page state.
+function keyField(r) {
+  const i = el('input');
+  i.type = 'text';
+  i.autocomplete = 'off';
+  i.spellcheck = false;
+  i.autocapitalize = 'off';
+  i.placeholder = t('key_placeholder');
+  i.dataset.field = `chain.${r.name}.key`;
+  i.setAttribute('aria-label', t('key_label', { name: r.name }));
+  const save = el('button', 'small', t('key_save'));
+  save.type = 'button';
+  save.disabled = true;
+  i.addEventListener('input', () => {
+    i.classList.remove('invalid');
+    i.removeAttribute('aria-invalid');
+    save.disabled = i.value === '';
+  });
+  // Enter saves the key, not the settings form around it.
+  i.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (!save.disabled) save.click();
+  });
+  save.addEventListener('click', () => void saveKey(r.name, i, save));
+  return el('span', 'key-input', i, save);
+}
+
+async function saveKey(name, field, button) {
+  const body = JSON.stringify({ entry: name, key: field.value, version: form.version });
+  field.value = '';
+  button.disabled = true;
+  const mine = form;
+  const fields = button.closest('.settings');
+  fields.inert = true;
+  try {
+    const res = await fetch('/api/key', {
+      method: 'POST',
+      headers: { 'X-Oboete-Token': token, 'Content-Type': 'application/json' },
+      body,
+      referrerPolicy: 'same-origin',
+      credentials: 'omit',
+    });
+    const answer = (res.headers.get('content-type') || '').startsWith('application/json') ? await res.json() : {};
+    const current = answer.code === 'stale' ? await api('settings') : null;
+    if (view !== 'settings' || form !== mine) return;
+    if (current) {
+      form = formOf(current);
+      drawSettings();
+      setStatus(t('stale'), true);
+      return;
+    }
+    if (res.ok) {
+      // Only the row's key state changes: what is typed elsewhere and not saved yet stays.
+      for (const r of form.chain) if (r.name === answer.entry) r.key = answer.key;
+      drawSettings();
+      setStatus(t(answer.durable ? 'key_saved' : 'key_not_durable'), !answer.durable);
+      return;
+    }
+    const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
+    fields.inert = false;
+    if (answer.field) markInvalid(answer.field);
+    setStatus(t(answer.code || byStatus[res.status] || 'other', { status: res.status }), true);
+  } catch (e) {
+    setStatus(e.message, true);
+  } finally {
+    fields.inert = false;
+  }
 }
 
 function chainRow(r, i, redraw) {

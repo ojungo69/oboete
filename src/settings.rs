@@ -142,6 +142,8 @@ pub fn show(home: &Path) -> Value {
             "tool_output": tool_output(capture.tool_output),
         },
         "chain": chain,
+        // Where a key typed on the page can be written (#94 part 3; macOS and Windows: #281).
+        "key_input": cfg!(target_os = "linux"),
         "warnings": cfg.warnings,
         // The page checks and words its fields by these, so they are stated once.
         "ranges": {
@@ -787,7 +789,7 @@ mod tests {
             let r = save_key(home.path(), &Mutex::new(()), &body).unwrap_err();
             (r.status, r.code)
         };
-        let key = "gsk_abcdefgh12";
+        let key = "key-abcdefgh12";
         assert_eq!(refusal(key_body("twin", key, &version)), (422, "ambiguous"));
         assert_eq!(
             refusal(key_body("open", key, &version)),
@@ -806,7 +808,7 @@ mod tests {
             (422, "bad_key")
         );
         assert_eq!(
-            refusal(key_body("twin", "gsk_abc\nbase_url", &version)),
+            refusal(key_body("twin", "key-abc\nbase_url", &version)),
             (422, "bad_key")
         );
         assert_eq!(
@@ -833,7 +835,7 @@ mod tests {
         let r = save_key(
             home.path(),
             &Mutex::new(()),
-            &key_body("local", "gsk_abcdefgh12", &version),
+            &key_body("local", "key-abcdefgh12", &version),
         );
         let r = r.unwrap_err();
         assert_eq!((r.status, r.code), (422, "unsupported"));

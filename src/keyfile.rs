@@ -392,7 +392,7 @@ mod tests {
         let path = dir.path().join("GROQ_KEY.md");
         let home = dir.path().join("home");
         assert_eq!(
-            write(&path, "gsk_abcdefgh", &home),
+            write(&path, "key-abcdefgh", &home),
             Err(Refused::Unsupported)
         );
         assert!(!path.exists());

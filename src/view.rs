@@ -27,6 +27,9 @@ const APP_CSS: &str = include_str!("../assets/viewer/app.css");
 const MAX_HEAD: usize = 16 * 1024;
 /// A settings save's body; the page's is under 2 KB.
 const MAX_BODY: usize = 16 * 1024;
+/// A key save's body: a key of at most 512 characters, an entry name of at most 64 bytes and the
+/// version always fit.
+const MAX_KEY_BODY: usize = 1024;
 /// Head and body together: a slow sender holds its thread this long at most.
 const REQUEST_TIME: Duration = Duration::from_secs(5);
 /// The answer, all of it: a client that stops reading holds its thread this long at most.
@@ -73,12 +76,15 @@ impl Drop for Slot {
     }
 }
 
-/// What a request's head leads to: an answer, or a settings save whose body of this many bytes
-/// is read first.
+/// What a request's head leads to: an answer, or a save whose body of this many bytes is read
+/// first and handed to it.
 enum Head {
     Answer(Response),
-    Body(usize),
+    Body(usize, Save),
 }
+
+/// A write that takes a request's body: the settings, or a key.
+type Save = fn(&Viewer, &[u8]) -> Response;
 
 struct Response {
     status: u16,
@@ -272,6 +278,18 @@ fn open_browser(page: &Path) {
     }
 }
 
+/// A save's answer: what it saved, or `{code, field}` for the page to put in words.
+fn saved(result: std::result::Result<Value, crate::settings::Refusal>) -> Response {
+    match result {
+        Ok(v) => Response::json(&v),
+        Err(r) => Response::new(
+            r.status,
+            "application/json",
+            serde_json::to_vec(&json!({"code": r.code, "field": r.field})).unwrap_or_default(),
+        ),
+    }
+}
+
 impl Viewer {
     fn serve(&self, mut stream: TcpStream) {
         let deadline = Instant::now() + REQUEST_TIME;
@@ -320,35 +338,41 @@ impl Viewer {
         let resp = match head {
             Head::Answer(r) => r,
             // Read only once the head has passed every check (`save_gate`).
-            Head::Body(len) => {
+            Head::Body(len, save) => {
                 while buf.len() < at + len {
                     if !more(&mut stream, &mut buf) {
                         return;
                     }
                 }
-                self.save(&buf[at..at + len])
+                save(self, &buf[at..at + len])
             }
         };
         send(&mut stream, &resp.bytes(head_only), ANSWER_TIME);
     }
 
-    /// The settings save goes through `save_gate`; every other request is answered by `route`.
+    /// The two saves go through `save_gate`; every other request is answered by `route`.
     fn head(&self, method: &str, target: &str, headers: &[(&str, &str)]) -> Head {
-        if method == "POST" && target == "/api/settings" {
-            return match self.save_gate(headers) {
-                Ok(len) => Head::Body(len),
-                Err(r) => Head::Answer(r),
-            };
+        let (cap, save): (usize, Save) = match (method, target) {
+            ("POST", "/api/settings") => (MAX_BODY, Self::save),
+            ("POST", "/api/key") => (MAX_KEY_BODY, Self::save_key),
+            _ => return Head::Answer(self.route(method, target, headers)),
+        };
+        match self.save_gate(headers, cap) {
+            Ok(len) => Head::Body(len, save),
+            Err(r) => Head::Answer(r),
         }
-        Head::Answer(self.route(method, target, headers))
     }
 
-    /// Spec 6.6 for the one write with a body, all on the head, before any byte of the body is
+    /// Spec 6.6 for the writes with a body, all on the head, before any byte of the body is
     /// read: no chunked framing, the Host and token as for every `/api` request, an `Origin` of
     /// this viewer (a browser sends one on every POST; the page's fetch asks for it with
     /// `referrerPolicy: 'same-origin'`, as the document's `no-referrer` would make it `null`),
-    /// JSON, and one `Content-Length` of at most `MAX_BODY`.
-    fn save_gate(&self, headers: &[(&str, &str)]) -> std::result::Result<usize, Response> {
+    /// JSON, and one `Content-Length` of at most `cap`.
+    fn save_gate(
+        &self,
+        headers: &[(&str, &str)],
+        cap: usize,
+    ) -> std::result::Result<usize, Response> {
         // Exactly one: a request with two of these is no browser's.
         let only = |name: &str| {
             let mut all = headers.iter().filter(|(n, _)| n.eq_ignore_ascii_case(name));
@@ -388,22 +412,20 @@ impl Viewer {
             }
             _ => return Err(Response::text(400, "a save declares one length")),
         };
-        if len > MAX_BODY {
-            return Err(Response::text(413, "a save is at most 16 KiB"));
+        if len > cap {
+            return Err(Response::text(413, "a save's body is over its cap"));
         }
         Ok(len)
     }
 
-    /// The save's answer: the settings as saved, or `{code, field}` for the page to put in words.
+    /// The settings as saved.
     fn save(&self, body: &[u8]) -> Response {
-        match crate::settings::save(&self.home, &self.saving, body) {
-            Ok(v) => Response::json(&v),
-            Err(r) => Response::new(
-                r.status,
-                "application/json",
-                serde_json::to_vec(&json!({"code": r.code, "field": r.field})).unwrap_or_default(),
-            ),
-        }
+        saved(crate::settings::save(&self.home, &self.saving, body))
+    }
+
+    /// A key written to its entry's key file (#94 part 3); the answer never holds it.
+    fn save_key(&self, body: &[u8]) -> Response {
+        saved(crate::settings::save_key(&self.home, &self.saving, body))
     }
 
     /// DNS rebinding: a page on another name that resolves to 127.0.0.1 sends its own Host.
@@ -821,7 +843,7 @@ mod tests {
         // A settings save that is the first request with the token removes it too.
         let page = opener_page(&dir, 4321, url).unwrap();
         *v.opener.lock().unwrap() = Some(page.clone());
-        assert!(v.save_gate(&[HOST, TOKEN]).is_err());
+        assert!(v.save_gate(&[HOST, TOKEN], MAX_BODY).is_err());
         assert!(!page.exists());
         std::fs::remove_file(other).unwrap();
         std::fs::remove_dir_all(&dir).ok();
@@ -1115,9 +1137,9 @@ mod tests {
     ) -> Response {
         match v.head(method, target, headers) {
             Head::Answer(r) => r,
-            Head::Body(len) => {
+            Head::Body(len, save) => {
                 assert_eq!(len, body.len());
-                v.save(body)
+                save(v, body)
             }
         }
     }
@@ -1136,8 +1158,8 @@ mod tests {
         .unwrap()
     }
 
-    /// #94 test 3: the settings save is the one request with a body, and its head passes every
-    /// check (spec 6.6) before a byte of the body is read.
+    /// #94 test 3: the two saves are the requests with a body, and a head passes every check
+    /// (spec 6.6) before a byte of its body is read; a key save's cap is 1 KiB (part 3).
     #[test]
     fn a_settings_save_passes_every_guard_first() {
         let (dir, v) = viewer("save-guards");
@@ -1148,7 +1170,62 @@ mod tests {
         let body = save_body(&shown);
         let len = body.len().to_string();
         let cl = ("Content-Length", len.as_str());
-        let status = |h: &[(&str, &str)]| request(&v, "POST", "/api/settings", h, &body).status;
+        for (path, cap) in [("/api/settings", MAX_BODY), ("/api/key", MAX_KEY_BODY)] {
+            save_guards(&v, path, cap, &body);
+        }
+        // Every other method on it, and a POST anywhere else, stay 405.
+        for m in ["PUT", "PATCH", "OPTIONS", "DELETE"] {
+            let r = request(&v, m, "/api/settings", &[HOST, TOKEN, origin], b"");
+            assert_eq!(r.status, 405, "{m}");
+        }
+        for t in [
+            "/api/repos",
+            "/api/settings?x=1",
+            "/api/key?x=1",
+            "/api/doc?id=o1",
+        ] {
+            let r = request(&v, "POST", t, &[HOST, TOKEN, origin, json_type, cl], &body);
+            assert_eq!(r.status, 405, "{t}");
+        }
+        assert!(!dir.join("config.toml").exists());
+        let saved = request(
+            &v,
+            "POST",
+            "/api/settings",
+            &[
+                HOST,
+                TOKEN,
+                origin,
+                ("Content-Type", "Application/JSON; charset=utf-8"),
+                cl,
+            ],
+            &body,
+        );
+        assert_eq!(json_of(&saved)["inject"]["session_start"], false);
+        assert!(!crate::config::inject(&dir).unwrap().session_start);
+        // The same body again names the file as it was: refused, and nothing echoes an error.
+        let stale = request(
+            &v,
+            "POST",
+            "/api/settings",
+            &[HOST, TOKEN, origin, json_type, cl],
+            &body,
+        );
+        assert_eq!(stale.status, 409);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&stale.body).unwrap(),
+            json!({"code": "stale", "field": ""})
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every head check of a save at `path`, whose body may be at most `cap` bytes.
+    fn save_guards(v: &Viewer, path: &str, cap: usize, body: &[u8]) {
+        let origin = ("Origin", "http://127.0.0.1:4321");
+        let json_type = ("Content-Type", "application/json");
+        let len = body.len().to_string();
+        let cl = ("Content-Length", len.as_str());
+        let status = |h: &[(&str, &str)]| request(v, "POST", path, h, body).status;
         assert_eq!(status(&[HOST, origin, json_type, cl]), 401);
         assert_eq!(
             status(&[("Host", "evil.example:4321"), TOKEN, origin, json_type, cl]),
@@ -1193,49 +1270,77 @@ mod tests {
             let h = [HOST, TOKEN, origin, json_type, ("Content-Length", l)];
             assert_eq!(status(&h), 400, "{l:?}");
         }
-        let over = [HOST, TOKEN, origin, json_type, ("Content-Length", "16385")];
-        match v.head("POST", "/api/settings", &over) {
-            Head::Answer(r) => assert_eq!(r.status, 413),
-            Head::Body(_) => panic!("a body over the cap would be read"),
+        let at_cap = cap.to_string();
+        let at_cap = [
+            HOST,
+            TOKEN,
+            origin,
+            json_type,
+            ("Content-Length", at_cap.as_str()),
+        ];
+        assert!(matches!(v.head("POST", path, &at_cap), Head::Body(l, _) if l == cap));
+        let over = (cap + 1).to_string();
+        let over = [
+            HOST,
+            TOKEN,
+            origin,
+            json_type,
+            ("Content-Length", over.as_str()),
+        ];
+        match v.head("POST", path, &over) {
+            Head::Answer(r) => assert_eq!(r.status, 413, "{path}"),
+            Head::Body(..) => panic!("a body over {path}'s cap would be read"),
         }
-        // Every other method on it, and a POST anywhere else, stay 405.
-        for m in ["PUT", "PATCH", "OPTIONS", "DELETE"] {
-            let r = request(&v, m, "/api/settings", &[HOST, TOKEN, origin], b"");
-            assert_eq!(r.status, 405, "{m}");
-        }
-        for t in ["/api/repos", "/api/settings?x=1", "/api/doc?id=o1"] {
-            let r = request(&v, "POST", t, &[HOST, TOKEN, origin, json_type, cl], &body);
-            assert_eq!(r.status, 405, "{t}");
-        }
-        assert!(!dir.join("config.toml").exists());
-        let saved = request(
-            &v,
-            "POST",
-            "/api/settings",
-            &[
+    }
+
+    /// #94 part 3: a key save through the viewer reaches its file, and neither its answer, a
+    /// refusal, nor the settings shown after it hold the key.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_key_save_answers_without_the_key() {
+        let (dir, v) = viewer("key-save");
+        let keys = tempfile::tempdir().unwrap();
+        let file = keys.path().join("LOCAL_KEY.md");
+        let config = format!(
+            "[[providers]]\nkind = \"openai\"\nname = \"local\"\n\
+             base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\nkey_file = {:?}\n",
+            file.display().to_string()
+        );
+        std::fs::write(dir.join("config.toml"), config).unwrap();
+        let shown = json_of(&v.route("GET", "/api/settings", &[HOST, TOKEN]));
+        let canary = format!("{}-{}", "canary", "5f2c9a17");
+        let post = |key: &str| {
+            let body = json!({"entry": "local", "key": key, "version": shown["version"]});
+            let body = serde_json::to_vec(&body).unwrap();
+            let len = body.len().to_string();
+            let origin = ("Origin", "http://127.0.0.1:4321");
+            let json_type = ("Content-Type", "application/json");
+            let h = [
                 HOST,
                 TOKEN,
                 origin,
-                ("Content-Type", "Application/JSON; charset=utf-8"),
-                cl,
-            ],
-            &body,
-        );
-        assert_eq!(json_of(&saved)["inject"]["session_start"], false);
-        assert!(!crate::config::inject(&dir).unwrap().session_start);
-        // The same body again names the file as it was: refused, and nothing echoes an error.
-        let stale = request(
-            &v,
-            "POST",
-            "/api/settings",
-            &[HOST, TOKEN, origin, json_type, cl],
-            &body,
-        );
-        assert_eq!(stale.status, 409);
+                json_type,
+                ("Content-Length", len.as_str()),
+            ];
+            request(&v, "POST", "/api/key", &h, &body)
+        };
+        let saved = post(&canary);
         assert_eq!(
-            serde_json::from_slice::<Value>(&stale.body).unwrap(),
-            json!({"code": "stale", "field": ""})
+            json_of(&saved),
+            json!({"entry": "local", "key": "ok", "durable": true})
         );
+        assert_eq!(crate::config::read_key(&file).unwrap(), canary);
+        let refused = post(&format!("{canary} x"));
+        assert_eq!(
+            (
+                refused.status,
+                serde_json::from_slice::<Value>(&refused.body).unwrap()
+            ),
+            (422, json!({"code": "bad_key", "field": "chain.local.key"}))
+        );
+        let after = v.route("GET", "/api/settings", &[HOST, TOKEN]);
+        assert!(!String::from_utf8_lossy(&after.body).contains("canary"));
+        assert_eq!(json_of(&after)["chain"][0]["key"], "ok");
         std::fs::remove_dir_all(&dir).ok();
     }
 
