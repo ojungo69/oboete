@@ -1,0 +1,22 @@
+docs/spec.md
+  s_30d0ae67cebed9::t_5a8585ce622c53 309
+docs/milestone-4-plan.md
+  s_30d0ae67cebed9::t_5a8585ce622c53 52,70,95,148,242
+  s_30d0ae67cebed9::t_3dba50a6324976 37,54,56,62,146,151,195,198,220
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "014ec5ba6fc7cf9608e4a7acd456ba2c229d0312",
+  "prompts": {},
+  "sessions": {
+    "s_30d0ae67cebed9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c79fad97-efa9-40d6-9230-d12636d3a455",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
