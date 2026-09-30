@@ -6,5 +6,6 @@ pub mod compress;
 pub mod digest;
 pub mod fts;
 pub mod gaps;
+pub mod imported;
 pub mod manifest;
 pub mod rescan;

@@ -113,6 +113,8 @@ pub enum OpKind {
     /// A repository excluded, or taken back out (`undo`): `{repo, undo}` (spec 5.5, milestone 4
     /// D13). An older binary stops at an op type it does not know.
     Exclusion,
+    /// A document another memory tool kept (milestone 4 D5): an `ImportDoc`.
+    Import,
 }
 
 impl OpKind {
@@ -123,6 +125,7 @@ impl OpKind {
             OpKind::Correction => "correction",
             OpKind::Digest => "digest",
             OpKind::Exclusion => "exclusion",
+            OpKind::Import => "import",
         }
     }
     fn from_name(name: &str) -> Option<Self> {
@@ -132,6 +135,7 @@ impl OpKind {
             Self::Correction,
             Self::Digest,
             Self::Exclusion,
+            Self::Import,
         ]
         .into_iter()
         .find(|k| k.name() == name)
@@ -155,6 +159,70 @@ pub struct Op {
 /// milestone 4 D6).
 pub fn is_live(source: &str) -> bool {
     matches!(source, "hook" | "replay")
+}
+
+/// A document another memory tool kept, as an `import` op's body (milestone 4 D5): a claude-mem
+/// observation, session summary or prompt. `uid` is `<source>:<source_id>`, as v1's import named
+/// it, so what was judged on v1's evaluation store maps to it. `ts` is unix ms.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ImportDoc {
+    pub uid: String,
+    pub source: String,
+    pub source_id: String,
+    pub kind: String,
+    pub repo: String,
+    pub session: String,
+    pub ts: i64,
+    pub title: String,
+    pub body: String,
+}
+
+/// Documents per `append_imports` append (D5).
+pub const IMPORT_BATCH: usize = 500;
+
+/// A title longer than this is cut when its op is over the cap: a title as long as a body is a
+/// malformed row.
+const TITLE_BYTES: usize = 1 << 10;
+
+/// `doc` with its body clipped so that its op fits `MAX_OP_BYTES`, and a title over
+/// `TITLE_BYTES` too, each with a marker saying how long it was, as a clipped tool output's does.
+/// An error when the other fields alone are over the cap (cubic on the Task 3 PR).
+fn within_op_cap(mut doc: ImportDoc) -> Result<ImportDoc> {
+    let size = |d: &ImportDoc| serde_json::to_string(d).map(|s| s.len());
+    if size(&doc)? <= MAX_OP_BYTES {
+        return Ok(doc);
+    }
+    if doc.title.len() > TITLE_BYTES {
+        doc.title = clipped(&doc.title, TITLE_BYTES);
+    }
+    // What is over once the title is cut, which may be nothing (Codex on #305).
+    let over = size(&doc)?.saturating_sub(MAX_OP_BYTES);
+    if over == 0 {
+        return Ok(doc);
+    }
+    // Each byte cut takes at least one byte of JSON with it; escapes can take more.
+    let mut keep = doc.body.len().saturating_sub(over + 128);
+    loop {
+        let cut = ImportDoc {
+            body: clipped(&doc.body, keep),
+            ..doc.clone()
+        };
+        if size(&cut)? <= MAX_OP_BYTES {
+            return Ok(cut);
+        }
+        anyhow::ensure!(
+            keep > 0,
+            "import {}: over the {MAX_OP_BYTES}-byte op cap with no body left",
+            doc.uid
+        );
+        keep = keep * 9 / 10;
+    }
+}
+
+/// The first `keep` bytes of `text` (to a character's end), and a marker saying how long it was.
+fn clipped(text: &str, keep: usize) -> String {
+    let marker = format!("\n…[clipped, {} chars in full]", text.chars().count());
+    format!("{}{marker}", &text[..text.floor_char_boundary(keep)])
 }
 
 /// One ops row as stored: the body is JSON text.
@@ -934,6 +1002,41 @@ impl Raw {
             [device],
             |r| r.get(0),
         )?)
+    }
+
+    /// The `source_id`s of `source`'s documents imported so far, on any device: what an import
+    /// skips (D5). An op whose `source_id` is missing or not text, which this version cannot read,
+    /// is passed over as the consumer passes it (OpenCodeReview on #305).
+    pub fn import_keys(&self, source: &str) -> Result<std::collections::HashSet<String>> {
+        let mut st = self.conn.prepare(
+            "SELECT json_extract(body, '$.source_id') FROM ops
+             WHERE type = 'import' AND json_extract(body, '$.source') = ?1
+               AND typeof(json_extract(body, '$.source_id')) = 'text'",
+        )?;
+        let rows = st.query_map([source], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// `docs` as this device's `import` ops (D5), in appends of at most `IMPORT_BATCH` documents
+    /// and `MAX_BATCH_BYTES`, each its own batch: an import stopped midway keeps what it appended.
+    /// A body that would take its op over `MAX_OP_BYTES` is clipped with a marker. The ops
+    /// appended.
+    pub fn append_imports(&mut self, docs: Vec<ImportDoc>) -> Result<usize> {
+        let (mut batch, mut bytes, mut appended) = (Vec::new(), 0, 0);
+        for doc in docs {
+            let body = serde_json::to_value(within_op_cap(doc)?)?;
+            let size = body.to_string().len();
+            if batch.len() == IMPORT_BATCH || bytes + size > MAX_BATCH_BYTES {
+                appended += self.append_ops(&std::mem::take(&mut batch))?.len();
+                bytes = 0;
+            }
+            bytes += size;
+            batch.push((OpKind::Import, body));
+        }
+        if !batch.is_empty() {
+            appended += self.append_ops(&batch)?.len();
+        }
+        Ok(appended)
     }
 
     /// The devices that have ops (this one's, and from milestone 6 other devices' through sync),
@@ -1777,6 +1880,106 @@ mod tests {
         let mut other = open(copy.path()).unwrap();
         other.exclude("x", false).unwrap();
         assert_eq!(other.exclusions().unwrap(), ["x"]);
+    }
+
+    fn import_doc(id: usize, body: String) -> ImportDoc {
+        ImportDoc {
+            uid: format!("claude-mem:abc:o{id}"),
+            source: "claude-mem:abc".into(),
+            source_id: format!("o{id}"),
+            kind: "decision".into(),
+            repo: "claude-mem:r".into(),
+            session: "s".into(),
+            ts: 1,
+            title: "t".into(),
+            body,
+        }
+    }
+
+    /// D5: a body that would take its op over the cap is cut to fit, the marker saying how long
+    /// it was, JSON escapes counted.
+    #[test]
+    fn an_op_over_the_cap_is_clipped_with_a_marker() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let body = "a \"quoted\" line\n".repeat(8_000);
+        let chars = body.chars().count();
+        assert_eq!(raw.append_imports(vec![import_doc(1, body)]).unwrap(), 1);
+        let op = raw.ops_after(raw.device(), 0, 1).unwrap().remove(0);
+        assert!(op.body.to_string().len() <= MAX_OP_BYTES);
+        let kept: ImportDoc = serde_json::from_value(op.body).unwrap();
+        let marker = format!("\n…[clipped, {chars} chars in full]");
+        assert!(
+            kept.body.ends_with(&marker),
+            "{}",
+            &kept.body[kept.body.len() - 80..]
+        );
+        assert!(kept.body.starts_with("a \"quoted\" line\n"));
+    }
+
+    /// cubic on the Task 3 PR: a title as long as a body is cut too, and a document whose other
+    /// fields alone are over the cap is an error, never an endless loop.
+    #[test]
+    fn a_title_over_the_cap_is_cut_and_other_fields_over_it_are_an_error() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let doc = ImportDoc {
+            title: "t".repeat(100_000),
+            ..import_doc(1, "b".repeat(100_000))
+        };
+        raw.append_imports(vec![doc]).unwrap();
+        let op = raw.ops_after(raw.device(), 0, 1).unwrap().remove(0);
+        assert!(op.body.to_string().len() <= MAX_OP_BYTES);
+        let kept: ImportDoc = serde_json::from_value(op.body).unwrap();
+        assert!(kept.title.ends_with("…[clipped, 100000 chars in full]"));
+        // A title that alone took the op over the cap leaves its body whole (Codex on #305).
+        let doc = ImportDoc {
+            title: "t".repeat(100_000),
+            ..import_doc(3, "b".repeat(1_000))
+        };
+        raw.append_imports(vec![doc]).unwrap();
+        let op = raw.ops_after(raw.device(), 1, 1).unwrap().remove(0);
+        let kept: ImportDoc = serde_json::from_value(op.body).unwrap();
+        assert_eq!(kept.body, "b".repeat(1_000));
+        let doc = ImportDoc {
+            session: "s".repeat(100_000),
+            ..import_doc(2, "b".into())
+        };
+        assert!(raw.append_imports(vec![doc]).is_err());
+    }
+
+    /// D5: large documents go in more than one append, each within the byte cap, and none lost.
+    #[test]
+    fn a_batch_of_large_documents_splits_under_the_byte_cap() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let docs: Vec<ImportDoc> = (0..100)
+            .map(|i| import_doc(i, "x".repeat(60_000)))
+            .collect();
+        assert_eq!(raw.append_imports(docs).unwrap(), 100);
+        let ops = raw.ops_after(raw.device(), 0, 1_000).unwrap();
+        let mut batches: std::collections::BTreeMap<i64, usize> = Default::default();
+        for op in &ops {
+            *batches.entry(op.batch).or_default() += op.body.to_string().len();
+        }
+        assert_eq!(ops.len(), 100);
+        assert!(batches.len() > 1);
+        assert!(batches.values().all(|&bytes| bytes <= MAX_BATCH_BYTES));
+    }
+
+    /// OpenCodeReview on #305: an import op without a source id is passed over, not an error.
+    #[test]
+    fn import_keys_pass_over_an_op_without_a_text_source_id() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let ops = [
+            serde_json::json!({"source": "claude-mem"}),
+            serde_json::json!({"source": "claude-mem", "source_id": 7}),
+            serde_json::json!({"source": "claude-mem", "source_id": "o1"}),
+        ];
+        raw.append_ops(&ops.map(|op| (OpKind::Import, op))).unwrap();
+        let keys = raw.import_keys("claude-mem").unwrap();
+        assert_eq!(keys, ["o1".to_owned()].into_iter().collect());
     }
 
     #[test]
