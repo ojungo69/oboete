@@ -144,11 +144,12 @@ A local runner of bge-m3 (spec 7.1) is built after a spike on its runtime (Task 
   - `a_retraction_in_another_chunk_never_brings_the_decision_back` (row 54-6);
   - `global_preferences_come_first_and_about_ten_claims_have_bodies`;
   - `the_chosen_claims_are_listed_newest_first_whatever_chose_them`;
+  - `a_claim_dated_between_a_pair_never_separates_it`;
   - `a_checkout_with_claims_and_no_manifest_row_still_gets_them`;
   - `an_owner_retraction_the_worker_has_not_applied_is_not_shown` (D3);
   - owner decision 31's fixture: a SessionStart lists a later decision above the earlier one its curator link ended, both with their dates.
 - [ ] **Step 2: `restates`.** `restate` adds its uids to the op's `restates`; the claims consumer writes them as edges of type `restates`; `TIPS` treats every edge type as an end, as now.
-- [ ] **Step 3: `DELIVERED` and `deliver`.** Choose for SessionStart by the number of the manifest's files and last-prompt words a claim's body shares, then by recency; apply the pair rule to the chosen set; then list it newest first, which puts each later claim above the earlier one it ended.
+- [ ] **Step 3: `DELIVERED` and `deliver`.** Choose for SessionStart by the number of the manifest's files and last-prompt words a claim's body shares, then by recency; apply the pair rule to the chosen set; then list it newest first, a pair as one unit dated by its later claim, so that a claim dated between the two never separates them.
 - [ ] **Step 4: SessionStart.** Global preferences, the manifest, the delivered claims (about 10 with bodies, the rest one line each), the tools line, the digest if fresh. `with_decisions` becomes a function that takes the stored text as an `Option`.
 - [ ] **Step 5: Spec.** Reword 8.4's milestone 4 fixture as #295 row 1 says.
 - [ ] **Step 6: Run** `cargo test claims manifest hook` and the whole suite.
@@ -212,9 +213,9 @@ A local runner of bge-m3 (spec 7.1) is built after a spike on its runtime (Task 
 - Test: `src/search.rs`, `src/mcp.rs`
 
 **Interfaces:**
-- `Query {text, repo: Option<String>, all: bool, since: Option<i64>, until: Option<i64>, history: bool, raw: RawArm, limit}`; `RawArm {Off, Below, Only}`, default `Below` (D7). The Raw run's third variant, RRF with a penalty, is `Below` with the penalty as a parameter of the evaluation entry.
+- `Query {text, caller: Option<String>, repo: Option<String>, all: bool, since: Option<i64>, until: Option<i64>, history: bool, raw: RawArm, limit}`: `caller` is the calling checkout's repository; `RawArm {Off, Below, Only}`, default `Below` (D7). The Raw run's third variant, RRF with a penalty, is `Below` with the penalty as a parameter of the evaluation entry.
 - `Hit {key, class: Delivered | Current | Imported | Raw | Superseded { by }, repo, when, kind, status, label: Citable | QuoteOnly | Imported, title, snippet}`.
-- `search::excluded(caller_repo, searched: &[String]) -> bool`: called before any leg that could send the query out (row 30-2), over D13's list from Task 2. Task 4 has no such leg; Task 5 adds the first.
+- `search::excluded(caller_repo, searched: &[String]) -> bool`, over D13's list from Task 2: `search::query` itself calls it with `Query.caller` and every repository searched, before any leg that could send the query out (row 30-2), so no caller (CLI, MCP, viewer, the shortlist) can skip it. Task 4 has no such leg; Task 5 adds the first.
 
 - [ ] **Step 1: Failing tests.**
   - `a_superseded_decision_ranks_below_every_current_hit_and_history_lifts_it` (MUST-M11: a query whose only match is superseded still returns it, labelled);
