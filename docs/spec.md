@@ -306,7 +306,7 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
 
 ### 4.1 Principle: hooks only read, the worker computes ahead
 
-- The worker keeps per checkout a SessionStart packet (ranked delivered decisions (3.4), manifest, fresh digest), and per (session, checkout) a shortlist of about 50 relevant delivered claims. The shortlist is built in two stages: a provisional one from plain hybrid RRF, then the reranked, judge-scored one. It is refreshed at each Stop, every N events, when sync delivers new knowledge, and when the session moves to another checkout (RD/constraints-synthesis.md S4-6, S1-10).
+- The worker keeps per checkout the SessionStart packet's manifest, and per (session, checkout) a shortlist of about 50 relevant delivered claims. The packet's delivered decisions (3.4), global preferences and fresh digest are read at SessionStart from the indexes the worker keeps, so a claim retracted since the worker's last run is never shown. They move into a packet the worker stores only if M22 shows the read pushing SessionStart past the read-hook line (Claude; overrulable). The shortlist is built in two stages: a provisional one from plain hybrid RRF, then the reranked, judge-scored one. It is refreshed at each Stop, every N events, when sync delivers new knowledge, and when the session moves to another checkout (RD/constraints-synthesis.md S4-6, S1-10).
 - Sync is done by the worker. Hooks never wait on the network and never embed a query.
 
 ### 4.2 What the hook does
@@ -1430,6 +1430,7 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A86 | M21's 53 new English test questions are drawn and frozen unjudged at milestone 1 and scored only inside milestone 4's single test run; the final set stays at 112 | 8.2, Appendix C | When M21's English questions are drawn and used |
 | A87 | A read of stored memory is shown to the curator by its call, not its output | 3.1 | Whether memory-tool output can come back as new knowledge |
 | A88 | Milestone 4's deciding runs that read curated claims (M5's one-device lines, M6, Inject) wait for the default curator that milestone 3's deciding run fixes; its build, dev tuning and the test-split run do not (owner decision 32) | 8.4 | Whether milestone 4's held-out runs may go on today's curator, with a curator changed after them measured on fresh held-out transcripts, since the held-out transcripts decide once (8.1) |
+| A89 | The SessionStart packet's delivered decisions, preferences and digest are read at SessionStart from the worker's indexes; the worker stores them per checkout only if M22 shows that read past the read-hook line | 4.1 | Whether the worker also stores them per checkout, rebuilt after every op that changes them |
 
 ## Appendix B. Acceptance tests carried from issues
 
