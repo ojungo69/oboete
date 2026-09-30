@@ -51,6 +51,16 @@ pub fn run(
         ..crate::capture::Settings::load(home)?
     };
     let clock = rusqlite::Connection::open_in_memory()?;
+    // This process holds the worker lock while it times hooks, so each hook's lock attempt starts
+    // no worker; from before the replay, so no worker consumes the replayed records before the
+    // cold arm reads (Codex on #301).
+    let busy =
+        "another process holds the worker lock: stop it before --spawn-sample or --read-sample";
+    let mut held = if spawn_sample > 0 || read_sample > 0 {
+        Some(crate::worker::lock(home)?.context(busy)?)
+    } else {
+        None
+    };
 
     // 1. In-process hook path: pure store cost per event.
     let mut micros: Vec<u128> = Vec::new();
@@ -86,24 +96,26 @@ pub fn run(
     // what the agent actually waits for, per tool-output size (M14). The replayed agent's hook.
     let spawn_agent = if agent == "all" { "claude" } else { agent };
     let mut spawns = serde_json::Map::new();
-    if spawn_sample > 0 {
+    if let Some(held) = held.as_ref().filter(|_| spawn_sample > 0) {
         for &kb in sizes {
-            let us = sample_spawns(home, &root_str, spawn_sample, spawn_agent, kb * 1024)?;
+            let us = sample_spawns(home, held, &root_str, spawn_sample, spawn_agent, kb * 1024)?;
             spawns.insert(format!("{kb}KB"), stats_ms(&us));
         }
     }
     // 2b. The read path (milestone 4 Task 0): cold, before any consumer has run, as a hook finds
     // the home before the worker is up (spec 4.2); warm, after the consumers are drained.
     let mut read = serde_json::Map::new();
-    if read_sample > 0 {
+    if let Some(cold) = held.take().filter(|_| read_sample > 0) {
         read.insert(
             "cold".into(),
-            read_arm(home, &root_str, read_sample, spawn_agent)?,
+            read_arm(home, &cold, &root_str, read_sample, spawn_agent)?,
         );
+        drop(cold);
         drain_for_read(home)?;
+        let warm = crate::worker::lock(home)?.context(busy)?;
         read.insert(
             "warm".into(),
-            read_arm(home, &root_str, read_sample, spawn_agent)?,
+            read_arm(home, &warm, &root_str, read_sample, spawn_agent)?,
         );
     }
     // 3. Backup export per segment (D11): each call seals one segment of at most
@@ -194,6 +206,7 @@ fn tool_output(bytes: usize) -> String {
 /// microseconds, sorted.
 fn sample_spawns(
     home: &Path,
+    held: &crate::worker::Lock,
     root: &str,
     n: usize,
     agent: &str,
@@ -214,7 +227,7 @@ fn sample_spawns(
         (crate::capture::REPLAY_ENV, "1".to_owned()),
         (crate::capture::FIELD_CAP_ENV, cap),
     ];
-    Ok(time_spawns(home, n, agent, "PostToolUse", &payload, &env)?.0)
+    Ok(time_spawns(home, held, n, agent, "PostToolUse", &payload, &env)?.0)
 }
 
 /// Drains the consumers for the warm arm; an error when another process holds the worker lock,
@@ -228,7 +241,13 @@ fn drain_for_read(home: &Path) -> Result<()> {
 /// The read path's times on `home` as it stands: `n` spawned SessionStart hooks and `n` prompt
 /// hooks, as the agent runs them (the write, the read of what is injected, the lock attempt),
 /// and `n` in-process reads of what SessionStart shows for the checkout at `root`.
-fn read_arm(home: &Path, root: &str, n: usize, agent: &str) -> Result<Value> {
+fn read_arm(
+    home: &Path,
+    held: &crate::worker::Lock,
+    root: &str,
+    n: usize,
+    agent: &str,
+) -> Result<Value> {
     let hook = |event: &str, extra: Value| {
         let mut payload = json!({"session_id": "read-sample", "cwd": root,
                                  "hook_event_name": event});
@@ -237,7 +256,7 @@ fn read_arm(home: &Path, root: &str, n: usize, agent: &str) -> Result<Value> {
             .expect("an object")
             .extend(extra.as_object().expect("an object").clone());
         let env = [(crate::capture::REPLAY_ENV, "1".to_owned())];
-        time_spawns(home, n, agent, event, &payload.to_string(), &env)
+        time_spawns(home, held, n, agent, event, &payload.to_string(), &env)
     };
     let (starts, printed) = hook("SessionStart", json!({"source": "startup"}))?;
     let (prompts, _) = hook(
@@ -272,10 +291,11 @@ fn read_in_process(home: &Path, cwd: &Path, n: usize) -> (Vec<u128>, usize) {
 }
 
 /// `n` spawned `oboete hook <agent> <event>` runs fed `payload`, in microseconds, sorted, and the
-/// bytes the last one printed. This process holds the worker lock meanwhile, so each hook makes
-/// the lock attempt it makes after every write (D6) and starts no worker, as while one runs.
+/// bytes the last one printed. The caller holds the worker lock (`_held`), so each hook makes the
+/// lock attempt it makes after every write (D6) and starts no worker, as while one runs.
 fn time_spawns(
     home: &Path,
+    _held: &crate::worker::Lock,
     n: usize,
     agent: &str,
     event: &str,
@@ -284,7 +304,6 @@ fn time_spawns(
 ) -> Result<(Vec<u128>, usize)> {
     use std::io::Write;
     let exe = std::env::current_exe()?;
-    let _held = crate::worker::lock(home)?;
     let mut us = Vec::with_capacity(n);
     let mut printed = 0;
     for _ in 0..n {
@@ -446,6 +465,25 @@ mod tests {
             format!("{err:#}").contains("holds the worker lock"),
             "{err:#}"
         );
+    }
+
+    /// Codex on #301: a worker running when the replay starts would consume the replayed records
+    /// before the cold arm reads, and one that stops before the drain would go unnoticed.
+    #[test]
+    fn the_read_sample_refuses_a_worker_running_before_the_replay() {
+        let home = tempfile::tempdir().unwrap();
+        let fixture = home.path().join("f.jsonl");
+        let line = json!({"agent": "claude", "event": "UserPromptSubmit",
+                          "ts": "2026-09-01T00:00:00.000Z",
+                          "payload": {"session_id": "s", "prompt": "one"}});
+        std::fs::write(&fixture, line.to_string()).unwrap();
+        let _held = crate::worker::lock(home.path()).unwrap().unwrap();
+        let err = run(home.path(), &fixture, None, 0, &[1], "claude", 1).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("holds the worker lock"),
+            "{err:#}"
+        );
+        assert!(!home.path().join("raw.db").exists());
     }
 
     /// cubic on #301: Grok and agy inject at other points, with other payloads.
