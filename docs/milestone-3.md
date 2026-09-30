@@ -10,6 +10,7 @@ The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and
 - M3's typed decisions: #254's prompt shipped. #259 (the typed lines listed again), #262 (a request carried out is the developer's decision) and #271 (the list judged in place, or each typed line weighed before drafting) did not ship (below).
 - Since 2026-09-30 a done claim that quotes the owner's request counts as recalling the decision (the owner's answer to #262's question). Every arm rose by 0 to 5 labels, the best to 26 of 44 (carry2), and no conclusion changed (Counted again, below).
 - A prompt another agent sent is not the owner's since #275 (#273). On the typed set, owner-no records decided went from 13 to 0 over 4 passes, and the typed hits stayed within noise (A prompt another agent sent, below).
+- Overturns: #278 (each carried decision weighed in the curator's answer) did not ship: 10 of 19 stayed current in both arms. #286 found that the model is not the lever: with sonnet as the curator, 8 and 7 stayed current. The default curator stays Haiku, and the next arm is structural (below).
 
 ## M2 on the dev transcripts: passes
 
@@ -294,10 +295,29 @@ Both failing lines rest on one behavior: the curator does not supersede an earli
 - **The uids**: of the 916 `reversed` entries over P's passes, 4 named a uid its prompt did not hold, and all 480 uids in `supersedes` over the 8 passes were in their prompts. The curator copies the 64-character uids; it applies them to the wrong claims.
 - **Reading**: asking for each carried decision moves nothing that the carried prompt did not. What stays current has the shapes carry1 and carry2 showed: a reversal drafted from a report or a tool line (the gates, by design), a line the curator judges as not reversing (d153's condition, d154, d111), and the pairs across sessions (#222). #286 measures the same B with sonnet as the curator, to tell whether the model is the lever for the middle group.
 
+### Sonnet as the curator (#286)
+
+A diagnostic, declared in #286 before its first pass: #278's B exactly (main aa85a49, the same harness copy and base, the claude CLI with `--effort low` and thinking off, as shipped), with the live entry's model `sonnet` instead of `haiku`, over every labeled window (127 spans a pass), 2 passes. The read-out, not an adoption rule: the model is the lever if the mean of overturned decisions still current is 3 or fewer, and not the lever at 7 or more.
+
+| | S1 | S2 |
+|---|---|---|
+| Overturned, still current (of 19) | 8 | 7 |
+| Compatible, dropped (of 25) | 5 | 7 |
+| Recall (of 44, decided or done by the owner's request) | 31 | 28 |
+| Owner-no records shown as decided (of 5) | 0 | 0 |
+| Decided claims | 91 | 74 |
+| Median seconds a window | 7.5 | 7.4 |
+| Tokens a pass (estimate) | 710,170 | 710,542 |
+
+- **Read-out**: a mean of 7.5, so the model is not the lever, and the next arm is structural. The default curator stays Haiku.
+- **Recall**: 29.5 on average, more than the latest Haiku arms on every labeled window (21 to 26, Counted again, above), below the line's 35.
+- **Left current in both passes** (7): d105 and d106 → d111, d142 → d156, d143, d144 and d151 → d153, and d143 → d154; d490 → d187 also in S1. Sonnet overturned d176 → d177 (its draft quoted the owner's price list) and d123 → d361 in both passes, which Haiku left current in every pass of #278; those passes sent only the pairs' spans, and these every labeled window.
+- **Speed**: Sonnet answered faster than Haiku: 7.5 s at the median a window, against 12.4 to 13.3 s in #278's B passes.
+
 ### What the next M3 run needs
 
 1. The test labels, classed by the same rule (instructions for the moment, above).
-2. Supersedes: a window now carries its sessions' decided claims, so a same-session earlier decision is in the prompt; the cross-session pairs need the hybrid search (#222). A record holding two labels is scored per decision (2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and with the reply's options carried, 2 of 6 acceptances settle their proposal (acc6: d462 and d107; #244: a go-ahead is often drafted as a proposal or not at all, or quotes another line than the owner's, and a quote from another repository's tool line loses its supersedes).
+2. Supersedes: a window now carries its sessions' decided claims, so a same-session earlier decision is in the prompt; the cross-session pairs need the hybrid search (#222). The same-session pairs that Haiku and Sonnet both leave current are d105 and d106 → d111, d142 → d156 and d143, d144 and d151 → d153 and d154 (#278, #286): neither a prompt nor a larger model moved them, so the next arm is structural, declared in its own issue before its run. A record holding two labels is scored per decision (2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and with the reply's options carried, 2 of 6 acceptances settle their proposal (acc6: d462 and d107; #244: a go-ahead is often drafted as a proposal or not at all, or quotes another line than the owner's, and a quote from another repository's tool line loses its supersedes).
 3. The quote match: the paraphrases (whitespace-blind matching is #248).
 4. The defaults as they would ship were run once (short-2): 22 of 44.
 5. A base whose Codex prompts from sessions another agent started carry `agent_sent` (#275): a rebuilt base gets it from the transcript parser, and the frozen dev base's copy `base273` has it (the 47 records named by their rollouts).
