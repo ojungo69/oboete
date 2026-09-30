@@ -1,0 +1,23 @@
+src/consumer/imported.rs
+  s_59cfa7617c8511::t_07c25a92c49811 151-153,160-161,164,175-191
+src/main.rs
+  s_59cfa7617c8511::t_77bb3e27323e05 404
+src/raw.rs
+  s_59cfa7617c8511::t_8e0f7452daccbc 1008-1009,1013-1014,1970-1979
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b91a3c339ce99659c2bab89b8936ae033d7fba27",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
