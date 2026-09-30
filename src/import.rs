@@ -74,136 +74,146 @@ pub fn claude_mem(raw: &mut Raw, path: &Path) -> Result<Stats> {
     // oboete keys sessions by the agent's id, so the same session captured by both lines up.
     let mut by_memory: HashMap<String, Session> = HashMap::new();
     let mut by_content: HashMap<String, Session> = HashMap::new();
-    let mut stmt = src.prepare(
+    each_row(
+        &src,
         "SELECT memory_session_id, content_session_id, COALESCE(project, '') FROM sdk_sessions",
+        |r| {
+            let memory: Option<String> = r.get(0)?;
+            let content: String = r.get(1)?;
+            let session = || -> rusqlite::Result<Session> {
+                Ok(Session {
+                    id: content.clone(),
+                    project: r.get(2)?,
+                })
+            };
+            if let Some(m) = memory {
+                by_memory.insert(m, session()?);
+            }
+            by_content.insert(content.clone(), session()?);
+            Ok(())
+        },
     )?;
-    let mut rows = stmt.query([])?;
-    while let Some(r) = rows.next()? {
-        let memory: Option<String> = r.get(0)?;
-        let content: String = r.get(1)?;
-        let session = || -> rusqlite::Result<Session> {
-            Ok(Session {
-                id: content.clone(),
-                project: r.get(2)?,
-            })
-        };
-        if let Some(m) = memory {
-            by_memory.insert(m, session()?);
-        }
-        by_content.insert(content.clone(), session()?);
-    }
-    drop(rows);
-    drop(stmt);
 
-    let mut stmt = src.prepare(
+    each_row(
+        &src,
         "SELECT id, COALESCE(memory_session_id, ''), COALESCE(project, ''), created_at_epoch, COALESCE(type, ''), COALESCE(title, ''),
                 COALESCE(narrative, ''), COALESCE(facts, '') FROM observations ORDER BY id",
+        |r| {
+            let (id, memory, project, ts): (i64, String, String, i64) =
+                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+            let title = redact::outbound(&r.get::<_, String>(5)?);
+            let body = redact::outbound(&observation_body(
+                &r.get::<_, String>(6)?,
+                &r.get::<_, String>(7)?,
+            ));
+            if title.is_empty() && body.is_empty() {
+                stats.empty += 1;
+                return Ok(());
+            }
+            let row = Row {
+                key: format!("o{id}"),
+                session: by_memory.get(&memory),
+                session_id: &memory,
+                project: &project,
+                ts,
+                kind: kind(&r.get::<_, String>(4)?),
+                title: &title,
+                body: &body,
+            };
+            count(sink.put(row)?, &mut stats.observations, &mut stats.seen);
+            Ok(())
+        },
     )?;
-    let mut rows = stmt.query([])?;
-    while let Some(r) = rows.next()? {
-        let (id, memory, project, ts): (i64, String, String, i64) =
-            (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-        let title = redact::outbound(&r.get::<_, String>(5)?);
-        let body = redact::outbound(&observation_body(
-            &r.get::<_, String>(6)?,
-            &r.get::<_, String>(7)?,
-        ));
-        if title.is_empty() && body.is_empty() {
-            stats.empty += 1;
-            continue;
-        }
-        let row = Row {
-            key: format!("o{id}"),
-            session: by_memory.get(&memory),
-            session_id: &memory,
-            project: &project,
-            ts,
-            kind: kind(&r.get::<_, String>(4)?),
-            title: &title,
-            body: &body,
-        };
-        count(sink.put(row)?, &mut stats.observations, &mut stats.seen);
-    }
-    drop(rows);
-    drop(stmt);
 
-    let mut stmt = src.prepare(
+    each_row(
+        &src,
         "SELECT id, COALESCE(memory_session_id, ''), COALESCE(project, ''), created_at_epoch, COALESCE(request, ''),
                 COALESCE(investigated, ''), COALESCE(learned, ''), COALESCE(completed, ''),
                 COALESCE(next_steps, '') FROM session_summaries ORDER BY id",
-    )?;
-    let mut rows = stmt.query([])?;
-    while let Some(r) = rows.next()? {
-        let (id, memory, project, ts): (i64, String, String, i64) =
-            (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-        let mut parts = Vec::new();
-        for (i, label) in [
-            "Request",
-            "Investigated",
-            "Learned",
-            "Completed",
-            "Next steps",
-        ]
-        .iter()
-        .enumerate()
-        {
-            let text: String = r.get(4 + i)?;
-            if !text.trim().is_empty() {
-                parts.push(format!("{label}: {}", text.trim()));
+        |r| {
+            let (id, memory, project, ts): (i64, String, String, i64) =
+                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+            let mut parts = Vec::new();
+            for (i, label) in [
+                "Request",
+                "Investigated",
+                "Learned",
+                "Completed",
+                "Next steps",
+            ]
+            .iter()
+            .enumerate()
+            {
+                let text: String = r.get(4 + i)?;
+                if !text.trim().is_empty() {
+                    parts.push(format!("{label}: {}", text.trim()));
+                }
             }
-        }
-        let body = redact::outbound(&parts.join("\n"));
-        if body.is_empty() {
-            stats.empty += 1;
-            continue;
-        }
-        let row = Row {
-            key: format!("s{id}"),
-            session: by_memory.get(&memory),
-            session_id: &memory,
-            project: &project,
-            ts,
-            kind: "summary",
-            title: "",
-            body: &body,
-        };
-        count(sink.put(row)?, &mut stats.summaries, &mut stats.seen);
-    }
-    drop(rows);
-    drop(stmt);
+            let body = redact::outbound(&parts.join("\n"));
+            if body.is_empty() {
+                stats.empty += 1;
+                return Ok(());
+            }
+            let row = Row {
+                key: format!("s{id}"),
+                session: by_memory.get(&memory),
+                session_id: &memory,
+                project: &project,
+                ts,
+                kind: "summary",
+                title: "",
+                body: &body,
+            };
+            count(sink.put(row)?, &mut stats.summaries, &mut stats.seen);
+            Ok(())
+        },
+    )?;
 
-    let mut stmt = src.prepare(
+    each_row(
+        &src,
         "SELECT id, COALESCE(content_session_id, ''), created_at_epoch, COALESCE(prompt_text, '')
          FROM user_prompts ORDER BY id",
+        |r| {
+            let (id, content, ts, text): (i64, String, i64, String) =
+                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+            // The same cleaning a live prompt gets: blocks out, secrets masked, notifications dropped.
+            let body = hook::clip(&hook::strip_blocks(&text, true));
+            if body.is_empty() || hook::is_envelope(&body) {
+                stats.empty += 1;
+                return Ok(());
+            }
+            let known = by_content.get(&content);
+            let project = known.map(|s| s.project.clone()).unwrap_or_default();
+            let row = Row {
+                key: format!("p{id}"),
+                session: known,
+                session_id: &content,
+                project: &project,
+                ts,
+                kind: "prompt",
+                title: "",
+                body: &body,
+            };
+            count(sink.put(row)?, &mut stats.prompts, &mut stats.seen);
+            Ok(())
+        },
     )?;
-    let mut rows = stmt.query([])?;
-    while let Some(r) = rows.next()? {
-        let (id, content, ts, text): (i64, String, i64, String) =
-            (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-        // The same cleaning a live prompt gets: blocks out, secrets masked, notifications dropped.
-        let body = hook::clip(&hook::strip_blocks(&text, true));
-        if body.is_empty() || hook::is_envelope(&body) {
-            stats.empty += 1;
-            continue;
-        }
-        let known = by_content.get(&content);
-        let project = known.map(|s| s.project.clone()).unwrap_or_default();
-        let row = Row {
-            key: format!("p{id}"),
-            session: known,
-            session_id: &content,
-            project: &project,
-            ts,
-            kind: "prompt",
-            title: "",
-            body: &body,
-        };
-        count(sink.put(row)?, &mut stats.prompts, &mut stats.seen);
-    }
-    drop(rows);
-    drop(stmt);
     sink.flush()?;
     Ok(stats)
+}
+
+/// Calls `each` with every row `sql` selects from `src`, in order.
+fn each_row(
+    src: &Connection,
+    sql: &str,
+    mut each: impl FnMut(&rusqlite::Row) -> Result<()>,
+) -> Result<()> {
+    let mut stmt = src.prepare(sql)?;
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        each(r)?;
+    }
+    Ok(())
 }
 
 /// claude-mem's ids restart in every database (the Windows copy and the WSL one both have an
