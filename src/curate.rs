@@ -1059,8 +1059,7 @@ pub fn run_phase(
         return Ok(waiting(p, now));
     }
     // Built only for a window that is sent now: a held one would search its candidates each pass.
-    let req = request(raw, k, rules, summary, &w)?;
-    let failed = match answered(raw, k, rules, &w, &req, curator)? {
+    let failed = match asked(raw, k, rules, summary, &w, curator)? {
         Ok((op, claims)) => return cover(raw, db, &w, op, claims),
         Err(failed) => failed,
     };
@@ -1099,13 +1098,15 @@ struct Request {
 }
 
 /// The request for window `w`: its text, the candidates of each of its repositories (found by
-/// that repository's lines) and what its sessions carried in, fitted to a fifth of the budget.
+/// that repository's lines) and what its sessions carried in, all of them, or with `room` fitted
+/// within that many tokens (`fit`).
 fn request(
     raw: &Raw,
     k: &Connection,
     rules: &Rules,
     summary: &Summary,
     w: &Window,
+    room: Option<u32>,
 ) -> Result<Request> {
     // `claims::current` reads, never creates: a store the worker has not yet given claims.
     crate::claims::schema(k)?;
@@ -1138,9 +1139,12 @@ fn request(
         shown.push(block);
     }
     let (carried_text, mut carried_uids, offered) = carried(raw, k, rules, w)?;
-    // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing,
-    // and options cut from it are picked by nothing.
-    let (carried_text, shown) = fit(&carried_text, &shown, summary.window_tokens / 5);
+    // A uid cut from the prompt is superseded by nothing, and options cut from it are picked by
+    // nothing.
+    let (carried_text, shown) = match room {
+        Some(room) => fit(&carried_text, &shown, room),
+        None => (carried_text, shown.concat()),
+    };
     carried_uids.retain(|(_, _, c)| carries(&carried_text, &c.uid));
     shown_in.retain(|(_, c)| shows(&shown, &c.uid));
     let offered = offered
@@ -1154,6 +1158,35 @@ fn request(
         carried_uids,
         offered,
     })
+}
+
+/// The chain's answer about `w` (`answered`) to a request with everything its sessions carry in
+/// and every candidate: a budget on them carried at most a session's 5 newest decisions in #286's
+/// prompts, so a later window could not supersede an older one, and the owner lifted it
+/// (2026-09-30). When an entry refuses that request as over its ceiling (Groq's free tier takes
+/// 8,000 tokens) and none answers it, the window is asked again within a fifth of its budget
+/// (`fit`), as before the lift, when that cuts anything: an entry with a ceiling still curates it.
+#[allow(clippy::type_complexity)]
+fn asked(
+    raw: &Raw,
+    k: &Connection,
+    rules: &Rules,
+    summary: &Summary,
+    w: &Window,
+    curator: &mut Curator,
+) -> Result<std::result::Result<(Value, Vec<Value>), Vec<Fallback>>> {
+    let whole = request(raw, k, rules, summary, w, None)?;
+    let answer = answered(raw, k, rules, w, &whole, curator)?;
+    if let Err(failed) = &answer
+        && failed.iter().any(|f| matches!(f.skip, Skip::TooBig))
+    {
+        let fitted = request(raw, k, rules, summary, w, Some(summary.window_tokens / 5))?;
+        // With nothing cut, the same prompt would be refused the same way.
+        if fitted.prompt != whole.prompt {
+            return answered(raw, k, rules, w, &fitted, curator);
+        }
+    }
+    Ok(answer)
 }
 
 /// The chain's answer about `w`, as the window op's body (`curated`) and the claim ops the gates
@@ -1423,7 +1456,7 @@ fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> 
     }
     let mut tokens = 0u32;
     for w in plan.iter().flat_map(|(_, w)| w) {
-        let req = request(&raw, &k, &rules, &cfg.summary, w)?;
+        let req = request(&raw, &k, &rules, &cfg.summary, w, None)?;
         tokens = tokens.saturating_add(crate::budget::estimate(&req.prompt));
     }
     let db = providers_db::open(home)?;
@@ -1604,8 +1637,7 @@ pub fn recurate_window(
     let (mut op, mut claims) = if w.text.is_empty() {
         (json!({"outcome": "covered"}), Vec::new())
     } else {
-        let req = request(raw, k, rules, summary, w)?;
-        match answered(raw, k, rules, w, &req, curator)? {
+        match asked(raw, k, rules, summary, w, curator)? {
             Ok(answer) => answer,
             Err(failed) => return Ok(Err(ChainFailed(failed).to_string())),
         }
@@ -3685,13 +3717,22 @@ mod tests {
                 2,
             ),
         ];
+        // A window refused as too big is asked again fitted, and refused again: it can never take
+        // this one.
+        let calls: Vec<_> = script
+            .iter()
+            .flat_map(|(skips, _, _)| {
+                let twice = skips.iter().any(|s| s.2 == Skip::TooBig);
+                vec![skips; if twice { 2 } else { 1 }]
+            })
+            .collect();
         let step = Cell::new(0);
         let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
             let i = step.get();
             step.set(i + 1);
-            match script.get(i) {
-                Some((skips, _, _)) => Err(went_past(skips)),
-                None if i == script.len() => Err(went_past(&[("groq", "HTTP 400", Skip::Failed)])),
+            match calls.get(i) {
+                Some(skips) => Err(went_past(skips)),
+                None if i == calls.len() => Err(went_past(&[("groq", "HTTP 400", Skip::Failed)])),
                 None => Ok(answered("groq")),
             }
         };
@@ -3731,6 +3772,23 @@ mod tests {
         assert!(ws[0]["reason"].as_str().unwrap().contains("groq: HTTP 400"));
         assert_eq!(ws[1]["outcome"], "curated");
         assert_eq!(ws[1]["from_seq"], 2);
+    }
+
+    /// A refusal as too big asks again fitted only when that cuts anything: the same prompt would
+    /// be refused the same way.
+    #[test]
+    fn a_window_with_nothing_to_cut_is_not_asked_again_fitted() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&prompt("one")).unwrap();
+        let calls = Cell::new(0);
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            calls.set(calls.get() + 1);
+            Err(went_past(&[("groq", "too big", Skip::TooBig)]))
+        };
+        let (rules, summary) = (Rules::default(), curating(5_000));
+        run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut chain).unwrap();
+        assert_eq!(calls.get(), 1);
     }
 
     /// Task 5: a pending row counts only while raw's next window still starts where it does. A
@@ -4083,6 +4141,12 @@ mod tests {
         crate::worker::drain(raw, k, &mut claims_consumer()).unwrap();
     }
 
+    /// A prompt as far as its window's lines: what a stub answers from, not what the window
+    /// carries in or is shown as candidates.
+    fn lines_part(p: &str) -> &str {
+        p.split("\n## Kept claims").next().unwrap_or(p)
+    }
+
     fn claims_consumer() -> Vec<Box<dyn crate::worker::Consumer>> {
         vec![Box::new(crate::consumer::claims::Claims)]
     }
@@ -4165,7 +4229,7 @@ mod tests {
         let w = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
             .unwrap()
             .unwrap();
-        let req = request(&raw, &k, &rules, &summary, &w).unwrap();
+        let req = request(&raw, &k, &rules, &summary, &w, None).unwrap();
         let shown: Vec<&str> = req.shown_in.iter().map(|(_, c)| c.body.as_str()).collect();
         assert!(shown.contains(&earlier), "{shown:?}");
         assert_eq!(shown.len(), 20, "tool text fills the places left");
@@ -4219,7 +4283,7 @@ mod tests {
         let w = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
             .unwrap()
             .unwrap();
-        let req = request(&raw, &k, &rules, &summary, &w).unwrap();
+        let req = request(&raw, &k, &rules, &summary, &w, None).unwrap();
         let shown: Vec<&str> = req.shown_in.iter().map(|(_, c)| c.body.as_str()).collect();
         assert!(shown.contains(&earlier), "{shown:?}");
         assert_eq!(shown.len(), 20);
@@ -4440,8 +4504,9 @@ mod tests {
         assert!(decided[0].ends_with(": Use Postgres."));
     }
 
-    /// A candidate the budget cut from the prompt, or never shown, is superseded by nothing; the
-    /// ones shown are labelled with their repository.
+    /// A candidate the budget cut from the prompt (when every entry refused the whole request),
+    /// or never shown, is superseded by nothing; the ones shown are labelled with their
+    /// repository.
     #[test]
     fn only_a_candidate_the_prompt_shows_is_superseded() {
         let home = tempfile::tempdir().unwrap();
@@ -4496,6 +4561,10 @@ mod tests {
         assert!(found.len() > 10 && found.iter().all(|u| all.contains(u)));
         let sent = std::cell::RefCell::new(String::new());
         let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            // The whole request shows every candidate, over the entry's ceiling.
+            if found.iter().all(|u| p.contains(u.as_str())) {
+                return Err(went_past(&[("groq", "over its ceiling", Skip::TooBig)]));
+            }
             *sent.borrow_mut() = p.to_owned();
             let shown = found.iter().find(|u| p.contains(u.as_str())).unwrap();
             let cut = found.iter().find(|u| !p.contains(u.as_str())).unwrap();
@@ -4620,11 +4689,31 @@ mod tests {
         then: impl Fn(&str) -> Value,
         again: bool,
     ) -> (Vec<String>, Vec<crate::raw::Op>) {
+        curated_under(first, answer, second, then, again, |_| false)
+    }
+
+    /// `curated`, with a prompt `too_big` names refused as over its ceiling, as Groq's free tier
+    /// refuses one over 8,000 tokens, and the other entry waiting for the owner: the window is
+    /// asked again fitted. The prompts sent are the ones answered.
+    fn curated_under(
+        first: &[Event],
+        answer: Value,
+        second: &[Event],
+        then: impl Fn(&str) -> Value,
+        again: bool,
+        too_big: impl Fn(&str) -> bool,
+    ) -> (Vec<String>, Vec<crate::raw::Op>) {
         let home = tempfile::tempdir().unwrap();
         let (mut raw, db) = open(home.path());
         let mut k = crate::knowledge::open(home.path()).unwrap();
         let sent = std::cell::RefCell::new(Vec::new());
         let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            if too_big(p) {
+                return Err(went_past(&[
+                    ("groq", "over its ceiling", Skip::TooBig),
+                    ("claude", "stopped", Skip::Owner),
+                ]));
+            }
             sent.borrow_mut().push(p.to_owned());
             let output = if sent.borrow().len() == 1 {
                 answer.clone()
@@ -4982,6 +5071,7 @@ mod tests {
         );
         raw.append(&prompt(&text)).unwrap();
         let answer = |p: &str| {
+            let p = lines_part(p);
             let (quote, line) = if p.contains("Use tabs") {
                 ("Use tabs", "L1")
             } else if p.contains("Log to stderr") {
@@ -6107,7 +6197,7 @@ mod tests {
         let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
             let quote = ["Use tabs", "log to stderr"]
                 .into_iter()
-                .find(|q| p.contains(q));
+                .find(|q| lines_part(p).contains(q));
             let claims: Vec<Value> = quote
                 .map(|q| drafted("c1", "decided", q, q))
                 .into_iter()
@@ -7170,8 +7260,9 @@ mod tests {
 
     /// A bare option number is shorter than a quote's usual 5 characters: quoted whole, as the
     /// prompt now allows, it is the user's pick and settles the carried option it names (#244,
-    /// d107), through the options the window's prompt carried in (`gates::picks_an_option`). Cut
-    /// from the prompt by the budget, they settle nothing.
+    /// d107), through the options the window's prompt carried in (`gates::picks_an_option`), long
+    /// ones too. Cut from the prompt by the budget, when an entry refused the whole request, they
+    /// settle nothing.
     #[test]
     fn a_bare_option_number_quoted_whole_settles_the_carried_option() {
         let options = "Two ways:\n1. **Cache the parsed files**\n2. **Parse in parallel**";
@@ -7208,6 +7299,12 @@ mod tests {
         assert_eq!(picked.body["supersedes"].as_array().unwrap().len(), 1);
         let long = " Keep the cache warm between runs.".repeat(25);
         let (sent, ops) = two_windows(&first, answer(&long), &[prompt("1")], pick);
+        assert!(sent[1].contains("options in the reply"), "{}", sent[1]);
+        let picked = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+        assert_eq!(picked.body["status"], "decided");
+        let options = |p: &str| p.contains("options in the reply");
+        let (sent, ops) =
+            curated_under(&first, answer(&long), &[prompt("1")], pick, false, options);
         assert!(!sent[1].contains("options in the reply"), "{}", sent[1]);
         let picked = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
         assert_eq!(picked.body["status"], "proposed");
