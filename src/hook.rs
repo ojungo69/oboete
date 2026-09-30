@@ -1101,14 +1101,26 @@ mod tests {
         crate::manifest::fenced(text.trim())
     }
 
-    fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "oboete-hook-{name}-{}-{}",
-            std::process::id(),
-            db::now_ms()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    /// A test's folder, removed when the test ends, passed or failed: the tests that did not remove
+    /// theirs left one each in the system's temporary folder on every run (3,449 by 2026-09-30).
+    struct Tmp(tempfile::TempDir);
+
+    impl std::ops::Deref for Tmp {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<Path> for Tmp {
+        fn as_ref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    fn tmp(name: &str) -> Tmp {
+        let prefix = format!("oboete-hook-{name}-");
+        Tmp(tempfile::Builder::new().prefix(&prefix).tempdir().unwrap())
     }
 
     #[test]
@@ -1841,7 +1853,7 @@ mod tests {
             let payload = match agent {
                 "agy" => agy_fixture(&dir)["PreInvocation"].clone(),
                 "cursor" => cursor_fixture(&dir)["SessionStart"].clone(),
-                _ => json!({"sessionId": "g", "workspaceRoot": dir,
+                _ => json!({"sessionId": "g", "workspaceRoot": &*dir,
                             "hookEventName": "PreToolUse", "toolName": "Read"}),
             };
             std::fs::create_dir_all(dir.join("raw.db")).unwrap(); // cannot be opened
@@ -1869,7 +1881,7 @@ mod tests {
         std::fs::write(&rollout, lines.join("\n") + "\n").unwrap();
         // exec-3 is not in the rollout: nothing says it failed.
         for (id, failed) in [("exec-1", true), ("exec-2", false), ("exec-3", false)] {
-            let payload = json!({"session_id": id, "cwd": dir, "transcript_path": rollout,
+            let payload = json!({"session_id": id, "cwd": &*dir, "transcript_path": rollout,
                                  "tool_name": "Bash", "tool_input": {"command": "cat /x"},
                                  "tool_response": "out", "tool_use_id": id});
             hook(&dir, "codex", "PostToolUse", &payload);
@@ -2000,7 +2012,7 @@ mod tests {
             .unwrap();
         let workers: Vec<_> = (0..4)
             .map(|_| {
-                let dir = dir.clone();
+                let dir = dir.to_path_buf();
                 let payload = payloads["UserPromptSubmit"].clone();
                 std::thread::spawn(move || hook(&dir, "cursor", "UserPromptSubmit", &payload))
             })
@@ -2159,7 +2171,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         let _worker = crate::worker::lock(&dir).unwrap();
         for agent in crate::setup::AGENTS {
-            let payload = json!({"session_id":agent, "conversationId":agent, "cwd":dir, "workspacePaths":[dir], "workspace_roots":[dir]});
+            let payload = json!({"session_id":agent, "conversationId":agent, "cwd":&*dir, "workspacePaths":[&*dir], "workspace_roots":[&*dir]});
             let input = format!("\u{feff}{payload}\r\n");
             let mut output = Vec::new();
             run_io(&dir, agent, "SessionStart", input.as_bytes(), &mut output).unwrap();
@@ -2589,7 +2601,7 @@ mod tests {
         assert_eq!(hook(&dir, "agy", "PreInvocation", &fresh), "{}");
         let workers: Vec<_> = (0..4)
             .map(|_| {
-                let dir = dir.clone();
+                let dir = dir.to_path_buf();
                 let mut payload = payloads["PreInvocation"].clone();
                 payload["conversationId"] = json!("simultaneous");
                 std::thread::spawn(move || hook(&dir, "agy", "PreInvocation", &payload))
@@ -2644,7 +2656,7 @@ mod tests {
         for (event, payload) in payloads.as_object_mut().unwrap() {
             payload["workspacePaths"] = json!([]);
             // Neither a Claude-shaped field nor the process cwd can stand in for a workspace.
-            payload["cwd"] = json!(dir);
+            payload["cwd"] = json!(&*dir);
             let mut output = Vec::new();
             run_io(
                 &unused_home,
@@ -2879,7 +2891,7 @@ mod tests {
             "h".repeat(half - 100),
             "S".repeat(half)
         );
-        let payload = json!({"session_id": "c1", "cwd": dir, "tool_name": "Read",
+        let payload = json!({"session_id": "c1", "cwd": &*dir, "tool_name": "Read",
                              "tool_input": {}, "tool_response": output});
         hook(&dir, "claude", "PostToolUse", &payload);
         let stored = &recorded(&dir, "claude", "c1")[0].body;
