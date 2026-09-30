@@ -98,19 +98,6 @@ pub fn show(home: &Path) -> Value {
     let db = (home.join("providers.db").exists())
         .then(|| crate::providers_db::open(home).ok())
         .flatten();
-    // Whether a `[chain]` model applies to an entry of its name: one `load()` left unset
-    // everywhere (a model no entry of the name can price) is shown as not applied, and a save
-    // that leaves it keeps it (#274). Every entry of one name shows the same value (Codex on #270).
-    let applied: std::collections::BTreeSet<&str> = (cfg.providers.iter())
-        .filter(|p| {
-            let own = match p {
-                Provider::Openai { model, .. } => Some(model.as_str()),
-                Provider::Cli { model, .. } => model.as_deref(),
-            };
-            own.is_some() && cfg.chain.model.get(p.name()).map(String::as_str) == own
-        })
-        .map(Provider::name)
-        .collect();
     // One row per name, as `[chain]` sets every entry of a name alike.
     let chain: Vec<Value> = names(&cfg.providers)
         .into_iter()
@@ -128,7 +115,7 @@ pub fn show(home: &Path) -> Value {
                 .into_iter()
                 .find(|r| rules.contains(r))
                 .unwrap_or(config::ModelRule::Any);
-            entry(&same, &cfg.chain, applied.contains(name), rule, db.as_ref())
+            entry(&same, &cfg.chain, rule, db.as_ref())
         })
         .collect();
     json!({
@@ -167,7 +154,6 @@ fn tool_output(t: ToolOutput) -> &'static str {
 fn entry(
     same: &[&Provider],
     chain: &ChainOverlay,
-    applied: bool,
     rule: config::ModelRule,
     db: Option<&Connection>,
 ) -> Value {
@@ -211,6 +197,9 @@ fn entry(
         Some(db) if p.budget_from_key() => crate::budget::daily(db, p).unwrap_or(p.daily_budget()),
         _ => p.daily_budget(),
     };
+    // Whether the row's entry takes the `[chain]` model: one `load()` left unset (a model the entry
+    // cannot price) is shown as not applied, and a save that leaves it keeps it (#274).
+    let applied = chain.model.get(name).map(String::as_str) == model;
     // The row shows the first entry's values: where entries of its name use different ones (with
     // `[chain]` applied), it says so (#274).
     let key_file_of = |p: &Provider| match p {
@@ -1320,6 +1309,29 @@ mod tests {
         )
         .unwrap();
         assert!(!file(&home).unwrap().contains("a = \"x\""));
+    }
+
+    /// A `[chain]` model the row's entry cannot take is marked, though another entry of its name
+    /// takes it (cubic on #287): the row shows the first entry, and says the entries differ.
+    #[test]
+    fn a_model_the_rows_entry_does_not_take_is_marked() {
+        let entry = |model: &str, priced: &str| {
+            format!(
+                "[[providers]]\nkind = \"openai\"\nname = \"a\"\nbase_url = \"https://example.invalid/v1\"\n\
+                 model = \"{model}\"\n{priced}\n"
+            )
+        };
+        let text = format!(
+            "[chain]\nmodel = {{ a = \"x\" }}\n\n{}{}",
+            entry("m", "limits = { usd_per_mtok_in = 1.0 }"),
+            entry("n", "")
+        );
+        let home = home_with(Some(&text));
+        let row = &show(home.path())["chain"][0];
+        assert_eq!(
+            (&row["model"], &row["model_applied"], &row["differs"]),
+            (&json!("x"), &json!(false), &json!(["model"]))
+        );
     }
 
     /// #274 item 3: the row shows the first entry's values, and says where entries of its name
