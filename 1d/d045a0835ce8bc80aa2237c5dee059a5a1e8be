@@ -1,0 +1,24 @@
+docs/spec.md
+  s_30d0ae67cebed9::t_0b366dae349cf7 59
+  s_30d0ae67cebed9::t_004d227bed754c 1341,1432
+  s_30d0ae67cebed9::t_a391fb6d09df19 26
+  s_30d0ae67cebed9::t_56da24bc967b39 1270
+CLAUDE.md
+  s_30d0ae67cebed9::t_1c301c340d73bd 6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1dd045a0835ce8bc80aa2237c5dee059a5a1e8be",
+  "prompts": {},
+  "sessions": {
+    "s_30d0ae67cebed9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c79fad97-efa9-40d6-9230-d12636d3a455",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
