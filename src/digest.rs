@@ -182,7 +182,10 @@ pub fn phase(
             }
             let mut claims = Vec::new();
             for c in crate::claims::anchored_through(k, repo, &device, *through, WALK)? {
-                if raw.session_key(&c.device, c.seq)?.as_deref() == Some(key.as_str()) {
+                // Not one that quotes an excluded session too (Codex on #304).
+                if raw.session_key(&c.device, c.seq)?.as_deref() == Some(key.as_str())
+                    && !crate::curate::quotes_excluded(raw, k, &reading.excluded, &c.uid)?
+                {
                     claims.push(c);
                     if claims.len() == CLAIMS {
                         break;
@@ -640,6 +643,59 @@ mod tests {
         let (phase, sent) = run(home.path(), Phase::Idle, &answer);
         assert_eq!((phase, sent.len()), (Phase::Idle, 0));
         assert!(digest_ops(home.path()).is_empty());
+    }
+
+    /// Codex on #304: a claim of the session that also quotes a session which touched an excluded
+    /// repository goes to no digester.
+    #[test]
+    fn a_claim_quoting_an_excluded_session_is_left_out_of_the_digest() {
+        let (home, uids) = home(&["Use tabs."], 1_000, true);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        let quote = |seq: i64, text: &str| crate::claims::Evidence {
+            device: device.clone(),
+            seq,
+            offset: 0,
+            length: text.len() as i64,
+            sentence: 0,
+            quote: text.into(),
+            claim_at: None,
+        };
+        let first = quote(1, "Use tabs.");
+        let e = Event {
+            kind: "prompt".into(),
+            session: "s2".into(),
+            repo: Some("secret".into()),
+            ts: 1_000,
+            ..test_event(&json!({"prompt": "Tabs in the feed too."}).to_string())
+        };
+        let seq = raw.append(&e).unwrap();
+        // The claim again, now also quoting s2: its active derivation.
+        let op = crate::claims::ClaimOp {
+            id: "c9".into(),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: "Use tabs.".into(),
+            evidence: vec![first, quote(seq, "Tabs in the feed too.")],
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier: 2,
+            why: String::new(),
+            tainted: false,
+        };
+        let exclusion = json!({"repo": "secret", "undo": false});
+        raw.append_ops(&[
+            (OpKind::Claim, serde_json::to_value(op).unwrap()),
+            (OpKind::Exclusion, exclusion),
+        ])
+        .unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        let answer = || lines(json!([{"text": "Tabs.", "uids": uids}]));
+        let (phase, sent) = run(home.path(), Phase::Idle, &answer);
+        assert_eq!((phase, sent.len()), (Phase::Idle, 0));
     }
 
     /// MUST-M6: a claim body is data in the prompt, and an answer's line that cites no claim it

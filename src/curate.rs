@@ -1276,7 +1276,7 @@ fn request(
         if !w.reading.excluded.is_empty() {
             let mut kept = Vec::with_capacity(current.len());
             for c in current {
-                if !quotes_excluded(raw, k, w, &c.uid)? {
+                if !quotes_excluded(raw, k, &w.reading.excluded, &c.uid)? {
                     kept.push(c);
                 }
             }
@@ -1315,9 +1315,18 @@ fn request(
     })
 }
 
-/// Whether the active derivation of claim `uid` quotes a record of a session `w` was cut to leave
-/// out (D13): a claim is content of each session it quotes, so it is no candidate, nor carried in.
-fn quotes_excluded(raw: &Raw, k: &Connection, w: &Window, uid: &str) -> Result<bool> {
+/// Whether the active derivation of claim `uid` quotes a record of an `excluded` session (D13,
+/// `Reading::excluded`): a claim is content of each session it quotes, so it is no candidate, is
+/// not carried in, and goes to no digest.
+pub(crate) fn quotes_excluded(
+    raw: &Raw,
+    k: &Connection,
+    excluded: &std::collections::HashSet<String>,
+    uid: &str,
+) -> Result<bool> {
+    if excluded.is_empty() {
+        return Ok(false);
+    }
     let quoted: Vec<(String, i64)> = k
         .prepare_cached(
             "SELECT q.device, q.seq FROM claims c
@@ -1329,7 +1338,7 @@ fn quotes_excluded(raw: &Raw, k: &Connection, w: &Window, uid: &str) -> Result<b
     for (device, seq) in quoted {
         if raw
             .session_key(&device, seq)?
-            .is_some_and(|key| w.reading.excluded.contains(&key))
+            .is_some_and(|key| excluded.contains(&key))
         {
             return Ok(true);
         }
@@ -2971,7 +2980,7 @@ fn carried(
     let (mut decided, mut items) = (Vec::new(), Vec::new());
     for repo in repos {
         for c in crate::claims::current_before(k, repo, w)? {
-            if !w.reading.excluded.is_empty() && quotes_excluded(raw, k, w, &c.uid)? {
+            if quotes_excluded(raw, k, &w.reading.excluded, &c.uid)? {
                 continue;
             }
             let list = if c.kind == "open item" {
@@ -3031,10 +3040,12 @@ fn carried(
                 let uid = crate::claims::uid(kind, first);
                 // Its active derivation, once, while that is still a current proposal: a sibling
                 // or a later window may have settled or reworded it.
+                // Not one that quotes an excluded session too (Codex on #304).
                 if let Some((repo, tip)) = crate::claims::tip(k, &uid, w)?
                     && tip.status == "proposed"
                     && !uids.iter().any(|(_, _, u)| u.uid == uid)
                     && !proposals.iter().any(|(.., u)| u.uid == uid)
+                    && !quotes_excluded(raw, k, &w.reading.excluded, &uid)?
                 {
                     let place = repo
                         .as_deref()
@@ -8160,6 +8171,48 @@ mod tests {
         let done = recurated(&mut raw);
         assert_eq!((done.windows, done.kept_back), (1, 0));
         assert!(parked_spans(&raw, "oboete-v1").unwrap().is_empty());
+    }
+
+    /// Codex on #304: a proposal carried into its session's next window that also quotes a session
+    /// which touched an excluded repository is not carried: a claim is content of each session it
+    /// quotes.
+    #[test]
+    fn a_proposal_quoting_an_excluded_session_is_not_carried() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        let (_, own) = kept(&mut raw, "a", "open", "Cache the parsed files.");
+        let (_, other) = kept(&mut raw, "b", "secret", "Parse the secret feed.");
+        let mut op: crate::claims::ClaimOp = serde_json::from_value(own).unwrap();
+        let other: crate::claims::ClaimOp = serde_json::from_value(other).unwrap();
+        (op.status, op.speaker) = ("proposed".into(), "assistant proposal".into());
+        op.evidence.extend(other.evidence);
+        let uid = crate::claims::uid("decision", &op.evidence[0]);
+        let window = json!({"outcome": "curated", "from_seq": 1, "from_offset": null,
+            "to_seq": 2, "to_offset": null, "elided": []});
+        let op = serde_json::to_value(op).unwrap();
+        raw.append_ops(&[(OpKind::Window, window), (OpKind::Claim, op)])
+            .unwrap();
+        consume(&raw, &mut k);
+        raw.append(&said("Yes.", "a", "open", "hook")).unwrap();
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let prompt = |raw: &Raw| {
+            let dev = raw.device().to_owned();
+            let at = raw.curation_checkpoint(&dev).unwrap();
+            let reading = Reading::now(raw, Reads::Live).unwrap();
+            let w = window_at(raw, &dev, at, None, WINDOW_TOKENS.into(), &rules, &reading)
+                .unwrap()
+                .unwrap();
+            request(raw, &k, &rules, &summary, &w).unwrap().prompt
+        };
+        let carried = format!("proposed before {uid}");
+        assert!(prompt(&raw).contains(&carried), "{}", prompt(&raw));
+        exclude(&mut raw, "secret", false);
+        let after = prompt(&raw);
+        assert!(
+            after.contains("Yes.") && !after.contains(&carried),
+            "{after}"
+        );
     }
 
     /// Codex on #304: `recurate --source` sends the other session of a window that also holds an
