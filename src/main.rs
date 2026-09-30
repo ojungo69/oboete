@@ -82,12 +82,17 @@ enum Cmd {
     /// with no AI call
     Rebuild,
     /// Curate again what was curated before: the spans queued since (a quote a new rule masked
-    /// or a forget removed), the windows every provider skipped, or a span you name. It lists
-    /// the windows and an estimate; nothing is sent without --yes
+    /// or a forget removed), the windows every provider skipped, the imported records of a
+    /// source, or a span you name. It lists the windows and an estimate; nothing is sent without
+    /// --yes
     Recurate {
         /// The windows every provider skipped
         #[arg(long, conflicts_with = "span")]
         skipped: bool,
+        /// The imported records of this source, which curation leaves aside: oboete-v1 or
+        /// transcript
+        #[arg(long, conflicts_with_all = ["skipped", "span"])]
+        source: Option<String>,
         /// A span of this device's records, as <device>:<from>-<to>
         span: Option<String>,
         /// Send them
@@ -109,6 +114,16 @@ enum Cmd {
     /// List the current claims of the repository in the current directory, each with the uid
     /// `oboete correct` takes
     Claims,
+    /// Keep a repository's sessions from every curator and embedder: nothing of a session that
+    /// touched it is sent out from now on (what was sent before stays sent). The repository in
+    /// the current directory unless one is named
+    Exclude {
+        /// The repository as oboete labels it (github.com/<owner>/<name>, or its path)
+        repo: Option<String>,
+        /// Take it back out of the list: its new records can be sent again
+        #[arg(long)]
+        undo: bool,
+    },
     /// Rebuild raw.db from the backup segments (MUST-M15); the current file is kept aside.
     /// The worker does this by itself when raw.db is damaged.
     Restore,
@@ -556,9 +571,15 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             }
             emit(&out)
         }
-        Cmd::Recurate { skipped, span, yes } => {
-            let again = match span {
-                Some(span) => {
+        Cmd::Recurate {
+            skipped,
+            source,
+            span,
+            yes,
+        } => {
+            let again = match (span, source) {
+                (_, Some(source)) => curate::Again::Source(source),
+                (Some(span), None) => {
                     let parsed = span.split_once(':').and_then(|(device, range)| {
                         let (from, to) = range.split_once('-')?;
                         let span = curate::Span::records(from.parse().ok()?, to.parse().ok()?);
@@ -568,10 +589,37 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                         anyhow::anyhow!("a span is <device>:<from>-<to>, such as 1a2b3c4d:120-180")
                     })?
                 }
-                None if skipped => curate::Again::Skipped,
-                None => curate::Again::Queued,
+                (None, None) if skipped => curate::Again::Skipped,
+                (None, None) => curate::Again::Queued,
             };
             print!("{}", curate::recurate(&home, again, yes)?);
+            Ok(())
+        }
+        Cmd::Exclude { repo, undo } => {
+            let repo = match repo {
+                Some(r) => r,
+                None => {
+                    // The label as capture stores it on the records, as `claims` finds it.
+                    let settings = capture::Settings::load(&home)?;
+                    let cwd = std::env::current_dir()?;
+                    let cwd = cwd.to_string_lossy();
+                    capture::checkout(&serde_json::json!({ "cwd": cwd }), &settings).1
+                }
+            };
+            let mut raw = raw::open(&home)?;
+            let op = serde_json::json!({ "repo": repo, "undo": undo });
+            raw.append_ops(&[(raw::OpKind::Exclusion, op)])?;
+            let list = raw.exclusions()?;
+            if undo {
+                println!("no longer excluded: {repo}");
+            } else {
+                println!("excluded: {repo}");
+            }
+            if list.is_empty() {
+                println!("no repository is excluded");
+            } else {
+                println!("excluded repositories: {}", list.join(", "));
+            }
             Ok(())
         }
         Cmd::Correct { uid, status, body } => {

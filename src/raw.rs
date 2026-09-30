@@ -43,12 +43,14 @@ CREATE INDEX IF NOT EXISTS ledger_seq ON ledger(device, seq);
 CREATE TABLE IF NOT EXISTS ops (
   device TEXT NOT NULL,
   op_seq INTEGER NOT NULL,
-  type TEXT NOT NULL,          -- 'window', 'claim', 'correction', 'digest'
+  type TEXT NOT NULL,          -- 'window', 'claim', 'correction', 'digest', 'exclusion'
   ts INTEGER NOT NULL,         -- unix ms, when it was appended
   body TEXT NOT NULL,          -- JSON, at most MAX_OP_BYTES
   batch INTEGER NOT NULL,      -- the first op_seq of the append it came in: a backup keeps it whole
   PRIMARY KEY (device, op_seq)
 );
+-- Milestone 4 D13: the exclusion list is read before each outbound call, from its few ops alone.
+CREATE INDEX IF NOT EXISTS ops_exclusions ON ops(ts) WHERE type = 'exclusion';
 ";
 
 /// One agent event as captured, after redaction.
@@ -108,6 +110,9 @@ pub enum OpKind {
     Claim,
     Correction,
     Digest,
+    /// A repository excluded, or taken back out (`undo`): `{repo, undo}` (spec 5.5, milestone 4
+    /// D13). An older binary stops at an op type it does not know.
+    Exclusion,
 }
 
 impl OpKind {
@@ -117,12 +122,19 @@ impl OpKind {
             OpKind::Claim => "claim",
             OpKind::Correction => "correction",
             OpKind::Digest => "digest",
+            OpKind::Exclusion => "exclusion",
         }
     }
     fn from_name(name: &str) -> Option<Self> {
-        [Self::Window, Self::Claim, Self::Correction, Self::Digest]
-            .into_iter()
-            .find(|k| k.name() == name)
+        [
+            Self::Window,
+            Self::Claim,
+            Self::Correction,
+            Self::Digest,
+            Self::Exclusion,
+        ]
+        .into_iter()
+        .find(|k| k.name() == name)
     }
 }
 
@@ -136,6 +148,13 @@ pub struct Op {
     pub body: serde_json::Value,
     /// The first op_seq of the `append_ops` it came in: one window's ops share it.
     pub batch: i64,
+}
+
+/// A record hooks wrote, or `replay` wrote in their stead (dev and evaluation homes): what curation
+/// reads and the manifest shows. Any other source is imported (`oboete-v1`, `transcript`,
+/// milestone 4 D6).
+pub fn is_live(source: &str) -> bool {
+    matches!(source, "hook" | "replay")
 }
 
 /// One ops row as stored: the body is JSON text.
@@ -767,6 +786,69 @@ impl Raw {
             },
         )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The repositories excluded now (spec 5.5, milestone 4 D13): every device's exclusion ops in
+    /// time order, an undo taking its repository back out. Read before each outbound call, with no
+    /// consumer in between; with no hub, this device's list is the whole list.
+    pub fn exclusions(&self) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT body FROM ops WHERE type = 'exclusion' ORDER BY ts, device, op_seq")?;
+        let mut out = std::collections::BTreeSet::new();
+        for body in st.query_map([], |r| r.get::<_, String>(0))? {
+            let v: serde_json::Value = serde_json::from_str(&body?)?;
+            let Some(repo) = v["repo"].as_str() else {
+                continue;
+            };
+            if v["undo"] == true {
+                out.remove(repo);
+            } else {
+                out.insert(repo.to_owned());
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
+    /// The sessions, as `agent` NUL `session`, with a record in one of `repos`: what an excluded
+    /// repository's session touched is sent nowhere (spec 5.5), whatever else it touched.
+    // ponytail: a scan of the records while any exclusion exists; an index on (repo) when a
+    // window's cut shows it.
+    pub fn sessions_in(&self, repos: &[String]) -> Result<std::collections::HashSet<String>> {
+        if repos.is_empty() {
+            return Ok(Default::default());
+        }
+        let mut st = self.conn.prepare(
+            "SELECT DISTINCT agent || char(0) || session FROM records
+             WHERE type = 'event' AND repo IN (SELECT value FROM json_each(?1))",
+        )?;
+        let rows = st.query_map([serde_json::to_string(repos)?], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Per imported source (not `is_live`), `device`'s events in the seq ranges `ranges`, each
+    /// inclusive.
+    pub fn imported_counts(
+        &self,
+        device: &str,
+        ranges: &[(i64, i64)],
+    ) -> Result<std::collections::BTreeMap<String, i64>> {
+        let mut st = self.conn.prepare(
+            "SELECT source, count(*) FROM records
+             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event' GROUP BY source",
+        )?;
+        let mut out = std::collections::BTreeMap::new();
+        for &(from, to) in ranges {
+            for row in st.query_map(params![device, from, to], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })? {
+                let (source, n) = row?;
+                if !is_live(&source) {
+                    *out.entry(source).or_default() += n;
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// This device's highest op seq, 0 before its first op.

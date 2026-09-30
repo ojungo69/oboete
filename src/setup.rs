@@ -1691,6 +1691,12 @@ pub fn doctor(home: &Path) -> Result<()> {
                 for l in crate::consumer::gaps::doctor(&k) {
                     println!("  {l}");
                 }
+                // Milestone 4 D6: imported records that curation leaves aside.
+                if let Some(raw) = &_raw
+                    && let Some(line) = crate::curate::parked_line(raw)?
+                {
+                    println!("  {line}");
+                }
                 Ok(())
             })(),
         );

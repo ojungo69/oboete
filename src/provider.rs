@@ -3431,6 +3431,8 @@ mod tests {
             elided: Vec::new(),
             shortened: Vec::new(),
             full: false,
+            excluded: Vec::new(),
+            aside: None,
             lines: Vec::new(),
         };
         let check = |v: &Value| crate::curate::check(&w, v);
