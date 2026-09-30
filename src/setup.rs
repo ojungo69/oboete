@@ -1692,8 +1692,9 @@ pub fn doctor(home: &Path) -> Result<()> {
                     println!("  {l}");
                 }
                 // Milestone 4 D6: imported records that curation leaves aside.
+                let curating = config::load(home).is_ok_and(|c| c.summary.curate);
                 if let Some(raw) = &_raw
-                    && let Some(line) = crate::curate::parked_line(raw)?
+                    && let Some(line) = crate::curate::parked_line(raw, curating)?
                 {
                     println!("  {line}");
                 }

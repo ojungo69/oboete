@@ -69,11 +69,13 @@ impl Consumer for Claims {
         {
             // What this window curated, and the part of its span curated through it (`covers`,
             // when the span took several): each queued span keeps what is left of it on either
-            // side (#192), a record it curated only part of whole.
-            for range in [&op.body, &op.body["covers"]] {
-                let Some(c) = crate::curate::op_span(range) else {
-                    continue;
-                };
+            // side (#192), a record it curated only part of whole, and the records of an excluded
+            // session it kept back (Codex on #304).
+            let ranges = [&op.body, &op.body["covers"]];
+            for c in ranges
+                .into_iter()
+                .flat_map(|range| crate::curate::curated_parts(&op.body, range))
+            {
                 let whole = Span::records(
                     c.from + i64::from(c.from_offset.is_some()),
                     c.to - i64::from(c.to_offset.is_some()),
