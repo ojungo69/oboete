@@ -80,11 +80,16 @@ fn run_io(
         let mut raw = String::new();
         input.read_to_string(&mut raw)?;
         let raw = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
-        let payload: Value = if raw.trim().is_empty() {
+        let mut payload: Value = if raw.trim().is_empty() {
             json!({})
         } else {
             serde_json::from_str(raw)?
         };
+        // The agent mark is oboete's own, from a rollout or the transcript parser (#273): a live
+        // hook's payload is the agent's, so any it carries is dropped.
+        if let Some(fields) = payload.as_object_mut() {
+            fields.remove(crate::capture::AGENT_SENT);
+        }
         let Some(agent) = resolve_agent(agent, &payload, &grok_hooks_file()) else {
             return Ok(());
         };
@@ -3057,6 +3062,8 @@ mod tests {
         let dir = tmp("codexsender");
         let sender = |id: &str, meta: Option<Value>| {
             let mut payload = json!({"session_id": id, "cwd": dir.to_string_lossy(), "prompt": "Review the diff."});
+            // An agent's payload that marks itself the user's: the rollout decides (cubic on #275).
+            payload[crate::capture::AGENT_SENT] = json!(false);
             if let Some(meta) = meta {
                 let rollout = dir.join(format!("{id}.jsonl"));
                 let line = json!({"type": "session_meta", "payload": meta});
@@ -3077,7 +3084,7 @@ mod tests {
             body["agent_sent"].clone()
         };
         let exec = json!({"originator": "codex_exec", "source": "exec"});
-        assert_eq!(sender("exec", Some(exec)), true);
+        assert_eq!(sender("exec", Some(exec.clone())), true);
         let plugin = json!({"originator": "Claude Code", "source": "vscode"});
         assert_eq!(sender("plugin", Some(plugin)), true);
         let sub = json!({"originator": "codex-tui", "source": {"subagent": {"thread_spawn": {}}}});

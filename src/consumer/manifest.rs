@@ -325,7 +325,9 @@ fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
     match e.kind.as_str() {
         "prompt" => {
             add("prompt", "")?;
-            if manifest::is_owner_line(str_at(&body, "prompt")) {
+            // A prompt another agent sent holds no directive of the owner's, whatever it says
+            // (#273).
+            if body["agent_sent"] != true && manifest::is_owner_line(str_at(&body, "prompt")) {
                 add("owner", "")?;
             }
         }
@@ -1718,6 +1720,32 @@ mod tests {
         worker::run_once(home.path()).unwrap();
         let main = manifest(home.path()).0;
         assert!(!main.contains("zqxlint"), "{main}");
+    }
+
+    /// #273: a prompt another agent sent is no directive of the owner's, whatever it says; the
+    /// owner's own line of the same words is one.
+    #[test]
+    fn a_prompt_another_agent_sent_is_no_owner_directive() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let said = "always run zqxlint first";
+        let shown = format!("\"{said}\"");
+        let prompt =
+            |session: &str, ts: i64, body: Value| ev("prompt", session, ts, cwd.path(), body);
+        let sent = serde_json::json!({"prompt": said, "agent_sent": true});
+        store.append(&prompt("s1", 60_000, sent)).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let m = manifest(home.path()).0;
+        assert!(!m.contains(&shown), "{m}");
+        let typed = serde_json::json!({"prompt": said});
+        store.append(&prompt("s2", 120_000, typed)).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let m = manifest(home.path()).0;
+        assert!(
+            m.contains("## Owner's directives") && m.contains(&shown),
+            "{m}"
+        );
     }
 
     #[test]
