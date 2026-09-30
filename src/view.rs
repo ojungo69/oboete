@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -122,13 +122,7 @@ pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/#t={}", viewer.token);
     println!("{url}\n(open it in a browser; Ctrl-C stops the viewer)");
     if open {
-        match opener_page(home, port, &url) {
-            Ok(page) => {
-                *viewer.opener.lock().unwrap_or_else(|e| e.into_inner()) = Some(page.clone());
-                open_browser(&page);
-            }
-            Err(e) => eprintln!("(could not write the page for the browser: {e})"),
-        }
+        viewer.open(home, &url, open_browser);
     }
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
@@ -144,15 +138,8 @@ pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
 /// address, so that the token goes on no command line, where the machine's other users could
 /// read it while the opener runs (#269).
 fn opener_page(home: &Path, port: u16, url: &str) -> std::io::Result<PathBuf> {
-    // One per port: another viewer of this home neither replaces nor removes it. On Windows a
-    // file takes its folder's ACL, not the mode below: the user's temp folder is theirs alone,
-    // where a folder given as --home may not be.
-    let dir = if cfg!(windows) {
-        std::env::temp_dir()
-    } else {
-        home.to_path_buf()
-    };
-    let page = dir.join(format!("view-open-{port}.html"));
+    // One per port: another viewer of this home neither replaces nor removes it.
+    let page = opener_dir(home).join(format!("view-open-{port}.html"));
     // Made anew, so it has this mode and is no link planted before.
     let _ = std::fs::remove_file(&page);
     let mut file = std::fs::OpenOptions::new();
@@ -169,22 +156,37 @@ fn opener_page(home: &Path, port: u16, url: &str) -> std::io::Result<PathBuf> {
     Ok(page)
 }
 
+/// Where the page goes: the home, where the page's mode keeps it the user's own. A Windows file
+/// takes its folder's ACL instead, and the user's local app data folder is theirs alone, where a
+/// folder given as --home may not be.
+fn opener_dir(home: &Path) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(dir);
+    }
+    home.to_path_buf()
+}
+
+/// The page as the opener takes it: a Windows browser under WSL reads it by its Windows path
+/// (`wslview` takes either); the page's own path when `wslpath` fails.
+fn opener_arg(page: &Path, wsl: bool) -> std::ffi::OsString {
+    wsl.then(|| {
+        std::process::Command::new("wslpath")
+            .arg("-w")
+            .arg(page)
+            .output()
+    })
+    .and_then(Result::ok)
+    .filter(|o| o.status.success())
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().into())
+    .unwrap_or_else(|| page.as_os_str().to_owned())
+}
+
 /// Best effort.
 fn open_browser(page: &Path) {
     let wsl = std::fs::read_to_string("/proc/version")
         .is_ok_and(|v| v.to_ascii_lowercase().contains("microsoft"));
-    // A Windows browser under WSL reads the page by its Windows path; `wslview` takes either.
-    let page = wsl
-        .then(|| {
-            std::process::Command::new("wslpath")
-                .arg("-w")
-                .arg(page)
-                .output()
-        })
-        .and_then(Result::ok)
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().into())
-        .unwrap_or_else(|| page.as_os_str().to_owned());
+    let page = opener_arg(page, wsl);
     let openers: &[&[&str]] = if cfg!(target_os = "macos") {
         &[&["open"]]
     } else if cfg!(windows) {
@@ -367,6 +369,17 @@ impl Viewer {
     fn token_arrived(&self) {
         if let Some(page) = self.opener.lock().ok().and_then(|mut p| p.take()) {
             let _ = std::fs::remove_file(page);
+        }
+    }
+
+    /// `--open`: the page for the browser, registered before `launch` starts the opener.
+    fn open(&self, home: &Path, url: &str, launch: impl FnOnce(&Path)) {
+        match opener_page(home, self.port, url) {
+            Ok(page) => {
+                *self.opener.lock().unwrap_or_else(PoisonError::into_inner) = Some(page.clone());
+                launch(&page);
+            }
+            Err(e) => eprintln!("(could not write the page for the browser: {e})"),
         }
     }
 
@@ -749,6 +762,33 @@ mod tests {
         assert!(v.save_gate(&[HOST, TOKEN]).is_err());
         assert!(!page.exists());
         std::fs::remove_file(other).unwrap();
+    }
+
+    /// #269: `--open` registers the page before it starts the opener, which gets the page's path;
+    /// a page it cannot write starts nothing. Under WSL the opener gets the Windows path.
+    #[test]
+    fn open_registers_the_page_then_launches_the_opener_with_its_path() {
+        let (dir, v) = viewer("open");
+        let mut launched = None;
+        v.open(&dir, "http://127.0.0.1:4321/#t=t0k", |p| {
+            assert_eq!(v.opener.lock().unwrap().as_deref(), Some(p));
+            launched = Some(p.to_owned());
+        });
+        let page = launched.unwrap();
+        assert!(page.exists() && page.starts_with(&dir));
+        v.opener.lock().unwrap().take();
+        let gone = dir.join("missing");
+        v.open(&gone, "http://127.0.0.1:4321/#t=t0k", |_| {
+            panic!("launched")
+        });
+        assert!(v.opener.lock().unwrap().is_none());
+        assert_eq!(opener_arg(&page, false), page.as_os_str());
+        let wsl = opener_arg(&page, true);
+        assert!(
+            wsl == page.as_os_str() || wsl.to_string_lossy().starts_with(r"\\"),
+            "{wsl:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
