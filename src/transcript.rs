@@ -941,6 +941,36 @@ mod tests {
         };
         assert_eq!(sender(rollout.to_str().unwrap()), true);
         assert_eq!(sender("src/testdata/transcripts/codex-basic.jsonl"), false);
+        // Replayed (`oboete transcript` then `oboete replay`), the prompt is stored as the
+        // agent's: `record` keeps the mark, which only the live hook drops from a payload.
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut raw = crate::raw::open(&home).unwrap();
+        let (v, _) = events(rollout.to_str().unwrap(), "codex");
+        for e in &v {
+            let event = e["event"].as_str().unwrap();
+            crate::hook::record(
+                &home,
+                &mut raw,
+                "codex",
+                event,
+                &e["payload"],
+                0,
+                &Default::default(),
+            )
+            .unwrap();
+        }
+        let prompts: Vec<Value> = (raw.after(raw.device(), 0, 100).unwrap().into_iter())
+            .filter_map(|r| match r.item {
+                crate::raw::Item::Event(e) if e.kind == "prompt" => Some(e.body),
+                _ => None,
+            })
+            .map(|b| serde_json::from_str(&b).unwrap())
+            .collect();
+        assert_eq!(
+            prompts,
+            [json!({"prompt": "Review the diff.", "agent_sent": true})]
+        );
     }
 
     #[test]
