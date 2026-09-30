@@ -769,6 +769,28 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The bodies of `device`'s ops of `kind` after `op_seq`, in op_seq order: what a reader checks
+    /// that the worker has not applied yet (`claims::Pending`).
+    pub fn ops_of(
+        &self,
+        kind: OpKind,
+        device: &str,
+        op_seq: i64,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut st = self.conn.prepare(
+            "SELECT op_seq, body FROM ops WHERE device = ?1 AND op_seq > ?2 AND type = ?3
+             ORDER BY op_seq",
+        )?;
+        let rows = st.query_map(params![device, op_seq, kind.name()], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.map(|r| {
+            let (op_seq, body) = r?;
+            serde_json::from_str(&body).with_context(|| format!("op {op_seq}: body"))
+        })
+        .collect()
+    }
+
     /// This device's highest op seq, 0 before its first op.
     pub fn max_op_seq(&self) -> Result<i64> {
         self.max_op_seq_of(&self.device)

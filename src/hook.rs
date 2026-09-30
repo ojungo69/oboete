@@ -304,10 +304,11 @@ pub fn record(
     Ok(appended)
 }
 
-/// The manifest of the checkout `labels` names (Claude Code's fields), for the agent's model
-/// provider: gated with the rules as they are now, so a rule added after the text was built
-/// already hides its value (spec 6.4), and cut to its cap. A manifest that cannot be read is
-/// none, never a failed hook.
+/// What SessionStart shows for the checkout `labels` names (Claude Code's fields), for the agent's
+/// model provider: its manifest with the delivered claims (`consumer::manifest::text`), which a
+/// checkout with no manifest to show gets too; gated with the rules as they are now, so a rule
+/// added after the text was built already hides its value (spec 6.4), and cut to its cap from the
+/// end, where the index is. Text that cannot be read is none, never a failed hook.
 fn checkout_manifest(
     home: &Path,
     store: &crate::raw::Raw,

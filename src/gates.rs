@@ -1549,6 +1549,7 @@ mod tests {
             valid_from: 0,
             device: "d".into(),
             seq: 1,
+            later: None,
         }
     }
 

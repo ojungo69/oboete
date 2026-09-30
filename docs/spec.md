@@ -1280,7 +1280,7 @@ Local first: milestones 2-5 build everything one device needs, and all sync code
    - The worker/no-worker comparison's one-device half, on dev transcripts: the worker rule's read-hook line at SessionStart and MCP p95 with local embeddings. It needs no labels. Its propagation half needs sync and runs at milestone 6.
      - The consumers are the same code in either process model. So if milestone 6 reverses the verdict, only the lifecycle wrapper changes, not the pipeline.
    - The Transcript line, because the transcript import is built here (Claude; overrulable).
-   - MUST fixtures: MUST-M8, MUST-M9, MUST-M11, MUST-M12, MUST-M13, and owner decision 31's order: a SessionStart packet lists a later decision above an earlier one that a curator link ended, both with their dates.
+   - MUST fixtures: MUST-M8, MUST-M9, MUST-M11, MUST-M12, MUST-M13, and owner decision 31's order: until curator links pass M3's control line (3.4), a SessionStart packet lists a later decision above an earlier one that a curator link ended, both with their dates; once they pass it, it lists only the later one.
 5. **Forget and safety** (section 6):
    - Build: the four levels, the forget pipeline and `forget_jobs`, viewer writes (the environment allow-list comes at milestone 3).
    - Lines: M4 (local), M22 forget time at scale.
