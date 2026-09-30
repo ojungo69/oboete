@@ -331,10 +331,25 @@ A diagnostic, declared in #286 before its first pass: #278's B exactly (main aa8
   B1 is left out: its log covers only the resumed part of its pass. Pairs whose earlier decision was kept as no decided claim at all (4, 7 and 5 in B2 to B4; 8 and 9 in S1 and S2) are not in it. In 2 of the 19 not-shown cases the claim's text was in the prompt under another uid (B2 d100 → d105, S2 d106 → d111).
 - **Reading**: most pairs Haiku left current were shown (25 of 31), which is what #278 read. Sonnet's were mostly not (9 of 15), so #286 cannot say whether the model is the lever. On the shown pairs Sonnet overturned 5 of 11 and Haiku 7 of 32: a hypothesis for a later arm, not a finding.
 
+### The claude-mem way (2026-09-30)
+
+The owner's decision 31 (spec 0.1) takes claude-mem's way for overturned decisions. claude-mem marks none: its observer keeps every observation and its context lists them newest first (13.28.0's worker, read 2026-09-30). So delivery lists a decision that a curator link to a later decision ended, the later first (spec 3.4, 4.4). M3's overturn line counts the later decision kept, where it counted the earlier one left current (spec 8.2).
+
+Read on #278's B (`later-recall.py` in `oboete-work/session-0930`), per pass, over the 19 overturn pairs whose ends are mapped, 11 distinct later decisions:
+
+| | B1 | B2 | B3 | B4 |
+|---|---|---|---|---|
+| Pairs whose later decision is kept as the owner's | 15 | 16 | 15 | 11 |
+| Distinct later decisions kept (of 11) | 7 | 8 | 7 | 6 |
+| Pairs whose earlier decision is left current (the old line's O) | 9 | 11 | 10 | 10 |
+
+- The later decisions not kept: d177 in every pass (the owner's price list, quoted from a tool line, which the gates lower to a proposal), d187 (across sessions), d463 (no draft of the owner's in its window), d156 in B1 and B4 (an assistant's report), d192 in B3, and d111 in B4 (4 pairs).
+- Control pairs whose earlier decision ended superseded, of 25: 1, 5, 3 and 2 in B1 to B4, and 7 in #291's Q1. All but one are across sessions, where the candidates come from the repository-wide search. That is over the 2% the links must pass before delivery drops a decision by them (spec 3.4), so delivery keeps both.
+
 ### What the next M3 run needs
 
 1. The test labels, classed by the same rule (instructions for the moment, above).
-2. Supersedes: a window carries a session's newest decided claims within about 500 estimated tokens, 5 at most in #286's prompts (What a prompt carries, above), and Haiku leaves most of the pairs it is shown current. The next arm is declared in its own issue before its run. The cross-session pairs need the hybrid search (#222). The same-session pairs Sonnet left current in both passes, and Haiku in nearly every pass, are d105 and d106 → d111, d142 → d156, d143, d144 and d151 → d153, and d143 → d154 (#278, #286). A record holding two labels is scored per decision (2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and with the reply's options carried, 2 of 6 acceptances settle their proposal (acc6: d462 and d107; #244: a go-ahead is often drafted as a proposal or not at all, or quotes another line than the owner's, and a quote from another repository's tool line loses its supersedes).
+2. The later decisions kept (The claude-mem way, above), and the supersede links reported beside them. #292 carries a window's whole context, where `fit` carried 5 decisions at most in #286's prompts (What a prompt carries, above). The cross-session pairs need the hybrid search (#222). A record holding two labels is scored per decision (2026-09-29). A draft that stays a proposal (an unaccepted assistant's report, or a change quoted from tool output) supersedes no decided claim, and one the owner accepts is decided and can. For d177's price list, the prompt can ask the curator to quote the owner's words. The accepted path is measured since #240 (`live --accepted`): the proposal reaches the acceptance's window (acc4), and with the reply's options carried, 2 of 6 acceptances settle their proposal (acc6: d462 and d107; #244: a go-ahead is often drafted as a proposal or not at all, or quotes another line than the owner's, and a quote from another repository's tool line loses its supersedes).
 3. The quote match: the paraphrases (whitespace-blind matching is #248).
 4. The defaults as they would ship were run once (short-2): 22 of 44.
 5. A base whose Codex prompts from sessions another agent started carry `agent_sent` (#275): a rebuilt base gets it from the transcript parser, and the frozen dev base's copy `base273` has it (the 47 records named by their rollouts).
