@@ -1,0 +1,21 @@
+docs/spike/read-hook.md
+  s_30d0ae67cebed9::t_cc4b4381efda10 8
+src/replay.rs
+  s_30d0ae67cebed9::t_02249fc41e3626 100,122,129,131-133,256-259,278-281,288-296,298
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6202433dcdd596434c372952bfd49e7756a23daa",
+  "prompts": {},
+  "sessions": {
+    "s_30d0ae67cebed9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c79fad97-efa9-40d6-9230-d12636d3a455",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
