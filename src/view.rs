@@ -42,7 +42,7 @@ struct Viewer {
     token: String,
     /// Settings saves, one at a time.
     saving: Mutex<()>,
-    /// The page `--open` gave the browser opener, removed by the first token that passes.
+    /// The page `--open` gave the browser opener, removed by the first request with the token.
     opener: Mutex<Option<PathBuf>>,
 }
 
@@ -124,8 +124,8 @@ pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
     if open {
         match opener_page(home, port, &url) {
             Ok(page) => {
+                *viewer.opener.lock().unwrap_or_else(|e| e.into_inner()) = Some(page.clone());
                 open_browser(&page);
-                *viewer.opener.lock().unwrap_or_else(|e| e.into_inner()) = Some(page);
             }
             Err(e) => eprintln!("(could not write the page for the browser: {e})"),
         }
@@ -307,6 +307,7 @@ impl Viewer {
         if !self.token_ok(only("x-oboete-token")) {
             return Err(Response::text(401, "missing or wrong token"));
         }
+        self.token_arrived();
         let origin = only("origin").and_then(|o| o.strip_prefix("http://"));
         if !self.host_ok(origin) {
             return Err(Response::text(403, "a save comes from this viewer's page"));
@@ -350,14 +351,16 @@ impl Viewer {
         })
     }
 
-    /// The first token that passes, on any path, removes the page that took the browser here.
     fn token_ok(&self, given: Option<&str>) -> bool {
-        let ok =
-            Sha256::digest(given.unwrap_or("").as_bytes()) == Sha256::digest(self.token.as_bytes());
-        if ok && let Some(page) = self.opener.lock().ok().and_then(|mut p| p.take()) {
+        Sha256::digest(given.unwrap_or("").as_bytes()) == Sha256::digest(self.token.as_bytes())
+    }
+
+    /// A request brought the token, on any path and whatever it asks: the browser has it, and
+    /// the page `--open` took it there through has done its work.
+    fn token_arrived(&self) {
+        if let Some(page) = self.opener.lock().ok().and_then(|mut p| p.take()) {
             let _ = std::fs::remove_file(page);
         }
-        ok
     }
 
     fn route(&self, method: &str, target: &str, headers: &[(&str, &str)]) -> Response {
@@ -396,6 +399,7 @@ impl Viewer {
         if !self.token_ok(header("x-oboete-token")) {
             return Response::text(401, "missing or wrong token");
         }
+        self.token_arrived();
         let q = params(query);
         let name = &path["/api/".len()..];
         // config.toml, not the store: no `db::open`, and no error text in the answer.
