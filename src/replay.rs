@@ -280,14 +280,21 @@ fn read_arm(
     };
     let mut raw = crate::raw::open(home)?;
     let before = raw.max_seq_of(raw.device())?;
-    let (starts, printed) = hook("SessionStart", root, json!({"source": "startup"}))?;
-    let (prompts, _) = hook(
-        "UserPromptSubmit",
-        samples,
-        json!({"prompt": "How did we fix the flaky test last time?"}),
-    )?;
-    let (reads, chars) = read_in_process(home, Path::new(root), n);
-    forget_samples(&mut raw, before)?;
+    let sampled = (|| -> Result<_> {
+        let (starts, printed) = hook("SessionStart", root, json!({"source": "startup"}))?;
+        let (prompts, _) = hook(
+            "UserPromptSubmit",
+            samples,
+            json!({"prompt": "How did we fix the flaky test last time?"}),
+        )?;
+        let (reads, chars) = read_in_process(home, Path::new(root), n);
+        Ok((starts, printed, prompts, reads, chars))
+    })();
+    // A sample that failed midway leaves its records too (Codex on #301): forgotten either way,
+    // and the sample's error reported first.
+    let forgot = forget_samples(&mut raw, before);
+    let (starts, printed, prompts, reads, chars) = sampled?;
+    forgot?;
     Ok(json!({
         "session_start_ms": stats_ms(&starts),
         "session_start_printed_bytes": printed,
