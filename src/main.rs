@@ -470,8 +470,9 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                     "importing into the everyday store waits for the repository mapping (PR-H); for an evaluation store pass --home <dir> --eval-store"
                 );
             }
-            let mut conn = db::open(&home)?;
-            let stats = import::claude_mem(&mut conn, &db)?;
+            let _lock = import::lock(&home)?;
+            let mut raw = raw::open(&home)?;
+            let stats = import::claude_mem(&mut raw, &db)?;
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())
         }
