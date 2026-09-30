@@ -186,6 +186,8 @@ fn send(stream: &mut TcpStream, out: &[u8], within: Duration) -> bool {
             return false;
         }
         match stream.write(&out[sent..]) {
+            // A stop and continue interrupts a write that has a timeout (#283).
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Ok(0) | Err(_) => return false,
             Ok(n) => sent += n,
         }
@@ -296,16 +298,18 @@ impl Viewer {
         let mut buf = Vec::with_capacity(2048);
         let mut chunk = [0u8; 4096];
         // False once the peer is gone or the request's time is up.
-        let mut more = |stream: &mut TcpStream, buf: &mut Vec<u8>| {
+        let mut more = |stream: &mut TcpStream, buf: &mut Vec<u8>| loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
                 return false;
             }
             match stream.read(&mut chunk) {
-                Ok(0) | Err(_) => false,
+                // A stop and continue interrupts a read that has a timeout (#283).
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Ok(0) | Err(_) => return false,
                 Ok(n) => {
                     buf.extend_from_slice(&chunk[..n]);
-                    true
+                    return true;
                 }
             }
         };
@@ -1486,6 +1490,64 @@ mod tests {
         assert!(send(&mut s, &vec![b'a'; 8 << 20], Duration::from_secs(10)));
         drop(s);
         assert_eq!(read.join().unwrap(), 8 << 20);
+    }
+
+    /// #283: a signal that interrupts the read of a request or the write of an answer drops
+    /// neither. Linux fails a socket call that has a timeout with EINTR when a handler runs (and
+    /// after a stop and continue with none); here SIGUSR1, with a handler that does nothing, is
+    /// sent to the one thread.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_interrupted_read_or_write_goes_on() {
+        extern "C" fn nothing(_: libc::c_int) {}
+        // SAFETY: a zeroed `sigaction` with a handler that does nothing and no SA_RESTART, for a
+        // signal no other test sends.
+        unsafe {
+            let mut act: libc::sigaction = std::mem::zeroed();
+            act.sa_sigaction = nothing as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            assert_eq!(
+                libc::sigaction(libc::SIGUSR1, &act, std::ptr::null_mut()),
+                0
+            );
+        }
+        use std::os::unix::thread::JoinHandleExt;
+        let poke = |thread: libc::pthread_t| {
+            for _ in 0..5 {
+                std::thread::sleep(Duration::from_millis(50));
+                // SAFETY: the thread is not joined yet, so its id is still valid.
+                unsafe { libc::pthread_kill(thread, libc::SIGUSR1) };
+            }
+        };
+        let (dir, mut v) = viewer("interrupted");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        v.port = listener.local_addr().unwrap().port();
+        let port = v.port;
+        // The request's read, interrupted before the client sends it.
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (s, _) = listener.accept().unwrap();
+        let server = std::thread::spawn(move || v.serve(s));
+        poke(server.as_pthread_t());
+        write!(c, "GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).unwrap();
+        assert!(
+            out.starts_with("HTTP/1.1 200 "),
+            "{}",
+            &out[..out.len().min(60)]
+        );
+        server.join().unwrap();
+        // The answer's write, interrupted while the client does not read yet.
+        let mut reader = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (mut s, _) = listener.accept().unwrap();
+        let writer = std::thread::spawn(move || {
+            send(&mut s, &vec![b'a'; 64 << 20], Duration::from_secs(10))
+        });
+        poke(writer.as_pthread_t());
+        let mut got = Vec::new();
+        reader.read_to_end(&mut got).unwrap();
+        assert_eq!(got.len(), 64 << 20);
+        assert!(writer.join().unwrap());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
