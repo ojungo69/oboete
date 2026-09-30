@@ -339,6 +339,12 @@ fn time_spawns(
             .expect("piped")
             .write_all(payload.as_bytes())?;
         let out = child.wait_with_output()?;
+        // A hook that failed ran another path than the one timed (Codex on #301).
+        anyhow::ensure!(
+            out.status.success(),
+            "a sampled `oboete hook {agent} {event}` failed: {}",
+            out.status
+        );
         us.push(started.elapsed().as_micros());
         printed = out.stdout.len();
     }
