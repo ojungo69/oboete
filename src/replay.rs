@@ -330,7 +330,7 @@ fn time_spawns(
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::piped())
             .spawn()?;
         // Dropped at the end of the statement: the hook reads to the end of its input.
         child
@@ -339,11 +339,13 @@ fn time_spawns(
             .expect("piped")
             .write_all(payload.as_bytes())?;
         let out = child.wait_with_output()?;
-        // A hook that failed ran another path than the one timed (Codex on #301).
+        // A hook that failed ran another path than the one timed (Codex on #301). It fails open,
+        // exiting 0 with its error on stderr, where a hook that worked prints nothing.
         anyhow::ensure!(
-            out.status.success(),
-            "a sampled `oboete hook {agent} {event}` failed: {}",
-            out.status
+            out.status.success() && out.stderr.is_empty(),
+            "a sampled `oboete hook {agent} {event}` failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
         );
         us.push(started.elapsed().as_micros());
         printed = out.stdout.len();
