@@ -42,7 +42,7 @@ struct Viewer {
     token: String,
     /// Settings saves, one at a time.
     saving: Mutex<()>,
-    /// The page `--open` gave the browser opener, removed by the first request with the token.
+    /// The page `--open` gave the browser opener, removed by the first token that passes.
     opener: Mutex<Option<PathBuf>>,
 }
 
@@ -122,7 +122,7 @@ pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/#t={}", viewer.token);
     println!("{url}\n(open it in a browser; Ctrl-C stops the viewer)");
     if open {
-        match opener_page(home, &url) {
+        match opener_page(home, port, &url) {
             Ok(page) => {
                 open_browser(&page);
                 *viewer.opener.lock().unwrap_or_else(|e| e.into_inner()) = Some(page);
@@ -143,8 +143,9 @@ pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
 /// The page `--open` hands the browser opener: owner-only, it sends the browser on to the
 /// address, so that the token goes on no command line, where the machine's other users could
 /// read it while the opener runs (#269).
-fn opener_page(home: &Path, url: &str) -> std::io::Result<PathBuf> {
-    let page = home.join("view-open.html");
+fn opener_page(home: &Path, port: u16, url: &str) -> std::io::Result<PathBuf> {
+    // One per port: another viewer of this home neither replaces nor removes it.
+    let page = home.join(format!("view-open-{port}.html"));
     // Made anew, so it has this mode and is no link planted before.
     let _ = std::fs::remove_file(&page);
     let mut file = std::fs::OpenOptions::new();
@@ -349,8 +350,14 @@ impl Viewer {
         })
     }
 
+    /// The first token that passes, on any path, removes the page that took the browser here.
     fn token_ok(&self, given: Option<&str>) -> bool {
-        Sha256::digest(given.unwrap_or("").as_bytes()) == Sha256::digest(self.token.as_bytes())
+        let ok =
+            Sha256::digest(given.unwrap_or("").as_bytes()) == Sha256::digest(self.token.as_bytes());
+        if ok && let Some(page) = self.opener.lock().ok().and_then(|mut p| p.take()) {
+            let _ = std::fs::remove_file(page);
+        }
+        ok
     }
 
     fn route(&self, method: &str, target: &str, headers: &[(&str, &str)]) -> Response {
@@ -388,10 +395,6 @@ impl Viewer {
         }
         if !self.token_ok(header("x-oboete-token")) {
             return Response::text(401, "missing or wrong token");
-        }
-        // The browser has the token: the page that took it there has done its work.
-        if let Some(page) = self.opener.lock().ok().and_then(|mut p| p.take()) {
-            let _ = std::fs::remove_file(page);
         }
         let q = params(query);
         let name = &path["/api/".len()..];
@@ -712,7 +715,7 @@ mod tests {
     fn the_opener_page_carries_the_token_and_goes_once_the_browser_has_it() {
         let (dir, v) = viewer("opener");
         let url = "http://127.0.0.1:4321/#t=t0k";
-        let page = opener_page(&dir, url).unwrap();
+        let page = opener_page(&dir, 4321, url).unwrap();
         let text = std::fs::read_to_string(&page).unwrap();
         assert!(text.contains(&format!("content=\"0;url={url}\"")), "{text}");
         #[cfg(unix)]
@@ -721,12 +724,18 @@ mod tests {
             let mode = std::fs::metadata(&page).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        // Written again over one a stopped viewer left.
-        assert_eq!(opener_page(&dir, url).unwrap(), page);
+        // Written again over one a stopped viewer of this port left; another port's is its own.
+        assert_eq!(opener_page(&dir, 4321, url).unwrap(), page);
+        let other = opener_page(&dir, 4322, "http://127.0.0.1:4322/#t=x").unwrap();
         *v.opener.lock().unwrap() = Some(page.clone());
         assert_eq!(v.route("GET", "/api/repos", &[HOST]).status, 401);
         assert!(page.exists());
         assert_eq!(v.route("GET", "/api/repos", &[HOST, TOKEN]).status, 200);
+        assert!(!page.exists() && other.exists());
+        // A settings save that is the first request with the token removes it too.
+        let page = opener_page(&dir, 4321, url).unwrap();
+        *v.opener.lock().unwrap() = Some(page.clone());
+        assert!(v.save_gate(&[HOST, TOKEN]).is_err());
         assert!(!page.exists());
     }
 
