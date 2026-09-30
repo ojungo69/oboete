@@ -11,7 +11,7 @@ The plan is docs/milestone-3-plan.md. The dev measurements behind this note, and
 - Since 2026-09-30 a done claim that quotes the owner's request counts as recalling the decision (the owner's answer to #262's question). Every arm rose by 0 to 5 labels, the best to 26 of 44 (carry2), and no conclusion changed (Counted again, below).
 - A prompt another agent sent is not the owner's since #275 (#273). On the typed set, owner-no records decided went from 13 to 0 over 4 passes, and the typed hits stayed within noise (A prompt another agent sent, below).
 - Overturns: #278 (each carried decision weighed in the curator's answer) did not ship: 10 of 19 stayed current in both arms. #286 (sonnet as the curator) left 8 and 7 current, but its read-out is withdrawn: a prompt carries a session's newest decided claims within about 500 estimated tokens (5 at most in its prompts), and for 9 of the 15 pairs it left current the earlier decision was not in the later window's prompt. The default curator stays Haiku. #291 (a narrow call that names the decisions a new one makes obsolete) and #292 (a window's whole context carried in) did not ship either (below).
-- Since owner decision 31 (2026-09-30) M3 counts overturns claude-mem's way: the later decision kept, where it counted the earlier one left current, and delivery lists both, the later first (The claude-mem way, below). `m3.py score` reports the overturn pairs whose later decision is kept, the distinct later decisions kept, and the control pairs whose earlier decision a link ended (#295). On #278's B that is 15, 16, 15 and 11 of 19 pairs, 7, 8, 7 and 6 of 11 distinct later decisions: below the 0.80 the spec now asks of them too.
+- Since owner decision 31 (2026-09-30) M3 counts overturns claude-mem's way: the later decision kept, where it counted the earlier one left current, and delivery lists both, the later first (The claude-mem way, below). `m3.py score` reports the overturn pairs whose later decision is kept, the distinct later decisions kept, and the control pairs whose earlier decision, kept as decided, a link ended (#295). On #278's B that is 15, 16, 15 and 11 of 19 pairs, 7, 8, 7 and 6 of 11 distinct later decisions: below the 0.80 the spec now asks of them too.
 
 ## M2 on the dev transcripts: passes
 
@@ -356,14 +356,15 @@ The owner lifted the budget on what a window carries in (「じゃあ制限し�
 | Overturned, still current (O, of 19) | 9 | 11 | 10 | 10 | 12 | 11 |
 | Overturned, never derived (N) | 0 | 0 | 2 | 2 | 2 | 1 |
 | Compatible, dropped (D, of 25) | 6 | 8 | 8 | 7 | 9 | 9 |
-| Control pairs whose earlier decision a link ended (of 25) | 1 | 5 | 3 | 2 | 6 | 5 |
+| Control pairs whose earlier decision, kept as decided, a link ended (of 25) | 1 | 2 | 2 | 2 | 2 | 3 |
+| The same, counting a link to the earlier decision's proposal | 1 | 5 | 3 | 2 | 6 | 5 |
 | W | 0 | 1 | 0 | 0 | 1 | 0 |
 | Supersede edges | 28 | 36 | 35 | 35 | 42 | 42 |
 | Overturn pairs whose later decision is kept (of 19) | 15 | 16 | 15 | 11 | 10 | 15 |
 | Distinct later decisions kept (of 11) | 7 | 8 | 7 | 6 | 5 | 7 |
 | Estimated tokens a pass | (resumed part only) | 351,465 | 350,924 | 350,699 | 405,758 | 403,571 |
 
-- **Verdict: not adopted.** D was 9 in both passes. With the whole context Haiku linked more (42 edges against 28 to 36), ended more control decisions, spent about 15% more tokens a pass, and kept no more later decisions. `fit`'s budget stays.
+- **Verdict: not adopted.** D was 9 in both passes. With the whole context Haiku linked more (42 edges against 28 to 36), more of its links hit control pairs, it spent about 15% more tokens a pass, and it kept no more later decisions. `fit`'s budget stays.
 - **Prompt sizes** (C2's 70 prompts, saved while it ran alone): median 6,629 estimated tokens, 90th percentile 7,942, largest 8,573. 29 were over 6,750, the most Groq's free tier takes with 1,250 kept for the answer. The prompts carried at most 6 `decided before` lines, and 36 carried none: the lift mostly added open items, proposals and candidates, not decisions (C1's d111 window: 2 decisions and 5 open items, 22,071 characters).
 - Codex's P1 on #292 (the fitted retry calls an entry that already failed the whole request again) went with it. The branch `curate/whole-context` (4accfce) stays on GitHub, unmerged.
 
@@ -380,7 +381,7 @@ Read on #278's B (`later-recall.py` in `oboete-work/session-0930`), per pass, ov
 | Pairs whose earlier decision is left current (the old line's O) | 9 | 11 | 10 | 10 |
 
 - The later decisions not kept: d177 in every pass (the owner's price list, quoted from a tool line, which the gates lower to a proposal), d187 (across sessions), d463 (no draft of the owner's in its window), d156 in B1 and B4 (an assistant's report), d192 in B3, and d111 in B4 (4 pairs).
-- Control pairs whose earlier decision ended superseded, of 25: 1, 5, 3 and 2 in B1 to B4, and 7 in #291's Q1. All but one are across sessions, where the candidates come from the repository-wide search. That is over the 2% the links must pass before delivery drops a decision by them (spec 3.4), so delivery keeps both.
+- Control pairs whose earlier decision, kept as decided, a link ended, of 25: 1, 2, 2 and 2 in B1 to B4, and 6 in #291's Q1 (1, 5, 3, 2 and 7 counting a link to the earlier decision's proposal). All but one are across sessions, where the candidates come from the repository-wide search. That is over the 2% the links must pass before delivery drops a decision by them (spec 3.4), so delivery keeps both.
 
 ### What the next M3 run needs
 
