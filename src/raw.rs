@@ -166,30 +166,45 @@ pub struct ImportDoc {
 /// Documents per `append_imports` append (D5).
 pub const IMPORT_BATCH: usize = 500;
 
-/// `doc` with its body clipped so that its op fits `MAX_OP_BYTES`, the marker saying how long it
-/// was, as a clipped tool output's does.
-fn within_op_cap(doc: ImportDoc) -> Result<ImportDoc> {
-    let size = serde_json::to_string(&doc)?.len();
-    if size <= MAX_OP_BYTES {
+/// A title longer than this is cut when its op is over the cap: a title as long as a body is a
+/// malformed row.
+const TITLE_BYTES: usize = 1 << 10;
+
+/// `doc` with its body clipped so that its op fits `MAX_OP_BYTES`, and a title over
+/// `TITLE_BYTES` too, each with a marker saying how long it was, as a clipped tool output's does.
+/// An error when the other fields alone are over the cap (cubic on the Task 3 PR).
+fn within_op_cap(mut doc: ImportDoc) -> Result<ImportDoc> {
+    let size = |d: &ImportDoc| serde_json::to_string(d).map(|s| s.len());
+    let over = size(&doc)?.saturating_sub(MAX_OP_BYTES);
+    if over == 0 {
         return Ok(doc);
     }
-    let marker = format!("\n…[clipped, {} chars in full]", doc.body.chars().count());
+    if doc.title.len() > TITLE_BYTES {
+        doc.title = clipped(&doc.title, TITLE_BYTES);
+    }
     // Each byte cut takes at least one byte of JSON with it; escapes can take more.
-    let mut keep = doc
-        .body
-        .len()
-        .saturating_sub(size - MAX_OP_BYTES + 2 * marker.len());
+    let mut keep = doc.body.len().saturating_sub(over + 128);
     loop {
-        let cut = doc.body.floor_char_boundary(keep);
-        let clipped = ImportDoc {
-            body: format!("{}{marker}", &doc.body[..cut]),
+        let cut = ImportDoc {
+            body: clipped(&doc.body, keep),
             ..doc.clone()
         };
-        if serde_json::to_string(&clipped)?.len() <= MAX_OP_BYTES {
-            return Ok(clipped);
+        if size(&cut)? <= MAX_OP_BYTES {
+            return Ok(cut);
         }
-        keep = cut * 9 / 10;
+        anyhow::ensure!(
+            keep > 0,
+            "import {}: over the {MAX_OP_BYTES}-byte op cap with no body left",
+            doc.uid
+        );
+        keep = keep * 9 / 10;
     }
+}
+
+/// The first `keep` bytes of `text` (to a character's end), and a marker saying how long it was.
+fn clipped(text: &str, keep: usize) -> String {
+    let marker = format!("\n…[clipped, {} chars in full]", text.chars().count());
+    format!("{}{marker}", &text[..text.floor_char_boundary(keep)])
 }
 
 /// One ops row as stored: the body is JSON text.
@@ -1703,6 +1718,28 @@ mod tests {
             &kept.body[kept.body.len() - 80..]
         );
         assert!(kept.body.starts_with("a \"quoted\" line\n"));
+    }
+
+    /// cubic on the Task 3 PR: a title as long as a body is cut too, and a document whose other
+    /// fields alone are over the cap is an error, never an endless loop.
+    #[test]
+    fn a_title_over_the_cap_is_cut_and_other_fields_over_it_are_an_error() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let doc = ImportDoc {
+            title: "t".repeat(100_000),
+            ..import_doc(1, "b".repeat(100_000))
+        };
+        raw.append_imports(vec![doc]).unwrap();
+        let op = raw.ops_after(raw.device(), 0, 1).unwrap().remove(0);
+        assert!(op.body.to_string().len() <= MAX_OP_BYTES);
+        let kept: ImportDoc = serde_json::from_value(op.body).unwrap();
+        assert!(kept.title.ends_with("…[clipped, 100000 chars in full]"));
+        let doc = ImportDoc {
+            session: "s".repeat(100_000),
+            ..import_doc(2, "b".into())
+        };
+        assert!(raw.append_imports(vec![doc]).is_err());
     }
 
     /// D5: large documents go in more than one append, each within the byte cap, and none lost.
