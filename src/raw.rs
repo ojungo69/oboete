@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS ops (
   PRIMARY KEY (device, op_seq)
 );
 -- Milestone 4 D13: the exclusion list is read before each outbound call, from its few ops alone.
-CREATE INDEX IF NOT EXISTS ops_exclusions ON ops(ts) WHERE type = 'exclusion';
+CREATE INDEX IF NOT EXISTS ops_exclusions ON ops(device, op_seq) WHERE type = 'exclusion';
 ";
 
 /// One agent event as captured, after redaction.
@@ -792,12 +792,26 @@ impl Raw {
     /// time order, an undo taking its repository back out. Read before each outbound call, with no
     /// consumer in between; with no hub, this device's list is the whole list.
     pub fn exclusions(&self) -> Result<Vec<String>> {
-        let mut st = self
-            .conn
-            .prepare("SELECT body FROM ops WHERE type = 'exclusion' ORDER BY ts, device, op_seq")?;
+        // A device's ops in its own order (op_seq), its clock never going back in it, then every
+        // device's by that time: a clock set back never puts a newer op first (Codex on #304).
+        let mut st = self.conn.prepare(
+            "SELECT device, ts, body FROM ops WHERE type = 'exclusion' ORDER BY device, op_seq",
+        )?;
+        let mut ops: Vec<(i64, String, usize, String)> = Vec::new();
+        let (mut device, mut clock) = (String::new(), i64::MIN);
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        for (i, row) in rows.enumerate() {
+            let (from, ts, body): (String, i64, String) = row?;
+            if from != device {
+                (device, clock) = (from.clone(), i64::MIN);
+            }
+            clock = clock.max(ts);
+            ops.push((clock, from, i, body));
+        }
+        ops.sort();
         let mut out = std::collections::BTreeSet::new();
-        for body in st.query_map([], |r| r.get::<_, String>(0))? {
-            let v: serde_json::Value = serde_json::from_str(&body?)?;
+        for (_, _, _, body) in ops {
+            let v: serde_json::Value = serde_json::from_str(&body)?;
             let Some(repo) = v["repo"].as_str() else {
                 continue;
             };
@@ -812,12 +826,16 @@ impl Raw {
 
     /// The sessions, as `agent` NUL `session`, with a record in one of `repos`: what an excluded
     /// repository's session touched is sent nowhere (spec 5.5), whatever else it touched.
-    // ponytail: a scan of the records while any exclusion exists; an index on (repo) when a
-    // window's cut shows it.
+    /// Read before each outbound call, so through an index of the events' repositories, built the
+    /// first time any exclusion is read: in the worker or the CLI, never in a hook, which then only
+    /// adds to it (CodeRabbit on #304).
     pub fn sessions_in(&self, repos: &[String]) -> Result<std::collections::HashSet<String>> {
         if repos.is_empty() {
             return Ok(Default::default());
         }
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS records_repo ON records(repo) WHERE type = 'event'",
+        )?;
         let mut st = self.conn.prepare(
             "SELECT DISTINCT agent || char(0) || session FROM records
              WHERE type = 'event' AND repo IN (SELECT value FROM json_each(?1))",
@@ -1663,6 +1681,25 @@ mod tests {
             "the bodies were not compressed: {stored} bytes"
         );
         assert_eq!(raw.after_within(&dev, 0, 10, 1500).unwrap().len(), 1);
+    }
+
+    /// Codex on #304: the list folds a device's ops in their own order, so a clock set back
+    /// between two of them never puts the newer one first.
+    #[test]
+    fn a_clock_set_back_never_puts_a_newer_exclusion_first() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let op = |undo: bool| {
+            let body = serde_json::json!({"repo": "x", "undo": undo});
+            (OpKind::Exclusion, body)
+        };
+        raw.append_ops(&[op(false)]).unwrap();
+        raw.append_ops(&[op(true)]).unwrap();
+        let last = raw.append_ops(&[op(false)]).unwrap()[0];
+        raw.conn
+            .execute("UPDATE ops SET ts = 0 WHERE op_seq = ?1", [last])
+            .unwrap();
+        assert_eq!(raw.exclusions().unwrap(), ["x"]);
     }
 
     #[test]
