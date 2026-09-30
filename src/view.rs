@@ -1364,12 +1364,11 @@ mod tests {
         let stalled = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let (mut s, _) = listener.accept().unwrap();
         let started = Instant::now();
-        // Far more than the two sockets' buffers hold.
-        assert!(!send(
-            &mut s,
-            &vec![b'a'; 64 << 20],
-            Duration::from_millis(300)
-        ));
+        // Far more than the two sockets' buffers hold. Windows takes a whole write while its
+        // buffer has room, so there the second one is what waits.
+        let big = vec![b'a'; 64 << 20];
+        let within = Duration::from_millis(300);
+        assert!(!(send(&mut s, &big, within) && send(&mut s, &big, within)));
         assert!(started.elapsed() < Duration::from_secs(3));
         drop((s, stalled));
         let mut reader = TcpStream::connect(("127.0.0.1", port)).unwrap();
