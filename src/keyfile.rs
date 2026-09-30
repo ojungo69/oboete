@@ -73,7 +73,8 @@ const TITLE: &str = "API key (oboete)";
 /// Filesystems whose Unix mode the kernel enforces for every local user, by their `statfs` magic.
 /// Any other is refused, as a 0600 there may not keep the key to its owner: a Windows drive under
 /// WSL (9p), FUSE (sshfs with `allow_other` shows 0600 and lets every local user read), network
-/// shares, FAT, exFAT and NTFS among them.
+/// shares, FAT, exFAT and NTFS among them, and eCryptfs, which leaves the check to the filesystem
+/// under it.
 const PRIVATE_FS: &[u32] = &[
     0xEF53,      // ext2, ext3, ext4
     0x5846_5342, // XFS
@@ -83,7 +84,6 @@ const PRIVATE_FS: &[u32] = &[
     0xCA45_1A4E, // bcachefs
     0x0102_1994, // tmpfs
     0x794C_7630, // overlayfs
-    0xF15F,      // eCryptfs
 ];
 
 /// 8 to 512 characters of letters, digits and `._~+/=:-`: every provider's keys, and no quote,
