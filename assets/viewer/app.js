@@ -430,8 +430,8 @@ const TEXT = {
   too_big: ['The key file is larger than 64 KiB, so nothing was changed.', 'キーのファイルが 64 KiB を超えているため、何も変更しませんでした。'],
   not_utf8: ['The key file is not UTF-8 text, so nothing was changed.', 'キーのファイルが UTF-8 のテキストではないため、何も変更しませんでした。'],
   not_private: [
-    'The key file is on a drive where it cannot be kept private (a Windows drive seen from WSL, for example), so it was not written.',
-    'キーのファイルが、ほかのユーザーから読めないように保てないドライブ(WSL から見た Windows のドライブなど)にあるため、書き込みませんでした。',
+    'The key file is on a drive where this page cannot keep it private (a Windows drive seen from WSL, a network share, or a FUSE mount such as sshfs), so it was not written.',
+    'キーのファイルが、ほかのユーザーから読めないことをこの画面では保証できないドライブ(WSL から見た Windows のドライブ、ネットワーク共有、sshfs などの FUSE)にあるため、書き込みませんでした。',
   ],
   changed: [
     'The key file changed while the key was being saved, so it was not overwritten. Please try again.',

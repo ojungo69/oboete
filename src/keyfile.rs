@@ -1,6 +1,7 @@
 //! A key typed on the settings page, written into its chain entry's key file (#94, part 3): line 2
-//! of a file named `*_KEY.md` outside the oboete home, on Linux, on a filesystem that keeps a Unix
-//! mode. Everything else in the file stays as it was, and the key goes nowhere but that file.
+//! of a file named `*_KEY.md` outside the oboete home, on Linux, on a filesystem known to enforce a
+//! Unix mode for every local user. Everything else in the file stays as it was, and the key goes
+//! nowhere but that file.
 //! macOS and Windows are refused until a file there can be made owner-only from its first instant
 //! (#281): a folder's inherited ACL entries would reach it through a 0600 mode.
 
@@ -69,10 +70,20 @@ const KEY_LEN: RangeInclusive<usize> = 8..=512;
 const MAX_FILE: u64 = 64 * 1024;
 /// A new file's line 1.
 const TITLE: &str = "API key (oboete)";
-/// Filesystems where a file's Unix mode does not keep it to its owner: a Windows drive under WSL,
-/// network shares, FAT and NTFS volumes.
-const NOT_PRIVATE: &[&str] = &[
-    "9p", "drvfs", "cifs", "smb3", "smbfs", "ntfs", "ntfs3", "fuseblk", "vfat", "exfat", "msdos",
+/// Filesystems whose Unix mode the kernel enforces for every local user, by their `statfs` magic.
+/// Any other is refused, as a 0600 there may not keep the key to its owner: a Windows drive under
+/// WSL (9p), FUSE (sshfs with `allow_other` shows 0600 and lets every local user read), network
+/// shares, FAT, exFAT and NTFS among them.
+const PRIVATE_FS: &[u32] = &[
+    0xEF53,      // ext2, ext3, ext4
+    0x5846_5342, // XFS
+    0x9123_683E, // Btrfs
+    0xF2F5_2010, // F2FS
+    0x2FC1_2FC1, // ZFS
+    0xCA45_1A4E, // bcachefs
+    0x0102_1994, // tmpfs
+    0x794C_7630, // overlayfs
+    0xF15F,      // eCryptfs
 ];
 
 /// 8 to 512 characters of letters, digits and `._~+/=:-`: every provider's keys, and no quote,
@@ -154,50 +165,6 @@ fn with_key(old: Option<&[u8]>, key: &str) -> Vec<u8> {
     }
 }
 
-/// The filesystem type of the mount that holds `dir` (canonical), from `/proc/self/mountinfo`: the
-/// longest mount point that is a whole-component prefix of it, the later of two on one point.
-fn mount_type<'a>(info: &'a str, dir: &Path) -> Option<&'a str> {
-    let mut best: Option<(usize, &str)> = None;
-    for line in info.lines() {
-        let fields: Vec<&str> = line.split(' ').collect();
-        let Some(dash) = fields.iter().position(|f| *f == "-") else {
-            continue;
-        };
-        let (Some(point), Some(kind)) = (fields.get(4), fields.get(dash + 1)) else {
-            continue;
-        };
-        let point = PathBuf::from(unescape(point));
-        let len = point.components().count();
-        if dir.starts_with(&point) && best.is_none_or(|(l, _)| len >= l) {
-            best = Some((len, kind));
-        }
-    }
-    best.map(|(_, kind)| kind)
-}
-
-/// mountinfo writes a space, tab, newline and backslash in a path as a three-digit octal escape.
-fn unescape(field: &str) -> String {
-    let b = field.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        let octal = b
-            .get(i + 1..i + 4)
-            .filter(|d| d.iter().all(|c| (b'0'..=b'7').contains(c)));
-        match (b[i], octal) {
-            (b'\\', Some(d)) => {
-                out.push((d[0] - b'0') * 64 + (d[1] - b'0') * 8 + (d[2] - b'0'));
-                i += 4;
-            }
-            (c, _) => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 /// The steps a failure can be injected at, in tests.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Step {
@@ -211,6 +178,8 @@ enum Step {
 #[cfg(test)]
 thread_local! {
     static FAIL: std::cell::Cell<Option<Step>> = const { std::cell::Cell::new(None) };
+    /// The filesystem magic `private` sees instead of the real one.
+    static FS: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
     static BEFORE_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -231,11 +200,6 @@ mod linux {
 
     pub(super) fn write(path: &Path, key: &str, home: &Path) -> Result<Written, Refused> {
         let (dest, dir) = destination(path, home)?;
-        let info =
-            std::fs::read_to_string("/proc/self/mountinfo").map_err(|_| Refused::NotPrivate)?;
-        if mount_type(&info, &dir).is_none_or(|kind| NOT_PRIVATE.contains(&kind)) {
-            return Err(Refused::NotPrivate);
-        }
         let old = read(&dest)?;
         let new = with_key(old.as_deref(), key);
         let mut tag = [0u8; 8];
@@ -252,13 +216,14 @@ mod linux {
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(&stage)
                 .map_err(|_| Refused::Failed)?;
-            // A filesystem that ignores the mode is found before the key is written.
+            // The filesystem the key would go to, asked of the staged file itself (a path could
+            // name a mount that a later one hides), and the mode it kept, before the key is written.
             let mode = file
                 .metadata()
                 .map_err(|_| Refused::Failed)?
                 .permissions()
                 .mode();
-            if mode & 0o777 != 0o600 {
+            if !private(&file) || mode & 0o777 != 0o600 {
                 return Err(Refused::NotPrivate);
             }
             step(Step::Write)
@@ -290,6 +255,22 @@ mod linux {
             .and_then(|d| d.sync_all())
             .is_ok();
         Ok(Written { durable })
+    }
+
+    /// Whether `file` is on a filesystem in `PRIVATE_FS`; not when that cannot be told.
+    fn private(file: &std::fs::File) -> bool {
+        use std::os::fd::AsRawFd;
+        let mut fs = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        // SAFETY: `fstatfs` gets an open descriptor and a buffer of its type, which it fills when
+        // it returns 0; only then is the buffer read.
+        if unsafe { libc::fstatfs(file.as_raw_fd(), fs.as_mut_ptr()) } != 0 {
+            return false;
+        }
+        // SAFETY: filled above. The magic is 32 bits, whatever the width of `f_type`.
+        let magic = unsafe { fs.assume_init() }.f_type as u32;
+        #[cfg(test)]
+        let magic = FS.with(|f| f.get()).unwrap_or(magic);
+        PRIVATE_FS.contains(&magic)
     }
 
     /// The key file as it is now, none when there is none: opened without following a link and
@@ -361,28 +342,6 @@ mod tests {
             String::from_utf8(with_key(None, "KEY")).unwrap(),
             "API key (oboete)\nKEY\n"
         );
-    }
-
-    #[test]
-    fn a_mount_is_matched_by_whole_components_and_its_escapes() {
-        let info = "22 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
-                    95 22 0:52 / /mnt/c rw - 9p drvfs rw\n\
-                    96 22 0:53 / /mnt/my\\040disk rw - vfat /dev/sdb1 rw\n\
-                    97 22 0:54 / /mnt/c rw - ext4 /dev/sdc1 rw\n";
-        let kind = |p: &str| mount_type(info, Path::new(p));
-        assert_eq!(kind("/home/me"), Some("ext4"));
-        // The later of two mounts on one point hides the earlier.
-        assert_eq!(kind("/mnt/c/Users"), Some("ext4"));
-        assert_eq!(kind("/mnt/cx"), Some("ext4"));
-        assert_eq!(kind("/mnt/my disk/keys"), Some("vfat"));
-        assert_eq!(
-            mount_type(
-                "95 22 0:52 / /mnt/c rw - 9p drvfs rw",
-                Path::new("/mnt/c/x")
-            ),
-            Some("9p")
-        );
-        assert_eq!(mount_type("", Path::new("/x")), None);
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -536,6 +495,30 @@ mod tests {
                     .map(|e| e.file_name())
                     .collect();
                 assert_eq!(names, ["GROQ_KEY.md"], "{at:?}");
+            }
+            assert!(holding(&[&keys, &home], KEY).is_empty());
+        }
+
+        /// The staged file's own filesystem decides, before the key is written: 9p (a Windows
+        /// drive under WSL) and FUSE are refused, and the file and folder stay as they were.
+        #[test]
+        fn a_filesystem_not_known_to_keep_a_mode_gets_no_key() {
+            let (_root, keys, home) = setup();
+            let path = keys.join("GROQ_KEY.md");
+            let before = "Groq\nold-key-123\n";
+            std::fs::write(&path, before).unwrap();
+            for magic in [0x0102_1997, 0x6573_5546] {
+                FS.with(|f| f.set(Some(magic)));
+                let result = write(&path, KEY, &home);
+                FS.with(|f| f.set(None));
+                assert_eq!(result, Err(Refused::NotPrivate), "{magic:x}");
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+                let names: Vec<_> = std::fs::read_dir(&keys)
+                    .unwrap()
+                    .flatten()
+                    .map(|e| e.file_name())
+                    .collect();
+                assert_eq!(names, ["GROQ_KEY.md"], "{magic:x}");
             }
             assert!(holding(&[&keys, &home], KEY).is_empty());
         }
