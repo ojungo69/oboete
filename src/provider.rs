@@ -182,6 +182,10 @@ impl CallError {
 /// under (the curation phase's `curate::check`, milestone 3 Task 7).
 pub type AnswerCheck<'a> = dyn Fn(&Value) -> Option<&'static str> + 'a;
 
+/// The egress gate (spec 5.5): asked before each call that sends the prompt out, a retry too. An
+/// error stops the run there, with no further call.
+pub type Gate<'a> = dyn Fn() -> Result<()> + 'a;
+
 pub struct Chain<'a> {
     providers: &'a [Provider],
     db: &'a Connection,
@@ -189,6 +193,7 @@ pub struct Chain<'a> {
     /// `OBOETE_FAIL_PROVIDER=<name>`: that provider fails without a call (fallback proof).
     forced_fail: Option<String>,
     check: Option<&'a AnswerCheck<'a>>,
+    gate: Option<&'a Gate<'a>>,
 }
 
 impl<'a> Chain<'a> {
@@ -199,6 +204,15 @@ impl<'a> Chain<'a> {
             paid_usd_per_month: 5.0,
             forced_fail: std::env::var("OBOETE_FAIL_PROVIDER").ok(),
             check: None,
+            gate: None,
+        }
+    }
+
+    /// `gate` is asked before each call; its error ends the run as it is.
+    pub fn gate(self, gate: &'a Gate<'a>) -> Self {
+        Self {
+            gate: Some(gate),
+            ..self
         }
     }
 
@@ -312,6 +326,9 @@ impl<'a> Chain<'a> {
                     continue;
                 }
             }
+            if let Some(gate) = self.gate {
+                gate()?;
+            }
             let (used, _) = providers_db::calls_in_a_day(conn, &name)?;
             let started = Instant::now();
             let forced = forced_fail.as_deref() == Some(name.as_str());
@@ -333,6 +350,9 @@ impl<'a> Chain<'a> {
                 // A 429 is an answer with an HTTP error status: not billed.
                 record("wait", ms, Some(&detail), true, Usage::default(), None)?;
                 std::thread::sleep(Duration::from_secs_f64(wait + 0.5));
+                if let Some(gate) = self.gate {
+                    gate()?;
+                }
                 result = call(p, prompt, schema);
             }
             // The headers hold whatever the answer turns out to be.
@@ -3026,6 +3046,56 @@ mod tests {
         assert_eq!(cooldown_for(&flagged), None);
     }
 
+    /// Spec 5.5: the gate is asked before each call, and its refusal ends the run: the next entry
+    /// is never called.
+    #[test]
+    fn a_gate_that_refuses_stops_the_chain_before_its_next_call() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let entry = |name: &str, base_url: String| Provider::Openai {
+            name: name.into(),
+            base_url,
+            key_file: None,
+            model: "m".into(),
+            daily_budget: Some(10),
+            timeout_s: 10,
+            retry_429: false,
+            extra: Default::default(),
+            headers: Default::default(),
+            limits: Default::default(),
+            subscription: false,
+        };
+        let (failing, first) = serve("500 Internal Server Error", b"{}".to_vec(), "");
+        let (answering, second) = serve("200 OK", b"{}".to_vec(), "");
+        let providers = [entry("one", failing), entry("two", answering)];
+        let asked = std::cell::Cell::new(0);
+        let gate = || {
+            asked.set(asked.get() + 1);
+            anyhow::ensure!(asked.get() == 1, "the list changed");
+            Ok(())
+        };
+        let Err(err) =
+            Chain::new(&providers, &conn)
+                .gate(&gate)
+                .run("curator", "s", "p", &json!({}))
+        else {
+            panic!("the gate refuses the second call");
+        };
+        assert_eq!(format!("{err:#}"), "the list changed");
+        let wait = std::time::Duration::from_secs(5);
+        assert!(first.recv_timeout(wait).is_ok());
+        let called: Vec<String> = conn
+            .prepare("SELECT provider FROM provider_calls")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(called, ["one"]);
+        assert!(second.try_recv().is_err());
+        assert_eq!(asked.get(), 2);
+    }
+
     #[test]
     fn a_failed_chain_keeps_no_error_body_in_provider_calls() {
         let canary = "要約の途中の文 canary-91-chain";
@@ -3434,6 +3504,7 @@ mod tests {
             excluded: Vec::new(),
             aside: None,
             lines: Vec::new(),
+            reading: Default::default(),
         };
         let check = |v: &Value| crate::curate::check(&w, v);
         let claim = json!({"id": "c1", "kind": "decision", "status": "decided", "speaker": "user",

@@ -614,6 +614,10 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 println!("no longer excluded: {repo}");
             } else {
                 println!("excluded: {repo}");
+                // A label that matches no record yet may be a typo: say so.
+                if raw.sessions_in(std::slice::from_ref(&repo))?.is_empty() {
+                    println!("no session recorded so far touched {repo}");
+                }
             }
             if list.is_empty() {
                 println!("no repository is excluded");
