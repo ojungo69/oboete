@@ -145,7 +145,7 @@ pub fn phase(
     rules: &Rules,
     summary: &Summary,
     chain: &str,
-    digester: &mut Curator,
+    digester: &mut dyn Curator,
     windows: Phase,
 ) -> Result<Phase> {
     if windows == Phase::Covered {
@@ -209,7 +209,7 @@ pub fn phase(
                 })
                 .collect();
             let span = format!("digest {through}");
-            let answer = digester(&span, &prompt, &|v| check(&shown, v, rules));
+            let answer = digester.curate(&span, &prompt, &|v| check(&shown, v, rules));
             let failed = match answer {
                 Ok(r) => {
                     let op = DigestOp {

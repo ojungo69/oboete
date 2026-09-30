@@ -405,11 +405,10 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
                 }
             },
         };
-        let mut curator = |span: &str, prompt: &str, check: &crate::provider::AnswerCheck| {
-            crate::provider::Chain::new(&cfg.providers, db)
-                .paid_cap(cfg.paid_usd_per_month)
-                .check(check)
-                .run("curator", span, prompt, &crate::curate::schema())
+        let mut curator = crate::curate::Chained {
+            providers: &cfg.providers,
+            db,
+            paid_usd_per_month: cfg.paid_usd_per_month,
         };
         // Who is asked and within what caps: a window held under other ones is tried again now.
         // That includes the key an entry's budget comes from (#238): another has its own limit.
