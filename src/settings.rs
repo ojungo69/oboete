@@ -193,10 +193,11 @@ fn entry(
             *timeout_s,
         ),
     };
-    let budget = match db {
-        Some(db) if p.budget_from_key() => crate::budget::daily(db, p).unwrap_or(p.daily_budget()),
-        _ => p.daily_budget(),
+    let budget_of = |q: &Provider| match db {
+        Some(db) if q.budget_from_key() => crate::budget::daily(db, q).unwrap_or(q.daily_budget()),
+        _ => q.daily_budget(),
     };
+    let budget = budget_of(p);
     // Whether the row's entry takes the `[chain]` model: one `load()` left unset (a model the entry
     // cannot price) is shown as not applied, and a save that leaves it keeps it (#274).
     let applied = chain.model.get(name).map(String::as_str) == model;
@@ -219,10 +220,8 @@ fn entry(
             same.iter().any(|q| key_file_of(q) != key_file_of(p)),
         ),
         ("model", same.iter().any(|q| model_of(q) != model_of(p))),
-        (
-            "daily_budget",
-            same.iter().any(|q| q.daily_budget() != p.daily_budget()),
-        ),
+        // The calls a day each uses: a key's read limit is its own (cubic on #287).
+        ("daily_budget", same.iter().any(|q| budget_of(q) != budget)),
         (
             "timeout_s",
             same.iter().any(|q| timeout_of(q) != timeout_of(p)),
@@ -1331,6 +1330,36 @@ mod tests {
         assert_eq!(
             (&row["model"], &row["model_applied"], &row["differs"]),
             (&json!("x"), &json!(false), &json!(["model"]))
+        );
+    }
+
+    /// Entries of one name whose calls a day come from their keys, one read and one not, use
+    /// different budgets, and the row says so (cubic on #287).
+    #[test]
+    fn entries_whose_keys_give_different_budgets_say_so() {
+        let keys = tempfile::tempdir().unwrap();
+        let (a, b) = (keys.path().join("A_KEY.md"), keys.path().join("B_KEY.md"));
+        std::fs::write(&a, "# a\nkey-a\n").unwrap();
+        std::fs::write(&b, "# b\nkey-b\n").unwrap();
+        let entry = |f: &std::path::Path| {
+            format!(
+                "[[providers]]\nkind = \"openai\"\nname = \"o\"\n\
+                 base_url = \"https://openrouter.ai/api/v1\"\nmodel = \"m:free\"\nkey_file = {:?}\n",
+                f.display().to_string()
+            )
+        };
+        let home = home_with(Some(&(entry(&a) + &entry(&b))));
+        let db = crate::providers_db::open(home.path()).unwrap();
+        let first = (config::load(home.path()).unwrap().providers.into_iter())
+            .next()
+            .unwrap();
+        let key = crate::provider::key_of(&first);
+        crate::providers_db::set_key_limit(&db, "o", Some(1000), crate::db::now_ms(), &key)
+            .unwrap();
+        let row = &show(home.path())["chain"][0];
+        assert_eq!(
+            (&row["effective_daily_budget"], &row["differs"]),
+            (&json!(200), &json!(["key_file", "daily_budget"]))
         );
     }
 
