@@ -28,12 +28,18 @@ does not accept `max` for that setting.
   on NIM on average, 4 on DeepSeek's API (60 and 134 calls). NIM's gateway also
   answers 504 to a call still running at about 300 seconds (below).
 - **Routing.** `OCR_LLM_EXTRA_BODY` is
-  `{"provider":{"allow_fallbacks":true,"quantizations":["fp8","fp16","bf16","fp32","unknown"],"max_price":{"prompt":0.6,"completion":2.4}}}`.
-  OpenRouter always tries BYOK endpoints first
-  ([BYOK](https://openrouter.ai/docs/guides/overview/auth/byok)), so a call goes to
-  DeepSeek with the owner's key while it answers. When it fails, the call goes to
-  another provider of the model, which spends OpenRouter credits at that provider's
-  price (about USD 10 were left on 2026-09-30). The filters keep that off the
+  `{"provider":{"order":["deepseek"],"allow_fallbacks":true,"quantizations":["fp8","fp16","bf16","fp32","unknown"],"max_price":{"prompt":0.6,"completion":2.4}}}`.
+  OpenRouter tries BYOK endpoints first, then its own endpoints in `order`, then
+  the model's other providers
+  ([BYOK with provider ordering](https://openrouter.ai/docs/guides/overview/auth/byok)).
+  So a call goes to DeepSeek with the owner's key while it answers, then to
+  DeepSeek on OpenRouter's key, then to another provider; the last two spend
+  OpenRouter credits (about USD 10 were left on 2026-09-30). Without `order`
+  (2026-09-30, 07:45Z to 12:55Z), a call the owner's key did not serve went to the
+  other providers balanced by price, the cheapest most often, and both code reviews
+  in that time used up their 45 minutes on both attempts (#290 on src/hook.rs,
+  #292 on src/curate.rs: 1,845,306 tokens in 45 minutes, where #287's review on
+  DeepSeek that morning used 6.1M in 20). The filters keep that off the
   providers that serve the model quantized to fp4 (its listing names two) and off
   any over twice DeepSeek's listed price (USD 0.30 per million input and 1.20 per
   million output tokens, read 2026-09-30, twice the listing of 2026-09-29 under
@@ -45,6 +51,15 @@ does not accept `max` for that setting.
   `"is_byok": true` in its usage. Until 2026-09-30 the value was
   `{"provider":{"only":["deepseek"],"allow_fallbacks":false}}`, which kept every
   call on DeepSeek's endpoints.
+- **When the owner's key is not used.** `GET https://openrouter.ai/api/v1/key` with
+  the workflow's key gives `byok_usage_daily`, what the owner's DeepSeek key spent
+  this UTC day, and `usage_daily`, what OpenRouter credits spent. On 2026-09-30 at
+  12:50Z they were 0 and USD 3.13: no call that day used the owner's key, after
+  BYOK usage of USD 2.30 on 2026-09-28 and 7.71 on 2026-09-29
+  (`GET /api/v1/activity` with a management key). A probe answered
+  `"provider": "DeepSeek"` with `"is_byok": false`. A BYOK key that fails falls
+  back to OpenRouter's endpoints unless its **Shared capacity fallback** setting
+  in OpenRouter says never; the owner checks the key's DeepSeek balance.
 - **Cost.** DeepSeek bills the owner's account at its price. OpenRouter charges 5%
   of the OpenRouter price for BYOK calls beyond a free monthly allowance
   ([BYOK](https://openrouter.ai/docs/guides/overview/auth/byok), read 2026-09-29), and
@@ -81,7 +96,7 @@ In the repository's **Settings > Secrets and variables > Actions**, configure:
 | Secret | `OCR_LLM_FALLBACK_URL` | `https://integrate.api.nvidia.com/v1/chat/completions`. Needed when `OCR_LLM_FALLBACK_MODEL` is set. |
 | Secret | `OCR_LLM_FALLBACK_AUTH_TOKEN` | NVIDIA NIM API key. Needed when `OCR_LLM_FALLBACK_MODEL` is set. |
 | Variable | `OCR_LLM_USE_ANTHROPIC` | `false`: both endpoints are OpenAI-compatible. |
-| Variable | `OCR_LLM_EXTRA_BODY` | `{"provider":{"allow_fallbacks":true,"quantizations":["fp8","fp16","bf16","fp32","unknown"],"max_price":{"prompt":0.6,"completion":2.4}}}`. Sent by the primary only. |
+| Variable | `OCR_LLM_EXTRA_BODY` | `{"provider":{"order":["deepseek"],"allow_fallbacks":true,"quantizations":["fp8","fp16","bf16","fp32","unknown"],"max_price":{"prompt":0.6,"completion":2.4}}}`. Sent by the primary only. |
 | Variable | `OCR_LLM_MODEL` | `deepseek/deepseek-v4.1-flash`. Set this last to enable the workflow. |
 | Variable | `OCR_LLM_FALLBACK_MODEL` | `deepseek-ai/deepseek-v4.1-flash`. Omit to disable fallback. |
 
