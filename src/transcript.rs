@@ -947,6 +947,8 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let mut raw = crate::raw::open(&home).unwrap();
         let (v, _) = events(rollout.to_str().unwrap(), "codex");
+        // Replayed where the rollout is gone: only the parser's mark can say an agent sent it.
+        std::fs::remove_file(&rollout).unwrap();
         for e in &v {
             let event = e["event"].as_str().unwrap();
             crate::hook::record(
