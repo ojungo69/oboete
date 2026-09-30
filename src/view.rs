@@ -144,8 +144,15 @@ pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
 /// address, so that the token goes on no command line, where the machine's other users could
 /// read it while the opener runs (#269).
 fn opener_page(home: &Path, port: u16, url: &str) -> std::io::Result<PathBuf> {
-    // One per port: another viewer of this home neither replaces nor removes it.
-    let page = home.join(format!("view-open-{port}.html"));
+    // One per port: another viewer of this home neither replaces nor removes it. On Windows a
+    // file takes its folder's ACL, not the mode below: the user's temp folder is theirs alone,
+    // where a folder given as --home may not be.
+    let dir = if cfg!(windows) {
+        std::env::temp_dir()
+    } else {
+        home.to_path_buf()
+    };
+    let page = dir.join(format!("view-open-{port}.html"));
     // Made anew, so it has this mode and is no link planted before.
     let _ = std::fs::remove_file(&page);
     let mut file = std::fs::OpenOptions::new();
@@ -741,6 +748,7 @@ mod tests {
         *v.opener.lock().unwrap() = Some(page.clone());
         assert!(v.save_gate(&[HOST, TOKEN]).is_err());
         assert!(!page.exists());
+        std::fs::remove_file(other).unwrap();
     }
 
     #[test]
