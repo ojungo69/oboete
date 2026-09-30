@@ -216,19 +216,19 @@ fn tool_output(bytes: usize) -> String {
     out
 }
 
-/// `n` spawned `oboete hook <agent> PostToolUse` runs with a tool output of `bytes`, in
-/// microseconds, sorted.
+/// `n` spawned `oboete hook <agent> PostToolUse` runs with a tool output of `bytes`, in the
+/// checkout at `checkout` (the samples' own, not the fixture's), in microseconds, sorted.
 fn sample_spawns(
     home: &Path,
     held: &crate::worker::Lock,
-    root: &str,
+    checkout: &str,
     n: usize,
     agent: &str,
     bytes: usize,
 ) -> Result<Vec<u128>> {
     let payload = json!({
         "session_id": "spawn-sample",
-        "cwd": root,
+        "cwd": checkout,
         "hook_event_name": "PostToolUse",
         "tool_name": "Bash",
         "tool_input": {"command": "cargo test"},
