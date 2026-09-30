@@ -1,0 +1,31 @@
+CLAUDE.md
+  s_59cfa7617c8511::t_697d4bf2d1399e 10
+docs/spike/read-hook.md
+  s_59cfa7617c8511::t_220eaaf137f222 1-46
+src/curate.rs
+  s_59cfa7617c8511::t_8756983b1ae522 4383
+src/main.rs
+  s_59cfa7617c8511::t_da3f840b5f7f12 255-258,578-587
+src/replay.rs
+  s_59cfa7617c8511::t_45900ef1a6b66d 3-4,23,25-29,54-63,98-108,110,112,116-134,153,219-220,223-224,231,238-339,341-368,374-375,377-378,380-394,396,399,428,450,487,492-594
+src/worker.rs
+  s_59cfa7617c8511::t_540344fbf36e4b 1663
+tests/replay_source.rs
+  s_59cfa7617c8511::t_7c1955703e47ea 36-72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4cd0282c4cd9bcb4719610e3e6826b2ada670066",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
