@@ -127,8 +127,10 @@ example), but not a fault of the model itself. It is tried only once.
 
 - Non-draft PRs whose head branch belongs to this repository run on open, reopen,
   and transition from draft to ready for review, not on each push: every run is
-  paid through the owner's DeepSeek key (US$0.03 to 0.08 measured, an estimated
-  US$0.15 to 0.18 for the largest PR), and a run on every push came to an estimated
+  paid, through the owner's DeepSeek key (US$0.03 to 0.08 measured, an estimated
+  US$0.15 to 0.18 for the largest PR), or from OpenRouter credits for the calls
+  another provider serves when that key fails (Routing, above), and a run on every
+  push came to an estimated
   US$20 to 60 a month. The owner chose on
   2026-09-29 to review a PR when it opens and after the push taken as its last,
   run by hand, as CodeRabbit is. While Codex or cubic cannot review (a usage
