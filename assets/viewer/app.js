@@ -467,8 +467,8 @@ const TEXT = {
     'config.toml でこのモデルが設定されていますが、この要約役では使えないため、適用されていません。',
   ],
   differs: [
-    'In config.toml they differ in: {what}. This row shows the first one\'s.',
-    'config.toml では次の点が異なります: {what}。この行には最初の要約役の値を表示しています。',
+    'The curators of this name use different values for: {what}. This row shows the first one\'s.',
+    'この名前の要約役は、使う値が次の点で異なります: {what}。この行には最初の要約役の値を表示しています。',
   ],
   differs_key_file: ['key file', 'キーのファイル'],
   differs_model: ['model', 'モデル'],
@@ -718,7 +718,7 @@ function chainRow(r, i, redraw) {
     el('td', null, on),
     el('td', null, el('span', 'entry-name', r.name), ...keyState(r), r.entries > 1 ? note(t('entries', { n: r.entries })) : null,
       r.differs.length ? note(t('differs', { what: r.differs.map((d) => t(`differs_${d}`)).join(lang === 'ja' ? '、' : ', ') })) : null),
-    el('td', null, model, modelNote ? note(modelNote) : null, r.model && !r.model_applied ? note(t('model_unapplied')) : null),
+    el('td', null, model, modelNote ? note(modelNote) : null, r.model !== null && !r.model_applied ? note(t('model_unapplied')) : null),
     el('td', null, budget, r.budget_from_key && !r.edit.daily_budget ? note(t('from_key', { n: r.effective_daily_budget })) : null),
     el('td', null, timeout));
   return tr;

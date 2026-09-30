@@ -211,7 +211,8 @@ fn entry(
         Some(db) if p.budget_from_key() => crate::budget::daily(db, p).unwrap_or(p.daily_budget()),
         _ => p.daily_budget(),
     };
-    // The row shows the first entry's values: where entries of its name differ, it says so (#274).
+    // The row shows the first entry's values: where entries of its name use different ones (with
+    // `[chain]` applied), it says so (#274).
     let key_file_of = |p: &Provider| match p {
         Provider::Openai { key_file, .. } => key_file.clone(),
         Provider::Cli { .. } => None,
