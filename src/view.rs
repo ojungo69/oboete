@@ -140,6 +140,9 @@ pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
 fn opener_page(home: &Path, port: u16, url: &str) -> std::io::Result<PathBuf> {
     // One per port: another viewer of this home neither replaces nor removes it.
     let page = opener_dir(home).join(format!("view-open-{port}.html"));
+    // Absolute: the opener, and a browser already running, resolve a relative path in their own
+    // working directory.
+    let page = std::path::absolute(&page).unwrap_or(page);
     // Made anew, so it has this mode and is no link planted before.
     let _ = std::fs::remove_file(&page);
     let mut file = std::fs::OpenOptions::new();
@@ -367,7 +370,12 @@ impl Viewer {
     /// A request brought the token, on any path and whatever it asks: the browser has it, and
     /// the page `--open` took it there through has done its work.
     fn token_arrived(&self) {
-        if let Some(page) = self.opener.lock().ok().and_then(|mut p| p.take()) {
+        let page = self
+            .opener
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(page) = page {
             let _ = std::fs::remove_file(page);
         }
     }
@@ -762,32 +770,39 @@ mod tests {
         assert!(v.save_gate(&[HOST, TOKEN]).is_err());
         assert!(!page.exists());
         std::fs::remove_file(other).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// #269: `--open` registers the page before it starts the opener, which gets the page's path;
     /// a page it cannot write starts nothing. Under WSL the opener gets the Windows path.
     #[test]
     fn open_registers_the_page_then_launches_the_opener_with_its_path() {
-        let (dir, v) = viewer("open");
+        let (dir, mut v) = viewer("open");
+        // Its own port: on Windows every test's page is in the one %LOCALAPPDATA%.
+        v.port = 4323;
         let mut launched = None;
-        v.open(&dir, "http://127.0.0.1:4321/#t=t0k", |p| {
+        v.open(&dir, "http://127.0.0.1:4323/#t=t0k", |p| {
             assert_eq!(v.opener.lock().unwrap().as_deref(), Some(p));
             launched = Some(p.to_owned());
         });
         let page = launched.unwrap();
-        assert!(page.exists() && page.starts_with(&dir));
-        v.opener.lock().unwrap().take();
-        let gone = dir.join("missing");
-        v.open(&gone, "http://127.0.0.1:4321/#t=t0k", |_| {
-            panic!("launched")
-        });
-        assert!(v.opener.lock().unwrap().is_none());
+        assert!(page.exists() && page.is_absolute() && page.starts_with(opener_dir(&dir)));
         assert_eq!(opener_arg(&page, false), page.as_os_str());
         let wsl = opener_arg(&page, true);
         assert!(
             wsl == page.as_os_str() || wsl.to_string_lossy().starts_with(r"\\"),
             "{wsl:?}"
         );
+        std::fs::remove_file(&page).unwrap();
+        // A home it cannot write the page in (off Windows, where the page is in the home).
+        #[cfg(not(windows))]
+        {
+            v.opener.lock().unwrap().take();
+            v.open(&dir.join("missing"), "http://127.0.0.1:4323/#t=t0k", |_| {
+                panic!("launched")
+            });
+            assert!(v.opener.lock().unwrap().is_none());
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
