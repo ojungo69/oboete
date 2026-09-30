@@ -262,6 +262,66 @@ struct EntryIn {
     model: Option<String>,
 }
 
+/// A key save's body (#94, part 3): the entry's name, the key, and the version of the config the
+/// page showed.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeySave {
+    entry: String,
+    key: String,
+    version: String,
+}
+
+/// Writes a key typed on the page into the key file its entry names (`keyfile`), against the
+/// config the page showed: a changed config is refused, and entries of one name are written only
+/// when they name one file. The answer is the entry's key state: the key is in no answer.
+pub fn save_key(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
+    let posted: KeySave =
+        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
+    if posted.entry.is_empty() || posted.entry.len() > 64 {
+        return Err(refused(422, "bad_entry", "entry"));
+    }
+    let field = format!("chain.{}.key", posted.entry);
+    if !crate::keyfile::valid(&posted.key) {
+        return Err(refused(422, "bad_key", field));
+    }
+    let _held = saving
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let path = home.join("config.toml");
+    let was = bytes(home).map_err(|_| invalid())?;
+    if version(was.as_deref()) != posted.version {
+        return Err(refused(409, "stale", ""));
+    }
+    let text = utf8(was.as_deref()).ok_or_else(invalid)?;
+    let (cfg, ..) = parsed(&path, text).ok_or_else(invalid)?;
+    let mut files = (cfg.providers.iter())
+        .filter(|p| p.name() == posted.entry)
+        .map(|p| match p {
+            Provider::Openai {
+                key_file: Some(f), ..
+            } => Some(f),
+            _ => None,
+        });
+    let Some(first) = files.next() else {
+        return Err(refused(404, "no_entry", field));
+    };
+    let Some(file) = first else {
+        return Err(refused(422, "no_key_file", field));
+    };
+    if let Some(other) = files.find(|f| *f != Some(file)) {
+        let code = if other.is_some() {
+            "ambiguous"
+        } else {
+            "no_key_file"
+        };
+        return Err(refused(422, code, field));
+    }
+    let written = crate::keyfile::write(file, &posted.key, home)
+        .map_err(|r| refused(r.status(), r.code(), field))?;
+    Ok(json!({"entry": posted.entry, "key": "ok", "durable": written.durable}))
+}
+
 /// The page's save: checks the request against the file it read (`version`), writes the page's
 /// keys into it and checks the result as every reader parses it before it replaces the file, and
 /// answers the new `show`. A value that equals the entry's own is not written, so it keeps
@@ -644,6 +704,140 @@ mod tests {
         (shown["chain"].as_array().unwrap().iter())
             .find(|e| e["name"] == name)
             .unwrap()
+    }
+
+    /// A config of API entries, each named with its key file.
+    fn api_entries(entries: &[(&str, &Path)]) -> String {
+        (entries.iter())
+            .map(|(name, file)| {
+                format!(
+                    "[[providers]]\nkind = \"openai\"\nname = \"{name}\"\n\
+                     base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\nkey_file = {:?}\n\n",
+                    file.display().to_string()
+                )
+            })
+            .collect()
+    }
+
+    fn key_body(entry: &str, key: &str, version: &Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({"entry": entry, "key": key, "version": version})).unwrap()
+    }
+
+    /// #94 part 3: a key typed on the page reaches its entry's key file, against the config the
+    /// page showed, and no answer holds it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_key_saved_from_the_page_reaches_its_file_and_no_answer() {
+        let keys = tempfile::tempdir().unwrap();
+        let file = keys.path().join("LOCAL_KEY.md");
+        std::fs::write(&file, "Local\nold-key-123\n").unwrap();
+        let text = api_entries(&[("local", &file), ("twin", &file), ("twin", &file)]);
+        let home = home_with(Some(&text));
+        let version = show(home.path())["version"].clone();
+        let canary = format!("{}-{}", "canary", "7d1e0b52");
+        let saved = save_key(
+            home.path(),
+            &Mutex::new(()),
+            &key_body("local", &canary, &version),
+        );
+        assert_eq!(
+            saved,
+            Ok(json!({"entry": "local", "key": "ok", "durable": true}))
+        );
+        assert_eq!(crate::config::read_key(&file).unwrap(), canary);
+        let shown = show(home.path());
+        assert!(!shown.to_string().contains(&canary), "{shown}");
+        // config.toml is not written, so the page's version still holds.
+        assert_eq!(
+            (self::file(&home), &shown["version"]),
+            (Some(text.clone()), &version)
+        );
+        // Entries of one name that name one file take the key.
+        let twin = save_key(
+            home.path(),
+            &Mutex::new(()),
+            &key_body("twin", "twin-key-1", &version),
+        );
+        assert_eq!(twin.unwrap()["key"], "ok");
+        assert_eq!(crate::config::read_key(&file).unwrap(), "twin-key-1");
+        // A config changed since the page read it: refused, nothing written.
+        std::fs::write(home.path().join("config.toml"), format!("{text}# edited\n")).unwrap();
+        let stale = save_key(
+            home.path(),
+            &Mutex::new(()),
+            &key_body("local", "late-key-12", &version),
+        );
+        let r = stale.unwrap_err();
+        assert_eq!((r.status, r.code), (409, "stale"));
+        assert_eq!(crate::config::read_key(&file).unwrap(), "twin-key-1");
+    }
+
+    /// #94 part 3: a key save names one key file of one API entry, and a request of another
+    /// shape writes nothing.
+    #[test]
+    fn a_key_save_names_one_key_file_of_one_api_entry() {
+        let keys = tempfile::tempdir().unwrap();
+        let (a, b) = (keys.path().join("A_KEY.md"), keys.path().join("B_KEY.md"));
+        let text = api_entries(&[("twin", &a), ("twin", &b)])
+            + "[[providers]]\nkind = \"openai\"\nname = \"open\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\n\
+               [[providers]]\nkind = \"cli\"\nname = \"sub\"\ncli = \"claude\"\n";
+        let home = home_with(Some(&text));
+        let version = show(home.path())["version"].clone();
+        let refusal = |body: Vec<u8>| {
+            let r = save_key(home.path(), &Mutex::new(()), &body).unwrap_err();
+            (r.status, r.code)
+        };
+        let key = "gsk_abcdefgh12";
+        assert_eq!(refusal(key_body("twin", key, &version)), (422, "ambiguous"));
+        assert_eq!(
+            refusal(key_body("open", key, &version)),
+            (422, "no_key_file")
+        );
+        assert_eq!(
+            refusal(key_body("sub", key, &version)),
+            (422, "no_key_file")
+        );
+        assert_eq!(
+            refusal(key_body("nobody", key, &version)),
+            (404, "no_entry")
+        );
+        assert_eq!(
+            refusal(key_body("twin", "short", &version)),
+            (422, "bad_key")
+        );
+        assert_eq!(
+            refusal(key_body("twin", "gsk_abc\nbase_url", &version)),
+            (422, "bad_key")
+        );
+        assert_eq!(
+            refusal(key_body(&"x".repeat(65), key, &version)),
+            (422, "bad_entry")
+        );
+        let extra =
+            json!({"entry": "twin", "key": key, "version": version, "key_file": "/tmp/X_KEY.md"});
+        assert_eq!(
+            refusal(serde_json::to_vec(&extra).unwrap()),
+            (400, "bad_request")
+        );
+        assert_eq!(self::file(&home), Some(text));
+        assert!(!a.exists() && !b.exists());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn a_key_save_waits_for_owner_only_files_off_linux() {
+        let keys = tempfile::tempdir().unwrap();
+        let file = keys.path().join("LOCAL_KEY.md");
+        let home = home_with(Some(&api_entries(&[("local", &file)])));
+        let version = show(home.path())["version"].clone();
+        let r = save_key(
+            home.path(),
+            &Mutex::new(()),
+            &key_body("local", "gsk_abcdefgh12", &version),
+        );
+        let r = r.unwrap_err();
+        assert_eq!((r.status, r.code), (422, "unsupported"));
+        assert!(!file.exists());
     }
 
     /// #94 acceptance test 2: no key reaches the page, and none is taken from it.

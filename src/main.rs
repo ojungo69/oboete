@@ -23,6 +23,7 @@ mod hookstate;
 mod import;
 mod inject;
 mod isolation;
+mod keyfile;
 mod knowledge;
 mod manifest;
 mod mcp;
