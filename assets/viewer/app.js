@@ -580,7 +580,7 @@ function note(text) {
 function keyState(r) {
   const state = el('span', 'note', t(`key_${r.key.replaceAll('-', '_')}`));
   if (!r.key_file) return [state];
-  return [state, note(t('key_file', { path: r.key_file })), form.keyInput ? keyField(r) : note(t('key_by_hand'))];
+  return [state, note(t('key_file', { path: r.key_file })), form.keyInput ? keyField(r, state) : note(t('key_by_hand'))];
 }
 
 // A new key for the row's key file (#94 part 3). What is typed leaves the page only in the
@@ -588,7 +588,7 @@ function keyState(r) {
 // not a password field: a browser offers to save a password field's typed value once the field
 // leaves the page after a request, and this page redraws. `autocomplete` off keeps the value out
 // of form history and saved page state.
-function keyField(r) {
+function keyField(r, state) {
   const i = el('input');
   i.type = 'text';
   i.autocomplete = 'off';
@@ -611,11 +611,11 @@ function keyField(r) {
     e.preventDefault();
     if (!save.disabled) save.click();
   });
-  save.addEventListener('click', () => void saveKey(r.name, i, save));
+  save.addEventListener('click', () => void saveKey(r.name, i, save, state));
   return el('span', 'key-input', i, save);
 }
 
-async function saveKey(name, field, button) {
+async function saveKey(name, field, button, state) {
   const body = JSON.stringify({ entry: name, key: field.value, version: form.version });
   field.value = '';
   button.disabled = true;
@@ -640,9 +640,10 @@ async function saveKey(name, field, button) {
       return;
     }
     if (res.ok) {
-      // Only the row's key state changes: what is typed elsewhere and not saved yet stays.
+      // Only the row's key state changes, in place: what is typed elsewhere and not saved yet
+      // stays, a key in another row included.
       for (const r of form.chain) if (r.name === answer.entry) r.key = answer.key;
-      drawSettings();
+      state.textContent = t(`key_${answer.key}`);
       setStatus(t(answer.durable ? 'key_saved' : 'key_not_durable'), !answer.durable);
       return;
     }

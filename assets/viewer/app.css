@@ -236,7 +236,7 @@ main { max-width: 60rem; padding: 8px 24px 64px; }
 .chain .move { display: inline-flex; gap: 4px; }
 .chain .entry-name { font-weight: 600; }
 .chain .key-input { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
-/* Masks the key as it is typed (Chromium and Safari; a browser without it shows the key). */
+/* Masks the key as it is typed (Chromium, Safari, Firefox 114 and later). */
 .chain .key-input input { -webkit-text-security: disc; }
 .chain tr.off .entry-name { color: var(--muted); text-decoration: line-through; }
 input.invalid { border-color: var(--red); background: var(--red-bg); }
