@@ -10,11 +10,12 @@ read here. Every command takes the binary by path: `oboete` on PATH is the owner
   m3.py stub <bin> <name> [--shrink] [--tokens=N]
                                 curate that home with a localhost stub that answers no claims: the
                                 windows, their estimated tokens, M2's coverage; no call leaves
-  m3.py live <bin> <name> [--yes] [--tool=T] [--accepted] [--typed]
+  m3.py live <bin> <name> [--yes] [--tool=T] [--accepted] [--typed] [--pairs]
                                 each labeled window sent again to one live entry by `recurate`
                                 (estimates only without --yes); only those of a tool's calls, of
-                                the accepted proposals (both ends), or of the owner's typed
-                                decisions and owner-no records, when asked
+                                the accepted proposals (both ends), of the owner's typed
+                                decisions and owner-no records, or of both ends of the pairs the
+                                lines score, when asked
   m3.py score <bin> <name>      M3's counts on the labeled items"""
 import collections, glob, http.server, json, os, re, sqlite3, subprocess, sys, threading, time
 from datetime import datetime
@@ -277,7 +278,7 @@ def item_records(raw, where, item):
     return {seq, other} - {None}
 
 
-def spans(h, tool=None, accepted=False, typed=False):
+def spans(h, tool=None, accepted=False, typed=False, pairs=False):
     """The windows that hold a labeled item's records (`item_records`: both ends of an accepted
     proposal), only those in a call of `tool`, only the accepted proposals', or only the owner's
     typed decisions (owner-yes, the owner's own prompt) and the owner-no records when asked, as
@@ -288,9 +289,13 @@ def spans(h, tool=None, accepted=False, typed=False):
     with open(f'{h}/map.json') as f:
         where = json.load(f)
     value = {d['id']: d['value'] for d in labels()[0]} if typed else {}
+    # Both ends of every pair the lines score (overturns and compatible), when asked.
+    ends = {p[k] for p in labels()[1] if p['value'] in ('overturns', 'compatible')
+            for k in ('earlier', 'later')} if pairs else None
     raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
     seqs = {s for i, r in where.items() if r['seq'] is not None
             and (tool is None or r.get('tool') == tool)
+            and (ends is None or i in ends)
             and (not accepted or r['who'] == 'assistant_accepted')
             and (not typed or value.get(i) == 'no'
                  or value.get(i) == 'yes' and r['who'] == 'user' and r.get('tool') is None)
@@ -325,7 +330,7 @@ def cooldown(h):
     time.sleep(max(0, until / 1000 - time.time()) + 5)
 
 
-def live(binary, name, send, tool=None, accepted=False, typed=False):
+def live(binary, name, send, tool=None, accepted=False, typed=False, pairs=False):
     """Each labeled window sent again to the live entry with `oboete recurate`, one span at a time
     in seq order, so an earlier claim is a candidate for a later window. Without `send`, only the
     estimates `recurate` prints."""
@@ -355,9 +360,9 @@ def live(binary, name, send, tool=None, accepted=False, typed=False):
     # selection, or spans not yet merged or not yet holding both ends of an accepted proposal)
     # would send records again, or curate an earlier span after a later one and so with claims
     # from its future as candidates (#228).
-    todo = spans(h, tool, accepted, typed)
+    todo = spans(h, tool, accepted, typed, pairs)
     if set(tries) != {json.dumps([a, b]) for a, b in todo[:len(tries)]}:
-        sys.exit(f'{log} is not the first spans of this pass: it was cut with another --tool, --accepted or --typed '
+        sys.exit(f'{log} is not the first spans of this pass: it was cut with another --tool, --accepted, --typed or --pairs '
                  'selection, or by an older m3.py. Resume it with that selection, or use a new home')
     if send:
         cooldown(h)  # the pass may have been cut while it waited out a cooldown
@@ -609,7 +614,7 @@ if __name__ == '__main__':
     elif cmd == 'live':
         live(args[0], args[1], '--yes' in args,
              next((a.split('=')[1] for a in args if a.startswith('--tool=')), None), '--accepted' in args,
-             '--typed' in args)
+             '--typed' in args, '--pairs' in args)
     elif cmd == 'score':
         score(args[0], args[1])
     elif cmd == 'drafts':
