@@ -22,6 +22,11 @@ pub fn run(
     agent: &str,
     read_sample: usize,
 ) -> Result<()> {
+    // Grok injects at PreToolUse and agy at PreInvocation, with payloads of their own: the read
+    // sample spawns Claude Code's SessionStart and prompt hooks only.
+    if read_sample > 0 && !matches!(agent, "claude" | "all") {
+        anyhow::bail!("--read-sample times Claude Code's hooks: use --agent claude or all");
+    }
     let root = match repo_root {
         Some(r) => r,
         None => {
@@ -95,7 +100,7 @@ pub fn run(
             "cold".into(),
             read_arm(home, &root_str, read_sample, spawn_agent)?,
         );
-        drop(crate::worker::drained(home)?);
+        drain_for_read(home)?;
         read.insert(
             "warm".into(),
             read_arm(home, &root_str, read_sample, spawn_agent)?,
@@ -210,6 +215,14 @@ fn sample_spawns(
         (crate::capture::FIELD_CAP_ENV, cap),
     ];
     Ok(time_spawns(home, n, agent, "PostToolUse", &payload, &env)?.0)
+}
+
+/// Drains the consumers for the warm arm; an error when another process holds the worker lock,
+/// whose consumers may not be drained.
+fn drain_for_read(home: &Path) -> Result<()> {
+    crate::worker::drained(home)?
+        .map(drop)
+        .context("another process holds the worker lock: stop it before --read-sample")
 }
 
 /// The read path's times on `home` as it stands: `n` spawned SessionStart hooks and `n` prompt
@@ -420,6 +433,31 @@ mod tests {
         let text = hook::inject_text(home.path(), &root, Some("read-sample"));
         assert_eq!(chars, text.chars().count());
         assert!(text.contains("Fix the flaky test first."), "{text}");
+    }
+
+    /// cubic on #301: a warm arm whose drain did not run would report the cold path as warm.
+    #[test]
+    fn the_warm_arm_refuses_a_home_whose_worker_lock_is_held() {
+        let home = tempfile::tempdir().unwrap();
+        crate::raw::open(home.path()).unwrap();
+        let _held = crate::worker::lock(home.path()).unwrap().unwrap();
+        let err = drain_for_read(home.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("holds the worker lock"),
+            "{err:#}"
+        );
+    }
+
+    /// cubic on #301: Grok and agy inject at other points, with other payloads.
+    #[test]
+    fn the_read_sample_is_for_claude_code_only() {
+        let home = tempfile::tempdir().unwrap();
+        let fixture = home.path().join("f.jsonl");
+        std::fs::write(&fixture, "").unwrap();
+        for agent in ["grok", "agy", "codex"] {
+            assert!(run(home.path(), &fixture, None, 0, &[1], agent, 1).is_err());
+        }
+        assert!(!home.path().join("raw.db").exists());
     }
 
     #[test]
