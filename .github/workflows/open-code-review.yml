@@ -120,8 +120,9 @@ jobs:
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           llm_model: ${{ vars.OCR_LLM_MODEL }}
           llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC || 'false' }}
-          # The upstream default contains a provider-specific "thinking" field. The variable pins
-          # OpenRouter to the owner's DeepSeek key (docs/open-code-review.md).
+          # The upstream default contains a provider-specific "thinking" field. The variable sets
+          # OpenRouter's routing: the owner's DeepSeek key first, then the model's other
+          # providers (docs/open-code-review.md).
           llm_extra_body: ${{ vars.OCR_LLM_EXTRA_BODY || '{}' }}
           llm_reasoning_effort: high
           llm_timeout: '600'
