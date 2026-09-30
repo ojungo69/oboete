@@ -40,6 +40,25 @@ const PAGE: usize = 200;
 /// well as in tokens, so a long run of tombstones cannot make one unbounded).
 const MAX_RECORDS: usize = 2_000;
 
+/// The kind (live, or its imported source) of `device`'s next event after `seq`, past the
+/// tombstones and removed records between; `None` when no event follows (Codex on #304).
+fn next_class(raw: &Raw, device: &str, mut seq: i64) -> Result<Option<Option<String>>> {
+    loop {
+        let records = raw.after_within(device, seq, PAGE, PAGE_BYTES)?;
+        let Some(last) = records.last().map(|r| r.seq) else {
+            return Ok(None);
+        };
+        for r in records {
+            if let Item::Event(e) = r.item {
+                return Ok(Some(
+                    (!crate::raw::is_live(&e.source)).then(|| e.source.clone()),
+                ));
+            }
+        }
+        seq = last;
+    }
+}
+
 /// One window of a device's records.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Window {
@@ -433,17 +452,9 @@ pub(crate) fn window_at(
                 if matches!(piece.role, Role::Tool { .. }) {
                     piece = prepared.elided(r.seq);
                     elided.push(r.seq);
-                    // Covered whole: the window is full only when a record of its kind follows
+                    // Covered whole: the window is full only when an event of its kind follows
                     // it, as a live one before imported records waits (Codex on #304).
-                    full = raw
-                        .after_within(device, r.seq, 1, 1)?
-                        .first()
-                        .is_some_and(|n| match &n.item {
-                            Item::Event(e) => {
-                                (!crate::raw::is_live(&e.source)).then(|| e.source.clone()) == this
-                            }
-                            _ => true,
-                        });
+                    full = next_class(raw, device, r.seq)?.is_some_and(|c| c == this);
                 } else {
                     let room = budget.saturating_sub(used + heading);
                     piece = prepared.split(r.seq, from, room, end);
@@ -8107,7 +8118,13 @@ mod tests {
     #[test]
     fn a_live_window_before_imported_records_waits_for_the_owner() {
         let long = "x".repeat(4_000);
-        for first in [said("Now at work.", "a", "r", "hook"), tool(&long)] {
+        let firsts = [
+            (said("Now at work.", "a", "r", "hook"), false),
+            (tool(&long), false),
+            // A removed record between: no event of the window's kind follows.
+            (tool(&long), true),
+        ];
+        for (first, removed) in firsts {
             let home = tempfile::tempdir().unwrap();
             let (mut raw, db) = open(home.path());
             let ts = crate::db::now_ms();
@@ -8118,6 +8135,16 @@ mod tests {
                 ..first
             };
             raw.append(&first).unwrap();
+            if removed {
+                let gone = Event {
+                    ts,
+                    ..said("Gone.", "a", "r", "hook")
+                };
+                let seq = raw.append(&gone).unwrap();
+                let device = raw.device().to_owned();
+                raw.append_tombstone(crate::raw::Target::Record { device, seq })
+                    .unwrap();
+            }
             raw.append(&said("Old words.", "v", "r", "oboete-v1"))
                 .unwrap();
             let calls = std::cell::Cell::new(0);
@@ -8132,7 +8159,7 @@ mod tests {
             assert_eq!(
                 (phase, calls.get()),
                 (Phase::Waiting { until, up: true }, 0),
-                "{}",
+                "{} {removed}",
                 first.kind
             );
         }
