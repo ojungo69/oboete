@@ -424,10 +424,14 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
                 }
             },
         };
-        let mut curator = |span: &str, prompt: &str, check: &crate::provider::AnswerCheck| {
+        let mut curator = |span: &str,
+                           prompt: &str,
+                           check: &crate::provider::AnswerCheck,
+                           gate: &crate::provider::Gate| {
             crate::provider::Chain::new(&cfg.providers, db)
                 .paid_cap(cfg.paid_usd_per_month)
                 .check(check)
+                .gate(gate)
                 .run("curator", span, prompt, &crate::curate::schema())
         };
         // Who is asked and within what caps: a window held under other ones is tried again now.
@@ -442,10 +446,14 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
             crate::curate::run_phase(raw, k, db, &rules, &cfg.summary, &chain, &mut curator)?;
         // The same chain, as the digest role (Task 9): spec 1.4 lets each role have its own, and
         // one list serves until measurement asks for two.
-        let mut digester = |span: &str, prompt: &str, check: &crate::provider::AnswerCheck| {
+        let mut digester = |span: &str,
+                            prompt: &str,
+                            check: &crate::provider::AnswerCheck,
+                            gate: &crate::provider::Gate| {
             crate::provider::Chain::new(&cfg.providers, db)
                 .paid_cap(cfg.paid_usd_per_month)
                 .check(check)
+                .gate(gate)
                 .run("digest", span, prompt, &crate::digest::answer_schema())
         };
         crate::digest::phase(
@@ -1471,6 +1479,7 @@ mod tests {
         _: &str,
         prompt: &str,
         check: &crate::provider::AnswerCheck,
+        _: &crate::provider::Gate,
     ) -> Result<crate::provider::ChainResult> {
         let claims: Vec<serde_json::Value> = prompt
             .lines()
@@ -1504,6 +1513,7 @@ mod tests {
         _: &str,
         prompt: &str,
         check: &crate::provider::AnswerCheck,
+        _: &crate::provider::Gate,
     ) -> Result<crate::provider::ChainResult> {
         let lines: Vec<serde_json::Value> = prompt
             .lines()

@@ -43,12 +43,14 @@ CREATE INDEX IF NOT EXISTS ledger_seq ON ledger(device, seq);
 CREATE TABLE IF NOT EXISTS ops (
   device TEXT NOT NULL,
   op_seq INTEGER NOT NULL,
-  type TEXT NOT NULL,          -- 'window', 'claim', 'correction', 'digest'
+  type TEXT NOT NULL,          -- 'window', 'claim', 'correction', 'digest', 'exclusion'
   ts INTEGER NOT NULL,         -- unix ms, when it was appended
   body TEXT NOT NULL,          -- JSON, at most MAX_OP_BYTES
   batch INTEGER NOT NULL,      -- the first op_seq of the append it came in: a backup keeps it whole
   PRIMARY KEY (device, op_seq)
 );
+-- Milestone 4 D13: the exclusion list is read before each outbound call, from its few ops alone.
+CREATE INDEX IF NOT EXISTS ops_exclusions ON ops(device, op_seq) WHERE type = 'exclusion';
 ";
 
 /// One agent event as captured, after redaction.
@@ -108,6 +110,9 @@ pub enum OpKind {
     Claim,
     Correction,
     Digest,
+    /// A repository excluded, or taken back out (`undo`): `{repo, undo}` (spec 5.5, milestone 4
+    /// D13). An older binary stops at an op type it does not know.
+    Exclusion,
     /// A document another memory tool kept (milestone 4 D5): an `ImportDoc`.
     Import,
 }
@@ -119,6 +124,7 @@ impl OpKind {
             OpKind::Claim => "claim",
             OpKind::Correction => "correction",
             OpKind::Digest => "digest",
+            OpKind::Exclusion => "exclusion",
             OpKind::Import => "import",
         }
     }
@@ -128,6 +134,7 @@ impl OpKind {
             Self::Claim,
             Self::Correction,
             Self::Digest,
+            Self::Exclusion,
             Self::Import,
         ]
         .into_iter()
@@ -146,6 +153,16 @@ pub struct Op {
     /// The first op_seq of the `append_ops` it came in: one window's ops share it.
     pub batch: i64,
 }
+
+/// A record hooks wrote, or `replay` wrote in their stead (dev and evaluation homes): what curation
+/// reads and the manifest shows. Any other source is imported (`oboete-v1`, `transcript`,
+/// milestone 4 D6).
+pub fn is_live(source: &str) -> bool {
+    LIVE.contains(&source)
+}
+
+/// The live sources, which `is_live` and the queries that pick live records read.
+const LIVE: [&str; 2] = ["hook", "replay"];
 
 /// A document another memory tool kept, as an `import` op's body (milestone 4 D5): a claude-mem
 /// observation, session summary or prompt. `uid` is `<source>:<source_id>`, as v1's import named
@@ -485,15 +502,27 @@ impl Raw {
         )?)
     }
 
-    /// The first prompt this device recorded in one agent's session, as `after` returns it: the
-    /// session's goal for the curator (milestone 3 Task 7). A scan by label, as `turns`.
-    pub fn first_prompt(&self, agent: &str, session: &str) -> Result<Option<Event>> {
-        let seq: Option<i64> = self.conn.query_row(
-            "SELECT MIN(seq) FROM records WHERE device = ?1 AND type = 'event' AND agent = ?2
-               AND session = ?3 AND kind = 'prompt'",
-            rusqlite::params![self.device, agent, session],
-            |r| r.get(0),
+    /// The first prompt this device recorded in one agent's session from a source `read` takes,
+    /// as `after` returns it: the session's goal for the curator (milestone 3 Task 7), from a
+    /// record its window may send (Codex on #304). A scan by label, as `turns`.
+    pub fn first_prompt(
+        &self,
+        agent: &str,
+        session: &str,
+        read: impl Fn(&str) -> bool,
+    ) -> Result<Option<Event>> {
+        let mut st = self.conn.prepare(
+            "SELECT seq, source FROM records WHERE device = ?1 AND type = 'event' AND agent = ?2
+               AND session = ?3 AND kind = 'prompt' ORDER BY seq",
         )?;
+        let mut rows = st.query(rusqlite::params![self.device, agent, session])?;
+        let mut seq = None;
+        while let Some(r) = rows.next()? {
+            if read(&r.get::<_, String>(1)?) {
+                seq = Some(r.get::<_, i64>(0)?);
+                break;
+            }
+        }
         let Some(seq) = seq else { return Ok(None) };
         Ok(self
             .after(&self.device, seq - 1, 1)?
@@ -521,14 +550,17 @@ impl Raw {
         Ok(labels.map(|(a, s)| format!("{}\u{0}{}", a.unwrap_or_default(), s.unwrap_or_default())))
     }
 
-    /// This device's newest `limit` event records, the newest first, by their labels alone (no
-    /// body): where the curation phase looks for a session whose digest is due (milestone 3 Task
-    /// 9). Down the primary key: sessions have no index (spec 1.6).
+    /// This device's newest `limit` live event records (the sources `is_live` names), the newest
+    /// first, by their labels alone (no body): where the curation phase looks for a session whose
+    /// digest is due (milestone 3 Task 9), so an import never pushes a live session out (Codex on
+    /// #304). Down the primary key: sessions have no index (spec 1.6).
     pub fn newest_labels(&self, limit: usize) -> Result<Vec<Labels>> {
-        let mut st = self.conn.prepare(
+        let mut st = self.conn.prepare(&format!(
             "SELECT agent, session, repo, seq, ts, kind FROM records
-             WHERE device = ?1 AND type = 'event' ORDER BY seq DESC LIMIT ?2",
-        )?;
+             WHERE device = ?1 AND type = 'event' AND source IN ('{}')
+             ORDER BY seq DESC LIMIT ?2",
+            LIVE.join("', '")
+        ))?;
         let rows = st.query_map(params![self.device, limit as i64], |r| {
             Ok(Labels {
                 agent: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
@@ -542,21 +574,28 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Typed prompts and replies of `agent`'s `session` on this device strictly between two seqs:
-    /// none when a proposal was the session's last turn before a window (milestone 3 Task 8).
+    /// Typed prompts and replies of `agent`'s `session` on this device strictly between two seqs,
+    /// of a `source` that `read` takes (a window's kind, milestone 4 D6): none when a proposal was
+    /// the session's last turn before a window (milestone 3 Task 8).
     pub fn turns_between(
         &self,
         agent: &str,
         session: &str,
         after: i64,
         before: i64,
+        read: impl Fn(&str) -> bool,
     ) -> Result<i64> {
-        Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
+        let mut st = self.conn.prepare_cached(
+            "SELECT source FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
                AND type = 'event' AND agent = ?4 AND session = ?5 AND kind IN ('prompt', 'reply')",
-            params![self.device, after, before, agent, session],
-            |r| r.get(0),
-        )?)
+        )?;
+        let mut n = 0;
+        for source in st.query_map(params![self.device, after, before, agent, session], |r| {
+            r.get::<_, String>(0)
+        })? {
+            n += i64::from(read(&source?));
+        }
+        Ok(n)
     }
 
     /// `agent`'s `session` events of `kind` on this device strictly between two seqs, as `after`
@@ -842,6 +881,104 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The repositories excluded now (spec 5.5, milestone 4 D13): every device's exclusion ops in
+    /// time order, an undo taking its repository back out. Read before each outbound call, with no
+    /// consumer in between; with no hub, this device's list is the whole list.
+    pub fn exclusions(&self) -> Result<Vec<String>> {
+        // A device's ops in its own order (op_seq), its clock never going back in it, then every
+        // device's by that clock: a clock set back never puts a newer op first, and an op
+        // `exclude` wrote comes after every op its store held (Codex on #304).
+        let mut st = self.conn.prepare(
+            "SELECT device, ts, body FROM ops WHERE type = 'exclusion' ORDER BY device, op_seq",
+        )?;
+        let mut ops: Vec<(i64, String, usize, serde_json::Value)> = Vec::new();
+        let (mut device, mut clock) = (String::new(), i64::MIN);
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        for (i, row) in rows.enumerate() {
+            let (from, ts, body): (String, i64, String) = row?;
+            let v: serde_json::Value = serde_json::from_str(&body)?;
+            if from != device {
+                (device, clock) = (from.clone(), i64::MIN);
+            }
+            clock = clock.max(v["clock"].as_i64().unwrap_or(ts));
+            ops.push((clock, from, i, v));
+        }
+        ops.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
+        let mut out = std::collections::BTreeSet::new();
+        for (_, _, _, v) in ops {
+            let Some(repo) = v["repo"].as_str() else {
+                continue;
+            };
+            if v["undo"] == true {
+                out.remove(repo);
+            } else {
+                out.insert(repo.to_owned());
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
+    /// Appends an exclusion op, or its undo (spec 5.5, D13), with a clock past every exclusion op
+    /// this store holds, as a Lamport clock: it takes effect after each op its device had seen,
+    /// whatever the clocks of the devices that wrote them. A copied store keeps its old device's
+    /// ops under a new device (Codex on #304).
+    pub fn exclude(&mut self, repo: &str, undo: bool) -> Result<i64> {
+        let seen: Option<i64> = self.conn.query_row(
+            "SELECT MAX(COALESCE(json_extract(body, '$.clock'), ts)) FROM ops
+             WHERE type = 'exclusion'",
+            [],
+            |r| r.get(0),
+        )?;
+        let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
+        let op = serde_json::json!({ "repo": repo, "undo": undo, "clock": clock });
+        Ok(self.append_ops(&[(OpKind::Exclusion, op)])?[0])
+    }
+
+    /// The sessions, as `agent` NUL `session`, with a record in one of `repos`: what an excluded
+    /// repository's session touched is sent nowhere (spec 5.5), whatever else it touched.
+    /// Read before each outbound call, so through an index of the events' repositories, built the
+    /// first time any exclusion is read: in the worker or the CLI, never in a hook, which then only
+    /// adds to it (CodeRabbit on #304).
+    pub fn sessions_in(&self, repos: &[String]) -> Result<std::collections::HashSet<String>> {
+        if repos.is_empty() {
+            return Ok(Default::default());
+        }
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS records_repo ON records(repo) WHERE type = 'event'",
+        )?;
+        let mut st = self.conn.prepare(
+            "SELECT DISTINCT COALESCE(agent, '') || char(0) || COALESCE(session, '') FROM records
+             WHERE type = 'event' AND repo IN (SELECT value FROM json_each(?1))",
+        )?;
+        let rows = st.query_map([serde_json::to_string(repos)?], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Per imported source (not `is_live`), `device`'s events in the seq ranges `ranges`, each
+    /// inclusive.
+    pub fn imported_counts(
+        &self,
+        device: &str,
+        ranges: &[(i64, i64)],
+    ) -> Result<std::collections::BTreeMap<String, i64>> {
+        let mut st = self.conn.prepare(
+            "SELECT source, count(*) FROM records
+             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event' GROUP BY source",
+        )?;
+        let mut out = std::collections::BTreeMap::new();
+        for &(from, to) in ranges {
+            for row in st.query_map(params![device, from, to], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })? {
+                let (source, n) = row?;
+                if !is_live(&source) {
+                    *out.entry(source).or_default() += n;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// The bodies of `device`'s ops of `kind` after `op_seq`, in op_seq order: what a reader checks
     /// that the worker has not applied yet (`claims::Pending`).
     pub fn ops_of(
@@ -1008,22 +1145,27 @@ impl Raw {
         agent: &str,
         session: &str,
         from: (i64, Option<i64>),
+        read: impl Fn(&str) -> bool,
     ) -> Result<Vec<Op>> {
-        use rusqlite::OptionalExtension;
         // A window that starts inside an event: its first part was in the previous window.
         let before = from.0 + i64::from(from.1.is_some());
         let start = (from.0, from.1.unwrap_or(0));
-        // Down the primary key from `before`: the session's latest event is usually close.
-        let seq: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT seq FROM records WHERE device = ?1 AND seq < ?2 AND type = 'event'
-                   AND agent = ?3 AND session = ?4 AND kind NOT IN ('start', 'end')
-                 ORDER BY seq DESC LIMIT 1",
-                params![self.device, before, agent, session],
-                |r| r.get(0),
-            )
-            .optional()?;
+        // Down the primary key from `before`: the session's latest event of a kind `read` takes
+        // (a window's, milestone 4 D6) is usually close.
+        let mut latest = self.conn.prepare_cached(
+            "SELECT seq, source FROM records WHERE device = ?1 AND seq < ?2 AND type = 'event'
+               AND agent = ?3 AND session = ?4 AND kind NOT IN ('start', 'end')
+             ORDER BY seq DESC",
+        )?;
+        let mut rows = latest.query(params![self.device, before, agent, session])?;
+        let mut seq = None;
+        while let Some(r) = rows.next()? {
+            if read(&r.get::<_, String>(1)?) {
+                seq = Some(r.get::<_, i64>(0)?);
+                break;
+            }
+        }
+        drop(rows);
         let Some(seq) = seq else {
             return Ok(Vec::new());
         };
@@ -1713,6 +1855,49 @@ mod tests {
         assert_eq!(raw.after_within(&dev, 0, 10, 1500).unwrap().len(), 1);
     }
 
+    /// Codex on #304: the list folds a device's ops in their own order, so a clock set back
+    /// between two of them never puts the newer one first.
+    #[test]
+    fn a_clock_set_back_never_puts_a_newer_exclusion_first() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let op = |undo: bool| {
+            let body = serde_json::json!({"repo": "x", "undo": undo});
+            (OpKind::Exclusion, body)
+        };
+        raw.append_ops(&[op(false)]).unwrap();
+        raw.append_ops(&[op(true)]).unwrap();
+        let last = raw.append_ops(&[op(false)]).unwrap()[0];
+        raw.conn
+            .execute("UPDATE ops SET ts = 0 WHERE op_seq = ?1", [last])
+            .unwrap();
+        assert_eq!(raw.exclusions().unwrap(), ["x"]);
+    }
+
+    /// Codex on #304: a copied store keeps the old device's ops under a new device, and an
+    /// exclusion appended there comes after every op it holds, even when the old device's clock
+    /// ran ahead of the new one's.
+    #[test]
+    fn an_exclusion_comes_after_every_op_a_copied_store_holds() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        raw.exclude("x", false).unwrap();
+        raw.exclude("x", true).unwrap();
+        raw.conn
+            .execute(
+                "UPDATE ops SET ts = ts + 3600000,
+                   body = json_set(body, '$.clock', json_extract(body, '$.clock') + 3600000)",
+                [],
+            )
+            .unwrap();
+        drop(raw);
+        let copy = tempfile::tempdir().unwrap();
+        std::fs::copy(home.path().join("raw.db"), copy.path().join("raw.db")).unwrap();
+        let mut other = open(copy.path()).unwrap();
+        other.exclude("x", false).unwrap();
+        assert_eq!(other.exclusions().unwrap(), ["x"]);
+    }
+
     fn import_doc(id: usize, body: String) -> ImportDoc {
         ImportDoc {
             uid: format!("claude-mem:abc:o{id}"),
@@ -1811,6 +1996,29 @@ mod tests {
         raw.append_ops(&ops.map(|op| (OpKind::Import, op))).unwrap();
         let keys = raw.import_keys("claude-mem").unwrap();
         assert_eq!(keys, ["o1".to_owned()].into_iter().collect());
+    }
+
+    /// OpenCodeReview on #304: an event's agent and session labels may be NULL; `sessions_in`
+    /// keys such an event as `session_key` does, never an error that stops the curation phase.
+    #[test]
+    fn sessions_in_keys_an_event_without_labels_as_session_key_does() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let e = Event {
+            repo: Some("x".into()),
+            ..test_event("hi")
+        };
+        let seq = raw.append(&e).unwrap();
+        raw.conn
+            .execute(
+                "UPDATE records SET agent = NULL, session = NULL WHERE seq = ?1",
+                [seq],
+            )
+            .unwrap();
+        let device = raw.device().to_owned();
+        let key = raw.session_key(&device, seq).unwrap().unwrap();
+        let keys = raw.sessions_in(&["x".to_owned()]).unwrap();
+        assert_eq!(keys, [key].into_iter().collect());
     }
 
     #[test]
@@ -1927,7 +2135,9 @@ mod tests {
             raw.append_ops(&ops).unwrap();
         };
         let previous = |raw: &Raw, from: (i64, Option<i64>)| -> Vec<String> {
-            let ops = raw.previous_window_ops("claude", "s", from).unwrap();
+            let ops = raw
+                .previous_window_ops("claude", "s", from, |_| true)
+                .unwrap();
             ops.into_iter()
                 .map(|o| o.body["text"].as_str().unwrap().to_owned())
                 .collect()
