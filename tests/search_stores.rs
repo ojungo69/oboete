@@ -25,8 +25,9 @@ fn oboete(home: &std::path::Path, cwd: &std::path::Path, args: &[&str], stdin: &
     String::from_utf8(out.stdout).unwrap()
 }
 
+/// `timeline` reads Design B since milestone 4's Task 4: it creates no v1 store beside raw.db.
 #[test]
-fn raw_hits_stay_found_after_a_v1_command_creates_oboete_db() {
+fn raw_hits_stay_found_after_timeline() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
     let (h, c) = (home.path(), cwd.path());
@@ -43,8 +44,8 @@ fn raw_hits_stay_found_after_a_v1_command_creates_oboete_db() {
     );
     oboete(h, c, &["worker", "--idle-ms", "0"], "");
     assert!(oboete(h, c, &["search", "zebra"], "").contains("zebra crossing"));
-    oboete(h, c, &["timeline"], ""); // opens, and so creates, v1's oboete.db
-    assert!(h.join("oboete.db").exists());
+    oboete(h, c, &["timeline"], "");
+    assert!(!h.join("oboete.db").exists());
     assert!(oboete(h, c, &["search", "zebra"], "").contains("zebra crossing"));
 }
 
@@ -72,12 +73,12 @@ fn a_raw_hit_id_from_search_opens_with_get() {
 }
 
 #[test]
-fn the_limit_holds_across_both_stores() {
+fn the_limit_holds_across_agents() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
     let (h, c) = (home.path(), cwd.path());
     for agent in ["claude", "grok"] {
-        // Claude Code writes raw.db; Grok, not yet ported (Task 2b), writes v1's oboete.db.
+        // Both agents' hooks write raw.db.
         for i in 0..3 {
             let payload = serde_json::json!({
                 "session_id": format!("{agent}-{i}"),

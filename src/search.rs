@@ -10,6 +10,8 @@ use anyhow::{Context, Result};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
+pub mod b;
+
 /// `doc` is `o<id>` for an observation, `s<id>` for a summary, `p<id>` for a prompt; `when` is
 /// local time.
 pub struct Hit {
@@ -489,15 +491,14 @@ pub struct RawHit {
     pub device: String,
     pub seq: i64,
     pub kind: String,
-    /// Local time, `YYYY-MM-DD HH:MM`.
-    pub when: String,
+    /// Unix ms.
+    pub ts: i64,
     pub repo: Option<String>,
     pub snippet: String,
 }
 
-/// Search the none tier's index (`raw_fts` in knowledge.db, milestone 2 Task 6) the way
-/// [`search`] searches v1's: trigrams ORed and ranked by bm25, or literal terms (all required)
-/// for a query too short for a trigram. `repo = None` searches every repository.
+/// `raw_in` on `home`'s stores.
+#[cfg(test)]
 pub fn raw(
     home: &std::path::Path,
     query: &str,
@@ -512,7 +513,40 @@ pub fn raw(
         None
     };
     let k = crate::knowledge::open(home)?;
-    crate::consumer::fts::schema(&k)?;
+    raw_in(raw.as_ref(), &k, query, repo, (None, None), limit)
+}
+
+/// MUST-M12: `since` and `until` (unix ms, `until` exclusive) on `column`, each leg's documents by
+/// their own time.
+fn within(
+    clauses: &mut Vec<String>,
+    args: &mut Vec<Value>,
+    column: &str,
+    (since, until): (Option<i64>, Option<i64>),
+) {
+    if let Some(t) = since {
+        clauses.push(format!("{column} >= ?"));
+        args.push(Value::Integer(t));
+    }
+    if let Some(t) = until {
+        clauses.push(format!("{column} < ?"));
+        args.push(Value::Integer(t));
+    }
+}
+
+/// Search the none tier's index (`raw_fts` in knowledge.db, milestone 2 Task 6) the way
+/// [`search`] searches v1's: trigrams ORed and ranked by bm25, or literal terms (all required)
+/// for a query too short for a trigram. `repo = None` searches every repository; `span` is
+/// `within`'s. `raw` is `None` for a home with no raw.db.
+pub(crate) fn raw_in(
+    raw: Option<&crate::raw::Raw>,
+    k: &Connection,
+    query: &str,
+    repo: Option<&str>,
+    span: (Option<i64>, Option<i64>),
+    limit: usize,
+) -> Result<Vec<RawHit>> {
+    crate::consumer::fts::schema(k)?;
     let Some((mut clauses, mut args, ranked)) = query_clauses(query, "raw_fts", &["f.text"]) else {
         return Ok(Vec::new());
     };
@@ -520,6 +554,7 @@ pub fn raw(
         clauses.push("d.repo = ?".into());
         args.push(Value::Text(r.to_string()));
     }
+    within(&mut clauses, &mut args, "d.ts", span);
     // D8: a tombstone the index has not reached yet hides its target here, so no search shows
     // what raw already hides. The checkpoint is read before the index and the tombstones after
     // it: one that commits while the query runs is still seen (one the worker applies in between
@@ -534,13 +569,13 @@ pub fn raw(
         }
         let mut ats = Vec::new();
         for d in devices {
-            ats.push((crate::knowledge::checkpoint::get(&k, "fts", &d)?, d));
+            ats.push((crate::knowledge::checkpoint::get(k, "fts", &d)?, d));
         }
         Some((raw, ats))
     } else {
         None
     };
-    type Seen = Option<(crate::raw::Raw, Vec<(i64, String)>)>;
+    type Seen<'a> = Option<(&'a crate::raw::Raw, Vec<(i64, String)>)>;
     let pending = |raw_db: &Seen| -> Result<std::collections::HashSet<(String, i64)>> {
         let mut out = std::collections::HashSet::new();
         if let Some((raw, ats)) = raw_db {
@@ -557,8 +592,7 @@ pub fn raw(
         "d.ts DESC"
     };
     let sql = format!(
-        "SELECT d.device, d.seq, d.kind, d.ts, d.repo, f.text,
-                strftime('%Y-%m-%d %H:%M', d.ts / 1000, 'unixepoch', 'localtime')
+        "SELECT d.device, d.seq, d.kind, d.ts, d.repo, f.text
          FROM raw_fts f JOIN raw_docs d ON d.rowid = f.rowid
          WHERE {} ORDER BY {order} LIMIT ?",
         clauses.join(" AND ")
@@ -573,10 +607,10 @@ pub fn raw(
             device: r.get(0)?,
             seq: r.get(1)?,
             kind: r.get(2)?,
-            when: r.get(6)?,
+            ts: r.get(3)?,
             repo: r.get(4)?,
             // Gated before the snippet is cut, field by field (the index holds one per line).
-            snippet: snippet(&crate::redact::outbound_lines(&text), &terms, 110),
+            snippet: snippet(&crate::redact::outbound_lines(&text), &terms, b::WIDTH),
         })
     })?;
     let mut hits: Vec<RawHit> = hits.collect::<Result<_, _>>()?;
