@@ -472,7 +472,10 @@ fn long_of(kind: &str, body: &Value) -> Option<String> {
     };
     match kind {
         "prompt" if body["omitted"] == true => None,
-        "prompt" | "envelope" => joined(text(&body["prompt"]), &["prompt", "omitted"]),
+        // `agent_sent` is who sent it (#273), which the line's label shows: not text.
+        "prompt" | "envelope" => {
+            joined(text(&body["prompt"]), &["prompt", "omitted", "agent_sent"])
+        }
         "reply" => joined(text(&body["assistant"]), &["assistant"]),
         "compaction" => joined(text(&body["summary"]), &["summary", "trigger"]),
         "directive" => text(&body["text"]),
@@ -534,7 +537,7 @@ impl<'r> Prepared<'r> {
             "prompt" => {
                 // A prompt another agent sent is not the developer's words: the gates read its
                 // line as the assistant's (#273).
-                let (head, role) = if body["sender"] == "agent" {
+                let (head, role) = if body["agent_sent"] == true {
                     ("[agent prompt]", Role::Assistant)
                 } else {
                     ("[user]", Role::User)

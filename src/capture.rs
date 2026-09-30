@@ -114,7 +114,7 @@ pub fn events(
             // (#273): never the developer's words.
             let sent = |mut body: Value| {
                 if payload["oboete_sender"] == "agent" {
-                    body["sender"] = json!("agent");
+                    body["agent_sent"] = json!(true);
                 }
                 body
             };

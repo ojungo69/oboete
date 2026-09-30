@@ -542,7 +542,8 @@ fn adapt(
     if agent == "codex"
         && event == "UserPromptSubmit"
         && p.get("oboete_sender").is_none()
-        && str_field(payload, &["transcript_path"]).is_some_and(|t| codex_agent_sent(Path::new(t)))
+        && str_field(payload, &["transcript_path"])
+            .is_some_and(|t| rollout_agent_sent(Path::new(t)))
     {
         p["oboete_sender"] = json!("agent");
     }
@@ -552,7 +553,7 @@ fn adapt(
 /// Whether another agent started the Codex session whose rollout is `path`, from its first line,
 /// the `session_meta` (about 23 KB with Codex's instructions, 0.158). One bounded read per
 /// prompt; a line over the cap or a file that cannot be read leaves the prompt the user's.
-fn codex_agent_sent(path: &Path) -> bool {
+fn rollout_agent_sent(path: &Path) -> bool {
     use std::io::BufRead;
     const HEAD: u64 = 1 << 20;
     let Ok(f) = std::fs::File::open(path) else {
@@ -3066,14 +3067,21 @@ mod tests {
             let ev = recorded(&dir, "codex", id);
             assert_eq!(ev.len(), 1, "{id}");
             assert_eq!(ev[0].kind, "prompt", "{id}");
-            serde_json::from_str::<Value>(&ev[0].body).unwrap()["sender"].clone()
+            let body: Value = serde_json::from_str(&ev[0].body).unwrap();
+            // A marker, not text: search finds the prompt by what it says only.
+            assert_eq!(
+                crate::consumer::fts::text(&ev[0].body),
+                "Review the diff.",
+                "{id}"
+            );
+            body["agent_sent"].clone()
         };
         let exec = json!({"originator": "codex_exec", "source": "exec"});
-        assert_eq!(sender("exec", Some(exec)), "agent");
+        assert_eq!(sender("exec", Some(exec)), true);
         let plugin = json!({"originator": "Claude Code", "source": "vscode"});
-        assert_eq!(sender("plugin", Some(plugin)), "agent");
+        assert_eq!(sender("plugin", Some(plugin)), true);
         let sub = json!({"originator": "codex-tui", "source": {"subagent": {"thread_spawn": {}}}});
-        assert_eq!(sender("sub", Some(sub)), "agent");
+        assert_eq!(sender("sub", Some(sub)), true);
         let typed = json!({"originator": "codex-tui", "source": "vscode"});
         assert_eq!(sender("tui", Some(typed)), Value::Null);
         assert_eq!(sender("none", None), Value::Null);

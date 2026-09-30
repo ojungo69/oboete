@@ -896,14 +896,11 @@ mod tests {
     fn a_prompt_another_agent_sent_is_never_the_users_words() {
         let asked = "Use npm run typecheck for the admin app.";
         let w = window(&[
-            ("prompt", json!({"prompt": asked, "sender": "agent"})),
+            ("prompt", json!({"prompt": asked, "agent_sent": true})),
             reply("Done: the admin app type-checks with npm run typecheck."),
         ]);
-        assert!(
-            w.text.contains(&format!("[agent prompt] {asked}")),
-            "{}",
-            w.text
-        );
+        // The whole line: the marker itself is not text the curator reads (review on #275).
+        assert_eq!(w.lines[0].text, format!("[agent prompt] {asked}"));
         assert_eq!(
             one(&w, "decided", "user", asked),
             ("proposed".into(), "assistant proposal".into())
