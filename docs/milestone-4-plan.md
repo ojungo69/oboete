@@ -205,18 +205,23 @@ As built in #303; D1 and D2 are the record.
 
 ## Task 2: Imported records are parked
 
+As built in #304; D6 and D13 are the record.
+
 **Files:**
-- Modify: `src/curate.rs` (the window cut stops at a change of source; records of `oboete-v1` and `transcript` get a window op skipped with reason `imported:<source>`; `recurate` gains `--source`)
-- Modify: `src/raw.rs` (the window's record query returns `source`)
+- Modify: `src/curate.rs` (a window reads one kind of record, live or one imported source, and ends where the kind changes; records of `oboete-v1` and `transcript` get a window op skipped with reason `imported:<source>`; `recurate --source`; each call holds to the exclusion list it was cut under)
+- Modify: `src/raw.rs` (`OpKind::Exclusion`; `Raw::{exclude, exclusions, sessions_in, imported_counts}`, read directly, no consumer; `raw::is_live`; the continuity reads take the window's kind)
+- Modify: `src/provider.rs` (`provider::Gate`, asked before each call, a retry too)
+- Modify: `src/digest.rs`, `src/consumer/claims.rs`, `src/worker.rs` (digests and claims leave excluded sessions out; the curator and digester closures pass the gate)
+- Modify: `src/embed.rs` (v1's `oboete reindex` asks the exclusion list before each request and stops while any repository is on it)
 - Modify: `src/consumer/manifest.rs` (facts from `hook` and `replay` records only; the not-yet-curated count leaves parked records out)
-- Modify: `src/setup.rs` (doctor: `imported, not curated: N records (oboete-v1: a, transcript: b)`)
-- Modify: `src/main.rs` (`Recurate { source: Option<String> }`; `oboete exclude [--undo] <repo>`)
-- Modify: `src/raw.rs` (`OpKind::Exclusion`; `Raw::exclusions()`, read directly, no consumer)
-- Test: `src/curate.rs`, `src/consumer/manifest.rs`
+- Modify: `src/setup.rs` (doctor: `imported, not curated: N records (oboete-v1: a, transcript: b)`, from `curate::parked_line`)
+- Modify: `src/main.rs` (`Recurate { source: Option<String>, .. }`; `oboete exclude [<repo>] [--undo]`, the current checkout's repository when none is named)
+- Test: `src/curate.rs`, `src/raw.rs`, `src/digest.rs`, `src/embed.rs`, `src/provider.rs`, `src/consumer/manifest.rs`
 
 **Interfaces:**
 - A parked span is a window op with outcome `skipped` and reason `imported:<source>`: the M2 coverage check counts it, and `recurate --skipped` does not take it.
-- `oboete recurate --source <source> [--send]`: the parked spans of that source, their windows and the cost estimate; with `--send`, curated.
+- `curate::Reads::{Live, Source(String), Any}` (the curation phase, `recurate --source`, a queued recuration; `Any` is narrowed to each window's own kind), `curate::Reading { exclusions, excluded, reads }` with `Reading::now(raw, reads)` and `Reading::still(raw)` (the egress gate: the list and the sessions it excludes as they were, else `ListChanged` and nothing is sent), and `Window::{aside, excluded, reads}`.
+- `oboete recurate --source <source> [--yes]`: the parked spans of that source, their windows and the cost estimate; with `--yes`, curated.
 
 - [ ] **Step 1: Failing tests.** `an_excluded_repositorys_records_reach_no_curator` (row 30-1 on curation: the stub provider sees none of them, and a window left empty is skipped with reason `excluded`); `undoing_an_exclusion_lets_new_windows_out`; `an_imported_record_is_skipped_with_its_reason_and_never_sent` (the stub provider sees no call); `a_window_never_mixes_live_and_imported_records`; `recurate_source_curates_the_parked_spans_only`; `the_manifest_ignores_imported_records`; `the_backlog_line_does_not_count_parked_records`; `every_seq_is_curated_elided_or_skipped` still passes with imported records in the fixture.
 - [ ] **Step 2: Implement** the exclusion op and the list the egress gate reads before each call (D13), then the cut and the skips in the curation phase, with no provider call and no budget spent.
