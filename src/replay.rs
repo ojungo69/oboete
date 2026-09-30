@@ -252,6 +252,9 @@ fn drain_for_read(home: &Path) -> Result<()> {
         .context("another process holds the worker lock: stop it before --read-sample")
 }
 
+/// The session the read arms' hooks record under.
+const SAMPLE_SESSION: &str = "read-sample";
+
 /// The read path's times on `home` as it stands: `n` spawned SessionStart hooks for the checkout
 /// at `root` and `n` prompt hooks in the checkout at `samples`, as the agent runs them (the write,
 /// the read of what is injected, the lock attempt), and `n` in-process reads of what SessionStart
@@ -266,7 +269,7 @@ fn read_arm(
     agent: &str,
 ) -> Result<Value> {
     let hook = |event: &str, cwd: &str, extra: Value| {
-        let mut payload = json!({"session_id": "read-sample", "cwd": cwd,
+        let mut payload = json!({"session_id": SAMPLE_SESSION, "cwd": cwd,
                                  "hook_event_name": event});
         payload
             .as_object_mut()
@@ -276,8 +279,7 @@ fn read_arm(
         time_spawns(home, held, n, agent, event, &payload.to_string(), &env)
     };
     let mut raw = crate::raw::open(home)?;
-    let device = raw.device().to_owned();
-    let before = raw.max_seq_of(&device)?;
+    let before = raw.max_seq_of(raw.device())?;
     let (starts, printed) = hook("SessionStart", root, json!({"source": "startup"}))?;
     let (prompts, _) = hook(
         "UserPromptSubmit",
@@ -285,15 +287,7 @@ fn read_arm(
         json!({"prompt": "How did we fix the flaky test last time?"}),
     )?;
     let (reads, chars) = read_in_process(home, Path::new(root), n);
-    // What the arm's hooks recorded is forgotten: a start on the fixture's checkout would be its
-    // newest event, and move its manifest's as-of time to now for the drain and the next arm
-    // (Codex on #301).
-    for seq in before + 1..=raw.max_seq_of(&device)? {
-        raw.append_tombstone(crate::raw::Target::Record {
-            device: device.clone(),
-            seq,
-        })?;
-    }
+    forget_samples(&mut raw, before)?;
     Ok(json!({
         "session_start_ms": stats_ms(&starts),
         "session_start_printed_bytes": printed,
@@ -304,6 +298,35 @@ fn read_arm(
     }))
 }
 
+/// Forgets what the read arms' hooks recorded after `before`, and nothing another process recorded
+/// meanwhile: a start on the fixture's checkout would be its newest event, and move its manifest's
+/// as-of time to now for the drain and the next arm (Codex on #301).
+fn forget_samples(raw: &mut crate::raw::Raw, before: i64) -> Result<()> {
+    let device = raw.device().to_owned();
+    let mut sampled = Vec::new();
+    let mut after = before;
+    loop {
+        let records = raw.after(&device, after, 500)?;
+        let Some(last) = records.last() else { break };
+        after = last.seq;
+        for r in records {
+            if let crate::raw::Item::Event(e) = &r.item
+                && e.session == SAMPLE_SESSION
+                && e.source == "replay"
+            {
+                sampled.push(r.seq);
+            }
+        }
+    }
+    for seq in sampled {
+        raw.append_tombstone(crate::raw::Target::Record {
+            device: device.clone(),
+            seq,
+        })?;
+    }
+    Ok(())
+}
+
 /// `n` in-process reads of what SessionStart shows for the checkout at `cwd` (`oboete inject`'s
 /// text), in microseconds, sorted, and the characters of the last one.
 fn read_in_process(home: &Path, cwd: &Path, n: usize) -> (Vec<u128>, usize) {
@@ -311,7 +334,7 @@ fn read_in_process(home: &Path, cwd: &Path, n: usize) -> (Vec<u128>, usize) {
     let mut chars = 0;
     for _ in 0..n {
         let started = Instant::now();
-        chars = hook::inject_text(home, cwd, Some("read-sample"))
+        chars = hook::inject_text(home, cwd, Some(SAMPLE_SESSION))
             .chars()
             .count();
         us.push(started.elapsed().as_micros());
@@ -534,6 +557,32 @@ mod tests {
             assert!(run(home.path(), &fixture, None, 0, &[1], agent, 1).is_err());
         }
         assert!(!home.path().join("raw.db").exists());
+    }
+
+    /// #301: a read arm forgets its hooks' records, never one another process recorded meanwhile.
+    #[test]
+    fn a_read_arm_forgets_only_its_own_records() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let before = raw.max_seq_of(raw.device()).unwrap();
+        let event = |session: &str, source: &str| crate::raw::Event {
+            session: session.into(),
+            source: source.into(),
+            body: json!({"prompt": "hello"}).to_string(),
+            ..crate::raw::test_event("")
+        };
+        let sampled = raw.append(&event(SAMPLE_SESSION, "replay")).unwrap();
+        let real = raw.append(&event("s1", "hook")).unwrap();
+        let replayed = raw.append(&event("s2", "replay")).unwrap();
+        forget_samples(&mut raw, before).unwrap();
+        let kept: Vec<(i64, bool)> = raw
+            .after(raw.device(), before, 10)
+            .unwrap()
+            .into_iter()
+            .filter(|r| !matches!(r.item, crate::raw::Item::Tombstone(_)))
+            .map(|r| (r.seq, matches!(r.item, crate::raw::Item::Event(_))))
+            .collect();
+        assert_eq!(kept, [(sampled, false), (real, true), (replayed, true)]);
     }
 
     #[test]
