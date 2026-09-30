@@ -1658,7 +1658,7 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/testdata/fixtures/overturn-cross.jsonl");
-        crate::replay::run(base.path(), &fixture, None, 0, &[1], "claude").unwrap();
+        crate::replay::run(base.path(), &fixture, None, 0, &[1], "claude", 0).unwrap();
         let clean = tempfile::tempdir().unwrap();
         copy_home(base.path(), clean.path());
         crate::crash::off();
