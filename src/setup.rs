@@ -1662,7 +1662,7 @@ pub fn doctor(home: &Path) -> Result<()> {
             (|| -> Result<()> {
                 // raw.db first, as `search` does: its shared hold on raw.lock keeps a restore or a
                 // rebuild from moving knowledge.db aside while this reads it.
-                let _raw = if crate::raw::exists(home) {
+                let raw = if crate::raw::exists(home) {
                     Some(crate::raw::open(home)?)
                 } else {
                     None
@@ -1693,8 +1693,9 @@ pub fn doctor(home: &Path) -> Result<()> {
                 }
                 // Milestone 4 D6: imported records that curation leaves aside.
                 let curating = config::load(home).is_ok_and(|c| c.summary.curate);
-                if let Some(raw) = &_raw
-                    && let Some(line) = crate::curate::parked_line(raw, curating)?
+                if let Some(raw) = &raw
+                    && let Some(line) = crate::curate::parked_line(raw, curating)
+                        .context("raw.db's imported records")?
                 {
                     println!("  {line}");
                 }

@@ -612,10 +612,15 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 }
             };
             let mut raw = raw::open(&home)?;
+            let was = raw.exclusions()?.contains(&repo);
             raw.exclude(&repo, undo)?;
             let list = raw.exclusions()?;
             if undo {
-                println!("no longer excluded: {repo}");
+                if was {
+                    println!("no longer excluded: {repo}");
+                } else {
+                    println!("{repo} was not excluded");
+                }
             } else {
                 println!("excluded: {repo}");
                 // A label that matches no record yet may be a typo: say so.

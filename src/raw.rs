@@ -158,8 +158,11 @@ pub struct Op {
 /// reads and the manifest shows. Any other source is imported (`oboete-v1`, `transcript`,
 /// milestone 4 D6).
 pub fn is_live(source: &str) -> bool {
-    matches!(source, "hook" | "replay")
+    LIVE.contains(&source)
 }
+
+/// The live sources, which `is_live` and the queries that pick live records read.
+const LIVE: [&str; 2] = ["hook", "replay"];
 
 /// A document another memory tool kept, as an `import` op's body (milestone 4 D5): a claude-mem
 /// observation, session summary or prompt. `uid` is `<source>:<source_id>`, as v1's import named
@@ -552,11 +555,12 @@ impl Raw {
     /// digest is due (milestone 3 Task 9), so an import never pushes a live session out (Codex on
     /// #304). Down the primary key: sessions have no index (spec 1.6).
     pub fn newest_labels(&self, limit: usize) -> Result<Vec<Labels>> {
-        let mut st = self.conn.prepare(
+        let mut st = self.conn.prepare(&format!(
             "SELECT agent, session, repo, seq, ts, kind FROM records
-             WHERE device = ?1 AND type = 'event' AND source IN ('hook', 'replay')
+             WHERE device = ?1 AND type = 'event' AND source IN ('{}')
              ORDER BY seq DESC LIMIT ?2",
-        )?;
+            LIVE.join("', '")
+        ))?;
         let rows = st.query_map(params![self.device, limit as i64], |r| {
             Ok(Labels {
                 agent: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
@@ -936,7 +940,7 @@ impl Raw {
             "CREATE INDEX IF NOT EXISTS records_repo ON records(repo) WHERE type = 'event'",
         )?;
         let mut st = self.conn.prepare(
-            "SELECT DISTINCT agent || char(0) || session FROM records
+            "SELECT DISTINCT COALESCE(agent, '') || char(0) || COALESCE(session, '') FROM records
              WHERE type = 'event' AND repo IN (SELECT value FROM json_each(?1))",
         )?;
         let rows = st.query_map([serde_json::to_string(repos)?], |r| r.get(0))?;
@@ -1980,6 +1984,29 @@ mod tests {
         raw.append_ops(&ops.map(|op| (OpKind::Import, op))).unwrap();
         let keys = raw.import_keys("claude-mem").unwrap();
         assert_eq!(keys, ["o1".to_owned()].into_iter().collect());
+    }
+
+    /// OpenCodeReview on #304: an event's agent and session labels may be NULL; `sessions_in`
+    /// keys such an event as `session_key` does, never an error that stops the curation phase.
+    #[test]
+    fn sessions_in_keys_an_event_without_labels_as_session_key_does() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let e = Event {
+            repo: Some("x".into()),
+            ..test_event("hi")
+        };
+        let seq = raw.append(&e).unwrap();
+        raw.conn
+            .execute(
+                "UPDATE records SET agent = NULL, session = NULL WHERE seq = ?1",
+                [seq],
+            )
+            .unwrap();
+        let device = raw.device().to_owned();
+        let key = raw.session_key(&device, seq).unwrap().unwrap();
+        let keys = raw.sessions_in(&["x".to_owned()]).unwrap();
+        assert_eq!(keys, [key].into_iter().collect());
     }
 
     #[test]
