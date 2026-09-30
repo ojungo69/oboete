@@ -2,7 +2,7 @@
 //! claude-mem's imported history and the raw records, for the CLI and MCP, and for the viewer from
 //! Task 7. Full text only: Task 5 adds the vector leg.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -311,6 +311,9 @@ fn imported_leg(k: &Connection, q: &Query, depth: usize, terms: &[String]) -> Re
         args.extend(imported_repos(r).map(Value::Text));
     }
     super::within(&mut clauses, &mut args, "i.ts", (q.since, q.until));
+    // Once per uid before the limit: two devices' imports of one document are one (Codex on
+    // #306), its newest row, as the embedding phase reads it.
+    clauses.push("i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)".into());
     let order = if ranked {
         "rank, i.ts DESC"
     } else {
@@ -334,22 +337,20 @@ fn imported_leg(k: &Connection, q: &Query, depth: usize, terms: &[String]) -> Re
             r.get::<_, String>(5)?,
         ))
     })?;
-    let (mut seen, mut out) = (HashSet::new(), Vec::new());
+    let mut out = Vec::new();
     for row in rows {
         let (uid, kind, repo, ts, title, body) = row?;
-        if seen.insert(uid.clone()) {
-            out.push(Hit {
-                key: uid,
-                class: Class::Imported,
-                repo: Some(repo),
-                when: ts,
-                kind,
-                status: String::new(),
-                label: Label::Imported,
-                title: redact::outbound(&title),
-                snippet: super::snippet(&redact::outbound(&body), terms, WIDTH),
-            });
-        }
+        out.push(Hit {
+            key: uid,
+            class: Class::Imported,
+            repo: Some(repo),
+            when: ts,
+            kind,
+            status: String::new(),
+            label: Label::Imported,
+            title: redact::outbound(&title),
+            snippet: super::snippet(&redact::outbound(&body), terms, WIDTH),
+        });
     }
     Ok(out)
 }
@@ -1002,6 +1003,46 @@ mod tests {
                     .position(|h| h.class == Class::Imported)
                     .unwrap()
         );
+    }
+
+    /// Codex on #306: an ended decision is named superseded by the claim whose link ended it, not
+    /// by a newer claim whose link alone would keep it delivered.
+    #[test]
+    fn an_ended_decision_names_the_link_that_ended_it() {
+        let mut s = Store::new();
+        let old = s.decided(R, 1_000, "Parser caches stay in Redis.", &[]);
+        let seq = s.said("s", R, 2_000, "Move the parser caches to files.");
+        let ended = s.claim(
+            seq,
+            "Move the parser caches to files.",
+            ("decision", "proposed", "assistant proposal"),
+            &[&old],
+        );
+        s.decided(R, 3_000, "Parser caches stay in Redis for now.", &[&old]);
+        s.run();
+        let found = s.query(&q("Redis"));
+        let hit = found.hits.iter().find(|h| h.key == old).unwrap();
+        assert!(hit.class == Class::Superseded { by: Some(ended) });
+    }
+
+    /// Codex on #306: a document two devices imported is one candidate, so the leg's depth holds
+    /// that many documents, not half.
+    #[test]
+    fn an_import_held_twice_is_one_candidate_before_the_limit() {
+        let mut s = Store::new();
+        for i in 0..120 {
+            for _ in 0..2 {
+                s.imported(&format!("o{i}"), "r", 1_000 + i, "Parser", "Parser notes.");
+            }
+        }
+        s.run();
+        let found = s.query(&Query {
+            limit: 150,
+            raw: RawArm::Off,
+            ..q("Parser")
+        });
+        let imported = found.hits.iter().filter(|h| h.class == Class::Imported);
+        assert_eq!(imported.count(), 120);
     }
 
     /// #295 row 3: an earlier decision only a curator link ended is delivered (D1), so it ranks
