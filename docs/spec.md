@@ -1429,7 +1429,7 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A85 | Local first: the sync client, protocol doc and fake hub, and M5's propagation half, are built and measured at milestone 6; the hub spikes run any time before milestone 6 (the owner left the order to Claude, 2026-09-26) | 8.2, 8.4, B.0 | The build order |
 | A86 | M21's 53 new English test questions are drawn and frozen unjudged at milestone 1 and scored only inside milestone 4's single test run; the final set stays at 112 | 8.2, Appendix C | When M21's English questions are drawn and used |
 | A87 | A read of stored memory is shown to the curator by its call, not its output | 3.1 | Whether memory-tool output can come back as new knowledge |
-| A88 | Milestone 4's deciding runs that read curated claims (M5's one-device lines, M6, Inject) wait for the default curator that milestone 3's deciding run fixes; its build, dev tuning and the test-split run do not (owner decision 32) | 8.4 | Whether milestone 4's held-out runs may go on today's curator, and be repeated on held-out transcripts already seen if milestone 3 changes it |
+| A88 | Milestone 4's deciding runs that read curated claims (M5's one-device lines, M6, Inject) wait for the default curator that milestone 3's deciding run fixes; its build, dev tuning and the test-split run do not (owner decision 32) | 8.4 | Whether milestone 4's held-out runs may go on today's curator, with a curator changed after them measured on fresh held-out transcripts, since the held-out transcripts decide once (8.1) |
 
 ## Appendix B. Acceptance tests carried from issues
 
