@@ -8,7 +8,6 @@
 // Off Linux only the refusal and the tests' pure helpers are used (#281).
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
-use std::io::{Read, Write};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
@@ -196,6 +195,7 @@ fn step(at: Step) -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
+    use std::io::{Read, Write};
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     pub(super) fn write(path: &Path, key: &str, home: &Path) -> Result<Written, Refused> {
