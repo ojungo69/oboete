@@ -2045,8 +2045,9 @@ mod tests {
     }
 
     /// D1: only a curator link from a later claim the owner backs, decided or done, leaves the
-    /// earlier decision delivered. One from a proposal, a retracted claim, an earlier claim or a
-    /// claim the owner does not back still ends it.
+    /// earlier decision delivered: the user's own words, or a proposal the user accepted (Codex on
+    /// #303). One from a proposal still open, a retracted claim, an earlier claim or a claim the
+    /// owner does not back still ends it.
     #[test]
     fn a_link_from_a_proposal_a_retracted_claim_or_an_earlier_claim_delivers_nothing_new() {
         let cases = [
@@ -2054,6 +2055,7 @@ mod tests {
             ("retracted", "user", 1),
             ("decided", "user", -1),
             ("decided", "assistant", 1),
+            ("decided", "assistant proposal", 1),
         ];
         let (_h, _c, text) = start(
             |store, cwd| {
@@ -2081,9 +2083,19 @@ mod tests {
             None,
         );
         let shown = lines_of(&text, "Decisions and open items").join("\n");
-        assert!(!shown.contains("Old rule"), "{shown}");
+        for ended in 0..4 {
+            assert!(!shown.contains(&format!("Old rule {ended}.")), "{shown}");
+        }
         assert!(
             shown.contains("New rule 2.") && shown.contains("New rule 3."),
+            "{shown}"
+        );
+        // The accepted proposal is the owner's later decision: the earlier one follows it.
+        assert!(
+            shown.contains(
+                "- 1970-02-21 decision: New rule 4.\n\
+                 - 1970-02-20 decision, superseded by the 1970-02-21 decision above: Old rule 4."
+            ),
             "{shown}"
         );
     }

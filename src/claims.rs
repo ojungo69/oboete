@@ -585,10 +585,13 @@ fn owner_backed(t: &str) -> String {
 
 /// Spec 3.4's delivered claims among the rows of the `active` view `a` that `which` selects, with
 /// `TIPS`' columns: the chain tips, and each decided decision or preference whose every end is a
-/// curator link from a later claim the owner backs, decided or done (D1). Such a claim's `later`
-/// is the newest of those claims. A retraction, an accepted proposal, a done open item, a link from
-/// a claim of the same time (a restatement quotes the same words, #261) and one from a claim the
-/// owner does not back still end it. With `links_end`, every link ends it: the tips.
+/// curator link from a later claim the owner backs, decided or done (D1): the user's own words, a
+/// proposal the user accepted, or a claim the owner corrected (`owner_backed`). Such a claim's
+/// `later` is the newest of those claims. Spec 3.4's other ends stay ends: a retraction, a proposal
+/// (the one an acceptance replaced among them) or an open item is not a decided decision or
+/// preference; and a link from a retraction, from a claim of the same time (a restatement quotes
+/// the same words, #261) or from a claim the owner does not back still ends a decision. With
+/// `links_end`, every link ends it: the tips.
 pub(crate) fn delivered(which: &str, links_end: bool) -> String {
     let linkers = "FROM edges e
            JOIN claims x ON x.op_device = e.op_device AND x.op_seq = e.op_seq
