@@ -201,6 +201,7 @@ The user settings in 1.5 change what is recorded: capture exclusion per repo or 
 ### 2.3 Capture sources and content
 
 - Capture sources are the hooks. Hooks may read transcript tails, as the agy, Codex and Cursor hooks do today.
+- A prompt that another agent wrote is recorded as that agent's, never as the developer's: a `codex exec` run, a Codex session that Claude Code's Codex plugin started, Codex as an MCP server, or a sub-agent's thread, read from the rollout's `session_meta`. Its record carries `agent_sent`, and curation shows it as `[agent prompt]` with the assistant's role, so a claim quoting it is the assistant's, as one quoting a reply is (a proposal or an inference), never the user's (3.2). An agent's own housekeeping sessions (Codex's memory consolidation, claude-mem's observer sessions) are not recorded (#273) (Claude; overrulable).
 - At Stop/SessionEnd the worker compares transcript turn counts with raw rows and reports gaps per adapter in doctor. Backfilling from transcripts comes later, and only if gaps show up (RD/constraints-synthesis.md S2-17).
 - Images and binary content are replaced at capture by a marker {kind, mime, bytes, sha256}. Neither the content nor its marker is sent to a curator or judge (RD/constraints-synthesis.md S2-25).
 
