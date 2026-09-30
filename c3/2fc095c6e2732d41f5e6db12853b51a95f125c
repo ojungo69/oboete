@@ -1,0 +1,20 @@
+src/embed.rs
+  s_59cfa7617c8511::t_56c718dde58b10 742-763
+  s_59cfa7617c8511::t_01fdcea4fecac9 48,53,62,156-162,181,195,201,460-471,474,599,623,655,666,729
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c32fc095c6e2732d41f5e6db12853b51a95f125c",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
