@@ -574,21 +574,28 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Typed prompts and replies of `agent`'s `session` on this device strictly between two seqs:
-    /// none when a proposal was the session's last turn before a window (milestone 3 Task 8).
+    /// Typed prompts and replies of `agent`'s `session` on this device strictly between two seqs,
+    /// of a `source` that `read` takes (a window's kind, milestone 4 D6): none when a proposal was
+    /// the session's last turn before a window (milestone 3 Task 8).
     pub fn turns_between(
         &self,
         agent: &str,
         session: &str,
         after: i64,
         before: i64,
+        read: impl Fn(&str) -> bool,
     ) -> Result<i64> {
-        Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
+        let mut st = self.conn.prepare_cached(
+            "SELECT source FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
                AND type = 'event' AND agent = ?4 AND session = ?5 AND kind IN ('prompt', 'reply')",
-            params![self.device, after, before, agent, session],
-            |r| r.get(0),
-        )?)
+        )?;
+        let mut n = 0;
+        for source in st.query_map(params![self.device, after, before, agent, session], |r| {
+            r.get::<_, String>(0)
+        })? {
+            n += i64::from(read(&source?));
+        }
+        Ok(n)
     }
 
     /// `agent`'s `session` events of `kind` on this device strictly between two seqs, as `after`
@@ -1138,22 +1145,27 @@ impl Raw {
         agent: &str,
         session: &str,
         from: (i64, Option<i64>),
+        read: impl Fn(&str) -> bool,
     ) -> Result<Vec<Op>> {
-        use rusqlite::OptionalExtension;
         // A window that starts inside an event: its first part was in the previous window.
         let before = from.0 + i64::from(from.1.is_some());
         let start = (from.0, from.1.unwrap_or(0));
-        // Down the primary key from `before`: the session's latest event is usually close.
-        let seq: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT seq FROM records WHERE device = ?1 AND seq < ?2 AND type = 'event'
-                   AND agent = ?3 AND session = ?4 AND kind NOT IN ('start', 'end')
-                 ORDER BY seq DESC LIMIT 1",
-                params![self.device, before, agent, session],
-                |r| r.get(0),
-            )
-            .optional()?;
+        // Down the primary key from `before`: the session's latest event of a kind `read` takes
+        // (a window's, milestone 4 D6) is usually close.
+        let mut latest = self.conn.prepare_cached(
+            "SELECT seq, source FROM records WHERE device = ?1 AND seq < ?2 AND type = 'event'
+               AND agent = ?3 AND session = ?4 AND kind NOT IN ('start', 'end')
+             ORDER BY seq DESC",
+        )?;
+        let mut rows = latest.query(params![self.device, before, agent, session])?;
+        let mut seq = None;
+        while let Some(r) = rows.next()? {
+            if read(&r.get::<_, String>(1)?) {
+                seq = Some(r.get::<_, i64>(0)?);
+                break;
+            }
+        }
+        drop(rows);
         let Some(seq) = seq else {
             return Ok(Vec::new());
         };
@@ -2123,7 +2135,9 @@ mod tests {
             raw.append_ops(&ops).unwrap();
         };
         let previous = |raw: &Raw, from: (i64, Option<i64>)| -> Vec<String> {
-            let ops = raw.previous_window_ops("claude", "s", from).unwrap();
+            let ops = raw
+                .previous_window_ops("claude", "s", from, |_| true)
+                .unwrap();
             ops.into_iter()
                 .map(|o| o.body["text"].as_str().unwrap().to_owned())
                 .collect()

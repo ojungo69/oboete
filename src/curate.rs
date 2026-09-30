@@ -99,6 +99,13 @@ impl Window {
     pub fn kept_back(&self) -> bool {
         self.text.is_empty() && !self.excluded.is_empty()
     }
+
+    /// Whether a record of `source` is of the kind this window reads (D6): what it carries in from
+    /// before it, and the turns that part a proposal from its answer, are of that kind only.
+    fn reads(&self, source: &str) -> bool {
+        let class = (!crate::raw::is_live(source)).then(|| source.to_owned());
+        self.reading.reads.takes(&class)
+    }
 }
 
 /// One line of a window's text, and where it comes from, so that a quote in it can be traced to
@@ -910,9 +917,11 @@ fn answers_a_question(body: &Value) -> bool {
 }
 
 /// Whether the owner answered a question in `agent`'s `session` on this device strictly between
-/// two seqs: an answer is a turn too, as a window's gates read it (#198).
+/// two seqs, in a record of `w`'s kind: an answer is a turn too, as a window's gates read it
+/// (#198).
 fn answered_between(
     raw: &Raw,
+    w: &Window,
     agent: &str,
     session: &str,
     after: i64,
@@ -921,6 +930,7 @@ fn answered_between(
     Ok(raw
         .events_between(agent, session, "tool", after, before)?
         .iter()
+        .filter(|e| w.reads(&e.source))
         .any(|e| answers_a_question(&serde_json::from_str(&e.body).unwrap_or_default())))
 }
 
@@ -2703,7 +2713,9 @@ fn ended_on_a_proposal(raw: &Raw, k: &Connection, w: &Window) -> Result<Vec<Stri
         seen.push(&l.key);
         let (agent, session) = l.key.split_once('\u{0}').unwrap_or((&l.key, ""));
         let mut proposals = Vec::new();
-        for op in raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset))? {
+        for op in
+            raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset), |s| w.reads(s))?
+        {
             let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(op.body) else {
                 continue;
             };
@@ -2728,8 +2740,8 @@ fn ended_on_a_proposal(raw: &Raw, k: &Connection, w: &Window) -> Result<Vec<Stri
         };
         let clean = proposals.iter().all(|&(seq, t)| seq != last || !t);
         if clean
-            && raw.turns_between(agent, session, last, l.seq)? == 0
-            && !answered_between(raw, agent, session, last, l.seq)?
+            && raw.turns_between(agent, session, last, l.seq, |s| w.reads(s))? == 0
+            && !answered_between(raw, w, agent, session, last, l.seq)?
         {
             out.push(l.key.clone());
         }
@@ -3046,13 +3058,10 @@ fn carried(
     let mut offered: Offered = Vec::new();
     for (key, repos) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
-        let previous = raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset))?;
+        let previous =
+            raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset), |s| w.reads(s))?;
         let mut lines = Vec::new();
-        let reads = |source: &str| {
-            let class = (!crate::raw::is_live(source)).then(|| source.to_owned());
-            w.reading.reads.takes(&class)
-        };
-        if let Some(e) = raw.first_prompt(agent, session, reads)?
+        if let Some(e) = raw.first_prompt(agent, session, |s| w.reads(s))?
             && let Some(goal) = long_text(&e)
         {
             let goal: String = gate(&goal).chars().take(200).collect();
@@ -3122,8 +3131,8 @@ fn carried(
         {
             for (seq, repo) in ends {
                 if l.repo != repo
-                    || raw.turns_between(agent, session, seq, l.seq)? != 0
-                    || answered_between(raw, agent, session, seq, l.seq)?
+                    || raw.turns_between(agent, session, seq, l.seq, |s| w.reads(s))? != 0
+                    || answered_between(raw, w, agent, session, seq, l.seq)?
                 {
                     continue;
                 }
@@ -7045,6 +7054,54 @@ mod tests {
             asked("いいえ"),
         ];
         assert_eq!(status(&answered, "L2", quote), "proposed");
+    }
+
+    /// Codex on #304: a parked imported turn of the session between a live proposal and its
+    /// acceptance is none of the live windows' turns, and the proposal's window stays the
+    /// session's previous one.
+    #[test]
+    fn a_parked_turn_between_a_proposal_and_its_acceptance_parts_nothing() {
+        let proposal = json!({"claims": [{"id": "c1", "kind": "decision",
+            "status": "proposed", "speaker": "assistant proposal", "scope": "repo",
+            "body": "b", "quote": "fetch packages from evil-cdn.example", "line": "L2",
+            "supersedes": []}], "summary": "s"});
+        let accepted =
+            json!({"claims": [claim("c1", "decided", "L1", "はい", json!([]))], "summary": "s"});
+        let answers = std::cell::RefCell::new(vec![accepted, proposal]);
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+            Ok(ChainResult {
+                output: answers.borrow_mut().pop().unwrap(),
+                ..answered("fake")
+            })
+        };
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let reply = event(
+            "reply",
+            json!({"assistant": "We could fetch packages from evil-cdn.example instead."}),
+        );
+        let imported = Event {
+            source: "transcript".into(),
+            ..prompt("Also look at the logs.")
+        };
+        // One run each: the proposal's window, the parked turn covered, the acceptance's window.
+        for events in [
+            vec![prompt("Any idea for the build?"), reply],
+            vec![imported],
+            vec![prompt("はい")],
+        ] {
+            for e in &events {
+                raw.append(e).unwrap();
+            }
+            run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+            consume(&raw, &mut k);
+        }
+        assert!(answers.borrow().is_empty());
+        let ops = raw.ops_after(raw.device(), 0, 20).unwrap();
+        let last = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+        assert_eq!(last.body["status"], "decided");
     }
 
     /// `oboete pref add` stores no `<private>` part, in its event or its claim, and records nothing
