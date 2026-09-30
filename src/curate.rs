@@ -394,7 +394,12 @@ pub(crate) fn window_at(
             }
             after = r.seq;
             if pieces.len() >= MAX_RECORDS {
-                full = true;
+                // Full when an event of its kind comes next, or when it has read no event: a live
+                // window before imported records waits for its session's idle time (Codex on #304).
+                full = match &class {
+                    None => true,
+                    Some(c) => next_class(raw, device, r.seq - 1)?.is_some_and(|n| n == *c),
+                };
                 break 'read;
             }
             let Item::Event(e) = r.item else {
@@ -8119,17 +8124,25 @@ mod tests {
 
     /// Codex on #304: a live window cut where imported records follow is not full by its size, so
     /// it waits for its session's idle time as any live window does, one of a tool output too
-    /// long for a window too.
+    /// long for a window too, and one that reached its record cap.
     #[test]
     fn a_live_window_before_imported_records_waits_for_the_owner() {
         let long = "x".repeat(4_000);
+        // Each first event, whether a removed record follows it, how many times it is written, and
+        // the window size.
         let firsts = [
-            (said("Now at work.", "a", "r", "hook"), false),
-            (tool(&long), false),
+            (said("Now at work.", "a", "r", "hook"), false, 1, 200),
+            (tool(&long), false, 1, 200),
             // A removed record between: no event of the window's kind follows.
-            (tool(&long), true),
+            (tool(&long), true, 1, 200),
+            (
+                said("Now at work.", "a", "r", "hook"),
+                false,
+                MAX_RECORDS,
+                1_000_000,
+            ),
         ];
-        for (first, removed) in firsts {
+        for (first, removed, count, tokens) in firsts {
             let home = tempfile::tempdir().unwrap();
             let (mut raw, db) = open(home.path());
             let ts = crate::db::now_ms();
@@ -8139,7 +8152,9 @@ mod tests {
                 repo: Some("r".into()),
                 ..first
             };
-            raw.append(&first).unwrap();
+            for _ in 0..count {
+                raw.append(&first).unwrap();
+            }
             if removed {
                 let gone = Event {
                     ts,
@@ -8157,14 +8172,14 @@ mod tests {
                 calls.set(calls.get() + 1);
                 Ok(answered("fake"))
             };
-            let (rules, summary) = (Rules::default(), curating(200));
+            let (rules, summary) = (Rules::default(), curating(tokens));
             let phase =
                 run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
             let until = ts + 600_000;
             assert_eq!(
                 (phase, calls.get()),
                 (Phase::Waiting { until, up: true }, 0),
-                "{} {removed}",
+                "{} {removed} {count}",
                 first.kind
             );
         }
