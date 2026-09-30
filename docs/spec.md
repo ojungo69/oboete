@@ -23,7 +23,7 @@ oboete is a lightweight single-binary memory for coding agents. This spec is the
 
 ### 0.1 Owner decisions
 
-A later decision wins over an earlier one and over any section text. Decisions 1-23 are RD/owner-decisions.md; decisions 24-29 were made on 2026-09-26 and decision 30 on 2026-09-28, and they are recorded here.
+A later decision wins over an earlier one and over any section text. Decisions 1-23 are RD/owner-decisions.md; decisions 24-29 were made on 2026-09-26, decision 30 on 2026-09-28 and decisions 31-32 on 2026-09-30, and they are recorded here.
 
 1. Redesign from a blank slate. The previous design is suspected of being shaped by the TypeScript prototype, not in one part but overall.
 2. Extreme lightness is not a goal. Resident background processes are acceptable if they earn their place.
@@ -56,6 +56,7 @@ A later decision wins over an earlier one and over any section text. Decisions 1
 29. (2026-09-26) Labelling is split, replacing decision 22's labelling set. After opening the calibration page, the owner found the memories too English and technical to judge ("記憶が英語や技術的なものが多すぎて私には判断できない") and chose the split. The owner labels only what the owner alone knows: whether something is a decision or preference of theirs, and whether a later one overturned an earlier one. Each item is in plain Japanese, shown with the owner's own prompt, and "判断できない" is always a choice. Technical relevance (search pairs, no-answer and false-premise questions, answer keys, kinds) is judged by a panel of judges from different model makers, and the judge is trusted by its agreement with the panel (8.1). The owner accepted the cost: technical relevance has no human reference.
 30. (2026-09-28) Subscriptions may curate while the owner works, and they have no daily cap of calls (the owner: 「別に作業中に使っても良いし一日の上限とかいらないよ」). This replaces decision 15 and the daily cap of decision 5's subscription tier. A subscription still stops at its own limits, with a cooldown until their reset (3.1). What stays of decision 15's 10 minutes is a wait for every provider, not for subscriptions only: a window that reaches the device's last record waits until the owner stops, so a few records are not sent at every hook (3.1). Past a plan's limits, codex can draw on paid credits and OpenCode Go on a Zen balance; the owner's accounts do neither (no codex credits or automatic reload, no Go fallback to a Zen balance; the owner, 2026-09-28), so the default chain's OpenCode Go has no daily cap either. What other users are told is issue #164.
 31. (2026-09-30) Memory is made the way claude-mem makes it, and oboete does better on claude-mem's weaknesses. The owner said what finished means: 「claude-memの体験に複数プロバイダとフォールバック、できればhindsidhtレベルの精度、完成後にcmem proのようなクラウド機能が欲しい。これが完成の希望」, and offered: 「もし開発が行き詰まってるならclaude-memをベースにすれば円滑に進むならそうしてもいいよ」. Told that one M3 line was stuck (overturned decisions shown as current, after the arms of #278, #286 and #291) and that claude-mem marks no decision as overturned (its observer keeps every observation and its context lists them newest first; claude-mem 13.28.0), the owner left the choice to Claude, with a yardstick: 「判断は任せるよ。claude-memのデメリットのメモリ肥大化や設定の複雑さ、要約プロバイダの少なさなどが改善出来てればそれでいい」. Claude's reading (overrulable): claude-mem's way is the base, not its code (a TS/Bun worker with Chroma and one curator provider at a time; the reasons of the 2026-09-22 rewrite stand). Delivery lists a decision that a curator link to a later decision ended, the later first (3.4, 4.4), and M3's overturn line counts the later decision kept (8.2 M3), replacing "overturned decisions shown as current = 0% (hard)". Ending a decision by such a link is the Hindsight-level part, kept for when the links are precise enough. What oboete must do better than claude-mem: memory use, settings, and the number of curator providers with fallback.
+32. (2026-09-30) Milestone 4 is built alongside milestone 3, before milestone 3's lines pass. Asked 「段階 4 (claude-mem と同じ使い心地: セッションの最初に記憶を渡す・検索・閲覧画面) を、段階 3 の「決定を 8 割拾う」基準を待たずに作り始めてよいですか？」, the owner chose 「始める (推奨)」, the option Claude recommended. The owner had been told that, of the 44 labeled dev decisions, the owner's claude-mem kept 24 on a looser test (21 read strictly; 25 and 22 after one label was judged again, docs/milestone-3.md), oboete's Haiku arms 22 to 26 and Sonnet 28 and 31; that recall's 0.80 (36) is the level of decision 31's 「できればhindsidhtレベルの精度」, not claude-mem's; and that milestone 3's deciding run needs the owner's test labels whatever is waited for. Milestone 3's lines and its deciding run are unchanged, and its experiments to raise recall go on beside milestone 4 (8.4). The viewer settings page was built ahead of its milestone the same way (#94, 7.2).
 
 Notes on decisions 23-26 (context, not part of the decisions): the research asked for by decision 23 is docs/research/curator-providers-2026-09-25.md; decisions 25 and 26 and Claude decision C1 (§3.1) adopt its results. PR #56 (merged 156ae27) took grok out of `default_providers()`. PR #58 (merged e24ba89) put decision 26's models into today's `default_providers()` (claude `--model haiku`, codex `gpt-6-luna`) and made today's chain treat an answer that does not fit the schema as a failed provider (3.1).
 
@@ -1266,6 +1267,7 @@ Local first: milestones 2-5 build everything one device needs, and all sync code
    - Lines: M2, M3, Isolation, Window, Judge.
    - MUST fixtures: MUST-M1, MUST-M2, MUST-M3, MUST-M4, MUST-M6, MUST-M7 (tie order), MUST-M18, MUST-M21 (per kind; corrections survive rebuild and re-derivation).
 4. **Deliver** (section 4):
+   - Built alongside milestone 3, before milestone 3's lines pass (owner decision 32). Of what follows, the deciding runs that read curated claims (M5's one-device lines, M6, Inject) wait for the default curator that milestone 3's deciding run fixes (8.2 M3, owner decision 26), because the held-out transcripts decide once (8.1); the build, dev tuning and the one test-split run do not, since that run's store holds no curated claim, only imported memories, which are never current (4.5), and raw chunks (Claude; overrulable).
    - Build:
      - packets and shortlists; SessionStart and per-prompt injection; compaction; current-first search on MCP, CLI and viewer;
      - the S3 reranker (§4.10, RD/sections-1-4.md:48) (Claude; overrulable);
@@ -1336,7 +1338,7 @@ Size:
 
 ## Appendix A. Decisions made by Claude (overrulable)
 
-Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row below. A row groups the tags of one decision (119 tags, 86 rows). Claude's estimates in 8.4 (labelling hours, size) are estimates, not decisions, and are not listed.
+Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row below. A row groups the tags of one decision. Claude's estimates in 8.4 (labelling hours, size) are estimates, not decisions, and are not listed.
 
 | # | Item | Section | What overruling it would change |
 |---|---|---|---|
@@ -1427,6 +1429,7 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A85 | Local first: the sync client, protocol doc and fake hub, and M5's propagation half, are built and measured at milestone 6; the hub spikes run any time before milestone 6 (the owner left the order to Claude, 2026-09-26) | 8.2, 8.4, B.0 | The build order |
 | A86 | M21's 53 new English test questions are drawn and frozen unjudged at milestone 1 and scored only inside milestone 4's single test run; the final set stays at 112 | 8.2, Appendix C | When M21's English questions are drawn and used |
 | A87 | A read of stored memory is shown to the curator by its call, not its output | 3.1 | Whether memory-tool output can come back as new knowledge |
+| A88 | Milestone 4's deciding runs that read curated claims (M5's one-device lines, M6, Inject) wait for the default curator that milestone 3's deciding run fixes; its build, dev tuning and the test-split run do not (owner decision 32) | 8.4 | Whether milestone 4's held-out runs may go on today's curator, and be repeated on held-out transcripts already seen if milestone 3 changes it |
 
 ## Appendix B. Acceptance tests carried from issues
 
