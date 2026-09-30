@@ -3884,7 +3884,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/testdata/fixtures/long-24h.jsonl");
-        crate::replay::run(home.path(), &fixture, None, 0, &[1], "claude").unwrap();
+        crate::replay::run(home.path(), &fixture, None, 0, &[1], "claude", 0).unwrap();
         let (mut raw, db) = open(home.path());
         let mut curator =
             |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> { Ok(answered("fake")) };

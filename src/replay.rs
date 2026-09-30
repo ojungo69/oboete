@@ -1,6 +1,7 @@
 //! Replay a JSONL fixture (one `{seq, agent, event, session, payload}` per line) through the
 //! hook path, and report what M14 must prove: hook latency in process and spawned, backup export
-//! time per segment, and resident size.
+//! time per segment, and resident size; with `--read-sample`, also the read path's (milestone 4
+//! Task 0).
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -19,6 +20,7 @@ pub fn run(
     spawn_sample: usize,
     sizes: &[usize],
     agent: &str,
+    read_sample: usize,
 ) -> Result<()> {
     let root = match repo_root {
         Some(r) => r,
@@ -85,6 +87,20 @@ pub fn run(
             spawns.insert(format!("{kb}KB"), stats_ms(&us));
         }
     }
+    // 2b. The read path (milestone 4 Task 0): cold, before any consumer has run, as a hook finds
+    // the home before the worker is up (spec 4.2); warm, after the consumers are drained.
+    let mut read = serde_json::Map::new();
+    if read_sample > 0 {
+        read.insert(
+            "cold".into(),
+            read_arm(home, &root_str, read_sample, spawn_agent)?,
+        );
+        drop(crate::worker::drained(home)?);
+        read.insert(
+            "warm".into(),
+            read_arm(home, &root_str, read_sample, spawn_agent)?,
+        );
+    }
     // 3. Backup export per segment (D11): each call seals one segment of at most
     // `backup::SEGMENT_BYTES` of records.
     let mut export_us = Vec::new();
@@ -103,6 +119,7 @@ pub fn run(
         "events": micros.len(),
         "hook_in_process_us": {"p50": pct(&micros, 50), "p95": pct(&micros, 95), "max": micros.last().copied().unwrap_or(0)},
         "hook_spawn_ms": spawns,
+        "read": read,
         "backup_export": {"segments": export_us.len(), "ms": stats_ms(&export_us), "segment_kb": {"p50": pct(&segment_kb, 50), "max": segment_kb.last().copied().unwrap_or(0)}},
         "vmhwm_kb": vmhwm_kb(),
     });
@@ -169,8 +186,7 @@ fn tool_output(bytes: usize) -> String {
 }
 
 /// `n` spawned `oboete hook <agent> PostToolUse` runs with a tool output of `bytes`, in
-/// microseconds, sorted. This process holds the worker lock meanwhile, so each hook makes the
-/// lock attempt it makes after every write (D6) and starts no worker, as while one runs.
+/// microseconds, sorted.
 fn sample_spawns(
     home: &Path,
     root: &str,
@@ -178,7 +194,6 @@ fn sample_spawns(
     agent: &str,
     bytes: usize,
 ) -> Result<Vec<u128>> {
-    let exe = std::env::current_exe()?;
     let payload = json!({
         "session_id": "spawn-sample",
         "cwd": root,
@@ -188,34 +203,100 @@ fn sample_spawns(
         "tool_response": tool_output(bytes),
     })
     .to_string();
+    // A candidate above today's cap is measured as written under that cap (D4).
+    let cap = bytes.max(crate::capture::MAX_FIELD_BYTES).to_string();
+    let env = [
+        (crate::capture::REPLAY_ENV, "1".to_owned()),
+        (crate::capture::FIELD_CAP_ENV, cap),
+    ];
+    Ok(time_spawns(home, n, agent, "PostToolUse", &payload, &env)?.0)
+}
+
+/// The read path's times on `home` as it stands: `n` spawned SessionStart hooks and `n` prompt
+/// hooks, as the agent runs them (the write, the read of what is injected, the lock attempt),
+/// and `n` in-process reads of what SessionStart shows for the checkout at `root`.
+fn read_arm(home: &Path, root: &str, n: usize, agent: &str) -> Result<Value> {
+    let hook = |event: &str, extra: Value| {
+        let mut payload = json!({"session_id": "read-sample", "cwd": root,
+                                 "hook_event_name": event});
+        payload
+            .as_object_mut()
+            .expect("an object")
+            .extend(extra.as_object().expect("an object").clone());
+        let env = [(crate::capture::REPLAY_ENV, "1".to_owned())];
+        time_spawns(home, n, agent, event, &payload.to_string(), &env)
+    };
+    let (starts, printed) = hook("SessionStart", json!({"source": "startup"}))?;
+    let (prompts, _) = hook(
+        "UserPromptSubmit",
+        json!({"prompt": "How did we fix the flaky test last time?"}),
+    )?;
+    let (reads, chars) = read_in_process(home, Path::new(root), n);
+    Ok(json!({
+        "session_start_ms": stats_ms(&starts),
+        "session_start_printed_bytes": printed,
+        "prompt_ms": stats_ms(&prompts),
+        "read_in_process_us": {"p50": pct(&reads, 50), "p95": pct(&reads, 95),
+                               "max": reads.last().copied().unwrap_or(0)},
+        "read_chars": chars,
+    }))
+}
+
+/// `n` in-process reads of what SessionStart shows for the checkout at `cwd` (`oboete inject`'s
+/// text), in microseconds, sorted, and the characters of the last one.
+fn read_in_process(home: &Path, cwd: &Path, n: usize) -> (Vec<u128>, usize) {
+    let mut us = Vec::with_capacity(n);
+    let mut chars = 0;
+    for _ in 0..n {
+        let started = Instant::now();
+        chars = hook::inject_text(home, cwd, Some("read-sample"))
+            .chars()
+            .count();
+        us.push(started.elapsed().as_micros());
+    }
+    us.sort_unstable();
+    (us, chars)
+}
+
+/// `n` spawned `oboete hook <agent> <event>` runs fed `payload`, in microseconds, sorted, and the
+/// bytes the last one printed. This process holds the worker lock meanwhile, so each hook makes
+/// the lock attempt it makes after every write (D6) and starts no worker, as while one runs.
+fn time_spawns(
+    home: &Path,
+    n: usize,
+    agent: &str,
+    event: &str,
+    payload: &str,
+    env: &[(&str, String)],
+) -> Result<(Vec<u128>, usize)> {
+    use std::io::Write;
+    let exe = std::env::current_exe()?;
     let _held = crate::worker::lock(home)?;
     let mut us = Vec::with_capacity(n);
+    let mut printed = 0;
     for _ in 0..n {
         let started = Instant::now();
         let mut child = std::process::Command::new(&exe)
             .arg("--home")
             .arg(home)
-            .args(["hook", agent, "PostToolUse"])
-            .env(crate::capture::REPLAY_ENV, "1")
-            // A candidate above today's cap is measured as written under that cap (D4).
-            .env(
-                crate::capture::FIELD_CAP_ENV,
-                bytes.max(crate::capture::MAX_FIELD_BYTES).to_string(),
-            )
+            .args(["hook", agent, event])
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
             .spawn()?;
-        {
-            use std::io::Write;
-            let mut stdin = child.stdin.take().unwrap();
-            stdin.write_all(payload.as_bytes())?;
-        }
-        child.wait()?;
+        // Dropped at the end of the statement: the hook reads to the end of its input.
+        child
+            .stdin
+            .take()
+            .expect("piped")
+            .write_all(payload.as_bytes())?;
+        let out = child.wait_with_output()?;
         us.push(started.elapsed().as_micros());
+        printed = out.stdout.len();
     }
     us.sort_unstable();
-    Ok(us)
+    Ok((us, printed))
 }
 
 fn pct(sorted: &[u128], p: usize) -> u128 {
@@ -244,7 +325,7 @@ mod tests {
             line("2026-09-02T00:00:00.000Z", "two"),
         ];
         std::fs::write(&fixture, lines.join("\n")).unwrap();
-        run(home.path(), &fixture, None, 0, &[1], "claude").unwrap();
+        run(home.path(), &fixture, None, 0, &[1], "claude", 0).unwrap();
         let raw = crate::raw::open(home.path()).unwrap();
         let ts: Vec<i64> = raw
             .after(raw.device(), 0, 10)
@@ -266,7 +347,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("src/testdata/fixtures/long-24h.jsonl");
-        run(home.path(), &fixture, None, 0, &[1], "claude").unwrap();
+        run(home.path(), &fixture, None, 0, &[1], "claude", 0).unwrap();
         let raw = crate::raw::open(home.path()).unwrap();
         let ts: Vec<i64> = raw
             .after(raw.device(), 0, 10_000)
@@ -303,9 +384,42 @@ mod tests {
                           "ts": "2026-09-01T00:00:00.000Z",
                           "payload": {"session_id": "s", "cwd": ROOT_PLACEHOLDER, "prompt": "one"}});
         std::fs::write(&fixture, line.to_string()).unwrap();
-        run(home.path(), &fixture, Some(root), 0, &[1], "claude").unwrap();
+        run(home.path(), &fixture, Some(root), 0, &[1], "claude", 0).unwrap();
         let raw = crate::raw::open(home.path()).unwrap();
         assert_eq!(raw.after(raw.device(), 0, 10).unwrap().len(), 1);
+    }
+
+    /// Milestone 4 Task 0, the read arms: before the consumers run, SessionStart shows nothing for
+    /// the checkout; once they are drained it shows the manifest, the replayed prompt with it.
+    #[test]
+    fn a_cold_read_shows_nothing_and_a_warm_one_shows_the_manifest() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("replay-repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let fixture = home.path().join("f.jsonl");
+        let line = json!({"agent": "claude", "event": "UserPromptSubmit",
+                          "ts": "2026-09-01T00:00:00.000Z",
+                          "payload": {"session_id": "s", "cwd": ROOT_PLACEHOLDER,
+                                      "prompt": "Fix the flaky test first."}});
+        std::fs::write(&fixture, line.to_string()).unwrap();
+        run(
+            home.path(),
+            &fixture,
+            Some(root.clone()),
+            0,
+            &[1],
+            "claude",
+            0,
+        )
+        .unwrap();
+        let (cold, chars) = read_in_process(home.path(), &root, 3);
+        assert_eq!((cold.len(), chars), (3, 0));
+        drop(crate::worker::drained(home.path()).unwrap());
+        let (warm, chars) = read_in_process(home.path(), &root, 3);
+        assert_eq!(warm.len(), 3);
+        let text = hook::inject_text(home.path(), &root, Some("read-sample"));
+        assert_eq!(chars, text.chars().count());
+        assert!(text.contains("Fix the flaky test first."), "{text}");
     }
 
     #[test]
