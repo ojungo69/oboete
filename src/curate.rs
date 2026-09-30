@@ -433,8 +433,17 @@ pub(crate) fn window_at(
                 if matches!(piece.role, Role::Tool { .. }) {
                     piece = prepared.elided(r.seq);
                     elided.push(r.seq);
-                    // Covered whole: the window is full only when a record follows it.
-                    full = !raw.after_within(device, r.seq, 1, 1)?.is_empty();
+                    // Covered whole: the window is full only when a record of its kind follows
+                    // it, as a live one before imported records waits (Codex on #304).
+                    full = raw
+                        .after_within(device, r.seq, 1, 1)?
+                        .first()
+                        .is_some_and(|n| match &n.item {
+                            Item::Event(e) => {
+                                (!crate::raw::is_live(&e.source)).then(|| e.source.clone()) == this
+                            }
+                            _ => true,
+                        });
                 } else {
                     let room = budget.saturating_sub(used + heading);
                     piece = prepared.split(r.seq, from, room, end);
@@ -2066,14 +2075,14 @@ pub fn recurate_window(
         .filter_map(|c| serde_json::from_value::<crate::claims::ClaimOp>(c.clone()).ok())
         .filter_map(|c| Some(crate::claims::uid(&c.kind, c.evidence.first()?)))
         .collect();
-    let mut anchored = anchored_in(k, w)?;
-    // A claim quoting an excluded session's record was not shown to the curator, which says
-    // nothing of it (D13).
-    anchored.retain(|(_, c)| {
-        !c.evidence
-            .iter()
-            .any(|e| e.device == w.device && w.excluded.contains(&e.seq))
-    });
+    // A claim that quotes an excluded session's record, in this window or elsewhere, was not
+    // shown to the curator whole, which says nothing of it (D13, Codex on #304).
+    let mut anchored = Vec::new();
+    for (uid, c) in anchored_in(k, w)? {
+        if !quotes_excluded(raw, k, &w.reading.excluded, &uid)? {
+            anchored.push((uid, c));
+        }
+    }
     restate(k, &anchored, &given, &mut claims)?;
     let recipe = op["provider"].as_str().unwrap_or("").to_owned();
     let retracted: Vec<Value> = anchored
@@ -8093,31 +8102,40 @@ mod tests {
     }
 
     /// Codex on #304: a live window cut where imported records follow is not full by its size, so
-    /// it waits for its session's idle time as any live window does.
+    /// it waits for its session's idle time as any live window does, one of a tool output too
+    /// long for a window too.
     #[test]
     fn a_live_window_before_imported_records_waits_for_the_owner() {
-        let home = tempfile::tempdir().unwrap();
-        let (mut raw, db) = open(home.path());
-        let ts = crate::db::now_ms();
-        raw.append(&Event {
-            ts,
-            ..said("Now at work.", "a", "r", "hook")
-        })
-        .unwrap();
-        raw.append(&said("Old words.", "v", "r", "oboete-v1"))
-            .unwrap();
-        let calls = std::cell::Cell::new(0);
-        let mut curator = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| {
-            calls.set(calls.get() + 1);
-            Ok(answered("fake"))
-        };
-        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
-        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
-        let until = ts + 600_000;
-        assert_eq!(
-            (phase, calls.get()),
-            (Phase::Waiting { until, up: true }, 0)
-        );
+        let long = "x".repeat(4_000);
+        for first in [said("Now at work.", "a", "r", "hook"), tool(&long)] {
+            let home = tempfile::tempdir().unwrap();
+            let (mut raw, db) = open(home.path());
+            let ts = crate::db::now_ms();
+            let first = Event {
+                ts,
+                session: "a".into(),
+                repo: Some("r".into()),
+                ..first
+            };
+            raw.append(&first).unwrap();
+            raw.append(&said("Old words.", "v", "r", "oboete-v1"))
+                .unwrap();
+            let calls = std::cell::Cell::new(0);
+            let mut curator = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| {
+                calls.set(calls.get() + 1);
+                Ok(answered("fake"))
+            };
+            let (rules, summary) = (Rules::default(), curating(200));
+            let phase =
+                run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
+            let until = ts + 600_000;
+            assert_eq!(
+                (phase, calls.get()),
+                (Phase::Waiting { until, up: true }, 0),
+                "{}",
+                first.kind
+            );
+        }
     }
 
     /// Codex on #304: `recurate --source` leaves a window of excluded sessions alone as it was, so
@@ -8206,13 +8224,47 @@ mod tests {
             request(raw, &k, &rules, &summary, &w).unwrap().prompt
         };
         let carried = format!("proposed before {uid}");
-        assert!(prompt(&raw).contains(&carried), "{}", prompt(&raw));
+        assert!(prompt(&raw).contains(&carried));
         exclude(&mut raw, "secret", false);
         let after = prompt(&raw);
-        assert!(
-            after.contains("Yes.") && !after.contains(&carried),
-            "{after}"
-        );
+        assert!(after.contains("Yes.") && !after.contains(&carried));
+    }
+
+    /// Codex on #304: a recuration that leaves out a claim anchored in its window which also quotes
+    /// an excluded session elsewhere does not retract it: the curator was not shown it whole.
+    #[test]
+    fn a_recuration_keeps_a_claim_that_quotes_an_excluded_session_elsewhere() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        let (_, other) = kept(&mut raw, "b", "secret", "Parse the secret feed.");
+        let (_, own) = kept(&mut raw, "a", "open", "Cache the parsed files.");
+        let mut op: crate::claims::ClaimOp = serde_json::from_value(own).unwrap();
+        let other: crate::claims::ClaimOp = serde_json::from_value(other).unwrap();
+        (op.status, op.speaker) = ("proposed".into(), "assistant proposal".into());
+        op.evidence.extend(other.evidence);
+        let uid = crate::claims::uid("decision", &op.evidence[0]);
+        let window = json!({"outcome": "curated", "from_seq": 1, "from_offset": null,
+            "to_seq": 2, "to_offset": null, "elided": []});
+        let op = serde_json::to_value(op).unwrap();
+        raw.append_ops(&[(OpKind::Window, window), (OpKind::Claim, op)])
+            .unwrap();
+        consume(&raw, &mut k);
+        exclude(&mut raw, "secret", false);
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let reading = Reading::now(&raw, Reads::Live).unwrap();
+        let w = span_windows(&raw, &Span::records(2, 2), WINDOW_TOKENS, &rules, &reading).unwrap();
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| Ok(answered("fake"));
+        let done = recurate_window(&mut raw, &k, &rules, &summary, &mut chain, &w[0], None)
+            .unwrap()
+            .unwrap();
+        consume(&raw, &mut k);
+        let status: String = k
+            .query_row("SELECT status FROM active WHERE uid = ?1", [&uid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!((done.1, status.as_str()), (0, "proposed"));
     }
 
     /// Codex on #304: `recurate --source` sends the other session of a window that also holds an
