@@ -447,6 +447,15 @@ pub fn reindex(home: &Path) -> Result<Stats> {
         "[embedding] account_id is not set"
     );
     config::read_key(&cfg.embedding.key_file)?;
+    // v1's store knows no exclusion list (spec 5.5), so nothing is embedded while a repository is
+    // on it (Codex on #304).
+    let excluded = crate::raw::open(home)?.exclusions()?;
+    anyhow::ensure!(
+        excluded.is_empty(),
+        "reindex embeds v1's store, which the exclusion list does not reach: it stops while {} \
+         is excluded",
+        excluded.join(", ")
+    );
     let mut conn = db::open(home)?;
     conn.execute_batch("DELETE FROM vec_docs; UPDATE embeddings SET indexed = 0;")?;
     backlog(&mut conn, &cfg.embedding, None)
@@ -692,6 +701,29 @@ mod tests {
         assert_eq!(still, n as i64);
         drop(conn);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Codex on #304: `exclude` keeps a repository from every embedder, and v1's cannot tell its
+    /// documents apart.
+    #[test]
+    fn reindex_stops_while_a_repository_is_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("key.md");
+        std::fs::write(&key, format!("workers ai\n{}\n", fake_token())).unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            format!(
+                "[embedding]\nprovider = \"workers-ai\"\naccount_id = \"a\"\nkey_file = \"{}\"\n",
+                key.display()
+            ),
+        )
+        .unwrap();
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        raw.exclude("github.com/o/secret", false).unwrap();
+        drop(raw);
+        let err = reindex(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("github.com/o/secret is excluded"), "{err}");
+        assert!(!dir.path().join("oboete.db").exists());
     }
 
     #[test]

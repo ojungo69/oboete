@@ -478,6 +478,12 @@ pub(crate) fn window_at(
     };
     // What a cut back to a turn boundary left out is the next window's.
     excluded.retain(|&s| s <= last.seq);
+    // A queued recuration reads whatever its spans hold, one kind per window (D6): what a window
+    // carries in from before it is of its kind, so a parked record stays unread (Codex on #304).
+    let reads = match (&reading.reads, &class) {
+        (Reads::Any, Some(kind)) => kind.clone().map_or(Reads::Live, Reads::Source),
+        (reads, _) => reads.clone(),
+    };
     let aside = class
         .filter(|c| !reading.reads.takes(c))
         .map(|c| c.unwrap_or_else(|| "live".into()));
@@ -499,7 +505,10 @@ pub(crate) fn window_at(
         excluded,
         aside,
         lines,
-        reading: reading.clone(),
+        reading: Reading {
+            reads,
+            ..reading.clone()
+        },
     }))
 }
 
@@ -8590,7 +8599,7 @@ mod tests {
 
     /// Codex on #304: a window's goal is the first prompt its reading takes, so a live window's
     /// is never an imported prompt of the same session, nor a `recurate --source` window's
-    /// another source's.
+    /// another source's, nor a queued recuration's window a prompt of another kind.
     #[test]
     fn a_windows_goal_is_a_prompt_its_reading_takes() {
         let home = tempfile::tempdir().unwrap();
@@ -8616,6 +8625,12 @@ mod tests {
         let (text, ..) = carried(&raw, &k, &rules, &windows[0]).unwrap();
         assert!(text.contains("goal: From v1."));
         assert!(!text.contains("Transcript goal."));
+        let reading = Reading::now(&raw, Reads::Any).unwrap();
+        let windows =
+            span_windows(&raw, &Span::records(3, 3), WINDOW_TOKENS, &rules, &reading).unwrap();
+        let (text, ..) = carried(&raw, &k, &rules, &windows[0]).unwrap();
+        assert!(text.contains("goal: Live prompt."));
+        assert!(!text.contains("Transcript goal.") && !text.contains("From v1."));
     }
 
     /// M2 with imported records among live ones: every seq is covered once, in order.
