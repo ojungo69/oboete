@@ -7,7 +7,7 @@
 --pool test needs --decide matching deciding.json before any held-out contents are read.
 Successful model calls share common.Calls' private cache; a failed call is retried next command.
 """
-import argparse, hashlib, itertools, json, os, shutil, sqlite3, subprocess, sys
+import argparse, json, os, shutil, sqlite3, subprocess, sys
 
 import common, m3
 
@@ -57,33 +57,27 @@ try:
                              stdout=subprocess.PIPE, env=env)
 except OSError:
     sys.exit(1)
-fd = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-os.fchmod(fd, 0o600)
-with os.fdopen(fd, 'a', encoding='utf-8') as log:
-    seen, continued = set(), False
-    # Bounded by provider.rs's response cap, even when a child never sends a newline.
-    for part in iter(lambda: child.stdout.readline(1 << 20), b''):
+with open(LOG, 'a', encoding='utf-8') as log:
+    seen = set()
+    for part in child.stdout:
         sys.stdout.buffer.write(part)
         sys.stdout.buffer.flush()
-        ended = part.endswith(b'\n') or len(part) < (1 << 20)
-        if not continued and ended:
-            try:
-                event = json.loads(part)
-            except (ValueError, UnicodeDecodeError):
-                event = None
-            names = []
-            if isinstance(event, dict):
-                message, usage = event.get('message'), event.get('modelUsage')
-                if event.get('type') == 'assistant' and isinstance(message, dict):
-                    names = [message.get('model')]
-                elif event.get('type') == 'result' and isinstance(usage, dict):
-                    names = list(usage)
-            for model in names:
-                if isinstance(model, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}', model) and model not in seen:
-                    log.write(json.dumps({'model': model}) + '\n')
-                    log.flush()
-                    seen.add(model)
-        continued = not ended
+        try:
+            event = json.loads(part)
+        except ValueError:
+            event = None
+        names = []
+        if isinstance(event, dict):
+            message, usage = event.get('message'), event.get('modelUsage')
+            if event.get('type') == 'assistant' and isinstance(message, dict):
+                names = [message.get('model')]
+            elif event.get('type') == 'result' and isinstance(usage, dict):
+                names = list(usage)
+        for model in names:
+            if isinstance(model, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}', model) and model not in seen:
+                log.write(json.dumps({'model': model}) + '\n')
+                log.flush()
+                seen.add(model)
 child.stdout.close()
 sys.exit(child.wait())
 '''
@@ -97,7 +91,7 @@ def choose_cut(session, events):
     if m3.when(events[-1]['ts']) - first < 1800:
         return None
     eligible = [i for i, e in enumerate(events) if m3.when(e['ts']) - first >= 1800]
-    return eligible[common.h(f'm5-cut:{common.SEED}:{session}') % len(eligible)] if eligible else None
+    return eligible[common.h(f'm5-cut:{common.SEED}:{session}') % len(eligible)]
 
 
 def metrics(rows):
@@ -130,18 +124,12 @@ def path(pool, name):
 
 def fixture_rows(session, pool='dev', decide=None, upto=None):
     common.guard(session_ids=[session], pool=pool, decide=decide)
-    with open(f'{m3.M}/fixtures/{session}.jsonl', encoding='utf-8') as f:
-        return [(i + 1, json.loads(line), line) for i, line in enumerate(itertools.islice(f, upto))
-                if line.strip()]
+    return [(i + 1, event, raw) for i, event, raw in m3.fixture_events(session) if upto is None or i < upto]
 
 
 def cuts(binary, pool='dev', decide=None):
     common.guard(pool=pool, decide=decide)
-    if pool == 'dev':
-        sessions = m3.sessions(dev_only=True, decide=decide)
-    else:
-        with open(f'{common.E}/replay/manifest.json', encoding='utf-8') as f:
-            sessions = sorted(s['session'] for s in json.load(f)['sessions'] if s['side'] == 'held-out')
+    sessions = m3.pool_sessions(pool, decide)
     rows = []
     for session in sessions:
         events = fixture_rows(session, pool, decide)
@@ -154,8 +142,6 @@ def cuts(binary, pool='dev', decide=None):
     if os.path.exists(existing) and common.read_jsonl(existing) != rows:
         raise SystemExit('Cuts changed; keep a new evaluation set before running it')
     common.write_jsonl(existing, rows)
-    common.keep_json(f'{common.E}/m5/cuts-{pool}.json',
-                     common.record(binary, f'{m3.M}/fixtures', len(rows), 'off', {}))
     print(f'{len(rows)} cuts; {len(sessions) - len(rows)} short sessions')
     return rows
 
@@ -195,27 +181,19 @@ def checkout(h, session, events):
 
 
 def curator_worker(binary, h):
-    if os.name != 'posix':
-        return {'status': 'unsupported_platform', 'ran': False, 'models': []}
     env = common.clean_env()
     real = shutil.which('claude', path=env.get('PATH', ''))
-    if real is None:
-        return {'status': 'missing_cli', 'ran': False, 'models': []}
+    if os.name != 'posix' or real is None:
+        sys.exit('M5 needs POSIX and the claude CLI on PATH')
     log, wrapper = f'{h}/curator-models.jsonl', f'{h}/wrap/claude'
     common.owner_only(wrapper)
     with open(wrapper, 'w', encoding='utf-8') as f:
         f.write(f'#!{sys.executable}\nREAL = {os.path.abspath(real)!r}\nLOG = {log!r}\n' + CLI_MODELS)
     os.chmod(wrapper, 0o700)
     env['PATH'] = f'{h}/wrap' + os.pathsep + env.get('PATH', '')
-    try:
-        outcome = subprocess.run([binary, '--home', h, 'worker', '--idle-ms', '0'],
-                                 env=env, capture_output=True, text=True, check=False)
-    except (OSError, subprocess.SubprocessError):
-        raise RuntimeError('Curator worker failed') from None
-    if outcome.returncode:
-        raise RuntimeError('Curator worker failed')
+    common.command([binary, '--home', h, 'worker', '--idle-ms', '0'], env=env)
     models = sorted({r['model'] for r in common.read_jsonl(log)}) if os.path.exists(log) else []
-    return {'status': 'ok' if models else 'missing_models', 'ran': True, 'models': models}
+    return {'status': 'ok' if models else 'missing_models', 'models': models}
 
 
 def curation(h, models):
@@ -246,7 +224,7 @@ def run(binary, pool='dev', decide=None):
         session = cut['session']
         if common.sha256_file(f'{m3.M}/fixtures/{session}.jsonl') != cut['fixture_sha256']:
             raise SystemExit('A cut fixture changed; no run made')
-        root = f'{common.E}/m5/{binary_hash[:12]}/{pool}/{hashlib.sha256(session.encode()).hexdigest()[:12]}'
+        root = f'{common.E}/m5/{binary_hash[:12]}/{pool}/{session}'
         h, none = f'{root}/curated', f'{root}/none'
         row = previous.get(session, {'session': session, 'cut': cut, 'homes': {'curated': h, 'none': none}})
         if row['cut'] != cut or row['homes'] != {'curated': h, 'none': none}:
@@ -261,11 +239,7 @@ def run(binary, pool='dev', decide=None):
                     shutil.rmtree(none + '.part')
                 shutil.copytree(h, none + '.part')
                 os.replace(none + '.part', none)
-                m3.config(none, '', False)
-            for directory, _, files in os.walk(none):
-                os.chmod(directory, 0o700)
-                for file in files:
-                    os.chmod(os.path.join(directory, file), 0o600)
+            common.owner_only_tree(none)
             cwd = checkout(h, session, events)
             row['no_checkout'] = cwd is None
             if cwd is None:
@@ -275,10 +249,9 @@ def run(binary, pool='dev', decide=None):
                     m3.config(h, m3.LIVE, True)
                     row['curator'] = curator_worker(binary, h)
                     row['pending_metadata'] = row['curator']['status'] != 'ok'
-                    if row['curator']['ran']:
-                        common.command([binary, '--home', none, 'worker', '--idle-ms', '0'])
-                        row['curation'] = curation(h, row['curator']['models'])
-                        row['pending_curation'] = row['curation']['coverage'] != '100%'
+                    common.command([binary, '--home', none, 'worker', '--idle-ms', '0'])
+                    row['curation'] = curation(h, row['curator']['models'])
+                    row['pending_curation'] = row['curation']['coverage'] != '100%'
                     if not row.get('pending_curation') and not row['pending_metadata']:
                         row['contexts'] = {tier: common.gate(common.command(
                             [binary, '--home', home, 'inject'], cwd=cwd), binary)
@@ -318,8 +291,7 @@ def score(binary, pool='dev', decide=None):
     common.guard(session_ids=[r['session'] for r in selected + runs], pool=pool, decide=decide)
     expected = {r['session']: r for r in selected}
     binary_hash = common.sha256_file(binary)
-    if (len(expected) != len(selected) or len({r['session'] for r in runs}) != len(runs)
-            or any(r['cut'] != expected.get(r['session']) or r['metadata']['sha256'] != binary_hash for r in runs)):
+    if any(r['cut'] != expected.get(r['session']) or r['metadata']['sha256'] != binary_hash for r in runs):
         raise SystemExit('M5 run inputs changed; no score made')
     missing = len(set(expected) - {r['session'] for r in runs})
     calls = common.Calls()
@@ -344,10 +316,7 @@ def score(binary, pool='dev', decide=None):
         out['label_agreement'] = {'n': len(checks), 'agree': sum(checks),
                                   'rate': sum(checks) / len(checks) if checks else None}
         out['no_checkout'] = sum(r['no_checkout'] for r in runs)
-    models = calls.models()
-    for row in runs:
-        for role, names in row['metadata']['models'].items():
-            models[role] = sorted(set(models.get(role, [])) | set(names))
+    models = calls.models(*(r['metadata']['models'] for r in runs))
     out['metadata'] = common.record(binary, f'{common.E}/m5', len(selected), 'off', models)
     common.keep_json(f'{common.E}/m5/score-{pool}.json', out)
     print(json.dumps(out, ensure_ascii=False, indent=1))

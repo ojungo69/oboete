@@ -162,7 +162,7 @@ def test_a_stopped_run_resumes_without_asking_again(monkeypatch, tmp_path):
     stop = [True]
     original = Path(home, 'oboete.db').read_bytes()
 
-    def answer(prompt, model):
+    def answer(prompt, model, timeout=300):
         assert model == 'claude-sonnet-5'
         assert 'KEY-MUST-NOT-REACH-ANSWERER' not in prompt
         prompts.append(prompt)
@@ -341,18 +341,18 @@ def test_dev_run_refuses_a_home_holding_a_held_out_session(monkeypatch, tmp_path
 
 
 def test_a_guarded_pool_uses_the_manifests_held_out_side(tmp_path):
-    import common, m6
+    import common, m3
     Path(common.E, 'replay').mkdir(parents=True)
     Path(common.E, 'deciding.json').write_text('{"curator":"curator"}')
     Path(common.E, 'replay/manifest.json').write_text(json.dumps({'sessions': [
         {'session': 'd', 'side': 'dev'}, {'session': 'h', 'side': 'held-out'}]}))
-    assert m6.pool_sessions('test', 'curator') == {'h'}
+    assert m3.pool_sessions('test', 'curator') == ['h']
 
 
 def test_the_full_text_home_uses_the_binarys_none_setting(tmp_path):
-    import m6
+    import m3
     (tmp_path / 'config.toml').write_text('[embedding]\nprovider = "none"\n')
-    assert m6.vector_side(str(tmp_path)) == 'off'
+    assert m3.vector_side(str(tmp_path)) == 'off'
 
 
 def test_key_writer_keeps_two_neighbor_records_around_blank_lines(monkeypatch, tmp_path):
@@ -364,7 +364,7 @@ def test_key_writer_keeps_two_neighbor_records_around_blank_lines(monkeypatch, t
     (tmp_path / 'fixtures/s.jsonl').write_text('\n'.join(events[:2] + ['', ''] + events[2:]) + '\n')
     monkeypatch.setattr(common.subprocess, 'run', lambda argv, **kw: subprocess.CompletedProcess(
         argv, 0, kw['input'].replace('x', 'g'), ''))
-    shown = m6.key_context({'session': 's', 'record': 4}, 'fake')
+    shown = m6.key_context({'session': 's', 'record': 4}, m6.fixture('s'), 'fake')
     assert list(shown) == [0, 1, 4, 5, 6]
     assert all(len(text) == 4000 and 'x' not in text for text in shown.values())
 

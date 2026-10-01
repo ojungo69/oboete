@@ -103,9 +103,17 @@ def clean_env():
             if k != 'CLAUDECODE' and not any(s in k.upper() for s in ('TOKEN', 'KEY', 'SECRET', 'PASSWORD'))}
 
 
+def owner_only_tree(root):
+    for directory, _, files in os.walk(root):
+        os.chmod(directory, 0o700)
+        for name in files:
+            os.chmod(os.path.join(directory, name), 0o600)
+
+
 def command(argv, **kwargs):
     """Capture a command's text without exposing private output in an exception."""
-    kwargs.update(capture_output=True, text=True, env=clean_env(), check=False)
+    kwargs.update(capture_output=True, text=True, check=False)
+    kwargs.setdefault('env', clean_env())
     try:
         run = subprocess.run(argv, **kwargs)
     except (OSError, subprocess.SubprocessError):
@@ -192,7 +200,7 @@ class Calls:
                      (read_jsonl(self.path) if os.path.exists(self.path) else []) if not r.get('failed')}
         self.used, self.failed = {}, set()
 
-    def call(self, model, prompt, validate, answerer=False):
+    def call(self, model, prompt, validate):
         from calib import chat
         digest = hashlib.sha256(prompt.encode()).hexdigest()
         key = model, digest
@@ -209,7 +217,7 @@ class Calls:
             row = {'requested': model, 'model': None, 'prompt_sha256': digest, 'failed': True}
             for attempt in range(2):
                 try:
-                    text, reported = (claude_json(prompt, model), model) if answerer else chat(model, prompt)
+                    text, reported = chat(model, prompt)
                     if not isinstance(reported, str) or not reported:
                         break
                 except Exception:
@@ -233,11 +241,15 @@ class Calls:
         self.used.setdefault(model, set()).add(row['model'])
         return row['answer']
 
-    def models(self):
-        return {m: sorted(names) for m, names in self.used.items()}
+    def models(self, *earlier):
+        """The reported names by requested model, with those of earlier records merged in."""
+        out = {}
+        for models in (*earlier, self.used):
+            for model, names in models.items():
+                out[model] = sorted(set(out.get(model, [])) | set(names))
+        return out
 
     def votes(self, prompt, fields):
-        fields = tuple(fields)
         out = {}
         for model in GRADERS:
             try:
@@ -271,7 +283,7 @@ class Mcp:
     """One newline JSON-RPC session with `oboete mcp`; tool results stay as dictionaries."""
 
     def __init__(self, binary, home, cwd):
-        self.next_id, self.pending = 0, {}
+        self.next_id = 0
         self.process = subprocess.Popen([binary, '--home', home, 'mcp'], cwd=cwd, env=clean_env(),
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.DEVNULL, text=True, bufsize=1)
@@ -294,7 +306,8 @@ class Mcp:
         self.next_id += 1
         wanted = self.next_id
         self._send({'id': wanted, 'method': method, 'params': params})
-        while wanted not in self.pending:
+        reply = {}
+        while reply.get('id') != wanted:
             line = self.process.stdout.readline()
             if not line:
                 raise ConnectionError('MCP connection closed')
@@ -304,9 +317,6 @@ class Mcp:
                 raise ConnectionError('Invalid MCP reply') from None
             if not isinstance(reply, dict) or reply.get('jsonrpc') != '2.0':
                 raise ConnectionError('Invalid MCP reply')
-            if 'id' in reply:
-                self.pending[reply['id']] = reply
-        reply = self.pending.pop(wanted)
         result = reply.get('result')
         if 'error' in reply or not isinstance(result, dict) or result.get('isError'):
             raise ConnectionError('MCP request failed')

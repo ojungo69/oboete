@@ -25,10 +25,8 @@ for line in sys.stdin:
         assert request['method'] == 'tools/call'
         assert request['params']['name'] == 'search'
 ''' + behavior + r'''
-        if request['id'] == 2:
-            send({'method': 'notifications/message', 'params': {'level': 'info'}})
-            send({'id': 3, 'result': {'content': [{'type': 'text', 'text': 'future'}]}})
-            send({'id': 2, 'result': {'content': [{'type': 'text', 'text': request['params']['arguments']['query']}]}})
+        send({'method': 'notifications/message', 'params': {'level': 'info'}})
+        send({'id': request['id'], 'result': {'content': [{'type': 'text', 'text': request['params']['arguments']['query']}]}})
 ''', encoding='utf-8')
     server.chmod(0o700)
 
@@ -46,7 +44,7 @@ def test_the_mcp_client_waits_for_each_result_and_fails_on_an_error(tmp_path, mo
     binary = fake_mcp(tmp_path, monkeypatch)
     with common.Mcp(binary, str(tmp_path / 'home'), str(tmp_path)) as client:
         assert client.call('search', {'query': 'first'}) == {'content': [{'type': 'text', 'text': 'first'}]}
-        assert client.call('search', {'query': 'second'}) == {'content': [{'type': 'text', 'text': 'future'}]}
+        assert client.call('search', {'query': 'second'}) == {'content': [{'type': 'text', 'text': 'second'}]}
     client.close()
     for behavior in (
             "        send({'id': request['id'], 'error': {'code': -1, 'message': 'error'}})\n        continue\n",
@@ -205,18 +203,6 @@ def test_the_pinned_sonnet_uses_the_existing_isolated_answerer(monkeypatch):
     assert calib.chat('claude-sonnet-5', 'p') == ('{"ok": true}', 'claude-sonnet-5')
     assert seen == [('p', 'claude-sonnet-5', 300)]
     assert calib.PANEL == original_panel
-
-
-def test_the_answerer_uses_the_pinned_claude_call_and_shared_cache(monkeypatch):
-    import calib
-    seen = []
-    monkeypatch.setattr(common, 'claude_json', lambda prompt, model: seen.append((prompt, model)) or '{"ok": true}')
-    monkeypatch.setattr(calib, 'chat', lambda *args: pytest.fail('answerer is common.claude_json'))
-    calls = common.Calls()
-    assert calls.call('claude-sonnet-5', 'p', boolean_answer, answerer=True) == {'ok': True}
-    assert common.Calls().call('claude-sonnet-5', 'p', boolean_answer, answerer=True) == {'ok': True}
-    assert seen == [('p', 'claude-sonnet-5')]
-    assert calls.models() == {'claude-sonnet-5': ['claude-sonnet-5']}
 
 
 def test_held_out_sessions_or_pools_require_the_recorded_curator_id(tmp_path, monkeypatch):

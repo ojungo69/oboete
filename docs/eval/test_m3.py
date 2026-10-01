@@ -124,7 +124,7 @@ def test_kinds_writes_the_label_format(monkeypatch, tmp_path):
     assert len(rows) == 16 and all(set(r) == {'uid', 'kind', 'text', 'quotes'} for r in rows)
     assert rows[-1] == {'uid': 'claim-17', 'kind': 'repo fact', 'text': 'text 17 SECRET',
                         'quotes': ['quote 17\u2028SECRET']}
-    assert result['per_kind']['decision'] == {'n': 15, 'scored': 15, 'correct': 15, 'precision': 1.0}
+    assert result['per_kind']['decision'] == {'n': 15, 'correct': 15, 'precision': 1.0}
     assert result['complete'] and len(prompts) == 48
     assert result['agreement']['kind_right']['glm-5.3']['agreement'] == 0.0
     assert stat.S_IMODE(os.stat(result['labels']).st_mode) == 0o600
@@ -181,7 +181,7 @@ def test_overturned_counts_linked_pairs_and_reports_the_rest_apart(monkeypatch, 
     db.commit()
     raw.commit()
     (home / 'map.json').write_text(json.dumps(where))
-    monkeypatch.setattr(m3, 'labels', lambda: ([], pairs, drafts))
+    monkeypatch.setattr(m3, 'labels', lambda pool='dev': ([], pairs, drafts))
     current_raw = 'd:900 2026-09-01 00:00 UTC prompt (quote-only) — raw text\u2028still this one hit\n'
     def line(uid):
         return f'{uid[:12]} 2026-09-01 00:00 UTC decision decided (citable) — words\n'

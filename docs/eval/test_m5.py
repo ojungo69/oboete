@@ -390,7 +390,7 @@ def test_curator_capture_preserves_stdout_and_keeps_only_model_names(monkeypatch
     monkeypatch.setattr(subprocess, 'run', run)
     monkeypatch.setattr(subprocess, 'Popen', popen)
     out = m5.curator_worker(str(worker), str(home))
-    assert out == {'status': 'ok', 'ran': True, 'models': ['claude-haiku-2099', 'claude-haiku-2100']}
+    assert out == {'status': 'ok', 'models': ['claude-haiku-2099', 'claude-haiku-2100']}
     assert (home / 'test-output').read_bytes() == output
     log = home / 'curator-models.jsonl'
     assert {r['model'] for r in common.read_jsonl(str(log))} == {'claude-haiku-2099', 'claude-haiku-2100'}
@@ -398,5 +398,5 @@ def test_curator_capture_preserves_stdout_and_keeps_only_model_names(monkeypatch
     assert (home / 'wrap' / 'claude').stat().st_mode & 0o777 == 0o700
     with monkeypatch.context() as unsupported:
         unsupported.setattr(m5.os, 'name', 'nt')
-        unavailable = m5.curator_worker(str(worker), str(home))
-    assert unavailable == {'status': 'unsupported_platform', 'ran': False, 'models': []}
+        with pytest.raises(SystemExit):
+            m5.curator_worker(str(worker), str(home))

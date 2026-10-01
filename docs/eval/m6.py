@@ -3,7 +3,7 @@
 Only a correct answer with live evidence counts. The answerer's results, keys and model
 calls stay in the owner-only evaluation directory, never in the report.
 """
-import argparse, collections, json, os, re, shutil, sqlite3, sys, tempfile, tomllib
+import argparse, collections, json, os, re, shutil, sqlite3, sys, tempfile
 from datetime import datetime, timedelta, timezone
 
 import common
@@ -108,18 +108,13 @@ def directory():
     return f'{common.E}/m6'
 
 
+def run_file(arm, pool, ext):
+    return f'{directory()}/runs/{arm}{"" if pool == "dev" else "-" + pool}.{ext}'
+
+
 def fixture(session):
-    """Preserve physical line numbers, including blank lines; U+2028 is part of JSON text."""
-    with open(f'{m3.M}/fixtures/{session}.jsonl', encoding='utf-8') as f:
-        return {i: json.loads(line) for i, line in enumerate(f) if line.strip()}
-
-
-def pool_sessions(pool, decide=None):
-    common.guard([], decide, pool)
-    with open(f'{common.E}/replay/manifest.json', encoding='utf-8') as f:
-        manifest = json.load(f)['sessions']
-    sides = {'test', 'held-out'} if pool == 'test' else {pool}
-    return {s['session'] for s in manifest if s['side'] in sides}
+    """Preserve physical line numbers, including blank lines."""
+    return {i: event for i, event, _ in m3.fixture_events(session)}
 
 
 def guard_home(home, arm='b', decide=None, pool='dev'):
@@ -136,7 +131,7 @@ def guard_home(home, arm='b', decide=None, pool='dev'):
 
 def questions(pool='dev', decide=None):
     """Check the drafted set without printing its text or reading the 112 search questions."""
-    wanted = pool_sessions(pool, decide)
+    wanted = set(m3.pool_sessions(pool, decide))
     rows = common.read_jsonl(f'{directory()}/questions-{pool}.jsonl')
     common.guard([q.get('session', '') for q in rows], decide, pool)
     if len(rows) != 40 or len({q.get('id') for q in rows}) != 40:
@@ -167,27 +162,24 @@ def questions(pool='dev', decide=None):
     return rows
 
 
-def record_text(event):
-    """Render the event's content as text; hook routing metadata is not answer evidence."""
-    payload = event.get('payload', {})
-    metadata = {'session_id', 'session', 'cwd', 'transcript_path', 'hook_event_name'}
-    return '\n'.join(m3.strings({k: v for k, v in payload.items() if k not in metadata}))
+ROUTING = {'session_id', 'session', 'cwd', 'transcript_path', 'hook_event_name'}  # not answer evidence
 
 
-def key_context(question, binary):
+def payload_strings(event):
+    return m3.strings({k: v for k, v in event.get('payload', {}).items() if k not in ROUTING})
+
+
+def key_context(question, records, binary):
     """Blank lines keep their numbers but are not neighboring records."""
-    records = fixture(question['session'])
     lines = list(records)
     at = lines.index(question['record'])
-    return {i: common.gate(record_text(records[i]), binary)[:4000]
+    return {i: common.gate('\n'.join(payload_strings(records[i])), binary)[:4000]
             for i in lines[max(0, at - 2):at + 3]}
 
 
 def mapped_record(raw, session, line, event, binary):
     """Match the quote, else its first 12 characters, nearest the fixture's time, as map_labels does."""
-    content = {k: v for k, v in event['payload'].items()
-               if k not in {'session_id', 'session', 'cwd', 'transcript_path', 'hook_event_name'}}
-    strings = sorted((common.gate(t, binary) for t in m3.strings(content) if t.strip()), key=len, reverse=True)
+    strings = sorted((common.gate(t, binary) for t in payload_strings(event) if t.strip()), key=len, reverse=True)
     records = [r for r in m3.records_of(raw, session) if r[2] not in m3.REPEATS]
     for match in ('quote', 'prefix'):
         hits = [(seq, ts) for seq, ts, _, texts in records
@@ -216,7 +208,7 @@ def keys(binary, home, pool='dev', decide=None):
             row = {'id': q['id'], 'session': q['session'], 'writer': common.draw('m6-key', q['id'])}
             try:
                 records = fixture(q['session'])
-                shown = key_context(q, binary)
+                shown = key_context(q, records, binary)
                 inputs = dict(asked_at=common.gate(q['asked_at'], binary),
                               question=common.gate(q['question'], binary),
                               records='\n\n'.join(f'[{i}]\n{text}' for i, text in shown.items()))
@@ -309,17 +301,6 @@ def hit_lines(text, arm):
     return hits[:10]
 
 
-def vector_side(home):
-    """D12's home has no embedder; do not record full text for a configured vector run."""
-    path = f'{home}/config.toml'
-    with open(path, 'rb') as f:
-        settings = tomllib.load(f)
-    provider = settings.get('embedding', {}).get('provider', 'none')
-    if provider != 'none':
-        sys.exit('D12 requires a home without an embedder')
-    return 'off'
-
-
 def copy_home(home):
     """v1's db::open migrates schemas, so every invocation gets its own writable copy."""
     parent = f'{directory()}/homes'
@@ -328,10 +309,7 @@ def copy_home(home):
         sys.exit('v1 copy destination must be outside its source home')
     copied = tempfile.mkdtemp(prefix='v1-', dir=parent)
     shutil.copytree(home, copied, dirs_exist_ok=True)
-    for root, _, files in os.walk(copied):
-        os.chmod(root, 0o700)
-        for name in files:
-            os.chmod(os.path.join(root, name), 0o600)
+    common.owner_only_tree(copied)
     return copied
 
 
@@ -344,7 +322,7 @@ def run(binary, home, arm, pool='dev', decide=None):
     keyed = {k['id']: k for k in key_rows}
     if set(keyed) != {q['id'] for q in qs} or any(k.get('rejected') or k.get('failed') for k in key_rows):
         sys.exit('M6 needs a checked key for every question before running an arm')
-    path = f'{directory()}/runs/{arm}{"" if pool == "dev" else "-" + pool}.jsonl'
+    path = run_file(arm, pool, 'jsonl')
     fingerprint = {'sha256': common.sha256_file(binary), 'source_home': home,
                    'questions_sha256': common.sha256_file(f'{directory()}/questions-{pool}.jsonl'),
                    'keys_sha256': common.sha256_file(f'{directory()}/keys-{pool}.jsonl')}
@@ -355,7 +333,7 @@ def run(binary, home, arm, pool='dev', decide=None):
     guard_home(home, arm, decide, pool)
     opened = copy_home(home) if arm == 'v1' else home
     guard_home(opened, arm, decide, pool)
-    vector = vector_side(opened) if os.path.exists(f'{opened}/config.toml') else 'off'
+    vector = m3.vector_side(opened)
     cache = common.Calls()
     model_names = {}
     key_metadata = f'{directory()}/keys-{pool}.json'
@@ -370,8 +348,7 @@ def run(binary, home, arm, pool='dev', decide=None):
         try:
             question = common.gate(q['question'], binary)
             asked_at = common.gate(q['asked_at'], binary)
-            query = cache.call(ANSWERER, QUERY.format(question=question, asked_at=asked_at),
-                               valid_query, answerer=True)
+            query = cache.call(ANSWERER, QUERY.format(question=question, asked_at=asked_at), valid_query)
             query = {k: common.gate(v, binary).strip() if v is not None else None for k, v in query.items()}
             if not valid_query(query):
                 raise ValueError('Gated query is invalid')
@@ -382,7 +359,7 @@ def run(binary, home, arm, pool='dev', decide=None):
             results = common.gate(text, binary)[:4000] + '\n\n' + '\n\n'.join(
                 common.gate(t, binary)[:4000] for t in gets.values())
             answer = cache.call(ANSWERER, ANSWER.format(question=question, asked_at=asked_at, results=results),
-                                valid_answer, answerer=True)
+                                valid_answer)
             row.update(answer=answer['answer'], cites=answer['cites'], query=query,
                        hits=hits, gets=gets, dropped_dates=dropped,
                        unlabelled_imported=sum(h['unlabelled_imported'] for h in hits))
@@ -390,9 +367,8 @@ def run(binary, home, arm, pool='dev', decide=None):
             row['failed'] = True
         rows[q['id']] = row
         common.write_jsonl(path, [rows[q['id']] for q in qs if q['id'] in rows])
-        for model, names in cache.models().items():
-            model_names[model] = sorted(set(model_names.get(model, [])) | set(names))
-        common.keep_json(path[:-6] + '.json', dict(common.record(binary, home, len(qs), vector, model_names),
+        model_names = cache.models(model_names)
+        common.keep_json(run_file(arm, pool, 'json'), dict(common.record(binary, home, len(qs), vector, model_names),
                                                 input=fingerprint, completed=sum(not r.get('failed') for r in rows.values()),
                                                 read_homes=sorted({r['home'] for r in rows.values()})))
     return {'n': len(qs), 'completed': sum(not r.get('failed') for r in rows.values()),
@@ -470,10 +446,10 @@ def score_answer(row, key, arm, cache):
     return out
 
 
-def score(arm, against=None, pool='dev', decide=None):
+def score(arm, pool='dev', decide=None):
     """Grade from kept inputs; completed calls across every arm share the same prompt cache."""
     common.guard([], decide, pool)
-    path = f'{directory()}/runs/{arm}{"" if pool == "dev" else "-" + pool}.jsonl'
+    path = run_file(arm, pool, 'jsonl')
     rows = common.read_jsonl(path)
     common.guard([r['session'] for r in rows], decide, pool)
     qs = questions(pool, decide)
@@ -493,32 +469,28 @@ def score(arm, against=None, pool='dev', decide=None):
     for row in rows:
         guard_home(row['home'], arm, decide, pool)
         scored.append(score_answer(row, keys[row['id']], arm, cache))
-        common.write_jsonl(path[:-6] + '.grades.jsonl', scored)
+        common.write_jsonl(run_file(arm, pool, 'grades.jsonl'), scored)
     baseline = None
-    if arm == 'b' or against == 'v1':
-        base = f'{directory()}/runs/v1{"" if pool == "dev" else "-" + pool}.score.json'
+    if arm == 'b':
+        base = run_file('v1', pool, 'score.json')
         if os.path.exists(base):
             with open(base, encoding='utf-8') as f:
                 reference = json.load(f)
-            if reference.get('complete') and reference.get('n') == 40 and reference.get('input') == inputs:
+            if reference.get('complete') and reference.get('input') == inputs:
                 baseline = reference['count']
     out = report(scored, baseline, arm)
     out['input'] = inputs
     out['against_v1'] = baseline
     out['comparison_required'] = arm == 'b'
-    if arm == 'b' and baseline is None:
-        out['pass'] = False
     correct = [r['correct_votes'] for r in scored if 'correct_votes' in r]
     holds = [s['votes'] for r in scored for h in r['hits'] for s in h['spans'] if 'votes' in s]
     if out['complete']:
         out['agreement'] = {'correct': common.agreement(correct, 'correct'), 'holds': common.agreement(holds, 'holds')}
-    with open(path[:-6] + '.json', encoding='utf-8') as f:
+    with open(run_file(arm, pool, 'json'), encoding='utf-8') as f:
         metadata = json.load(f)
-    out['models'] = metadata['models'].copy()
-    for model, names in cache.models().items():
-        out['models'][model] = sorted(set(out['models'].get(model, [])) | set(names))
+    out['models'] = cache.models(metadata['models'])
     out['run'] = metadata
-    common.keep_json(path[:-6] + '.score.json', out)
+    common.keep_json(run_file(arm, pool, 'score.json'), out)
     return out
 
 
@@ -530,16 +502,13 @@ def counted(correct, spans):
 
 def report(rows, against=None, arm='b'):
     """The 0.70 and +0.10 lines are integer counts, not rounded answer rates."""
-    complete = (all(r['correct'] is not None and r.get('complete', True) for r in rows)
-                and all(s['holds'] is not None for r in rows for h in r['hits'] if h['label'] == 'citable'
-                        for s in h.get('spans', [])))
+    complete = all(r['correct'] is not None and r.get('complete', True) for r in rows)
     if not complete:
         return {'n': len(rows), 'complete': False, 'pass': False,
                 'pending': sum(r['correct'] is None or not r.get('complete', True) for r in rows)}
-    spans = [s for r in rows for hit in r['hits'] if hit['label'] == 'citable'
-             for s in hit.get('spans', [])]
-    counts = [counted(r['correct'], [s for hit in r['hits'] if hit['label'] == 'citable'
-                                   for s in hit.get('spans', [])]) for r in rows]
+    per_row = [[s for hit in r['hits'] if hit['label'] == 'citable' for s in hit.get('spans', [])] for r in rows]
+    spans = [s for row_spans in per_row for s in row_spans]
+    counts = [counted(r['correct'], row_spans) for r, row_spans in zip(rows, per_row)]
     total = sum(counts)
     valid = sum(s['live'] and s['holds'] is True for s in spans)
     attributed = sum(bool(r['hits']) and all(hit['label'] != 'citable' for hit in r['hits']) for r in rows)
@@ -576,7 +545,6 @@ def main(argv=None):
             p.add_argument('--arm', choices=('b', 'v1', 'b-cmem'), required=True)
         if name == 'score':
             p.add_argument('arm', choices=('b', 'v1', 'b-cmem'))
-            p.add_argument('--against', choices=('v1',))
     args = parser.parse_args(argv)
     common.owner_only()
     try:
@@ -588,7 +556,7 @@ def main(argv=None):
         elif args.command == 'run':
             out = run(args.binary, args.home, args.arm, args.pool, args.decide)
         else:
-            out = score(args.arm, args.against, args.pool, args.decide)
+            out = score(args.arm, args.pool, args.decide)
     except (OSError, ValueError, RuntimeError, sqlite3.Error, KeyError, TypeError):
         sys.exit('M6 command failed; private text is not printed')
     print(json.dumps(out, ensure_ascii=False))

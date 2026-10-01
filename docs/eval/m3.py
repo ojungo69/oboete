@@ -20,7 +20,7 @@ Every command takes the binary by path: `oboete` on PATH is the owner's v1.
   m3.py score <bin> <name>      M3's counts on the labeled items
   m3.py kinds|overturned <home> --binary <bin> [--pool dev|test] [--decide ID]
                                 Task 12a: per-kind precision / MUST-M11; test labels are labels/test-*"""
-import collections, glob, http.server, json, os, re, sqlite3, subprocess, sys, threading, time
+import collections, glob, http.server, json, os, re, sqlite3, subprocess, sys, threading, time, tomllib
 from datetime import datetime
 
 import common
@@ -75,10 +75,17 @@ def labels(pool='dev'):
     return decisions, pairs, drafts
 
 
+def pool_sessions(pool='dev', decide=None):
+    """The replay manifest's sessions of one pool; the held-out side only under the guard."""
+    common.guard(pool=pool, decide=decide)
+    with open(f'{common.E}/replay/manifest.json', encoding='utf-8') as f:
+        side = 'held-out' if pool == 'test' else pool
+        return sorted(s['session'] for s in json.load(f)['sessions'] if s['side'] == side)
+
+
 def sessions(dev_only=False, decide=None):
     """The sessions to replay: the replay set's dev side, and every session a dev label is in."""
-    with open(f'{E}/replay/manifest.json') as f:
-        wanted = {s['session'] for s in json.load(f)['sessions'] if s['side'] == 'dev'}
+    wanted = set(pool_sessions())
     if not dev_only:
         decisions, pairs, drafts = labels()
         wanted |= {d['session'] for d in decisions}
@@ -112,16 +119,18 @@ def config(h, providers, curate, shrink=False, tokens=None):
                 + providers)
 
 
-def replay(binary, name, dev_only=False, only=None, decide=None):
+def fixture_events(session):
+    """(line index, event, raw line) of a fixture's non-blank lines; U+2028 is JSON text, not a break."""
+    with open(f'{M}/fixtures/{session}.jsonl', encoding='utf-8') as f:
+        return [(i, json.loads(line), line) for i, line in enumerate(f) if line.strip()]
+
+
+def replay(binary, name, dev_only=False, decide=None):
     """One home for every session, so a later session's claim can supersede an earlier one's; the
     events of all sessions in time order, as the hooks would have received them."""
-    selected = sessions(dev_only, decide) if only is None else sorted(set(only))
+    selected = sessions(dev_only, decide)
     common.guard(session_ids=selected, decide=decide)
-    events = []
-    for s in selected:
-        for i, line in enumerate(open(f'{M}/fixtures/{s}.jsonl', encoding='utf-8')):
-            if line.strip():
-                events.append((when(json.loads(line)['ts']), s, i, line))
+    events = [(when(e['ts']), s, i, raw) for s in selected for i, e, raw in fixture_events(s)]
     return replay_events(binary, home(binary, name), events, len(selected))
 
 
@@ -194,7 +203,7 @@ def kinds(binary, h, decide=None, pool='dev'):
         for kind in MEANINGS:
             members = [votes[r['uid']] for r in drawn if r['kind'] == kind]
             correct = sum(common.voted(v, 'borne_out') and common.voted(v, 'kind_right') for v in members)
-            each[kind] = {'n': len(members), 'scored': len(members), 'correct': correct,
+            each[kind] = {'n': len(members), 'correct': correct,
                           'precision': correct / len(members) if members else None}
         out.update(complete=True, per_kind=each,
                    agreement={f: common.agreement(list(votes.values()), f) for f in ('borne_out', 'kind_right')})
@@ -203,18 +212,22 @@ def kinds(binary, h, decide=None, pool='dev'):
     return out
 
 
-def overturned(binary, h, decide=None, pool='dev'):
-    """A108: linked pairs alone set the current-rank line; every earlier claim sets history N."""
-    import tomllib
-    binary, h = os.path.abspath(os.path.expanduser(binary)), os.path.abspath(os.path.expanduser(h))
-    guard_home(h, decide, pool)
+def vector_side(h):
+    """Task 12a's homes have no embedder, so every run is full text ('off')."""
     if os.path.exists(f'{h}/config.toml'):
         with open(f'{h}/config.toml', 'rb') as f:
-            embedding = tomllib.load(f).get('embedding', {})
-        if embedding.get('provider', 'none') != 'none':
-            sys.exit('Task 12a requires a full text home with no embedder')
+            if tomllib.load(f).get('embedding', {}).get('provider', 'none') != 'none':
+                sys.exit('Task 12a requires a full text home with no embedder')
+    return 'off'
+
+
+def overturned(binary, h, decide=None, pool='dev'):
+    """A108: linked pairs alone set the current-rank line; every earlier claim sets history N."""
+    binary, h = os.path.abspath(os.path.expanduser(binary)), os.path.abspath(os.path.expanduser(h))
+    guard_home(h, decide, pool)
+    vector_side(h)
     common.owner_only()
-    decisions, pairs, drafted = labels() if pool == 'dev' else labels(pool)
+    decisions, pairs, drafted = labels(pool)
     quote_of = {i: d['quote'] for i, d in drafted.items()} | {d['id']: d['quote'] for d in decisions}
     where = json.load(open(f'{h}/map.json'))
     on = collections.defaultdict(list)
