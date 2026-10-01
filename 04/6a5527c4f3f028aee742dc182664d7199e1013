@@ -1,0 +1,21 @@
+docs/eval/m4.py
+  s_59cfa7617c8511::t_1a7ee930772dcd 256-258,291-308,311-312,316,359-360,405-407,449-451
+docs/eval/test_m4.py
+  s_59cfa7617c8511::t_00c05e97591664 194,218-252
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "046a5527c4f3f028aee742dc182664d7199e1013",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
