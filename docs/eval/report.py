@@ -327,6 +327,8 @@ def main():
     if not m4_mode and os.path.exists(f'{J.RUNS}/b-off.trec'):
         sys.exit('these are milestone 4 runs: add --m4')
     split, judge = args[0], args[1] if len(args) > 1 else J.JUDGE
+    if m4_mode and judge != J.JUDGE:
+        sys.exit(f'--m4 reports the pinned judge only (D10): {J.JUDGE}')
     db = sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True)
     queries = {q['qid']: q for q in map(json.loads, open(J.QUESTIONS)) if q['split'] == split}
     if m4_mode and (len(queries) != m4.TEST_N or sum(q['lang'] == 'en' for q in queries.values()) != m4.ENGLISH_N):
@@ -339,6 +341,13 @@ def main():
         missing_runs = set(m4.RUNS) - {'b-rerank'} - runs_now.keys()
         if missing_runs:
             sys.exit('missing milestone 4 runs: ' + ', '.join(sorted(missing_runs)))
+        with open(f'{m4.E}/corpus-m4.json') as f:
+            window = json.load(f)['window']
+        eligible = {qid for qid, q in queries.items() if m4.raw_eligible(q, window)}
+        # The gate's own check: an empty or partial run would score its missing questions as zeros.
+        gaps = m4.missing(runs_now, sorted(runs_now), set(queries), eligible)
+        if gaps:
+            sys.exit(f'{len(gaps)} run lines missing, as m4.py gate counts them; first: {gaps[0]}')
     pools = {qid: [(d, text, n) for d, text, n in J.pool(db, runs_now, q) if d not in own]
              for qid, q in queries.items()}
     # A partly judged pool would score whichever questions happened to be judged first.
@@ -374,9 +383,6 @@ def main():
     print(f'split={split} judge={judge} questions={len(queries)} judged={len(judged)} '
           f'with an answer={len(answerable)} without={len(judged) - len(answerable)}')
     if m4_mode:
-        with open(f'{m4.E}/corpus-m4.json') as f:
-            window = json.load(f)['window']
-        eligible = {qid for qid, q in queries.items() if m4.raw_eligible(q, window)}
         m4_report(runs, judged, queries, own, eligible, asked, now, shown, timestamps)
     else:
         for label, data in tables(runs, judged, queries, asked, now, shown, timestamps).items():

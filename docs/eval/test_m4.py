@@ -449,6 +449,34 @@ def report_module(monkeypatch):
         return importlib.import_module('report')
 
 
+def test_m4_reports_the_pinned_judge_only(monkeypatch, report_module):
+    """D10: the deciding report reads the calibrated judge's grades, never another's (Codex's
+    review of #319)."""
+    report = report_module
+    monkeypatch.setattr(report.J, 'POOL_DEPTH', m4.DEPTH)
+    monkeypatch.setattr(sys, 'argv', ['report.py', 'test', 'other-model', '--m4'])
+    with pytest.raises(SystemExit, match='pinned judge'):
+        report.main()
+
+
+def test_go_reads_the_holm_p_and_lines_unrounded(capsys, monkeypatch, report_module):
+    """A family whose smallest p, 0.02, sits beside 0.4, 0.5 and 0.6 holds no GO after Holm (0.08);
+    a gain printed as +0.030000 but below +0.03 holds none either (Codex's review of #319)."""
+    report = report_module
+    queries = {f'q{i}': q(f'q{i}') for i in range(6)}
+    judged = {qid: {'o107': 3} for qid in queries}
+    runs = {name: {qid: ['o107'] for qid in queries} for name in m4.RUNS}
+    for gain, p, why in ((0.05, 0.02, 'Holm p >= 0.05'), (0.0299996, 1e-9, 'difference below +0.03')):
+        ps = {'b-off': 0.4, 'b-rerank': p, 'b-rrf5': 0.5, 'b-only': 0.6}
+        monkeypatch.setattr(report, 'contrast', lambda rs, name, base, ps=ps, gain=gain: {
+            'n': 6, 'diff': gain if name == 'b-rerank' else 0.0, 'sd': 0.1, 'low': 0.0, 'high': 0.0,
+            'p': ps[name]})
+        report.m4_report(runs, judged, queries, set(), set(queries), {}, 0, {'o107': 'y'}, {})
+        out = capsys.readouterr().out
+        line = next(l for l in out.split('\n') if l.startswith(('GO b-rerank', 'NO-GO b-rerank')))
+        assert line.startswith('NO-GO b-rerank') and why in line, line
+
+
 def test_the_132_leave_every_table(capsys, report_module):
     """A v1-owned document is relevant but no system can return it: it leaves the qrels too."""
     report = report_module
