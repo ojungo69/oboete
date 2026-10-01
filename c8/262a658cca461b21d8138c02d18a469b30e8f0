@@ -1,0 +1,21 @@
+docs/eval/rerank.py
+  s_59cfa7617c8511::t_caa185690e8c99 229-249,297,354-360
+docs/eval/test_rerank.py
+  s_59cfa7617c8511::t_61542b1f0d6153 208-259
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c8262a658cca461b21d8138c02d18a469b30e8f0",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
