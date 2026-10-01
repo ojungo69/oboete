@@ -1,0 +1,21 @@
+.github/workflows/open-code-review.yml
+  s_59cfa7617c8511::t_5d2378eb67062b 78-79
+docs/open-code-review.md
+  s_59cfa7617c8511::t_2fe051c7369dd6 168-177,185-186,196,232
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9e72263d6a8522e65b0fa7745003fe867cce7885",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
