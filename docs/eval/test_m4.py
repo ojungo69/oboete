@@ -189,6 +189,9 @@ def test_the_gate_fails(tmp_path):
     # A hit of the question's own session.
     session = {'o1': 's2', 'r:d:1': 's2'}.get
     assert m4.own_session(runs, asked, session) == ['b-only: q2 has r:d:1 of its own session']
+    # A key the gate already reports as missing or unmapped has no session: it does not stop the gate.
+    of = m4.session_of({'r:d:1': {'session': 's2'}}, {'o1': ('text', 's1', 4)}.__getitem__)
+    assert [of(d) for d in ('r:d:1', 'r:d:9', 'o1', 'claude-mem:db:o5')] == ['s2', None, 's1', None]
     # A candidate run made before the pre-registration's main commit; a baseline's time is its own.
     for name in ('b-off', 'hybrid-d2'):
         (tmp_path / f'{name}.trec').write_text('q1 Q0 o1 1 50 x\n')

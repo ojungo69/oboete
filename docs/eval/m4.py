@@ -32,6 +32,8 @@ TEST_N, ENGLISH_N = 165, 60
 # B's text and v1's text of a mapped document: the same document when they share this share of
 # trigrams; the gate wants this share of a kind's sample to match (D10's match rate).
 SAME_TEXT, MATCH_LINE, SAMPLE = 0.8, 0.95, 50
+# The judge that passed calibration (spec 8.2 Judge), pinned for the run.
+JUDGE = 'claude-sonnet-5'
 
 
 def questions(split):
@@ -285,6 +287,17 @@ def missing(runs, names, every, eligible):
     return out
 
 
+def session_of(side, doc_text):
+    """The session of a hit, for the own-session check: a record's from the sidecar, a v1 document's
+    from `doc_text`; None for a key the checks before it already report as missing or unmapped, so
+    the gate lists its problems and never stops on one (OpenCodeReview on 606fadc)."""
+    def of(doc):
+        if doc.startswith('r:'):
+            return side[doc]['session'] if doc in side else None
+        return doc_text(doc)[1] if doc[:1] in 'osp' and doc[1:].isdigit() else None
+    return of
+
+
 def own_session(runs, asked, session_of):
     """Each hit of the question's own session: every leg leaves it out before its limit."""
     return [f'{name}: {qid} has {doc} of its own session'
@@ -324,7 +337,8 @@ def matches(runs_dir, v1_text):
     v1's text of the doc id it maps to, so the mapping holds the same documents (D10)."""
     by_kind = collections.defaultdict(list)
     for row in read_jsonl(f'{runs_dir}/b-docs.jsonl'):
-        if not row['doc'].startswith('r:'):
+        # A sidecar that was never mapped has no `doc`: the unmapped check reports it.
+        if row.get('doc', 'r:')[:1] in 'osp':
             by_kind[row['doc'][0]].append(row)
     out = {}
     for kind, rows in sorted(by_kind.items()):
@@ -374,16 +388,11 @@ def gate(runs_dir, home, commit, answered, rerank=True):
     problems += [f'{name}: no sidecar row for {doc}' for name, per in runs.items() for docs in per.values()
                  for doc in docs if doc.startswith('r:') and doc not in side]
     db = v1()
-
-    def session_of(doc):
-        if doc.startswith('r:'):
-            return record(side, doc)['session']
-        return judge.doc_text(db, doc)[1]
-
-    problems += own_session(runs, asked, session_of)
+    session = session_of(side, lambda doc: judge.doc_text(db, doc))
+    problems += own_session(runs, asked, session)
     # The positive control: a developer prompt's qid is its own prompt in the v1 store, of its session.
     q = next(q for q in asked.values() if q['set'] == 'prompt')
-    if not own_session({'control': {q['qid']: [q['qid']]}}, asked, session_of):
+    if not own_session({'control': {q['qid']: [q['qid']]}}, asked, session):
         problems.append('the own-session check misses its positive control')
     since = int(subprocess.run(['git', 'show', '-s', '--format=%ct', commit], capture_output=True, text=True,
                                check=True, cwd=os.path.dirname(os.path.abspath(__file__)), env=clean_env()).stdout)
@@ -412,8 +421,10 @@ def gate(runs_dir, home, commit, answered, rerank=True):
     own = v1_own()
     pooled = {d for per in runs.values() for docs in per.values() for d in docs[:DEPTH] if d in own}
     print(f'v1-written documents: {len(own)}; in the pool: {len(pooled)} (they leave every run and the qrels)')
-    if judge.MODEL != 'claude-sonnet-5':
-        problems.append(f'the judge is {judge.MODEL}, not the pinned claude-sonnet-5')
+    # The model judge.py grades with and whose grades it reuses (`latest`): a change to judge.py
+    # between the pre-registration and this gate shows here.
+    if judge.JUDGE != JUDGE:
+        problems.append(f'the judge is {judge.JUDGE}, not the pinned {JUDGE}')
     backup = f'{E}/judgments.jsonl.m4'
     if not (os.path.exists(backup) and sha256_file(backup) == sha256_file(f'{E}/judgments.jsonl')):
         problems.append(f'judgments.jsonl has no current backup at {backup}')
