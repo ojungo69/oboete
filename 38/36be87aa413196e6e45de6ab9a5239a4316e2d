@@ -1,0 +1,19 @@
+src/search/b.rs
+  s_24c0cb9ce0dbb8::t_05f1aa0016b70a 3706,3832
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3836be87aa413196e6e45de6ab9a5239a4316e2d",
+  "prompts": {},
+  "sessions": {
+    "s_24c0cb9ce0dbb8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f961-7acd-7583-90e9-5edc43a57041",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
