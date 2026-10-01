@@ -435,7 +435,8 @@ def test_dev_tables_keep_the_existing_slices_and_documents(report_module):
 
 @pytest.fixture
 def report_module(monkeypatch):
-    import builtins, importlib, ranx
+    import builtins, importlib
+    importlib.import_module('ranx')
 
     def forbidden(*args, **kwargs):
         raise AssertionError('import must not access evaluation files or databases')
