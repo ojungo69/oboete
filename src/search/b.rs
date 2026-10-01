@@ -273,18 +273,19 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             hits.extend(imported_leg(&k, q, depth, &terms, fts, near.as_ref())?);
         }
         if q.raw != RawArm::Off {
-            let mut rows = rows?;
+            let rows = rows?;
+            let mut order: Vec<String> = rows
+                .iter()
+                .map(|h| format!("{}:{}", h.device, h.seq))
+                .collect();
             if let Some(near) = &near {
                 let repos: Vec<String> = q.searched().map(str::to_owned).into_iter().collect();
-                let fts: Vec<String> = rows
-                    .iter()
-                    .map(|h| format!("{}:{}", h.device, h.seq))
-                    .collect();
-                let mut fused = rrf(&fts, &near.knn(&k, "r", &repos, span, depth)?);
-                fused.truncate(depth);
-                rows = super::raw_rows(Some(&raw), &k, &fused, &q.text, rows)?;
+                order = rrf(&order, &near.knn(&k, "r", &repos, span, depth)?);
+                order.truncate(depth);
             }
-            for h in rows {
+            // Through `raw_rows` whatever became of the call: the list was read before it came
+            // back, so a tombstone raw.db took meanwhile is checked again here (D8).
+            for h in super::raw_rows(Some(&raw), &k, &order, &q.text, rows)? {
                 hits.push(Hit {
                     key: format!("{}:{}", h.device, h.seq),
                     class: Class::Raw,
@@ -2069,6 +2070,46 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert_eq!(outcomes, ["ok", "error", "error"]);
+    }
+
+    /// D8 with the query's call beside the full-text sides: a tombstone raw.db takes while the call
+    /// is out hides its record, whatever becomes of the call (here a timeout: full text alone),
+    /// though the record's full-text list was read before it.
+    #[test]
+    fn a_tombstone_taken_while_the_query_is_out_hides_its_record() {
+        use crate::embed::stub::Stub;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        let seq = s.said("s", R, 1_000, "Deploy words.");
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let home = s.home.path().to_owned();
+        let ask = Query {
+            text: "Deploy words".into(),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        let records = |a: &Answer| a.hits.iter().filter(|h| h.class == Class::Raw).count();
+        assert_eq!(records(&query(&home, &ask).unwrap()), 1);
+        let sent = stub.requests();
+        let held = stub.hold();
+        let search = std::thread::spawn(move || query(&home, &ask).unwrap());
+        // The call is out, and the full-text lists have been read beside it.
+        while stub.requests() == sent {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let target = crate::raw::Target::Record {
+            device: s.raw.device().to_owned(),
+            seq,
+        };
+        s.raw.append_tombstone(target).unwrap();
+        let answer = search.join().unwrap();
+        drop(held);
+        assert_eq!(answer.vector, Vector::Skipped(VectorSkip::Timeout));
+        assert_eq!(records(&answer), 0, "{:?}", keys(&answer));
     }
 
     /// D7: claude-mem's knowledge comes before the prompts it recorded, whatever the full-text
