@@ -260,19 +260,22 @@ As built in #305; D5 is the record and the Interfaces below name the code.
 
 ## Task 4: The search core
 
-As built in the Task 4 PR.
+As built in #306; D7 is the record and the Interfaces below name the code.
 
 **Files:**
 - Create: `src/search/b.rs` (`Query`, `RawArm`, `Hit`, `Class`, `Label`, `Answer`, `query`, `excluded`; the claims, imported and raw legs; `get`, `timeline`, `known`, `fenced`; `fixture::Store`)
 - Modify: `src/search.rs` (the shared helpers `terms`, `raw_in`, `query_clauses` and `within`, reused by the legs)
 - Modify: `src/mcp.rs` (tools on B; `get` for a claim uid, a raw `device:seq` and an imported uid; `timeline` of claims, imported documents and session starts around an anchor; the fence)
 - Modify: `src/main.rs` (CLI `search`, `get`, `timeline` on B; v1's halves removed)
-- Test: `src/search/b.rs`, `src/mcp.rs`
+- Modify: `src/claims.rs` (`delivered_one`, `active_one`: one claim as delivered, or as the `active` view holds it, with its `later`), `src/manifest.rs` (`fence(what, text)`, shared by SessionStart and MCP), `src/import.rs` (`repo`, which `imported_repos` maps a key's last part through)
+- Modify: `docs/milestone-4.md` (the search's time and memory on the evaluation home and a curated home)
+- Test: `src/search/b.rs`, `src/mcp.rs`, `tests/search_stores.rs`
 
 **Interfaces:**
 - `Query {text, caller: Option<String>, repo: Option<String>, all: bool, since: Option<i64>, until: Option<i64>, history: bool, raw: RawArm, limit}`: `caller` is the calling checkout's repository; `RawArm {Off, Below, Only}`, default `Below` (D7). The Raw run's third variant, RRF with a penalty, is `RawArm::Rrf(u32)` (Task 6), merging the imported and raw lists by RRF with raw ranks offset by P.
 - `Hit {key, class: Class, repo, when, kind, status, label: Label, title, snippet}`; `Class::{Current, Delivered { later: String }, Superseded { by: Option<String> }, Imported, Raw}`; `Label::{Citable, QuoteOnly, Imported}`.
 - `Answer {hits, full_text_only}`; Task 5 replaces `full_text_only` with `vector`.
+- The legs read past what they hide: the claims leg reads pages of its depth (at most `PAGES`, 10) to fill it past hidden claims (an owner's change still to apply, `claims::Pending`) and lowered ones; `timeline` reads pages of `limit` past those and past session starts raw no longer holds, each imported uid once (its newest row, as `get` reads it); `known` takes a repository with only imported history (`imported_repos`). MCP's errors are fenced and gated like its answers.
 - `search::b::excluded(list: &[String], q: &Query) -> bool`, over D13's list from Task 2: `search::b::query` itself calls it with `raw.exclusions()` before any leg that could send the query out (row 30-2), so no caller (CLI, MCP, viewer) can skip it; it asks about `Query.caller` and the repository searched, and a search of every repository is excluded when the list is not empty. The shortlist calls `delivered_ranked`, not `query`, and checks its session instead, a stricter rule (every repository the session touched, through `Raw::sessions_in`, D13). Task 4 has no such leg; Task 5 adds the first.
 
 - [ ] **Step 1: Failing tests.**
