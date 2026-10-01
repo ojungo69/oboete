@@ -12,7 +12,9 @@ already passed the outbound gate.
 
 usage: judge.py <split> <max questions> [max calls]
 """
-import concurrent.futures, json, os, re, sqlite3, subprocess, sys, tempfile, time
+import concurrent.futures, functools, json, os, re, sqlite3, subprocess, sys, tempfile, time
+
+import m4
 
 E = os.path.expanduser('~/.oboete/eval')
 # The questions, documents and grades are the developer's own records: owner-only files.
@@ -22,6 +24,9 @@ os.umask(0o077)
 # OBOETE_EVAL_DEPTH=50 OBOETE_EVAL_RUNS=~/.oboete/eval/runs-test.
 POOL_DEPTH = int(os.environ.get('OBOETE_EVAL_DEPTH', '20'))
 RUNS = os.path.expanduser(os.environ.get('OBOETE_EVAL_RUNS', f'{E}/runs'))
+# The questions: the split's in queries.jsonl, or the file a run names (m4.py's
+# questions-<split>-m4.jsonl, which adds M21's English questions to the test split).
+QUESTIONS = os.path.expanduser(os.environ.get('OBOETE_EVAL_QUESTIONS', f'{E}/queries.jsonl'))
 BATCH = 10
 # Enough for 99.8% of the pooled documents; the rest are clipped and marked. Grades written
 # before `chars` was recorded saw 1,200 characters.
@@ -75,8 +80,18 @@ DOC_TEXT = {
 }
 
 
+@functools.cache
+def side():
+    return m4.sidecar(RUNS)
+
+
 def doc_text(db, doc):
-    """(what the judge is shown, session, full length); (None, None, 0) for a deleted document."""
+    """(what the judge is shown, session, full length); (None, None, 0) for a deleted document. A
+    record (`r:<device>:<seq>`, milestone 4's Raw runs) is read from the run's sidecar, gated and
+    cut as the run wrote it (m4.py)."""
+    if doc.startswith('r:'):
+        row = m4.record(side(), doc)
+        return row['text'], row['session'], len(row['text'])
     row = db.execute(DOC_TEXT[doc[0]], (int(doc[1:]),)).fetchone()
     if row is None:
         return None, None, 0
@@ -146,21 +161,26 @@ def ask(query, docs):
     return out
 
 
-def main():
-    split, max_questions = sys.argv[1], int(sys.argv[2])
-    max_calls = int(sys.argv[3]) if len(sys.argv) > 3 else 600
-    db = sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True)
-    queries = [json.loads(l) for l in open(f'{E}/queries.jsonl')]
-    queries = [q for q in queries if q['split'] == split][:max_questions]
-    runs = load_runs()
-    done = latest()
-    path = f'{E}/judgments.jsonl'
+def jobs_for(db, queries, runs, done):
+    """The calls judging `queries` takes: each one's pooled documents with no grade for the text
+    now shown, BATCH to a call."""
     jobs = []
     for q in queries:
         todo = [(d, t) for d, t, n in pool(db, runs, q)
                 if not ((q['qid'], d) in done and covers(done[(q['qid'], d)], n))]
         for i in range(0, len(todo), BATCH):
             jobs.append((q, todo[i:i + BATCH]))
+    return jobs
+
+
+def main():
+    split, max_questions = sys.argv[1], int(sys.argv[2])
+    max_calls = int(sys.argv[3]) if len(sys.argv) > 3 else 600
+    db = sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True)
+    queries = [json.loads(l) for l in open(QUESTIONS)]
+    queries = [q for q in queries if q['split'] == split][:max_questions]
+    jobs = jobs_for(db, queries, load_runs(), latest())
+    path = f'{E}/judgments.jsonl'
     print(f'{len(queries)} questions, {len(jobs)} calls needed, running {min(len(jobs), max_calls)}', flush=True)
     jobs = jobs[:max_calls]
     failed = 0
