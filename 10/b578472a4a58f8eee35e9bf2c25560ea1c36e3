@@ -1,0 +1,19 @@
+src/migrate.rs
+  s_59cfa7617c8511::t_5b2a0719da3b64 36-76,95-239,802-812,1077-1253
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "10b578472a4a58f8eee35e9bf2c25560ea1c36e3",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
