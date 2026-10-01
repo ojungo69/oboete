@@ -380,7 +380,7 @@ As built in #309, whose description lists where it differs from the steps below;
 - CLI (hidden): `oboete eval <queries> --depth 50 --arms off,rrf:5,only --out <dir>`.
 - From Task 5: `search::b::query_with` and the session on vector rows. `embed_phase::coverage` was not built in #309: it comes with the first task that needs it, this one (to know the evaluation home is fully embedded) or Task 10 (the generation switch). The evaluation home's cap is its own config.toml (D10), with no code.
 - `m4.py`: `questions(split)` (writes `questions-<split>-m4.jsonl`), `v1_doc(uid)` (source id through the v1 store's `imports`, `mode=ro`), `raw_eligible(q)`, `corpus()`, `replay(home)`, `map`, `gate`; Codex: `holm(ps)`, `gap(en, ja)`.
-- `rerank.py <run> <docs.jsonl> --k 50 --max-length 512 [--time]` writes `b-rerank.trec` beside the run (D10's name); `--time` prints the p95 wall time per question on CPU (the process CPU time beside it) and peak RSS.
+- `rerank.py <run> <docs.jsonl> --questions <questions.jsonl> --k 50 --max-length 512 [--time]` writes `b-rerank.trec` beside the run (D10's name); `--time` prints the p95 wall time per question on CPU (the process CPU time beside it) and peak RSS.
 
 - [ ] **Step 1: Failing tests.** In `src/search/b.rs`, with Task 5's stub embedder:
   - `the_questions_own_session_leaves_every_leg_before_its_limit`: s1 has more than `depth` matches ranking above s2's in each leg; skipping s1 returns exactly `depth` hits of s2 (row 46-3, spec 8.2 M1);
