@@ -11,6 +11,8 @@ way into the evaluation store (agent questions through `oboete gate`), so what i
 already passed the outbound gate.
 
 usage: judge.py <split> <max questions> [max calls]
+Environment: OBOETE_EVAL_DEPTH, OBOETE_EVAL_RUNS and OBOETE_EVAL_QUESTIONS (below); report.py reads
+the same three.
 """
 import concurrent.futures, functools, json, os, re, sqlite3, subprocess, sys, tempfile, time
 
