@@ -94,8 +94,6 @@ pub struct Phase {
     /// A call's own timeout: `embed::BATCH_TIMEOUT`, shorter in tests.
     timeout: Duration,
     split: Option<Split>,
-    /// Whether this worker looked for a quarantined knowledge.db to carry vectors from.
-    carried: bool,
     #[cfg(test)]
     polls: usize,
 }
@@ -127,7 +125,6 @@ impl Phase {
             db: None,
             timeout: crate::embed::BATCH_TIMEOUT,
             split: None,
-            carried: false,
             #[cfg(test)]
             polls: 0,
         }
@@ -144,6 +141,9 @@ impl Phase {
         {
             self.polls += 1;
         }
+        // First: a knowledge.db the worker has just started takes its vectors before anything is
+        // written to it, a call's answer included.
+        carry_quarantined(&self.home, k)?;
         if let Some(f) = &self.flight {
             if !f.thread.is_finished() {
                 // A thread past its call's timeout is asked again each second, never at once.
@@ -175,10 +175,6 @@ impl Phase {
         };
         let reading = Reading::now(raw, Reads::Live)?;
         cleared(k, &embedder.id, &reading)?;
-        if !self.carried {
-            self.carried = true;
-            carry_quarantined(&self.home, k);
-        }
         let wait = match self.held_back(&cfg) {
             Ok(wait) => wait,
             // A providers.db that will not open or read holds back the vectors only.
@@ -550,15 +546,13 @@ pub fn carry(k: &Connection, from: &Path) -> Result<usize> {
     Ok(carried)
 }
 
-/// After a restore or a damage quarantine (spec 1.7): an empty cache takes the vectors of the
-/// newest quarantined knowledge.db. One whose vectors cannot be read carries nothing, and says so.
-fn carry_quarantined(home: &Path, k: &Connection) {
-    let empty = k.query_row("SELECT NOT EXISTS (SELECT 1 FROM vectors)", [], |r| {
-        r.get::<_, bool>(0)
-    });
-    if !matches!(empty, Ok(true)) {
-        return;
-    }
+/// After a restore or a damage quarantine (spec 1.7): the vectors of the newest quarantined
+/// knowledge.db, carried once into the one open now, whose checkpoint `carried` holds the time of
+/// the last file it took them from. One whose vectors cannot be read carries nothing, and says so
+/// once.
+fn carry_quarantined(home: &Path, k: &Connection) -> Result<()> {
+    use crate::knowledge::checkpoint;
+    let done = checkpoint::get(k, "carried", "")?;
     let newest = std::fs::read_dir(home)
         .into_iter()
         .flatten()
@@ -567,15 +561,19 @@ fn carry_quarantined(home: &Path, k: &Connection) {
             let name = e.file_name().into_string().ok()?;
             let at = name
                 .strip_prefix("knowledge.db.quarantined-")?
-                .parse::<i64>();
-            Some((at.ok()?, name))
+                .parse()
+                .ok()?;
+            Some((at, name))
         })
+        .filter(|(at, _)| *at > done)
         .max();
-    if let Some((_, name)) = newest
-        && let Err(e) = carry(k, &home.join(&name))
-    {
+    let Some((at, name)) = newest else {
+        return Ok(());
+    };
+    if let Err(e) = carry(k, &home.join(&name)) {
         eprintln!("oboete: no vectors carried from {name}: {e:#}");
     }
+    checkpoint::set_in(k, checkpoint::SEQS, "carried", "", at)
 }
 
 /// A request counted before it is sent (Step 7): in one write transaction, unless the day's
@@ -1763,6 +1761,64 @@ mod tests {
         s.run();
         embed_all(&s);
         assert_eq!((stub.requests(), indexed(&s)), (sent, before));
+    }
+
+    /// Spec 1.7: a worker that sets knowledge.db aside and opens a new one carries into it too,
+    /// before the answer of a call in flight is written there, whatever the cap: the same phase
+    /// serves both files.
+    #[test]
+    fn a_worker_carries_into_each_knowledge_db_it_opens() {
+        use crate::providers_db as pdb;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        claim(
+            &mut s,
+            "Parser caches stay in Redis.",
+            "Parser caches go to Redis.",
+        );
+        s.said("s", R, 3_000, "Words.");
+        s.run();
+        let home = s.home.path().to_owned();
+        let mut phase = Phase::new(&home);
+        let k = crate::knowledge::open(&home).unwrap();
+        until_idle(&s, &k, &mut phase);
+        let indexed = |s: &Store| keys(s).iter().filter(|(.., why)| why.is_none()).count();
+        let before = indexed(&s);
+        let held = stub.hold();
+        s.said("s", R, 4_000, "More words.");
+        s.run();
+        assert!(matches!(
+            phase.poll(&s.raw, &k).unwrap(),
+            Step::Waiting { .. }
+        ));
+        drop(k);
+        crate::backup::quarantine(&home, "knowledge.db").unwrap();
+        s.run();
+        let db = pdb::open(&home).unwrap();
+        for _ in 0..200 {
+            let call = pdb::Call {
+                provider: crate::embed::CALLS,
+                role: ROLE,
+                span: "",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 1,
+                est_tokens: Some(1),
+                usage: pdb::Usage::default(),
+                usd: None,
+            };
+            pdb::record(&db, &call).unwrap();
+        }
+        let sent = stub.requests();
+        drop(held);
+        while !phase.done() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let k = crate::knowledge::open(&home).unwrap();
+        while phase.poll(&s.raw, &k).unwrap() == Step::Covered {}
+        assert_eq!((stub.requests(), indexed(&s)), (sent, before + 1));
     }
 
     /// Step 6: while a call waits, each kind's cached vectors are still mapped: one claim to send
