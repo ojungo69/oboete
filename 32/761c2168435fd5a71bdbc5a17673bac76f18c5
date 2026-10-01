@@ -1,0 +1,27 @@
+src/main.rs
+  s_59cfa7617c8511::t_492645111d9b67 217-227,428-441
+src/migrate.rs
+  s_59cfa7617c8511::t_7009ed8206f329 16,133-185,1307-1335
+src/setup.rs
+  s_59cfa7617c8511::t_d842729e12f12c 1768-1777
+tests/doctor_curators.rs
+  s_59cfa7617c8511::t_28fe63501007ff 69-71,89
+tests/migrate_cli.rs
+  s_59cfa7617c8511::t_3f619415069ad0 1-66
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "32761c2168435fd5a71bdbc5a17673bac76f18c5",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
