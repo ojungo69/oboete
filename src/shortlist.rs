@@ -411,10 +411,8 @@ fn share(of: &HashSet<String>, body: &str) -> f64 {
     of.iter().filter(|g| held.contains(*g)).count() as f64 / of.len() as f64
 }
 
-/// Spec 4.2 and D9: of `candidates` (uids, the best first), the units (D2) of the claims whose
-/// body holds at least `threshold` of one text's trigrams, each claim still delivered under
-/// `claims::DECIDED`, and a unit left out whole when an owner's change the worker has not applied
-/// touches one of its claims (D3), in `PLACES` places, newest first. Read-only.
+/// Spec 4.2 and D9: of `candidates` (uids, the best first), the units (`placed`) of the claims
+/// whose body holds at least `threshold` of one text's trigrams. Read-only.
 pub fn pick(
     raw: &Raw,
     k: &Connection,
@@ -422,13 +420,31 @@ pub fn pick(
     texts: &[&str],
     threshold: f64,
 ) -> Result<Vec<Vec<crate::claims::Claim>>> {
-    use crate::claims;
     let of: Vec<HashSet<String>> = texts
         .iter()
         .map(|t| grams(t, GRAMS))
         .filter(|g| !g.is_empty())
         .collect();
-    if of.is_empty() || !exists(k, "view", "active")? {
+    if of.is_empty() {
+        return Ok(Vec::new());
+    }
+    placed(raw, k, candidates, |c| {
+        of.iter().any(|g| share(g, &c.body) >= threshold)
+    })
+}
+
+/// The units (D2) of the claims of `candidates` (uids, the best first) that `keep` keeps, each
+/// still delivered under `claims::DECIDED`, a unit left out whole when an owner's change the
+/// worker has not applied touches one of its claims (D3), in `PLACES` places, newest first.
+/// Read-only.
+pub fn placed(
+    raw: &Raw,
+    k: &Connection,
+    candidates: &[String],
+    keep: impl Fn(&crate::claims::Claim) -> bool,
+) -> Result<Vec<Vec<crate::claims::Claim>>> {
+    use crate::claims;
+    if !exists(k, "view", "active")? {
         return Ok(Vec::new());
     }
     let pending = claims::Pending::read(raw, k)?;
@@ -446,7 +462,7 @@ pub fn pick(
             .query_row(&decided, [uid], |_| Ok(()))
             .optional()?
             .is_some();
-        if still && of.iter().any(|g| share(g, &c.body) >= threshold) {
+        if still && keep(&c) {
             ranked.push(c);
         }
     }

@@ -110,6 +110,8 @@ pub struct Shown {
     pub fp: String,
     /// Its body, or only its index line.
     pub body: bool,
+    /// The line that shows it: a later cut that drops the line leaves it unshown.
+    pub line: String,
 }
 
 /// A body's fingerprint: whether a claim's body changed since it was shown.
@@ -380,6 +382,7 @@ fn with_delivered(
                 uid: c.uid.clone(),
                 fp: fingerprint(&c.body),
                 body: true,
+                line: line.clone(),
             };
             bodies.push((line.clone(), shown));
             line + "\n"
@@ -435,6 +438,7 @@ fn with_delivered(
                     uid: c.uid.clone(),
                     fp: fingerprint(&c.body),
                     body: false,
+                    line: line.clone(),
                 };
                 bodies.push((line, shown));
             }
