@@ -497,7 +497,7 @@ pub struct RawHit {
     pub snippet: String,
 }
 
-/// `raw_in` on `home`'s stores.
+/// The raw records `query` finds on `home`'s stores, as B's search reads them.
 #[cfg(test)]
 pub fn raw(
     home: &std::path::Path,
@@ -513,7 +513,8 @@ pub fn raw(
         None
     };
     let k = crate::knowledge::open(home)?;
-    raw_in(raw.as_ref(), &k, query, repo, (None, None), limit)
+    let keys = raw_order(raw.as_ref(), &k, query, repo, (None, None), limit)?;
+    raw_rows(raw.as_ref(), &k, &keys, query)
 }
 
 /// MUST-M12: `since` and `until` (unix ms, `until` exclusive) on `column`, each leg's documents by
@@ -537,15 +538,18 @@ fn within(
 /// Search the none tier's index (`raw_fts` in knowledge.db, milestone 2 Task 6) the way
 /// [`search`] searches v1's: trigrams ORed and ranked by bm25, or literal terms (all required)
 /// for a query too short for a trigram. `repo = None` searches every repository; `span` is
-/// `within`'s. `raw` is `None` for a home with no raw.db.
-pub(crate) fn raw_in(
+/// `within`'s. `raw` is `None` for a home with no raw.db. The records come as keys
+/// (`device:seq`), the best first, through the tombstone filter, with no text read: `raw_rows`
+/// reads them and gates their snippets, after a search's query call is back (Task 5), with the
+/// rules of that moment.
+pub(crate) fn raw_order(
     raw: Option<&crate::raw::Raw>,
     k: &Connection,
     query: &str,
     repo: Option<&str>,
     span: (Option<i64>, Option<i64>),
     limit: usize,
-) -> Result<Vec<RawHit>> {
+) -> Result<Vec<String>> {
     crate::consumer::fts::schema(k)?;
     let Some((mut clauses, mut args, ranked)) = query_clauses(query, "raw_fts", &["f.text"]) else {
         return Ok(Vec::new());
@@ -563,32 +567,23 @@ pub(crate) fn raw_in(
         "d.ts DESC"
     };
     let sql = format!(
-        "SELECT d.device, d.seq, d.kind, d.ts, d.repo, f.text
-         FROM raw_fts f JOIN raw_docs d ON d.rowid = f.rowid
+        "SELECT d.device, d.seq FROM raw_fts f JOIN raw_docs d ON d.rowid = f.rowid
          WHERE {} ORDER BY {order} LIMIT ?",
         clauses.join(" AND ")
     );
     // Enough rows that the hidden ones cannot take the place of visible ones.
     args.push(Value::Integer(sql_limit(limit.saturating_add(before))));
-    let terms = terms(query);
-    let mut stmt = k.prepare(&sql)?;
-    let hits = stmt.query_map(params_from_iter(args), |r| {
-        let text: String = r.get(5)?;
-        Ok(RawHit {
-            device: r.get(0)?,
-            seq: r.get(1)?,
-            kind: r.get(2)?,
-            ts: r.get(3)?,
-            repo: r.get(4)?,
-            // Gated before the snippet is cut, field by field (the index holds one per line).
-            snippet: snippet(&crate::redact::outbound_lines(&text), &terms, b::WIDTH),
-        })
-    })?;
-    let mut hits: Vec<RawHit> = hits.collect::<Result<_, _>>()?;
+    let rows: Vec<(String, i64)> = k
+        .prepare(&sql)?
+        .query_map(params_from_iter(args), |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
     let pending = hidden(&raw_db)?;
-    hits.retain(|h| !pending.contains(&(h.device.clone(), h.seq)));
-    hits.truncate(limit);
-    Ok(hits)
+    Ok(rows
+        .into_iter()
+        .filter(|(device, seq)| !pending.contains(&(device.clone(), *seq)))
+        .take(limit)
+        .map(|(device, seq)| format!("{device}:{seq}"))
+        .collect())
 }
 
 /// D8: a tombstone the index has not reached yet hides its target, so no search shows what raw
@@ -625,27 +620,18 @@ fn hidden(seen: &Seen) -> Result<std::collections::HashSet<(String, i64)>> {
     Ok(out)
 }
 
-/// The raw hits `keys` (`device:seq`) name, in their order: `known`'s as they are, the rest read
-/// from the index with `raw_in`'s tombstone filter and snippet (a vector side's hits, Task 5).
+/// The raw hits `keys` (`device:seq`) name, in their order, read from the index through the
+/// tombstones past it, each snippet gated (the egress rules of now) before it is cut.
 pub(crate) fn raw_rows(
     raw: Option<&crate::raw::Raw>,
     k: &Connection,
     keys: &[String],
     query: &str,
-    known: Vec<RawHit>,
 ) -> Result<Vec<RawHit>> {
     let seen = fts_seen(raw, k)?;
-    let mut known: std::collections::HashMap<String, RawHit> = known
-        .into_iter()
-        .map(|h| (format!("{}:{}", h.device, h.seq), h))
-        .collect();
     let terms = terms(query);
     let mut out = Vec::new();
     for key in keys {
-        if let Some(h) = known.remove(key) {
-            out.push(h);
-            continue;
-        }
         let Some((device, seq)) = key.rsplit_once(':') else {
             continue;
         };

@@ -256,7 +256,7 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
         };
         let rows = match q.raw {
             RawArm::Off => Ok(Vec::new()),
-            _ => super::raw_in(Some(&raw), &k, &q.text, q.searched(), span, depth),
+            _ => super::raw_order(Some(&raw), &k, &q.text, q.searched(), span, depth),
         };
         let (vector, near) = match asked {
             Ok(ready) => ready,
@@ -273,19 +273,16 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             hits.extend(imported_leg(&k, q, depth, &terms, fts, near.as_ref())?);
         }
         if q.raw != RawArm::Off {
-            let rows = rows?;
-            let mut order: Vec<String> = rows
-                .iter()
-                .map(|h| format!("{}:{}", h.device, h.seq))
-                .collect();
+            let mut order = rows?;
             if let Some(near) = &near {
                 let repos: Vec<String> = q.searched().map(str::to_owned).into_iter().collect();
                 order = rrf(&order, &near.knn(&k, "r", &repos, span, depth)?);
                 order.truncate(depth);
             }
-            // Through `raw_rows` whatever became of the call: the list was read before it came
-            // back, so a tombstone raw.db took meanwhile is checked again here (D8).
-            for h in super::raw_rows(Some(&raw), &k, &order, &q.text, rows)? {
+            // The records read and their snippets gated now, whatever became of the call: the
+            // order was read before it came back, so a tombstone raw.db took meanwhile and a rule
+            // added meanwhile both hold here (D8).
+            for h in super::raw_rows(Some(&raw), &k, &order, &q.text)? {
                 hits.push(Hit {
                     key: format!("{}:{}", h.device, h.seq),
                     class: Class::Raw,
@@ -2110,6 +2107,85 @@ mod tests {
         drop(held);
         assert_eq!(answer.vector, Vector::Skipped(VectorSkip::Timeout));
         assert_eq!(records(&answer), 0, "{:?}", keys(&answer));
+    }
+
+    /// D8 with the query's call beside the full-text sides: a redaction rule added while the call
+    /// is out holds in the snippets, whether the call is answered or times out (the records are
+    /// read and gated after it), though no tombstone has been written yet. The search runs in a
+    /// child process: egress reads the rules of the home `redact::set_home` names, the process's.
+    #[test]
+    fn a_rule_added_while_the_query_is_out_masks_the_snippets() {
+        use crate::embed::stub::Stub;
+        const HOME: &str = "OBOETE_TEST_RULE_HOME";
+        const SECRET: &str = "INTERNAL-ALPHA-42";
+        let ask = Query {
+            text: "deploy".into(),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        if let Ok(home) = std::env::var(HOME) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let answer = query(&home, &ask).unwrap();
+            let shown: Vec<&str> = answer.hits.iter().map(|h| h.snippet.as_str()).collect();
+            assert!(shown.iter().any(|s| s.contains("deploy")), "{shown:?}");
+            assert!(shown.iter().all(|s| !s.contains(SECRET)), "{shown:?}");
+            return;
+        }
+        let stub = Stub::start();
+        let mut s = Store::new();
+        // Two fields, so the rule anchored to a field's end matches only line by line.
+        let body = serde_json::json!({"prompt": format!("deploy {SECRET}"), "result": "tail"});
+        let event = crate::raw::Event {
+            session: "s".into(),
+            repo: Some(R.into()),
+            ts: 1_000,
+            ..crate::raw::test_event(&body.to_string())
+        };
+        s.raw.append(&event).unwrap();
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let home = s.home.path().to_owned();
+        let config = home.join("config.toml");
+        let plain = std::fs::read_to_string(&config).unwrap();
+        let ruled = format!(
+            "{plain}[redaction]\nextra_rules = [{{ id = \"alpha\", regex = '{SECRET}$' }}]\n"
+        );
+        let name = "search::b::tests::a_rule_added_while_the_query_is_out_masks_the_snippets";
+        for answered in [true, false] {
+            std::fs::write(&config, &plain).unwrap();
+            let sent = stub.requests();
+            let held = stub.hold();
+            let child = std::process::Command::new(std::env::args_os().next().unwrap())
+                .args(["--exact", name])
+                .env(HOME, &home)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            // The call is out, and the full-text order has been read beside it.
+            while stub.requests() == sent {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let next = home.join("config.toml.next");
+            std::fs::write(&next, &ruled).unwrap();
+            std::fs::rename(&next, &config).unwrap();
+            if !answered {
+                std::thread::sleep(QUERY_TIMEOUT + std::time::Duration::from_millis(300));
+            }
+            drop(held);
+            let out = child.wait_with_output().unwrap();
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(out.status.success(), "answered {answered}: {said}");
+            assert!(said.contains("1 passed"), "{said}");
+        }
     }
 
     /// D7: claude-mem's knowledge comes before the prompts it recorded, whatever the full-text
