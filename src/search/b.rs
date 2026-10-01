@@ -2,7 +2,7 @@
 //! claude-mem's imported history and the raw records, for the CLI and MCP, and for the viewer from
 //! Task 7. Full text only: Task 5 adds the vector leg.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,11 @@ const PAGES: usize = 10;
 const CANDIDATES: i64 = 400;
 /// The query embedding's own timeout (D8): past it, search answers from full text.
 const QUERY_TIMEOUT: Duration = Duration::from_millis(1_200);
+/// An evaluation question's embedding (Task 6): longer than a search's, as a question that cannot
+/// be embedded stops the run (Step 13: 5 of 624 queries passed 1.2 s).
+const EVAL_TIMEOUT: Duration = Duration::from_secs(10);
+/// judge.py's `MAX_DOC_CHARS`: a sidecar text is cut where the judge would cut it.
+const JUDGE_CHARS: usize = 4_000;
 /// A snippet's width in characters.
 pub(crate) const WIDTH: usize = 160;
 
@@ -43,6 +48,11 @@ pub struct Query {
     pub history: bool,
     pub raw: RawArm,
     pub limit: usize,
+    /// Evaluation only (Task 6, spec 8.2 M1): every leg leaves this session's documents out in
+    /// SQL before its limit, its vector side too, as the question's own conversation holds the
+    /// answer written after it; a document with no session stays. Claims are not filtered: an
+    /// evaluation home holds none (`trec_run`).
+    pub skip_session: Option<String>,
 }
 
 impl Query {
@@ -57,13 +67,46 @@ impl Query {
 }
 
 /// Where raw records rank (D7): below the curated rows (spec 8.2's Raw row keeps that unless its
-/// measurement decides otherwise), not at all, or alone.
+/// measurement decides otherwise), not at all, or alone. `Rrf(p)` is the Raw arms' third (Task 6,
+/// evaluation only): the imported documents and the records merged by reciprocal rank, a record
+/// ranked as if `p` places lower.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum RawArm {
     Off,
     #[default]
     Below,
     Only,
+    Rrf(u32),
+}
+
+impl RawArm {
+    /// The arm as `--arms` names it and its run file is named (D10): `rrf:5` is `rrf5`, as Windows
+    /// refuses a colon in a file name.
+    pub fn name(self) -> String {
+        match self {
+            RawArm::Off => "off".into(),
+            RawArm::Below => "below".into(),
+            RawArm::Only => "only".into(),
+            RawArm::Rrf(p) => format!("rrf{p}"),
+        }
+    }
+}
+
+impl std::str::FromStr for RawArm {
+    type Err = anyhow::Error;
+
+    /// `off`, `below`, `only` or `rrf:<p>`.
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(match s {
+            "off" => RawArm::Off,
+            "below" => RawArm::Below,
+            "only" => RawArm::Only,
+            _ => match s.strip_prefix("rrf:").map(str::parse) {
+                Some(Ok(p)) => RawArm::Rrf(p),
+                _ => anyhow::bail!("an arm is off, below, only or rrf:<n>, not {s:?}"),
+            },
+        })
+    }
 }
 
 /// What a hit is.
@@ -246,7 +289,9 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
         // again just before the call. `Err` is the call on its way.
         let asked = ready.ok_or_else(|| {
             s.spawn(move || match crate::raw::open(home) {
-                Ok(raw) => embedded(home, &raw, q, active).unwrap_or(Err(VectorSkip::Error)),
+                Ok(raw) => {
+                    embedded(home, &raw, q, active, QUERY_TIMEOUT).unwrap_or(Err(VectorSkip::Error))
+                }
                 Err(_) => Err(VectorSkip::Error),
             })
         });
@@ -256,7 +301,15 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
         };
         let rows = match q.raw {
             RawArm::Off => Ok(Vec::new()),
-            _ => super::raw_order(Some(&raw), &k, &q.text, q.searched(), span, depth),
+            _ => super::raw_order(
+                Some(&raw),
+                &k,
+                &q.text,
+                q.searched(),
+                span,
+                q.skip_session.as_deref(),
+                depth,
+            ),
         };
         let (vector, near) = match asked {
             Ok(ready) => ready,
@@ -266,24 +319,26 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                 Err(_) => (Vector::Skipped(VectorSkip::Error), None),
             },
         };
-        let (mut hits, mut lowered) = (Vec::new(), Vec::new());
+        let (mut hits, mut lowered, mut imports, mut records) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         if let Some([knowledge, prompts]) = imported {
             (hits, lowered) = claims_leg(&raw, &k, q, depth, &terms, near.as_ref())?;
             let fts = [knowledge?, prompts?];
-            hits.extend(imported_leg(&k, q, depth, &terms, fts, near.as_ref())?);
+            imports = imported_leg(&k, q, depth, &terms, fts, near.as_ref())?;
         }
         if q.raw != RawArm::Off {
             let mut order = rows?;
             if let Some(near) = &near {
                 let repos: Vec<String> = q.searched().map(str::to_owned).into_iter().collect();
-                order = rrf(&order, &near.knn(&k, "r", &repos, span, depth)?);
+                let skip = q.skip_session.as_deref();
+                order = rrf(&order, &near.knn(&k, "r", &repos, span, skip, depth)?);
                 order.truncate(depth);
             }
             // The records read and their snippets gated now, whatever became of the call: the
             // order was read before it came back, so a tombstone raw.db took meanwhile and a rule
             // added meanwhile both hold here (D8).
             for h in super::raw_rows(Some(&raw), &k, &order, &q.text)? {
-                hits.push(Hit {
+                records.push(Hit {
                     key: format!("{}:{}", h.device, h.seq),
                     class: Class::Raw,
                     repo: h.repo,
@@ -295,6 +350,10 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                     snippet: h.snippet,
                 });
             }
+        }
+        match q.raw {
+            RawArm::Rrf(p) => hits.extend(by_rank(imports, records, p)),
+            _ => hits.extend(imports.into_iter().chain(records)),
         }
         hits.extend(lowered);
         hits.truncate(q.limit);
@@ -313,6 +372,7 @@ fn embedded(
     raw: &crate::raw::Raw,
     q: &Query,
     active: Option<String>,
+    timeout: Duration,
 ) -> Result<Result<Near, VectorSkip>> {
     use crate::providers_db as pdb;
     let Ok(config) = crate::config::load(home) else {
@@ -372,7 +432,7 @@ fn embedded(
         }));
     }
     let started = Instant::now();
-    let result = embedder.run(&[&sent], QUERY_TIMEOUT);
+    let result = embedder.run(&[&sent], timeout);
     let (outcome, detail, billed) = match &result {
         Ok(_) => ("ok", "1 query".to_owned(), true),
         Err(f) => ("error", f.message.clone(), f.billed()),
@@ -394,6 +454,163 @@ fn embedded(
     })
 }
 
+/// `oboete eval` (Task 6, D10): each question of `queries`, one `{"qid", "text", "session"?}` a
+/// line, embedded once and searched with every arm over every repository, its own session left
+/// out of each leg before its limit. Writes `<out>/b-<arm>.trec` per arm (`qid Q0 key rank score
+/// b-<arm>`, a record's key as `r:<device>:<seq>`) and `<out>/b-docs.jsonl`, each printed key's
+/// session, time, kind and text, gated as embedding gates it and cut where the judge cuts. A
+/// home with a claim or an exclusion is refused; a question that cannot be embedded, or an arm
+/// that used no vector, stops the run before any file is written.
+pub fn trec_run(
+    home: &Path,
+    queries: &str,
+    depth: usize,
+    arms: &[RawArm],
+    out: &Path,
+) -> Result<()> {
+    anyhow::ensure!(!arms.is_empty(), "no arm to run");
+    let raw = crate::raw::open(home)?;
+    let k = crate::knowledge::open(home)?;
+    claims::schema(&k)?;
+    let claims: bool = k.query_row("SELECT EXISTS (SELECT 1 FROM active)", [], |r| r.get(0))?;
+    anyhow::ensure!(
+        !claims,
+        "an evaluation home holds no claim (D10), and this one does"
+    );
+    anyhow::ensure!(
+        raw.exclusions()?.is_empty(),
+        "an evaluation home holds no exclusion (D10), and this one does"
+    );
+    let active: Option<String> = k
+        .query_row(
+            "SELECT embedder FROM vec_generation WHERE state = 'active'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let mut runs = vec![String::new(); arms.len()];
+    let (mut printed, mut seen) = (Vec::new(), HashSet::new());
+    for line in queries.lines().filter(|l| !l.trim().is_empty()) {
+        let (qid, q) = question(line, depth)?;
+        let near = match embedded(home, &raw, &q, active.clone(), EVAL_TIMEOUT)? {
+            Ok(near) => near,
+            Err(why) => anyhow::bail!("question {qid} has no vector ({why:?}): the run stops"),
+        };
+        for (arm, run) in arms.iter().zip(&mut runs) {
+            let asked = Query {
+                raw: *arm,
+                ..q.clone()
+            };
+            let answer = query_with(home, &asked, Some(&near.vector))?;
+            anyhow::ensure!(
+                answer.vector == Vector::Used,
+                "question {qid}, arm {}: no vector used ({:?}): the run stops",
+                arm.name(),
+                answer.vector
+            );
+            for (i, h) in answer.hits.iter().enumerate() {
+                let key = match h.class {
+                    Class::Raw => format!("r:{}", h.key),
+                    _ => h.key.clone(),
+                };
+                run.push_str(&format!(
+                    "{qid} Q0 {key} {} {} b-{}\n",
+                    i + 1,
+                    depth - i,
+                    arm.name()
+                ));
+                if seen.insert(key.clone()) {
+                    printed.push(key);
+                }
+            }
+        }
+    }
+    let docs = sidecar(&k, &printed)?;
+    std::fs::create_dir_all(out)?;
+    for (arm, run) in arms.iter().zip(&runs) {
+        std::fs::write(out.join(format!("b-{}.trec", arm.name())), run)?;
+    }
+    std::fs::write(out.join("b-docs.jsonl"), docs)?;
+    Ok(())
+}
+
+/// One line of an evaluation's questions as the query every arm asks.
+fn question(line: &str, depth: usize) -> Result<(String, Query)> {
+    let v: serde_json::Value = serde_json::from_str(line)?;
+    let (Some(qid), Some(text)) = (v["qid"].as_str(), v["text"].as_str()) else {
+        anyhow::bail!("each line needs string qid and text: {line}");
+    };
+    // A TREC run is whitespace-separated columns.
+    anyhow::ensure!(
+        !qid.is_empty() && !qid.contains(char::is_whitespace),
+        "qid must be one token without whitespace: {qid:?}"
+    );
+    // A malformed session must not quietly turn the same-session exclusion off.
+    let skip_session = match &v["session"] {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(s.clone()).filter(|s| !s.is_empty()),
+        _ => anyhow::bail!("session must be a string: {line}"),
+    };
+    let q = Query {
+        text: text.to_owned(),
+        all: true,
+        limit: depth,
+        skip_session,
+        ..Default::default()
+    };
+    Ok((qid.to_owned(), q))
+}
+
+/// The run's sidecar (Task 6): one JSON line per printed key, its session, time, kind and text,
+/// gated as embedding gates it (`outbound_lines`) and cut where the judge cuts.
+fn sidecar(k: &Connection, keys: &[String]) -> Result<String> {
+    let mut out = String::new();
+    for key in keys {
+        let row: Option<(Option<String>, i64, String, String)> = match key.strip_prefix("r:") {
+            Some(record) => {
+                let Some((device, seq)) = record.rsplit_once(':') else {
+                    anyhow::bail!("a record key is r:<device>:<seq>, not {key}");
+                };
+                k.query_row(
+                    "SELECT d.session, d.ts, d.kind, f.text
+                     FROM raw_docs d JOIN raw_fts f ON f.rowid = d.rowid
+                     WHERE d.device = ?1 AND d.seq = ?2",
+                    params![device, seq.parse::<i64>()?],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?
+            }
+            None => k
+                .query_row(
+                    "SELECT session, ts, kind, title, body FROM imported WHERE uid = ?1
+                     ORDER BY rowid DESC LIMIT 1",
+                    [key],
+                    |r| {
+                        let kind: String = r.get(2)?;
+                        let text = crate::embed_phase::composed(
+                            &kind,
+                            &r.get::<_, String>(3)?,
+                            &r.get::<_, String>(4)?,
+                        );
+                        Ok((r.get(0)?, r.get(1)?, kind, text))
+                    },
+                )
+                .optional()?,
+        };
+        let Some((session, ts, kind, text)) = row else {
+            anyhow::bail!("printed key {key} is not in the store");
+        };
+        let text: String = redact::outbound_lines(&text)
+            .chars()
+            .take(JUDGE_CHARS)
+            .collect();
+        let line = serde_json::json!({"key": key, "session": session, "ts": ts, "kind": kind, "text": text});
+        out.push_str(&line.to_string());
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 /// A query's vector, for the index of `embedder`.
 struct Near {
     embedder: String,
@@ -402,14 +619,16 @@ struct Near {
 
 impl Near {
     /// The keys of the `kind` documents nearest the query, the best first: `CANDIDATES` from the
-    /// bit index, kept to `repos` (any of them; none for every one) and the time span inside the
-    /// KNN (MUST-M12), each scored again by its fp32 vector, the best `depth`.
+    /// bit index, kept to `repos` (any of them; none for every one), the time span (MUST-M12) and
+    /// all but the `skip` session inside the KNN, each scored again by its fp32 vector, the best
+    /// `depth`.
     fn knn(
         &self,
         k: &Connection,
         kind: &str,
         repos: &[String],
         span: (Option<i64>, Option<i64>),
+        skip: Option<&str>,
         depth: usize,
     ) -> Result<Vec<String>> {
         let mut clauses = vec![
@@ -429,6 +648,11 @@ impl Near {
             args.extend(repos.iter().cloned().map(Value::Text));
         }
         super::within(&mut clauses, &mut args, "ts", span);
+        // A document with no session is indexed with '', which stays.
+        if let Some(s) = skip {
+            clauses.push("session != ?".into());
+            args.push(Value::Text(s.to_owned()));
+        }
         let sql = format!(
             "SELECT rowid FROM vec_index WHERE {}",
             clauses.join(" AND ")
@@ -461,6 +685,29 @@ impl Near {
         scored.truncate(depth);
         Ok(scored.into_iter().map(|(key, _)| key).collect())
     }
+}
+
+/// The Raw arms' merge (Task 6, spec 8.2 Raw): imported rank i (from 1) scores 1/(60 + i) and
+/// record rank j 1/(60 + j + `offset`), ties to the imported document, so record j comes right
+/// after imported j + `offset`.
+fn by_rank(imports: Vec<Hit>, records: Vec<Hit>, offset: u32) -> Vec<Hit> {
+    let (mut imports, mut records) = (imports.into_iter().peekable(), records.into_iter());
+    let mut out = Vec::new();
+    let (mut i, mut j) = (1usize, 1usize);
+    while imports.peek().is_some() {
+        if i <= j + offset as usize {
+            out.extend(imports.next());
+            i += 1;
+        } else if let Some(r) = records.next() {
+            out.push(r);
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    out.extend(imports);
+    out.extend(records);
+    out
 }
 
 /// D8: a leg's full-text and vector lists as one, by reciprocal rank (1 / (61 + rank), rank from
@@ -566,7 +813,7 @@ fn claims_leg(
     if let Some(near) = near {
         let repos: Vec<String> = q.searched().map(str::to_owned).into_iter().collect();
         let (mut near_shown, mut near_ended) = (Vec::new(), Vec::new());
-        for uid in near.knn(k, "c", &repos, (q.since, q.until), depth)? {
+        for uid in near.knn(k, "c", &repos, (q.since, q.until), None, depth)? {
             if !hidden(&uid)? {
                 place_claim(
                     k,
@@ -726,7 +973,14 @@ fn imported_leg(
                 .unwrap_or_default();
             uids = rrf(
                 &uids,
-                &near.knn(k, kind, &repos, (q.since, q.until), depth)?,
+                &near.knn(
+                    k,
+                    kind,
+                    &repos,
+                    (q.since, q.until),
+                    q.skip_session.as_deref(),
+                    depth,
+                )?,
             );
             uids.truncate(depth);
         }
@@ -759,6 +1013,10 @@ fn imported_fts(k: &Connection, q: &Query, depth: usize, prompts: bool) -> Resul
         args.extend(values);
     }
     super::within(&mut clauses, &mut args, "i.ts", (q.since, q.until));
+    if let Some(s) = &q.skip_session {
+        clauses.push("COALESCE(i.session, '') <> ?".into());
+        args.push(Value::Text(s.clone()));
+    }
     // Once per uid before the limit: two devices' imports of one document are one (Codex on
     // #306), its newest row, as the embedding phase reads it.
     clauses.push("i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)".into());
@@ -1372,6 +1630,31 @@ pub(crate) mod fixture {
             let uid = doc.uid.clone();
             self.raw.append_imports(vec![doc]).unwrap();
             uid
+        }
+
+        /// claude-mem documents `(id, session, kind, ts, body)` of one project, appended at once:
+        /// their uids.
+        pub fn imported_all(
+            &mut self,
+            docs: Vec<(String, &str, &str, i64, String)>,
+        ) -> Vec<String> {
+            let docs: Vec<ImportDoc> = docs
+                .into_iter()
+                .map(|(id, session, kind, ts, body)| ImportDoc {
+                    uid: format!("claude-mem:test:{id}"),
+                    source: "claude-mem:test".into(),
+                    source_id: id,
+                    kind: kind.into(),
+                    repo: crate::import::repo("p"),
+                    session: session.into(),
+                    ts,
+                    title: String::new(),
+                    body,
+                })
+                .collect();
+            let uids = docs.iter().map(|d| d.uid.clone()).collect();
+            self.raw.append_imports(docs).unwrap();
+            uids
         }
 
         pub fn exclude(&mut self, repo: &str) {
@@ -2426,5 +2709,404 @@ mod tests {
         s.run();
         assert!(known(s.home.path(), R).unwrap());
         assert!(!known(s.home.path(), "github.com/o/other").unwrap());
+    }
+
+    /// The stub embedder configured for `s` and every document of it embedded.
+    fn embedded_by(s: &Store, stub: &crate::embed::stub::Stub) {
+        crate::embed_phase::fixture::config(s, stub);
+        crate::embed_phase::fixture::embed_all(s);
+    }
+
+    /// Task 6 (row 46-3, spec 8.2 M1): the question's own session leaves each leg in SQL before
+    /// its limit, the vector side too, so a session with more matches than a leg's depth, all
+    /// ranked above the rest, still leaves the leg full of the rest's. One store per leg, so no
+    /// other leg fills the answer first.
+    #[test]
+    fn the_questions_own_session_leaves_every_leg_before_its_limit() {
+        use crate::embed::stub::{Stub, vector};
+        for leg in ["records", "decision", "prompt"] {
+            let stub = Stub::start();
+            let mut s = Store::new();
+            let mut rest = HashSet::new();
+            // The skipped session's texts are the word alone: shorter, so first by full text,
+            // and nearest by vector.
+            let text = |own: bool| {
+                if own {
+                    "zebra".to_owned()
+                } else {
+                    "zebra lion tiger".to_owned()
+                }
+            };
+            if leg == "records" {
+                for i in 0..=DEPTH as i64 {
+                    s.said("s1", R, 1_000 + i, &text(true));
+                }
+                for i in 0..DEPTH as i64 {
+                    let seq = s.said("s2", R, 5_000 + i, &text(false));
+                    rest.insert(s.key(seq));
+                }
+            } else {
+                let mut docs = Vec::new();
+                for i in 0..=DEPTH as i64 {
+                    docs.push((format!("a{i}"), "s1", leg, 1_000 + i, text(true)));
+                }
+                for i in 0..DEPTH as i64 {
+                    docs.push((format!("b{i}"), "s2", leg, 5_000 + i, text(false)));
+                }
+                let uids = s.imported_all(docs);
+                rest.extend(uids.into_iter().filter(|u| u.contains(":b")));
+            }
+            s.run();
+            embedded_by(&s, &stub);
+            let ask = Query {
+                text: "zebra".into(),
+                all: true,
+                limit: DEPTH,
+                skip_session: Some("s1".into()),
+                ..Default::default()
+            };
+            for v in [None, Some(vector(crate::embed::EMBEDDER, "zebra"))] {
+                let a = query_with(s.home.path(), &ask, v.as_deref()).unwrap();
+                let side = if v.is_some() {
+                    "with its vector side"
+                } else {
+                    "full text"
+                };
+                assert_eq!(a.hits.len(), DEPTH, "{leg}, {side}");
+                let own: Vec<&str> = keys(&a)
+                    .into_iter()
+                    .filter(|k| !rest.contains(*k))
+                    .collect();
+                assert!(own.is_empty(), "{leg}, {side}: {own:?}");
+            }
+        }
+    }
+
+    /// Task 6: a document with no session is no question's own, so leaving a session out keeps
+    /// it, on both sides of the leg.
+    #[test]
+    fn a_search_without_a_skip_still_finds_a_record_with_no_session() {
+        use crate::embed::stub::{Stub, vector};
+        let stub = Stub::start();
+        let mut s = Store::new();
+        let lone = s.said("", R, 1_000, "zebra");
+        s.said("s1", R, 2_000, "zebra");
+        s.run();
+        embedded_by(&s, &stub);
+        let lone = s.key(lone);
+        for skip in [None, Some("s1".to_owned())] {
+            let ask = Query {
+                all: true,
+                raw: RawArm::Only,
+                skip_session: skip.clone(),
+                ..q("zebra")
+            };
+            for v in [None, Some(vector(crate::embed::EMBEDDER, "zebra"))] {
+                let a = query_with(s.home.path(), &ask, v.as_deref()).unwrap();
+                assert!(keys(&a).contains(&lone.as_str()), "{skip:?} {:?}", keys(&a));
+            }
+        }
+    }
+
+    /// Spec 8.2's Raw row: `Rrf(p)` ranks record j right after imported j + p, ties to the
+    /// imported document; `Rrf(0)` alternates.
+    #[test]
+    fn rrf_5_puts_raw_rank_one_after_imported_rank_six() {
+        let mut s = Store::new();
+        // Ten of each, one word and one length, so each list is in time order.
+        let docs = (0..10)
+            .map(|i| {
+                (
+                    format!("i{i}"),
+                    "cm",
+                    "decision",
+                    10_000 - i,
+                    "heron".to_owned(),
+                )
+            })
+            .collect();
+        let imported = s.imported_all(docs);
+        let records: Vec<String> = (0..10)
+            .map(|i| {
+                let seq = s.said("s", R, 10_000 - i, "heron");
+                s.key(seq)
+            })
+            .collect();
+        s.run();
+        let ask = |raw| Query {
+            all: true,
+            raw,
+            limit: 10,
+            ..q("heron")
+        };
+        let got: Vec<String> = keys(&s.query(&ask(RawArm::Rrf(5))))
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let want = [
+            &imported[..6],
+            &records[..1],
+            &imported[6..7],
+            &records[1..2],
+            &imported[7..8],
+        ]
+        .concat();
+        assert_eq!(got, want);
+        let got: Vec<String> = keys(&s.query(&ask(RawArm::Rrf(0))))
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let want: Vec<String> = imported[..5]
+            .iter()
+            .zip(&records[..5])
+            .flat_map(|(i, r)| [i.clone(), r.clone()])
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    /// Raw's default run is `Off` (spec 8.2): while imported hits fill the top 50, `Below` gives
+    /// the same 50.
+    #[test]
+    fn below_and_off_give_the_same_top_fifty_while_imported_hits_fill_it() {
+        let mut s = Store::new();
+        let docs = (0..60)
+            .map(|i| {
+                (
+                    format!("i{i}"),
+                    "cm",
+                    "decision",
+                    1_000 + i,
+                    "heron notes".to_owned(),
+                )
+            })
+            .collect();
+        s.imported_all(docs);
+        for i in 0..10 {
+            s.said("s", R, 1_000 + i, "heron");
+        }
+        s.run();
+        let ask = |raw| Query {
+            all: true,
+            raw,
+            limit: 50,
+            ..q("heron")
+        };
+        let below = s.query(&ask(RawArm::Below));
+        assert_eq!(below.hits.len(), 50);
+        assert_eq!(keys(&below), keys(&s.query(&ask(RawArm::Off))));
+    }
+
+    /// An evaluation's questions as runs need them: a one-token string qid, a string session,
+    /// every repository, the depth as the limit; an empty session leaves nothing out.
+    #[test]
+    fn question_lines_are_checked_as_a_run_needs_them() {
+        assert!(question(r#"{"qid":1,"text":"x"}"#, 5).is_err());
+        assert!(question(r#"{"qid":"q 1","text":"x"}"#, 5).is_err());
+        assert!(question(r#"{"qid":"q1","text":"x","session":7}"#, 5).is_err());
+        let (qid, q) = question(r#"{"qid":"q1","text":"x","session":"s1"}"#, 5).unwrap();
+        assert_eq!(qid, "q1");
+        assert_eq!(
+            (q.skip_session.as_deref(), q.limit, q.all),
+            (Some("s1"), 5, true)
+        );
+        let (_, q) = question(r#"{"qid":"q1","text":"x","session":""}"#, 5).unwrap();
+        assert_eq!(q.skip_session, None);
+    }
+
+    /// An evaluation home (D10): two records (one holding a GitHub-token-shaped fake) and two
+    /// claude-mem documents, embedded by `stub`.
+    fn eval_home(stub: &crate::embed::stub::Stub) -> (Store, String) {
+        let mut s = Store::new();
+        let token = ["gh", "p_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"].concat();
+        s.said("s1", R, 1_000, &format!("deploy with {token}"));
+        s.said("s2", R, 2_000, "deploy the worker");
+        s.imported_all(vec![
+            ("k1".into(), "s3", "decision", 3_000, "deploy notes".into()),
+            (
+                "p1".into(),
+                "s3",
+                "prompt",
+                4_000,
+                "how do we deploy".into(),
+            ),
+        ]);
+        s.run();
+        embedded_by(&s, stub);
+        (s, token)
+    }
+
+    fn run_files(out: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(out)
+            .map(|d| {
+                d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// Task 6 (rows 30-1, 30-14): every key a run prints has its sidecar row, a record's as
+    /// `r:<device>:<seq>`, and its text is gated as embedding gates it.
+    #[test]
+    fn every_printed_key_has_a_gated_sidecar_row() {
+        let stub = crate::embed::stub::Stub::start();
+        let (s, token) = eval_home(&stub);
+        let out = tempfile::tempdir().unwrap();
+        let arms = [RawArm::Off, RawArm::Only, RawArm::Rrf(5)];
+        let questions = r#"{"qid":"q1","text":"deploy","session":"s9"}"#;
+        trec_run(s.home.path(), questions, 10, &arms, out.path()).unwrap();
+        assert_eq!(
+            run_files(out.path()),
+            ["b-docs.jsonl", "b-off.trec", "b-only.trec", "b-rrf5.trec"]
+        );
+        let docs: HashMap<String, serde_json::Value> =
+            std::fs::read_to_string(out.path().join("b-docs.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|l| {
+                    let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                    (v["key"].as_str().unwrap().to_owned(), v)
+                })
+                .collect();
+        for arm in ["off", "only", "rrf5"] {
+            let run = std::fs::read_to_string(out.path().join(format!("b-{arm}.trec"))).unwrap();
+            assert!(!run.is_empty(), "{arm}");
+            for (i, line) in run.lines().enumerate() {
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                let want_rank = (i + 1).to_string();
+                let want_name = format!("b-{arm}");
+                assert_eq!(
+                    (cols[0], cols[1], cols[3], cols[5]),
+                    ("q1", "Q0", want_rank.as_str(), want_name.as_str())
+                );
+                assert!(docs.contains_key(cols[2]), "{arm}: {line}");
+            }
+        }
+        let record = docs
+            .values()
+            .find(|d| d["text"].as_str().unwrap().contains("deploy with"))
+            .unwrap();
+        assert!(
+            record["key"].as_str().unwrap().starts_with("r:"),
+            "{record}"
+        );
+        assert!(
+            !record["text"].as_str().unwrap().contains(&token),
+            "{record}"
+        );
+        assert_eq!(record["session"], "s1");
+        assert!(
+            docs.values()
+                .any(|d| d["kind"] == "prompt" && d["session"] == "s3")
+        );
+    }
+
+    /// Task 6 (rows 30-1, 30-14): the sidecar gates each text with the rules of the run, a rule
+    /// added after the record was indexed included, line by line as embedding gates it. The run
+    /// is in a child process: egress reads the rules of the home `redact::set_home` names.
+    #[test]
+    fn the_sidecar_gates_with_the_rules_of_the_run() {
+        const HOME: &str = "OBOETE_TEST_SIDECAR_HOME";
+        const SECRET: &str = "INTERNAL-BETA-7";
+        let questions = r#"{"qid":"q1","text":"deploy"}"#;
+        if let Ok(home) = std::env::var(HOME) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let out = home.join("run");
+            trec_run(&home, questions, 10, &[RawArm::Only], &out).unwrap();
+            let docs = std::fs::read_to_string(out.join("b-docs.jsonl")).unwrap();
+            assert!(docs.contains("deploy"), "{docs}");
+            assert!(!docs.contains(SECRET), "{docs}");
+            return;
+        }
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        // Two fields, so the rule anchored to a field's end matches only line by line.
+        let body = serde_json::json!({"prompt": format!("deploy {SECRET}"), "result": "tail"});
+        let event = crate::raw::Event {
+            session: "s".into(),
+            repo: Some(R.into()),
+            ts: 1_000,
+            ..crate::raw::test_event(&body.to_string())
+        };
+        s.raw.append(&event).unwrap();
+        s.run();
+        embedded_by(&s, &stub);
+        let config = s.home.path().join("config.toml");
+        let plain = std::fs::read_to_string(&config).unwrap();
+        let ruled = format!(
+            "{plain}[redaction]\nextra_rules = [{{ id = \"beta\", regex = '{SECRET}$' }}]\n"
+        );
+        std::fs::write(&config, ruled).unwrap();
+        let name = "search::b::tests::the_sidecar_gates_with_the_rules_of_the_run";
+        let out = std::process::Command::new(std::env::args_os().next().unwrap())
+            .args(["--exact", name])
+            .env(HOME, s.home.path())
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains("1 passed"), "{said}");
+    }
+
+    /// Task 6: a question is embedded once, whatever the number of arms, each request counted.
+    #[test]
+    fn each_question_is_embedded_once_for_every_arm() {
+        let stub = crate::embed::stub::Stub::start();
+        let (s, _) = eval_home(&stub);
+        let out = tempfile::tempdir().unwrap();
+        let before = stub.requests();
+        let questions =
+            "{\"qid\":\"q1\",\"text\":\"deploy\"}\n{\"qid\":\"q2\",\"text\":\"worker\"}\n";
+        let arms = [RawArm::Off, RawArm::Only, RawArm::Rrf(5)];
+        trec_run(s.home.path(), questions, 10, &arms, out.path()).unwrap();
+        assert_eq!(stub.requests(), before + 2);
+        assert_eq!(
+            &stub.texts()[before..],
+            [vec!["deploy".to_owned()], vec!["worker".to_owned()]]
+        );
+    }
+
+    /// Task 6: a question that cannot be embedded stops the run, and no file is written, the
+    /// earlier questions' included: a hybrid run never quietly becomes a full-text one.
+    #[test]
+    fn a_question_that_cannot_be_embedded_stops_the_run() {
+        let stub = crate::embed::stub::Stub::start();
+        let (s, _) = eval_home(&stub);
+        let out = tempfile::tempdir().unwrap();
+        stub.refuse("broken question");
+        let questions =
+            "{\"qid\":\"q1\",\"text\":\"deploy\"}\n{\"qid\":\"q2\",\"text\":\"broken question\"}\n";
+        let err = trec_run(s.home.path(), questions, 10, &[RawArm::Off], out.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("q2"), "{err:#}");
+        assert!(run_files(out.path()).is_empty());
+    }
+
+    /// D10: an evaluation home holds imported documents and records only; one with a claim or an
+    /// exclusion is refused before anything is sent.
+    #[test]
+    fn an_eval_home_with_a_claim_or_an_exclusion_is_refused() {
+        let stub = crate::embed::stub::Stub::start();
+        let questions = r#"{"qid":"q1","text":"deploy"}"#;
+        let (mut s, _) = eval_home(&stub);
+        let out = tempfile::tempdir().unwrap();
+        trec_run(s.home.path(), questions, 10, &[RawArm::Off], out.path()).unwrap();
+        s.exclude("github.com/o/elsewhere");
+        s.run();
+        let (mut c, _) = eval_home(&stub);
+        c.decided(R, 9_000, "Deploy from the main branch only.", &[]);
+        c.run();
+        let sent = stub.requests();
+        for home in [s.home.path(), c.home.path()] {
+            let out = tempfile::tempdir().unwrap();
+            assert!(trec_run(home, questions, 10, &[RawArm::Off], out.path()).is_err());
+            assert!(run_files(out.path()).is_empty());
+        }
+        assert_eq!(stub.requests(), sent);
     }
 }

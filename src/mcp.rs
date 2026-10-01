@@ -160,6 +160,7 @@ impl Oboete {
             history: a.history == Some(true),
             raw: search::RawArm::Below,
             limit: a.limit.unwrap_or(10).min(MAX_LIMIT),
+            skip_session: None,
         };
         let answer = search::query(&self.home, &q).map_err(internal)?;
         let out: String = answer.hits.iter().map(|h| search::line(h, q.all)).collect();

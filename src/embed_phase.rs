@@ -1007,7 +1007,7 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
 
 /// An imported document's text as v1 composed it (docs/pr-d.md): an observation's kind and title
 /// over its body, a summary's or a prompt's body.
-fn composed(kind: &str, title: &str, body: &str) -> String {
+pub(crate) fn composed(kind: &str, title: &str, body: &str) -> String {
     match kind {
         "prompt" | "summary" => body.to_owned(),
         _ => format!("{kind}: {title}\n{body}"),
