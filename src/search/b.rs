@@ -673,10 +673,14 @@ fn on_this_device(raw: &Raw, device: &str, seq: i64) -> Result<bool> {
 
 /// The repositories whose imported documents are `repo`'s: claude-mem names a project, not a
 /// repository, and its documents are `claude-mem:<project>` (`import::repo`), so a repository's
-/// are those of the project its key ends in. ponytail: by name, as PR-H is to map them.
+/// are those of the project its key ends in, and a claude-mem name's those of its own project (a
+/// worktree session's too, as the index files them). ponytail: by name, as PR-H is to map them.
 fn imported_repos(repo: &str) -> [String; 2] {
-    let name = repo.rsplit('/').next().unwrap_or(repo);
-    [repo.to_owned(), crate::import::repo(name)]
+    let project = match repo.strip_prefix("claude-mem:") {
+        Some(name) => name.split('/').next().unwrap_or(name),
+        None => repo.rsplit('/').next().unwrap_or(repo),
+    };
+    [repo.to_owned(), crate::import::repo(project)]
 }
 
 /// The imported documents `q` finds, once per uid (two devices' imports of one are one): the
@@ -1685,6 +1689,10 @@ mod tests {
                 Some("github.com/o/other"),
                 false,
             ),
+            // A claude-mem project searched by its own name: its worktree sessions too.
+            ("claude-mem:foo/wt", open, Some("claude-mem:foo"), true),
+            ("claude-mem:foo", open, Some("claude-mem:foo/wt"), true),
+            ("claude-mem:bar/wt", open, Some("claude-mem:foo"), false),
         ] {
             assert_eq!(
                 excluded(&[list.to_owned()], &ask(caller, repo, false)),
