@@ -82,12 +82,17 @@ enum Cmd {
     /// with no AI call
     Rebuild,
     /// Curate again what was curated before: the spans queued since (a quote a new rule masked
-    /// or a forget removed), the windows every provider skipped, or a span you name. It lists
-    /// the windows and an estimate; nothing is sent without --yes
+    /// or a forget removed), the windows every provider skipped, the imported records of a
+    /// source, or a span you name. It lists the windows and an estimate; nothing is sent without
+    /// --yes
     Recurate {
         /// The windows every provider skipped
         #[arg(long, conflicts_with = "span")]
         skipped: bool,
+        /// The imported records of this source, which curation leaves aside: oboete-v1 or
+        /// transcript
+        #[arg(long, conflicts_with_all = ["skipped", "span"])]
+        source: Option<String>,
         /// A span of this device's records, as <device>:<from>-<to>
         span: Option<String>,
         /// Send them
@@ -109,6 +114,16 @@ enum Cmd {
     /// List the current claims of the repository in the current directory, each with the uid
     /// `oboete correct` takes
     Claims,
+    /// Keep a repository's sessions from every curator and embedder: nothing of a session that
+    /// touched it is sent out from now on (what was sent before stays sent). The repository in
+    /// the current directory unless one is named
+    Exclude {
+        /// The repository as oboete labels it (github.com/<owner>/<name>, or its path)
+        repo: Option<String>,
+        /// Take it back out of the list: its new records can be sent again
+        #[arg(long)]
+        undo: bool,
+    },
     /// Rebuild raw.db from the backup segments (MUST-M15); the current file is kept aside.
     /// The worker does this by itself when raw.db is damaged.
     Restore,
@@ -120,8 +135,9 @@ enum Cmd {
     },
     /// Serve the memory as an MCP server on stdin/stdout (search / get / timeline tools)
     Mcp,
-    /// Search observations, summaries and prompts (this repository unless --all): by words, and
-    /// by meaning too when `[embedding] provider = "workers-ai"`
+    /// Search what is remembered (this repository unless --all or --repo): the decisions and
+    /// other claims first, then claude-mem's imported history, then the raw records, then the
+    /// claims later ones ended
     Search {
         /// Words or a sentence. Ranked by the 3-character pieces they share; a query too short
         /// for that matches its terms as literal substrings, all required. Put `--` before a
@@ -129,16 +145,35 @@ enum Cmd {
         query: Vec<String>,
         #[arg(long)]
         all: bool,
+        /// A repository's key instead of this one's
+        #[arg(long)]
+        repo: Option<String>,
+        /// Only what is dated at or after this (2026-09-30, or 2026-09-30T14:00; UTC unless it
+        /// says `Z` or an offset)
+        #[arg(long)]
+        since: Option<String>,
+        /// Only what is dated before this; a date runs to the end of its day
+        #[arg(long)]
+        until: Option<String>,
+        /// Rank the claims later ones ended where their words rank them
+        #[arg(long)]
+        history: bool,
+        /// The raw records: below the rest (below), not at all (off), or alone (only)
+        #[arg(long, default_value = "below")]
+        raw: String,
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
-    /// Print one document in full by its id from `search` (o12 = observation, s5 = summary,
-    /// p7 = prompt)
+    /// Print one in full by its id from `search`: a claim's uid (or its first characters), an
+    /// imported document's uid, or a record's `device:seq`
     Get { id: String },
-    /// Sessions newest first with their summaries (this repository unless --all)
+    /// Claims, imported history and session starts, newest first (this repository unless --all)
     Timeline {
         #[arg(long)]
         all: bool,
+        /// An id `get` takes: what is around its time, instead of the newest
+        #[arg(long)]
+        anchor: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
@@ -250,44 +285,6 @@ fn repo_filter(all: bool) -> Result<Option<String>> {
 
 /// Listing output. Piped into `head`, stdout closes early; that is not an error. Anything
 /// else (a full disk behind a redirect) is.
-/// A raw hit's id as `oboete search` prints it, `<device>:<seq>` (milestone 2 Task 6): the event
-/// with its time, kind and repo. `None` for any other id, or one raw does not hold, which then
-/// goes to v1's store (whose synced uids also hold a colon).
-fn raw_get(home: &std::path::Path, id: &str) -> Result<Option<String>> {
-    let Some((device, seq)) = id.split_once(':') else {
-        return Ok(None);
-    };
-    let Ok(seq) = seq.parse::<i64>() else {
-        return Ok(None);
-    };
-    if seq < 1 || !raw::exists(home) {
-        return Ok(None);
-    }
-    let raw = raw::open(home)?;
-    let Some(r) = raw
-        .after(device, seq - 1, 1)?
-        .pop()
-        .filter(|r| r.seq == seq)
-    else {
-        return Ok(None);
-    };
-    let raw::Item::Event(e) = r.item else {
-        return Ok(None);
-    };
-    let when: String = rusqlite::Connection::open_in_memory()?.query_row(
-        "SELECT strftime('%Y-%m-%d %H:%M', ?1 / 1000, 'unixepoch', 'localtime')",
-        [e.ts],
-        |r| r.get(0),
-    )?;
-    // Gated field by field as well as whole (`emit`): a rule may be anchored to a field's end.
-    let repo = redact::outbound(e.repo.as_deref().unwrap_or(""));
-    Ok(Some(format!(
-        "{id} {when} {} {repo}\n\n{}\n",
-        e.kind,
-        redact::outbound_fields(&e.body)
-    )))
-}
-
 /// Stored text leaves through the egress gate: the user's rules as they are now (spec 6.4), so a
 /// rule added after capture hides its value, labels included, before the rescan (Task 7b) has
 /// tombstoned it.
@@ -337,115 +334,53 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             Ok(())
         }
         Cmd::Mcp => mcp::run(&home),
-        Cmd::Search { query, all, limit } => {
-            let query = query.join(" ");
-            let scope = repo_filter(all)?;
-            let mut out = String::new();
-            let mut left = limit;
-            // Design B's none tier (milestone 2 Task 6): the raw index, by (device, seq). Until
-            // every agent is ported (Task 2b) a home can hold both stores, and v1 commands such
-            // as `timeline` create an empty oboete.db, so each store is searched when it exists.
-            if raw::exists(&home) {
-                let hits = search::raw(&home, &query, scope.as_deref(), limit)?;
-                left -= hits.len().min(left);
-                for h in hits {
-                    // Each stored field through the gate on its own, before the lines are joined.
-                    let repo = match (all, &h.repo) {
-                        (true, Some(r)) => {
-                            let r = redact::outbound(r);
-                            format!("[{}] ", r.rsplit('/').next().unwrap_or(&r))
-                        }
-                        _ => String::new(),
-                    };
-                    let device: String = h.device.chars().take(8).collect();
-                    out.push_str(&format!(
-                        "{device}:{:<5} {}  {:<10} {repo}{}\n",
-                        h.seq, h.when, h.kind, h.snippet
-                    ));
-                }
-            }
-            if left == 0 || !home.join("oboete.db").exists() {
-                return emit(&out);
-            }
-            let conn = db::open(&home)?;
-            let terms = search::terms(&query);
-            let embedding = config::search_embedding(&home);
-            for h in search::find(&conn, &embedding, &query, scope.as_deref(), left)? {
-                let text = search::snippet(&redact::outbound(&h.body), &terms, 110);
-                let repo = if all {
-                    let name = std::path::Path::new(&h.repo)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| h.repo.clone());
-                    format!("[{}] ", redact::outbound(&name))
-                } else {
-                    String::new()
-                };
-                out.push_str(&if h.title.is_empty() {
-                    format!("{:<5} {}  {:<10} {repo}{text}\n", h.doc, h.when, h.kind)
-                } else {
-                    format!(
-                        "{:<5} {}  {:<10} {repo}{}\n      {text}\n",
-                        h.doc,
-                        h.when,
-                        h.kind,
-                        redact::outbound(&h.title)
-                    )
-                });
-            }
-            emit(&out)
-        }
-        Cmd::Get { id } => {
-            if let Some(text) = raw_get(&home, &id)? {
-                return emit(&text);
-            }
-            let missing = || anyhow::anyhow!("no document {id} (ids come from `oboete search`)");
-            if !home.join("oboete.db").exists() {
-                return Err(missing());
-            }
-            let conn = db::open(&home)?;
-            let h = search::get(&conn, &id)?.ok_or_else(missing)?;
-            // Each stored field through the gate on its own, then the whole (`emit`).
-            let title = if h.title.is_empty() {
-                String::new()
-            } else {
-                format!("{}\n", redact::outbound(&h.title))
+        Cmd::Search {
+            query,
+            all,
+            repo,
+            since,
+            until,
+            history,
+            raw,
+            limit,
+        } => {
+            let q = search::b::Query {
+                text: query.join(" "),
+                caller: repo_filter(false)?,
+                repo,
+                all,
+                since: since.map(|s| search::b::time(&s, false)).transpose()?,
+                until: until.map(|s| search::b::time(&s, true)).transpose()?,
+                history,
+                raw: match raw.as_str() {
+                    "below" => search::b::RawArm::Below,
+                    "off" => search::b::RawArm::Off,
+                    "only" => search::b::RawArm::Only,
+                    other => anyhow::bail!("--raw {other}: use below, off or only"),
+                },
+                limit,
             };
-            emit(&format!(
-                "{} {} {} {}\n{title}\n{}\n",
-                h.doc,
-                h.when,
-                h.kind,
-                redact::outbound(&h.repo),
-                redact::outbound(&h.body)
-            ))
+            let answer = search::b::query(&home, &q)?;
+            let shown = q.searched().is_none();
+            emit(
+                &answer
+                    .hits
+                    .iter()
+                    .map(|h| search::b::line(h, shown))
+                    .collect::<String>(),
+            )
         }
-        Cmd::Timeline { all, limit } => {
-            let conn = db::open(&home)?;
+        Cmd::Get { id } => match search::b::get(&home, &id)? {
+            Some(text) => emit(&text),
+            None => Err(anyhow::anyhow!(
+                "no document {id} (ids come from `oboete search`)"
+            )),
+        },
+        Cmd::Timeline { all, anchor, limit } => {
             let mut out = String::new();
-            for r in search::timeline(&conn, repo_filter(all)?.as_deref(), limit)? {
-                // The tail of the id: UUIDv7 heads (Codex, Grok) are timestamps and collide.
-                // Gated before it is shortened, as each field is.
-                let id: String = redact::outbound(&r.id)
-                    .chars()
-                    .rev()
-                    .take(8)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect();
-                // Gated before it is flattened and clipped, and the label on its own.
-                let summary: String = redact::outbound(&r.summary)
-                    .replace('\n', " ")
-                    .chars()
-                    .take(120)
-                    .collect();
-                out.push_str(&format!(
-                    "{}  {:<6} {id}  {}  {summary}\n",
-                    r.when,
-                    r.agent,
-                    redact::outbound(&r.repo)
-                ));
+            let repo = repo_filter(all)?;
+            for i in search::b::timeline(&home, repo.as_deref(), anchor.as_deref(), limit)? {
+                out.push_str(&search::b::item_line(&i, all));
             }
             emit(&out)
         }
@@ -561,9 +496,15 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             }
             emit(&out)
         }
-        Cmd::Recurate { skipped, span, yes } => {
-            let again = match span {
-                Some(span) => {
+        Cmd::Recurate {
+            skipped,
+            source,
+            span,
+            yes,
+        } => {
+            let again = match (span, source) {
+                (_, Some(source)) => curate::Again::Source(source),
+                (Some(span), None) => {
                     let parsed = span.split_once(':').and_then(|(device, range)| {
                         let (from, to) = range.split_once('-')?;
                         let span = curate::Span::records(from.parse().ok()?, to.parse().ok()?);
@@ -573,10 +514,45 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                         anyhow::anyhow!("a span is <device>:<from>-<to>, such as 1a2b3c4d:120-180")
                     })?
                 }
-                None if skipped => curate::Again::Skipped,
-                None => curate::Again::Queued,
+                (None, None) if skipped => curate::Again::Skipped,
+                (None, None) => curate::Again::Queued,
             };
             print!("{}", curate::recurate(&home, again, yes)?);
+            Ok(())
+        }
+        Cmd::Exclude { repo, undo } => {
+            let repo = match repo {
+                Some(r) => r,
+                None => {
+                    // The label as capture stores it on the records, as `claims` finds it.
+                    let settings = capture::Settings::load(&home)?;
+                    let cwd = std::env::current_dir()?;
+                    let cwd = cwd.to_string_lossy();
+                    capture::checkout(&serde_json::json!({ "cwd": cwd }), &settings).1
+                }
+            };
+            let mut raw = raw::open(&home)?;
+            let was = raw.exclusions()?.contains(&repo);
+            raw.exclude(&repo, undo)?;
+            let list = raw.exclusions()?;
+            if undo {
+                if was {
+                    println!("no longer excluded: {repo}");
+                } else {
+                    println!("{repo} was not excluded");
+                }
+            } else {
+                println!("excluded: {repo}");
+                // A label that matches no record yet may be a typo: say so.
+                if raw.sessions_in(std::slice::from_ref(&repo))?.is_empty() {
+                    println!("no session recorded so far touched {repo}");
+                }
+            }
+            if list.is_empty() {
+                println!("no repository is excluded");
+            } else {
+                println!("excluded repositories: {}", list.join(", "));
+            }
             Ok(())
         }
         Cmd::Correct { uid, status, body } => {

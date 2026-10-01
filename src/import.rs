@@ -303,7 +303,8 @@ impl Sink<'_> {
     }
 }
 
-fn repo(project: &str) -> String {
+/// claude-mem's `project` as its documents' repository.
+pub(crate) fn repo(project: &str) -> String {
     format!("{SOURCE}:{project}")
 }
 

@@ -158,9 +158,16 @@ pub fn phase(
     let now = crate::db::now_ms();
     let (ck, ck_offset) = raw.curation_checkpoint(&device)?;
     let covered = |seq: i64| seq < ck || (seq == ck && ck_offset.is_none());
+    // A session that touched an excluded repository gets no digest (D13), and each call holds to
+    // the list as it is now (spec 5.5).
+    let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
     let mut out = windows;
     for s in sessions(raw)? {
         if !covered(s.last) {
+            continue;
+        }
+        let key = format!("{}\u{0}{}", s.agent, s.session);
+        if reading.excluded.contains(&key) {
             continue;
         }
         if !s.ended && s.last_ts + idle > now {
@@ -169,14 +176,16 @@ pub fn phase(
             out = sooner(out, Phase::Waiting { until, up });
             continue;
         }
-        let key = format!("{}\u{0}{}", s.agent, s.session);
         for (repo, through) in &s.repos {
             if digested(k, &device, repo, *through)? {
                 continue;
             }
             let mut claims = Vec::new();
             for c in crate::claims::anchored_through(k, repo, &device, *through, WALK)? {
-                if raw.session_key(&c.device, c.seq)?.as_deref() == Some(key.as_str()) {
+                // Not one that quotes an excluded session too (Codex on #304).
+                if raw.session_key(&c.device, c.seq)?.as_deref() == Some(key.as_str())
+                    && !crate::curate::quotes_excluded(raw, k, &reading.excluded, &c.uid)?
+                {
                     claims.push(c);
                     if claims.len() == CLAIMS {
                         break;
@@ -209,7 +218,9 @@ pub fn phase(
                 })
                 .collect();
             let span = format!("digest {through}");
-            let answer = digester(&span, &prompt, &|v| check(&shown, v, rules));
+            let answer = digester(&span, &prompt, &|v| check(&shown, v, rules), &|| {
+                reading.still(raw)
+            });
             let failed = match answer {
                 Ok(r) => {
                     let op = DigestOp {
@@ -227,6 +238,16 @@ pub fn phase(
                         db, &device, &s.agent, &s.session, repo,
                     )?;
                     return Ok(Phase::Covered);
+                }
+                // Nothing more went out: the next pass reads the list again.
+                Err(e) if e.is::<crate::curate::ListChanged>() => {
+                    return Ok(sooner(
+                        out,
+                        Phase::Waiting {
+                            until: now,
+                            up: true,
+                        },
+                    ));
                 }
                 Err(e) => match e.downcast::<ChainFailed>() {
                     Ok(ChainFailed(failed)) => failed,
@@ -543,13 +564,16 @@ mod tests {
         let k = crate::knowledge::open(home).unwrap();
         let db = crate::providers_db::open(home).unwrap();
         let sent = RefCell::new(Vec::new());
-        let mut digester =
-            |_: &str, p: &str, check: &crate::provider::AnswerCheck| -> Result<ChainResult> {
-                sent.borrow_mut().push(p.to_owned());
-                let r = answer()?;
-                assert_eq!(check(&r.output), None, "{}", r.output);
-                Ok(r)
-            };
+        let mut digester = |_: &str,
+                            p: &str,
+                            check: &crate::provider::AnswerCheck,
+                            _: &crate::provider::Gate|
+         -> Result<ChainResult> {
+            sent.borrow_mut().push(p.to_owned());
+            let r = answer()?;
+            assert_eq!(check(&r.output), None, "{}", r.output);
+            Ok(r)
+        };
         let summary = Summary::default();
         let rules = Rules::default();
         let phase = phase(
@@ -610,6 +634,93 @@ mod tests {
         // A session whose last record is not yet curated waits for it.
         let (home, _) = self::home(&["Use tabs."], -1, true);
         assert!(run(home.path(), Phase::Idle, &answer).1.is_empty());
+    }
+
+    /// Codex on #304: imported records after a live session's last one never push it out of the
+    /// sessions the phase reads.
+    #[test]
+    fn imported_records_never_crowd_a_live_session_out_of_the_digest() {
+        let (home, uids) = home(&["Use tabs."], 1_000, true);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        for i in 0..RECENT {
+            let e = Event {
+                session: "imported".into(),
+                source: "transcript".into(),
+                ..test_event(&json!({ "prompt": format!("Imported {i}.") }).to_string())
+            };
+            raw.append(&e).unwrap();
+        }
+        drop(raw);
+        let answer = || lines(json!([{"text": "Tabs.", "uids": uids}]));
+        let (phase, sent) = run(home.path(), Phase::Idle, &answer);
+        assert_eq!((phase, sent.len()), (Phase::Covered, 1));
+    }
+
+    /// D13: a session that touched an excluded repository gets no digest, and no call is made.
+    #[test]
+    fn an_excluded_session_gets_no_digest_call() {
+        let (home, uids) = home(&["Use tabs."], 1_000, true);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let op = json!({"repo": "r", "undo": false});
+        raw.append_ops(&[(OpKind::Exclusion, op)]).unwrap();
+        drop(raw);
+        let answer = || lines(json!([{"text": "Tabs.", "uids": uids}]));
+        let (phase, sent) = run(home.path(), Phase::Idle, &answer);
+        assert_eq!((phase, sent.len()), (Phase::Idle, 0));
+        assert!(digest_ops(home.path()).is_empty());
+    }
+
+    /// Codex on #304: a claim of the session that also quotes a session which touched an excluded
+    /// repository goes to no digester.
+    #[test]
+    fn a_claim_quoting_an_excluded_session_is_left_out_of_the_digest() {
+        let (home, uids) = home(&["Use tabs."], 1_000, true);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        let quote = |seq: i64, text: &str| crate::claims::Evidence {
+            device: device.clone(),
+            seq,
+            offset: 0,
+            length: text.len() as i64,
+            sentence: 0,
+            quote: text.into(),
+            claim_at: None,
+        };
+        let first = quote(1, "Use tabs.");
+        let e = Event {
+            kind: "prompt".into(),
+            session: "s2".into(),
+            repo: Some("secret".into()),
+            ts: 1_000,
+            ..test_event(&json!({"prompt": "Tabs in the feed too."}).to_string())
+        };
+        let seq = raw.append(&e).unwrap();
+        // The claim again, now also quoting s2: its active derivation.
+        let op = crate::claims::ClaimOp {
+            id: "c9".into(),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: "Use tabs.".into(),
+            evidence: vec![first, quote(seq, "Tabs in the feed too.")],
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier: 2,
+            why: String::new(),
+            tainted: false,
+        };
+        let exclusion = json!({"repo": "secret", "undo": false});
+        raw.append_ops(&[
+            (OpKind::Claim, serde_json::to_value(op).unwrap()),
+            (OpKind::Exclusion, exclusion),
+        ])
+        .unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        let answer = || lines(json!([{"text": "Tabs.", "uids": uids}]));
+        let (phase, sent) = run(home.path(), Phase::Idle, &answer);
+        assert_eq!((phase, sent.len()), (Phase::Idle, 0));
     }
 
     /// MUST-M6: a claim body is data in the prompt, and an answer's line that cites no claim it

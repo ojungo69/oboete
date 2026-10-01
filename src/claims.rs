@@ -593,20 +593,8 @@ fn owner_backed(t: &str) -> String {
 /// the same words, #261) or from a claim the owner does not back still ends a decision. With
 /// `links_end`, every link ends it: the tips.
 pub(crate) fn delivered(which: &str, links_end: bool) -> String {
-    let linkers = "FROM edges e
-           JOIN claims x ON x.op_device = e.op_device AND x.op_seq = e.op_seq
-           JOIN active l ON l.uid = x.uid
-           WHERE e.to_uid = a.uid AND x.uid <> a.uid";
-    let ends = if links_end {
-        "1".to_owned()
-    } else {
-        format!(
-            "NOT (a.kind IN ('decision', 'preference') AND a.status = 'decided'
-                  AND e.type = 'supersedes' AND l.status IN ('decided', 'done')
-                  AND {} AND l.valid_from > a.valid_from)",
-            owner_backed("l")
-        )
-    };
+    let linkers = LINKERS;
+    let ends = ends(links_end);
     format!(
         "SELECT a.uid, a.kind, a.status, a.speaker, a.scope, a.body, a.valid_from,
                 a.anchor_device, a.anchor_seq,
@@ -618,6 +606,53 @@ pub(crate) fn delivered(which: &str, links_end: bool) -> String {
            AND NOT EXISTS (SELECT 1 {linkers} AND {ends})"
     )
 }
+
+/// Whether the link from `l` (edge `e`) ends claim `a` (`delivered`): every link does with
+/// `links_end`.
+fn ends(links_end: bool) -> String {
+    if links_end {
+        return "1".to_owned();
+    }
+    format!(
+        "NOT (a.kind IN ('decision', 'preference') AND a.status = 'decided'
+              AND e.type = 'supersedes' AND l.status IN ('decided', 'done')
+              AND {} AND l.valid_from > a.valid_from)",
+        owner_backed("l")
+    )
+}
+
+/// Claim `uid` if it is delivered (`delivered`): a tip, or an earlier decision only curator links
+/// ended, with the newest of them as its `later`.
+pub fn delivered_one(k: &Connection, uid: &str) -> Result<Option<Claim>> {
+    Ok(tips(k, &delivered("a.uid = ?1", LINKS_END_DECISIONS), [uid])?.pop())
+}
+
+/// Claim `uid` as the `active` view holds it, delivered or not, with the newest claim whose link
+/// ended it as its `later` (MUST-M11: search names it), or, when no link ended it, the newest
+/// linker, as `delivered` names it (Codex on #306).
+pub fn active_one(k: &Connection, uid: &str) -> Result<Option<Claim>> {
+    let newest = "ORDER BY l.valid_from DESC, l.anchor_device DESC, l.anchor_seq DESC, l.uid DESC
+                  LIMIT 1";
+    let ends = ends(LINKS_END_DECISIONS);
+    Ok(tips(
+        k,
+        &format!(
+            "SELECT a.uid, a.kind, a.status, a.speaker, a.scope, a.body, a.valid_from,
+                    a.anchor_device, a.anchor_seq,
+                    COALESCE((SELECT l.uid {LINKERS} AND {ends} {newest}),
+                             (SELECT l.uid {LINKERS} {newest}))
+             FROM active a WHERE a.uid = ?1"
+        ),
+        [uid],
+    )?
+    .pop())
+}
+
+/// The active claims `l` whose derivation links claim `a` (a row of the `active` view).
+const LINKERS: &str = "FROM edges e
+           JOIN claims x ON x.op_device = e.op_device AND x.op_seq = e.op_seq
+           JOIN active l ON l.uid = x.uid
+           WHERE e.to_uid = a.uid AND x.uid <> a.uid";
 
 /// Spec 3.4's pair rule (D2), which every surface applies to the delivered claims it ranked:
 /// each claim of `ranked` (the most relevant first) with the later claims that ended it, one unit

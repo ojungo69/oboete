@@ -440,6 +440,11 @@ impl Consumer for Manifest {
 /// The facts of one event, and its checkout marked for a rebuild. Events without a repo label
 /// belong to no checkout.
 fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
+    // Imported records are history, not the checkout's state (milestone 4 D6): its facts and its
+    // count of records not yet curated come from live records only.
+    if !crate::raw::is_live(&e.source) {
+        return Ok(());
+    }
     let Some(repo) = e.repo.as_deref() else {
         return Ok(());
     };
@@ -1961,6 +1966,62 @@ mod tests {
         }
         worker::run_once(home.path()).unwrap();
         assert_eq!(manifest(home.path()).0, after); // the same records, the same bytes
+    }
+
+    /// Milestone 4 D6: imported records are history, not the checkout's state: the manifest's
+    /// last prompt, its sessions and its count of records not yet curated come from live records
+    /// only.
+    #[test]
+    fn the_manifest_ignores_imported_records() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        worker::run_once(home.path()).unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let before = shown(home.path(), &store).unwrap();
+        let prompt = serde_json::json!({"prompt": "An imported prompt."});
+        let imported = Event {
+            source: "oboete-v1".into(),
+            ..ev("prompt", "v1", 100 * 60_000, cwd.path(), prompt)
+        };
+        store.append(&imported).unwrap();
+        worker::run_once(home.path()).unwrap();
+        assert_eq!(shown(home.path(), &store).unwrap(), before);
+    }
+
+    /// Milestone 4 D6, MUST-M9: the backlog line counts live records not yet curated, never the
+    /// imported ones that wait for `recurate --source`.
+    #[test]
+    fn the_backlog_line_does_not_count_parked_records() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        worker::run_once(home.path()).unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let backlog = |store: &Raw| {
+            let text = shown(home.path(), store).unwrap();
+            let as_of = text.split("## As of\n").nth(1).unwrap();
+            as_of
+                .lines()
+                .next()
+                .unwrap()
+                .split("; ")
+                .nth(1)
+                .unwrap()
+                .to_owned()
+        };
+        let before = backlog(&store);
+        assert!(before.ends_with("record(s) not yet curated"), "{before}");
+        for i in 0..3 {
+            let body = serde_json::json!({"prompt": format!("Imported {i}.")});
+            let e = Event {
+                source: "transcript".into(),
+                ..ev("prompt", "t", (200 + i) * 60_000, cwd.path(), body)
+            };
+            store.append(&e).unwrap();
+        }
+        worker::run_once(home.path()).unwrap();
+        assert_eq!(backlog(&store), before);
     }
 
     const DAY: i64 = 86_400_000;
