@@ -231,6 +231,7 @@ pub fn finish(
     );
     let mut failed = 0;
     for (path, _) in &files {
+        // `remove_dir_all` removes a link, never what it points to.
         let gone = if path.is_dir() {
             std::fs::remove_dir_all(path)
         } else {
@@ -1258,8 +1259,14 @@ key_file = "/k/CF_WORKERS_AI_KEY.md"
             format!("{refused:#}").contains("--from must be"),
             "{refused:#}"
         );
+        // A link named as an old directory goes, never what it points to.
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("kept"), "x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), h.join("memory.db-wal")).unwrap();
         let mut out = Vec::new();
         finish(h, &v1.path, "yes\n".as_bytes(), &mut out).unwrap();
+        assert!(outside.path().join("kept").exists());
         for gone in [
             "oboete.db",
             "pre-1.db",
