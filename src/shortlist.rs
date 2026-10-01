@@ -35,9 +35,12 @@ pub const VECTOR_EVERY: i64 = 15 * 60_000;
 
 /// The claims one prompt's injection takes at most, a pair counting two (D2).
 pub const PLACES: usize = 3;
-/// The share of one text's trigrams a claim's body holds to be injected with it (D9): 0.5 until
-/// Task 8 Step 11 sets it on dev prompts, and Task 12b tunes it.
-pub const THRESHOLD: f64 = 0.5;
+/// The share of one text's trigrams a claim's body holds to be injected with it (D9): set by Task 8
+/// Step 11 on milestone 3's dev prompts (docs/milestone-4.md), tuned by Task 12b.
+pub const THRESHOLD: f64 = 0.53;
+/// A text's trigrams count as at least this many: a short prompt (`進めて`) tells no topic, and
+/// its one or two trigrams would match any claim holding them (Step 11).
+pub const MIN_GRAMS: usize = 10;
 /// The trigrams read of each text (D9): `search::trigrams`' 64 would leave a long prompt's end out.
 const GRAMS: usize = 256;
 
@@ -405,10 +408,10 @@ fn grams(text: &str, cap: usize) -> HashSet<String> {
         .collect()
 }
 
-/// The share of `of` (one text's trigrams) that `body` holds.
+/// The share of `of` (one text's trigrams, at least `MIN_GRAMS`) that `body` holds.
 fn share(of: &HashSet<String>, body: &str) -> f64 {
     let held = grams(body, usize::MAX);
-    of.iter().filter(|g| held.contains(*g)).count() as f64 / of.len() as f64
+    of.iter().filter(|g| held.contains(*g)).count() as f64 / of.len().max(MIN_GRAMS) as f64
 }
 
 /// Spec 4.2 and D9: of `candidates` (uids, the best first), the units (`placed`) of the claims
@@ -1090,6 +1093,11 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        // A short text counts as `MIN_GRAMS` trigrams: three held tell no topic.
+        let short = pick(&s.raw, &k, &all, &["Lexer"], THRESHOLD).unwrap();
+        assert!(short.is_empty(), "{:?}", uids(short));
+        let whole = pick(&s.raw, &k, &all, &["Lexer tokens are cached"], THRESHOLD).unwrap();
+        assert_eq!(uids(whole), [vec![lexer.clone()]]);
         // The CLI prints each one's share, from every delivered claim of the repository.
         let printed = report(
             s.home.path(),
