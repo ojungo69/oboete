@@ -364,18 +364,17 @@ pub fn start_text_read(
     else {
         return Ok(None);
     };
-    let text = crate::consumer::manifest::text(
+    let start = crate::consumer::manifest::text(
         home,
         store,
         repo,
         branch,
         session,
-        settings.rules.version(),
+        &settings.rules,
+        inject.session_start_chars,
+        crate::db::now_ms(),
     )?;
-    Ok(text.map(|t| {
-        let gated = crate::redact::outbound_with(&t, &settings.rules);
-        crate::manifest::cut(&gated, inject.session_start_chars)
-    }))
+    Ok(start.map(|s| s.text))
 }
 
 /// `oboete inject`: what a SessionStart hook shows for the checkout at `cwd` (the recording-failure
@@ -1132,17 +1131,19 @@ mod tests {
         let settings = crate::capture::Settings::load(home).unwrap();
         let (session, repo, branch) =
             crate::capture::checkout(&json!({"session_id": "next", "cwd": cwd}), &settings);
-        let text = crate::consumer::manifest::text(
+        let start = crate::consumer::manifest::text(
             home,
             &raw,
             &repo,
             branch.as_deref().unwrap_or(""),
             &session,
-            settings.rules.version(),
+            &settings.rules,
+            usize::MAX,
+            crate::db::now_ms(),
         )
         .unwrap()
         .unwrap();
-        crate::manifest::fenced(text.trim())
+        crate::manifest::fenced(start.text.trim())
     }
 
     /// A test's folder, removed when the test ends, passed or failed: the tests that did not remove

@@ -51,6 +51,9 @@ CREATE TABLE IF NOT EXISTS ops (
 );
 -- Milestone 4 D13: the exclusion list is read before each outbound call, from its few ops alone.
 CREATE INDEX IF NOT EXISTS ops_exclusions ON ops(device, op_seq) WHERE type = 'exclusion';
+-- The curation checkpoint, which SessionStart reads (Task 8, MUST-M9): the last window op without
+-- a scan of the ops after it (178,370 imports took 136 ms).
+CREATE INDEX IF NOT EXISTS ops_windows ON ops(device, op_seq) WHERE type = 'window';
 ";
 
 /// One agent event as captured, after redaction.

@@ -1014,7 +1014,7 @@ pub fn outbound_lines(text: &str) -> String {
     }
 }
 
-fn lines_with(text: &str, rules: &Rules) -> String {
+pub(crate) fn lines_with(text: &str, rules: &Rules) -> String {
     outbound_with(text, rules)
         .split('\n')
         .map(|line| outbound_with(line, rules))
