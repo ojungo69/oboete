@@ -102,17 +102,17 @@ pub struct Phase {
 }
 
 /// A batch the model would not take (400, 413, 422), being split until each text it will not take
-/// is alone (Step 6).
+/// is alone (Step 6). A text alone that fails before anything is answered is held: a `held` mark,
+/// so neither this worker nor the next sends it again or waits on it, until another document's
+/// answer sends it once more, alone, in an answered split (`unhold`). Its mark gone, it is queued
+/// as well: if that send fails for another reason, it goes again later as any document does.
 #[derive(Default)]
 struct Split {
     /// Halves still to send, before anything else.
     halves: Vec<Batch>,
-    /// Whether one of its requests was answered: only then is a text it would not take alone that
-    /// text's fault, not the embedder's.
+    /// Whether one of its requests was answered, or an answer made it to send the held texts
+    /// again: only then is a text it would not take alone that text's fault, not the embedder's.
     answered: bool,
-    /// The texts it would not take alone before any answer: kept out of the batches (`pending`),
-    /// neither refused nor resting the embedder, until an answer sends them again.
-    held: Vec<Doc>,
     /// The texts it would not take alone after an answer, marked `refused` once it is over.
     lone: Vec<Doc>,
     /// Its requests that failed.
@@ -193,17 +193,12 @@ impl Phase {
             None => self.next_half(raw, k, &embedder.id, &reading)?,
             Some(_) => None,
         };
-        let held: Vec<Doc> = self
-            .split
-            .as_ref()
-            .map_or_else(Vec::new, |s| s.held.clone());
         let batch = match half {
             Some(b) => b,
             // Cached vectors are mapped and documents passed over are marked whatever the rest
             // or the cap, each kind up to its first page with a text to send; only the call waits.
             None => {
-                let Some(b) = pending(raw, k, &embedder.id, &reading, wait.is_some(), &held)?
-                else {
+                let Some(b) = pending(raw, k, &embedder.id, &reading, wait.is_some())? else {
                     return Ok(Step::Idle);
                 };
                 if let Some(w) = wait {
@@ -353,20 +348,12 @@ impl Phase {
         };
         // The embedder's state after it: unchanged (None), cleared (Some(None)) or rested.
         let mut rest = None;
+        // A text that failed alone before anything was answered, to be marked `held`.
+        let mut hold = Vec::new();
         match failure {
             None => {
                 if let Some(split) = &mut self.split {
                     split.answered = true;
-                    // The embedder answers: a text held since it failed alone goes once more,
-                    // alone, and only a failure now is that text's fault.
-                    for doc in std::mem::take(&mut split.held) {
-                        split.halves.push(Batch {
-                            embedder: batch.embedder.clone(),
-                            docs: vec![doc],
-                            texts: Vec::new(),
-                            reading: batch.reading.clone(),
-                        });
-                    }
                 }
                 rest = Some(None);
             }
@@ -377,7 +364,7 @@ impl Phase {
                     if split.answered {
                         split.lone.push(doc.clone());
                     } else {
-                        split.held.push(doc.clone());
+                        hold.push(doc.clone());
                     }
                 } else {
                     let mid = batch.docs.len() / 2;
@@ -396,15 +383,12 @@ impl Phase {
             }
             Some(f) => rest = Some(Some(f)),
         }
-        // A split that is over (nothing left to send, nothing held), or that failed past
-        // `SPLIT_FAILS` unanswered: answered, its lone texts are refused; unanswered, the embedder
-        // rests as for any failure, and what it held goes back to the batches. Until then a text
-        // held waits for another document's answer, so one the model will not take, alone from the
-        // start, neither rests the embedder nor holds the rest back.
+        // A split that is over, or that failed past `SPLIT_FAILS` unanswered: answered, its lone
+        // texts are refused; unanswered, the embedder's state takes the failure as any other's (a
+        // 400 rests it only as the breaker's third in a row). What it held stays held.
         let mut refused = Vec::new();
         if let Some(split) = &self.split
-            && ((split.halves.is_empty() && split.held.is_empty())
-                || (!split.answered && split.fails >= SPLIT_FAILS))
+            && (split.halves.is_empty() || (!split.answered && split.fails >= SPLIT_FAILS))
         {
             let split = self.split.take().expect("checked above");
             if split.answered {
@@ -435,10 +419,28 @@ impl Phase {
         }
         if let Sent::Vectors(vecs) = &sent {
             write(k, batch, vecs)?;
+            // The embedder answers: each text held for that goes once more, alone, in an answered
+            // split, so only a failure now is that text's fault.
+            let held = unhold(k, &batch.embedder)?;
+            if !held.is_empty() {
+                let split = self.split.get_or_insert_with(Split::default);
+                split.answered = true;
+                split.halves.extend(held.into_iter().map(|doc| Batch {
+                    embedder: batch.embedder.clone(),
+                    docs: vec![doc],
+                    texts: Vec::new(),
+                    reading: batch.reading.clone(),
+                }));
+            }
         }
         for doc in &refused {
             if stored(k, doc)? {
                 mark(k, &batch.embedder, doc, "refused")?;
+            }
+        }
+        for doc in &hold {
+            if stored(k, doc)? {
+                mark(k, &batch.embedder, doc, "held")?;
             }
         }
         Ok(())
@@ -734,7 +736,6 @@ fn pending(
     embedder: &str,
     reading: &Reading,
     waiting: bool,
-    held: &[Doc],
 ) -> Result<Option<Batch>> {
     crate::claims::schema(k)?;
     crate::consumer::imported::schema(k)?;
@@ -743,15 +744,7 @@ fn pending(
     let mut waits = None;
     for kind in ["c", "i", "r"] {
         loop {
-            // A text a split holds stays out; a page of nothing else ends this kind for now.
-            let page: Vec<Read> = read_page(raw, k, embedder, kind)?
-                .into_iter()
-                .filter(|r| {
-                    !held
-                        .iter()
-                        .any(|d| d.kind == r.doc.kind && d.key == r.doc.key)
-                })
-                .collect();
+            let page = read_page(raw, k, embedder, kind)?;
             if page.is_empty() {
                 break;
             }
@@ -1109,6 +1102,35 @@ fn mark(k: &Connection, embedder: &str, doc: &Doc, why: &str) -> Result<()> {
         params![embedder, index_kind(doc.kind), doc.key, doc.sha, why],
     )?;
     Ok(())
+}
+
+/// The texts held for an answer (`held` marks, Step 6), their marks taken off: each to be sent
+/// again, alone. A mark keeps the index's kind, so a prompt record comes back as a record, which
+/// `current` reads alike.
+fn unhold(k: &Connection, embedder: &str) -> Result<Vec<Doc>> {
+    let rows: Vec<(String, String, Option<String>)> = k
+        .prepare_cached(
+            "DELETE FROM vector_keys WHERE embedder = ?1 AND skipped = 'held'
+             RETURNING kind, key, src_sha",
+        )?
+        .query_map([embedder], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows
+        .into_iter()
+        .map(|(kind, key, sha)| Doc {
+            kind: match kind.as_str() {
+                "c" => "c",
+                "k" => "k",
+                "p" => "p",
+                _ => "r",
+            },
+            key,
+            sha: sha.unwrap_or_default(),
+            repo: String::new(),
+            ts: 0,
+            session: String::new(),
+        })
+        .collect())
 }
 
 fn cached(k: &Connection, embedder: &str, sha: &str) -> Result<Option<Vec<u8>>> {
@@ -1491,7 +1513,7 @@ mod tests {
         let config = crate::config::load(home).unwrap();
         let embedder = Embedder::from_config(&config.embedding).unwrap().unwrap();
         let reading = Reading::now(&s.raw, Reads::Live).unwrap();
-        let batch = pending(&s.raw, &k, &embedder.id, &reading, false, &[])
+        let batch = pending(&s.raw, &k, &embedder.id, &reading, false)
             .unwrap()
             .unwrap();
         let db = crate::providers_db::open(home).unwrap();
@@ -1685,8 +1707,9 @@ mod tests {
         );
 
         // Alone from the start with nothing answered: not refused, as the embedder may be what
-        // fails, and not sent again, rested on, or in the way of the rest: held until another
-        // document's answer, then sent once more alone and refused.
+        // fails, and not rested on or in the way of the rest: held, a mark, so not sent again by
+        // this worker or the next, until another document's answer; then sent once more alone and
+        // refused.
         let alone = s.said("s", R, 4_000, "Poison words.");
         s.run();
         let sent = stub.requests();
@@ -1700,11 +1723,20 @@ mod tests {
         assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
         assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Idle);
         assert_eq!(stub.requests(), sent + 1);
-        assert_eq!(skipped(&s, &s.key(alone)), None);
+        assert_eq!(skipped(&s, &s.key(alone)).as_deref(), Some("held"));
+        // Counted as the breaker counts a 400 (one, no rest), so failing alone again and again
+        // with nothing answered would rest it.
         assert_eq!(
             pdb::state(&db, crate::embed::CALLS).unwrap(),
-            pdb::State::default()
+            pdb::State {
+                fails: 1,
+                ..pdb::State::default()
+            }
         );
+        let mut phase = Phase::new(s.home.path());
+        phase.timeout = Duration::from_millis(300);
+        assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Idle);
+        assert_eq!(stub.requests(), sent + 1);
         let later = s.said("s", R, 5_000, "Later words.");
         s.run();
         until_idle(&s, &k, &mut phase);
@@ -1806,7 +1838,8 @@ mod tests {
     }
 
     /// Step 6: a split that nothing answers stops after `SPLIT_FAILS` requests: the embedder is
-    /// failing, not a text, so nothing is refused.
+    /// failing, not a text, so nothing is refused; the texts that failed alone are held for an
+    /// answer.
     #[test]
     fn a_split_nothing_answers_stops_at_its_bound() {
         let stub = Stub::start();
@@ -1832,7 +1865,12 @@ mod tests {
         }
         assert!(phase.split.is_none());
         assert_eq!(stub.requests(), SPLIT_FAILS as usize);
-        assert!(keys(&s).is_empty());
+        let marks: Vec<_> = keys(&s).into_iter().map(|(_, _, why)| why).collect();
+        assert!(!marks.is_empty());
+        assert!(
+            marks.iter().all(|why| why.as_deref() == Some("held")),
+            "{marks:?}"
+        );
     }
 
     /// The Global Constraints (Step 7): batches stop 40 requests short of `daily_requests`, kept
