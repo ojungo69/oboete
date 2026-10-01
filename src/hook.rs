@@ -699,7 +699,7 @@ fn grok_delivers(grok_hooks: &Path) -> bool {
 /// (a plugin, say) is real work.
 const HOUSEKEEPING_DIRS: &[&str] = &[".codex/memories", ".claude-mem/observer-sessions"];
 
-fn is_agent_internal(agent: &str, payload: &Value) -> bool {
+pub(crate) fn is_agent_internal(agent: &str, payload: &Value) -> bool {
     let Some(cwd) = agent_workspace(agent, payload)
         .or_else(|| str_field(payload, &["cwd", "workspaceRoot"]).map(str::to_owned))
     else {

@@ -97,6 +97,45 @@ pub fn events(
     ts: i64,
     settings: &Settings,
 ) -> Vec<Captured> {
+    shaped(event, payload, settings)
+        .map(|(kind, body)| capture(agent, kind, body, payload, ts, settings))
+        .into_iter()
+        .collect()
+}
+
+/// The events an imported hook payload records (milestone 4 D6): `events`' kinds and bodies, under
+/// `settings` (source `oboete-v1` or `transcript`), labelled with the `repo` and `cwd` its source
+/// kept, through the same gate, with no git read: the checkout has moved on since. `Touch` is
+/// v1's `session_repos` row: kind `touch`, body `{}`.
+pub fn imported(
+    agent: &str,
+    event: &str,
+    payload: &Value,
+    ts: i64,
+    repo: &str,
+    cwd: Option<&str>,
+    settings: &Settings,
+) -> Vec<Captured> {
+    let shaped = match event {
+        "Touch" => Some(("touch", json!({}))),
+        _ => shaped(event, payload, settings),
+    };
+    let place = |kind, body| {
+        let place = Place {
+            repo: repo.to_owned(),
+            cwd: cwd.map(str::to_owned),
+            git: Git::default(),
+        };
+        labelled(agent, kind, body, payload, ts, place, settings)
+    };
+    shaped
+        .map(|(kind, body)| place(kind, body))
+        .into_iter()
+        .collect()
+}
+
+/// The kind and body of the event a hook payload records: none for events that carry nothing.
+fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static str, Value)> {
     let (kind, body) = match event {
         "SessionStart" => ("start", json!({"source": payload.get("source").map(clean)})),
         "UserPromptSubmit" => {
@@ -112,7 +151,7 @@ pub fn events(
             // whether a turn is recorded never depends on the settings, and Task 11 can count
             // a transcript's turns under any of them.
             if prompt.is_empty() {
-                return Vec::new();
+                return None;
             }
             // A prompt another agent sent, as the hook adapter or the transcript parser read it
             // (#273): never the developer's words.
@@ -124,14 +163,7 @@ pub fn events(
             };
             if !settings.store_prompts {
                 // The turn is still an event (Task 11 counts it), without what was typed.
-                return vec![capture(
-                    agent,
-                    kind,
-                    sent(json!({"omitted": true})),
-                    payload,
-                    ts,
-                    settings,
-                )];
+                return Some((kind, sent(json!({"omitted": true}))));
             }
             (kind, sent(json!({"prompt": base64_runs(&prompt)})))
         }
@@ -161,7 +193,7 @@ pub fn events(
             };
             let reply = without_blocks(&reply, false);
             if reply.trim().is_empty() {
-                return Vec::new();
+                return None;
             }
             ("reply", json!({"assistant": base64_runs(&reply)}))
         }
@@ -174,7 +206,7 @@ pub fn events(
                 Some(s) if !s.trim().is_empty() => {
                     ("compaction", json!({"summary": base64_runs(&s)}))
                 }
-                _ => return Vec::new(),
+                _ => return None,
             }
         }
         "SessionEnd" => {
@@ -185,9 +217,9 @@ pub fn events(
             }
             ("end", body)
         }
-        _ => return Vec::new(), // PreToolUse and the rest carry nothing to keep
+        _ => return None, // PreToolUse and the rest carry nothing to keep
     };
-    vec![capture(agent, kind, body, payload, ts, settings)]
+    Some((kind, body))
 }
 
 /// The session, repo and branch labels `capture` gives an event of this payload, through the
@@ -209,7 +241,7 @@ pub fn checkout(payload: &Value, settings: &Settings) -> (String, String, Option
     (session, repo, branch)
 }
 
-/// One event of `kind` with `body`, its labels from `payload`, all through one gate.
+/// One event of `kind` with `body`, its labels from `payload` and the checkout it names.
 fn capture(
     agent: &str,
     kind: &str,
@@ -219,7 +251,32 @@ fn capture(
     settings: &Settings,
 ) -> Captured {
     let cwd = str_field(payload, &["cwd"]).unwrap_or(".");
-    let git = git(Path::new(cwd));
+    let place = Place {
+        repo: repo::key(Path::new(cwd)),
+        cwd: Some(cwd.to_owned()),
+        git: git(Path::new(cwd)),
+    };
+    labelled(agent, kind, body, payload, ts, place, settings)
+}
+
+/// Where an event was recorded, as its labels name it.
+struct Place {
+    repo: String,
+    cwd: Option<String>,
+    git: Git,
+}
+
+/// One event of `kind` with `body`, its session from `payload` and its other labels from `place`,
+/// all through one gate.
+fn labelled(
+    agent: &str,
+    kind: &str,
+    body: Value,
+    payload: &Value,
+    ts: i64,
+    place: Place,
+    settings: &Settings,
+) -> Captured {
     // Labels are stored text too (spec 2.2): a path or branch can carry a token.
     let mut gate = Gate::new(settings);
     let cap = gate.cap;
@@ -228,11 +285,12 @@ fn capture(
         "session",
         str_field(payload, &["session_id", "sessionId"]).unwrap_or("unknown"),
     );
-    let repo = label("repo", &repo::key(Path::new(cwd)));
+    let repo = label("repo", &place.repo);
+    let git = place.git;
     let branch = git.branch.as_deref().map(|b| label("branch", b));
     let head = git.head.as_deref().map(|h| label("head", h));
     let gitdir = git.gitdir.as_deref().map(|g| label("gitdir", g));
-    let cwd_label = label("cwd", cwd);
+    let cwd_label = place.cwd.map(|c| label("cwd", &c));
     // One gate for the body: every string and key in it, whatever field it is.
     let body = gate.value("", body, cap).to_string();
     Captured {
@@ -246,7 +304,7 @@ fn capture(
             branch,
             head,
             gitdir,
-            cwd: Some(cwd_label),
+            cwd: cwd_label,
             source: settings.source.into(),
             body,
             original_bytes: gate.cut,
@@ -1079,6 +1137,66 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// Milestone 4 D6: an imported event takes `events`' kind and body, and the labels its source
+    /// kept (session, repo, cwd) through the same gate, never the checkout as it is now (its branch
+    /// has moved on); v1's
+    /// repository row is a `touch` record.
+    #[test]
+    fn an_imported_event_keeps_its_source_labels_and_reads_no_git() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/now\n").unwrap();
+        let payload = json!({"session_id": "s1", "prompt": "keep UTC", "cwd": dir.path()});
+        let live = one("UserPromptSubmit", payload.clone());
+        assert_eq!(live.branch.as_deref(), Some("now"));
+        let settings = Settings {
+            source: "oboete-v1",
+            ..Settings::default()
+        };
+        let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let repo = format!("github.com/o/r/{token}");
+        let mut v = imported(
+            "claude",
+            "UserPromptSubmit",
+            &payload,
+            7,
+            &repo,
+            dir.path().to_str(),
+            &settings,
+        );
+        assert_eq!(v.len(), 1);
+        let Captured { event: e, ledger } = v.remove(0);
+        assert_eq!((e.kind.as_str(), body(&e)), ("prompt", body(&live)));
+        assert_eq!((e.branch, e.head, e.gitdir), (None, None, None));
+        assert_eq!(
+            (e.session.as_str(), e.cwd.as_deref(), e.source.as_str()),
+            ("s1", dir.path().to_str(), "oboete-v1")
+        );
+        let repo = e.repo.unwrap();
+        assert!(
+            !repo.contains(&token) && repo.contains("[REDACTED]"),
+            "{repo}"
+        );
+        assert_eq!(ledger[0].0, "repo");
+        let touch = json!({"session_id": "s1"});
+        let v = imported(
+            "claude",
+            "Touch",
+            &touch,
+            5,
+            "github.com/o/r",
+            None,
+            &settings,
+        );
+        let e = &v[0].event;
+        assert_eq!(
+            (e.kind.as_str(), e.body.as_str(), e.repo.as_deref(), e.ts),
+            ("touch", "{}", Some("github.com/o/r"), 5)
+        );
+        // What a hook records nothing of, an import records nothing of either.
+        assert!(imported("claude", "PreToolUse", &payload, 7, "r", None, &settings).is_empty());
     }
 
     #[test]
