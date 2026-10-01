@@ -104,10 +104,16 @@ impl Builder {
         if !on || !exists(k, "table", "manifest_facts")? || !exists(k, "view", "active")? {
             return Ok(Phase::Idle);
         }
+        // Rules that do not load stop the phase as they stop a hook's capture: the bundled rules
+        // alone never gate a query in place of the user's (Codex's security review of Step 4).
+        let rules = match crate::redact::Rules::load(&self.home) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("oboete: no shortlist for now: {e:#}");
+                return Ok(Phase::Idle);
+            }
+        };
         schema(k)?;
-        let rules = crate::capture::Settings::load(&self.home)
-            .map(|s| s.rules)
-            .unwrap_or_default();
         let device = raw.device();
         let live = keys(raw, k, now)?;
         // The exclusion list and the sessions it holds (every repository they touched), once.
@@ -132,9 +138,12 @@ impl Builder {
             }
             let texts = parts(raw, k, key, &rules)?;
             let text = texts.join("\n");
+            // The parts are read by session (the facts have no agent): a session of this id that
+            // any agent ran in an excluded repository excludes the key.
             let excluded = reading
                 .excluded
-                .contains(&format!("{}\0{}", key.agent, key.session));
+                .iter()
+                .any(|e| e.split_once('\0').is_some_and(|(_, s)| s == key.session));
             // A vector is used only for the text the key has now, from the active embedder.
             let vector = answered
                 .filter(|a| a.text == text && !excluded && active.as_ref() == Some(&a.embedder))
@@ -145,12 +154,12 @@ impl Builder {
             let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
             let claims =
                 crate::search::b::delivered_ranked(raw, k, &refs, vector, &key.repo, SHORT)?;
-            let mut asked = 0;
+            let mut asked = vector_at(k, key)?;
             if let Some(e) = embed.as_deref_mut()
                 && vector.is_none()
                 && !excluded
                 && !text.is_empty()
-                && now - vector_at(k, key)? >= VECTOR_EVERY
+                && now - asked >= VECTOR_EVERY
                 && e.ask(k, &id, &text, &reading)?
             {
                 asked = now;
@@ -280,16 +289,14 @@ fn keys(raw: &Raw, k: &Connection, now: i64) -> Result<Vec<Key>> {
     Ok(out)
 }
 
-/// When `key`'s query vector was last asked for, 0 never.
+/// When `key`'s session last asked for a query vector, on any of its checkouts, 0 never: a key
+/// built keeps it, so a session that moves between branches asks no more often.
 fn vector_at(k: &Connection, key: &Key) -> Result<i64> {
     Ok(k.query_row(
-        "SELECT vector_at FROM shortlists
-         WHERE agent = ?1 AND session = ?2 AND repo = ?3 AND branch = ?4",
-        params![key.agent, key.session, key.repo, key.branch],
+        "SELECT COALESCE(MAX(vector_at), 0) FROM shortlists WHERE agent = ?1 AND session = ?2",
+        params![key.agent, key.session],
         |r| r.get(0),
-    )
-    .optional()?
-    .unwrap_or(0))
+    )?)
 }
 
 /// Whether `key` is built now: it has no row; its session's records went back past its build (a
@@ -320,9 +327,10 @@ fn due(k: &Connection, device: &str, key: &Key) -> Result<bool> {
     Ok(replies > 0 || events >= EVERY_EVENTS)
 }
 
-/// The key's query in three parts, each gated with `rules` as it is read: the session's last
-/// `PROMPTS` prompts on the checkout, the files it touched there, and its failing command (its
-/// tool and what it ran, never its output). Empty parts are left out.
+/// The key's query in three parts, each gated with `rules` as it is read, whole and in each of
+/// its fields alone (`joined`): the session's last `PROMPTS` prompts on the checkout, the files it
+/// touched there, and its failing command (its tool and what it ran, never its output). Empty
+/// parts are left out.
 fn parts(
     raw: &Raw,
     k: &Connection,
@@ -378,14 +386,30 @@ fn parts(
         )
         .optional()?;
     let failed = match failing.map(body).transpose()?.flatten() {
-        Some(b) => format!("{} {}", field(&b, "tool"), what_ran(&field(&b, "input"))),
-        None => String::new(),
+        Some(b) => vec![field(&b, "tool"), what_ran(&field(&b, "input"))],
+        None => Vec::new(),
     };
-    Ok([prompts.join("\n"), files.join("\n"), failed]
+    Ok([(prompts, "\n"), (files, "\n"), (failed, " ")]
         .iter()
-        .map(|t| crate::redact::lines_with(t, rules))
+        .map(|(fields, sep)| joined(fields, sep, rules))
         .filter(|t| !t.trim().is_empty())
         .collect())
+}
+
+/// `fields` joined by `sep`, gated whole, line by line and in each field alone
+/// (`redact::joined_with`): a rule anchored to a field (`^...$`) still holds once another field
+/// is joined before it (Codex's security review of Step 4).
+fn joined(fields: &[String], sep: &str, rules: &crate::redact::Rules) -> String {
+    let mut at = 0;
+    let parts: Vec<_> = fields
+        .iter()
+        .map(|f| {
+            let part = at..at + f.len();
+            at = part.end + sep.len();
+            part
+        })
+        .collect();
+    crate::redact::joined_with(&fields.join(sep), &parts, rules)
 }
 
 /// The shortlist the worker keeps for `key`'s session on a checkout, the best first: none when
@@ -802,6 +826,174 @@ mod tests {
             assert!(!asked[0].contains(hidden), "{asked:?}");
         }
         assert_eq!(queries(&s), 1);
+    }
+
+    /// Spec 5.5 (D9): the parts are read by session, so a session of the same id that another
+    /// agent ran in an excluded repository excludes the key too (Codex's security review of Step
+    /// 4).
+    #[test]
+    fn another_agents_excluded_session_of_the_id_sends_no_query() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        let codex = |kind: &str, repo: &str, ts: i64, body: Value| crate::raw::Event {
+            agent: "codex".into(),
+            kind: kind.into(),
+            session: "s".into(),
+            repo: Some(repo.into()),
+            branch: Some("main".into()),
+            ts,
+            ..crate::raw::test_event(&body.to_string())
+        };
+        let secret = "github.com/x/secret";
+        let words = json!({"prompt": "zebra words"});
+        s.raw
+            .append(&codex("prompt", secret, NOW - 3 * MIN, words.clone()))
+            .unwrap();
+        s.raw
+            .append(&codex("prompt", R, NOW - 2 * MIN, words))
+            .unwrap();
+        // Newer, so the key is Claude's.
+        s.event(
+            "prompt",
+            "s",
+            (R, "main"),
+            NOW - MIN,
+            json!({"prompt": "the parser"}),
+        );
+        s.exclude(secret);
+        s.run();
+        embedded(&s, &stub);
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = crate::embed_phase::Phase::new(s.home.path());
+        let mut b = Builder::new(s.home.path());
+        assert_eq!(
+            b.run(&s.raw, &mut k, Some(&mut phase), NOW).unwrap(),
+            Phase::Covered
+        );
+        assert_eq!(keys_built(&k), [key("s", "main")]);
+        assert_eq!(queries(&s), 0);
+    }
+
+    /// Each field of a part is gated alone as well as joined (`joined`): a rule anchored to the
+    /// failing command (`^...`) holds once its tool's name is before it (Codex's security review
+    /// of Step 4).
+    #[test]
+    fn each_field_of_a_query_is_gated_alone_too() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        let main = (R, "main");
+        s.event(
+            "prompt",
+            "live",
+            main,
+            NOW - 2 * MIN,
+            json!({"prompt": "the parser"}),
+        );
+        let input = json!({"command": "deploy-key-123456 --push"}).to_string();
+        let run = json!({"tool": "Bash", "input": input, "output": "error", "failed": true});
+        s.event("tool", "live", main, NOW - MIN, run);
+        s.run();
+        embedded(&s, &stub);
+        let path = s.home.path().join("config.toml");
+        let rule =
+            "[redaction]\nextra_rules = [{ id = \"deploy\", regex = '^deploy-key-[0-9]{6}' }]\n";
+        let text = std::fs::read_to_string(&path).unwrap() + rule;
+        std::fs::write(path, text).unwrap();
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = crate::embed_phase::Phase::new(s.home.path());
+        let sent = stub.requests();
+        let mut b = Builder::new(s.home.path());
+        assert_eq!(
+            b.run(&s.raw, &mut k, Some(&mut phase), NOW).unwrap(),
+            Phase::Covered
+        );
+        wait(|| phase.done());
+        let asked = stub.texts()[sent..].concat();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(
+            asked[0].ends_with(" --push") && !asked[0].contains("123456"),
+            "{asked:?}"
+        );
+    }
+
+    /// Redaction rules that do not load stop the phase as they stop capture: nothing is built and
+    /// nothing asked under the bundled rules alone (Codex's security review of Step 4).
+    #[test]
+    fn rules_that_do_not_load_build_and_ask_nothing() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        s.event(
+            "prompt",
+            "live",
+            (R, "main"),
+            NOW - MIN,
+            json!({"prompt": "the parser"}),
+        );
+        s.run();
+        embedded(&s, &stub);
+        let path = s.home.path().join("config.toml");
+        let good = std::fs::read_to_string(&path).unwrap();
+        let wrong = "[redaction]\nextra_rules = [{ id = \"x\", regex = '(' }]\n";
+        std::fs::write(&path, good.clone() + wrong).unwrap();
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = crate::embed_phase::Phase::new(s.home.path());
+        let mut b = Builder::new(s.home.path());
+        assert_eq!(
+            b.run(&s.raw, &mut k, Some(&mut phase), NOW).unwrap(),
+            Phase::Idle
+        );
+        assert_eq!(queries(&s), 0);
+        std::fs::write(&path, good).unwrap();
+        assert_eq!(
+            b.run(&s.raw, &mut k, Some(&mut phase), NOW).unwrap(),
+            Phase::Covered
+        );
+        assert_eq!(queries(&s), 1);
+    }
+
+    /// D9: a session that moves to another branch and back asks for its query vector no more
+    /// often than every `VECTOR_EVERY`: each key built keeps the session's last ask (Codex's
+    /// security review of Step 4).
+    #[test]
+    fn a_session_moving_between_branches_asks_no_sooner() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        let ask = json!({"prompt": "the parser"});
+        s.event("prompt", "live", (R, "main"), NOW - 3 * MIN, ask.clone());
+        s.run();
+        embedded(&s, &stub);
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = crate::embed_phase::Phase::new(s.home.path());
+        let mut b = Builder::new(s.home.path());
+        assert_eq!(
+            b.run(&s.raw, &mut k, Some(&mut phase), NOW).unwrap(),
+            Phase::Covered
+        );
+        assert_eq!(queries(&s), 1);
+        // The ask settled, so the phase could take another.
+        wait(|| phase.done());
+        phase.poll(&s.raw, &k).unwrap();
+        for (i, branch) in [(1, "feature"), (2, "main")] {
+            s.event(
+                "prompt",
+                "live",
+                (R, branch),
+                NOW - 3 * MIN + i,
+                ask.clone(),
+            );
+            s.run();
+            assert_eq!(
+                b.run(&s.raw, &mut k, Some(&mut phase), NOW + i * MIN)
+                    .unwrap(),
+                Phase::Covered
+            );
+            assert_eq!(keys_built(&k), [key("live", branch)]);
+            assert_eq!(queries(&s), 1, "{branch}");
+        }
     }
 
     /// Rows 55-1 and 55-7 (D8, D9): while the embedder holds a key's query, the key is built from
