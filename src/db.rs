@@ -83,16 +83,6 @@ CREATE TABLE IF NOT EXISTS imports(
   doc TEXT NOT NULL,
   PRIMARY KEY(source, source_id)
 );
--- Document vectors (PR-D): normalized fp32, one per document, with the model and a hash of the
--- text they were made from. `vec_docs` is derived from these rows; `indexed` = 0 until it is.
-CREATE TABLE IF NOT EXISTS embeddings(
-  doc TEXT PRIMARY KEY,
-  embedder TEXT NOT NULL,
-  text_sha TEXT NOT NULL,
-  vec BLOB NOT NULL,
-  indexed INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS embeddings_unindexed ON embeddings(doc) WHERE indexed = 0;
 ";
 
 /// WAL with a 2 s busy timeout and the given `synchronous` level.
@@ -144,7 +134,6 @@ pub(crate) fn wal(conn: &Connection, synchronous: &str) -> Result<()> {
 pub fn open(home: &Path) -> Result<Connection> {
     let path = home.join("oboete.db");
     private(home, 0o700);
-    register_sqlite_vec();
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     wal(&conn, "NORMAL")?;
     conn.execute_batch(SCHEMA).context("schema")?;
@@ -173,7 +162,6 @@ pub fn open(home: &Path) -> Result<Connection> {
     .context("migrate observe cursor")?;
     ensure_autoincrement(&mut conn).context("migrate doc ids")?;
     ensure_fts(&mut conn).context("search index")?;
-    ensure_vec(&mut conn).context("vector index")?;
     ensure_repo_keys(&mut conn).context("migrate repository keys")?;
     ensure_device(&conn, &path).context("device id")?;
     ensure_uids(&mut conn).context("migrate document uids")?;
@@ -400,16 +388,6 @@ pub fn rekey_paths(conn: &mut Connection) -> Result<usize> {
             params![new, old],
         )?;
         tx.execute("DELETE FROM session_repos WHERE repo=?1", params![old])?;
-        // The partition key cannot be updated: drop the old rows, and the next `embed::backlog`
-        // indexes the moved documents under the new key.
-        tx.execute("DELETE FROM vec_docs WHERE repo=?1", params![old])?;
-        tx.execute(
-            "UPDATE embeddings SET indexed = 0 WHERE doc IN (
-               SELECT 'o' || id FROM observations WHERE repo=?1
-               UNION ALL SELECT 's' || id FROM summaries WHERE repo=?1
-               UNION ALL SELECT 'p' || id FROM prompts WHERE repo=?1)",
-            params![new],
-        )?;
     }
     tx.commit()?;
     Ok(moves.len())
@@ -519,27 +497,6 @@ pub(crate) fn register_sqlite_vec() {
     });
 }
 
-/// The bit index over `embeddings` (PR-D): one row per document, sharded by repository (the MCP
-/// default scope) and by knowledge (`k`, observations and summaries) or prompt (`p`), searched by
-/// Hamming distance and rescored from the fp32 rows (docs/pr-d.md). Same guard as `ensure_fts`.
-fn ensure_vec(conn: &mut Connection) -> Result<()> {
-    if table_exists(conn, "vec_docs")? {
-        return Ok(());
-    }
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    if !table_exists(&tx, "vec_docs")? {
-        tx.execute_batch(&format!(
-            "CREATE VIRTUAL TABLE vec_docs USING vec0(
-               doc TEXT PRIMARY KEY, repo TEXT PARTITION KEY, kind TEXT PARTITION KEY,
-               embedding bit[{}]
-             );",
-            crate::embed::DIM
-        ))?;
-    }
-    tx.commit()?;
-    Ok(())
-}
-
 fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     Ok(conn
         .query_row(
@@ -623,21 +580,6 @@ pub fn upsert_session(
 }
 
 #[cfg(test)] // a fixture for v1's readers' tests: no hook writes oboete.db since Task 2b
-pub fn insert_event(
-    conn: &Connection,
-    session_id: &str,
-    event: &str,
-    ts: i64,
-    payload: &str,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO events(session_id, event, ts, payload) VALUES(?1,?2,?3,?4)",
-        params![session_id, event, ts, payload],
-    )?;
-    Ok(())
-}
-
-#[cfg(test)] // a fixture for v1's readers' tests: no hook writes oboete.db since Task 2b
 pub fn insert_prompt(conn: &Connection, session_id: &str, ts: i64, body: &str) -> Result<()> {
     let repo: String = conn.query_row(
         "SELECT repo FROM sessions WHERE id=?1",
@@ -682,26 +624,6 @@ pub(crate) fn private(path: &Path, mode: u32) {
     }
     #[cfg(not(unix))]
     let _ = (path, mode);
-}
-
-/// Which session a document (`o<id>`, `s<id>`, `p<id>`) belongs to.
-pub fn doc_session(conn: &Connection, doc: &str) -> Result<Option<String>> {
-    let table = match doc.get(..1) {
-        Some("o") => "observations",
-        Some("s") => "summaries",
-        Some("p") => "prompts",
-        _ => return Ok(None),
-    };
-    let Ok(id) = doc[1..].parse::<i64>() else {
-        return Ok(None);
-    };
-    Ok(conn
-        .query_row(
-            &format!("SELECT session_id FROM {table} WHERE id=?1"),
-            params![id],
-            |r| r.get(0),
-        )
-        .optional()?)
 }
 
 /// Whether a source row was imported before (the document may since have been deleted).
@@ -827,91 +749,6 @@ pub fn apply_batch(
     )?;
     tx.commit()?;
     Ok(true)
-}
-
-/// Remove one observation (`o<id>`), summary (`s<id>`) or prompt (`p<id>`) together with its
-/// search row. Only the exact id form is accepted (`o+5`, `o05` would leave the search row behind).
-pub fn delete_doc(conn: &mut Connection, doc: &str) -> Result<bool> {
-    let (table, id) = match doc.split_at_checked(1) {
-        Some(("o", n)) => ("observations", n),
-        Some(("s", n)) => ("summaries", n),
-        Some(("p", n)) => ("prompts", n),
-        _ => return Ok(false),
-    };
-    let Ok(id) = id.parse::<i64>() else {
-        return Ok(false);
-    };
-    if doc != format!("{}{id}", &doc[..1]) {
-        return Ok(false);
-    }
-    let tx = conn.transaction()?;
-    let n = tx.execute(&format!("DELETE FROM {table} WHERE id=?1"), params![id])?;
-    for index in ["fts", "embeddings", "vec_docs"] {
-        tx.execute(&format!("DELETE FROM {index} WHERE doc=?1"), params![doc])?;
-    }
-    tx.commit()?;
-    Ok(n > 0)
-}
-
-/// Remove a session with everything it left: raw events, prompts, observations, summaries,
-/// search rows. A session whose agent is still running comes back on its next event.
-pub fn delete_session(conn: &mut Connection, id: &str) -> Result<bool> {
-    let tx = conn.transaction()?;
-    for index in ["fts", "embeddings", "vec_docs"] {
-        tx.execute(
-            &format!(
-                "DELETE FROM {index} WHERE doc IN (SELECT 'o' || id FROM observations WHERE session_id=?1
-                   UNION ALL SELECT 's' || id FROM summaries WHERE session_id=?1
-                   UNION ALL SELECT 'p' || id FROM prompts WHERE session_id=?1)"
-            ),
-            params![id],
-        )?;
-    }
-    for table in [
-        "observations",
-        "summaries",
-        "prompts",
-        "events",
-        "session_repos",
-    ] {
-        tx.execute(
-            &format!("DELETE FROM {table} WHERE session_id=?1"),
-            params![id],
-        )?;
-    }
-    let n = tx.execute("DELETE FROM sessions WHERE id=?1", params![id])?;
-    tx.commit()?;
-    Ok(n > 0)
-}
-
-pub fn record_call(
-    conn: &Connection,
-    provider: &str,
-    outcome: &str,
-    ms: i64,
-    detail: Option<&str>,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO provider_calls(ts, provider, outcome, ms, detail) VALUES(?1,?2,?3,?4,?5)",
-        params![now_ms(), provider, outcome, ms, detail],
-    )?;
-    Ok(())
-}
-
-/// Requests sent to `provider` since the last UTC midnight (the per-provider daily budget window).
-/// A 429 that was waited out still counts: the budget bounds our requests, not our successes.
-pub fn calls_today(conn: &Connection, provider: &str) -> Result<u32> {
-    let day_ms: i64 = 86_400_000;
-    let midnight = now_ms() / day_ms * day_ms;
-    let n: u32 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM provider_calls WHERE provider=?1 AND ts>=?2 AND outcome IN ('ok','error','invalid','wait')",
-            params![provider, midnight],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or(0);
-    Ok(n)
 }
 
 #[cfg(test)]
@@ -1154,69 +991,6 @@ mod tests {
     }
 
     #[test]
-    fn delete_takes_the_search_rows_along() {
-        let dir = std::env::temp_dir().join(format!("oboete-db-delete-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut conn = open(&dir).unwrap();
-        let s = PendingSession {
-            id: "s1".into(),
-            repo: "/r".into(),
-            last_event_at: 1,
-        };
-        upsert_session(&conn, "s1", "claude", "/r", "/r", 1).unwrap();
-        insert_event(&conn, "s1", "Stop", 1, "{}").unwrap();
-        let obs = |t: &str| Observation {
-            kind: "change".into(),
-            title: t.into(),
-            body: "body".into(),
-        };
-        apply_batch(
-            &mut conn,
-            &s,
-            "test",
-            "summary one",
-            &[obs("a"), obs("b")],
-            0,
-        )
-        .unwrap();
-        insert_event(&conn, "s1", "Stop", 2, "{}").unwrap();
-        insert_prompt(&conn, "s1", 2, "first prompt").unwrap();
-        insert_prompt(&conn, "s1", 3, "second prompt").unwrap();
-        let count =
-            |c: &Connection, sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert!(delete_doc(&mut conn, "o1").unwrap());
-        assert!(!delete_doc(&mut conn, "o1").unwrap());
-        assert!(delete_doc(&mut conn, "p1").unwrap());
-        for bad in ["o+2", "o02", "p+2", "x2", "o", "p", "2", ""] {
-            assert!(!delete_doc(&mut conn, bad).unwrap(), "{bad}");
-        }
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM observations"), 1);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM prompts"), 1);
-        assert_eq!(
-            count(&conn, "SELECT COUNT(*) FROM fts WHERE doc IN ('o1', 'p1')"),
-            0
-        );
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM fts"), 3);
-        assert!(delete_session(&mut conn, "s1").unwrap());
-        assert!(!delete_session(&mut conn, "s1").unwrap());
-        for table in [
-            "sessions",
-            "events",
-            "observations",
-            "summaries",
-            "prompts",
-            "fts",
-        ] {
-            assert_eq!(
-                count(&conn, &format!("SELECT COUNT(*) FROM {table}")),
-                0,
-                "{table}"
-            );
-        }
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn doc_ids_are_never_reused_and_old_tables_are_rebuilt() {
         let dir = std::env::temp_dir().join(format!("oboete-db-autoinc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1261,8 +1035,11 @@ mod tests {
             .unwrap();
         assert_eq!(indexes, 4);
         // Delete the newest of each, store again: the ids move on.
-        assert!(delete_doc(&mut conn, "o7").unwrap());
-        assert!(delete_doc(&mut conn, "s3").unwrap());
+        conn.execute_batch(
+            "DELETE FROM observations WHERE id = 7; DELETE FROM summaries WHERE id = 3;
+             DELETE FROM fts WHERE doc IN ('o7', 's3');",
+        )
+        .unwrap();
         let s = PendingSession {
             id: "s1".into(),
             repo: "/r".into(),
@@ -1285,7 +1062,15 @@ mod tests {
         );
         // A session deleted while its summary was being written leaves nothing behind, also
         // when the agent's next event has recreated the session in the meantime.
-        assert!(delete_session(&mut conn, "s1").unwrap());
+        conn.execute_batch(
+            "DELETE FROM fts WHERE doc IN (SELECT 'o' || id FROM observations WHERE session_id = 's1'
+               UNION ALL SELECT 's' || id FROM summaries WHERE session_id = 's1');
+             DELETE FROM observations WHERE session_id = 's1';
+             DELETE FROM summaries WHERE session_id = 's1';
+             DELETE FROM events WHERE session_id = 's1';
+             DELETE FROM sessions WHERE id = 's1';",
+        )
+        .unwrap();
         assert!(!apply_batch(&mut conn, &s, "p", "late", std::slice::from_ref(&obs), 0).unwrap());
         upsert_session(&conn, "s1", "claude", "/r", "/r", 3).unwrap();
         assert!(!apply_batch(&mut conn, &s, "p", "later", std::slice::from_ref(&obs), 0).unwrap());
@@ -1303,18 +1088,6 @@ mod tests {
         };
         assert!(apply_batch(&mut conn, &s3, "p", "own", std::slice::from_ref(&obs), 0).unwrap());
         assert_eq!(ids(&conn, "SELECT COUNT(*) FROM summaries"), 1);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn waited_429_counts_against_the_daily_budget() {
-        let dir = std::env::temp_dir().join(format!("oboete-db-budget-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let conn = open(&dir).unwrap();
-        record_call(&conn, "groq", "wait", 1, None).unwrap();
-        record_call(&conn, "groq", "ok", 1, None).unwrap();
-        record_call(&conn, "groq", "budget", 0, None).unwrap();
-        assert_eq!(calls_today(&conn, "groq").unwrap(), 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

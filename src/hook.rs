@@ -315,30 +315,45 @@ fn checkout_manifest(
     labels: &Value,
     settings: &crate::capture::Settings,
 ) -> Option<String> {
+    let (session, repo, branch) = crate::capture::checkout(labels, settings);
+    let session = own_session(session, store);
+    start_text(
+        home,
+        store,
+        &repo,
+        branch.as_deref().unwrap_or(""),
+        &session,
+        settings,
+    )
+}
+
+/// SessionStart's manifest for the checkout (`repo`, `branch`) shown to `session`, the labels as
+/// `checkout_manifest` reads them from a hook's fields: gated with the rules as they are now and
+/// cut to `[inject]`'s size. It writes nothing (milestone 4 D11: the viewer's Context page shows it
+/// for any checkout).
+pub fn start_text(
+    home: &Path,
+    store: &crate::raw::Raw,
+    repo: &str,
+    branch: &str,
+    session: &str,
+    settings: &crate::capture::Settings,
+) -> Option<String> {
     // `[inject]` (#94): off, or a smaller size than the stored manifest's. Settings that do not
     // read inject nothing, as capture settings that do not read record nothing.
     let inject = crate::config::inject(home)
         .inspect_err(|e| eprintln!("oboete: nothing injected: {e:#}"))
         .ok()
         .filter(|i| i.session_start)?;
-    let (session, repo, branch) = crate::capture::checkout(labels, settings);
-    let session = own_session(session, store);
-    crate::consumer::manifest::text(
-        home,
-        store,
-        &repo,
-        branch.as_deref().unwrap_or(""),
-        &session,
-        settings.rules.version(),
-    )
-    .unwrap_or_else(|e| {
-        eprintln!("oboete: manifest not read: {e:#}");
-        None
-    })
-    .map(|t| {
-        let gated = crate::redact::outbound_with(&t, &settings.rules);
-        crate::manifest::cut(&gated, inject.session_start_chars)
-    })
+    crate::consumer::manifest::text(home, store, repo, branch, session, settings.rules.version())
+        .unwrap_or_else(|e| {
+            eprintln!("oboete: manifest not read: {e:#}");
+            None
+        })
+        .map(|t| {
+            let gated = crate::redact::outbound_with(&t, &settings.rules);
+            crate::manifest::cut(&gated, inject.session_start_chars)
+        })
 }
 
 /// `oboete inject`: what a SessionStart hook shows for the checkout at `cwd` (the recording-failure
@@ -357,9 +372,15 @@ pub fn inject_text(home: &Path, cwd: &Path, session: Option<&str>) -> String {
         eprintln!("oboete: manifest not read: {e:#}");
         None
     });
+    joined(home, manifest.as_deref())
+}
+
+/// The recording-failure line, then `manifest` in its fence: what SessionStart shows, as `oboete
+/// inject` prints it and the viewer's Context page shows it.
+pub fn joined(home: &Path, manifest: Option<&str>) -> String {
     let parts: Vec<String> = [
         crate::failure::since(home).map(crate::failure::line),
-        manifest.as_deref().map(crate::manifest::fenced),
+        manifest.map(crate::manifest::fenced),
     ]
     .into_iter()
     .flatten()
@@ -370,7 +391,7 @@ pub fn inject_text(home: &Path, cwd: &Path, session: Option<&str>) -> String {
 /// An idless event's session is this device's own: a bare "unknown" would be one session on
 /// every device once they sync (v1 did the same). Recording and the manifest's lookup
 /// both use it.
-fn own_session(session: String, raw: &crate::raw::Raw) -> String {
+pub(crate) fn own_session(session: String, raw: &crate::raw::Raw) -> String {
     if session == "unknown" {
         format!("unknown-{}", raw.device())
     } else {

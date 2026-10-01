@@ -1234,6 +1234,142 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
     })
 }
 
+/// A claim as the viewer shows it (milestone 4 D11), every text through the egress gate.
+#[derive(Debug, serde::Serialize)]
+pub struct ClaimView {
+    pub uid: String,
+    pub kind: String,
+    pub status: String,
+    pub speaker: String,
+    pub scope: String,
+    pub repo: Option<String>,
+    /// Unix ms: its `valid_from`.
+    pub when: i64,
+    pub text: String,
+    /// Whether every surface delivers it (spec 3.4): a chain tip, or an earlier decision only
+    /// curator links ended, with the claim that ended it as `later`.
+    pub delivered: bool,
+    /// The newest claim whose link ended it, or, when none did, the newest that links it.
+    pub later: Option<String>,
+    /// What its active derivation links (one type: `supersedes`).
+    pub supersedes: Vec<String>,
+    /// The claims whose derivation links it, the newest first (`claims::LINKERS`).
+    pub ended_by: Vec<String>,
+    pub label: &'static str,
+    pub quotes: Vec<Quote>,
+    /// Its derivations and the owner's corrections, the oldest first.
+    pub history: Vec<Change>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct Quote {
+    /// The record it quotes: `device:seq`.
+    pub key: String,
+    pub text: String,
+}
+
+/// A derivation of a claim (its `tier` and `recipe`) or an owner's correction (neither); a field
+/// a correction leaves as it was is `None`.
+#[derive(Debug, serde::Serialize)]
+pub struct Change {
+    pub ts: i64,
+    pub tier: Option<i64>,
+    pub recipe: Option<String>,
+    pub status: Option<String>,
+    pub body: Option<String>,
+}
+
+/// Claim `id` (a uid, or the first characters of one) as the viewer shows it: `None` when the id
+/// names no claim, several, or something else (milestone 4 D11).
+pub fn claim(home: &Path, id: &str) -> Result<Option<ClaimView>> {
+    if !crate::raw::exists(home) {
+        return Ok(None);
+    }
+    let raw = crate::raw::open(home)?;
+    let k = crate::knowledge::open(home)?;
+    claims::schema(&k)?;
+    crate::consumer::imported::schema(&k)?;
+    let Some(Named::Claim(uid)) = named(&raw, &k, id)? else {
+        return Ok(None);
+    };
+    let Some(c) = claims::active_one(&k, &uid)? else {
+        return Ok(None);
+    };
+    let strings = |sql: &str| -> Result<Vec<String>> {
+        let mut st = k.prepare(sql)?;
+        let rows = st.query_map([&uid], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    };
+    let supersedes = strings(
+        "SELECT e.to_uid FROM claims c
+         JOIN edges e ON e.op_device = c.op_device AND e.op_seq = c.op_seq
+         WHERE c.uid = ?1 ORDER BY e.to_uid",
+    )?;
+    let linkers = claims::LINKERS.trim_start().trim_start_matches("FROM ");
+    let ended_by = strings(&format!(
+        "SELECT l.uid FROM active a JOIN {linkers} AND a.uid = ?1
+         ORDER BY l.valid_from DESC, l.anchor_device DESC, l.anchor_seq DESC, l.uid DESC"
+    ))?;
+    let mut st = k.prepare(
+        "SELECT e.device || ':' || e.seq, e.quote FROM claims c
+         JOIN evidence e ON e.op_device = c.op_device AND e.op_seq = c.op_seq
+         WHERE c.uid = ?1 ORDER BY e.idx",
+    )?;
+    let quotes = st
+        .query_map([&uid], |r| {
+            Ok(Quote {
+                key: r.get(0)?,
+                text: redact::outbound(&r.get::<_, String>(1)?),
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut st = k.prepare(
+        "SELECT ts, tier, recipe, status, body FROM (
+           SELECT ts, tier, recipe, status, body, op_device, op_seq FROM derivations WHERE uid = ?1
+           UNION ALL
+           SELECT ts, NULL, NULL, status, body, op_device, op_seq FROM corrections WHERE uid = ?1)
+         ORDER BY ts, op_device, op_seq",
+    )?;
+    let history = st
+        .query_map([&uid], |r| {
+            Ok(Change {
+                ts: r.get(0)?,
+                tier: r.get(1)?,
+                recipe: r.get(2)?,
+                status: r.get(3)?,
+                body: r.get::<_, Option<String>>(4)?.map(|b| redact::outbound(&b)),
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    let repo: Option<String> = k
+        .query_row("SELECT repo FROM active WHERE uid = ?1", [&uid], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .flatten();
+    Ok(Some(ClaimView {
+        delivered: claims::delivered_one(&k, &uid)?.is_some(),
+        label: if on_this_device(&raw, &c.device, c.seq)? {
+            "citable"
+        } else {
+            "quote-only"
+        },
+        text: redact::outbound(&c.body),
+        repo: repo.map(|r| redact::outbound(&r)),
+        uid,
+        kind: c.kind,
+        status: c.status,
+        speaker: c.speaker,
+        scope: c.scope,
+        when: c.valid_from,
+        later: c.later,
+        supersedes,
+        ended_by,
+        quotes,
+        history,
+    }))
+}
+
 fn claim_text(raw: &Raw, k: &Connection, uid: &str) -> Result<Option<String>> {
     let Some(c) = claims::active_one(k, uid)? else {
         return Ok(None);
@@ -1358,15 +1494,20 @@ pub struct Item {
     pub repo: Option<String>,
     /// Through the egress gate, on one line.
     pub text: String,
+    /// `claim`, `imported` or `start`.
+    pub class: String,
 }
 
 /// Claims, imported documents and session starts in `repo` (every repository with `None`), the
-/// newest first: the `limit` newest, or with `anchor` (an id `get` takes) those around its time,
-/// half at or before it. A claim the worker has yet to apply an owner's change to is left out.
+/// newest first, by time and then key: the `limit` newest, those after `before` (the time and key
+/// of a page's last entry, the viewer's next page), or with `anchor` (an id `get` takes) those
+/// around its time, half at or before it. A claim the worker has yet to apply an owner's change to
+/// is left out.
 pub fn timeline(
     home: &Path,
     repo: Option<&str>,
     anchor: Option<&str>,
+    before: Option<(i64, String)>,
     limit: usize,
 ) -> Result<Vec<Item>> {
     if !crate::raw::exists(home) {
@@ -1381,23 +1522,25 @@ pub fn timeline(
     let pending = claims::Pending::read(&raw, &k)?;
     let [own, named] = repo.map(imported_repos).unwrap_or_default();
     let repo = repo.map(str::to_owned);
-    let items = "SELECT key, ts, kind, repo, text FROM (
+    let items = "SELECT key, ts, kind, repo, text, class FROM (
            SELECT a.uid AS key, a.valid_from AS ts, a.kind || ' ' || a.status AS kind,
-                  a.repo AS repo, a.body AS text
+                  a.repo AS repo, a.body AS text, 'claim' AS class
            FROM active a WHERE ?1 IS NULL OR a.repo = ?1
            UNION ALL
            SELECT i.uid, i.ts, i.kind, i.repo,
-                  CASE WHEN i.title <> '' THEN i.title ELSE i.body END
+                  CASE WHEN i.title <> '' THEN i.title ELSE i.body END, 'imported'
            FROM imported i WHERE (?1 IS NULL OR i.repo IN (?2, ?3))
              AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
            UNION ALL
            SELECT d.device || ':' || d.seq, d.ts, 'session start', d.repo,
-                  COALESCE(d.session, '')
+                  COALESCE(d.session, ''), 'start'
            FROM raw_docs d WHERE d.kind = 'start' AND (?1 IS NULL OR d.repo = ?1))";
     // Each key once (a document several devices imported is its newest row, as `imported_leg`
     // reads it). A claim with an owner's change still to apply is only hidden: the entries after
     // it fill its place (Codex on #306), read on in pages of `limit`.
-    let read = |sql: &str, at: i64| -> Result<Vec<Item>> {
+    // Entries strictly past (`at`, `key`) in the listing's order, the newest first and then by
+    // key: `key` is empty for an anchor, which keeps every entry of its time.
+    let read = |sql: &str, at: i64, key: &str| -> Result<Vec<Item>> {
         let mut st = k.prepare(sql)?;
         let mut out: Vec<Item> = Vec::new();
         for page in 0.. {
@@ -1408,7 +1551,8 @@ pub fn timeline(
                     named,
                     at,
                     super::sql_limit(limit),
-                    super::sql_limit(limit.saturating_mul(page))
+                    super::sql_limit(limit.saturating_mul(page)),
+                    key
                 ],
                 |r| {
                     Ok((
@@ -1417,13 +1561,14 @@ pub fn timeline(
                         r.get::<_, String>(2)?,
                         r.get::<_, Option<String>>(3)?,
                         r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
                     ))
                 },
             )?;
             let mut read = 0;
             for row in rows {
                 read += 1;
-                let (key, when, kind, repo, text) = row?;
+                let (key, when, kind, repo, text, class) = row?;
                 // A start raw no longer holds is left out before the index has caught up, as
                 // `get` leaves it out (Codex on #306).
                 if pending.touches(&k, &key)? || (kind == "session start" && !held(&raw, &key)?) {
@@ -1435,6 +1580,7 @@ pub fn timeline(
                     kind,
                     repo,
                     text: one_line(&redact::outbound(&text), 120),
+                    class,
                 });
             }
             if read < limit || out.len() >= limit {
@@ -1443,17 +1589,29 @@ pub fn timeline(
         }
         Ok(out)
     };
+    let (from, key) = match (at, before) {
+        (Some(at), _) => (at, String::new()),
+        (None, Some(page)) => page,
+        (None, None) => (i64::MAX, String::new()),
+    };
     let mut before = read(
-        &format!("{items} WHERE ts <= ?4 ORDER BY ts DESC, key LIMIT ?5 OFFSET ?6"),
-        at.unwrap_or(i64::MAX),
+        &format!(
+            "{items} WHERE ts < ?4 OR (ts = ?4 AND key > ?7)
+             ORDER BY ts DESC, key LIMIT ?5 OFFSET ?6"
+        ),
+        from,
+        &key,
     )?;
     let Some(at) = at else {
         before.truncate(limit);
         return Ok(before);
     };
     let mut after = read(
-        &format!("{items} WHERE ts > ?4 ORDER BY ts, key LIMIT ?5 OFFSET ?6"),
+        &format!(
+            "{items} WHERE ts > ?4 OR (ts = ?4 AND key < ?7) ORDER BY ts, key LIMIT ?5 OFFSET ?6"
+        ),
         at,
+        "",
     )?;
     // Half on each side, and what one side cannot fill to the other (Codex on #306).
     let later = after.len().min(limit - before.len().min(limit - limit / 2));
@@ -2052,7 +2210,7 @@ mod tests {
         let listed = get(home, &claim[..12]).unwrap().unwrap();
         assert!(listed.starts_with("2 claims start with"), "{listed}");
         // The timeline's anchor reads ids as `get` does: several claims are no anchor.
-        let anchor = timeline(home, None, Some(&claim[..12]), 5).unwrap_err();
+        let anchor = timeline(home, None, Some(&claim[..12]), None, 5).unwrap_err();
         assert!(
             format!("{anchor:#}").contains("2 claims start with"),
             "{anchor:#}"
@@ -2078,7 +2236,7 @@ mod tests {
         let last = s.decided(R, 3_000, "Last decision.", &[]);
         s.run();
         let home = s.home.path();
-        let all: Vec<String> = timeline(home, Some(R), None, 10)
+        let all: Vec<String> = timeline(home, Some(R), None, None, 10)
             .unwrap()
             .into_iter()
             .map(|i| i.key)
@@ -2087,13 +2245,13 @@ mod tests {
             all,
             [last.clone(), doc.clone(), first.clone(), s.key(started)]
         );
-        let around: Vec<String> = timeline(home, Some(R), Some(&doc), 2)
+        let around: Vec<String> = timeline(home, Some(R), Some(&doc), None, 2)
             .unwrap()
             .into_iter()
             .map(|i| i.key)
             .collect();
         assert_eq!(around, [last, doc]);
-        assert!(timeline(home, Some(R), Some("nope"), 2).is_err());
+        assert!(timeline(home, Some(R), Some("nope"), None, 2).is_err());
     }
 
     /// Codex on #306: a claim the worker has yet to apply a removal to is only hidden, so the claim
@@ -2182,7 +2340,7 @@ mod tests {
             seq: started,
         };
         s.raw.append_tombstone(target).unwrap();
-        let keys: Vec<String> = timeline(s.home.path(), Some(R), None, 10)
+        let keys: Vec<String> = timeline(s.home.path(), Some(R), None, None, 10)
             .unwrap()
             .into_iter()
             .map(|i| i.key)
@@ -2200,7 +2358,7 @@ mod tests {
             s.decided(R, 2_000 + i, &format!("Later decision {i}."), &[]);
         }
         s.run();
-        let around = timeline(s.home.path(), Some(R), Some(&oldest), 4).unwrap();
+        let around = timeline(s.home.path(), Some(R), Some(&oldest), None, 4).unwrap();
         assert_eq!(around.len(), 4);
         assert_eq!(around[3].key, oldest);
     }
@@ -2230,7 +2388,7 @@ mod tests {
             };
             s.raw.append_tombstone(target).unwrap();
         }
-        let keys: Vec<String> = timeline(s.home.path(), Some(R), None, 2)
+        let keys: Vec<String> = timeline(s.home.path(), Some(R), None, None, 2)
             .unwrap()
             .into_iter()
             .map(|i| i.key)
@@ -2698,7 +2856,12 @@ mod tests {
             }
         }
         s.run();
-        assert_eq!(timeline(s.home.path(), Some(R), None, 3).unwrap().len(), 3);
+        assert_eq!(
+            timeline(s.home.path(), Some(R), None, None, 3)
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     /// Codex on #306: a repository known only by its imported history's name is known, as the
