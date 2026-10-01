@@ -1,0 +1,21 @@
+docs/eval/inject.py
+  s_59cfa7617c8511::t_04dce2ea00c7ba 67,158-166,168,172,174,179,183,188,223-225,234,239-240,277,303
+docs/eval/test_inject.py
+  s_59cfa7617c8511::t_dae716f9168afd 1,173-176,236,241,273,300,340,353,384,388,410,425,434-436,438
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "89993c40a8547503900f7087fe359bb8127cab67",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
