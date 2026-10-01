@@ -667,12 +667,14 @@ pub fn timeline(
            UNION ALL
            SELECT i.uid, i.ts, i.kind, i.repo,
                   CASE WHEN i.title <> '' THEN i.title ELSE i.body END
-           FROM imported i WHERE ?1 IS NULL OR i.repo IN (?2, ?3)
+           FROM imported i WHERE (?1 IS NULL OR i.repo IN (?2, ?3))
+             AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
            UNION ALL
            SELECT d.device || ':' || d.seq, d.ts, 'session start', d.repo,
                   COALESCE(d.session, '')
            FROM raw_docs d WHERE d.kind = 'start' AND (?1 IS NULL OR d.repo = ?1))";
-    // Twice the rows: two devices' imports of a document are one entry.
+    // Each key once (a document several devices imported is its newest row, as `imported_leg`
+    // reads it), and twice the rows: a claim with an owner's change still to apply is left out.
     let read = |sql: &str, at: i64| -> Result<Vec<Item>> {
         let mut st = k.prepare(sql)?;
         let rows = st.query_map(
@@ -696,7 +698,7 @@ pub fn timeline(
         let mut out: Vec<Item> = Vec::new();
         for row in rows {
             let (key, when, kind, repo, text) = row?;
-            if out.iter().any(|i| i.key == key) || pending.touches(&k, &key)? {
+            if pending.touches(&k, &key)? {
                 continue;
             }
             out.push(Item {
@@ -757,11 +759,13 @@ pub fn known(home: &Path, repo: &str) -> Result<bool> {
     claims::schema(&k)?;
     crate::consumer::imported::schema(&k)?;
     crate::consumer::fts::schema(&k)?;
+    // Imported history under its claude-mem name too, as `imported_leg` and `timeline` search it.
+    let [own, named] = imported_repos(repo);
     Ok(k.query_row(
         "SELECT EXISTS (SELECT 1 FROM derivations WHERE repo = ?1)
-             OR EXISTS (SELECT 1 FROM imported WHERE repo = ?1)
+             OR EXISTS (SELECT 1 FROM imported WHERE repo IN (?1, ?2))
              OR EXISTS (SELECT 1 FROM raw_docs WHERE repo = ?1)",
-        [repo],
+        params![own, named],
         |r| r.get(0),
     )?)
 }
@@ -1303,5 +1307,36 @@ mod tests {
             .collect();
         assert_eq!(around, [last, doc]);
         assert!(timeline(home, Some(R), Some("nope"), 2).is_err());
+    }
+
+    /// Codex on #306: three devices' imports of a document are one entry before the limit, so the
+    /// timeline is not short.
+    #[test]
+    fn a_timeline_of_documents_imported_three_times_is_full() {
+        let mut s = Store::new();
+        for i in 0..3 {
+            for _ in 0..3 {
+                s.imported(
+                    &format!("o{i}"),
+                    "r",
+                    1_000 + i,
+                    "Note",
+                    "An imported note.",
+                );
+            }
+        }
+        s.run();
+        assert_eq!(timeline(s.home.path(), Some(R), None, 3).unwrap().len(), 3);
+    }
+
+    /// Codex on #306: a repository known only by its imported history's name is known, as the
+    /// imported leg and the timeline search it.
+    #[test]
+    fn a_repository_with_only_imported_history_is_known() {
+        let mut s = Store::new();
+        s.imported("o1", "r", 1_000, "Note", "An imported note.");
+        s.run();
+        assert!(known(s.home.path(), R).unwrap());
+        assert!(!known(s.home.path(), "github.com/o/other").unwrap());
     }
 }
