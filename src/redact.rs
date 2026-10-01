@@ -373,8 +373,13 @@ pub fn outbound_range(
     if range == (0..text.len()) {
         return outbound_with(text, rules);
     }
+    outbound_with(&masked_part(text, range, hidden), rules)
+}
+
+/// `text[range]` with each of `runs` (sorted, apart) replaced by one mask where it falls in it.
+fn masked_part(text: &str, range: std::ops::Range<usize>, runs: &[(usize, usize)]) -> String {
     let (mut part, mut pos) = (String::with_capacity(range.len()), range.start);
-    for &(s, e) in hidden {
+    for &(s, e) in runs {
         let (s, e) = (s.max(pos), e.min(range.end));
         if s < e {
             part.push_str(&text[pos..s]);
@@ -383,7 +388,7 @@ pub fn outbound_range(
         }
     }
     part.push_str(&text[pos..range.end]);
-    outbound_with(&part, rules)
+    part
 }
 
 /// The byte ranges of `text` that `outbound_with(text)` does not show: the blocks its block
@@ -391,33 +396,41 @@ pub fn outbound_range(
 /// sees it (blocks removed tag by tag, trimmed, then masked pass by pass) and given in `text`'s own
 /// offsets, sorted and merged. `None` when the gate masks the whole text.
 pub fn hidden(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
-    hidden_map(text, rules).map(|(.., runs)| runs)
+    let g = gated(text, rules)?;
+    Some(merged_runs([g.blocks, g.masks].concat()))
 }
 
-/// What the gate shows of a text, for each of its bytes the range of the text it stands for, and
-/// the ranges it hides (`hidden`).
-type Shown = (String, Vec<(usize, usize)>, Vec<(usize, usize)>);
+/// A text as the gate sees it: `plain` is what it scans (blocks removed tag by tag, trimmed,
+/// nothing masked yet) and `shown` what it shows (`plain` masked pass by pass), each with, for each
+/// of its bytes, the range of the text it stands for; `blocks` and `masks` are the ranges of the
+/// text its block removal and its scan hide.
+struct Gated {
+    plain: (String, Vec<(usize, usize)>),
+    shown: (String, Vec<(usize, usize)>),
+    blocks: Vec<(usize, usize)>,
+    masks: Vec<(usize, usize)>,
+}
 
-fn hidden_map(text: &str, rules: &Rules) -> Option<Shown> {
+fn gated(text: &str, rules: &Rules) -> Option<Gated> {
     // The text as the gate sees it, and for each of its bytes the range of `text` it stands for.
     let mut work = text.to_owned();
     let mut from: Vec<(usize, usize)> = (0..text.len()).map(|i| (i, i + 1)).collect();
-    let mut hidden = Vec::new();
+    let mut blocks = Vec::new();
     for tag in crate::hook::STRIP_BLOCKS {
-        let blocks = if *tag == "claude-mem-context" {
+        let found = if *tag == "claude-mem-context" {
             crate::hook::memory_context_blocks(&work)
         } else {
             crate::hook::tag_blocks(&work, tag, false).0
         };
         let (mut next, mut next_from, mut pos) = (String::new(), Vec::new(), 0);
-        for (s, e) in blocks {
+        for (s, e) in found {
             if s < pos {
                 continue; // inside a block already taken
             }
             next.push_str(&work[pos..s]);
             next_from.extend_from_slice(&from[pos..s]);
             if s < e {
-                hidden.push((from[s].0, from[e - 1].1));
+                blocks.push((from[s].0, from[e - 1].1));
             }
             pos = e;
         }
@@ -427,8 +440,9 @@ fn hidden_map(text: &str, rules: &Rules) -> Option<Shown> {
     }
     let start = work.len() - work.trim_start().len();
     let end = work.trim_end().len().max(start);
-    let (mut work, mut from) = (work[start..end].to_owned(), from[start..end].to_vec());
-    let mut found = 0;
+    let plain = (work[start..end].to_owned(), from[start..end].to_vec());
+    let (mut work, mut from) = plain.clone();
+    let (mut masks, mut found) = (Vec::new(), 0);
     for pass in 0..=MAX_PASSES + 1 {
         let again = spans(&work, rules);
         if again.is_empty() {
@@ -442,10 +456,8 @@ fn hidden_map(text: &str, rules: &Rules) -> Option<Shown> {
         for (s, e) in merged(&again) {
             next.push_str(&work[pos..s]);
             next_from.extend_from_slice(&from[pos..s]);
-            let run = from[s..e]
-                .iter()
-                .fold((usize::MAX, 0), |(a, b), &(x, y)| (a.min(x), b.max(y)));
-            hidden.push(run);
+            let run = hull(&from[s..e]);
+            masks.push(run);
             next.push_str(MASK);
             next_from.extend(std::iter::repeat_n(run, MASK.len()));
             pos = e;
@@ -457,27 +469,54 @@ fn hidden_map(text: &str, rules: &Rules) -> Option<Shown> {
         }
         (work, from) = (next, next_from);
     }
-    Some((work, from, merged_runs(hidden)))
+    Some(Gated {
+        plain,
+        shown: (work, from),
+        blocks,
+        masks,
+    })
 }
 
-/// The byte ranges of `text` that `outbound_lines(text)` does not show: `hidden`'s, and what its
-/// line pass hides in each line of what the gate shows (where a removed block may have joined two
-/// lines), mapped back to `text`. Unmerged.
-fn hidden_lines(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
-    let (shown, from, mut runs) = hidden_map(text, rules)?;
-    let mut at = 0;
-    for line in shown.split('\n') {
-        for (s, e) in hidden(line, rules)? {
-            let run = from[at + s..at + e]
-                .iter()
-                .fold((usize::MAX, 0), |(a, b), &(x, y)| (a.min(x), b.max(y)));
-            if run.0 < run.1 {
-                runs.push(run);
+/// Byte ranges of a text.
+type Runs = Vec<(usize, usize)>;
+
+/// The smallest range of the text that holds each of `from`'s.
+fn hull(from: &[(usize, usize)]) -> (usize, usize) {
+    from.iter()
+        .fold((usize::MAX, 0), |(a, b), &(x, y)| (a.min(x), b.max(y)))
+}
+
+/// What `outbound_lines(text)` hides of `text`, in its offsets, unmerged: the blocks the gate
+/// removes, and as masks what its scan hides and what its line pass hides in each line, both of
+/// what the gate scans (before any mask, so a mask from a rule that spans two lines takes no
+/// context a rule anchored to the next line needs: #315) and of what it shows (as the line pass saw
+/// it before #315, so nothing it hid then is shown now).
+fn hidden_lines(text: &str, rules: &Rules) -> Option<(Runs, Runs)> {
+    let Gated {
+        plain,
+        shown,
+        blocks,
+        mut masks,
+    } = gated(text, rules)?;
+    // Where the whole pass masked nothing, what it shows is what it scans: one sweep.
+    let views = if masks.is_empty() {
+        vec![plain]
+    } else {
+        vec![plain, shown]
+    };
+    for (view, from) in views {
+        let mut at = 0;
+        for line in view.split('\n') {
+            for (s, e) in hidden(line, rules)? {
+                let run = hull(&from[at + s..at + e]);
+                if run.0 < run.1 {
+                    masks.push(run);
+                }
             }
+            at += line.len() + 1;
         }
-        at += line.len() + 1;
     }
-    Some(runs)
+    Some((blocks, masks))
 }
 
 /// v1's import into oboete.db (`hook::clip`): the bundled rules only. Hooks go through
@@ -1014,12 +1053,23 @@ pub fn outbound_lines(text: &str) -> String {
     }
 }
 
+/// What the whole text's pass and each line's pass hide (`hidden_lines`: each line both before
+/// and after the whole pass's masks), masked at once, then a rescan, whole and line by line, which
+/// can only add masks: a mask from a rule that spans two lines takes no context a rule anchored to
+/// a line needs on the next one (#315), and nothing the line pass hid before is shown.
 fn lines_with(text: &str, rules: &Rules) -> String {
-    outbound_with(text, rules)
-        .split('\n')
-        .map(|line| outbound_with(line, rules))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let Some((_, masks)) = hidden_lines(text, rules) else {
+        return MASK.to_string();
+    };
+    // The blocks stay for the gate to remove, once, as `outbound_with` does.
+    outbound_with(
+        &masked_part(text, 0..text.len(), &merged_runs(masks)),
+        rules,
+    )
+    .split('\n')
+    .map(|line| outbound_with(line, rules))
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 /// `outbound_lines` of a text joined from `parts` (byte ranges of it: an imported document's
@@ -1041,14 +1091,7 @@ fn joined_with(text: &str, parts: &[std::ops::Range<usize>], rules: &Rules) -> S
     let Some(runs) = hidden_views(text, views, rules) else {
         return MASK.to_string();
     };
-    let (mut masked, mut pos) = (String::with_capacity(text.len()), 0);
-    for (s, e) in runs {
-        masked.push_str(&text[pos..s]);
-        masked.push_str(MASK);
-        pos = e;
-    }
-    masked.push_str(&text[pos..]);
-    lines_with(&masked, rules)
+    lines_with(&masked_part(text, 0..text.len(), &runs), rules)
 }
 
 /// What `outbound_lines` hides in each of `views` (byte ranges of `text`) gated alone, found on
@@ -1061,12 +1104,9 @@ fn hidden_views(
 ) -> Option<Vec<(usize, usize)>> {
     let mut runs = Vec::new();
     for view in views {
-        let found = hidden_lines(&text[view.clone()], rules)?;
-        runs.extend(
-            found
-                .into_iter()
-                .map(|(s, e)| (view.start + s, view.start + e)),
-        );
+        let (blocks, masks) = hidden_lines(&text[view.clone()], rules)?;
+        let found = blocks.into_iter().chain(masks);
+        runs.extend(found.map(|(s, e)| (view.start + s, view.start + e)));
     }
     Some(merged_runs(runs))
 }
@@ -1090,8 +1130,10 @@ pub fn outbound_quote(text: &str, range: std::ops::Range<usize>) -> String {
 }
 
 fn quote_with(text: &str, range: std::ops::Range<usize>, rules: &Rules) -> String {
-    let runs = hidden_views(text, [0..text.len(), range.clone()], rules);
-    lines_with(&outbound_range(text, range, runs.as_deref(), rules), rules)
+    match hidden_views(text, [0..text.len(), range.clone()], rules) {
+        Some(runs) => lines_with(&masked_part(text, range, &runs), rules),
+        None => MASK.to_string(),
+    }
 }
 
 /// The egress gate on a stored body, field by field as capture scanned it.
@@ -1728,6 +1770,90 @@ mod tests {
         let at = record.find("otp=").unwrap();
         let quote = quote_with(record, at..at + 10, &around);
         assert_eq!(quote, format!("otp={MASK}"));
+    }
+
+    /// #315 (Codex's security review of Task 7, on 3d9c958): each pass of `outbound_lines` finds
+    /// what it hides on the untouched text, so a mask from a rule that spans two lines takes no
+    /// context a line-anchored rule needs on the next line, in a quote and a joined text too.
+    #[test]
+    fn a_line_rule_keeps_its_context_when_a_rule_spans_two_lines() {
+        let rules = user(
+            r#"[redaction]
+extra_rules = [
+  { id = "owner", regex = 'owner\n(ACME)', secret_group = 1 },
+  { id = "otp", regex = '^ACME otp=([0-9]{6})$', secret_group = 1 },
+]
+"#,
+        )
+        .unwrap();
+        let text = "owner\nACME otp=654321";
+        let shown = format!("owner\n{MASK} otp={MASK}");
+        assert_eq!(lines_with(text, &rules), shown);
+        assert_eq!(joined_with(text, &[0..5, 6..text.len()], &rules), shown);
+        let quote = quote_with(text, 6..text.len(), &rules);
+        assert_eq!(quote, format!("{MASK} otp={MASK}"));
+        // A document gated whole, a quote of the code alone, and a quote of the whole record
+        // (Codex's security review of 81f12d8).
+        assert_eq!(joined_with(text, &[], &rules), shown);
+        assert_eq!(quote_with(text, 15..21, &rules), MASK);
+        assert_eq!(quote_with(text, 0..text.len(), &rules), shown);
+    }
+
+    /// Codex's security review of 81f12d8: a line rule that matches the whole pass's masks, as the
+    /// line pass saw them before #315, still hides what it hid then, beside what each line's
+    /// untouched text hides.
+    #[test]
+    fn a_line_rule_on_the_masked_text_still_hides_what_it_hid() {
+        let masked = regex::escape(MASK);
+        let rules = user(&format!(
+            r#"[redaction]
+extra_rules = [
+  {{ id = "owner", regex = 'owner\n(ACME)', secret_group = 1 }},
+  {{ id = "flag", regex = '^ACME (flag) otp=[0-9]{{6}}$', secret_group = 1 }},
+  {{ id = "otp", regex = '^{masked} flag otp=([0-9]{{6}})$', secret_group = 1 }},
+]
+"#
+        ))
+        .unwrap();
+        let text = "owner\nACME flag otp=654321";
+        let shown = format!("owner\n{MASK} {MASK} otp={MASK}");
+        assert_eq!(lines_with(text, &rules), shown);
+        assert_eq!(joined_with(text, &[], &rules), shown);
+        assert_eq!(quote_with(text, 20..26, &rules), MASK);
+    }
+
+    /// Codex's security review of 81f12d8: the line gate removes blocks once, as the gate does, so
+    /// a block that taking out another reveals keeps the words a rule needs for the whole pass.
+    #[test]
+    fn the_line_gate_removes_blocks_once() {
+        let rules = user(
+            r#"[redaction]
+extra_rules = [
+  { id = "ctx", regex = 'CTX</ide_opened_file> otp=([0-9]{6})', secret_group = 1 },
+]
+"#,
+        )
+        .unwrap();
+        // A quote or a part that cuts a block keeps it hidden: alone, its closer pairs with nothing.
+        let text = "a <private>code 1234</private> b";
+        let inside = text.find("1234").unwrap();
+        for shown in [
+            quote_with(text, inside..text.len(), &rules),
+            joined_with(text, &[0..2, inside..text.len()], &rules),
+        ] {
+            assert!(!shown.contains("1234"), "{shown}");
+        }
+        let text = "<ide_opened_file<private>x</private>>CTX</ide_opened_file> otp=654321";
+        assert!(outbound_with(text, &rules).ends_with(&format!("otp={MASK}")));
+        let at = text.len() - 6;
+        for shown in [
+            lines_with(text, &rules),
+            joined_with(text, &[], &rules),
+            quote_with(text, 0..text.len(), &rules),
+            quote_with(text, at..text.len(), &rules),
+        ] {
+            assert!(!shown.contains("654321"), "{shown}");
+        }
     }
 
     fn sha(v: &str) -> String {
