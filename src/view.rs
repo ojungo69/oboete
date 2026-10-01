@@ -1853,7 +1853,8 @@ mod tests {
             })
             .collect();
         serde_json::to_vec(&json!({"version": shown["version"],
-            "inject": {"session_start": false, "session_start_chars": 6000},
+            "inject": {"session_start": false, "session_start_chars": 6000, "per_prompt": false,
+                "per_prompt_chars": 1500, "correction": true, "correction_chars": 800},
             "capture": shown["capture"], "chain": chain}))
         .unwrap()
     }

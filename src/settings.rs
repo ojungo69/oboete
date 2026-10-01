@@ -35,7 +35,6 @@ fn invalid() -> Refusal {
     refused(422, "file_invalid", "")
 }
 
-const CHARS: std::ops::RangeInclusive<usize> = 1_000..=crate::consumer::manifest::CAP;
 const BUDGET: std::ops::RangeInclusive<u32> = 1..=100_000;
 const TIMEOUT_S: std::ops::RangeInclusive<u64> = 5..=900;
 const MODEL_CHARS: usize = 200;
@@ -123,6 +122,10 @@ pub fn show(home: &Path) -> Value {
         "inject": {
             "session_start": inject.session_start,
             "session_start_chars": inject.session_start_chars,
+            "per_prompt": inject.per_prompt,
+            "per_prompt_chars": inject.per_prompt_chars,
+            "correction": inject.correction,
+            "correction_chars": inject.correction_chars,
         },
         "capture": {
             "store_prompts": capture.store_prompts,
@@ -134,11 +137,17 @@ pub fn show(home: &Path) -> Value {
         "warnings": cfg.warnings,
         // The page checks and words its fields by these, so they are stated once.
         "ranges": {
-            "session_start_chars": [CHARS.start(), CHARS.end()],
+            "session_start_chars": range(config::SESSION_START_CHARS),
+            "per_prompt_chars": range(config::PER_PROMPT_CHARS),
+            "correction_chars": range(config::CORRECTION_CHARS),
             "daily_budget": [BUDGET.start(), BUDGET.end()],
             "timeout_s": [TIMEOUT_S.start(), TIMEOUT_S.end()],
         },
     })
+}
+
+fn range(r: std::ops::RangeInclusive<usize>) -> [usize; 2] {
+    [*r.start(), *r.end()]
 }
 
 fn tool_output(t: ToolOutput) -> &'static str {
@@ -265,6 +274,10 @@ struct Save {
 struct InjectIn {
     session_start: bool,
     session_start_chars: usize,
+    per_prompt: bool,
+    per_prompt_chars: usize,
+    correction: bool,
+    correction_chars: usize,
 }
 
 #[derive(Deserialize)]
@@ -371,16 +384,35 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
     // The order changes when the chain's does, not when `order` would be spelled another way.
     let reordered = !(posted.chain.iter().map(|e| e.name.as_str())).eq(names(&now.providers));
     let i = &posted.inject;
-    if i.session_start != inject.session_start {
-        put(&mut doc, "inject", "session_start", i.session_start.into());
+    for (key, now, was) in [
+        ("session_start", i.session_start, inject.session_start),
+        ("per_prompt", i.per_prompt, inject.per_prompt),
+        ("correction", i.correction, inject.correction),
+    ] {
+        if now != was {
+            put(&mut doc, "inject", key, now.into());
+        }
     }
-    if i.session_start_chars != inject.session_start_chars {
-        put(
-            &mut doc,
-            "inject",
+    for (key, now, was) in [
+        (
             "session_start_chars",
-            (i.session_start_chars as i64).into(),
-        );
+            i.session_start_chars,
+            inject.session_start_chars,
+        ),
+        (
+            "per_prompt_chars",
+            i.per_prompt_chars,
+            inject.per_prompt_chars,
+        ),
+        (
+            "correction_chars",
+            i.correction_chars,
+            inject.correction_chars,
+        ),
+    ] {
+        if now != was {
+            put(&mut doc, "inject", key, (now as i64).into());
+        }
     }
     let c = &posted.capture;
     if c.store_prompts != capture.store_prompts {
@@ -446,9 +478,27 @@ struct Chain {
 /// or the entries are not the chain's; each value equal to the entry's own is left out. `now` is
 /// the file as it applies before the save.
 fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result<Chain, Refusal> {
-    let chars = posted.inject.session_start_chars;
-    if !CHARS.contains(&chars) {
-        return Err(refused(422, "range", "inject.session_start_chars"));
+    let i = &posted.inject;
+    for (field, value, range) in [
+        (
+            "inject.session_start_chars",
+            i.session_start_chars,
+            config::SESSION_START_CHARS,
+        ),
+        (
+            "inject.per_prompt_chars",
+            i.per_prompt_chars,
+            config::PER_PROMPT_CHARS,
+        ),
+        (
+            "inject.correction_chars",
+            i.correction_chars,
+            config::CORRECTION_CHARS,
+        ),
+    ] {
+        if !range.contains(&value) {
+            return Err(refused(422, "range", field));
+        }
     }
     // Each name once, as the page shows it.
     let order: Vec<String> = posted.chain.iter().map(|e| e.name.clone()).collect();
@@ -1104,6 +1154,43 @@ mod tests {
         );
     }
 
+    /// Task 8: the prompt's injection and its corrections are shown with their ranges, saved
+    /// alone, and refused out of range by name.
+    #[test]
+    fn inject_settings_check_ranges_and_save_alone() {
+        let home = home_with(None);
+        let shown = show(home.path());
+        assert_eq!(
+            shown["inject"],
+            json!({"session_start": true, "session_start_chars": 6000, "per_prompt": false,
+                "per_prompt_chars": 1500, "correction": true, "correction_chars": 800})
+        );
+        assert_eq!(shown["ranges"]["per_prompt_chars"], json!([500, 6000]));
+        assert_eq!(shown["ranges"]["correction_chars"], json!([300, 3000]));
+        save_to(
+            &home,
+            &posted(&shown, |v| {
+                v["inject"]["per_prompt"] = json!(true);
+                v["inject"]["correction_chars"] = json!(1200);
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            file(&home).as_deref(),
+            Some("[inject]\nper_prompt = true\ncorrection_chars = 1200\n")
+        );
+        let i = config::inject(home.path()).unwrap();
+        assert!(i.per_prompt && i.correction_chars == 1_200);
+        for (key, bad) in [("per_prompt_chars", 499), ("correction_chars", 3_001)] {
+            let shown = show(home.path());
+            let r = save_to(&home, &posted(&shown, |v| v["inject"][key] = json!(bad))).unwrap_err();
+            assert_eq!(
+                (r.status, r.code, r.field),
+                (422, "range", format!("inject.{key}"))
+            );
+        }
+    }
+
     /// No file: the page shows the defaults and a save makes a file with only what it changes.
     #[test]
     fn a_save_without_a_file_makes_one() {
@@ -1473,7 +1560,8 @@ mod tests {
             let shown = show(home.path());
             assert_eq!(shown["error"], "file_invalid", "{text}");
             let body = json!({"version": shown["version"], "inject": {"session_start": true,
-                "session_start_chars": 6000}, "capture": {"store_prompts": true,
+                "session_start_chars": 6000, "per_prompt": false, "per_prompt_chars": 1500,
+                "correction": true, "correction_chars": 800}, "capture": {"store_prompts": true,
                 "tool_output": "full"}, "chain": []});
             let r = save_to(&home, &serde_json::to_vec(&body).unwrap()).unwrap_err();
             assert_eq!((r.status, r.code), (422, "file_invalid"), "{text}");

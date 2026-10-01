@@ -345,6 +345,16 @@ const TEXT = {
   ],
   inject_on: ['Give agents the summary of your memory', 'エージェントに記憶のまとめを渡す'],
   inject_chars: ['Size in characters ({min} to {max})', '大きさ(文字数、{min}〜{max})'],
+  per_prompt_on: [
+    'Also give the decisions that match each prompt (off until it has been measured)',
+    'プロンプトごとに、関係する決定も渡す(測定が済むまでは切)',
+  ],
+  per_prompt_chars: ['Their size in characters ({min} to {max})', 'その大きさ(文字数、{min}〜{max})'],
+  correction_on: [
+    'Tell the agent at the next prompt when a decision it was given has changed',
+    '渡した決定が変わったときは、次のプロンプトでエージェントに伝える',
+  ],
+  correction_chars: ['Its size in characters ({min} to {max})', 'その大きさ(文字数、{min}〜{max})'],
   capture_h: ['Recording', '記録'],
   capture_desc: ['What is recorded from each session.', '各セッションから記録する内容です。'],
   store_prompts: ['Keep the text of your prompts', 'プロンプトの本文を保存する'],
@@ -513,13 +523,15 @@ function t(key, vars = {}) {
 
 // The form's values between redraws: a language switch or a move keeps what is not saved yet.
 let form = null;
+// `[inject]`'s sizes, each checked against the range the server states for it.
+const SIZES = ['session_start_chars', 'per_prompt_chars', 'correction_chars'];
 
 function formOf(s) {
   if (s.error) return null;
   const text = (v) => (v === null || v === undefined ? '' : String(v));
   return {
     version: s.version,
-    inject: { ...s.inject, session_start_chars: String(s.inject.session_start_chars) },
+    inject: { ...s.inject, ...Object.fromEntries(SIZES.map((k) => [k, String(s.inject[k])])) },
     capture: { ...s.capture },
     chain: s.chain.map((e) => ({
       ...e,
@@ -707,8 +719,11 @@ function chainRow(r, i, redraw) {
 // The save's body, or the field a value is wrong in.
 function saveBody() {
   const whole = (v, min, max) => (/^\d+$/.test(v.trim()) && Number(v) >= min && Number(v) <= max ? Number(v) : Number.NaN);
-  const chars = whole(form.inject.session_start_chars, ...form.ranges.session_start_chars);
-  if (Number.isNaN(chars)) return { field: 'inject.session_start_chars' };
+  const sizes = {};
+  for (const key of SIZES) {
+    sizes[key] = whole(form.inject[key], ...form.ranges[key]);
+    if (Number.isNaN(sizes[key])) return { field: `inject.${key}` };
+  }
   const chain = [];
   for (const r of form.chain) {
     // Empty follows the curator's own value; a value config.toml has already stays as it is.
@@ -727,7 +742,12 @@ function saveBody() {
   return {
     body: {
       version: form.version,
-      inject: { session_start: form.inject.session_start, session_start_chars: chars },
+      inject: {
+        session_start: form.inject.session_start,
+        per_prompt: form.inject.per_prompt,
+        correction: form.inject.correction,
+        ...sizes,
+      },
       capture: { store_prompts: form.capture.store_prompts, tool_output: form.capture.tool_output },
       chain,
     },
@@ -810,9 +830,13 @@ function drawSettings() {
     return;
   }
   const f = form;
-  const chars = input('number', f.inject.session_start_chars, '', 'inject.session_start_chars', (v) => { f.inject.session_start_chars = v; });
-  const [least, most] = f.ranges.session_start_chars;
-  [chars.min, chars.max] = [least, most];
+  const size = (key, label) => {
+    const i = input('number', f.inject[key], '', `inject.${key}`, (v) => { f.inject[key] = v; });
+    const [least, most] = f.ranges[key];
+    [i.min, i.max] = [least, most];
+    return el('label', 'field', el('span', null, t(label, { min: least.toLocaleString('en-US'), max: most.toLocaleString('en-US') })), i);
+  };
+  const flag = (key, label) => el('label', 'check', checkbox(f.inject[key], (v) => { f.inject[key] = v; }), t(label));
   const tool = el('select', null, ...['full', 'head-tail'].map((v) => {
     const o = el('option', null, t(v === 'full' ? 'tool_full' : 'tool_head_tail'));
     o.value = v;
@@ -834,8 +858,9 @@ function drawSettings() {
     el('section', null,
       el('h3', null, t('inject_h')),
       el('p', 'desc', t('inject_desc')),
-      el('label', 'check', checkbox(f.inject.session_start, (v) => { f.inject.session_start = v; }), t('inject_on')),
-      el('label', 'field', el('span', null, t('inject_chars', { min: least.toLocaleString('en-US'), max: most.toLocaleString('en-US') })), chars)),
+      flag('session_start', 'inject_on'), size('session_start_chars', 'inject_chars'),
+      flag('per_prompt', 'per_prompt_on'), size('per_prompt_chars', 'per_prompt_chars'),
+      flag('correction', 'correction_on'), size('correction_chars', 'correction_chars')),
     el('section', null,
       el('h3', null, t('capture_h')),
       el('p', 'desc', t('capture_desc')),
