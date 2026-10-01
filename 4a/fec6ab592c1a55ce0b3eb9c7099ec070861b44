@@ -1,0 +1,30 @@
+docs/eval/test_hooks.py
+  s_aef29e4b705537::t_530a60404d9876 294-310
+  s_aef29e4b705537::t_e183dcf316821c 1,117
+  s_aef29e4b705537::t_0d76d58886ea37 34,91,95-96,369,381-392
+  s_aef29e4b705537::t_7779539342d101 72-89,92-94,98-116,118-245,261-291
+  s_aef29e4b705537::t_f815f81db3076a 2-33,35-71
+  s_aef29e4b705537::t_bcd0852e000a3e 90,246-260
+  s_aef29e4b705537::t_2cfabdfb72b447 97,292-293,311-368,370-380,393-441
+docs/eval/hooks.py
+  s_aef29e4b705537::t_e183dcf316821c 26,57-58,124
+  s_aef29e4b705537::t_7779539342d101 40
+  s_aef29e4b705537::t_530a60404d9876 65-68
+  s_aef29e4b705537::t_dde32589654d80 1-25,27-39,41-56,59-64,69-123,125-300
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4afec6ab592c1a55ce0b3eb9c7099ec070861b44",
+  "prompts": {},
+  "sessions": {
+    "s_aef29e4b705537": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f849-41c4-7dd1-968e-4e6cc93dd261",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
