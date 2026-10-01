@@ -39,9 +39,13 @@ fn schema(k: &Connection) -> Result<()> {
            agent TEXT NOT NULL, session TEXT NOT NULL, repo TEXT NOT NULL, branch TEXT NOT NULL,
            -- The session's last event the build read.
            built_seq INTEGER NOT NULL,
-           -- When its query vector was last asked for (unix ms), 0 never.
-           vector_at INTEGER NOT NULL DEFAULT 0,
            PRIMARY KEY (agent, session, repo, branch)
+         );
+         -- When a session last asked for a query vector (unix ms), kept apart from its keys, whose
+         -- rows go when it ends or moves, until `VECTOR_EVERY` has passed.
+         CREATE TABLE IF NOT EXISTS shortlist_asks(
+           agent TEXT NOT NULL, session TEXT NOT NULL, at INTEGER NOT NULL,
+           PRIMARY KEY (agent, session)
          );
          CREATE TABLE IF NOT EXISTS shortlist(
            agent TEXT NOT NULL, session TEXT NOT NULL, repo TEXT NOT NULL, branch TEXT NOT NULL,
@@ -154,15 +158,15 @@ impl Builder {
             let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
             let claims =
                 crate::search::b::delivered_ranked(raw, k, &refs, vector, &key.repo, SHORT)?;
-            let mut asked = vector_at(k, key)?;
+            let mut asked = false;
             if let Some(e) = embed.as_deref_mut()
                 && vector.is_none()
                 && !excluded
                 && !text.is_empty()
-                && now - asked >= VECTOR_EVERY
+                && now - asked_at(k, key)? >= VECTOR_EVERY
                 && e.ask(k, &id, &text, &reading)?
             {
-                asked = now;
+                asked = true;
             }
             built.push((key, claims, asked));
         }
@@ -176,6 +180,10 @@ impl Builder {
             .optional()?
             .is_some();
         let tx = k.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM shortlist_asks WHERE at <= ?1",
+            [now - VECTOR_EVERY],
+        )?;
         let mut dropped = 0;
         if !rebuilding {
             let rows: Vec<(String, String, String, String)> = tx
@@ -222,20 +230,18 @@ impl Builder {
                 )?;
             }
             tx.execute(
-                "INSERT INTO shortlists(agent, session, repo, branch, built_seq, vector_at)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO shortlists(agent, session, repo, branch, built_seq)
+                 VALUES(?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(agent, session, repo, branch) DO UPDATE SET
-                   built_seq = excluded.built_seq,
-                   vector_at = MAX(vector_at, excluded.vector_at)",
-                params![
-                    key.agent,
-                    key.session,
-                    key.repo,
-                    key.branch,
-                    key.last,
-                    asked
-                ],
+                   built_seq = excluded.built_seq",
+                params![key.agent, key.session, key.repo, key.branch, key.last],
             )?;
+            if *asked {
+                tx.execute(
+                    "INSERT OR REPLACE INTO shortlist_asks(agent, session, at) VALUES(?1, ?2, ?3)",
+                    params![key.agent, key.session, now],
+                )?;
+            }
         }
         tx.commit()?;
         Ok(if built.is_empty() && dropped == 0 {
@@ -289,14 +295,16 @@ fn keys(raw: &Raw, k: &Connection, now: i64) -> Result<Vec<Key>> {
     Ok(out)
 }
 
-/// When `key`'s session last asked for a query vector, on any of its checkouts, 0 never: a key
-/// built keeps it, so a session that moves between branches asks no more often.
-fn vector_at(k: &Connection, key: &Key) -> Result<i64> {
+/// When `key`'s session last asked for a query vector in the last `VECTOR_EVERY`, on any of its
+/// checkouts and across an end and a resume, 0 never.
+fn asked_at(k: &Connection, key: &Key) -> Result<i64> {
     Ok(k.query_row(
-        "SELECT COALESCE(MAX(vector_at), 0) FROM shortlists WHERE agent = ?1 AND session = ?2",
+        "SELECT at FROM shortlist_asks WHERE agent = ?1 AND session = ?2",
         params![key.agent, key.session],
         |r| r.get(0),
-    )?)
+    )
+    .optional()?
+    .unwrap_or(0))
 }
 
 /// Whether `key` is built now: it has no row; its session's records went back past its build (a
@@ -954,11 +962,11 @@ mod tests {
         assert_eq!(queries(&s), 1);
     }
 
-    /// D9: a session that moves to another branch and back asks for its query vector no more
-    /// often than every `VECTOR_EVERY`: each key built keeps the session's last ask (Codex's
-    /// security review of Step 4).
+    /// D9: a session that moves to another branch and back, or ends and resumes, asks for its
+    /// query vector no more often than every `VECTOR_EVERY`: the ask is kept apart from the keys,
+    /// whose rows go (Codex's security review of Step 4).
     #[test]
-    fn a_session_moving_between_branches_asks_no_sooner() {
+    fn a_session_moving_or_resumed_asks_no_sooner() {
         let stub = Stub::start();
         let mut s = Store::new();
         s.decided(R, MIN, "Parser errors go to stderr.", &[]);
@@ -994,6 +1002,22 @@ mod tests {
             assert_eq!(keys_built(&k), [key("live", branch)]);
             assert_eq!(queries(&s), 1, "{branch}");
         }
+        s.event("end", "live", (R, "main"), NOW - 2 * MIN, json!({}));
+        s.run();
+        let now = NOW + 3 * MIN;
+        assert_eq!(
+            b.run(&s.raw, &mut k, Some(&mut phase), now).unwrap(),
+            Phase::Covered
+        );
+        assert!(keys_built(&k).is_empty());
+        s.event("prompt", "live", (R, "main"), NOW - MIN, ask);
+        s.run();
+        assert_eq!(
+            b.run(&s.raw, &mut k, Some(&mut phase), now + MIN).unwrap(),
+            Phase::Covered
+        );
+        assert_eq!(keys_built(&k), [key("live", "main")]);
+        assert_eq!(queries(&s), 1, "resumed");
     }
 
     /// Rows 55-1 and 55-7 (D8, D9): while the embedder holds a key's query, the key is built from

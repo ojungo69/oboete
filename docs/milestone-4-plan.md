@@ -474,7 +474,7 @@ As built in #309, whose description lists where it differs from the steps below;
 
 **Interfaces:**
 - `search::b::delivered_ranked(raw, k, texts: &[&str], vector: Option<&[f32]>, repo, depth) -> Result<Vec<Claim>>`: `DECIDED` delivered claims: a full-text list per text and the vector list fused by RRF, `Pending` out; no schema write.
-- knowledge.db `shortlists(agent, session, repo, branch, built_seq, vector_at)`, `shortlist(session, repo, branch, rank, uid)`: at most 50 per key.
+- knowledge.db `shortlists(agent, session, repo, branch, built_seq)`, `shortlist_asks(agent, session, at)`, `shortlist(session, repo, branch, rank, uid)`: at most 50 per key.
 - `shortlist::Builder::run(&mut self, raw, k: &mut Connection, embed: Option<&mut embed_phase::Phase>, now) -> Result<curate::Phase>`: a key's query vector comes from `embed_phase::Phase::ask` (D8).
 - `worker::Phases { embed, shortlist, curation }`, run in that order in each round of `serve`.
 - `shortlist::pick(raw, k, candidates: &[String], texts: &[&str], threshold) -> Result<Vec<Vec<Claim>>>`: units whose body holds `threshold` of a text's trigrams (`trigrams_upto(text, 256)`), in `PLACES` (3).
