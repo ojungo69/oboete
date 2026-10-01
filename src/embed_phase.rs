@@ -211,9 +211,11 @@ impl Phase {
             .providers()
             .and_then(|db| reserve(db, ROLE, &span, &texts, cap, cfg.monthly_usd));
         let call = match reserved {
-            Ok(Some(call)) => call,
-            // Another process took the last of the cap meanwhile.
-            Ok(None) => return Ok(self.held_back(&cfg).ok().flatten().unwrap_or(Step::Idle)),
+            Ok(Ok(call)) => call,
+            Ok(Err(until)) => {
+                let up = until.saturating_sub(crate::db::now_ms()) <= crate::curate::STAY_UP_MS;
+                return Ok(Step::Waiting { until, up });
+            }
             Err(e) => {
                 eprintln!("oboete: no embedding for now: {e:#}");
                 return Ok(Step::Idle);
@@ -576,10 +578,12 @@ fn carry_quarantined(home: &Path, k: &Connection) -> Result<()> {
     checkpoint::set_in(k, checkpoint::SEQS, "carried", "", at)
 }
 
-/// A request counted before it is sent (Step 7): in one write transaction, unless the day's
-/// requests reached `cap` or the month's USD `monthly_usd`, a row that counts as sent and billed as
-/// estimated until `providers_db::settle` says what became of it. A process that dies first leaves
-/// it counted, and one that checks meanwhile (the CLI, MCP, the worker) sees it.
+/// A request counted before it is sent (Step 7): in one write transaction, a row that counts as
+/// sent and billed as estimated until `providers_db::settle` says what became of it, its id; a
+/// process that dies first leaves it counted, and one that checks meanwhile (the CLI, MCP, the
+/// worker) sees it. Or, when it may not go, until when: the day's requests reached `cap` (until
+/// the oldest leaves the day), the month's USD reached `monthly_usd` (the next month), or this
+/// request's cost would pass it (the next UTC day, whose free neurons may make it cost nothing).
 pub(crate) fn reserve(
     db: &Connection,
     role: &str,
@@ -587,16 +591,23 @@ pub(crate) fn reserve(
     texts: &str,
     cap: u32,
     monthly_usd: f64,
-) -> Result<Option<i64>> {
+) -> Result<std::result::Result<i64, i64>> {
     use crate::providers_db as pdb;
     let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
-    if pdb::calls_in_a_day(&tx, crate::embed::CALLS)?.0 >= cap
-        || pdb::embed_usd_this_month(&tx)? >= monthly_usd
-    {
-        return Ok(None);
+    let now = crate::db::now_ms();
+    let (calls, oldest) = pdb::calls_in_a_day(&tx, crate::embed::CALLS)?;
+    if calls >= cap {
+        return Ok(Err(oldest.map_or(now + pdb::DAY_MS, pdb::out_of_the_day)));
     }
     let est = crate::budget::estimate(texts);
     let usd = billed_usd(&tx, est)?;
+    let spent = pdb::embed_usd_this_month(&tx)?;
+    if spent >= monthly_usd {
+        return Ok(Err(pdb::next_month()));
+    }
+    if spent + usd > monthly_usd {
+        return Ok(Err(now - now.rem_euclid(pdb::DAY_MS) + pdb::DAY_MS));
+    }
     pdb::record(
         &tx,
         &pdb::Call {
@@ -614,7 +625,7 @@ pub(crate) fn reserve(
     )?;
     let id = tx.last_insert_rowid();
     tx.commit()?;
-    Ok(Some(id))
+    Ok(Ok(id))
 }
 
 /// What a billed call of `tokens` costs, after the UTC day's billed embedding calls so far.
@@ -1650,6 +1661,25 @@ mod tests {
             panic!("the month's USD spent, and a batch went")
         };
         assert_eq!((until, up), (pdb::next_month(), false));
+        assert_eq!(stub.requests(), 2);
+        // Short of it, a request whose cost would pass it waits for the next UTC day, when the
+        // free neurons come back.
+        db.execute(
+            "UPDATE provider_calls SET usd = 1.0 - 1e-9 WHERE role = 'embed'",
+            [],
+        )
+        .unwrap();
+        let used = pdb::Call {
+            est_tokens: Some(10_000_000),
+            usd: Some(0.0),
+            ..row("elsewhere", None, crate::embed::CALLS)
+        };
+        pdb::record(&db, &used).unwrap();
+        let now = crate::db::now_ms();
+        let Step::Waiting { until, .. } = phase.poll(&s.raw, &k).unwrap() else {
+            panic!("a batch past the month's USD went")
+        };
+        assert!(until > now && until <= now + pdb::DAY_MS && until % pdb::DAY_MS == 0);
         assert_eq!(stub.requests(), 2);
         // The estimate: free inside the day's 10,000 neurons, USD 0.011 per 1,000 past them.
         let tokens = |neurons: f64| (neurons * 1e6 / NEURONS_PER_M) as i64;

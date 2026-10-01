@@ -334,8 +334,8 @@ fn embedded(
         config.embedding.monthly_usd,
     );
     let call = match reserved {
-        Ok(Some(call)) => call,
-        Ok(None) => return Ok(Err(VectorSkip::Waiting)),
+        Ok(Ok(call)) => call,
+        Ok(Err(_)) => return Ok(Err(VectorSkip::Waiting)),
         Err(_) => return Ok(Err(VectorSkip::Error)),
     };
     // Again as near the call as it can be: an exclusion made since the first check holds.
@@ -471,8 +471,7 @@ pub fn excluded(list: &[String], q: &Query) -> bool {
         .into_iter()
         .flatten()
         .any(|r| {
-            let [own, named] = imported_repos(r);
-            let worktrees = format!("{named}/");
+            let ([own, named], worktrees) = imported_scope(r);
             crate::embed_phase::import_excluded(&own, list)
                 || crate::embed_phase::import_excluded(&named, list)
                 || list.iter().any(|x| x.starts_with(&worktrees))
@@ -777,11 +776,17 @@ fn imported_hit(k: &Connection, uid: &str, terms: &[String]) -> Result<Option<Hi
     .optional()?)
 }
 
-/// SQL over `col` for the imported documents of `repo`: `imported_repos`', and its claude-mem
-/// project's worktree sessions (`claude-mem:<name>/…`), with the four values it takes.
-fn imported_match(col: &str, repo: &str) -> (String, [Value; 4]) {
+/// The imported documents a search of `repo` reads: those of `imported_repos`, and of the
+/// claude-mem project's worktree sessions, whose repository starts with the prefix given.
+fn imported_scope(repo: &str) -> ([String; 2], String) {
     let [own, named] = imported_repos(repo);
     let worktrees = format!("{named}/");
+    ([own, named], worktrees)
+}
+
+/// SQL over `col` for `imported_scope(repo)`, with the four values it takes.
+fn imported_match(col: &str, repo: &str) -> (String, [Value; 4]) {
+    let ([own, named], worktrees) = imported_scope(repo);
     (
         format!("({col} IN (?, ?) OR substr({col}, 1, length(?)) = ?)"),
         [own, named, worktrees.clone(), worktrees].map(Value::Text),

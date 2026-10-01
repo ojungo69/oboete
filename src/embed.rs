@@ -555,8 +555,8 @@ pub fn reindex(home: &Path) -> Result<Stats> {
 }
 
 /// A loopback Workers AI for tests (milestone 4 Task 5). Each request is answered with one unit
-/// vector per text, whose dimensions come from the text's words and the model id the url ends
-/// in, so a text is near the texts that share its words, and two ids' spaces differ. It records
+/// vector per text, whose dimensions come from the text's words (`vector`), so a text is near the
+/// texts that share its words. It records
 /// every request's texts, answers the next ones with a scripted status and Retry-After when told,
 /// and holds requests while a `Hold` lives.
 #[cfg(test)]
@@ -596,20 +596,14 @@ pub(crate) mod stub {
     impl Stub {
         /// bge-m3 at a free loopback port.
         pub(crate) fn start() -> Stub {
-            Self::of(super::EMBEDDER)
-        }
-
-        /// The model `id` at a free loopback port.
-        pub(crate) fn of(id: &str) -> Stub {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let url = format!("http://{}/run/{id}", listener.local_addr().unwrap());
+            let url = format!("http://{}/run/bge-m3", listener.local_addr().unwrap());
             let state: Shared = Arc::default();
             let shared = state.clone();
-            let id = id.to_owned();
             std::thread::spawn(move || {
                 for conn in listener.incoming() {
-                    let (shared, id) = (shared.clone(), id.clone());
-                    std::thread::spawn(move || answer(conn.unwrap(), &shared, &id));
+                    let shared = shared.clone();
+                    std::thread::spawn(move || answer(conn.unwrap(), &shared, super::EMBEDDER));
                 }
             });
             Stub { url, state }
