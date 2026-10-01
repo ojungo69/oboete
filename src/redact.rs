@@ -1045,19 +1045,12 @@ pub fn outbound_joined(text: &str, parts: &[std::ops::Range<usize>]) -> String {
 }
 
 fn joined_with(text: &str, parts: &[std::ops::Range<usize>], rules: &Rules) -> String {
-    let mut runs = Vec::new();
-    for view in std::iter::once(0..text.len()).chain(parts.iter().cloned()) {
-        let Some(found) = hidden_lines(&text[view.clone()], rules) else {
-            return MASK.to_string();
-        };
-        runs.extend(
-            found
-                .into_iter()
-                .map(|(s, e)| (view.start + s, view.start + e)),
-        );
-    }
+    let views = std::iter::once(0..text.len()).chain(parts.iter().cloned());
+    let Some(runs) = hidden_views(text, views, rules) else {
+        return MASK.to_string();
+    };
     let (mut masked, mut pos) = (String::with_capacity(text.len()), 0);
-    for (s, e) in merged_runs(runs) {
+    for (s, e) in runs {
         masked.push_str(&text[pos..s]);
         masked.push_str(MASK);
         pos = e;
@@ -1066,25 +1059,44 @@ fn joined_with(text: &str, parts: &[std::ops::Range<usize>], rules: &Rules) -> S
     lines_with(&masked, rules)
 }
 
-/// `runs` sorted, overlapping or touching ones joined (`merged`).
-fn merged_runs(mut runs: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+/// What `outbound_lines` hides in each of `views` (byte ranges of `text`) gated alone, found on
+/// the untouched text and given in its offsets, sorted and merged: no view's mask takes away the
+/// context another view's rule needs. `None` when the gate masks a view whole.
+fn hidden_views(
+    text: &str,
+    views: impl IntoIterator<Item = std::ops::Range<usize>>,
+    rules: &Rules,
+) -> Option<Vec<(usize, usize)>> {
+    let mut runs = Vec::new();
+    for view in views {
+        let found = hidden_lines(&text[view.clone()], rules)?;
+        runs.extend(
+            found
+                .into_iter()
+                .map(|(s, e)| (view.start + s, view.start + e)),
+        );
+    }
     runs.sort_unstable();
-    merged(&runs.into_iter().map(|(s, e)| (s, e, 0)).collect::<Vec<_>>())
+    Some(merged(
+        &runs.into_iter().map(|(s, e)| (s, e, 0)).collect::<Vec<_>>(),
+    ))
 }
 
 /// `outbound_lines` of `text[range]` with what `outbound_lines` of the whole `text` hides there
 /// hidden too, also where the range splits it: a claim's quote shown with its record's words
 /// around it, so a rule that needs them (a code after a name) hides the quote as it hides the
-/// record (Codex's security review of Task 7). `range` is on character boundaries.
+/// record, and a rule on the quote alone still sees the quote untouched (Codex's security review
+/// of Task 7). `range` is on character boundaries.
 pub fn outbound_quote(text: &str, range: std::ops::Range<usize>) -> String {
     match egress() {
-        Some(rules) => match hidden_lines(text, &rules) {
-            Some(found) => lines_with(
-                &outbound_range(text, range, Some(&merged_runs(found)), &rules),
-                &rules,
-            ),
-            None => MASK.to_string(),
-        },
+        Some(rules) => quote_with(text, range, &rules),
+        None => MASK.to_string(),
+    }
+}
+
+fn quote_with(text: &str, range: std::ops::Range<usize>, rules: &Rules) -> String {
+    match hidden_views(text, [0..text.len(), range.clone()], rules) {
+        Some(runs) => lines_with(&outbound_range(text, range, Some(&runs), rules), rules),
         None => MASK.to_string(),
     }
 }
@@ -1697,6 +1709,32 @@ mod tests {
             lines_with("a value\nb", &line)
         );
         assert!(!joined_with("a value\nb", &[], &line).contains("value"));
+    }
+
+    /// Codex's security review of Task 7 (on 908b8bf): a quote is gated on the untouched record
+    /// and on itself untouched, so the record's mask (the name) takes away no context a rule on
+    /// the quote alone needs (the name before the code), and a rule that needs the record's words
+    /// around the quote still hides it.
+    #[test]
+    fn a_quote_is_gated_on_its_record_and_on_itself_untouched() {
+        let rules = |list: &str| user(&format!("[redaction]\nextra_rules = [{list}]")).unwrap();
+        let both = rules(
+            "{ id = \"name\", regex = 'secret=(ACME)', secret_group = 1 }, \
+             { id = \"code\", regex = '^ACME otp=([0-9]{6})$', secret_group = 1 }",
+        );
+        let record = "Owner note: secret=ACME otp=654321";
+        let at = record.find("ACME").unwrap();
+        let quote = quote_with(record, at..record.len(), &both);
+        assert!(
+            !quote.contains("ACME") && !quote.contains("654321"),
+            "{quote}"
+        );
+        assert!(quote.contains(" otp="), "{quote}");
+        let around = rules("{ id = \"acme\", regex = 'ACME.*otp=([0-9]{6})', secret_group = 1 }");
+        let record = "ACME deploy; otp=654321.";
+        let at = record.find("otp=").unwrap();
+        let quote = quote_with(record, at..at + 10, &around);
+        assert_eq!(quote, format!("otp={MASK}"));
     }
 
     fn sha(v: &str) -> String {
