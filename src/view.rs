@@ -601,17 +601,15 @@ impl Viewer {
             None => self.checkout()?,
             Some(r) => (r.to_owned(), newest_branch(&self.home, r)?),
         };
-        let text = if crate::raw::exists(&self.home) {
+        let manifest = if crate::raw::exists(&self.home) {
             let settings = crate::capture::Settings::load(&self.home)?;
             let raw = crate::raw::open(&self.home)?;
             let session = crate::hook::own_session("unknown".into(), &raw);
-            let manifest = crate::hook::start_text_read(
-                &self.home, &raw, &repo, &branch, &session, &settings,
-            )?;
-            crate::hook::joined(&self.home, manifest.as_deref())
+            crate::hook::start_text_read(&self.home, &raw, &repo, &branch, &session, &settings)?
         } else {
-            crate::hook::joined(&self.home, None)
+            None
         };
+        let text = crate::hook::joined(&self.home, manifest.as_deref());
         Ok(json!({
             "repo": redact::outbound(&repo),
             "branch": redact::outbound(&branch),
