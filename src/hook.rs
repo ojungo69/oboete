@@ -339,21 +339,43 @@ pub fn start_text(
     session: &str,
     settings: &crate::capture::Settings,
 ) -> Option<String> {
+    start_text_read(home, store, repo, branch, session, settings).unwrap_or_else(|e| {
+        eprintln!("oboete: manifest not read: {e:#}");
+        None
+    })
+}
+
+/// `start_text` with the manifest's read error returned, which a hook only logs: the viewer's
+/// Context page answers it (D11: 503 for a store a restore or a rebuild holds).
+pub fn start_text_read(
+    home: &Path,
+    store: &crate::raw::Raw,
+    repo: &str,
+    branch: &str,
+    session: &str,
+    settings: &crate::capture::Settings,
+) -> anyhow::Result<Option<String>> {
     // `[inject]` (#94): off, or a smaller size than the stored manifest's. Settings that do not
     // read inject nothing, as capture settings that do not read record nothing.
-    let inject = crate::config::inject(home)
+    let Some(inject) = crate::config::inject(home)
         .inspect_err(|e| eprintln!("oboete: nothing injected: {e:#}"))
         .ok()
-        .filter(|i| i.session_start)?;
-    crate::consumer::manifest::text(home, store, repo, branch, session, settings.rules.version())
-        .unwrap_or_else(|e| {
-            eprintln!("oboete: manifest not read: {e:#}");
-            None
-        })
-        .map(|t| {
-            let gated = crate::redact::outbound_with(&t, &settings.rules);
-            crate::manifest::cut(&gated, inject.session_start_chars)
-        })
+        .filter(|i| i.session_start)
+    else {
+        return Ok(None);
+    };
+    let text = crate::consumer::manifest::text(
+        home,
+        store,
+        repo,
+        branch,
+        session,
+        settings.rules.version(),
+    )?;
+    Ok(text.map(|t| {
+        let gated = crate::redact::outbound_with(&t, &settings.rules);
+        crate::manifest::cut(&gated, inject.session_start_chars)
+    }))
 }
 
 /// `oboete inject`: what a SessionStart hook shows for the checkout at `cwd` (the recording-failure

@@ -1056,22 +1056,37 @@ fn joined_with(text: &str, parts: &[std::ops::Range<usize>], rules: &Rules) -> S
                 .map(|(s, e)| (view.start + s, view.start + e)),
         );
     }
-    runs.sort_unstable();
-    let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (s, e) in runs {
-        match merged.last_mut() {
-            Some((_, last)) if s <= *last => *last = (*last).max(e),
-            _ => merged.push((s, e)),
-        }
-    }
     let (mut masked, mut pos) = (String::with_capacity(text.len()), 0);
-    for (s, e) in merged {
+    for (s, e) in merged_runs(runs) {
         masked.push_str(&text[pos..s]);
         masked.push_str(MASK);
         pos = e;
     }
     masked.push_str(&text[pos..]);
     lines_with(&masked, rules)
+}
+
+/// `runs` sorted, overlapping or touching ones joined (`merged`).
+fn merged_runs(mut runs: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    runs.sort_unstable();
+    merged(&runs.into_iter().map(|(s, e)| (s, e, 0)).collect::<Vec<_>>())
+}
+
+/// `outbound_lines` of `text[range]` with what `outbound_lines` of the whole `text` hides there
+/// hidden too, also where the range splits it: a claim's quote shown with its record's words
+/// around it, so a rule that needs them (a code after a name) hides the quote as it hides the
+/// record (Codex's security review of Task 7). `range` is on character boundaries.
+pub fn outbound_quote(text: &str, range: std::ops::Range<usize>) -> String {
+    match egress() {
+        Some(rules) => match hidden_lines(text, &rules) {
+            Some(found) => lines_with(
+                &outbound_range(text, range, Some(&merged_runs(found)), &rules),
+                &rules,
+            ),
+            None => MASK.to_string(),
+        },
+        None => MASK.to_string(),
+    }
 }
 
 /// The egress gate on a stored body, field by field as capture scanned it.
