@@ -17,12 +17,13 @@ from collections import defaultdict
 from ranx import Qrels, Run, compare
 
 import judge as J
+import m4
 
 E = J.E
 split = sys.argv[1]
 judge = sys.argv[2] if len(sys.argv) > 2 else J.JUDGE
 db = sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True)
-queries = {q['qid']: q for q in map(json.loads, open(f'{E}/queries.jsonl')) if q['split'] == split}
+queries = {q['qid']: q for q in map(json.loads, open(J.QUESTIONS)) if q['split'] == split}
 latest = J.latest(judge)
 
 # A partly judged pool would score whichever questions happened to be judged first.
@@ -51,6 +52,8 @@ SESSION_OF = {
 
 
 def session_of(doc, cache={}):
+    if doc.startswith('r:'):
+        return m4.record(J.side(), doc)['session']
     if doc not in cache:
         row = db.execute(SESSION_OF[doc[0]], (int(doc[1:]),)).fetchone()
         cache[doc] = row[0] if row else None
@@ -77,6 +80,8 @@ TS = {
 
 @functools.cache
 def ts(doc):
+    if doc.startswith('r:'):
+        return m4.record(J.side(), doc)['ts']
     row = db.execute(TS[doc[0]], (int(doc[1:]),)).fetchone()
     return row[0] if row else 0
 
