@@ -122,13 +122,9 @@ impl Embedder {
             sent: true,
             message,
         };
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(timeout))
-            .http_status_as_error(false)
-            .user_agent(concat!("oboete/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .into();
-        let mut resp = agent
+        // A loopback url (a stub) is never reached through the environment's proxy, which would
+        // get the key and the texts; no redirect is followed.
+        let mut resp = crate::provider::agent(&self.url, timeout, 0)
             .post(&self.url)
             .header("Authorization", &format!("Bearer {}", self.key))
             .send_json(json!({"text": texts, "truncate_inputs": true}))

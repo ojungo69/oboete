@@ -227,7 +227,7 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
         Ask::Embed if excluded(&raw.exclusions()?, q) => {
             (Vector::Skipped(VectorSkip::Excluded), None)
         }
-        Ask::Embed => match embedded(home, &q.text, active)? {
+        Ask::Embed => match embedded(home, &raw, q, active)? {
             Ok(near) => (Vector::Used, Some(near)),
             Err(skip) => (Vector::Skipped(skip), None),
         },
@@ -272,13 +272,19 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
 }
 
 /// The query's vector from the configured embedder (D8), or why there is none: off, no vectors,
-/// a new embedder's still being made, the embedder resting or its cap spent (nothing is sent), a
-/// timeout or an error. A sent request is recorded in providers.db with role `query`, from the
+/// a new embedder's still being made, the embedder resting or its cap spent, an exclusion made
+/// since `search` checked (nothing is sent), a timeout or an error. The exclusions are read again
+/// just before the call (row 30-2). A sent request is recorded in providers.db with role `query`, from the
 /// requests batches leave for queries; a failure sets no rest. One that cannot open providers.db
 /// sends nothing.
 // ponytail: the call runs before the full-text legs, not beside them on a thread; that saves the
 // legs' few ms only.
-fn embedded(home: &Path, text: &str, active: Option<String>) -> Result<Result<Near, VectorSkip>> {
+fn embedded(
+    home: &Path,
+    raw: &crate::raw::Raw,
+    q: &Query,
+    active: Option<String>,
+) -> Result<Result<Near, VectorSkip>> {
     use crate::providers_db as pdb;
     let Ok(config) = crate::config::load(home) else {
         return Ok(Err(VectorSkip::Error));
@@ -304,12 +310,16 @@ fn embedded(home: &Path, text: &str, active: Option<String>) -> Result<Result<Ne
         return Ok(Err(VectorSkip::Waiting));
     }
     // Gated, then cut, as a prompt is (D8).
-    let sent: String = redact::outbound_lines(text)
+    let sent: String = redact::outbound_lines(&q.text)
         .chars()
         .take(crate::embed::PROMPT_CHARS)
         .collect();
     if sent.trim().is_empty() || sent.trim() == "[REDACTED]" {
         return Ok(Err(VectorSkip::Error));
+    }
+    // Again as near the call as it can be: an exclusion made since the first check holds.
+    if excluded(&raw.exclusions()?, q) {
+        return Ok(Err(VectorSkip::Excluded));
     }
     let started = Instant::now();
     let result = embedder.run(&[&sent], QUERY_TIMEOUT);
@@ -439,7 +449,9 @@ pub fn rrf(fts: &[String], vec: &[String]) -> Vec<String> {
 }
 
 /// Row 30-2 over D13's `list`: whether the caller's repository or the one `q` searches is
-/// excluded. A search of every repository searches the excluded ones too.
+/// excluded, with what the imported leg reads for it (`imported_match`): the claude-mem project
+/// its last part names and that project's worktree sessions, as D13 maps them. A search of every
+/// repository searches the excluded ones too.
 pub fn excluded(list: &[String], q: &Query) -> bool {
     if q.all {
         return !list.is_empty();
@@ -447,7 +459,13 @@ pub fn excluded(list: &[String], q: &Query) -> bool {
     [q.caller.as_deref(), q.searched()]
         .into_iter()
         .flatten()
-        .any(|r| list.iter().any(|x| x == r))
+        .any(|r| {
+            let [own, named] = imported_repos(r);
+            let worktrees = format!("{named}/");
+            crate::embed_phase::import_excluded(&own, list)
+                || crate::embed_phase::import_excluded(&named, list)
+                || list.iter().any(|x| x.starts_with(&worktrees))
+        })
 }
 
 /// The claims `q` finds: the delivered and current ones in units (`claims::units`, the pair rule)
@@ -1634,6 +1652,30 @@ mod tests {
             );
         }
         assert!(!excluded(&[], &ask(open, None, true)));
+        // What the imported leg reads too (`imported_match`): the claude-mem project a key's last
+        // part names and its worktree sessions, excluded as D13 maps them.
+        for (list, caller, repo, want) in [
+            ("claude-mem:jura", "/home/jura", None, true),
+            ("github.com/o/foo", open, Some("claude-mem:foo"), true),
+            (
+                "claude-mem:private/wt",
+                open,
+                Some("github.com/o/private"),
+                true,
+            ),
+            (
+                "claude-mem:private/wt",
+                open,
+                Some("github.com/o/other"),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                excluded(&[list.to_owned()], &ask(caller, repo, false)),
+                want,
+                "{list} {caller} {repo:?}"
+            );
+        }
         let mut s = Store::new();
         s.decided(open, 1_000, "Open words.", &[]);
         s.exclude(secret);

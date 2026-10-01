@@ -171,9 +171,9 @@ impl Phase {
         let reading = Reading::now(raw, Reads::Live)?;
         cleared(k, &embedder.id, &reading)?;
         let wait = self.held_back(&cfg)?;
-        let half = match (&wait, &mut self.split) {
-            (None, Some(split)) => split.halves.pop(),
-            _ => None,
+        let half = match wait {
+            None => self.next_half(raw, k, &embedder.id, &reading)?,
+            Some(_) => None,
         };
         let batch = match half {
             Some(b) => b,
@@ -199,6 +199,53 @@ impl Phase {
             until,
         });
         Ok(Step::Waiting { until, up: true })
+    }
+
+    /// The split's next half, its documents read again (D8): one whose stored text changed or
+    /// went since is left out (a fresh page brings it back), and the rest are sorted out and gated
+    /// as a page's are, under the list read now, so a mask, a rule or an exclusion made while it
+    /// waited holds.
+    fn next_half(
+        &mut self,
+        raw: &Raw,
+        k: &Connection,
+        embedder: &str,
+        reading: &Reading,
+    ) -> Result<Option<Batch>> {
+        let Some(split) = &mut self.split else {
+            return Ok(None);
+        };
+        while let Some(half) = split.halves.pop() {
+            let (mut docs, mut texts) = (Vec::new(), Vec::new());
+            let tx = k.unchecked_transaction()?;
+            for doc in half.docs {
+                let Some(mut r) = current(&tx, doc.kind, &doc.key)? else {
+                    continue;
+                };
+                if r.doc.sha != doc.sha {
+                    continue;
+                }
+                if let Some((device, seq)) = doc.key.rsplit_once(':')
+                    && matches!(doc.kind, "r" | "rp")
+                {
+                    r.labels = raw.event_labels(device, seq.parse()?)?;
+                }
+                if let Some((doc, text)) = sort_out(&tx, raw, reading, embedder, r)? {
+                    docs.push(doc);
+                    texts.push(text);
+                }
+            }
+            tx.commit()?;
+            if !docs.is_empty() {
+                return Ok(Some(Batch {
+                    embedder: embedder.to_owned(),
+                    docs,
+                    texts,
+                    reading: reading.clone(),
+                }));
+            }
+        }
+        Ok(None)
     }
 
     fn providers(&mut self) -> Result<&Connection> {
@@ -542,20 +589,7 @@ fn pending(raw: &Raw, k: &Connection, embedder: &str, reading: &Reading) -> Resu
             let mut todo = Vec::new();
             let tx = k.unchecked_transaction()?;
             for r in page {
-                if let Some(why) = passed_over(raw, k, reading, &r)? {
-                    mark(&tx, embedder, &r.doc, why)?;
-                    continue;
-                }
-                let sent = gated(&r);
-                if sent.trim().is_empty() || sent.trim() == "[REDACTED]" {
-                    mark(&tx, embedder, &r.doc, "empty")?;
-                    continue;
-                }
-                if let Some(vec) = cached(&tx, embedder, &r.doc.sha)? {
-                    index(&tx, embedder, &r.doc, &vec)?;
-                    continue;
-                }
-                todo.push((r.doc, sent));
+                todo.extend(sort_out(&tx, raw, reading, embedder, r)?);
             }
             tx.commit()?;
             if todo.is_empty() {
@@ -578,6 +612,31 @@ fn pending(raw: &Raw, k: &Connection, embedder: &str, reading: &Reading) -> Resu
         }
     }
     Ok(None)
+}
+
+/// What becomes of `r`, a document read to embed: passed over and marked (D13, A92), mapped to the
+/// vector its stored text already has, or its text to send, gated and cut (D8).
+fn sort_out(
+    k: &Connection,
+    raw: &Raw,
+    reading: &Reading,
+    embedder: &str,
+    r: Read,
+) -> Result<Option<(Doc, String)>> {
+    if let Some(why) = passed_over(raw, k, reading, &r)? {
+        mark(k, embedder, &r.doc, why)?;
+        return Ok(None);
+    }
+    let sent = gated(&r);
+    if sent.trim().is_empty() || sent.trim() == "[REDACTED]" {
+        mark(k, embedder, &r.doc, "empty")?;
+        return Ok(None);
+    }
+    if let Some(vec) = cached(k, embedder, &r.doc.sha)? {
+        index(k, embedder, &r.doc, &vec)?;
+        return Ok(None);
+    }
+    Ok(Some((r.doc, sent)))
 }
 
 /// A page of `kind`'s documents (`i` reads both imported kinds) with no key row for `embedder`,
@@ -725,7 +784,7 @@ fn passed_over(
 /// Whether an imported document's repository is excluded: listed itself, or a claude-mem project
 /// (and its worktree sessions, `claude-mem:<name>/…`) named by a listed repository's last part,
 /// as search maps them (D13).
-fn import_excluded(repo: &str, list: &[String]) -> bool {
+pub(crate) fn import_excluded(repo: &str, list: &[String]) -> bool {
     if list.iter().any(|x| x == repo) {
         return true;
     }
@@ -837,7 +896,7 @@ pub fn touched(k: &Connection, family: &str, key: &str) -> Result<()> {
     let Some((_, kind, ..)) = rows.first() else {
         return Ok(());
     };
-    let now = current(k, kind, key)?;
+    let now = current(k, kind, key)?.map(|r| r.doc);
     for (id, _, src_sha, indexed) in rows {
         match &now {
             Some(d) if src_sha.as_ref() == Some(&d.sha) => {
@@ -878,26 +937,34 @@ fn write(k: &Connection, batch: &Batch, vecs: &[Vec<f32>]) -> Result<()> {
 
 /// Whether `doc`'s stored text is still the one it was read with.
 fn stored(k: &Connection, doc: &Doc) -> Result<bool> {
-    Ok(current(k, doc.kind, &doc.key)?.is_some_and(|d| d.sha == doc.sha))
+    Ok(current(k, doc.kind, &doc.key)?.is_some_and(|r| r.doc.sha == doc.sha))
 }
 
 /// The document `key` of `kind` (`c`, `k` or `p` for an import, `r` or `rp` for a record) as it
-/// is stored now, or None once it is gone. An imported uid's is its row with the highest rowid.
-fn current(k: &Connection, kind: &str, key: &str) -> Result<Option<Doc>> {
+/// is stored now, with its text, or None once it is gone. An imported uid's is its row with the
+/// highest rowid. A record's labels are left unread.
+fn current(k: &Connection, kind: &str, key: &str) -> Result<Option<Read>> {
+    let read = |doc: Doc, text: String| Read {
+        doc,
+        text,
+        labels: None,
+    };
     Ok(match kind {
         "c" => k
             .query_row(
                 "SELECT body, COALESCE(repo, ''), valid_from FROM active WHERE uid = ?1",
                 [key],
                 |r| {
-                    Ok(Doc {
+                    let text: String = r.get(0)?;
+                    let doc = Doc {
                         kind: "c",
                         key: key.to_owned(),
-                        sha: sha(&r.get::<_, String>(0)?),
+                        sha: sha(&text),
                         repo: r.get(1)?,
                         ts: r.get(2)?,
                         session: String::new(),
-                    })
+                    };
+                    Ok(read(doc, text))
                 },
             )
             .optional()?,
@@ -910,14 +977,15 @@ fn current(k: &Connection, kind: &str, key: &str) -> Result<Option<Doc>> {
                     let doc_kind: String = r.get(0)?;
                     let text =
                         composed(&doc_kind, &r.get::<_, String>(1)?, &r.get::<_, String>(2)?);
-                    Ok(Doc {
+                    let doc = Doc {
                         kind: if doc_kind == "prompt" { "p" } else { "k" },
                         key: key.to_owned(),
                         sha: sha(&text),
                         repo: r.get(3)?,
                         ts: r.get(4)?,
                         session: r.get(5)?,
-                    })
+                    };
+                    Ok(read(doc, text))
                 },
             )
             .optional()?,
@@ -931,18 +999,20 @@ fn current(k: &Connection, kind: &str, key: &str) -> Result<Option<Doc>> {
                  WHERE d.device = ?1 AND d.seq = ?2",
                 params![device, seq.parse::<i64>().unwrap_or(-1)],
                 |r| {
-                    Ok(Doc {
+                    let text: String = r.get(4)?;
+                    let doc = Doc {
                         kind: if r.get::<_, String>(0)? == "prompt" {
                             "rp"
                         } else {
                             "r"
                         },
                         key: key.to_owned(),
-                        sha: sha(&r.get::<_, String>(4)?),
+                        sha: sha(&text),
                         repo: r.get(2)?,
                         ts: r.get(1)?,
                         session: r.get(3)?,
-                    })
+                    };
+                    Ok(read(doc, text))
                 },
             )
             .optional()?
@@ -1303,6 +1373,53 @@ mod tests {
                 .iter()
                 .any(|(_, key, why)| *key == s.key(poison) && why.is_none())
         );
+    }
+
+    /// Step 6 (D8): a split's half that waited out a rest is read again before it goes: a text
+    /// masked meanwhile never leaves as it was, and goes as it is now.
+    #[test]
+    fn a_split_half_is_read_again_before_it_is_sent() {
+        use crate::providers_db as pdb;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        stub.refuse("Poison words.");
+        let poison = s.said("s", R, 1_000, "Poison words.");
+        s.said("s", R, 2_000, "Fine words, longer.");
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = Phase::new(s.home.path());
+        let answered = |phase: &mut Phase| {
+            assert!(matches!(
+                phase.poll(&s.raw, &k).unwrap(),
+                Step::Waiting { .. }
+            ));
+            while !phase.done() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
+        };
+        // The batch is refused and split; its other half meets a 429: the poison's half waits.
+        answered(&mut phase);
+        stub.fail_next(429, Some(60));
+        answered(&mut phase);
+        assert_eq!(stub.requests(), 2);
+        let body = serde_json::json!({ "prompt": "Poison words." }).to_string();
+        s.raw
+            .append_tombstone(crate::raw::Target::Range {
+                device: s.raw.device().to_owned(),
+                seq: poison,
+                offset: body.find("words").unwrap() as i64,
+                length: 5,
+            })
+            .unwrap();
+        s.run();
+        let db = pdb::open(s.home.path()).unwrap();
+        pdb::set_state(&db, crate::embed::CALLS, pdb::State::default()).unwrap();
+        until_idle(&s, &k, &mut phase);
+        let after = stub.texts()[2..].concat();
+        assert!(!after.iter().any(|t| t == "Poison words."), "{after:?}");
+        assert!(after.iter().any(|t| t == "Poison *****."), "{after:?}");
     }
 
     /// Step 6: a split that nothing answers stops after `SPLIT_FAILS` requests: the embedder is
@@ -1811,7 +1928,7 @@ mod tests {
         let follows = |s: &Store, kind: &str, key: &str| {
             s.run();
             embed_all(s);
-            let now = current(&k, kind, key).unwrap().map(|d| d.sha);
+            let now = current(&k, kind, key).unwrap().map(|r| r.doc.sha);
             let got: Option<String> = k
                 .query_row(
                     "SELECT src_sha FROM vector_keys WHERE key = ?1 AND skipped IS NULL",
@@ -1830,7 +1947,9 @@ mod tests {
 
         derive(&mut s, seq, quote, "Parser caches go to disk.");
         follows(&s, "c", &uid);
-        assert!(current(&k, "c", &uid).unwrap().unwrap().sha == sha("Parser caches go to disk."));
+        assert!(
+            current(&k, "c", &uid).unwrap().unwrap().doc.sha == sha("Parser caches go to disk.")
+        );
         crate::claims::correct(&home, &uid, None, Some("Caches go to files.")).unwrap();
         follows(&s, "c", &uid);
         let sent = stub.requests();

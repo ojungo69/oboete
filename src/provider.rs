@@ -695,7 +695,7 @@ fn free_limit(url: &str, key: &str) -> Option<u32> {
 /// An agent for requests to `url`: `timeout` in all, any status as an answer, at most
 /// `redirects` redirects, and a server on this machine (Ollama, the tests' servers) never reached
 /// through the environment's proxy.
-fn agent(url: &str, timeout: Duration, redirects: u32) -> ureq::Agent {
+pub(crate) fn agent(url: &str, timeout: Duration, redirects: u32) -> ureq::Agent {
     let mut config = ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .http_status_as_error(false)
