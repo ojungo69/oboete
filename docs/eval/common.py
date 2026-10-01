@@ -143,7 +143,25 @@ def claude_json(prompt, model, timeout=300):
 
 
 def parse_json(text):
-    """One JSON object, optionally fenced or preceded by a reasoning block; no prose."""
+    """One JSON object, optionally fenced or around reasoning blocks; else, as calib.parse_grade reads
+    a grade, the span from the first `{` to the last `}` once reasoning blocks are removed (a
+    sentence around the JSON)."""
+    try:
+        return _json_only(text)
+    except ValueError:
+        if not isinstance(text, str):
+            raise
+    span = re.search(r'\{.*\}', re.sub(r'<think>.*?</think>', '', text, flags=re.S), re.S)
+    try:
+        answer = json.loads(span.group(0)) if span else None
+    except ValueError:
+        raise ValueError('Invalid model answer') from None
+    if not isinstance(answer, dict):
+        raise ValueError('Invalid model answer')
+    return answer
+
+
+def _json_only(text):
     if not isinstance(text, str):
         raise ValueError('Invalid model answer')
     text = re.sub(r'^(?:\s*<think>.*?</think>\s*)+', '', text, flags=re.S).strip()

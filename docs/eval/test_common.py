@@ -74,15 +74,18 @@ def test_the_mcp_client_fails_safely_on_error_or_exit(tmp_path, monkeypatch, beh
     assert capsys.readouterr() == ('', '')
 
 
-def test_json_parsing_accepts_fences_and_reasoning_but_not_prose():
+def test_json_parsing_reads_as_calib_parse_grade_does():
     assert common.parse_json('```json\n{"ok": true}\n```') == {'ok': True}
     assert common.parse_json('<think>{"ok": false}</think> {"ok": true}') == {'ok': True}
     assert common.parse_json('{"ok": true}<think>{"ok": false}</think>') == {'ok': True}
     assert common.parse_json('```json\n{"ok": true}\n```<think>reason</think>') == {'ok': True}
     assert common.parse_json('```json\n  <think>reason</think>\n {"ok": true} \n```') == {'ok': True}
     assert common.parse_json('{"text":"<think>literal text</think>"}') == {'text': '<think>literal text</think>'}
-    for bad in ('Here is JSON: {"ok": true}', '{"ok": true} done', '```json\n{"ok": true}\n``` done',
-                '[]', 'true', None, '<think>unfinished {"ok": true}'):
+    # A sentence around the JSON, as calib.parse_grade allows: a judge that adds one is not failed.
+    for prose in ('Here is JSON: {"ok": true}', '{"ok": true} done', '```json\n{"ok": true}\n``` done',
+                  '```json {"ok": true} ```', '<think>unfinished {"ok": true}'):
+        assert common.parse_json(prose) == {'ok': True}
+    for bad in ('[]', 'true', None, 'no answer', '{"ok": true} and {"ok": false}', '{not json}'):
         with pytest.raises(ValueError):
             common.parse_json(bad)
 

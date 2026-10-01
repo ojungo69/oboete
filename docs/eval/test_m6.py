@@ -250,6 +250,10 @@ def test_keys_use_the_draw_and_map_plain_records_before_a_worker(monkeypatch, tm
     assert all(k['records'][0]['device'] == 'd' and k['records'][0]['seq'] == expected[k['id']] for k in written)
     writers = [m for m, p in calls if p.startswith('You write')]
     assert writers == [common.draw('m6-key', q['id']) for q in qs]
+    # The checker: drawn by m6-checker from the other seven, on the m6-check draw's 20%.
+    checkers = [m for m, p in calls if p.startswith('Here are a question')]
+    assert checkers == [common.draw('m6-checker', q['id'], exclude=common.draw('m6-key', q['id']))
+                        for q in qs if common.checked('m6-check', q['id'])]
     assert len(calls) == 40 + sum(common.checked('m6-check', q['id']) for q in qs)
     assert Path(common.E, 'm6/keys-dev.jsonl').stat().st_mode & 0o777 == 0o600
     raw.execute("UPDATE records SET enc = 'zstd' WHERE seq = 1")

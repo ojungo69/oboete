@@ -16,7 +16,7 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 @pytest.fixture(autouse=True)
-def offline(monkeypatch, tmp_path):
+def offline(monkeypatch, tmp_path, tmp_path_factory):
     import common
 
     for key in list(os.environ):
@@ -26,9 +26,15 @@ def offline(monkeypatch, tmp_path):
     def refused(*args, **kwargs):
         raise AssertionError('evaluation tests require an injected offline stub')
 
+    base = os.fspath(tmp_path_factory.getbasetemp()) + os.sep
+
     def local(tool, argv, **kwargs):
-        # The unchanged freeze tests run this repository's pure file checker in a child.
-        if argv[:2] != [sys.executable, _freeze]:
+        # The children the other tests start: freeze.py's pure file checker, a fake binary a test
+        # wrote under pytest's temporary directory (m4.py's replay), and git asked for a commit's
+        # time (m4.py's gate).
+        program = os.fspath(argv[0]) if argv else ''
+        if not (argv[:2] == [sys.executable, _freeze] or program.startswith(base)
+                or list(argv[:3]) == ['git', 'show', '-s']):
             return refused()
         kwargs['env'] = {k: v for k, v in kwargs.get('env', common.clean_env()).items()
                          if not any(s in k.upper() for s in ('TOKEN', 'KEY', 'SECRET', 'PASSWORD'))}

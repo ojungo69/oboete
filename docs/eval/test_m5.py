@@ -285,7 +285,8 @@ def test_a_seeded_checker_reads_the_same_turns_from_a_different_judge(harness):
         {'session': 's3', 'side': 'dev'}]}))
     m5.cuts(binary)
     row = m5.run(binary)[0]
-    assert row['check'] and row['labeller'] != row['checker']
+    assert row['check'] and row['labeller'] == common.draw('m5-label', 's3')
+    assert row['checker'] == common.draw('m5-checker', 's3', exclude=row['labeller'])
     assert len(state['calls']) == 2
     labelled_turns = state['calls'][0][1].split('\n\nAt the end')[0].split('\n', 1)[1]
     checked_turns = state['calls'][1][1].split('\n\nLabels:')[0].split('\n', 1)[1]
