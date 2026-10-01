@@ -1,0 +1,33 @@
+docs/eval/m4.py
+  s_59cfa7617c8511::t_5482ff9d1a3a74 343-345,347-354,396-397,402-406,433
+docs/eval/test_m4.py
+  s_5913b264870909::t_a3fec01f8ebc40 210-213,223,236,241-244,259-261
+docs/milestone-4-plan.md
+  s_59cfa7617c8511::t_477f18e75155e5 95
+docs/milestone-4.md
+  s_59cfa7617c8511::t_8e70398bd3186e 48-58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0944c93d4019c9a48855f0c7b183280447faf79b",
+  "prompts": {},
+  "sessions": {
+    "s_5913b264870909": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f818-7e16-7d52-8bfe-80701244ee83",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
