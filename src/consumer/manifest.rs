@@ -374,15 +374,8 @@ fn with_delivered(
         claims::newest_first(&mut index);
         let gate = |s: &str, n: usize| one_line(&crate::redact::lines_with(s, rules), n);
         let date = |c: &Claim| crate::db::utc(c.valid_from)[..10].to_owned();
-        // An earlier claim names the claim above it that ended it.
         let mut full = |c: &Claim, unit: &[Claim]| {
-            let ended = c
-                .later
-                .as_ref()
-                .and_then(|l| unit.iter().find(|u| u.uid == *l))
-                .map(|l| format!(", superseded by the {} {} above", date(l), l.kind))
-                .unwrap_or_default();
-            let line = format!("- {} {}{ended}: {}", date(c), c.kind, gate(&c.body, CLIP));
+            let line = body_line(c, unit, rules);
             let shown = Shown {
                 uid: c.uid.clone(),
                 fp: fingerprint(&c.body),
@@ -785,6 +778,25 @@ fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// A claim's line with its body, at SessionStart and at a prompt: its date and kind, the later
+/// claim of `unit` that ended it (shown above it), and its body gated with `rules` before it is
+/// flattened and clipped.
+pub(crate) fn body_line(
+    c: &crate::claims::Claim,
+    unit: &[crate::claims::Claim],
+    rules: &crate::redact::Rules,
+) -> String {
+    let date = |c: &crate::claims::Claim| crate::db::utc(c.valid_from)[..10].to_owned();
+    let ended = c
+        .later
+        .as_ref()
+        .and_then(|l| unit.iter().find(|u| u.uid == *l))
+        .map(|l| format!(", superseded by the {} {} above", date(l), l.kind))
+        .unwrap_or_default();
+    let body = one_line(&crate::redact::lines_with(&c.body, rules), CLIP);
+    format!("- {} {}{ended}: {body}", date(c), c.kind)
 }
 
 /// `s` on one line, cut to `n` characters at a space, or after a Japanese or Chinese clause mark
