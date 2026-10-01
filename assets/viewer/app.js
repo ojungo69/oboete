@@ -238,10 +238,10 @@ async function showTimeline(repo) {
       if (more.disabled) return;
       more.disabled = true;
       try {
-        const page = await api('timeline', { ...params, before: next });
+        const older = await api('timeline', { ...params, before: next });
         if (mine !== generation || !more.isConnected) return;
-        $('list').append(...page.items.map((item) => timelineEntry(item, !repo)));
-        next = page.next;
+        $('list').append(...older.items.map((item) => timelineEntry(item, !repo)));
+        next = older.next;
         if (!next) more.remove();
         setStatus(`${$('list').childElementCount} entries loaded.`);
       } catch (e) {
