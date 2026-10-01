@@ -203,22 +203,36 @@ fn claims_leg(
     args.push(Value::Integer(super::sql_limit(depth)));
     let sql = format!(
         "SELECT c.uid FROM claims_fts f JOIN claims c ON c.rowid = f.rowid
-         JOIN active a ON a.uid = c.uid WHERE {} ORDER BY {order} LIMIT ?",
+         JOIN active a ON a.uid = c.uid WHERE {} ORDER BY {order} LIMIT ? OFFSET ?",
         clauses.join(" AND ")
     );
-    let uids: Vec<String> = k
-        .prepare(&sql)?
-        .query_map(params_from_iter(args), |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
     let pending = claims::Pending::read(raw, k)?;
     let hidden = |uid: &str| pending.touches(k, uid);
+    // A pending claim is only hidden: the claims after it take its place, so the leg still holds
+    // `depth` (Codex on #306).
+    let mut st = k.prepare(&sql)?;
+    let mut uids = Vec::new();
+    for page in 0.. {
+        let mut paged = args.clone();
+        paged.push(Value::Integer(super::sql_limit(depth.saturating_mul(page))));
+        let read: Vec<String> = st
+            .query_map(params_from_iter(paged), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let last = read.len() < depth;
+        for uid in read {
+            if !hidden(&uid)? {
+                uids.push(uid);
+            }
+        }
+        if last || uids.len() >= depth {
+            break;
+        }
+    }
+    uids.truncate(depth);
     // The ended claims with what ended them: kept out of `units`, which would pair them.
     let mut ended_by: HashMap<String, Option<String>> = HashMap::new();
     let (mut shown, mut ended) = (Vec::new(), Vec::new());
     for uid in uids {
-        if hidden(&uid)? {
-            continue;
-        }
         let c = match claims::delivered_one(k, &uid)? {
             Some(c) => c,
             None => {
@@ -1307,6 +1321,32 @@ mod tests {
             .collect();
         assert_eq!(around, [last, doc]);
         assert!(timeline(home, Some(R), Some("nope"), 2).is_err());
+    }
+
+    /// Codex on #306: a claim the worker has yet to apply a removal to is only hidden, so the claim
+    /// after it takes its place within the leg's depth.
+    #[test]
+    fn a_pending_claim_leaves_its_place_to_the_next() {
+        let mut s = Store::new();
+        let mut newest = 0;
+        for i in 0..101 {
+            let text = format!("Parser decision {i:03}.");
+            newest = s.said("s", R, 1_000 + i, &text);
+            s.claim(newest, &text, ("decision", "decided", "user"), &[]);
+        }
+        s.run();
+        let target = crate::raw::Target::Record {
+            device: s.raw.device().to_owned(),
+            seq: newest,
+        };
+        s.raw.append_tombstone(target).unwrap();
+        let found = s.query(&Query {
+            limit: 100,
+            raw: RawArm::Off,
+            ..q("Parser decision")
+        });
+        assert_eq!(found.hits.len(), 100);
+        assert!(found.hits.iter().all(|h| h.class == Class::Current));
     }
 
     /// Codex on #306: three devices' imports of a document are one entry before the limit, so the
