@@ -688,45 +688,54 @@ pub fn timeline(
                   COALESCE(d.session, '')
            FROM raw_docs d WHERE d.kind = 'start' AND (?1 IS NULL OR d.repo = ?1))";
     // Each key once (a document several devices imported is its newest row, as `imported_leg`
-    // reads it), and twice the rows: a claim with an owner's change still to apply is left out.
+    // reads it). A claim with an owner's change still to apply is only hidden: the entries after
+    // it fill its place (Codex on #306), read on in pages of `limit`.
     let read = |sql: &str, at: i64| -> Result<Vec<Item>> {
         let mut st = k.prepare(sql)?;
-        let rows = st.query_map(
-            params![
-                repo,
-                own,
-                named,
-                at,
-                super::sql_limit(limit.saturating_mul(2))
-            ],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            },
-        )?;
         let mut out: Vec<Item> = Vec::new();
-        for row in rows {
-            let (key, when, kind, repo, text) = row?;
-            if pending.touches(&k, &key)? {
-                continue;
+        for page in 0.. {
+            let rows = st.query_map(
+                params![
+                    repo,
+                    own,
+                    named,
+                    at,
+                    super::sql_limit(limit),
+                    super::sql_limit(limit.saturating_mul(page))
+                ],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                },
+            )?;
+            let mut read = 0;
+            for row in rows {
+                read += 1;
+                let (key, when, kind, repo, text) = row?;
+                if pending.touches(&k, &key)? {
+                    continue;
+                }
+                out.push(Item {
+                    key,
+                    when,
+                    kind,
+                    repo,
+                    text: one_line(&redact::outbound(&text), 120),
+                });
             }
-            out.push(Item {
-                key,
-                when,
-                kind,
-                repo,
-                text: one_line(&redact::outbound(&text), 120),
-            });
+            if read < limit || out.len() >= limit {
+                break;
+            }
         }
         Ok(out)
     };
     let mut before = read(
-        &format!("{items} WHERE ts <= ?4 ORDER BY ts DESC, key LIMIT ?5"),
+        &format!("{items} WHERE ts <= ?4 ORDER BY ts DESC, key LIMIT ?5 OFFSET ?6"),
         at.unwrap_or(i64::MAX),
     )?;
     let Some(at) = at else {
@@ -734,7 +743,7 @@ pub fn timeline(
         return Ok(before);
     };
     let mut after = read(
-        &format!("{items} WHERE ts > ?4 ORDER BY ts, key LIMIT ?5"),
+        &format!("{items} WHERE ts > ?4 ORDER BY ts, key LIMIT ?5 OFFSET ?6"),
         at,
     )?;
     let later = after.len().min(limit / 2);
@@ -1347,6 +1356,39 @@ mod tests {
         });
         assert_eq!(found.hits.len(), 100);
         assert!(found.hits.iter().all(|h| h.class == Class::Current));
+    }
+
+    /// Codex on #306: claims the worker has yet to apply a removal to are only hidden from the
+    /// timeline, however many of the newest they are: the entries after them fill it.
+    #[test]
+    fn a_timeline_past_many_pending_claims_is_full() {
+        let mut s = Store::new();
+        let older = [
+            s.decided(R, 1_000, "First decision.", &[]),
+            s.decided(R, 2_000, "Second decision.", &[]),
+        ];
+        let newer: Vec<i64> = (0..4)
+            .map(|i| {
+                let text = format!("Newer decision {i}.");
+                let seq = s.said("s", R, 3_000 + i, &text);
+                s.claim(seq, &text, ("decision", "decided", "user"), &[]);
+                seq
+            })
+            .collect();
+        s.run();
+        for seq in newer {
+            let target = crate::raw::Target::Record {
+                device: s.raw.device().to_owned(),
+                seq,
+            };
+            s.raw.append_tombstone(target).unwrap();
+        }
+        let keys: Vec<String> = timeline(s.home.path(), Some(R), None, 2)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.key)
+            .collect();
+        assert_eq!(keys, [older[1].clone(), older[0].clone()]);
     }
 
     /// Codex on #306: three devices' imports of a document are one entry before the limit, so the
