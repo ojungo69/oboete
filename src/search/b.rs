@@ -3703,7 +3703,7 @@ mod tests {
                 .collect()
         };
         let all = uids(&s.raw, 100);
-        assert_eq!(all.len(), 62, "{all:?}");
+        assert_eq!(all.len(), 62);
         assert!(all.contains(&open) && all.contains(&corrected));
         assert!(left_out.iter().all(|u| !all.contains(u)));
         assert_eq!(uids(&s.raw, 50).len(), 50);
@@ -3829,7 +3829,7 @@ mod tests {
         .map(|c| c.uid)
         .collect();
         for uid in [&lexical, &filed, &meaning] {
-            assert!(found.contains(uid), "{uid} not in {found:?}");
+            assert!(found.contains(uid));
         }
         assert!(!found.contains(&proposal) && !found.contains(&elsewhere));
         let two = delivered_ranked(
