@@ -4,10 +4,13 @@ evaluation store's docs through `imports`, and drops (and counts) ids newer than
 
     run_claude_mem.py              -> runs/claude-mem.trec, as the owner's claude-mem searches today
     run_claude_mem.py --no-window  -> runs/claude-mem-nowindow.trec, without its 90-day window
+    ... --questions <file> --out <dir>
+                                   another question file and run directory (milestone 4's test
+                                   run: questions-test-m4.jsonl into runs-test-m4)
 
 By default claude-mem keeps only Chroma hits from the last 90 days, counted from today, so older
 questions lose their answers; `dateStart` replaces that window (SearchManager.ts, 13.25.3)."""
-import json, os, sqlite3, sys, urllib.parse, urllib.request
+import argparse, json, os, sqlite3, sys, urllib.parse, urllib.request
 
 E = os.path.expanduser('~/.oboete/eval')
 # The questions and runs are the developer's own records: owner-only files.
@@ -15,8 +18,14 @@ os.umask(0o077)
 os.makedirs(E, mode=0o700, exist_ok=True)
 os.chmod(E, 0o700)
 DEPTH = 50
-NAME = 'claude-mem-nowindow' if sys.argv[1:] == ['--no-window'] else 'claude-mem'
-WINDOW = {'dateStart': '2000-01-01'} if NAME == 'claude-mem-nowindow' else {}
+args = argparse.ArgumentParser()
+args.add_argument('--no-window', action='store_true')
+args.add_argument('--questions', default=f'{E}/queries.jsonl')
+args.add_argument('--out', default=f'{E}/runs')
+args = args.parse_args()
+os.makedirs(args.out, exist_ok=True)
+NAME = 'claude-mem-nowindow' if args.no_window else 'claude-mem'
+WINDOW = {'dateStart': '2000-01-01'} if args.no_window else {}
 db = sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True)
 # One claude-mem database per evaluation store: `oboete import` names it claude-mem:<id>.
 sources = [r[0] for r in db.execute("SELECT DISTINCT source FROM imports WHERE source LIKE 'claude-mem%'")]
@@ -25,8 +34,8 @@ if len(sources) != 1:
 doc_of = dict(db.execute("SELECT source_id, doc FROM imports WHERE source=? AND source_id LIKE 'o%'", sources))
 missing = errors = 0
 # A failed query would look like a search that found nothing, so a run with failures is not kept.
-with open(f'{E}/runs/{NAME}.trec.part', 'w') as out:
-    for line in open(f'{E}/queries.jsonl'):
+with open(f'{args.out}/{NAME}.trec.part', 'w') as out:
+    for line in open(args.questions):
         q = json.loads(line)
         url = 'http://127.0.0.1:37777/api/search?' + urllib.parse.urlencode(
             {'query': q['text'], 'format': 'json', 'type': 'observations', 'limit': DEPTH, **WINDOW})
@@ -48,4 +57,4 @@ with open(f'{E}/runs/{NAME}.trec.part', 'w') as out:
 print(f'ids newer than the copy (dropped): {missing}; failed queries: {errors}')
 if errors:
     sys.exit('not kept: run it again')
-os.replace(f'{E}/runs/{NAME}.trec.part', f'{E}/runs/{NAME}.trec')
+os.replace(f'{args.out}/{NAME}.trec.part', f'{args.out}/{NAME}.trec')
