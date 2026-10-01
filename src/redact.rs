@@ -1057,7 +1057,7 @@ pub fn outbound_lines(text: &str) -> String {
 /// and after the whole pass's masks), masked at once, then a rescan, whole and line by line, which
 /// can only add masks: a mask from a rule that spans two lines takes no context a rule anchored to
 /// a line needs on the next one (#315), and nothing the line pass hid before is shown.
-fn lines_with(text: &str, rules: &Rules) -> String {
+pub(crate) fn lines_with(text: &str, rules: &Rules) -> String {
     let Some((_, masks)) = hidden_lines(text, rules) else {
         return MASK.to_string();
     };
