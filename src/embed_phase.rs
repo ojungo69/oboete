@@ -77,6 +77,27 @@ struct InFlight {
     until: i64,
 }
 
+/// A query vector another phase asked for (milestone 4 D9), on a thread of its own beside the
+/// batch's.
+struct Asked {
+    key: String,
+    /// The text as the asker built it, before the cut: the answer goes with it.
+    text: String,
+    embedder: String,
+    /// Its `provider_calls` row, counted since before it was sent.
+    call: i64,
+    thread: std::thread::JoinHandle<(Sent, i64)>,
+    until: i64,
+}
+
+/// An asked query vector that came back: under `key`, for `text`, from `embedder`.
+pub struct Answer {
+    pub key: String,
+    pub text: String,
+    pub embedder: String,
+    pub vector: Vec<f32>,
+}
+
 /// The requests of `daily_requests` kept for query vectors: batches stop this short (Global
 /// Constraints).
 const KEPT_FOR_QUERIES: u32 = 40;
@@ -93,6 +114,8 @@ const USD_PER_K_NEURONS: f64 = 0.011;
 pub struct Phase {
     home: PathBuf,
     flight: Option<InFlight>,
+    asked: Option<Asked>,
+    answered: Option<Answer>,
     db: Option<Connection>,
     /// A call's own timeout: `embed::BATCH_TIMEOUT`, shorter in tests.
     timeout: Duration,
@@ -128,6 +151,8 @@ impl Phase {
         Phase {
             home: home.to_owned(),
             flight: None,
+            asked: None,
+            answered: None,
             db: None,
             timeout: crate::embed::BATCH_TIMEOUT,
             split: None,
@@ -136,17 +161,162 @@ impl Phase {
         }
     }
 
-    /// Whether a call's thread has finished, so a wait can end early.
+    /// Whether a call's thread has finished, a batch's or an asked query's, so a wait can end
+    /// early.
     pub fn done(&self) -> bool {
         self.flight.as_ref().is_some_and(|f| f.thread.is_finished())
+            || self.asked.as_ref().is_some_and(|a| a.thread.is_finished())
     }
 
     /// One step: a finished call's vectors written, or the next batch sent, or what it waits on.
+    /// An asked query vector that came back is settled first and kept for `answer`; while one is
+    /// out, the phase is not idle, so the worker stays up for it.
     pub fn poll(&mut self, raw: &Raw, k: &Connection) -> Result<Step> {
         #[cfg(test)]
         {
             self.polls += 1;
         }
+        if self.asked.as_ref().is_some_and(|a| a.thread.is_finished()) {
+            let a = self.asked.take().expect("checked above");
+            self.answered = self.settled(a);
+        }
+        let step = self.batch(raw, k)?;
+        let Some(a) = &self.asked else {
+            return Ok(step);
+        };
+        // Asked again each second past its timeout, as a batch's call is.
+        let until = a.until.max(crate::db::now_ms() + 1_000);
+        Ok(match step {
+            Step::Covered => Step::Covered,
+            Step::Waiting { until: u, up: true } => Step::Waiting {
+                until: u.min(until),
+                up: true,
+            },
+            _ => Step::Waiting { until, up: true },
+        })
+    }
+
+    /// Asks for `text`'s vector under `key` and returns at once (milestone 4 D9). The text, gated
+    /// by the asker, is cut as a prompt is, counted in providers.db (role `query`) from the day's
+    /// whole allowance as a search's query is, and sent on a thread of its own once `reading` is
+    /// found to be the exclusion list still (`send`). False when nothing is asked: one is out,
+    /// embedding is off or its settings do not load, the active vectors are another embedder's,
+    /// the embedder rests, or a cap is spent.
+    pub fn ask(
+        &mut self,
+        k: &Connection,
+        key: &str,
+        text: &str,
+        reading: &Reading,
+    ) -> Result<bool> {
+        use crate::providers_db as pdb;
+        if self.asked.is_some() {
+            return Ok(false);
+        }
+        let Ok(config) = crate::config::load(&self.home) else {
+            return Ok(false);
+        };
+        let Ok(Some(embedder)) = Embedder::from_config(&config.embedding) else {
+            return Ok(false);
+        };
+        let active: Option<String> = k
+            .query_row(
+                "SELECT embedder FROM vec_generation WHERE state = 'active'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if active.as_deref() != Some(embedder.id.as_str()) {
+            return Ok(false);
+        }
+        let sent: String = text.chars().take(crate::embed::PROMPT_CHARS).collect();
+        let reserved = self.providers().and_then(|db| {
+            if pdb::state(db, crate::embed::CALLS)?.down_until > crate::db::now_ms() {
+                return Ok(None);
+            }
+            let cfg = &config.embedding;
+            Ok(reserve(
+                db,
+                "query",
+                "1 query",
+                &sent,
+                cfg.daily_requests,
+                cfg.monthly_usd,
+            )?
+            .ok())
+        });
+        let call = match reserved {
+            Ok(Some(call)) => call,
+            Ok(None) => return Ok(false),
+            Err(e) => {
+                eprintln!("oboete: no query embedding for now: {e:#}");
+                return Ok(false);
+            }
+        };
+        let batch = Batch {
+            embedder: embedder.id.clone(),
+            docs: Vec::new(),
+            texts: vec![sent],
+            reading: reading.clone(),
+        };
+        let (home, timeout) = (self.home.clone(), self.timeout);
+        self.asked = Some(Asked {
+            key: key.to_owned(),
+            text: text.to_owned(),
+            embedder: embedder.id.clone(),
+            call,
+            thread: std::thread::spawn(move || send(&home, &batch, &embedder, timeout)),
+            until: crate::db::now_ms() + timeout.as_millis() as i64,
+        });
+        Ok(true)
+    }
+
+    /// The asked query vector that came back since the last call, if any.
+    pub fn answer(&mut self) -> Option<Answer> {
+        self.answered.take()
+    }
+
+    /// A finished ask settled as `search::b::embedded` settles a query: counted, and never a
+    /// rest; one not sent is no longer counted.
+    fn settled(&mut self, a: Asked) -> Option<Answer> {
+        use crate::providers_db as pdb;
+        let (sent, ms) = a.thread.join().unwrap_or_else(|_| {
+            (
+                Sent::Unsent(anyhow::anyhow!("the call's thread panicked")),
+                0,
+            )
+        });
+        let (outcome, detail, billed) = match &sent {
+            Sent::Unsent(e) => {
+                eprintln!("oboete: query embedding not sent: {e:#}");
+                if let Err(e) = self.providers().and_then(|db| pdb::unreserve(db, a.call)) {
+                    eprintln!("oboete: a query embedding not sent stays counted: {e:#}");
+                }
+                return None;
+            }
+            Sent::Vectors(_) => ("ok", "1 query".to_owned(), true),
+            Sent::Failed(f) => ("error", f.message.clone(), f.billed()),
+        };
+        let settled = self
+            .providers()
+            .and_then(|db| pdb::settle(db, a.call, outcome, ms, &detail, billed));
+        if let Err(e) = settled {
+            eprintln!("oboete: a query embedding is not settled: {e:#}");
+        }
+        let Sent::Vectors(mut vectors) = sent else {
+            return None;
+        };
+        let vector = vectors.pop().filter(|v| v.len() == crate::embed::DIM)?;
+        Some(Answer {
+            key: a.key,
+            text: a.text,
+            embedder: a.embedder,
+            vector,
+        })
+    }
+
+    /// `poll`'s batches.
+    fn batch(&mut self, raw: &Raw, k: &Connection) -> Result<Step> {
         // First: a knowledge.db the worker has just started takes its vectors before anything is
         // written to it, a call's answer included.
         carry_set_aside(&self.home, k)?;
@@ -1380,7 +1550,7 @@ pub(crate) mod fixture {
         for _ in 0..100 {
             match phase.poll(raw, k).unwrap() {
                 Step::Idle => return,
-                Step::Waiting { .. } if phase.flight.is_some() => {
+                Step::Waiting { .. } if phase.flight.is_some() || phase.asked.is_some() => {
                     while !phase.done() {
                         std::thread::sleep(Duration::from_millis(5));
                     }

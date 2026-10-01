@@ -340,7 +340,12 @@ fn serve(
             }
         }
         if let Some(shortlist) = phases.shortlist.as_mut()
-            && shortlist.run(&raw, &mut k, crate::db::now_ms())? == Phase::Covered
+            && shortlist.run(
+                &raw,
+                &mut k,
+                phases.embed.as_deref_mut(),
+                crate::db::now_ms(),
+            )? == Phase::Covered
         {
             again = true;
         }
