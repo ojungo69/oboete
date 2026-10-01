@@ -394,8 +394,8 @@ pub fn hidden(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
     hidden_map(text, rules).map(|(.., runs)| runs)
 }
 
-/// What the gate shows of a text, for each of its bytes the range of the text it stands for, and
-/// the ranges it hides (`hidden`).
+/// What the gate scans of a text (its blocks removed, trimmed, nothing masked yet), for each of
+/// its bytes the range of the text it stands for, and the ranges the gate hides (`hidden`).
 type Shown = (String, Vec<(usize, usize)>, Vec<(usize, usize)>);
 
 fn hidden_map(text: &str, rules: &Rules) -> Option<Shown> {
@@ -427,7 +427,8 @@ fn hidden_map(text: &str, rules: &Rules) -> Option<Shown> {
     }
     let start = work.len() - work.trim_start().len();
     let end = work.trim_end().len().max(start);
-    let (mut work, mut from) = (work[start..end].to_owned(), from[start..end].to_vec());
+    let plain = (work[start..end].to_owned(), from[start..end].to_vec());
+    let (mut work, mut from) = plain.clone();
     let mut found = 0;
     for pass in 0..=MAX_PASSES + 1 {
         let again = spans(&work, rules);
@@ -457,16 +458,16 @@ fn hidden_map(text: &str, rules: &Rules) -> Option<Shown> {
         }
         (work, from) = (next, next_from);
     }
-    Some((work, from, merged_runs(hidden)))
+    Some((plain.0, plain.1, merged_runs(hidden)))
 }
 
 /// The byte ranges of `text` that `outbound_lines(text)` does not show: `hidden`'s, and what its
-/// line pass hides in each line of what the gate shows (where a removed block may have joined two
-/// lines), mapped back to `text`. Unmerged.
+/// line pass hides in each line of what the gate scans (where a removed block may have joined two
+/// lines) before any mask (#315), mapped back to `text`. Unmerged.
 fn hidden_lines(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
-    let (shown, from, mut runs) = hidden_map(text, rules)?;
+    let (plain, from, mut runs) = hidden_map(text, rules)?;
     let mut at = 0;
-    for line in shown.split('\n') {
+    for line in plain.split('\n') {
         for (s, e) in hidden(line, rules)? {
             let run = from[at + s..at + e]
                 .iter()
@@ -1014,12 +1015,32 @@ pub fn outbound_lines(text: &str) -> String {
     }
 }
 
+/// What the whole text's pass and each line's pass hide, both found on the text as the gate scans
+/// it (`hidden_lines`), masked at once, then a rescan, whole and line by line, which can only add
+/// masks: a mask from a rule that spans two lines takes no context a rule anchored to a line
+/// needs on the next one (#315).
 fn lines_with(text: &str, rules: &Rules) -> String {
-    outbound_with(text, rules)
+    let plain = crate::hook::strip_blocks(text, false);
+    let Some(runs) = hidden_lines(&plain, rules) else {
+        return MASK.to_string();
+    };
+    outbound_with(&with_masks(&plain, &merged_runs(runs)), rules)
         .split('\n')
         .map(|line| outbound_with(line, rules))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `text` with each of `runs` (sorted, apart) replaced by one mask.
+fn with_masks(text: &str, runs: &[(usize, usize)]) -> String {
+    let (mut masked, mut pos) = (String::with_capacity(text.len()), 0);
+    for &(s, e) in runs {
+        masked.push_str(&text[pos..s]);
+        masked.push_str(MASK);
+        pos = e;
+    }
+    masked.push_str(&text[pos..]);
+    masked
 }
 
 /// `outbound_lines` of a text joined from `parts` (byte ranges of it: an imported document's
@@ -1041,14 +1062,7 @@ fn joined_with(text: &str, parts: &[std::ops::Range<usize>], rules: &Rules) -> S
     let Some(runs) = hidden_views(text, views, rules) else {
         return MASK.to_string();
     };
-    let (mut masked, mut pos) = (String::with_capacity(text.len()), 0);
-    for (s, e) in runs {
-        masked.push_str(&text[pos..s]);
-        masked.push_str(MASK);
-        pos = e;
-    }
-    masked.push_str(&text[pos..]);
-    lines_with(&masked, rules)
+    lines_with(&with_masks(text, &runs), rules)
 }
 
 /// What `outbound_lines` hides in each of `views` (byte ranges of `text`) gated alone, found on
@@ -1728,6 +1742,28 @@ mod tests {
         let at = record.find("otp=").unwrap();
         let quote = quote_with(record, at..at + 10, &around);
         assert_eq!(quote, format!("otp={MASK}"));
+    }
+
+    /// #315 (Codex's security review of Task 7, on 3d9c958): each pass of `outbound_lines` finds
+    /// what it hides on the untouched text, so a mask from a rule that spans two lines takes no
+    /// context a line-anchored rule needs on the next line, in a quote and a joined text too.
+    #[test]
+    fn a_line_rule_keeps_its_context_when_a_rule_spans_two_lines() {
+        let rules = user(
+            r#"[redaction]
+extra_rules = [
+  { id = "owner", regex = 'owner\n(ACME)', secret_group = 1 },
+  { id = "otp", regex = '^ACME otp=([0-9]{6})$', secret_group = 1 },
+]
+"#,
+        )
+        .unwrap();
+        let text = "owner\nACME otp=654321";
+        let shown = format!("owner\n{MASK} otp={MASK}");
+        assert_eq!(lines_with(text, &rules), shown);
+        assert_eq!(joined_with(text, &[0..5, 6..text.len()], &rules), shown);
+        let quote = quote_with(text, 6..text.len(), &rules);
+        assert_eq!(quote, format!("{MASK} otp={MASK}"));
     }
 
     fn sha(v: &str) -> String {
