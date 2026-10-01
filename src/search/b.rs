@@ -1310,37 +1310,46 @@ pub fn claim(home: &Path, id: &str) -> Result<Option<ClaimView>> {
         "SELECT l.uid FROM active a JOIN {linkers} AND a.uid = ?1
          ORDER BY l.valid_from DESC, l.anchor_device DESC, l.anchor_seq DESC, l.uid DESC"
     ))?;
-    let mut st = k.prepare(
-        "SELECT e.device || ':' || e.seq, e.quote FROM claims c
-         JOIN evidence e ON e.op_device = c.op_device AND e.op_seq = c.op_seq
-         WHERE c.uid = ?1 ORDER BY e.idx",
-    )?;
-    let quotes = st
-        .query_map([&uid], |r| {
+    let quotes = active_quotes(&k, &uid)?
+        .iter()
+        .map(|e| {
             Ok(Quote {
-                key: r.get(0)?,
-                text: redact::outbound(&r.get::<_, String>(1)?),
+                key: format!("{}:{}", e.device, e.seq),
+                text: quote_text(&raw, e)?,
             })
-        })?
-        .collect::<Result<_, _>>()?;
+        })
+        .collect::<Result<_>>()?;
     let mut st = k.prepare(
-        "SELECT ts, tier, recipe, status, body FROM (
+        "SELECT ts, tier, recipe, status, body, op_device, op_seq FROM (
            SELECT ts, tier, recipe, status, body, op_device, op_seq FROM derivations WHERE uid = ?1
            UNION ALL
            SELECT ts, NULL, NULL, status, body, op_device, op_seq FROM corrections WHERE uid = ?1)
          ORDER BY ts, op_device, op_seq",
     )?;
-    let history = st
+    let rows = st
         .query_map([&uid], |r| {
-            Ok(Change {
-                ts: r.get(0)?,
-                tier: r.get(1)?,
-                recipe: r.get(2)?,
-                status: r.get(3)?,
-                body: r.get::<_, Option<String>>(4)?.map(|b| redact::outbound(&b)),
-            })
+            Ok((
+                Change {
+                    ts: r.get(0)?,
+                    tier: r.get(1)?,
+                    recipe: r.get(2)?,
+                    status: r.get(3)?,
+                    body: r.get::<_, Option<String>>(4)?.map(|b| redact::outbound(&b)),
+                },
+                r.get::<_, String>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
         })?
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
+    // A derivation whose quote a tombstone the worker has yet to apply masks is left out, as
+    // Anchors will drop it: its body may say what the mask hides (Codex's security review).
+    let pending = claims::Pending::read(&raw, &k)?;
+    let mut history = Vec::with_capacity(rows.len());
+    for (change, op_device, op_seq) in rows {
+        if !pending.touches_op(&k, &op_device, op_seq)? {
+            history.push(change);
+        }
+    }
     let repo: Option<String> = k
         .query_row("SELECT repo FROM active WHERE uid = ?1", [&uid], |r| {
             r.get(0)
@@ -1400,27 +1409,50 @@ fn claim_text(raw: &Raw, k: &Connection, uid: &str) -> Result<Option<String>> {
         c.scope,
         redact::outbound(&c.body)
     );
+    out.push_str("\nquotes:\n");
+    for e in active_quotes(k, uid)? {
+        out.push_str(&format!(
+            "- {}:{}: {}\n",
+            e.device,
+            e.seq,
+            one_line(&quote_text(raw, &e)?, 300)
+        ));
+    }
+    Ok(Some(out))
+}
+
+/// The quotes of `uid`'s active derivation, in order.
+fn active_quotes(k: &Connection, uid: &str) -> Result<Vec<claims::Evidence>> {
     let mut st = k.prepare(
-        "SELECT e.device, e.seq, e.quote FROM claims c
+        "SELECT e.device, e.seq, e.offset, e.length, e.sentence, e.quote FROM claims c
          JOIN evidence e ON e.op_device = c.op_device AND e.op_seq = c.op_seq
          WHERE c.uid = ?1 ORDER BY e.idx",
     )?;
     let quotes = st.query_map([uid], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, String>(2)?,
-        ))
+        Ok(claims::Evidence {
+            device: r.get(0)?,
+            seq: r.get(1)?,
+            offset: r.get(2)?,
+            length: r.get(3)?,
+            sentence: r.get(4)?,
+            quote: r.get(5)?,
+            claim_at: None,
+        })
     })?;
-    out.push_str("\nquotes:\n");
-    for q in quotes {
-        let (device, seq, quote) = q?;
-        out.push_str(&format!(
-            "- {device}:{seq}: {}\n",
-            one_line(&redact::outbound(&quote), 300)
-        ));
-    }
-    Ok(Some(out))
+    Ok(quotes.collect::<Result<_, _>>()?)
+}
+
+/// A quote as the gate shows it inside its record, with the words around it
+/// (`redact::outbound_quote`), so a rule added since that needs them hides it there too; the mask
+/// when it no longer reads verbatim in the record, whose derivation Anchors drops next.
+fn quote_text(raw: &Raw, e: &claims::Evidence) -> Result<String> {
+    let long = crate::consumer::claims::live(raw, e)?.and_then(|ev| crate::curate::long_text(&ev));
+    Ok(
+        match (long, usize::try_from(e.offset), usize::try_from(e.length)) {
+            (Some(long), Ok(start), Ok(len)) => redact::outbound_quote(&long, start..start + len),
+            _ => redact::outbound(""),
+        },
+    )
 }
 
 fn imported_text(k: &Connection, uid: &str) -> Result<Option<String>> {
@@ -3284,5 +3316,170 @@ mod tests {
             assert!(run_files(out.path()).is_empty());
         }
         assert_eq!(stub.requests(), sent);
+    }
+
+    /// Codex's security review of Task 7: a claim's quote is gated with its record's words around
+    /// it, so a rule added after the claim that needs them (a code after a name) hides it in the
+    /// viewer's claim and in `get` as in the record, before the rescan masks the record. The read
+    /// runs in a child process: egress reads the rules of the home `redact::set_home` names.
+    #[test]
+    fn a_quote_is_gated_with_its_records_words() {
+        use crate::claims::{ClaimOp, Evidence};
+        use crate::raw::OpKind;
+        use serde_json::json;
+        const HOME: &str = "OBOETE_TEST_QUOTE_HOME";
+        const UID: &str = "OBOETE_TEST_QUOTE_UID";
+        const CODE: &str = "654321";
+        if let (Ok(home), Ok(uid)) = (std::env::var(HOME), std::env::var(UID)) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let view = claim(&home, &uid).unwrap().unwrap();
+            let quote = &view.quotes[0].text;
+            assert!(
+                quote.starts_with("otp=") && !quote.contains(CODE),
+                "{quote}"
+            );
+            let text = get(&home, &uid).unwrap().unwrap();
+            assert!(text.contains("otp=") && !text.contains(CODE), "{text}");
+            return;
+        }
+        let mut s = Store::new();
+        let record = format!("ACME deploy; otp={CODE}.");
+        let seq = s.said("s", R, 1_000, &record);
+        let event = crate::raw::Event {
+            kind: "prompt".into(),
+            ..crate::raw::test_event(&json!({ "prompt": record }).to_string())
+        };
+        let quote = format!("otp={CODE}");
+        let long = crate::curate::long_text(&event).unwrap();
+        let evidence = Evidence {
+            device: s.raw.device().to_owned(),
+            seq,
+            offset: long.find(&quote).unwrap() as i64,
+            length: quote.len() as i64,
+            sentence: 0,
+            quote,
+            claim_at: None,
+        };
+        let uid = crate::claims::uid("decision", &evidence);
+        let op = ClaimOp {
+            id: "c".into(),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: "Deploy through ACME with the one-time code.".into(),
+            evidence: vec![evidence],
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier: 1,
+            why: String::new(),
+            tainted: false,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        s.raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
+        s.run();
+        // The rule comes after the claim, and no worker runs before the read.
+        std::fs::write(
+            s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'ACME.*otp=([0-9]{6})', secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let out = std::process::Command::new(std::env::args_os().next().unwrap())
+            .args([
+                "--exact",
+                "search::b::tests::a_quote_is_gated_with_its_records_words",
+            ])
+            .env(HOME, s.home.path())
+            .env(UID, &uid)
+            .output()
+            .unwrap();
+        let printed = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && printed.contains("1 passed"),
+            "{printed}"
+        );
+    }
+
+    /// Codex's security review of Task 7: a claim's history leaves out a derivation whose quote a
+    /// tombstone the worker has yet to apply masks, as Anchors drops it at its next step, while the
+    /// claim, whose active derivation quotes a clean record, is still shown.
+    #[test]
+    fn a_history_entry_whose_quote_is_masked_waits_out_of_sight_until_anchors_drop_it() {
+        use crate::claims::{ClaimOp, Evidence};
+        use crate::raw::OpKind;
+        let mut s = Store::new();
+        let clean = "Use the staging deploy key.";
+        let leaked = "The staging key is acme-123456.";
+        let first = s.said("s", R, 1_000, clean);
+        let second = s.said("s", R, 2_000, leaked);
+        let quote = |seq: i64, text: &str| Evidence {
+            device: s.raw.device().to_owned(),
+            seq,
+            offset: 0,
+            length: text.len() as i64,
+            sentence: 0,
+            quote: text.into(),
+            claim_at: None,
+        };
+        let derivation = |id: &str, body: &str, evidence: Vec<Evidence>, tier: i64| ClaimOp {
+            id: id.into(),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: body.into(),
+            evidence,
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier,
+            why: String::new(),
+            tainted: false,
+        };
+        // One claim (its uid is the first quote's), two derivations: the paid one is active.
+        let older = derivation(
+            "a",
+            "Use acme-123456 for staging.",
+            vec![quote(first, clean), quote(second, leaked)],
+            1,
+        );
+        let active = derivation(
+            "b",
+            "Use the staging deploy key.",
+            vec![quote(first, clean)],
+            3,
+        );
+        let uid = crate::claims::uid("decision", &active.evidence[0]);
+        for op in [older, active] {
+            let op = serde_json::to_value(op).unwrap();
+            s.raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
+        }
+        s.run();
+        let bodies = |s: &Store| -> Vec<String> {
+            claim(s.home.path(), &uid)
+                .unwrap()
+                .unwrap()
+                .history
+                .into_iter()
+                .filter_map(|c| c.body)
+                .collect()
+        };
+        assert_eq!(
+            bodies(&s),
+            [
+                "Use acme-123456 for staging.",
+                "Use the staging deploy key."
+            ]
+        );
+        let target = crate::raw::Target::Range {
+            device: s.raw.device().to_owned(),
+            seq: second,
+            offset: leaked.find("acme").unwrap() as i64,
+            length: "acme-123456".len() as i64,
+        };
+        s.raw.append_tombstone(target).unwrap();
+        assert_eq!(bodies(&s), ["Use the staging deploy key."]);
+        s.run();
+        assert_eq!(bodies(&s), ["Use the staging deploy key."]);
     }
 }

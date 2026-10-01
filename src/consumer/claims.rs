@@ -303,7 +303,7 @@ fn derive(raw: &Raw, k: &Connection, op: &Op) -> Result<Option<Derived>> {
 /// The event `e` anchors on, when its quote still reads verbatim there as `Raw::after` returns
 /// it: a tombstoned record reads as nothing and a masked range as its mask, so a secret masked
 /// after curation does not come back through a claim (spec 6.4).
-fn live(raw: &Raw, e: &Evidence) -> Result<Option<crate::raw::Event>> {
+pub(crate) fn live(raw: &Raw, e: &Evidence) -> Result<Option<crate::raw::Event>> {
     let record = raw
         .after(&e.device, e.seq - 1, 1)?
         .into_iter()

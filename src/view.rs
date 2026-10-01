@@ -605,8 +605,9 @@ impl Viewer {
             let settings = crate::capture::Settings::load(&self.home)?;
             let raw = crate::raw::open(&self.home)?;
             let session = crate::hook::own_session("unknown".into(), &raw);
-            let manifest =
-                crate::hook::start_text(&self.home, &raw, &repo, &branch, &session, &settings);
+            let manifest = crate::hook::start_text_read(
+                &self.home, &raw, &repo, &branch, &session, &settings,
+            )?;
             crate::hook::joined(&self.home, manifest.as_deref())
         } else {
             crate::hook::joined(&self.home, None)
@@ -1574,6 +1575,21 @@ mod tests {
         let other = get(&v, "/api/context?repo=github.com%2Fx%2Fother");
         assert_eq!(other["repo"], "github.com/x/other");
         assert!(!other["text"].as_str().unwrap().contains("Parser"));
+    }
+
+    /// Codex's security review of Task 7: the Context page answers a manifest it cannot read
+    /// (D11: busy or locked is 503, `failed`), where a SessionStart hook only logs it and shows
+    /// nothing: never an empty 200.
+    #[test]
+    fn a_context_page_that_cannot_read_the_manifest_answers_an_error() {
+        let (s, v, _) = seeded();
+        assert_eq!(v.route("GET", "/api/context", &[HOST, TOKEN]).status, 200);
+        let home = s.home.path().to_owned();
+        for name in ["knowledge.db-wal", "knowledge.db-shm"] {
+            let _ = std::fs::remove_file(home.join(name));
+        }
+        std::fs::write(home.join("knowledge.db"), b"not a database, only text").unwrap();
+        assert_eq!(v.route("GET", "/api/context", &[HOST, TOKEN]).status, 500);
     }
 
     /// D11: stats from raw.db, knowledge.db and providers.db; a leftover rebuild file alone is no

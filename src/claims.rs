@@ -793,6 +793,26 @@ impl Pending {
         }
         Ok(false)
     }
+
+    /// Whether they touch a quote of the derivation op `op_seq` of `op_device`, active or not: a
+    /// claim's history leaves such a derivation out, as Anchors will drop it.
+    pub fn touches_op(&self, k: &Connection, op_device: &str, op_seq: i64) -> Result<bool> {
+        if self.records.is_empty() {
+            return Ok(false);
+        }
+        let mut st = k.prepare_cached(
+            "SELECT device, seq FROM evidence WHERE op_device = ?1 AND op_seq = ?2",
+        )?;
+        let quotes = st.query_map(rusqlite::params![op_device, op_seq], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        for q in quotes {
+            if self.records.contains(&q?) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 /// `units` listed newest first, each by its newest claim (spec 4.4): a claim dated between the two
