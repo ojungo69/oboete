@@ -606,6 +606,7 @@ impl Viewer {
             let raw = crate::raw::open(&self.home)?;
             let session = crate::hook::own_session("unknown".into(), &raw);
             crate::hook::start_text_read(&self.home, &raw, &repo, &branch, &session, &settings)?
+                .map(|s| s.text)
         } else {
             None
         };

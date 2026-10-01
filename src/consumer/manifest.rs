@@ -94,12 +94,31 @@ fn schema(k: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// What SessionStart shows (`text`), and the claims shown with their bodies, which a later
-/// injection need not repeat (spec 4.7).
+/// What SessionStart shows (`text`), and the claims it shows (spec 4.7, 4.8).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Start {
     pub text: String,
-    pub shown: Vec<String>,
+    pub shown: Vec<Shown>,
+}
+
+/// A claim shown to a session: a later injection need not repeat its body, and a correction names
+/// it if it changes (Task 8, D9).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shown {
+    pub uid: String,
+    /// `fingerprint` of its body when it was shown.
+    pub fp: String,
+    /// Its body, or only its index line.
+    pub body: bool,
+}
+
+/// A body's fingerprint: whether a claim's body changed since it was shown.
+pub fn fingerprint(body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(body.as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// What SessionStart shows for this checkout (spec 4.4, D3 and D4 of milestone 4's plan): the
@@ -136,7 +155,7 @@ pub fn text(
     let shown = bodies
         .into_iter()
         .filter(|(line, _)| text.lines().any(|l| l == line))
-        .map(|(_, uid)| uid)
+        .map(|(_, shown)| shown)
         .collect();
     Ok(Some(Start { text, shown }))
 }
@@ -296,7 +315,8 @@ fn stored(
 }
 
 /// A line that shows a claim's body, and the claim's uid.
-type Body = (String, String);
+/// A line that shows a claim, its body's or its index line, and the claim.
+type Body = (String, Shown);
 
 /// Spec 4.4's SessionStart around the checkout's `manifest`: the global preferences first; the
 /// manifest, with `repo`'s delivered decisions, preferences, open items and lessons (spec 3.4) in
@@ -307,7 +327,7 @@ type Body = (String, String);
 /// earlier claim with the later claim that ended it (`claims::units`), and listed newest first. A
 /// checkout with no manifest to show (a new branch, a dirty manifest, a tombstone not yet applied)
 /// still gets them (D4). Each body and digest line is gated with `rules` before it is flattened
-/// and clipped. The text, with each line that shows a claim's body and its uid.
+/// and clipped. The text, with each line that shows a claim, its body's or its index line.
 /// Read when the text is (D3): claims come from curation, which runs while the owner is idle and
 /// appends no record this consumer steps on, so a section built with the text would miss the last
 /// session's decisions; and what the worker has not applied yet (`claims::Pending`) is left out.
@@ -363,7 +383,12 @@ fn with_delivered(
                 .map(|l| format!(", superseded by the {} {} above", date(l), l.kind))
                 .unwrap_or_default();
             let line = format!("- {} {}{ended}: {}", date(c), c.kind, gate(&c.body, CLIP));
-            bodies.push((line.clone(), c.uid.clone()));
+            let shown = Shown {
+                uid: c.uid.clone(),
+                fp: fingerprint(&c.body),
+                body: true,
+            };
+            bodies.push((line.clone(), shown));
             line + "\n"
         };
         let id = |uid: &str| uid.chars().take(12).collect::<String>();
@@ -374,7 +399,7 @@ fn with_delivered(
                 .map(|l| format!(", superseded by {}", id(l)))
                 .unwrap_or_default();
             format!(
-                "- {} {} {}{ended}: {}\n",
+                "- {} {} {}{ended}: {}",
                 id(&c.uid),
                 date(c),
                 c.kind,
@@ -408,7 +433,18 @@ fn with_delivered(
             middle.push_str(&section("Digest of the last session", lines));
         }
         if !(units.is_empty() && index.is_empty()) {
-            let lines: String = index.iter().flatten().map(brief).collect();
+            let mut lines = String::new();
+            for c in index.iter().flatten() {
+                let line = brief(c);
+                lines.push_str(&line);
+                lines.push('\n');
+                let shown = Shown {
+                    uid: c.uid.clone(),
+                    fp: fingerprint(&c.body),
+                    body: false,
+                };
+                bodies.push((line, shown));
+            }
             last = format!("## More from memory\n{TOOLS}\n{lines}");
         }
     }
@@ -1421,10 +1457,10 @@ mod tests {
         );
     }
 
-    /// Spec 4.7: `Start::shown` names the claims shown with their bodies, never an index line's,
-    /// nor one the cut dropped.
+    /// Spec 4.7, 4.8: `Start::shown` names each claim shown, with its body or only its index line,
+    /// and its body's fingerprint, never one the cut dropped.
     #[test]
-    fn start_names_the_claims_shown_with_their_bodies() {
+    fn start_names_the_claims_it_shows_and_how() {
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         session(home.path(), cwd.path());
@@ -1446,18 +1482,33 @@ mod tests {
                 .unwrap()
         };
         let all = start(usize::MAX);
-        let mut shown = all.shown.clone();
-        shown.sort();
+        let shown = |start: &Start, body: bool| {
+            let mut uids: Vec<String> = start
+                .shown
+                .iter()
+                .filter(|s| s.body == body)
+                .map(|s| s.uid.clone())
+                .collect();
+            uids.sort();
+            uids
+        };
         let mut newest: Vec<String> = uids[2..].to_vec();
         newest.sort();
-        assert_eq!(shown, newest); // the 2 oldest are index lines
-        // A cap that ends inside the bodies: the claims past it are not shown.
+        assert_eq!(shown(&all, true), newest);
+        // The 2 oldest are index lines.
+        let mut oldest = uids[..2].to_vec();
+        oldest.sort();
+        assert_eq!(shown(&all, false), oldest);
+        for (i, uid) in uids.iter().enumerate() {
+            let s = all.shown.iter().find(|s| s.uid == *uid).unwrap();
+            assert_eq!(s.fp, fingerprint(&format!("Rule {:02}.", i + 1)));
+        }
+        // A cap that ends inside the bodies: the claims past it, and the index, are not shown.
         let at = all.text.find("- 1970-01-09 decision").unwrap();
         let cut = start(all.text[..at].chars().count());
-        assert_eq!(
-            cut.shown,
-            uids[8..].iter().rev().cloned().collect::<Vec<_>>()
-        );
+        let mut kept = uids[8..].to_vec();
+        kept.sort();
+        assert_eq!((shown(&cut, true), shown(&cut, false)), (kept, Vec::new()));
     }
 
     /// Task 8: a row built before the read-time lines carries the ruleset without the format tag:

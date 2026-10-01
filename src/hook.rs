@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{Value, json};
 
+use crate::consumer::manifest::{Shown, Start};
 use crate::{config, db, redact};
 
 /// Largest text kept per field. Tool outputs beyond this are clipped with a marker.
@@ -134,6 +135,9 @@ fn run_io(
         // A manifest that cannot be read is no recording failure: the row is written.
         if injecting {
             manifest = checkout_manifest(home, &store, &labels, &settings);
+            if let Some(start) = &manifest {
+                remember(home, agent, session_label(&labels), &start.shown);
+            }
         }
         Ok(())
     })();
@@ -190,7 +194,7 @@ fn run_io(
             failed
                 .filter(|_| injecting || reads_start)
                 .map(crate::failure::line),
-            manifest.as_deref().map(crate::manifest::fenced),
+            manifest.as_ref().map(|m| crate::manifest::fenced(&m.text)),
         ]
         .into_iter()
         .flatten()
@@ -314,7 +318,7 @@ fn checkout_manifest(
     store: &crate::raw::Raw,
     labels: &Value,
     settings: &crate::capture::Settings,
-) -> Option<String> {
+) -> Option<Start> {
     let (session, repo, branch) = crate::capture::checkout(labels, settings);
     let session = own_session(session, store);
     start_text(
@@ -338,7 +342,7 @@ pub fn start_text(
     branch: &str,
     session: &str,
     settings: &crate::capture::Settings,
-) -> Option<String> {
+) -> Option<Start> {
     start_text_read(home, store, repo, branch, session, settings).unwrap_or_else(|e| {
         eprintln!("oboete: manifest not read: {e:#}");
         None
@@ -354,7 +358,7 @@ pub fn start_text_read(
     branch: &str,
     session: &str,
     settings: &crate::capture::Settings,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<Start>> {
     // `[inject]` (#94): off, or a smaller size than the stored manifest's. Settings that do not
     // read inject nothing, as capture settings that do not read record nothing.
     let Some(inject) = crate::config::inject(home)
@@ -364,7 +368,7 @@ pub fn start_text_read(
     else {
         return Ok(None);
     };
-    let start = crate::consumer::manifest::text(
+    crate::consumer::manifest::text(
         home,
         store,
         repo,
@@ -373,8 +377,20 @@ pub fn start_text_read(
         &settings.rules,
         inject.session_start_chars,
         crate::db::now_ms(),
-    )?;
-    Ok(start.map(|s| s.text))
+    )
+}
+
+/// Task 8 Step 5 (spec 4.7, 4.8): what an injection showed replaces the session's shown set, so a
+/// resume, which injects nothing, keeps it. One that cannot be written costs a body shown again.
+fn remember(home: &Path, agent: &str, session: &str, shown: &[Shown]) {
+    let set: serde_json::Map<String, Value> = shown
+        .iter()
+        .map(|s| (s.uid.clone(), json!({"fp": s.fp, "body": s.body})))
+        .collect();
+    let set = Value::Object(set).to_string();
+    if let Err(e) = crate::hookstate::update(home, agent, session, "shown", |_| Some(set)) {
+        eprintln!("oboete: what was shown is not kept: {e}");
+    }
 }
 
 /// `oboete inject`: what a SessionStart hook shows for the checkout at `cwd` (the recording-failure
@@ -383,7 +399,7 @@ pub fn start_text_read(
 pub fn inject_text(home: &Path, cwd: &Path, session: Option<&str>) -> String {
     // The failure line does not wait on the settings or raw.db: one that cannot be read may be
     // the failure it reports.
-    let manifest = (|| -> Result<Option<String>> {
+    let manifest = (|| -> Result<Option<Start>> {
         let settings = crate::capture::Settings::load(home)?;
         let store = crate::raw::open(home)?;
         let labels = json!({"session_id": session.unwrap_or("unknown"), "cwd": cwd});
@@ -393,7 +409,11 @@ pub fn inject_text(home: &Path, cwd: &Path, session: Option<&str>) -> String {
         eprintln!("oboete: manifest not read: {e:#}");
         None
     });
-    joined(home, manifest.as_deref())
+    // OpenCode's plugin is what reads it (D9).
+    if let (Some(start), Some(session)) = (&manifest, session) {
+        remember(home, "opencode", session, &start.shown);
+    }
+    joined(home, manifest.as_ref().map(|m| m.text.as_str()))
 }
 
 /// The recording-failure line, then `manifest` in its fence: what SessionStart shows, as `oboete
@@ -1243,6 +1263,81 @@ mod tests {
         assert_eq!(crate::failure::since(home), None);
         let raw = crate::raw::open(home).unwrap();
         assert_eq!(raw.max_seq().unwrap(), 1);
+    }
+
+    /// Task 8 Step 5 (spec 4.7, 4.8): an injection keeps what it showed as the session's shown
+    /// set, each claim with its body's fingerprint and whether its body or only its index line
+    /// came through; a resume keeps it, the next SessionStart replaces it, and `oboete inject`
+    /// keeps OpenCode's.
+    #[test]
+    fn session_start_keeps_the_claims_it_showed() {
+        const DAY: i64 = 86_400_000;
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
+        std::fs::write(cwd.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let c = cwd.path().to_string_lossy().into_owned();
+        let settings = crate::capture::Settings::load(&home).unwrap();
+        let (_, repo, _) = crate::capture::checkout(&json!({"cwd": c}), &settings);
+        for i in 1..=12 {
+            s.decided(&repo, i * DAY, &format!("Rule {i:02} for the parser."), &[]);
+        }
+        s.run();
+        let start = |session: &str, source: &str| {
+            let mut out = Vec::new();
+            let input = json!({"session_id": session, "cwd": c, "source": source}).to_string();
+            run_io(&home, "claude", "SessionStart", input.as_bytes(), &mut out).unwrap();
+        };
+        let kept = |agent: &str, session: &str| -> Option<Value> {
+            crate::hookstate::value(&home, agent, session, "shown")
+                .map(|v| serde_json::from_str(&v).unwrap())
+        };
+        let expected = || {
+            let raw = crate::raw::open(&home).unwrap();
+            let start = crate::consumer::manifest::text(
+                &home,
+                &raw,
+                &repo,
+                "main",
+                "a",
+                &settings.rules,
+                crate::config::inject(&home).unwrap().session_start_chars,
+                crate::db::now_ms(),
+            )
+            .unwrap()
+            .unwrap();
+            let set: serde_json::Map<String, Value> = start
+                .shown
+                .iter()
+                .map(|s| (s.uid.clone(), json!({"fp": s.fp, "body": s.body})))
+                .collect();
+            Value::Object(set)
+        };
+        start("a", "startup");
+        let first = kept("claude", "a").unwrap();
+        assert_eq!(first, expected());
+        let bodies = |v: &Value, body: bool| {
+            v.as_object()
+                .unwrap()
+                .values()
+                .filter(|s| s["body"] == body)
+                .count()
+        };
+        assert!(
+            bodies(&first, true) > 0 && bodies(&first, false) > 0,
+            "{first}"
+        );
+        let newer = s.decided(&repo, 13 * DAY, "Rule 13 for the parser.", &[]);
+        s.run();
+        start("a", "resume");
+        assert_eq!(kept("claude", "a").unwrap(), first);
+        start("a", "compact");
+        let after = kept("claude", "a").unwrap();
+        assert!(after.get(&newer).is_some() && after != first, "{after}");
+        assert_eq!(kept("opencode", "o"), None);
+        inject_text(&home, cwd.path(), Some("o"));
+        assert_eq!(kept("opencode", "o").unwrap(), after);
     }
 
     #[test]
