@@ -196,11 +196,12 @@ def detectable(n, sd):
     return high * sd / math.sqrt(n)
 
 
-def raw_table(label, data, queries, selectors, adjusted, reported=False):
-    """Raw's slice checks stay inside its eligible population and retain record qrels."""
+def raw_table(label, data, queries, selectors, adjusted, eligible, reported=False):
+    """Raw's slice checks stay inside its eligible population and retain record qrels. Raw N is
+    D10's: the eligible questions, then how many of them have an answer."""
     qrels, runs = data
-    print(f'\n## {label}: Raw N = {len(qrels)} questions with an answer'
-          + (' (reported only)' if reported else ''))
+    print(f'\n## {label}: Raw N = {eligible} eligible questions, {len(qrels)} with an answer, '
+          f'{eligible - len(qrels)} without' + (' (reported only)' if reported else ''))
     rs = score(qrels, runs)
     failures = {name: [] for name in m4.RAW_RUNS}
     for slice_label, keep, _ in selectors:
@@ -234,7 +235,9 @@ def raw_table(label, data, queries, selectors, adjusted, reported=False):
 
 
 def m4_report(runs, judged, queries, own, eligible, asked, now, shown, timestamps):
-    views = tables(runs, judged, queries, asked, now, shown, timestamps, own, m4_mode=True)
+    # The Raw runs hold the eligible questions only: they are scored in the Raw table alone.
+    views = tables({name: per for name, per in runs.items() if name not in m4.RAW_RUNS}, judged, queries,
+                   asked, now, shown, timestamps, own, m4_mode=True)
     results, rerank_failures = {}, []
     for label, (qrels, per) in views.items():
         results[label] = table(label, qrels, per, m4_mode=True)
@@ -276,7 +279,7 @@ def m4_report(runs, judged, queries, own, eligible, asked, now, shown, timestamp
               f'Holm p={corrected["b-rerank"]:.6g}; ' + ('; '.join(rerank_failures) or 'all lines held'))
 
     selectors = slices(asked, now, shown, timestamps, queries, m4_mode=True)
-    raw_table('Raw', raw, queries, selectors, corrected)
+    raw_table('Raw', raw, queries, selectors, corrected, len(eligible))
     removed = {(qid, doc) for qid in eligible for doc in judged.get(qid, {})
                if doc not in own and doc.startswith('r:') and near_copy(queries[qid]['text'], shown[doc])}
     print(f'near-copy records in Raw pools: {len({doc for _, doc in removed})} unique, '
@@ -288,7 +291,8 @@ def m4_report(runs, judged, queries, own, eligible, asked, now, shown, timestamp
     clean_ps = [contrast(clean_rs, name, baseline)['p'] if name in m4.RAW_RUNS else result['p']
                 for name, baseline, result in family]
     clean_adjusted = {name: p for (name, _, _), p in zip(family, m4.holm(clean_ps))}
-    raw_table('Raw, near-copy records removed', clean, queries, selectors, clean_adjusted, reported=True)
+    raw_table('Raw, near-copy records removed', clean, queries, selectors, clean_adjusted, len(eligible),
+              reported=True)
 
     print('\n## English-minus-Japanese gap (M21)')
     # One-sided, as M21's error rates are (a system equal in both languages fails 4-6% of the
@@ -320,9 +324,14 @@ def main():
         sys.exit('usage: report.py <split> [judge] [--m4]')
     if m4_mode and J.POOL_DEPTH != m4.DEPTH:
         sys.exit('--m4 requires OBOETE_EVAL_DEPTH=50')
+    if not m4_mode and os.path.exists(f'{J.RUNS}/b-off.trec'):
+        sys.exit('these are milestone 4 runs: add --m4')
     split, judge = args[0], args[1] if len(args) > 1 else J.JUDGE
     db = sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True)
     queries = {q['qid']: q for q in map(json.loads, open(J.QUESTIONS)) if q['split'] == split}
+    if m4_mode and (len(queries) != m4.TEST_N or sum(q['lang'] == 'en' for q in queries.values()) != m4.ENGLISH_N):
+        sys.exit(f'--m4 scores the {m4.TEST_N} test questions, {m4.ENGLISH_N} of them English: '
+                 'set OBOETE_EVAL_QUESTIONS to questions-test-m4.jsonl')
     latest = J.latest(judge)
     own = m4.v1_own() if m4_mode else set()
     runs_now = m4.load(J.RUNS, m4.RUNS) if m4_mode else J.load_runs()

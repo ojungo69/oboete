@@ -277,6 +277,11 @@ def test_the_english_gap_has_a_welch_interval():
     assert 0.055 < (high - low) / 2 < 0.065
     assert (high + low) / 2 == pytest.approx(diff)
     assert m4.gap([0.6] * 3, [0.5] * 5) == pytest.approx((0.1, 0.1, 0.1))
+    # Unequal spread and N: Welch's interval, not a pooled or a z one.
+    from scipy.stats import ttest_ind
+    en, ja = [0.2, 0.9, 0.4, 0.7, 0.1], [0.5, 0.52, 0.48, 0.51, 0.49, 0.5, 0.53, 0.47]
+    ci = ttest_ind(en, ja, equal_var=False).confidence_interval(0.95)
+    assert m4.gap(en, ja)[1:] == pytest.approx((ci.low, ci.high))
     with pytest.raises(ValueError, match='two questions'):
         m4.gap([0.5], [0.5, 0.6])
 
@@ -329,6 +334,9 @@ def test_a_slice_drop_is_named_and_a_small_slice_counted(capsys, report_module):
     assert 'b-off [question in English]' not in out
     assert 'Holm family: m=3' in out
     assert 'NO-GO b-rerank: absent' in out
+    assert [line for line in out.splitlines() if line.startswith('FAIL b-off [all]') and 'FLOOR=' in line]
+    # The Raw runs, which hold the eligible questions only, are in no other table.
+    assert '\nb-rrf5 ' not in out.split('## Holm family')[0]
 
 
 def test_the_english_gap_line_is_one_sided(capsys, report_module):
@@ -341,7 +349,9 @@ def test_the_english_gap_line_is_one_sided(capsys, report_module):
         runs['b-off'] = {qid: ['o107', 'o108'] if queries[qid]['lang'] == better else ['o108', 'o107']
                          for qid in queries}
         report.m4_report(runs, judged, queries, set(), set(), {}, 0, {'o107': 'a memory', 'o108': 'x'}, {})
-        gap = capsys.readouterr().out.split('English-minus-Japanese gap')[1]
+        out = capsys.readouterr().out
+        assert [line for line in out.splitlines() if line.startswith('PASS b-off [all]') and 'FLOOR=' in line]
+        gap = out.split('English-minus-Japanese gap')[1]
         assert ('PASS b-off' if better == 'en' else 'FAIL b-off') in gap
         assert 'hybrid-d2: English N=6' in gap and '(holds no line)' in gap
 
@@ -403,7 +413,7 @@ def test_raw_uses_only_eligible_questions_and_near_copy_is_reported_only(capsys,
     assert 'b-rerank against b-off: N=20' in primary
     assert 'b-rrf5 against b-off: N=10' in primary
     assert '\nGO b-rerank:' in primary
-    assert 'Raw N = 10 questions with an answer' in primary
+    assert 'Raw N = 10 eligible questions, 10 with an answer, 0 without' in primary
     assert '\nGO b-rrf5:' in primary and '\nGO b-only:' in primary
     assert 'Raw [prompts typed 90 days ago or earlier]: 0 questions with an answer (holds no line)' in primary
     assert 'near-copy records in Raw pools: 1 unique, 10 question-record pairs' in primary
@@ -437,3 +447,16 @@ def report_module(monkeypatch):
         guard.setattr(os, 'listdir', forbidden)
         guard.setattr(os.path, 'getmtime', forbidden)
         return importlib.import_module('report')
+
+
+def test_the_132_leave_every_table(capsys, report_module):
+    """A v1-owned document is relevant but no system can return it: it leaves the qrels too."""
+    report = report_module
+
+    queries = {f'q{i}': q(f'q{i}') for i in range(6)}
+    judged = {qid: {'o1': 3, 'o107': 3} for qid in queries}
+    runs = {name: {qid: ['o107'] for qid in queries} for name in m4.RUNS}
+    report.m4_report(runs, judged, queries, {'o1'}, set(queries), {}, 0, {'o1': 'x', 'o107': 'y'}, {})
+    primary, clean = capsys.readouterr().out.split('## Raw, near-copy records removed:')
+    assert '\nb-off 1.000000 ' in primary
+    assert 'b-rrf5: ndcg@10=1.000000' in primary and 'b-rrf5: ndcg@10=1.000000' in clean
