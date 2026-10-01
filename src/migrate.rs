@@ -91,7 +91,7 @@ fn read_pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<(Stats, Fingerpr
     };
     let mut stats = Stats::default();
     events(&v1, raw, &device, &settings, &mut stats)?;
-    stats.deleted = deleted(&v1, raw)?;
+    stats.deleted = deleted(&v1, raw, &settings)?;
     repos(&v1, raw, &settings, &mut stats)?;
     documents(&v1, raw, &device, &settings, &mut stats)?;
     Ok((stats, fingerprint(&v1)?))
@@ -103,7 +103,15 @@ pub fn settings(home: &Path, from: &Path) -> Result<Vec<String>> {
     let ours = home.join("config.toml");
     let theirs = from.with_file_name("config.toml");
     if !ours.exists() && theirs.exists() {
-        std::fs::copy(&theirs, &ours).with_context(|| format!("copy {}", theirs.display()))?;
+        // Whole or not at all: a copy cut short would read as a file with nothing set, which a
+        // rerun keeps. A link, not a rename, so a config.toml written meanwhile is never replaced.
+        let part = home.join("config.toml.part");
+        std::fs::copy(&theirs, &part).with_context(|| format!("copy {}", theirs.display()))?;
+        std::fs::File::open(&part)?.sync_all()?;
+        match std::fs::hard_link(&part, &ours) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
+            _ => std::fs::remove_file(&part)?,
+        }
     }
     let text = match std::fs::read_to_string(&ours) {
         Ok(t) => t,
@@ -198,7 +206,10 @@ pub fn finish(
     out: &mut impl std::io::Write,
 ) -> Result<()> {
     let from = &home.join("oboete.db");
-    let (stats, before) = read_pass(home, &mut crate::raw::open(home)?, from)?;
+    // Open to the end: its shared lock keeps a restore from swapping raw.db, with the batches the
+    // pass just checked, while the answer is read and v1 is deleted.
+    let mut raw = crate::raw::open(home)?;
+    let (stats, before) = read_pass(home, &mut raw, from)?;
     let mut files = old_files(home)?;
     writeln!(out, "v1's old files in {}:", home.display())?;
     for (path, bytes) in &files {
@@ -220,8 +231,13 @@ pub fn finish(
         writeln!(out, "Nothing was deleted.")?;
         return Ok(());
     }
+    let now = {
+        let v1 = open_v1(from)?;
+        v1.execute_batch("BEGIN")?;
+        fingerprint(&v1)?
+    };
     anyhow::ensure!(
-        fingerprint(&open_v1(from)?)? == before,
+        now == before,
         "oboete.db changed after the import pass (an old hook still writes to it): nothing was \
          deleted; run `oboete migrate --finish` again"
     );
@@ -417,15 +433,27 @@ fn payload(session: &str, stored: &str) -> Value {
 }
 
 /// The imported v1 sessions none of whose events oboete.db still holds.
-fn deleted(v1: &Connection, raw: &Raw) -> Result<Vec<String>> {
-    let mut st = v1.prepare("SELECT 1 FROM events WHERE session_id = ?1 LIMIT 1")?;
-    let mut gone = Vec::new();
-    for session in raw.sessions_of(SOURCE)? {
-        if !st.exists([&session])? {
-            gone.push(session);
-        }
-    }
-    Ok(gone)
+fn deleted(v1: &Connection, raw: &Raw, settings: &Settings) -> Result<Vec<String>> {
+    // Design B's labels passed the gate: v1's ids are compared as capture labels them, and each
+    // is printed as the rules read now.
+    let label = |id: &str| {
+        let payload = json!({ "session_id": id });
+        capture::imported("claude", "Touch", &payload, 0, "", None, settings)
+            .pop()
+            .map(|c| c.event.session)
+            .unwrap_or_default()
+    };
+    let mut st = v1.prepare("SELECT DISTINCT session_id FROM events")?;
+    let held = st
+        .query_map([], |r| r.get::<_, String>(0))?
+        .map(|id| id.map(|id| label(&id)))
+        .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+    Ok(raw
+        .sessions_of(SOURCE)?
+        .into_iter()
+        .filter(|s| !held.contains(s))
+        .map(|s| label(&s))
+        .collect())
 }
 
 /// v1's `session_repos` rows as `touch` records at their session's start (A57), so the
@@ -788,6 +816,26 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         );
     }
 
+    /// Each listed id reads as the rules read now: a rule added after the import hides it.
+    #[test]
+    fn a_deleted_session_is_listed_as_the_rules_read_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let v1 = V1::new(dir.path());
+        v1.session("acme-123456", "r", 100);
+        v1.prompt("acme-123456", 101, "one");
+        v1.session("b", "r", 200);
+        v1.prompt("b", 201, "two");
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        pass(home.path(), &mut raw, &v1.path).unwrap();
+        v1.delete_session("acme-123456");
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+        std::fs::write(home.path().join("config.toml"), rule).unwrap();
+        let listed = pass(home.path(), &mut raw, &v1.path).unwrap().deleted;
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert!(!listed[0].contains("acme-123456"), "{listed:?}");
+    }
+
     /// D6: v1 gives the ids of deleted newest events to new ones, so a pass refuses when the
     /// event at its checkpoint is gone or another, before it imports anything.
     #[test]
@@ -828,6 +876,14 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
             v1.session(id, "r", 100 * i as i64);
             v1.prompt(id, 100 * i as i64 + 1, id);
         }
+        // An id the gate masks: its records' labels are masked, so it is matched as they are.
+        let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let masked = format!("s-{token}");
+        v1.session(&masked, "r", 400);
+        v1.prompt(&masked, 401, "four");
+        // Not the newest: deleting the newest session is refused (D6).
+        v1.session("d", "r", 500);
+        v1.prompt("d", 501, "five");
         let home = tempfile::tempdir().unwrap();
         let mut raw = raw::open(home.path()).unwrap();
         assert!(
@@ -839,6 +895,10 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         v1.delete_session("a");
         let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
         assert_eq!(stats.deleted, ["a"]);
+        v1.delete_session(&masked);
+        let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
+        assert_eq!(stats.deleted.len(), 2, "{:?}", stats.deleted);
+        assert!(stats.deleted.iter().all(|s| !s.contains(&token)));
         // And by `--finish`, from the home's own store.
         drop(raw);
         let h = home.path();
@@ -849,7 +909,10 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         let mut out = Vec::new();
         finish(h, "no\n".as_bytes(), &mut out).unwrap();
         let said = String::from_utf8(out).unwrap();
-        assert!(said.contains("here too): a\n"), "{said}");
+        assert!(
+            said.contains("here too): a, ") && !said.contains(&token),
+            "{said}"
+        );
     }
 
     /// Spec 7.4: each batch commits with its checkpoint, so a pass killed between two resumes after
@@ -1219,7 +1282,10 @@ key_file = "/k/CF_WORKERS_AI_KEY.md"
         let broken = format!("[redaction]\nallowlist = [{secret}]\n");
         std::fs::write(dir.path().join("config.toml"), broken).unwrap();
         let fresh = tempfile::tempdir().unwrap();
+        // A copy an earlier run left cut short is not the file: it is copied again, whole.
+        std::fs::write(fresh.path().join("config.toml.part"), "[redaction]\n").unwrap();
         let refused = settings(fresh.path(), &v1.path).unwrap_err();
+        assert!(!fresh.path().join("config.toml.part").exists());
         let said = format!("{refused:#}");
         assert!(said.contains("line 2") && !said.contains(&secret), "{said}");
     }
@@ -1254,6 +1320,26 @@ key_file = "/k/CF_WORKERS_AI_KEY.md"
         let raw = raw::open(h).unwrap();
         assert_eq!(of_kind(&raw, "prompt"), [json!({"prompt": "one"})]);
         drop(raw);
+        // While the answer is read, raw.db stays open: a restore cannot swap it under the pass.
+        struct Swapping<'a>(&'a Path, Option<bool>);
+        impl std::io::Read for Swapping<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.1.is_some() {
+                    return Ok(0);
+                }
+                let lock = std::fs::File::open(self.0.join("raw.lock"))?;
+                self.1 = Some(lock.try_lock().is_err());
+                buf[..3].copy_from_slice(b"no\n");
+                Ok(3)
+            }
+        }
+        let mut answer = std::io::BufReader::new(Swapping(h, None));
+        finish(h, &mut answer, &mut Vec::new()).unwrap();
+        assert_eq!(
+            answer.into_inner().1,
+            Some(true),
+            "a restore could swap raw.db"
+        );
         // An old hook writes while the answer is read: nothing is deleted.
         struct Writing<'a>(&'a V1, bool);
         impl std::io::Read for Writing<'_> {
