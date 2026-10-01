@@ -294,6 +294,18 @@ fn claim_hit(raw: &Raw, k: &Connection, c: &Claim, class: Class, terms: &[String
     })
 }
 
+/// Whether raw holds record `key` (`device:seq`) as an event: not one a tombstone removed.
+fn held(raw: &Raw, key: &str) -> Result<bool> {
+    let Some((device, seq)) = key.rsplit_once(':') else {
+        return Ok(false);
+    };
+    let seq: i64 = seq.parse().unwrap_or(0);
+    Ok(raw
+        .after(device, seq - 1, 1)?
+        .first()
+        .is_some_and(|r| r.seq == seq && matches!(r.item, crate::raw::Item::Event(_))))
+}
+
 /// Whether raw.db holds record `seq` of `device`: a claim anchored there is citable (MUST-M13).
 fn on_this_device(raw: &Raw, device: &str, seq: i64) -> Result<bool> {
     Ok(seq >= 1
@@ -654,8 +666,6 @@ pub struct Item {
 /// Claims, imported documents and session starts in `repo` (every repository with `None`), the
 /// newest first: the `limit` newest, or with `anchor` (an id `get` takes) those around its time,
 /// half at or before it. A claim the worker has yet to apply an owner's change to is left out.
-// ponytail: a session start's tombstone the index has not reached shows the start (its session id
-// only); `search` hides those.
 pub fn timeline(
     home: &Path,
     repo: Option<&str>,
@@ -717,7 +727,9 @@ pub fn timeline(
             for row in rows {
                 read += 1;
                 let (key, when, kind, repo, text) = row?;
-                if pending.touches(&k, &key)? {
+                // A start raw no longer holds is left out before the index has caught up, as
+                // `get` leaves it out (Codex on #306).
+                if pending.touches(&k, &key)? || (kind == "session start" && !held(&raw, &key)?) {
                     continue;
                 }
                 out.push(Item {
@@ -746,7 +758,8 @@ pub fn timeline(
         &format!("{items} WHERE ts > ?4 ORDER BY ts, key LIMIT ?5 OFFSET ?6"),
         at,
     )?;
-    let later = after.len().min(limit / 2);
+    // Half on each side, and what one side cannot fill to the other (Codex on #306).
+    let later = after.len().min(limit - before.len().min(limit - limit / 2));
     before.truncate(limit - later);
     after.truncate(later);
     after.reverse();
@@ -1356,6 +1369,49 @@ mod tests {
         });
         assert_eq!(found.hits.len(), 100);
         assert!(found.hits.iter().all(|h| h.class == Class::Current));
+    }
+
+    /// Codex on #306: a session start removed from raw is left out of the timeline before the
+    /// worker has removed it from the index, as `get` leaves it out.
+    #[test]
+    fn a_removed_session_start_leaves_the_timeline_at_once() {
+        let mut s = Store::new();
+        let start = crate::raw::Event {
+            kind: "start".into(),
+            session: "s".into(),
+            repo: Some(R.into()),
+            ts: 500,
+            ..crate::raw::test_event("{}")
+        };
+        let started = s.raw.append(&start).unwrap();
+        let first = s.decided(R, 1_000, "First decision.", &[]);
+        s.run();
+        let target = crate::raw::Target::Record {
+            device: s.raw.device().to_owned(),
+            seq: started,
+        };
+        s.raw.append_tombstone(target).unwrap();
+        let keys: Vec<String> = timeline(s.home.path(), Some(R), None, 10)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.key)
+            .collect();
+        assert_eq!(keys, [first]);
+    }
+
+    /// Codex on #306: an anchor near the oldest end leaves its unused half to the newer side, so
+    /// the timeline still holds its limit.
+    #[test]
+    fn an_anchored_timeline_fills_from_the_side_that_has_entries() {
+        let mut s = Store::new();
+        let oldest = s.decided(R, 1_000, "Oldest decision.", &[]);
+        for i in 0..6 {
+            s.decided(R, 2_000 + i, &format!("Later decision {i}."), &[]);
+        }
+        s.run();
+        let around = timeline(s.home.path(), Some(R), Some(&oldest), 4).unwrap();
+        assert_eq!(around.len(), 4);
+        assert_eq!(around[3].key, oldest);
     }
 
     /// Codex on #306: claims the worker has yet to apply a removal to are only hidden from the
