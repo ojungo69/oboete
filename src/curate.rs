@@ -624,10 +624,10 @@ fn runs_memory_read(v: &Value) -> bool {
 /// after it). `None` for an event with nothing to read.
 pub fn long_text(e: &Event) -> Option<String> {
     let body: Value = serde_json::from_str(&e.body).unwrap_or(Value::String(e.body.clone()));
-    long_of(&e.kind, &body)
+    long_of(&e.kind, &body).0
 }
 
-fn long_of(kind: &str, body: &Value) -> Option<String> {
+fn long_of(kind: &str, body: &Value) -> (Option<String>, Option<usize>) {
     // Fields this renderer does not know (a key a redaction rule masked at capture) are shown
     // after the long text rather than dropped unseen.
     let rest = |known: &[&str]| -> Option<String> {
@@ -639,11 +639,23 @@ fn long_of(kind: &str, body: &Value) -> Option<String> {
             .collect();
         (!other.is_empty()).then(|| without_markers(&Value::Object(other).to_string()))
     };
-    let joined = |long: Option<String>, known: &[&str]| match (long, rest(known)) {
-        (Some(l), Some(r)) => Some(format!("{l}\n{r}")),
-        (l, r) => l.or(r),
+    let mut json = None;
+    let mut joined = |long: Option<String>, known: &[&str]| match (long, rest(known)) {
+        (Some(l), Some(r)) => {
+            if kind == "tool" {
+                json = Some(l.len() + 1);
+            }
+            Some(format!("{l}\n{r}"))
+        }
+        (None, Some(r)) => {
+            if kind == "tool" {
+                json = Some(0);
+            }
+            Some(r)
+        }
+        (l, _) => l,
     };
-    match kind {
+    let long = match kind {
         "prompt" if body["omitted"] == true => None,
         // `agent_sent` is who sent it (#273), which the line's label shows: not text.
         "prompt" | "envelope" => {
@@ -664,7 +676,8 @@ fn long_of(kind: &str, body: &Value) -> Option<String> {
             Some(joined(text(&body["output"]), &known).unwrap_or_default())
         }
         _ => None,
-    }
+    };
+    (long, json)
 }
 
 fn text(v: &Value) -> Option<String> {
@@ -701,8 +714,8 @@ impl<'r> Prepared<'r> {
         let short = shrink && e.kind == "tool" && !OWNERS_WORDS.contains(&tool);
         let mut cut_input = false;
         // An owner directive is already a claim (`oboete pref add`): nothing for the curator.
-        let long = if memory || e.kind == "directive" {
-            None
+        let (long, json) = if memory || e.kind == "directive" {
+            (None, None)
         } else {
             long_of(&e.kind, &body)
         };
@@ -781,21 +794,13 @@ impl<'r> Prepared<'r> {
         let json = if e.kind == "tool" {
             let whole = match &body["output"] {
                 Value::Object(_) | Value::Array(_) => true,
-                Value::String(t) => matches!(
-                    serde_json::from_str::<Value>(t),
-                    Ok(Value::Object(_) | Value::Array(_))
-                ),
+                Value::String(t) => {
+                    t.trim_start().starts_with(['{', '['])
+                        && serde_json::from_str::<serde::de::IgnoredAny>(t).is_ok()
+                }
                 _ => false,
             };
-            if whole {
-                Some(0)
-            } else {
-                let output = text(&body["output"]);
-                let end = output.as_ref().map_or(0, String::len);
-                long.as_ref()
-                    .filter(|l| l.len() > end)
-                    .map(|_| end + usize::from(output.is_some()))
-            }
+            if whole { Some(0) } else { json }
         } else {
             None
         };
@@ -1057,10 +1062,11 @@ fn grouped(pieces: &[Piece]) -> (String, Vec<Line>) {
     (out, lines)
 }
 
-/// Spec 3.2's evidence for a quote a curator gave from line `line` of `window`: the quote found
-/// verbatim in that line as it was sent and in the event's own long text where the gate shows it,
-/// with the event's own byte offsets. `None` when it is in neither, or only where the gate hid
-/// something (a quote with a mask in it, or text a mask stands for).
+/// Spec 3.2's evidence for a quote a curator gave from line `line` of `window`. The quote may
+/// differ from the line by whitespace, Unicode compatibility forms or JSON escapes. The returned
+/// quote is the event's own text bytes, with its byte offsets, outside what the window hides.
+/// `None` when no span is found in both, or only where the gate hid something (a quote with a
+/// mask in it, or text a mask stands for).
 pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims::Evidence> {
     let line = &window.lines[line_index(window, line)?];
     let source = line.source.as_ref()?;
@@ -1086,16 +1092,12 @@ pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims:
         .then(|| anchor(quote, false))
         .flatten()
         .or_else(|| {
-            spaced(&line.text, quote)
-                .map(|q| (q, false))
-                .chain(
-                    [false, true]
-                        .into_iter()
-                        .filter(|&escapes| !escapes || source.json.is_some())
-                        .flat_map(|escapes| {
-                            compatible(&line.text, quote, escapes).map(move |q| (q, escapes))
-                        }),
-                )
+            [false, true]
+                .into_iter()
+                .filter(|&escapes| !escapes || source.json.is_some())
+                .flat_map(|escapes| {
+                    compatible(&line.text, quote, escapes).map(move |q| (q, escapes))
+                })
                 .filter(|(q, _)| tried.insert(*q))
                 .find_map(|(q, escapes)| anchor(q, escapes))
         })?;
@@ -1108,29 +1110,6 @@ pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims:
         sentence: as_i64(source.sentence(at))?,
         quote: quote.to_owned(),
         claim_at: None,
-    })
-}
-
-/// The stretches of `text` whose characters other than whitespace are `quote`'s, in order and with
-/// nothing else between them, each from the first of them to the last, in `text`'s order.
-fn spaced<'a>(text: &'a str, quote: &str) -> impl Iterator<Item = &'a str> {
-    let want: Vec<char> = quote.chars().filter(|c| !c.is_whitespace()).collect();
-    let have: Vec<(usize, char)> = text
-        .char_indices()
-        .filter(|(_, c)| !c.is_whitespace())
-        .collect();
-    let n = want.len();
-    let starts = if n == 0 {
-        0
-    } else {
-        (have.len() + 1).saturating_sub(n)
-    };
-    (0..starts).filter_map(move |at| {
-        let w = &have[at..at + n];
-        w.iter().map(|&(_, c)| c).eq(want.iter().copied()).then(|| {
-            let ((start, _), (last, c)) = (w[0], w[n - 1]);
-            &text[start..last + c.len_utf8()]
-        })
     })
 }
 
@@ -1152,8 +1131,7 @@ fn compatible<'a>(text: &'a str, quote: &str, escapes: bool) -> impl Iterator<It
         if !w.iter().map(|&(_, _, c)| c).eq(want.iter().copied()) {
             return None;
         }
-        let start = w.iter().map(|&(s, _, _)| s).min().unwrap();
-        let end = w.iter().map(|&(_, e, _)| e).max().unwrap();
+        let (start, end) = (w[0].0, w[n - 1].1);
         let span = &text[start..end];
         // A match must use the whole compatibility character or escape, not part of its expansion.
         folded(span, escapes)
@@ -1164,9 +1142,9 @@ fn compatible<'a>(text: &'a str, quote: &str, escapes: bool) -> impl Iterator<It
     })
 }
 
-/// NFKD has NFKC's equivalence, with each character still mapped to its original byte span.
+/// Compatibility decomposition, with each character mapped to its original byte span.
 fn folded(text: &str, escapes: bool) -> Vec<(usize, usize, char)> {
-    use unicode_normalization::char::{canonical_combining_class, decompose_compatible};
+    use unicode_normalization::char::decompose_compatible;
     let mut have = Vec::new();
     let mut chars = text.char_indices().peekable();
     while let Some((start, mut c)) = chars.next() {
@@ -1193,15 +1171,6 @@ fn folded(text: &str, escapes: bool) -> Vec<(usize, usize, char)> {
         decompose_compatible(c, |c| have.push((start, end, c)));
     }
     have.retain(|&(_, _, c)| !c.is_whitespace());
-    // Canonical order across adjacent characters, keeping the offsets when marks move.
-    let mut pending = 0;
-    for i in 0..have.len() {
-        if canonical_combining_class(have[i].2) == 0 {
-            have[pending..i].sort_by_key(|&(_, _, c)| canonical_combining_class(c));
-            pending = i + 1;
-        }
-    }
-    have[pending..].sort_by_key(|&(_, _, c)| canonical_combining_class(c));
     have
 }
 
@@ -3829,9 +3798,6 @@ mod tests {
             ("office files", "oﬃce files"),
             ("ガイド", "ｶﾞｲﾄﾞ"),
             ("ｶﾞｲﾄﾞ", "ガイド"),
-            ("A\u{315}\u{300} text", "À\u{315} text"),
-            ("A\u{301} \u{323}", "A\u{323}\u{301}"),
-            ("A\u{323}\u{301}", "A\u{301} \u{323}"),
         ];
         for (said, _) in cases {
             raw.append(&prompt(&format!("前置き {said} 後置き")))
@@ -3850,6 +3816,27 @@ mod tests {
         let e = locate(&w, &format!("L{}", cases.len() + 1), "@").unwrap();
         assert_eq!(e.offset, "＠ first, ".len() as i64);
         assert_eq!(e.quote, "@");
+    }
+
+    #[test]
+    fn a_quote_with_a_different_mark_order_stays_unanchored() {
+        let (_h, mut raw, dev) = store();
+        let cases = [
+            ("A\u{315}\u{300} text", "À\u{315} text"),
+            ("A\u{301} \u{323}", "A\u{323}\u{301}"),
+            ("A\u{323}\u{301}", "A\u{301} \u{323}"),
+        ];
+        for (said, _) in cases {
+            raw.append(&prompt(said)).unwrap();
+        }
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        for (i, (said, quote)) in cases.iter().enumerate() {
+            let line = format!("L{}", i + 1);
+            assert_eq!(locate(&w, &line, said).unwrap().quote, *said);
+            assert_eq!(locate(&w, &line, quote), None);
+        }
     }
 
     fn tool_quote_window(code: &str) -> (Window, String) {
@@ -3995,6 +3982,40 @@ mod tests {
             assert_eq!(e.length, 31);
         }
         assert_eq!(locate(&w, "L1", "Use literal in config"), None);
+    }
+
+    #[test]
+    fn a_split_tool_keeps_extra_field_offsets_and_plain_output_escapes() {
+        let (_h, mut raw, dev) = store();
+        let literal = r"Use literal \n in config";
+        let output = format!("先頭\n{}{literal}\n", "some more output\n".repeat(25));
+        let quote = "row.type === \"owner\" &&\nnext";
+        let event = event(
+            "tool",
+            json!({"tool": "AskUserQuestion", "input": {},
+            "output": output, "failed": false, "extra": {"code": quote}}),
+        );
+        let text = long_text(&event).unwrap();
+        raw.append(&event).unwrap();
+        let rules = Rules::default();
+        let first = next_window(&raw, &dev, 120, &rules).unwrap().unwrap();
+        let cut = first.to_offset.expect("split");
+        assert!(cut > 0 && cut < output.find(literal).unwrap() as i64);
+        close(&mut raw, &first);
+        let second = next_window(&raw, &dev, 120, &rules).unwrap().unwrap();
+        assert_eq!((second.from_seq, second.from_offset), (1, Some(cut)));
+        assert_eq!(second.to_offset, None);
+        assert!(second.lines[0].text.contains(literal));
+        let e = locate(&second, "L1", quote).unwrap();
+        assert_eq!(e.quote, r#"row.type === \"owner\" &&\nnext"#);
+        assert_eq!(e.offset, text.find("row.type").unwrap() as i64);
+        assert_eq!(e.length, 31);
+        let at = usize::try_from(e.offset).unwrap();
+        assert_eq!(&text[at..at + e.quote.len()], e.quote);
+        assert_eq!(locate(&second, "L1", literal).unwrap().quote, literal);
+        for quote in ["Use literal\nin config", "Use literal in config"] {
+            assert_eq!(locate(&second, "L1", quote), None);
+        }
     }
 
     #[test]
