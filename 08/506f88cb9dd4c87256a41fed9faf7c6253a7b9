@@ -1,0 +1,25 @@
+src/main.rs
+  s_59cfa7617c8511::t_75d80465cd1616 136-145,338-352
+src/search/b.rs
+  s_59cfa7617c8511::t_e559af7a83aa95 1987-2003
+src/shortlist.rs
+  s_59cfa7617c8511::t_3d20ca8a49763b 18,36-43,400-507,1025-1089
+src/view.rs
+  s_59cfa7617c8511::t_72d0fb1122625c 1054
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "08506f88cb9dd4c87256a41fed9faf7c6253a7b9",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
