@@ -155,6 +155,11 @@ Fixed on 2026-10-01 in this commit, before any M6, M5, MUST-M11 or per-kind run 
 
 A script given a held-out session or pool exits unless `--decide <id>` equals `curator` in `~/.oboete/eval/deciding.json`, which milestone 3's deciding run writes (A88): no file, or another id, is a refusal.
 
+### Changed on 2026-10-02, before the dev runs' curation
+
+- **The binary.** Claude Code 2.1.287 loads a built-in plugin, `cc-plugin-plugin-authoring`, that the curator's isolation check refuses, so on main the claude entry curates nothing (#323). The dev home is replayed and its keys mapped with a release build of main (0d5de61, SHA-256 `ce6c9f28c329b8857f45aa1b6ac38a3f0e6d005bcb4a7b5d8b92e14aa861fc53`); it is curated, and M6's `b` arm, M5, MUST-M11's slice and the per-kind labels run, with a release build of main plus #323 (ceda2d3, SHA-256 `ecb94d91a7beea4efa07d35e1a50d4a8f16ab1533aba96fc7e44fcd313636070`), which changes only the curator's settings. The deciding runs use a release build of main once #323 is merged.
+- **One question replaced.** q05's key named a task-notification prompt among its records. Capture stores that prompt as a subagent's envelope, which no key maps to (m6.py's `mapped_record`, as m3.py's `map_labels`), so the key could not be mapped. As for a key the checker rejects, the drafter replaced the question, with another from the same session, before any run.
+
 ### Prompts
 
 The harnesses' prompts are these texts, as Python format strings (`{{` is a brace), byte for byte; `test_m6.py`, `test_m5.py` and `test_m3.py` compare them with this file. Every text filled in has passed `oboete gate`.
