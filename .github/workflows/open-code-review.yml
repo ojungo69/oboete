@@ -1,10 +1,12 @@
 name: OpenCodeReview
 
 on:
-  # Not on each push: every run is paid, so a PR's last push is reviewed by hand with
-  # workflow_dispatch (owner, 2026-09-29; docs/open-code-review.md).
-  pull_request_target:
-    types: [opened, reopened, ready_for_review]
+  # By hand only, at a decisive moment: every run is paid, and the OpenRouter credits that pay
+  # for the calls the owner's DeepSeek key does not serve are nearly spent (owner, 2026-10-02;
+  # docs/open-code-review.md). The pull_request_target conditions below are kept, so adding
+  #   pull_request_target:
+  #     types: [opened, reopened, ready_for_review]
+  # back here restores the review at a PR's opening.
   workflow_dispatch:
     inputs:
       pr_number:
@@ -50,10 +52,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    concurrency:
-      group: open-code-review
-      cancel-in-progress: false
-      queue: max
     steps:
       - name: Resolve queued pull request
         id: pr
@@ -79,7 +77,8 @@ jobs:
               return;
             }
             // No push queues a review (a PR's last push is reviewed by hand), so an opening review
-            // that waited in the queue past a push reviews the current head, as a manual one does.
+            // that started after a push (a job can wait for a runner) reviews the current head, as a
+            // manual one does.
             const eventPr = context.payload.pull_request;
             if (eventPr && (pr.head.sha !== eventPr.head.sha || pr.base.ref !== eventPr.base.ref)) {
               core.notice('The pull request moved while this review was queued: reviewing its current head.');
