@@ -4,7 +4,10 @@
 //! `search::b::delivered_ranked` over the session's last prompts, the files it touched and its
 //! failing command, each gated with the rules as they are now. A key is built when it has no row,
 //! after a reply, every `EVERY_EVENTS` events and after a rewind. The search runs outside every
-//! transaction, and only its result is written, in one short one.
+//! transaction, and only its result is written, in one short one. A key's query vector is asked
+//! of the embedding phase, which never waits for it, at most every `VECTOR_EVERY`: the key is
+//! built from full text meanwhile, and again with the vector once it comes back for the text the
+//! key still has.
 
 use crate::consumer::manifest::{ACTIVE_MS, event, exists, what_ran};
 use crate::curate::Phase;
@@ -24,6 +27,10 @@ const KEYS: usize = 8;
 const PROMPTS: i64 = 3;
 /// The session's files a key's query reads, the newest first (the manifest's `FILES`).
 const FILES: i64 = 10;
+/// A key's query vector is asked at most this often (D9, pending the owner's item 1).
+// ponytail: up to `KEYS` keys asking 4 an hour each can spend a day's `daily_requests` on a busy
+// day; one hourly budget across keys if that shows.
+pub const VECTOR_EVERY: i64 = 15 * 60_000;
 
 /// Made when `per_prompt` is first on: a home that never asks for it gets no table.
 fn schema(k: &Connection) -> Result<()> {
@@ -32,6 +39,8 @@ fn schema(k: &Connection) -> Result<()> {
            agent TEXT NOT NULL, session TEXT NOT NULL, repo TEXT NOT NULL, branch TEXT NOT NULL,
            -- The session's last event the build read.
            built_seq INTEGER NOT NULL,
+           -- When its query vector was last asked for (unix ms), 0 never.
+           vector_at INTEGER NOT NULL DEFAULT 0,
            PRIMARY KEY (agent, session, repo, branch)
          );
          CREATE TABLE IF NOT EXISTS shortlist(
@@ -55,6 +64,15 @@ struct Key {
     last: i64,
 }
 
+impl Key {
+    /// What an ask is filed under.
+    fn id(&self) -> String {
+        [&self.agent, &self.session, &self.repo, &self.branch]
+            .map(String::as_str)
+            .join("\0")
+    }
+}
+
 pub struct Builder {
     home: PathBuf,
 }
@@ -67,9 +85,19 @@ impl Builder {
     }
 
     /// One call at `now`: the rows of keys no longer live dropped, and up to `KEYS` keys that are
-    /// due built; `Covered` when one was. Idle while `per_prompt` is off, or settings that do not
-    /// load turn it off, and before the worker has made the claims and the manifest's facts.
-    pub fn run(&mut self, raw: &Raw, k: &mut Connection, now: i64) -> Result<Phase> {
+    /// due, or whose vector came back, built; `Covered` when one was. Idle while `per_prompt` is
+    /// off, or settings that do not load turn it off, and before the worker has made the claims
+    /// and the manifest's facts. With `embed`, a key built from full text asks for its vector.
+    pub fn run(
+        &mut self,
+        raw: &Raw,
+        k: &mut Connection,
+        mut embed: Option<&mut crate::embed_phase::Phase>,
+        now: i64,
+    ) -> Result<Phase> {
+        let answer = embed
+            .as_deref_mut()
+            .and_then(crate::embed_phase::Phase::answer);
         let on = crate::config::inject(&self.home)
             .inspect_err(|e| eprintln!("oboete: no shortlist for now: {e:#}"))
             .is_ok_and(|i| i.per_prompt);
@@ -82,18 +110,52 @@ impl Builder {
             .unwrap_or_default();
         let device = raw.device();
         let live = keys(raw, k, now)?;
+        // The exclusion list and the sessions it holds (every repository they touched), once.
+        let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
+        let active: Option<String> = k
+            .query_row(
+                "SELECT embedder FROM vec_generation WHERE state = 'active'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
         let mut built = Vec::new();
         for key in &live {
             if built.len() == KEYS {
                 break;
             }
-            if due(k, device, key)? {
-                let texts = parts(raw, k, key, &rules)?;
-                let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
-                let claims =
-                    crate::search::b::delivered_ranked(raw, k, &texts, None, &key.repo, SHORT)?;
-                built.push((key, claims));
+            let id = key.id();
+            let answered = answer.as_ref().filter(|a| a.key == id);
+            let is_due = due(k, device, key)?;
+            if answered.is_none() && !is_due {
+                continue;
             }
+            let texts = parts(raw, k, key, &rules)?;
+            let text = texts.join("\n");
+            let excluded = reading
+                .excluded
+                .contains(&format!("{}\0{}", key.agent, key.session));
+            // A vector is used only for the text the key has now, from the active embedder.
+            let vector = answered
+                .filter(|a| a.text == text && !excluded && active.as_ref() == Some(&a.embedder))
+                .map(|a| a.vector.as_slice());
+            if vector.is_none() && !is_due {
+                continue;
+            }
+            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+            let claims =
+                crate::search::b::delivered_ranked(raw, k, &refs, vector, &key.repo, SHORT)?;
+            let mut asked = 0;
+            if let Some(e) = embed.as_deref_mut()
+                && vector.is_none()
+                && !excluded
+                && !text.is_empty()
+                && now - vector_at(k, key)? >= VECTOR_EVERY
+                && e.ask(k, &id, &text, &reading)?
+            {
+                asked = now;
+            }
+            built.push((key, claims, asked));
         }
         // A half-rebuilt `manifest_facts` (after a rewind) looks as if every session ended.
         let rebuilding = k
@@ -129,7 +191,7 @@ impl Builder {
                 }
             }
         }
-        for (key, claims) in &built {
+        for (key, claims, asked) in &built {
             let at = params![key.agent, key.session, key.repo, key.branch];
             tx.execute(
                 "DELETE FROM shortlist
@@ -151,10 +213,19 @@ impl Builder {
                 )?;
             }
             tx.execute(
-                "INSERT INTO shortlists(agent, session, repo, branch, built_seq)
-                 VALUES(?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(agent, session, repo, branch) DO UPDATE SET built_seq = excluded.built_seq",
-                params![key.agent, key.session, key.repo, key.branch, key.last],
+                "INSERT INTO shortlists(agent, session, repo, branch, built_seq, vector_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(agent, session, repo, branch) DO UPDATE SET
+                   built_seq = excluded.built_seq,
+                   vector_at = MAX(vector_at, excluded.vector_at)",
+                params![
+                    key.agent,
+                    key.session,
+                    key.repo,
+                    key.branch,
+                    key.last,
+                    asked
+                ],
             )?;
         }
         tx.commit()?;
@@ -207,6 +278,18 @@ fn keys(raw: &Raw, k: &Connection, now: i64) -> Result<Vec<Key>> {
         });
     }
     Ok(out)
+}
+
+/// When `key`'s query vector was last asked for, 0 never.
+fn vector_at(k: &Connection, key: &Key) -> Result<i64> {
+    Ok(k.query_row(
+        "SELECT vector_at FROM shortlists
+         WHERE agent = ?1 AND session = ?2 AND repo = ?3 AND branch = ?4",
+        params![key.agent, key.session, key.repo, key.branch],
+        |r| r.get(0),
+    )
+    .optional()?
+    .unwrap_or(0))
 }
 
 /// Whether `key` is built now: it has no row; its session's records went back past its build (a
@@ -341,8 +424,10 @@ pub fn of(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embed::stub::Stub;
     use crate::search::b::fixture::Store;
     use serde_json::json;
+    use std::time::{Duration, Instant};
 
     const R: &str = "github.com/x/r";
     const MIN: i64 = 60_000;
@@ -383,19 +468,19 @@ mod tests {
         s.run();
         let mut k = crate::knowledge::open(s.home.path()).unwrap();
         let mut b = Builder::new(s.home.path());
-        assert_eq!(b.run(&s.raw, &mut k, NOW).unwrap(), Phase::Idle);
+        assert_eq!(b.run(&s.raw, &mut k, None, NOW).unwrap(), Phase::Idle);
         assert!(!exists(&k, "table", "shortlists").unwrap());
         per_prompt(&s, true);
-        assert_eq!(b.run(&s.raw, &mut k, NOW).unwrap(), Phase::Covered);
+        assert_eq!(b.run(&s.raw, &mut k, None, NOW).unwrap(), Phase::Covered);
         assert_eq!(keys_built(&k), [key("live", "main")]);
         let live = of(&k, ("claude", "live", R, "main")).unwrap();
         assert_eq!(live, Some(vec![parser]));
         assert_eq!(of(&k, ("claude", "idle", R, "main")).unwrap(), None);
         // Nothing new: nothing built.
-        assert_eq!(b.run(&s.raw, &mut k, NOW).unwrap(), Phase::Idle);
+        assert_eq!(b.run(&s.raw, &mut k, None, NOW).unwrap(), Phase::Idle);
         // Idle past 30 minutes: its rows go.
         assert_eq!(
-            b.run(&s.raw, &mut k, NOW + 30 * MIN).unwrap(),
+            b.run(&s.raw, &mut k, None, NOW + 30 * MIN).unwrap(),
             Phase::Covered
         );
         assert!(keys_built(&k).is_empty());
@@ -422,7 +507,7 @@ mod tests {
         let mut b = Builder::new(s.home.path());
         let mut run = |s: &Store| {
             s.run();
-            b.run(&s.raw, &mut k, NOW).unwrap()
+            b.run(&s.raw, &mut k, None, NOW).unwrap()
         };
         assert_eq!(run(&s), Phase::Covered);
         let lexer = s.decided(R, 2 * MIN, "Lexer errors go to stderr too.", &[]);
@@ -518,7 +603,7 @@ mod tests {
         let mut k = crate::knowledge::open(s.home.path()).unwrap();
         assert_eq!(
             Builder::new(s.home.path())
-                .run(&s.raw, &mut k, NOW)
+                .run(&s.raw, &mut k, None, NOW)
                 .unwrap(),
             Phase::Covered
         );
@@ -551,7 +636,7 @@ mod tests {
         }));
         assert!(inside.is_err(), "a search inside a transaction is a bug");
         let mut b = Builder::new(s.home.path());
-        assert_eq!(b.run(&s.raw, &mut k, NOW).unwrap(), Phase::Covered);
+        assert_eq!(b.run(&s.raw, &mut k, None, NOW).unwrap(), Phase::Covered);
         s.decided(R, 2 * MIN, "Parser warnings go to stderr.", &[]);
         s.event(
             "reply",
@@ -567,14 +652,257 @@ mod tests {
              BEGIN SELECT RAISE(ABORT, 'a failed write'); END;",
         )
         .unwrap();
-        assert!(b.run(&s.raw, &mut k, NOW).is_err());
+        assert!(b.run(&s.raw, &mut k, None, NOW).is_err());
         k.execute_batch("DROP TRIGGER no_rank").unwrap();
         assert_eq!(
             of(&k, ("claude", "live", R, "main")).unwrap(),
             Some(vec![parser.clone()])
         );
-        assert_eq!(b.run(&s.raw, &mut k, NOW).unwrap(), Phase::Covered);
+        assert_eq!(b.run(&s.raw, &mut k, None, NOW).unwrap(), Phase::Covered);
         let uids = of(&k, ("claude", "live", R, "main")).unwrap().unwrap();
         assert_eq!(uids.len(), 2, "{uids:?}");
+    }
+
+    /// `per_prompt` on, with `stub` as the embedder, and what is stored embedded.
+    fn embedded(s: &Store, stub: &Stub) {
+        crate::embed_phase::fixture::config(s, stub);
+        let path = s.home.path().join("config.toml");
+        let text = std::fs::read_to_string(&path).unwrap() + "[inject]\nper_prompt = true\n";
+        std::fs::write(path, text).unwrap();
+        crate::embed_phase::fixture::embed_all(s);
+    }
+
+    /// The query embeddings counted in providers.db.
+    fn queries(s: &Store) -> i64 {
+        crate::providers_db::open(s.home.path())
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM provider_calls WHERE role = 'query'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn wait(until: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !until() {
+            assert!(Instant::now() < deadline, "waited 20 s");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// D9: a key built from full text asks for its query vector, never waiting for it, and is
+    /// built again with it when it comes back for the text the key still has; a key asks at most
+    /// once every `VECTOR_EVERY`.
+    #[test]
+    fn one_query_vector_per_key_every_fifteen_minutes() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        let parser = s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        // Words of two letters: no full-text list finds it (trigrams), the vector list does.
+        let near = s.decided(R, MIN, "Db ok.", &[]);
+        let main = (R, "main");
+        s.event(
+            "prompt",
+            "live",
+            main,
+            NOW - 2 * MIN,
+            json!({"prompt": "parser db ok"}),
+        );
+        s.run();
+        embedded(&s, &stub);
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = crate::embed_phase::Phase::new(s.home.path());
+        let mut b = Builder::new(s.home.path());
+        let mut run = |s: &Store, k: &mut Connection, phase: &mut _, now| {
+            s.run();
+            b.run(&s.raw, k, Some(phase), now).unwrap()
+        };
+        let shortlist = |k: &Connection| of(k, ("claude", "live", R, "main")).unwrap().unwrap();
+        let sent = stub.requests();
+        assert_eq!(run(&s, &mut k, &mut phase, NOW), Phase::Covered);
+        let uids = shortlist(&k);
+        assert!(uids.contains(&parser) && !uids.contains(&near), "{uids:?}");
+        assert_eq!(queries(&s), 1);
+        wait(|| phase.done());
+        assert_eq!(stub.texts()[sent..], [["parser db ok"]]);
+        // The embedding phase settles the answer; the next call builds the key with it.
+        phase.poll(&s.raw, &k).unwrap();
+        assert_eq!(run(&s, &mut k, &mut phase, NOW), Phase::Covered);
+        let uids = shortlist(&k);
+        assert!(uids.contains(&parser) && uids.contains(&near), "{uids:?}");
+        // A reply within 15 minutes: built again, nothing asked.
+        s.event("reply", "live", main, NOW - MIN, json!({"assistant": "ok"}));
+        assert_eq!(run(&s, &mut k, &mut phase, NOW + MIN), Phase::Covered);
+        assert_eq!(queries(&s), 1);
+        s.event(
+            "reply",
+            "live",
+            main,
+            NOW + 15 * MIN,
+            json!({"assistant": "ok"}),
+        );
+        assert_eq!(run(&s, &mut k, &mut phase, NOW + 16 * MIN), Phase::Covered);
+        assert_eq!(queries(&s), 2);
+    }
+
+    /// Rows 30-1 and 30-2, spec 5.5 (D9): a session with an event in an excluded repository asks
+    /// for no query vector, whatever checkout its key is on; another session's words are sent,
+    /// gated: never its token or a `<private>` block.
+    #[test]
+    fn an_excluded_session_sends_no_query() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        let token = ["gh", "p_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"].concat();
+        let open = format!("the parser {token} <private>acme plan</private> again");
+        s.event(
+            "prompt",
+            "open",
+            (R, "main"),
+            NOW - 3 * MIN,
+            json!({"prompt": open}),
+        );
+        // Newer, so it would be asked first, and alone, were its exclusion missed.
+        s.event(
+            "prompt",
+            "mixed",
+            ("github.com/x/secret", "main"),
+            NOW - 2 * MIN,
+            json!({"prompt": "zebra words"}),
+        );
+        s.event(
+            "prompt",
+            "mixed",
+            (R, "main"),
+            NOW - MIN,
+            json!({"prompt": "zebra parser"}),
+        );
+        s.exclude("github.com/x/secret");
+        s.run();
+        embedded(&s, &stub);
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = crate::embed_phase::Phase::new(s.home.path());
+        let sent = stub.requests();
+        let mut b = Builder::new(s.home.path());
+        assert_eq!(
+            b.run(&s.raw, &mut k, Some(&mut phase), NOW).unwrap(),
+            Phase::Covered
+        );
+        assert_eq!(keys_built(&k), [key("mixed", "main"), key("open", "main")]);
+        wait(|| phase.done());
+        let asked = stub.texts()[sent..].concat();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(
+            asked[0].starts_with("the parser ") && asked[0].ends_with(" again"),
+            "{asked:?}"
+        );
+        for hidden in [&token[..12], "acme", "zebra"] {
+            assert!(!asked[0].contains(hidden), "{asked:?}");
+        }
+        assert_eq!(queries(&s), 1);
+    }
+
+    /// Rows 55-1 and 55-7 (D8, D9): while the embedder holds a key's query, the key is built from
+    /// full text and curation runs; the worker stays up for the answer and builds the key again
+    /// with it.
+    #[test]
+    fn a_waiting_embedder_leaves_full_text_rows() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let stub = Stub::start();
+        let mut s = Store::new();
+        let parser = s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        let near = s.decided(R, MIN, "Db ok.", &[]);
+        let now = crate::db::now_ms();
+        s.event(
+            "prompt",
+            "live",
+            (R, "main"),
+            now - MIN,
+            json!({"prompt": "parser db ok"}),
+        );
+        s.run();
+        embedded(&s, &stub);
+        let sent = stub.requests();
+        let held = stub.hold();
+        let home = s.home.path().to_owned();
+        let curated = AtomicUsize::new(0);
+        let shortlist = || {
+            let k = crate::knowledge::open(&home).unwrap();
+            of(&k, ("claude", "live", R, "main")).unwrap()
+        };
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut embed = crate::embed_phase::Phase::new(&home);
+                let mut builder = Builder::new(&home);
+                let mut curation = |_: &mut Raw, _: &Connection| {
+                    curated.fetch_add(1, Ordering::SeqCst);
+                    Ok(Phase::Idle)
+                };
+                let phases = crate::worker::Phases {
+                    embed: Some(&mut embed),
+                    shortlist: Some(&mut builder),
+                    curation: Some(&mut curation),
+                };
+                let consumers = crate::worker::consumers(&home);
+                crate::worker::run_holding(&home, 200, consumers, || {}, None, phases)
+            });
+            wait(|| stub.requests() > sent && shortlist().is_some());
+            wait(|| curated.load(Ordering::SeqCst) > 0);
+            let uids = shortlist().unwrap();
+            assert!(uids.contains(&parser) && !uids.contains(&near), "{uids:?}");
+            // Past the worker's idle wait: it stays up for the answer.
+            std::thread::sleep(Duration::from_millis(1_000));
+            assert!(!worker.is_finished(), "the worker left before the answer");
+            drop(held);
+            worker.join().unwrap().unwrap();
+        });
+        let uids = shortlist().unwrap();
+        assert!(uids.contains(&parser) && uids.contains(&near), "{uids:?}");
+        assert_eq!(queries(&s), 1);
+    }
+
+    /// D9: a vector that comes back for a text the key no longer has is dropped: the key keeps
+    /// its full-text rows until it is due.
+    #[test]
+    fn a_vector_for_an_old_text_is_dropped() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        let near = s.decided(R, MIN, "Db ok.", &[]);
+        let main = (R, "main");
+        s.event(
+            "prompt",
+            "live",
+            main,
+            NOW - 2 * MIN,
+            json!({"prompt": "parser db ok"}),
+        );
+        s.run();
+        embedded(&s, &stub);
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = crate::embed_phase::Phase::new(s.home.path());
+        let mut b = Builder::new(s.home.path());
+        assert_eq!(
+            b.run(&s.raw, &mut k, Some(&mut phase), NOW).unwrap(),
+            Phase::Covered
+        );
+        wait(|| phase.done());
+        s.event(
+            "prompt",
+            "live",
+            main,
+            NOW - MIN,
+            json!({"prompt": "the lexer"}),
+        );
+        s.run();
+        phase.poll(&s.raw, &k).unwrap();
+        assert_eq!(
+            b.run(&s.raw, &mut k, Some(&mut phase), NOW).unwrap(),
+            Phase::Idle
+        );
+        let uids = of(&k, ("claude", "live", R, "main")).unwrap().unwrap();
+        assert!(!uids.contains(&near), "{uids:?}");
     }
 }
