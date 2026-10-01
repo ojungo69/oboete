@@ -1,0 +1,27 @@
+src/consumer/claims.rs
+  s_59cfa7617c8511::t_5124e3919d9419 455,468,740-742
+src/consumer/fts.rs
+  s_59cfa7617c8511::t_86cede0b21b5df 82,119-122,131-133
+src/consumer/imported.rs
+  s_59cfa7617c8511::t_8bbdf331b28423 77-78,85-88,98-100
+src/embed_phase.rs
+  s_59cfa7617c8511::t_088c9e9bbe5533 506-545,551,565-568,570-583,587-589,591-601,606,610-611,614-627,631,657-663,834-948
+src/knowledge.rs
+  s_59cfa7617c8511::t_d7d4fc3efc15fd 49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7e8cdccc674d4144e9bf9fe6462dc39deb50637f",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
