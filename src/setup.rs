@@ -59,6 +59,106 @@ const CURSOR_EVENTS: [(&str, &str); 7] = [
     ("sessionEnd", "SessionEnd"),
 ];
 
+/// MUST-M10 (spec 4.7): each agent's injection points (`POINTS`), each with the tests that drive
+/// it through `run_io`, `inject_text` or a Node harness. None is live-verified yet: Task 8 Step
+/// 10's live checks mark the ones seen working in a live session of the agent.
+const POINTS: [&str; 6] = [
+    "start",
+    "resume",
+    "compaction",
+    "prompt",
+    "correction",
+    "failure line",
+];
+const AGENT_STATUS: [(&str, [&[&str]; 6]); 7] = {
+    const START: &[&str] = &["session_start_injects_at_a_start_and_a_compaction_not_a_resume"];
+    const PROMPT: &[&str] = &["each_agent_takes_the_prompt_injection_in_its_shape"];
+    const CORRECTION: &[&str] = &["each_agent_gets_a_correction_at_its_next_prompt"];
+    const FAILURE: &[&str] = &["each_injection_point_warns_when_its_own_write_fails"];
+    const GROK: &[&str] = &["grok_delivers_at_each_turns_first_tool_use"];
+    const AGY: &[&str] = &["agy_injects_context_once_at_preinvocation_in_its_own_json_shape"];
+    const CURSOR: &[&str] = &["cursor_injects_once_per_conversation_within_its_cap"];
+    const OPENCODE: &[&str] = &["opencode_plugin_escapes_paths_and_runs_on_node"];
+    const PI: &[&str] = &[
+        "session_start_injects_at_a_start_and_a_compaction_not_a_resume",
+        "pi_generated_extension_matches_event_and_tool_contract",
+    ];
+    [
+        ("claude", [START, START, START, PROMPT, CORRECTION, FAILURE]),
+        ("codex", [START, START, START, PROMPT, CORRECTION, FAILURE]),
+        ("grok", [GROK, GROK, GROK, GROK, GROK, FAILURE]),
+        (
+            "agy",
+            [
+                AGY,
+                AGY,
+                &["agy_reinjects_after_a_later_checkpoint"],
+                PROMPT,
+                CORRECTION,
+                FAILURE,
+            ],
+        ),
+        (
+            "opencode",
+            [
+                &[
+                    "pi_and_opencode_record_to_raw_and_get_the_manifest_at_session_start",
+                    "opencode_plugin_escapes_paths_and_runs_on_node",
+                ],
+                OPENCODE,
+                OPENCODE,
+                &[
+                    "each_agent_takes_the_prompt_injection_in_its_shape",
+                    "opencode_plugin_escapes_paths_and_runs_on_node",
+                ],
+                &[
+                    "each_agent_gets_a_correction_at_its_next_prompt",
+                    "opencode_plugin_escapes_paths_and_runs_on_node",
+                ],
+                &["inject_shows_the_failure_line_when_raw_cannot_be_opened"],
+            ],
+        ),
+        (
+            "pi",
+            [
+                PI,
+                PI,
+                PI,
+                &[
+                    "each_agent_takes_the_prompt_injection_in_its_shape",
+                    "pi_generated_extension_matches_event_and_tool_contract",
+                ],
+                CORRECTION,
+                FAILURE,
+            ],
+        ),
+        (
+            "cursor",
+            [
+                &["cursor_session_start_uses_workspace_and_prints_flat_context"],
+                CURSOR,
+                &["cursor_compaction_reinjects_once_after_cleanup_even_with_concurrent_prompts"],
+                PROMPT,
+                CORRECTION,
+                FAILURE,
+            ],
+        ),
+    ]
+};
+
+/// MUST-M10: what setup says of `agent`'s row of `AGENT_STATUS`.
+fn status_line(agent: &str) -> String {
+    let tested = AGENT_STATUS
+        .iter()
+        .find(|(a, _)| *a == agent)
+        .map(|(_, cells)| POINTS.iter().zip(cells).filter(|(_, t)| !t.is_empty()));
+    let points: Vec<&str> = tested.into_iter().flatten().map(|(p, _)| *p).collect();
+    format!(
+        "{agent}: injection at {} is implemented and tested, not yet checked in a live session",
+        points.join(", ")
+    )
+}
+
 pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
     let agents: Vec<&str> = if agent == "all" {
         AGENTS.to_vec()
@@ -73,6 +173,9 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
     let failed = wire_each(&agents, |a| wire(a, &cmd, remove));
     if !remove {
         println!("Hook files are read when an agent starts: restart running sessions.");
+        for a in agents.iter().filter(|a| !failed.contains(a)) {
+            println!("{}", status_line(a));
+        }
     }
     anyhow::ensure!(
         failed.is_empty(),
@@ -2233,6 +2336,31 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// MUST-M10: every cell of the status table names tests that exist.
+    #[test]
+    fn every_claimed_cell_has_its_test() {
+        let src = |f: &str| {
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(f))
+                .unwrap()
+        };
+        let tests = src("hook.rs") + &src("setup.rs");
+        assert_eq!(AGENT_STATUS.map(|(a, _)| a), AGENTS);
+        for (agent, cells) in AGENT_STATUS {
+            for (point, names) in POINTS.iter().zip(cells) {
+                assert!(!names.is_empty(), "{agent} {point}");
+                for name in names {
+                    let declared = format!("#[test]\n    fn {name}() {{");
+                    assert!(tests.contains(&declared), "{agent} {point}: {name}");
+                }
+            }
+        }
+        assert_eq!(
+            status_line("pi"),
+            "pi: injection at start, resume, compaction, prompt, correction, failure line is \
+             implemented and tested, not yet checked in a live session"
+        );
     }
 
     #[test]

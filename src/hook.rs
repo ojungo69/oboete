@@ -2305,6 +2305,11 @@ mod tests {
         assert!(first.contains(crate::manifest::MEMORY), "{first}");
         assert_eq!(first.matches(line).count(), 1, "{first}");
         assert!(!first.contains(picks), "{first}");
+        // A resume shows nothing again: the session has it.
+        let resume = json!({"sessionId": "g", "workspaceRoot": c,
+                            "hookEventName": "SessionStart", "source": "resume"});
+        assert_eq!(hook(&home, "grok", "SessionStart", &resume), "");
+        assert_eq!(tool(), "");
         p.decided(2, "Lexer warnings go to the log.", &[]);
         p.s.run();
         assert_eq!(prompt("where do the lexer warnings go"), "");
@@ -2443,6 +2448,103 @@ mod tests {
             assembled("cursor", None, &[("what", "## A\n- a\n"), ("b", &wide)]),
             crate::manifest::fence("what", "## A\n- a\n")
         );
+    }
+
+    /// MUST-M10, spec 4.7: Claude Code, Codex and Pi read SessionStart: the manifest at a start
+    /// and after a compaction, nothing on a resume.
+    #[test]
+    fn session_start_injects_at_a_start_and_a_compaction_not_a_resume() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        for agent in ["claude", "codex", "pi"] {
+            let start = |source: &str| {
+                let payload =
+                    json!({"session_id": format!("{agent}-s"), "cwd": p.c, "source": source});
+                injected(agent, &hook(&home, agent, "SessionStart", &payload))
+            };
+            assert!(
+                start("startup").contains("Parser errors go to stderr."),
+                "{agent}"
+            );
+            assert_eq!(start("resume"), "", "{agent}");
+            assert!(
+                start("compact").contains("Parser errors go to stderr."),
+                "{agent}"
+            );
+        }
+    }
+
+    /// MUST-M10, spec 4.8: a claim an agent was shown that changed since is named at its next
+    /// prompt, in the agent's shape (Grok's: `grok_delivers_at_each_turns_first_tool_use`).
+    #[test]
+    fn each_agent_gets_a_correction_at_its_next_prompt() {
+        let mut p = Prompts::new(false);
+        let parser = p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let c = p.c.clone();
+        let transcript = home.join("agy.jsonl");
+        let ask = |agent: &str, prompts: &[&str]| {
+            let session = format!("{agent}-s");
+            let prompt = prompts[prompts.len() - 1];
+            let (event, payload) = match agent {
+                "cursor" => (
+                    "UserPromptSubmit",
+                    json!({"conversation_id": session, "workspace_roots": [c], "prompt": prompt}),
+                ),
+                "agy" => {
+                    let steps: String = prompts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, text)| {
+                            let content = format!("<USER_REQUEST>{text}</USER_REQUEST>");
+                            json!({"type": "USER_INPUT", "source": "USER_EXPLICIT",
+                                   "step_index": i, "content": content})
+                            .to_string()
+                                + "\n"
+                        })
+                        .collect();
+                    std::fs::write(&transcript, steps).unwrap();
+                    let payload = json!({"conversationId": session, "workspacePaths": [c],
+                                         "transcriptPath": transcript, "invocationNum": 0});
+                    ("PreInvocation", payload)
+                }
+                _ => (
+                    "UserPromptSubmit",
+                    json!({"session_id": session, "cwd": c, "prompt": prompt}),
+                ),
+            };
+            injected(agent, &hook(&home, agent, event, &payload))
+        };
+        // Each is shown the claim's body by its manifest.
+        let old = "Parser errors go to stderr.";
+        for agent in ["claude", "codex", "pi", "cursor"] {
+            let payload = match agent {
+                "cursor" => json!({"conversation_id": "cursor-s", "workspace_roots": [c]}),
+                _ => json!({"session_id": format!("{agent}-s"), "cwd": c, "source": "startup"}),
+            };
+            let text = injected(agent, &hook(&home, agent, "SessionStart", &payload));
+            assert!(text.contains(old), "{agent}: {text}");
+        }
+        assert!(inject_text(&home, Path::new(&c), Some("opencode-s")).contains(old));
+        assert!(ask("agy", &["hello"]).contains(old));
+        p.s.correct(&parser, None, Some("Parser errors go to the log."));
+        p.s.run();
+        for agent in ["claude", "codex", "pi", "opencode", "cursor", "agy"] {
+            let text = ask(agent, &["hello", "anything new"]);
+            assert!(text.contains("have changed since"), "{agent}: {text}");
+            assert!(
+                text.contains("Parser errors go to the log."),
+                "{agent}: {text}"
+            );
+            assert_eq!(
+                ask(agent, &["hello", "anything new", "and now"]),
+                "",
+                "{agent}"
+            );
+        }
     }
 
     #[test]
@@ -3087,19 +3189,25 @@ mod tests {
         );
     }
 
+    /// MUST-M16, MUST-M10: each agent's injection point carries the recording-failure line when its
+    /// own write fails (OpenCode's, read by `oboete inject`: `inject_shows_the_failure_line_…`).
     #[test]
-    fn adapter_injection_points_warn_when_their_own_write_fails() {
+    fn each_injection_point_warns_when_its_own_write_fails() {
         for (agent, event) in [
             ("grok", "PreToolUse"),
             ("agy", "PreInvocation"),
             ("cursor", "SessionStart"),
+            ("claude", "SessionStart"),
+            ("codex", "SessionStart"),
+            ("pi", "SessionStart"),
         ] {
             let dir = tmp(&format!("fail-{agent}"));
             let payload = match agent {
                 "agy" => agy_fixture(&dir)["PreInvocation"].clone(),
                 "cursor" => cursor_fixture(&dir)["SessionStart"].clone(),
-                _ => json!({"sessionId": "g", "workspaceRoot": &*dir,
-                            "hookEventName": "PreToolUse", "toolName": "Read"}),
+                "grok" => json!({"sessionId": "g", "workspaceRoot": &*dir,
+                                 "hookEventName": "PreToolUse", "toolName": "Read"}),
+                _ => json!({"session_id": "s", "cwd": &*dir, "source": "startup"}),
             };
             std::fs::create_dir_all(dir.join("raw.db")).unwrap(); // cannot be opened
             let mut out = Vec::new();
