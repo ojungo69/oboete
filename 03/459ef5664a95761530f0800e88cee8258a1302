@@ -1,0 +1,21 @@
+src/main.rs
+  s_59cfa7617c8511::t_849b23ca2a4a98 216-219,420-426
+src/search/b.rs
+  s_59cfa7617c8511::t_942824fd23717d 1443-1478,3368-3452
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "03459ef5664a95761530f0800e88cee8258a1302",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
