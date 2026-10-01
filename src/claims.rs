@@ -842,12 +842,27 @@ pub fn anchored_through(
     )
 }
 
+// `DECIDED_WHERE`'s text, which `DECIDED` repeats byte for byte.
+macro_rules! decided_where {
+    () => {
+        "a.kind IN ('decision', 'preference', 'open item', 'lesson')
+     AND (a.status = 'decided' OR (a.kind = 'open item' AND a.status <> 'done'))"
+    };
+}
+
 /// `decisions`' filter, order and limit (`?2`), which `derivations_repo` serves in order: spec
 /// 4.4's kinds (fixes, changes and repo facts are for search, D4).
-pub(crate) const DECIDED: &str = "AND a.kind IN ('decision', 'preference', 'open item', 'lesson')
-     AND (a.status = 'decided' OR (a.kind = 'open item' AND a.status <> 'done'))
+pub(crate) const DECIDED: &str = concat!(
+    "AND ",
+    decided_where!(),
+    "
      ORDER BY a.valid_from DESC, a.anchor_device DESC, a.anchor_seq DESC, a.uid DESC
-     LIMIT ?2";
+     LIMIT ?2"
+);
+
+/// `DECIDED`'s filter alone, on a row `a` of the `active` view: what the shortlist keeps (D9).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const DECIDED_WHERE: &str = decided_where!();
 
 /// A repository's current claims, over the `active` view; `?1` is the repository. A claim `a` is
 /// current as a chain tip (no active derivation of another uid supersedes or retracts it) that is
