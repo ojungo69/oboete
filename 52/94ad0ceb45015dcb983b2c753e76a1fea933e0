@@ -1,0 +1,21 @@
+docs/eval/hooks.py
+  s_59cfa7617c8511::t_3ad2272c6f04ea 11,63,76,98,109,116,181,195,206,235
+docs/eval/m3.py
+  s_59cfa7617c8511::t_4b52f6f2edd540 24,26,167
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5294ad0ceb45015dcb983b2c753e76a1fea933e0",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
