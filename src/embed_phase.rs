@@ -94,6 +94,8 @@ pub struct Phase {
     /// A call's own timeout: `embed::BATCH_TIMEOUT`, shorter in tests.
     timeout: Duration,
     split: Option<Split>,
+    /// Whether this worker looked for a quarantined knowledge.db to carry vectors from.
+    carried: bool,
     #[cfg(test)]
     polls: usize,
 }
@@ -125,6 +127,7 @@ impl Phase {
             db: None,
             timeout: crate::embed::BATCH_TIMEOUT,
             split: None,
+            carried: false,
             #[cfg(test)]
             polls: 0,
         }
@@ -172,6 +175,10 @@ impl Phase {
         };
         let reading = Reading::now(raw, Reads::Live)?;
         cleared(k, &embedder.id, &reading)?;
+        if !self.carried {
+            self.carried = true;
+            carry_quarantined(&self.home, k);
+        }
         let wait = match self.held_back(&cfg) {
             Ok(wait) => wait,
             // A providers.db that will not open or read holds back the vectors only.
@@ -501,7 +508,7 @@ pub fn doctor_lines(home: &Path, k: &Connection) -> Result<Vec<String>> {
 
 /// Spec 1.7: the vectors of `from`, a knowledge.db set aside by a rebuild or quarantined, copied
 /// into `k`'s cache, so the documents they were made for are mapped again with no call. Only
-/// blobs of one finite vector each; a file from before the cache carries nothing. One
+/// blobs of one unit vector each; a file from before the cache carries nothing. One
 /// transaction: a read that fails carries nothing.
 // ponytail: the cache keeps every text ever embedded, the old texts of changed documents too (a
 // rewind maps them back for free); sweep unreferenced rows if it grows past what that is worth.
@@ -525,10 +532,14 @@ pub fn carry(k: &Connection, from: &Path) -> Result<usize> {
         while let Some(r) = rows.next()? {
             let vec: Vec<u8> = r.get(2)?;
             let (floats, rest) = vec.as_chunks::<4>();
-            if floats.len() != crate::embed::DIM
-                || !rest.is_empty()
-                || floats.iter().any(|b| !f32::from_le_bytes(*b).is_finite())
-            {
+            let norm = floats
+                .iter()
+                .map(|b| f64::from(f32::from_le_bytes(*b)).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            // `embed` keeps unit vectors only; the sum is NaN when one is not finite.
+            let unit = (norm - 1.0).abs() < 1e-3;
+            if floats.len() != crate::embed::DIM || !rest.is_empty() || !unit {
                 continue;
             }
             carried +=
@@ -537,6 +548,34 @@ pub fn carry(k: &Connection, from: &Path) -> Result<usize> {
     }
     tx.commit()?;
     Ok(carried)
+}
+
+/// After a restore or a damage quarantine (spec 1.7): an empty cache takes the vectors of the
+/// newest quarantined knowledge.db. One whose vectors cannot be read carries nothing, and says so.
+fn carry_quarantined(home: &Path, k: &Connection) {
+    let empty = k.query_row("SELECT NOT EXISTS (SELECT 1 FROM vectors)", [], |r| {
+        r.get::<_, bool>(0)
+    });
+    if !matches!(empty, Ok(true)) {
+        return;
+    }
+    let newest = std::fs::read_dir(home)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let at = name
+                .strip_prefix("knowledge.db.quarantined-")?
+                .parse::<i64>();
+            Some((at.ok()?, name))
+        })
+        .max();
+    if let Some((_, name)) = newest
+        && let Err(e) = carry(k, &home.join(&name))
+    {
+        eprintln!("oboete: no vectors carried from {name}: {e:#}");
+    }
 }
 
 /// A request counted before it is sent (Step 7): in one write transaction, unless the day's
@@ -1667,6 +1706,46 @@ mod tests {
         assert!(last.1.is_some_and(|usd| usd > 0.0), "{last:?}");
     }
 
+    /// Spec 1.7: a restore sets aside a knowledge.db that is not damaged, and the next worker's
+    /// first poll carries its vectors into the empty cache, those its WAL still held included (a
+    /// process that died left them there): nothing is embedded again.
+    #[test]
+    fn a_restore_keeps_the_vectors_its_wal_held() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let home = s.home.path().to_owned();
+        drop(crate::knowledge::open(&home).unwrap());
+        // Open across what follows, so no close copies the WAL into the file (Windows renames no
+        // open file).
+        #[cfg(unix)]
+        let held = {
+            let held = Connection::open(home.join("knowledge.db")).unwrap();
+            held.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+            held
+        };
+        claim(
+            &mut s,
+            "Parser caches stay in Redis.",
+            "Parser caches go to Redis.",
+        );
+        s.said("s", R, 3_000, "Words.");
+        s.run();
+        embed_all(&s);
+        let indexed = |s: &Store| keys(s).iter().filter(|(.., why)| why.is_none()).count();
+        let (sent, before) = (stub.requests(), indexed(&s));
+        assert!(sent >= 1 && before >= 2, "{sent} {before}");
+        #[cfg(unix)]
+        std::mem::forget(held);
+        crate::backup::quarantine(&home, "knowledge.db").unwrap();
+        s.run();
+        embed_all(&s);
+        assert_eq!((stub.requests(), indexed(&s)), (sent, before));
+    }
+
     /// Rows 55-1 and 55-7: a providers.db that will not open holds back the vectors only: the
     /// phase sends nothing and is idle, so the worker goes on with curation and its backups.
     #[test]
@@ -1729,10 +1808,17 @@ mod tests {
         }
         // Blobs that are no vector: never carried.
         let k = crate::knowledge::open(&home).unwrap();
+        let ones: Vec<u8> = (0..crate::embed::DIM)
+            .flat_map(|_| 1.0f32.to_le_bytes())
+            .collect();
         k.execute(
             "INSERT INTO vectors(embedder, src_sha, vec) VALUES ('bge-m3', 'short', x'00'),
-               ('bge-m3', 'nan', ?1)",
-            [vec![0xffu8; crate::embed::DIM * 4]],
+               ('bge-m3', 'nan', ?1), ('bge-m3', 'zero', ?2), ('bge-m3', 'long', ?3)",
+            params![
+                vec![0xffu8; crate::embed::DIM * 4],
+                vec![0u8; crate::embed::DIM * 4],
+                ones
+            ],
         )
         .unwrap();
         drop(k);
@@ -1743,7 +1829,7 @@ mod tests {
         let k = crate::knowledge::open(&home).unwrap();
         let bad: i64 = k
             .query_row(
-                "SELECT count(*) FROM vectors WHERE src_sha IN ('short', 'nan')",
+                "SELECT count(*) FROM vectors WHERE src_sha IN ('short', 'nan', 'zero', 'long')",
                 [],
                 |r| r.get(0),
             )

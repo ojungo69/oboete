@@ -311,8 +311,9 @@ fn damage(seg: &Path) -> Option<String> {
 }
 
 /// `<name>` (and its -wal and -shm, which SQLite binds to the name) moved aside as
-/// `<name>.quarantined-<ms>`. Returns the new name of the main file.
-fn quarantine(home: &Path, name: &str) -> Result<PathBuf> {
+/// `<name>.quarantined-<ms>`, its sidecars under the names SQLite looks for beside that (`...-wal`,
+/// `...-shm`), so the kept file opens with its last commits. Returns the new name of the main file.
+pub(crate) fn quarantine(home: &Path, name: &str) -> Result<PathBuf> {
     let suffix = format!("quarantined-{}", crate::db::now_ms());
     let main = home.join(format!("{name}.{suffix}"));
     // The sidecars before the file: stopped in between, the file is left without them (and is
@@ -321,7 +322,7 @@ fn quarantine(home: &Path, name: &str) -> Result<PathBuf> {
     for ext in ["-wal", "-shm", ""] {
         let from = home.join(format!("{name}{ext}"));
         if from.exists() {
-            std::fs::rename(&from, home.join(format!("{name}{ext}.{suffix}")))
+            std::fs::rename(&from, home.join(format!("{name}.{suffix}{ext}")))
                 .with_context(|| format!("quarantine {}", from.display()))?;
         }
     }
@@ -537,12 +538,8 @@ pub fn open_knowledge(home: &Path) -> Result<rusqlite::Connection> {
                 "oboete: knowledge.db: {e:#}; kept as {} and rebuilt from raw.db",
                 kept.display()
             );
-            let k = crate::knowledge::open(home)?;
-            // Its vectors when they still read (spec 1.7): those are not embedded again.
-            if let Err(e) = crate::embed_phase::carry(&k, &kept) {
-                eprintln!("oboete: no vectors carried from {}: {e:#}", kept.display());
-            }
-            Ok(k)
+            // Its vectors, when they still read, come with the embedding phase's first poll.
+            crate::knowledge::open(home)
         }
         Err(e) => Err(e),
     }

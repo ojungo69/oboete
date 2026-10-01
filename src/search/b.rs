@@ -234,6 +234,13 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
     };
     let terms = super::terms(&q.text);
     let depth = q.limit.max(DEPTH);
+    // Every leg reads one snapshot of knowledge.db: a hit is read back as it was found, never
+    // after a write between (a tombstone applied, a uid imported again). The schemas first: one
+    // made inside the snapshot would have to write.
+    crate::claims::schema(&k)?;
+    crate::consumer::imported::schema(&k)?;
+    crate::consumer::fts::schema(&k)?;
+    let _snapshot = k.unchecked_transaction()?;
     let (mut hits, mut lowered) = (Vec::new(), Vec::new());
     if q.raw != RawArm::Only {
         (hits, lowered) = claims_leg(&raw, &k, q, depth, &terms, near.as_ref())?;
