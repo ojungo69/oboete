@@ -1,0 +1,23 @@
+docs/eval/m4.py
+  s_59cfa7617c8511::t_5ddb1d3af784c4 15,98-100,111-113,118,138-141,144,150-151,175-180,220-221,226,294-307,367,388-391
+docs/eval/test_m4.py
+  s_59cfa7617c8511::t_36f8c0f643021b 96,99-100,116-117,120,194-199
+docs/milestone-4.md
+  s_59cfa7617c8511::t_483a701c1d69fa 44-45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "606fadc10c8a1418d036d7e24ff34c45028b3b68",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
