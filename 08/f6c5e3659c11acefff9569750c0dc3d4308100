@@ -1,0 +1,25 @@
+src/consumer/manifest.rs
+  s_59cfa7617c8511::t_4eff5837759d3f 113-114,385,441
+src/hook.rs
+  s_59cfa7617c8511::t_f5780a95bd34ff 74-77,128,137,139,147-149,158-169,226-253,255-256,312-318,320,329,346,348-350,375-378,453-484,487,497-545,552-554,559-577,579,585-598,600,607-608,611-648,650,652-682,694,854,2181-2361
+src/manifest.rs
+  s_59cfa7617c8511::t_d6242aada5db3a 160,163-167
+src/shortlist.rs
+  s_59cfa7617c8511::t_7e0393a116a093 414-415,428-447,465
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "08f6c5e3659c11acefff9569750c0dc3d4308100",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
