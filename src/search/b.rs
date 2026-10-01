@@ -204,8 +204,9 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             |r| r.get(0),
         )
         .optional()?;
-    let (vector, near) = match ask {
-        Ask::Given(None) => (Vector::Skipped(VectorSkip::Off), None),
+    // `None` when the query is to be embedded.
+    let ready = match ask {
+        Ask::Given(None) => Some((Vector::Skipped(VectorSkip::Off), None)),
         Ask::Given(Some(v)) if v.len() != crate::embed::DIM => {
             anyhow::bail!(
                 "a query vector of {} dimensions, not {}",
@@ -213,7 +214,7 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                 crate::embed::DIM
             )
         }
-        Ask::Given(Some(v)) => match active {
+        Ask::Given(Some(v)) => Some(match active.clone() {
             Some(embedder) => (
                 Vector::Used,
                 Some(Near {
@@ -222,18 +223,16 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                 }),
             ),
             None => (Vector::Skipped(VectorSkip::NoVectors), None),
-        },
+        }),
         // Before anything else: an excluded repository's query is never sent (row 30-2).
         Ask::Embed if excluded(&raw.exclusions()?, q) => {
-            (Vector::Skipped(VectorSkip::Excluded), None)
+            Some((Vector::Skipped(VectorSkip::Excluded), None))
         }
-        Ask::Embed => match embedded(home, &raw, q, active)? {
-            Ok(near) => (Vector::Used, Some(near)),
-            Err(skip) => (Vector::Skipped(skip), None),
-        },
+        Ask::Embed => None,
     };
     let terms = super::terms(&q.text);
     let depth = q.limit.max(DEPTH);
+    let span = (q.since, q.until);
     // Every leg reads one snapshot of knowledge.db: a hit is read back as it was found, never
     // after a write between (a tombstone applied, a uid imported again). The schemas first: one
     // made inside the snapshot would have to write.
@@ -241,41 +240,68 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
     crate::consumer::imported::schema(&k)?;
     crate::consumer::fts::schema(&k)?;
     let _snapshot = k.unchecked_transaction()?;
-    let (mut hits, mut lowered) = (Vec::new(), Vec::new());
-    if q.raw != RawArm::Only {
-        (hits, lowered) = claims_leg(&raw, &k, q, depth, &terms, near.as_ref())?;
-        hits.extend(imported_leg(&k, q, depth, &terms, near.as_ref())?);
-    }
-    if q.raw != RawArm::Off {
-        let span = (q.since, q.until);
-        let mut rows = super::raw_in(Some(&raw), &k, &q.text, q.searched(), span, depth)?;
-        if let Some(near) = &near {
-            let repos: Vec<String> = q.searched().map(str::to_owned).into_iter().collect();
-            let fts: Vec<String> = rows
-                .iter()
-                .map(|h| format!("{}:{}", h.device, h.seq))
-                .collect();
-            let mut fused = rrf(&fts, &near.knn(&k, "r", &repos, span, depth)?);
-            fused.truncate(depth);
-            rows = super::raw_rows(Some(&raw), &k, &fused, &q.text, rows)?;
+    std::thread::scope(|s| {
+        // D8: the query's call goes out while the full-text sides read (on the 178k store they
+        // take longer than the call). Its thread opens raw.db for itself, to read the exclusions
+        // again just before the call. `Err` is the call on its way.
+        let asked = ready.ok_or_else(|| {
+            s.spawn(move || match crate::raw::open(home) {
+                Ok(raw) => embedded(home, &raw, q, active).unwrap_or(Err(VectorSkip::Error)),
+                Err(_) => Err(VectorSkip::Error),
+            })
+        });
+        let imported = match q.raw {
+            RawArm::Only => None,
+            _ => Some([false, true].map(|prompts| imported_fts(&k, q, depth, prompts))),
+        };
+        let rows = match q.raw {
+            RawArm::Off => Ok(Vec::new()),
+            _ => super::raw_in(Some(&raw), &k, &q.text, q.searched(), span, depth),
+        };
+        let (vector, near) = match asked {
+            Ok(ready) => ready,
+            Err(call) => match call.join() {
+                Ok(Ok(near)) => (Vector::Used, Some(near)),
+                Ok(Err(skip)) => (Vector::Skipped(skip), None),
+                Err(_) => (Vector::Skipped(VectorSkip::Error), None),
+            },
+        };
+        let (mut hits, mut lowered) = (Vec::new(), Vec::new());
+        if let Some([knowledge, prompts]) = imported {
+            (hits, lowered) = claims_leg(&raw, &k, q, depth, &terms, near.as_ref())?;
+            let fts = [knowledge?, prompts?];
+            hits.extend(imported_leg(&k, q, depth, &terms, fts, near.as_ref())?);
         }
-        for h in rows {
-            hits.push(Hit {
-                key: format!("{}:{}", h.device, h.seq),
-                class: Class::Raw,
-                repo: h.repo,
-                when: h.ts,
-                kind: h.kind,
-                status: String::new(),
-                label: Label::Citable,
-                title: String::new(),
-                snippet: h.snippet,
-            });
+        if q.raw != RawArm::Off {
+            let mut rows = rows?;
+            if let Some(near) = &near {
+                let repos: Vec<String> = q.searched().map(str::to_owned).into_iter().collect();
+                let fts: Vec<String> = rows
+                    .iter()
+                    .map(|h| format!("{}:{}", h.device, h.seq))
+                    .collect();
+                let mut fused = rrf(&fts, &near.knn(&k, "r", &repos, span, depth)?);
+                fused.truncate(depth);
+                rows = super::raw_rows(Some(&raw), &k, &fused, &q.text, rows)?;
+            }
+            for h in rows {
+                hits.push(Hit {
+                    key: format!("{}:{}", h.device, h.seq),
+                    class: Class::Raw,
+                    repo: h.repo,
+                    when: h.ts,
+                    kind: h.kind,
+                    status: String::new(),
+                    label: Label::Citable,
+                    title: String::new(),
+                    snippet: h.snippet,
+                });
+            }
         }
-    }
-    hits.extend(lowered);
-    hits.truncate(q.limit);
-    Ok(Answer { hits, vector })
+        hits.extend(lowered);
+        hits.truncate(q.limit);
+        Ok(Answer { hits, vector })
+    })
 }
 
 /// The query's vector from the configured embedder (D8), or why there is none: off, no vectors,
@@ -284,8 +310,6 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
 /// providers.db (role `query`) before it is sent, from the requests batches leave for queries,
 /// and the exclusions are read again just before the call (row 30-2); a failure sets no rest.
 /// One that cannot open or write providers.db sends nothing.
-// ponytail: the call runs before the full-text legs, not beside them on a thread; that saves the
-// legs' few ms only.
 fn embedded(
     home: &Path,
     raw: &crate::raw::Raw,
@@ -684,19 +708,18 @@ fn imported_repos(repo: &str) -> [String; 2] {
 }
 
 /// The imported documents `q` finds, once per uid (two devices' imports of one are one): the
-/// knowledge claude-mem kept, then the prompts it recorded (D7), each kind's full-text list fused
-/// with its vector side's.
+/// knowledge claude-mem kept, then the prompts it recorded (D7), each kind's full-text list
+/// (`imported_fts`, read while the query's call is out) fused with its vector side's.
 fn imported_leg(
     k: &Connection,
     q: &Query,
     depth: usize,
     terms: &[String],
+    fts: [Vec<String>; 2],
     near: Option<&Near>,
 ) -> Result<Vec<Hit>> {
-    crate::consumer::imported::schema(k)?;
     let mut out = Vec::new();
-    for (prompts, kind) in [(false, "k"), (true, "p")] {
-        let mut uids = imported_fts(k, q, depth, prompts)?;
+    for (mut uids, kind) in fts.into_iter().zip(["k", "p"]) {
         if let Some(near) = near {
             // The index holds an import's repository as its claude-mem project (`vec_repo`).
             let repos: Vec<String> = q
