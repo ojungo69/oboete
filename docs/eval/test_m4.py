@@ -489,3 +489,20 @@ def test_the_132_leave_every_table(capsys, report_module):
     primary, clean = capsys.readouterr().out.split('## Raw, near-copy records removed:')
     assert '\nb-off 1.000000 ' in primary
     assert 'b-rrf5: ndcg@10=1.000000' in primary and 'b-rrf5: ndcg@10=1.000000' in clean
+
+
+def test_milestone_4_test_runs_need_m4_and_dev_runs_keep_the_plain_report(tmp_path, monkeypatch, report_module):
+    report = report_module
+    (tmp_path / 'b-off.trec').write_text('')
+    monkeypatch.setattr(report.J, 'RUNS', str(tmp_path))
+
+    def past_the_gate(*args, **kwargs):
+        raise RuntimeError('past the gate')
+
+    monkeypatch.setattr(report.sqlite3, 'connect', past_the_gate)
+    monkeypatch.setattr(sys, 'argv', ['report.py', 'test'])
+    with pytest.raises(SystemExit, match='add --m4'):
+        report.main()
+    monkeypatch.setattr(sys, 'argv', ['report.py', 'dev'])
+    with pytest.raises(RuntimeError, match='past the gate'):
+        report.main()

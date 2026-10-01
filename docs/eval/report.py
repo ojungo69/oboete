@@ -324,9 +324,11 @@ def main():
         sys.exit('usage: report.py <split> [judge] [--m4]')
     if m4_mode and J.POOL_DEPTH != m4.DEPTH:
         sys.exit('--m4 requires OBOETE_EVAL_DEPTH=50')
-    if not m4_mode and os.path.exists(f'{J.RUNS}/b-off.trec'):
-        sys.exit('these are milestone 4 runs: add --m4')
     split, judge = args[0], args[1] if len(args) > 1 else J.JUDGE
+    # The deciding test runs are read only under D10; milestone 4's dev runs (Task 6 Step 10) decide
+    # nothing and keep the plain report.
+    if not m4_mode and split == 'test' and os.path.exists(f'{J.RUNS}/b-off.trec'):
+        sys.exit('these are milestone 4 runs: add --m4')
     if m4_mode and judge != J.JUDGE:
         sys.exit(f'--m4 reports the pinned judge only (D10): {J.JUDGE}')
     db = sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True)
