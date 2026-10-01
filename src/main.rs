@@ -232,6 +232,10 @@ enum Cmd {
         #[arg(long)]
         finish: bool,
     },
+    /// Evaluation (milestone 4 D12): each claim's label and evidence rows, whether each still
+    /// reads in its record, as JSON: what M6's harness checks a cited span against
+    #[command(hide = true)]
+    Cite { uids: Vec<String> },
     /// Evaluation: pass stdin through the outbound gate (what may leave the machine) to stdout
     #[command(hide = true)]
     Gate,
@@ -464,6 +468,13 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             }
             let stats = migrate::pass(&home, &mut raw::open(&home)?, &from)?;
             println!("{}", serde_json::to_string(&stats)?);
+            Ok(())
+        }
+        Cmd::Cite { uids } => {
+            println!(
+                "{}",
+                serde_json::to_string(&search::b::cite(&home, &uids)?)?
+            );
             Ok(())
         }
         Cmd::Gate => {
