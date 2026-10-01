@@ -20,20 +20,39 @@ export default {
     const abort = new AbortController();
     let pending = Promise.resolve();
 
-    // Finish each capture before starting the next, without awaiting it in an agent hook.
+    // Finish each capture before starting the next, without awaiting it in an agent hook. A
+    // prompt's capture also returns what the hook printed for the turn.
     function send(event, payload) {
+      const read = event === "UserPromptSubmit";
       pending = pending.then(() => new Promise((resolve) => {
         const child = spawn(exe, [...args, "hook", "opencode", event], {
           cwd: payload.cwd,
-          stdio: ["pipe", "ignore", "ignore"],
+          stdio: ["pipe", read ? "pipe" : "ignore", "ignore"],
         });
-        child.once("error", resolve);
-        child.once("close", resolve);
+        let out = "";
+        child.stdout?.setEncoding("utf8");
+        child.stdout?.on("data", (data) => { out += data; });
+        child.once("error", () => resolve(""));
+        child.once("close", () => resolve(out));
         child.stdin.on("error", ignore);
         child.stdin.end(JSON.stringify(payload));
         child.unref();
-      })).catch(ignore);
+      })).catch(() => "");
+      return pending;
     }
+
+    function contextOf(out) {
+      try {
+        const context = JSON.parse(out).hookSpecificOutput?.additionalContext;
+        return typeof context === "string" ? context : "";
+      } catch { return ""; }
+    }
+
+    // A capture or an injection never holds a turn longer than this.
+    const bounded = (work) => Promise.race([
+      work,
+      new Promise((resolve) => setTimeout(resolve, 3000, "").unref()),
+    ]);
 
     function toolText(e) {
       const content = e.result?.content;
@@ -56,7 +75,7 @@ export default {
         // Unlocated bus events can belong to another plugin instance's sessions.
         if (!location) return null;
         if (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
-        state = { dir: location.directory, started: false, message: null, parts: [] };
+        state = { dir: location.directory, started: false, message: null, parts: [], turn: null };
       }
       sessions.set(id, state);
       if (!state.started) {
@@ -86,10 +105,7 @@ export default {
       // Cache the promise too: overlapping calls still start only one injection process. The
       // session's queued SessionStart capture runs first: its write sets or clears the
       // recording-failure line the text reports. Bounded, so a stuck capture never holds a turn.
-      state.context ??= Promise.race([
-        pending,
-        new Promise((resolve) => setTimeout(resolve, 3000).unref()),
-      ]).then(() => new Promise((resolve) => {
+      state.context ??= bounded(pending).then(() => new Promise((resolve) => {
         // `=` keeps an id that starts with "-" a value. The session is left out of the other sessions.
         execFile(exe, [...args, "inject", `--session=${e.sessionID}`], {
           cwd: state.dir,
@@ -99,6 +115,9 @@ export default {
       })).catch(() => "");
       const text = await state.context;
       if (text) e.system.push({ type: "text", text });
+      // What the turn's prompt got, at each of the turn's calls: OpenCode keeps no system text.
+      const turn = state.turn && await bounded(state.turn);
+      if (turn) e.system.push({ type: "text", text: turn });
     });
 
     (async () => {
@@ -110,7 +129,13 @@ export default {
         switch (ev.type) {
           case "session.inbox.enqueued":
             if (data.item?.type === "user") {
-              send("UserPromptSubmit", { ...payload, prompt: data.item.payload?.text });
+              // A change it names may be in the cached manifest: the turn reads it again.
+              state.turn = send("UserPromptSubmit", { ...payload, prompt: data.item.payload?.text })
+                .then(contextOf)
+                .then((text) => {
+                  if (text) state.context = undefined;
+                  return text;
+                });
             }
             break;
           case "session.text.ended":
@@ -127,9 +152,12 @@ export default {
             send("Stop", { ...payload, last_assistant_message: state.parts.filter(Boolean).join("\n") });
             state.message = null;
             state.parts = [];
+            state.turn = null;
             break;
           case "session.compaction.ended":
             send("PostCompact", { ...payload, compact_summary: data.text });
+            // The summary replaced what the manifest put in: the next call reads it again.
+            state.context = undefined;
             break;
         }
       }
