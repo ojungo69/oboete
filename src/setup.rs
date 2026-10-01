@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{config, db};
+use crate::config;
 
 pub const AGENTS: [&str; 7] = ["claude", "codex", "grok", "agy", "opencode", "pi", "cursor"];
 const BACKUP_SUFFIX: &str = ".oboete.bak";
@@ -1724,7 +1724,8 @@ pub fn doctor(home: &Path) -> Result<()> {
             &mut unhealthy,
             "oboete.db",
             (|| -> Result<()> {
-                let conn = db::open(home)?;
+                // Read only: v1's open writes its schema and a new device id into a copy.
+                let conn = crate::migrate::open_v1(&db_path)?;
                 // A table that cannot be read makes the section unhealthy, not a count of 0; the
                 // readable counts and the calls below are still shown.
                 let counts = ["sessions", "events", "observations", "summaries"].map(|t| {

@@ -27,6 +27,7 @@ mod keyfile;
 mod knowledge;
 mod manifest;
 mod mcp;
+mod migrate;
 mod provider;
 mod providers_db;
 // Design B's store: the hook writes to it; its readers come with the worker (milestone 2 Task 5).
