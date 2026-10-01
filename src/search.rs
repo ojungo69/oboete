@@ -555,37 +555,8 @@ pub(crate) fn raw_in(
         args.push(Value::Text(r.to_string()));
     }
     within(&mut clauses, &mut args, "d.ts", span);
-    // D8: a tombstone the index has not reached yet hides its target here, so no search shows
-    // what raw already hides. The checkpoint is read before the index and the tombstones after
-    // it: one that commits while the query runs is still seen (one the worker applies in between
-    // only hides more).
-    // Every device partition counts: a copied home keeps its records, and their tombstones,
-    // under the old id (#83: the worker reads only its own until Task 8's part b).
-    let raw_db = if let Some(raw) = raw {
-        let mut devices = raw.devices()?;
-        // This device's own partition too while it is still empty (a home copied a moment ago).
-        if !devices.iter().any(|d| d == raw.device()) {
-            devices.push(raw.device().to_owned());
-        }
-        let mut ats = Vec::new();
-        for d in devices {
-            ats.push((crate::knowledge::checkpoint::get(k, "fts", &d)?, d));
-        }
-        Some((raw, ats))
-    } else {
-        None
-    };
-    type Seen<'a> = Option<(&'a crate::raw::Raw, Vec<(i64, String)>)>;
-    let pending = |raw_db: &Seen| -> Result<std::collections::HashSet<(String, i64)>> {
-        let mut out = std::collections::HashSet::new();
-        if let Some((raw, ats)) = raw_db {
-            for (at, d) in ats {
-                out.extend(raw.tombstones_after(d, *at)?);
-            }
-        }
-        Ok(out)
-    };
-    let before = pending(&raw_db)?.len();
+    let raw_db = fts_seen(raw, k)?;
+    let before = hidden(&raw_db)?.len();
     let order = if ranked {
         "rank, d.ts DESC"
     } else {
@@ -614,10 +585,97 @@ pub(crate) fn raw_in(
         })
     })?;
     let mut hits: Vec<RawHit> = hits.collect::<Result<_, _>>()?;
-    let pending = pending(&raw_db)?;
+    let pending = hidden(&raw_db)?;
     hits.retain(|h| !pending.contains(&(h.device.clone(), h.seq)));
     hits.truncate(limit);
     Ok(hits)
+}
+
+/// D8: a tombstone the index has not reached yet hides its target, so no search shows what raw
+/// already hides. The fts consumer's checkpoint on each device partition, read before the index,
+/// and the tombstones past it read after: one that commits while the query runs is still seen
+/// (one the worker applies in between only hides more). Every partition counts: a copied home
+/// keeps its records, and their tombstones, under the old id (#83).
+type Seen<'a> = Option<(&'a crate::raw::Raw, Vec<(i64, String)>)>;
+
+fn fts_seen<'a>(raw: Option<&'a crate::raw::Raw>, k: &Connection) -> Result<Seen<'a>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let mut devices = raw.devices()?;
+    // This device's own partition too while it is still empty (a home copied a moment ago).
+    if !devices.iter().any(|d| d == raw.device()) {
+        devices.push(raw.device().to_owned());
+    }
+    let mut ats = Vec::new();
+    for d in devices {
+        ats.push((crate::knowledge::checkpoint::get(k, "fts", &d)?, d));
+    }
+    Ok(Some((raw, ats)))
+}
+
+/// The records the tombstones past `seen`'s checkpoints hide.
+fn hidden(seen: &Seen) -> Result<std::collections::HashSet<(String, i64)>> {
+    let mut out = std::collections::HashSet::new();
+    if let Some((raw, ats)) = seen {
+        for (at, d) in ats {
+            out.extend(raw.tombstones_after(d, *at)?);
+        }
+    }
+    Ok(out)
+}
+
+/// The raw hits `keys` (`device:seq`) name, in their order: `known`'s as they are, the rest read
+/// from the index with `raw_in`'s tombstone filter and snippet (a vector side's hits, Task 5).
+pub(crate) fn raw_rows(
+    raw: Option<&crate::raw::Raw>,
+    k: &Connection,
+    keys: &[String],
+    query: &str,
+    known: Vec<RawHit>,
+) -> Result<Vec<RawHit>> {
+    let seen = fts_seen(raw, k)?;
+    let mut known: std::collections::HashMap<String, RawHit> = known
+        .into_iter()
+        .map(|h| (format!("{}:{}", h.device, h.seq), h))
+        .collect();
+    let terms = terms(query);
+    let mut out = Vec::new();
+    for key in keys {
+        if let Some(h) = known.remove(key) {
+            out.push(h);
+            continue;
+        }
+        let Some((device, seq)) = key.rsplit_once(':') else {
+            continue;
+        };
+        let seq: i64 = seq.parse()?;
+        let row = k
+            .query_row(
+                "SELECT d.kind, d.ts, d.repo, f.text FROM raw_docs d JOIN raw_fts f ON f.rowid = d.rowid
+                 WHERE d.device = ?1 AND d.seq = ?2",
+                params![device, seq],
+                |r| {
+                    Ok(RawHit {
+                        device: device.to_owned(),
+                        seq,
+                        kind: r.get(0)?,
+                        ts: r.get(1)?,
+                        repo: r.get(2)?,
+                        snippet: snippet(
+                            &crate::redact::outbound_lines(&r.get::<_, String>(3)?),
+                            &terms,
+                            b::WIDTH,
+                        ),
+                    })
+                },
+            )
+            .optional()?;
+        out.extend(row);
+    }
+    let hidden = hidden(&seen)?;
+    out.retain(|h| !hidden.contains(&(h.device.clone(), h.seq)));
+    Ok(out)
 }
 
 /// One line of `body`, `width` characters around the passage with the most different `terms`

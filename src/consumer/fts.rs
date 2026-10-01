@@ -79,7 +79,7 @@ fn reindex(raw: &Raw, k: &Connection, device: &str, seq: i64) -> Result<()> {
             k.execute("DELETE FROM raw_docs WHERE rowid = ?1", [rowid])?;
         }
     }
-    Ok(())
+    crate::embed_phase::touched(k, "r", &format!("{device}:{seq}"))
 }
 
 impl Consumer for Fts {
@@ -116,6 +116,10 @@ impl Consumer for Fts {
 
     fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> {
         schema(k)?;
+        let seqs: Vec<i64> = k
+            .prepare("SELECT seq FROM raw_docs WHERE device = ?1 AND seq > ?2")?
+            .query_map(params![device, to], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
         k.execute(
             "DELETE FROM raw_fts WHERE rowid IN (SELECT rowid FROM raw_docs WHERE device = ?1 AND seq > ?2)",
             params![device, to],
@@ -124,6 +128,9 @@ impl Consumer for Fts {
             "DELETE FROM raw_docs WHERE device = ?1 AND seq > ?2",
             params![device, to],
         )?;
+        for seq in seqs {
+            crate::embed_phase::touched(k, "r", &format!("{device}:{seq}"))?;
+        }
         Ok(())
     }
 }

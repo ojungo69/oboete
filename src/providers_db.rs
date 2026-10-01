@@ -370,10 +370,23 @@ pub fn tokens_since(conn: &Connection, provider: &str, since: i64) -> Result<(i6
 }
 
 /// What every paid entry cost since the first of this month (UTC), at the prices of each call's
-/// time: an entry since removed from the chain or repriced still counts.
+/// time: an entry since removed from the chain or repriced still counts. Embedding calls have a
+/// cap of their own (`embed_usd_this_month`), so neither spend stops the other.
 pub fn usd_this_month(conn: &Connection) -> Result<f64> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(usd), 0) FROM provider_calls WHERE ts>=?1",
+        "SELECT COALESCE(SUM(usd), 0) FROM provider_calls
+         WHERE ts>=?1 AND role NOT IN ('embed', 'query')",
+        [chrono_free_month_start(now_ms())],
+        |r| r.get(0),
+    )?)
+}
+
+/// What embedding calls, of documents and of queries, are estimated to have cost since the first
+/// of this month (UTC): `[embedding] monthly_usd`'s count (milestone 4 D8).
+pub fn embed_usd_this_month(conn: &Connection) -> Result<f64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(usd), 0) FROM provider_calls
+         WHERE ts>=?1 AND role IN ('embed', 'query')",
         [chrono_free_month_start(now_ms())],
         |r| r.get(0),
     )?)

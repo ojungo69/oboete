@@ -1699,6 +1699,10 @@ pub fn doctor(home: &Path) -> Result<()> {
                 {
                     println!("  {line}");
                 }
+                // Milestone 4 D8: the embedding phase.
+                for line in crate::embed_phase::doctor_lines(home, &k)? {
+                    println!("  {line}");
+                }
                 Ok(())
             })(),
         );

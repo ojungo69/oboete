@@ -537,7 +537,12 @@ pub fn open_knowledge(home: &Path) -> Result<rusqlite::Connection> {
                 "oboete: knowledge.db: {e:#}; kept as {} and rebuilt from raw.db",
                 kept.display()
             );
-            crate::knowledge::open(home)
+            let k = crate::knowledge::open(home)?;
+            // Its vectors when they still read (spec 1.7): those are not embedded again.
+            if let Err(e) = crate::embed_phase::carry(&k, &kept) {
+                eprintln!("oboete: no vectors carried from {}: {e:#}", kept.display());
+            }
+            Ok(k)
         }
         Err(e) => Err(e),
     }

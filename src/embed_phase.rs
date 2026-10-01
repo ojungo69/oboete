@@ -1,0 +1,1904 @@
+//! Milestone 4 Task 5 (D8): the embedding phase. The worker runs it before curation in each round
+//! of `serve`. It reads the next batch of documents that have no vector (claims, then imported
+//! documents, then raw records, the newest first), gates each text, and sends the batch on a
+//! thread of its own, so a slow or failing embedder delays only the vectors (rows 55-1, 55-7).
+//! Vectors are kept by the hash of the stored text, so a rebuild maps them back with no call
+//! (spec 1.7), and a changed egress rule re-embeds nothing (A94).
+
+use crate::curate::{Phase as Step, Reading, Reads};
+use crate::embed::{Embedder, Failure};
+use crate::raw::Raw;
+use anyhow::Result;
+use rusqlite::{Connection, OptionalExtension, params};
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// `provider_calls` name and role of a batch.
+const ROLE: &str = "embed";
+/// Documents read per poll: each poll sends at most one batch, its texts the shortest of these.
+const PAGE: usize = 2 * crate::embed::BATCH;
+
+/// One document the phase reads: its kind (`c` claim, `k` imported knowledge, `p` imported prompt,
+/// `r` raw record), its key, and the metadata the index filters by.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Doc {
+    pub kind: &'static str,
+    pub key: String,
+    /// SHA-256 of the stored text, before the gate.
+    pub sha: String,
+    pub repo: String,
+    pub ts: i64,
+    pub session: String,
+}
+
+/// A batch to send: its documents, their texts as sent (gated, then cut), and the exclusion list
+/// they were read under, which the sending thread holds the call to (D13).
+pub struct Batch {
+    pub embedder: String,
+    pub docs: Vec<Doc>,
+    pub texts: Vec<String>,
+    pub reading: Reading,
+}
+
+/// What became of a batch.
+pub enum Sent {
+    Vectors(Vec<Vec<f32>>),
+    Failed(Failure),
+    /// Nothing left the machine: the exclusion list changed since the batch was read (D13), or a
+    /// local error such as raw.db not opening.
+    Unsent(anyhow::Error),
+}
+
+/// The thread's body: raw.db opened, the exclusion list checked against the batch's, raw.db
+/// closed, then the call. What it took, in ms, beside what became of it.
+pub fn send(home: &Path, batch: &Batch, embedder: &Embedder, timeout: Duration) -> (Sent, i64) {
+    let started = Instant::now();
+    let still = crate::raw::open(home).and_then(|raw| batch.reading.still(&raw));
+    if let Err(e) = still {
+        return (Sent::Unsent(e), 0);
+    }
+    let texts: Vec<&str> = batch.texts.iter().map(String::as_str).collect();
+    let sent = match embedder.run(&texts, timeout) {
+        Ok(v) => Sent::Vectors(v),
+        Err(f) => Sent::Failed(f),
+    };
+    (sent, started.elapsed().as_millis() as i64)
+}
+
+/// A call on its thread.
+struct InFlight {
+    batch: Arc<Batch>,
+    thread: std::thread::JoinHandle<(Sent, i64)>,
+    /// When the call's own timeout has passed (unix ms).
+    until: i64,
+}
+
+/// The requests of `daily_requests` kept for query vectors: batches stop this short (Global
+/// Constraints).
+const KEPT_FOR_QUERIES: u32 = 40;
+/// Workers AI's free neurons a UTC day, bge-m3's neurons per million input tokens, and the price
+/// past the allowance in USD per 1,000 neurons (Step 7).
+const FREE_NEURONS: f64 = 10_000.0;
+const NEURONS_PER_M: f64 = 1_075.0;
+const USD_PER_K_NEURONS: f64 = 0.011;
+
+/// The phase over one home: at most one call in flight.
+pub struct Phase {
+    home: PathBuf,
+    flight: Option<InFlight>,
+    db: Option<Connection>,
+    /// A call's own timeout: `embed::BATCH_TIMEOUT`, shorter in tests.
+    timeout: Duration,
+    split: Option<Split>,
+    #[cfg(test)]
+    polls: usize,
+}
+
+/// A batch the model would not take (400, 413, 422), being split until each text it will not take
+/// is alone (Step 6).
+#[derive(Default)]
+struct Split {
+    /// Halves still to send, before anything else.
+    halves: Vec<Batch>,
+    /// Whether one of its requests was answered: only then is a text it would not take alone that
+    /// text's fault, not the embedder's.
+    answered: bool,
+    /// The texts it would not take alone, marked `refused` once it is over, answered.
+    lone: Vec<Doc>,
+    /// Its requests that failed.
+    fails: u32,
+}
+
+/// The failed requests of one split before one is answered: a batch of 100 reaches a text alone
+/// within 8, so past this the embedder is failing, not a text.
+const SPLIT_FAILS: u32 = 10;
+
+impl Phase {
+    pub fn new(home: &Path) -> Phase {
+        Phase {
+            home: home.to_owned(),
+            flight: None,
+            db: None,
+            timeout: crate::embed::BATCH_TIMEOUT,
+            split: None,
+            #[cfg(test)]
+            polls: 0,
+        }
+    }
+
+    /// Whether a call's thread has finished, so a wait can end early.
+    pub fn done(&self) -> bool {
+        self.flight.as_ref().is_some_and(|f| f.thread.is_finished())
+    }
+
+    /// One step: a finished call's vectors written, or the next batch sent, or what it waits on.
+    pub fn poll(&mut self, raw: &Raw, k: &Connection) -> Result<Step> {
+        #[cfg(test)]
+        {
+            self.polls += 1;
+        }
+        if let Some(f) = &self.flight {
+            if !f.thread.is_finished() {
+                // A thread past its call's timeout is asked again each second, never at once.
+                return Ok(Step::Waiting {
+                    until: f.until.max(crate::db::now_ms() + 1_000),
+                    up: true,
+                });
+            }
+            let f = self.flight.take().expect("a call in flight");
+            let (sent, ms) = f.thread.join().unwrap_or_else(|_| {
+                (
+                    Sent::Unsent(anyhow::anyhow!("the call's thread panicked")),
+                    0,
+                )
+            });
+            self.finish(k, &f.batch, sent, ms)?;
+            return Ok(Step::Covered);
+        }
+        // Read again each poll: a worker that stays up follows the owner's edits.
+        let loaded = crate::config::load(&self.home)
+            .and_then(|c| Ok((Embedder::from_config(&c.embedding)?, c.embedding)));
+        let (embedder, cfg) = match loaded {
+            Ok((Some(e), cfg)) => (e, cfg),
+            Ok((None, _)) => return Ok(Step::Idle),
+            Err(e) => {
+                eprintln!("oboete: no embedding for now: {e:#}");
+                return Ok(Step::Idle);
+            }
+        };
+        let reading = Reading::now(raw, Reads::Live)?;
+        cleared(k, &embedder.id, &reading)?;
+        let wait = self.held_back(&cfg)?;
+        let half = match (&wait, &mut self.split) {
+            (None, Some(split)) => split.halves.pop(),
+            _ => None,
+        };
+        let batch = match half {
+            Some(b) => b,
+            // Cached vectors are mapped and documents passed over are marked whatever the rest
+            // or the cap; only the call waits.
+            None => {
+                let Some(b) = pending(raw, k, &embedder.id, &reading)? else {
+                    return Ok(Step::Idle);
+                };
+                if let Some(w) = wait {
+                    return Ok(w);
+                }
+                b
+            }
+        };
+        let batch = Arc::new(batch);
+        let (home, sending, timeout) = (self.home.clone(), batch.clone(), self.timeout);
+        let thread = std::thread::spawn(move || send(&home, &sending, &embedder, timeout));
+        let until = crate::db::now_ms() + timeout.as_millis() as i64;
+        self.flight = Some(InFlight {
+            batch,
+            thread,
+            until,
+        });
+        Ok(Step::Waiting { until, up: true })
+    }
+
+    fn providers(&mut self) -> Result<&Connection> {
+        if self.db.is_none() {
+            self.db = Some(crate::providers_db::open(&self.home)?);
+        }
+        Ok(self.db.as_ref().expect("opened above"))
+    }
+
+    /// Why no batch goes now, and until when: the embedder rests (a failure's cooldown, or the
+    /// owner's hold), the day's requests are spent but those kept for queries, or the month's USD
+    /// is (Step 7).
+    fn held_back(&mut self, cfg: &crate::config::Embedding) -> Result<Option<Step>> {
+        use crate::providers_db as pdb;
+        let db = self.providers()?;
+        let now = crate::db::now_ms();
+        let rest = pdb::state(db, crate::embed::CALLS)?.down_until;
+        let (calls, oldest) = pdb::calls_in_a_day(db, crate::embed::CALLS)?;
+        let until = if rest > now {
+            rest
+        } else if calls >= cfg.daily_requests.saturating_sub(KEPT_FOR_QUERIES) {
+            oldest.map_or(now + pdb::DAY_MS, pdb::out_of_the_day)
+        } else if pdb::embed_usd_this_month(db)? >= cfg.monthly_usd {
+            pdb::next_month()
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(Step::Waiting {
+            until,
+            up: until.saturating_sub(now) <= crate::curate::STAY_UP_MS,
+        }))
+    }
+
+    /// A finished call: its vectors written in one transaction, each document's only while its
+    /// stored text is still the one sent (row 55-6); or the batch split, its lone texts refused,
+    /// or the embedder rested; and the call recorded with what it is estimated to cost.
+    fn finish(&mut self, k: &Connection, batch: &Batch, sent: Sent, ms: i64) -> Result<()> {
+        use crate::providers_db as pdb;
+        let was = pdb::state(self.providers()?, crate::embed::CALLS)?;
+        let mut next = None;
+        let (outcome, detail) = match &sent {
+            Sent::Vectors(vecs) => {
+                write(k, batch, vecs)?;
+                if let Some(split) = &mut self.split {
+                    split.answered = true;
+                }
+                next = Some(pdb::State::default());
+                ("ok", batch.docs.len().to_string())
+            }
+            Sent::Failed(f) if matches!(f.status, Some(400 | 413 | 422)) => {
+                let split = self.split.get_or_insert_with(Split::default);
+                split.fails += 1;
+                if let [doc] = &batch.docs[..] {
+                    split.lone.push(doc.clone());
+                } else {
+                    let mid = batch.docs.len() / 2;
+                    for (docs, texts) in [
+                        (&batch.docs[..mid], &batch.texts[..mid]),
+                        (&batch.docs[mid..], &batch.texts[mid..]),
+                    ] {
+                        split.halves.push(Batch {
+                            embedder: batch.embedder.clone(),
+                            docs: docs.to_vec(),
+                            texts: texts.to_vec(),
+                            reading: batch.reading.clone(),
+                        });
+                    }
+                }
+                ("error", f.message.clone())
+            }
+            Sent::Failed(f) => {
+                next = Some(crate::provider::next_state(was, &f.into()));
+                ("error", f.message.clone())
+            }
+            // Nothing left: nothing to record, and no rest set. A split's other halves were read
+            // under the same list: the next poll reads them again.
+            Sent::Unsent(e) => {
+                eprintln!("oboete: embedding not sent: {e:#}");
+                self.split = None;
+                return Ok(());
+            }
+        };
+        // A split that is over, or that failed past `SPLIT_FAILS` unanswered: answered, its lone
+        // texts are refused; unanswered, the embedder rests as for any failure.
+        if let Some(split) = &self.split
+            && (split.halves.is_empty() || (!split.answered && split.fails >= SPLIT_FAILS))
+        {
+            let split = self.split.take().expect("checked above");
+            if split.answered {
+                for doc in &split.lone {
+                    if stored(k, doc)? {
+                        mark(k, &batch.embedder, doc, "refused")?;
+                    }
+                }
+            } else if let Sent::Failed(f) = &sent {
+                next = Some(crate::provider::next_state(was, &f.into()));
+            }
+        }
+        // Billed: an answer, or a request that may have been run (a timeout, a dropped answer);
+        // an HTTP error status was not.
+        let billed = match &sent {
+            Sent::Vectors(_) => true,
+            Sent::Failed(f) => f.sent && f.status.is_none(),
+            Sent::Unsent(_) => false,
+        };
+        let texts = batch.texts.join("\n");
+        let est = crate::budget::estimate(&texts);
+        let db = self.providers()?;
+        let usd = if billed {
+            Some(billed_usd(db, est)?)
+        } else {
+            None
+        };
+        pdb::record(
+            db,
+            &pdb::Call {
+                provider: crate::embed::CALLS,
+                role: ROLE,
+                span: &format!("{} documents", batch.docs.len()),
+                outcome,
+                ms,
+                detail: Some(&detail),
+                bytes_out: texts.len(),
+                est_tokens: Some(est),
+                usage: pdb::Usage::default(),
+                usd,
+            },
+        )?;
+        if let Some(next) = next
+            && next != was
+        {
+            pdb::set_state(db, crate::embed::CALLS, next)?;
+        }
+        Ok(())
+    }
+}
+
+/// Doctor's lines (Step 11): the embedder and its generation, the documents still waiting per kind,
+/// those passed over per reason, the requests and USD against the caps, a rest, the last error.
+pub fn doctor_lines(home: &Path, k: &Connection) -> Result<Vec<String>> {
+    use crate::providers_db as pdb;
+    let config = crate::config::load(home)?.embedding;
+    if config.provider != "workers-ai" {
+        return Ok(vec!["embeddings: off".into()]);
+    }
+    let embedder = crate::embed::EMBEDDER;
+    crate::claims::schema(k)?;
+    crate::consumer::imported::schema(k)?;
+    crate::consumer::fts::schema(k)?;
+    let state: Option<String> = k
+        .query_row(
+            "SELECT state FROM vec_generation WHERE embedder = ?1",
+            [embedder],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let count = |sql: &str| -> Result<i64> { Ok(k.query_row(sql, [embedder], |r| r.get(0))?) };
+    let claims = count(
+        "SELECT count(*) FROM active a WHERE NOT EXISTS (SELECT 1 FROM vector_keys v
+           WHERE v.embedder = ?1 AND v.kind = 'c' AND v.key = a.uid)",
+    )?;
+    let imports = count(
+        "SELECT count(*) FROM imported i
+         WHERE i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
+           AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
+             AND v.kind IN ('k', 'p') AND v.key = i.uid)",
+    )?;
+    let records = count(
+        "SELECT count(*) FROM raw_docs d WHERE NOT EXISTS (SELECT 1 FROM vector_keys v
+           WHERE v.embedder = ?1 AND v.kind = 'r' AND v.key = d.device || ':' || d.seq)",
+    )?;
+    let mut lines = vec![format!(
+        "embeddings: {embedder} ({}), waiting: {claims} claims, {imports} imported, {records} records",
+        state.as_deref().unwrap_or("nothing embedded yet")
+    )];
+    let skipped: Vec<String> = k
+        .prepare(
+            "SELECT skipped, count(*) FROM vector_keys WHERE embedder = ?1 AND skipped IS NOT NULL
+             GROUP BY skipped ORDER BY skipped",
+        )?
+        .query_map([embedder], |r| {
+            Ok(format!(
+                "{} {}",
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(0)?
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    if !skipped.is_empty() {
+        lines.push(format!("  passed over: {}", skipped.join(", ")));
+    }
+    if !home.join("providers.db").exists() {
+        return Ok(lines);
+    }
+    let db = pdb::open(home)?;
+    let calls = crate::embed::CALLS;
+    lines.push(format!(
+        "  requests in the last day: {} of {} ({KEPT_FOR_QUERIES} kept for queries); USD this month: {:.2} of {:.2}",
+        pdb::calls_in_a_day(&db, calls)?.0,
+        config.daily_requests,
+        pdb::embed_usd_this_month(&db)?,
+        config.monthly_usd
+    ));
+    let rest = pdb::state(&db, calls)?.down_until;
+    if rest > crate::db::now_ms() {
+        lines.push(format!("  resting until {}", crate::db::utc(rest)));
+    }
+    let last: Option<(i64, String, Option<String>)> = db
+        .query_row(
+            "SELECT ts, role, detail FROM provider_calls WHERE provider = ?1 AND outcome = 'error'
+             ORDER BY id DESC LIMIT 1",
+            [calls],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    if let Some((ts, role, detail)) = last {
+        lines.push(format!(
+            "  last error ({role}, {}): {}",
+            crate::db::utc(ts),
+            detail.unwrap_or_default()
+        ));
+    }
+    Ok(lines)
+}
+
+/// Spec 1.7: the vectors of `from`, a knowledge.db set aside by a rebuild or quarantined, copied
+/// into `k`'s cache, so the documents they were made for are mapped again with no call. Only
+/// blobs of one finite vector each; a file from before the cache carries nothing. One
+/// transaction: a read that fails carries nothing.
+// ponytail: the cache keeps every text ever embedded, the old texts of changed documents too (a
+// rewind maps them back for free); sweep unreferenced rows if it grows past what that is worth.
+pub fn carry(k: &Connection, from: &Path) -> Result<usize> {
+    let old = Connection::open_with_flags(from, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let has: bool = old.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vectors')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has {
+        return Ok(0);
+    }
+    let tx = k.unchecked_transaction()?;
+    let mut carried = 0;
+    {
+        let mut read = old.prepare("SELECT embedder, src_sha, vec FROM vectors")?;
+        let mut rows = read.query([])?;
+        let mut write = tx
+            .prepare("INSERT OR IGNORE INTO vectors(embedder, src_sha, vec) VALUES (?1, ?2, ?3)")?;
+        while let Some(r) = rows.next()? {
+            let vec: Vec<u8> = r.get(2)?;
+            let (floats, rest) = vec.as_chunks::<4>();
+            if floats.len() != crate::embed::DIM
+                || !rest.is_empty()
+                || floats.iter().any(|b| !f32::from_le_bytes(*b).is_finite())
+            {
+                continue;
+            }
+            carried +=
+                write.execute(params![r.get::<_, String>(0)?, r.get::<_, String>(1)?, vec])?;
+        }
+    }
+    tx.commit()?;
+    Ok(carried)
+}
+
+/// What a billed call of `tokens` costs, after the UTC day's billed embedding calls so far.
+pub(crate) fn billed_usd(db: &Connection, tokens: u32) -> Result<f64> {
+    let now = crate::db::now_ms();
+    let day = now - now.rem_euclid(crate::providers_db::DAY_MS);
+    let before: i64 = db.query_row(
+        "SELECT COALESCE(SUM(est_tokens), 0) FROM provider_calls
+         WHERE provider = ?1 AND ts >= ?2 AND usd IS NOT NULL",
+        params![crate::embed::CALLS, day],
+        |r| r.get(0),
+    )?;
+    Ok(usd(before, i64::from(tokens)))
+}
+
+/// What `tokens` more cost past the UTC day's free neurons, the day's billed calls having used
+/// `before` tokens. ponytail: the allowance is the account's, shared with v1 and any other Workers
+/// AI use, and this sees only this store's calls; counting the account's needs its usage API.
+fn usd(before: i64, tokens: i64) -> f64 {
+    let past = |t: i64| (t as f64 * NEURONS_PER_M / 1e6 - FREE_NEURONS).max(0.0);
+    (past(before + tokens) - past(before)) * USD_PER_K_NEURONS / 1_000.0
+}
+
+/// The `excluded` markers hold only under the list they were made under: a new list clears them,
+/// so undoing an exclusion queues its documents again (D13).
+fn cleared(k: &Connection, embedder: &str, reading: &Reading) -> Result<()> {
+    let list = serde_json::to_string(&*reading.exclusions)?;
+    let made: Option<Option<String>> = k
+        .query_row(
+            "SELECT exclusions FROM vec_generation WHERE embedder = ?1",
+            [embedder],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if made
+        .as_ref()
+        .is_some_and(|m| m.as_deref() == Some(list.as_str()))
+    {
+        return Ok(());
+    }
+    let tx = k.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM vector_keys WHERE embedder = ?1 AND skipped = 'excluded'",
+        [embedder],
+    )?;
+    // The first embedder is active from its start.
+    tx.execute(
+        "INSERT INTO vec_generation(embedder, state, exclusions) VALUES (?1, 'active', ?2)
+         ON CONFLICT(embedder) DO UPDATE SET exclusions = excluded.exclusions",
+        params![embedder, list],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// A document read to embed: what it is, and its stored text.
+struct Read {
+    doc: Doc,
+    text: String,
+    /// Records only: its session as `Raw::event_labels` spells it, and its source.
+    labels: Option<(String, String)>,
+}
+
+/// The next batch of documents with no vector from `embedder`: claims, then imported documents,
+/// then raw records, the newest first. A document passed over is marked (`excluded`, `source`,
+/// `empty`), and one whose stored text is already embedded is mapped to that vector, so neither
+/// comes back; the rest of a page is sent as one batch of its shortest texts.
+fn pending(raw: &Raw, k: &Connection, embedder: &str, reading: &Reading) -> Result<Option<Batch>> {
+    crate::claims::schema(k)?;
+    crate::consumer::imported::schema(k)?;
+    crate::consumer::fts::schema(k)?;
+    for kind in ["c", "i", "r"] {
+        loop {
+            let page = read_page(raw, k, embedder, kind)?;
+            if page.is_empty() {
+                break;
+            }
+            let mut todo = Vec::new();
+            let tx = k.unchecked_transaction()?;
+            for r in page {
+                if let Some(why) = passed_over(raw, k, reading, &r)? {
+                    mark(&tx, embedder, &r.doc, why)?;
+                    continue;
+                }
+                let sent = gated(&r);
+                if sent.trim().is_empty() || sent.trim() == "[REDACTED]" {
+                    mark(&tx, embedder, &r.doc, "empty")?;
+                    continue;
+                }
+                if let Some(vec) = cached(&tx, embedder, &r.doc.sha)? {
+                    index(&tx, embedder, &r.doc, &vec)?;
+                    continue;
+                }
+                todo.push((r.doc, sent));
+            }
+            tx.commit()?;
+            if todo.is_empty() {
+                continue;
+            }
+            todo.sort_by_key(|(_, text)| text.chars().count());
+            let pairs: Vec<(String, String)> = todo
+                .iter()
+                .enumerate()
+                .map(|(i, (_, t))| (i.to_string(), t.clone()))
+                .collect();
+            let first = crate::embed::batches(&pairs)[0].len();
+            let (docs, texts) = todo.into_iter().take(first).unzip();
+            return Ok(Some(Batch {
+                embedder: embedder.to_owned(),
+                docs,
+                texts,
+                reading: reading.clone(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// A page of `kind`'s documents (`i` reads both imported kinds) with no key row for `embedder`,
+/// the newest first.
+fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Vec<Read>> {
+    let limit = PAGE as i64;
+    Ok(match kind {
+        "c" => k
+            .prepare_cached(
+                "SELECT a.uid, a.body, COALESCE(a.repo, ''), a.valid_from FROM active a
+                 WHERE NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
+                                     AND v.kind = 'c' AND v.key = a.uid)
+                 ORDER BY a.valid_from DESC LIMIT ?2",
+            )?
+            .query_map(params![embedder, limit], |r| {
+                let text: String = r.get(1)?;
+                Ok(Read {
+                    doc: Doc {
+                        kind: "c",
+                        key: r.get(0)?,
+                        sha: sha(&text),
+                        repo: r.get(2)?,
+                        ts: r.get(3)?,
+                        session: String::new(),
+                    },
+                    text,
+                    labels: None,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?,
+        "i" => k
+            .prepare_cached(
+                "SELECT i.uid, i.kind, i.title, i.body, i.repo, i.ts, i.session FROM imported i
+                 WHERE i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
+                   AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
+                     AND v.kind = CASE i.kind WHEN 'prompt' THEN 'p' ELSE 'k' END
+                     AND v.key = i.uid)
+                 ORDER BY i.ts DESC LIMIT ?2",
+            )?
+            .query_map(params![embedder, limit], |r| {
+                let doc_kind: String = r.get(1)?;
+                let text = composed(&doc_kind, &r.get::<_, String>(2)?, &r.get::<_, String>(3)?);
+                Ok(Read {
+                    doc: Doc {
+                        kind: if doc_kind == "prompt" { "p" } else { "k" },
+                        key: r.get(0)?,
+                        sha: sha(&text),
+                        repo: r.get(4)?,
+                        ts: r.get(5)?,
+                        session: r.get(6)?,
+                    },
+                    text,
+                    labels: None,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?,
+        _ => {
+            let rows: Vec<(String, i64, String, i64, String, String, String)> = k
+                .prepare_cached(
+                    "SELECT d.device, d.seq, d.kind, d.ts, COALESCE(d.repo, ''),
+                       COALESCE(d.session, ''), f.text
+                     FROM raw_docs d JOIN raw_fts f ON f.rowid = d.rowid
+                     WHERE NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
+                                         AND v.kind = 'r' AND v.key = d.device || ':' || d.seq)
+                     ORDER BY d.seq DESC LIMIT ?2",
+                )?
+                .query_map(params![embedder, limit], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut out = Vec::with_capacity(rows.len());
+            for (device, seq, record_kind, ts, repo, session, text) in rows {
+                let labels = raw.event_labels(&device, seq)?;
+                out.push(Read {
+                    doc: Doc {
+                        kind: if record_kind == "prompt" { "rp" } else { "r" },
+                        key: format!("{device}:{seq}"),
+                        sha: sha(&text),
+                        repo,
+                        ts,
+                        session,
+                    },
+                    text,
+                    labels,
+                });
+            }
+            out
+        }
+    })
+}
+
+/// An imported document's text as v1 composed it (docs/pr-d.md): an observation's kind and title
+/// over its body, a summary's or a prompt's body.
+fn composed(kind: &str, title: &str, body: &str) -> String {
+    match kind {
+        "prompt" | "summary" => body.to_owned(),
+        _ => format!("{kind}: {title}\n{body}"),
+    }
+}
+
+fn sha(text: &str) -> String {
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+/// Why a document gets no vector without being sent: its repository or session is excluded
+/// (D13), or it is a record of an imported source (A92).
+fn passed_over(
+    raw: &Raw,
+    k: &Connection,
+    reading: &Reading,
+    r: &Read,
+) -> Result<Option<&'static str>> {
+    let list = &reading.exclusions;
+    match r.doc.kind {
+        "c" => {
+            let excluded = list.contains(&r.doc.repo)
+                || crate::curate::quotes_excluded(raw, k, &reading.excluded, &r.doc.key)?;
+            Ok(excluded.then_some("excluded"))
+        }
+        "k" | "p" => Ok(import_excluded(&r.doc.repo, list).then_some("excluded")),
+        _ => Ok(match &r.labels {
+            // A record the index holds and raw no longer does: its rewind comes.
+            None => Some("empty"),
+            Some((session, source)) => {
+                if reading.excluded.contains(session) {
+                    Some("excluded")
+                } else if !crate::raw::is_live(source) {
+                    Some("source")
+                } else {
+                    None
+                }
+            }
+        }),
+    }
+}
+
+/// Whether an imported document's repository is excluded: listed itself, or a claude-mem project
+/// (and its worktree sessions, `claude-mem:<name>/…`) named by a listed repository's last part,
+/// as search maps them (D13).
+fn import_excluded(repo: &str, list: &[String]) -> bool {
+    if list.iter().any(|x| x == repo) {
+        return true;
+    }
+    let Some(name) = repo.strip_prefix("claude-mem:") else {
+        return false;
+    };
+    let project = crate::import::repo(name.split('/').next().unwrap_or(name));
+    list.iter()
+        .any(|x| *x == project || crate::import::repo(x.rsplit('/').next().unwrap_or(x)) == project)
+}
+
+/// The text sent for `r`: gated first, then cut (12,000 characters; a prompt 1,000), so a secret
+/// across the cut is hidden whole (D8).
+fn gated(r: &Read) -> String {
+    let keep = match r.doc.kind {
+        "p" | "rp" => crate::embed::PROMPT_CHARS,
+        _ => crate::embed::MAX_CHARS,
+    };
+    crate::redact::outbound_lines(&r.text)
+        .chars()
+        .take(keep)
+        .collect()
+}
+
+/// The repository the index files a document under: an import's claude-mem project, its worktree
+/// sessions' (`claude-mem:<name>/…`) included, so a search of one repository finds them all.
+fn vec_repo<'a>(kind: &str, repo: &'a str) -> &'a str {
+    match (kind, repo.strip_prefix("claude-mem:")) {
+        ("k" | "p", Some(rest)) => rest
+            .find('/')
+            .map_or(repo, |i| &repo[.."claude-mem:".len() + i]),
+        _ => repo,
+    }
+}
+
+/// The index's kind of a document: a prompt record is a record.
+fn index_kind(kind: &str) -> &str {
+    if kind == "rp" { "r" } else { kind }
+}
+
+fn mark(k: &Connection, embedder: &str, doc: &Doc, why: &str) -> Result<()> {
+    k.execute(
+        "INSERT INTO vector_keys(embedder, kind, key, src_sha, skipped) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(embedder, kind, key) DO UPDATE SET src_sha = excluded.src_sha,
+           skipped = excluded.skipped",
+        params![embedder, index_kind(doc.kind), doc.key, doc.sha, why],
+    )?;
+    Ok(())
+}
+
+fn cached(k: &Connection, embedder: &str, sha: &str) -> Result<Option<Vec<u8>>> {
+    Ok(k.query_row(
+        "SELECT vec FROM vectors WHERE embedder = ?1 AND src_sha = ?2",
+        params![embedder, sha],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+/// `doc`'s key row mapped to the vector `vec` (fp32, little-endian), and its index row.
+fn index(k: &Connection, embedder: &str, doc: &Doc, vec: &[u8]) -> Result<()> {
+    let id: i64 = k.query_row(
+        "INSERT INTO vector_keys(embedder, kind, key, src_sha, skipped) VALUES (?1, ?2, ?3, ?4, NULL)
+         ON CONFLICT(embedder, kind, key) DO UPDATE SET src_sha = excluded.src_sha, skipped = NULL
+         RETURNING id",
+        params![embedder, index_kind(doc.kind), doc.key, doc.sha],
+        |r| r.get(0),
+    )?;
+    let floats: Vec<f32> = vec
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect();
+    k.execute("DELETE FROM vec_index WHERE rowid = ?1", [id])?;
+    k.execute(
+        "INSERT INTO vec_index(rowid, embedder, kind, repo, ts, session, embedding)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, vec_bit(?7))",
+        params![
+            id,
+            embedder,
+            index_kind(doc.kind),
+            vec_repo(doc.kind, &doc.repo),
+            doc.ts,
+            doc.session,
+            crate::embed::bits(&floats)
+        ],
+    )?;
+    Ok(())
+}
+
+/// The document `key` of `family` (`c` a claim, `i` an import, `r` a record) was written, in the
+/// consumer's transaction that wrote it (row 46-2): a key whose text is gone or differs loses its
+/// rows, so a poll gives it the vector of its text now; the same text keeps its vector, under the
+/// document's repository and time now.
+pub fn touched(k: &Connection, family: &str, key: &str) -> Result<()> {
+    let kinds = match family {
+        "i" => "'k', 'p'",
+        "c" => "'c'",
+        _ => "'r'",
+    };
+    let rows: Vec<(i64, String, Option<String>, bool)> = k
+        .prepare_cached(&format!(
+            "SELECT id, kind, src_sha, skipped IS NULL FROM vector_keys
+             WHERE kind IN ({kinds}) AND key = ?1"
+        ))?
+        .query_map([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let Some((_, kind, ..)) = rows.first() else {
+        return Ok(());
+    };
+    let now = current(k, kind, key)?;
+    for (id, _, src_sha, indexed) in rows {
+        match &now {
+            Some(d) if src_sha.as_ref() == Some(&d.sha) => {
+                if indexed {
+                    k.execute(
+                        "UPDATE vec_index SET repo = ?2, ts = ?3, session = ?4 WHERE rowid = ?1",
+                        params![id, vec_repo(d.kind, &d.repo), d.ts, d.session],
+                    )?;
+                }
+            }
+            _ => {
+                k.execute("DELETE FROM vec_index WHERE rowid = ?1", [id])?;
+                k.execute("DELETE FROM vector_keys WHERE id = ?1", [id])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A batch's vectors, cached and indexed, in one transaction: a document whose stored text is no
+/// longer the one sent (a correction or a mask meanwhile) gets none (row 55-6).
+fn write(k: &Connection, batch: &Batch, vecs: &[Vec<f32>]) -> Result<()> {
+    let tx = k.unchecked_transaction()?;
+    for (doc, vec) in batch.docs.iter().zip(vecs) {
+        if !stored(&tx, doc)? {
+            continue;
+        }
+        let bytes: Vec<u8> = vec.iter().flat_map(|x| x.to_le_bytes()).collect();
+        tx.execute(
+            "INSERT OR IGNORE INTO vectors(embedder, src_sha, vec) VALUES (?1, ?2, ?3)",
+            params![batch.embedder, doc.sha, bytes],
+        )?;
+        index(&tx, &batch.embedder, doc, &bytes)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Whether `doc`'s stored text is still the one it was read with.
+fn stored(k: &Connection, doc: &Doc) -> Result<bool> {
+    Ok(current(k, doc.kind, &doc.key)?.is_some_and(|d| d.sha == doc.sha))
+}
+
+/// The document `key` of `kind` (`c`, `k` or `p` for an import, `r` or `rp` for a record) as it
+/// is stored now, or None once it is gone. An imported uid's is its row with the highest rowid.
+fn current(k: &Connection, kind: &str, key: &str) -> Result<Option<Doc>> {
+    Ok(match kind {
+        "c" => k
+            .query_row(
+                "SELECT body, COALESCE(repo, ''), valid_from FROM active WHERE uid = ?1",
+                [key],
+                |r| {
+                    Ok(Doc {
+                        kind: "c",
+                        key: key.to_owned(),
+                        sha: sha(&r.get::<_, String>(0)?),
+                        repo: r.get(1)?,
+                        ts: r.get(2)?,
+                        session: String::new(),
+                    })
+                },
+            )
+            .optional()?,
+        "k" | "p" => k
+            .query_row(
+                "SELECT kind, title, body, repo, ts, session FROM imported WHERE uid = ?1
+                 ORDER BY rowid DESC LIMIT 1",
+                [key],
+                |r| {
+                    let doc_kind: String = r.get(0)?;
+                    let text =
+                        composed(&doc_kind, &r.get::<_, String>(1)?, &r.get::<_, String>(2)?);
+                    Ok(Doc {
+                        kind: if doc_kind == "prompt" { "p" } else { "k" },
+                        key: key.to_owned(),
+                        sha: sha(&text),
+                        repo: r.get(3)?,
+                        ts: r.get(4)?,
+                        session: r.get(5)?,
+                    })
+                },
+            )
+            .optional()?,
+        _ => {
+            let Some((device, seq)) = key.rsplit_once(':') else {
+                return Ok(None);
+            };
+            k.query_row(
+                "SELECT d.kind, d.ts, COALESCE(d.repo, ''), COALESCE(d.session, ''), f.text
+                 FROM raw_docs d JOIN raw_fts f ON f.rowid = d.rowid
+                 WHERE d.device = ?1 AND d.seq = ?2",
+                params![device, seq.parse::<i64>().unwrap_or(-1)],
+                |r| {
+                    Ok(Doc {
+                        kind: if r.get::<_, String>(0)? == "prompt" {
+                            "rp"
+                        } else {
+                            "r"
+                        },
+                        key: key.to_owned(),
+                        sha: sha(&r.get::<_, String>(4)?),
+                        repo: r.get(2)?,
+                        ts: r.get(1)?,
+                        session: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?
+        }
+    })
+}
+
+#[cfg(test)]
+pub(crate) mod fixture {
+    use super::*;
+    use crate::embed::stub::Stub;
+    use crate::search::b::fixture::Store;
+
+    /// A home whose `[embedding]` points at `stub`, with a key file.
+    pub(crate) fn config(s: &Store, stub: &Stub) {
+        let key = s.home.path().join("key.md");
+        std::fs::write(&key, "workers ai\nk\n").unwrap();
+        let text = format!(
+            "[embedding]\nprovider = \"workers-ai\"\naccount_id = \"a\"\nkey_file = '{}'\nurl = \"{}\"\n",
+            key.display(),
+            stub.url
+        );
+        std::fs::write(s.home.path().join("config.toml"), text).unwrap();
+    }
+
+    /// The phase polled until it has nothing left, each call waited for.
+    pub(crate) fn embed_all(s: &Store) {
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        until_idle(s, &k, &mut Phase::new(s.home.path()));
+    }
+
+    pub(crate) fn until_idle(s: &Store, k: &Connection, phase: &mut Phase) {
+        for _ in 0..100 {
+            match phase.poll(&s.raw, k).unwrap() {
+                Step::Idle => return,
+                Step::Waiting { .. } if phase.flight.is_some() => {
+                    while !phase.done() {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                Step::Waiting { until, .. } => panic!("the phase waits until {until}"),
+                Step::Covered => {}
+            }
+        }
+        panic!("the phase never went idle");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixture::*;
+    use super::*;
+    use crate::embed::stub::Stub;
+    use crate::search::b::fixture::Store;
+
+    const R: &str = "github.com/o/r";
+
+    /// A decided decision of `R` that quotes a new record (`quote`, whole), with its own `body`.
+    fn claim(s: &mut Store, quote: &str, body: &str) -> String {
+        let seq = s.said("s", R, 1_000, quote);
+        derive(s, seq, quote, body)
+    }
+
+    /// A claim op that quotes record `seq` (`quote`, whole) with `body`: a new claim, or a
+    /// re-derivation of the one that quotes the same.
+    fn derive(s: &mut Store, seq: i64, quote: &str, body: &str) -> String {
+        use crate::claims::{ClaimOp, Evidence};
+        let evidence = Evidence {
+            device: s.raw.device().to_owned(),
+            seq,
+            offset: 0,
+            length: quote.len() as i64,
+            sentence: 0,
+            quote: quote.into(),
+            claim_at: None,
+        };
+        let uid = crate::claims::uid("decision", &evidence);
+        let op = ClaimOp {
+            id: "c1".into(),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: body.into(),
+            evidence: vec![evidence],
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier: 1,
+            why: String::new(),
+            tainted: false,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        let ops = [(crate::raw::OpKind::Claim, op)];
+        s.raw.append_ops(&ops).unwrap();
+        uid
+    }
+
+    fn keys(s: &Store) -> Vec<(String, String, Option<String>)> {
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        k.prepare("SELECT kind, key, skipped FROM vector_keys ORDER BY kind, key")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn skipped(s: &Store, key: &str) -> Option<String> {
+        keys(s)
+            .into_iter()
+            .find(|(_, k, _)| k == key)
+            .and_then(|(.., why)| why)
+    }
+
+    /// Row 30-1 (D13): nothing of an excluded repository reaches the embedder: its claims, a claim
+    /// elsewhere that quotes a session that touched it, its claude-mem project and that project's
+    /// worktree sessions, and that session's records in any repository. The rest is sent.
+    #[test]
+    fn an_excluded_repositorys_documents_reach_no_embedder() {
+        const X: &str = "github.com/o/secret";
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let there = s.said("sx", X, 1_000, "Secret words there.");
+        let here = s.said("sx", R, 2_000, "Secret words said here.");
+        let secret = [
+            derive(&mut s, there, "Secret words there.", "Secret words there."),
+            derive(
+                &mut s,
+                here,
+                "Secret words said here.",
+                "Secret words said here.",
+            ),
+            s.imported(
+                "o1",
+                "secret",
+                3_000,
+                "Secret notes",
+                "Secret project notes.",
+            ),
+            s.imported(
+                "o2",
+                "secret/wt",
+                3_000,
+                "Secret tree",
+                "Secret worktree notes.",
+            ),
+            s.key(there),
+            s.key(here),
+        ];
+        let open = s.said("so", R, 4_000, "Open words.");
+        derive(&mut s, open, "Open words.", "Open words.");
+        s.imported("o3", "r", 4_000, "Open notes", "Open project notes.");
+        s.raw.exclude(X, false).unwrap();
+        s.run();
+        embed_all(&s);
+        let sent = stub.texts().concat();
+        assert!(sent.iter().any(|t| t == "Open words."), "{sent:?}");
+        assert!(sent.iter().all(|t| !t.contains("Secret")), "{sent:?}");
+        for key in &secret {
+            assert_eq!(skipped(&s, key).as_deref(), Some("excluded"), "{key}");
+        }
+    }
+
+    /// D13: a batch read under one exclusion list is not sent once the list changed: `send` makes
+    /// no request and the phase records nothing; the next poll reads again and sends what may go.
+    #[test]
+    fn a_batch_read_before_an_exclusion_is_never_sent() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        s.said("s", R, 1_000, "Open words.");
+        s.run();
+        let home = s.home.path();
+        let k = crate::knowledge::open(home).unwrap();
+        let config = crate::config::load(home).unwrap();
+        let embedder = Embedder::from_config(&config.embedding).unwrap().unwrap();
+        let reading = Reading::now(&s.raw, Reads::Live).unwrap();
+        let batch = pending(&s.raw, &k, &embedder.id, &reading)
+            .unwrap()
+            .unwrap();
+        s.raw.exclude("github.com/o/elsewhere", false).unwrap();
+        let (sent, _) = send(home, &batch, &embedder, Duration::from_secs(5));
+        assert!(matches!(&sent, Sent::Unsent(e) if e.is::<crate::curate::ListChanged>()));
+        Phase::new(home).finish(&k, &batch, sent, 0).unwrap();
+        assert_eq!(stub.requests(), 0);
+        let db = crate::providers_db::open(home).unwrap();
+        let rows: i64 = db
+            .query_row(
+                "SELECT (SELECT count(*) FROM provider_calls) + (SELECT count(*) FROM provider_state)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+        embed_all(&s);
+        assert_eq!(stub.requests(), 1);
+    }
+
+    /// D13: an exclusion undone queues its documents again: the marks made under the old list go.
+    #[test]
+    fn undoing_an_exclusion_queues_its_documents() {
+        const X: &str = "github.com/o/secret";
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let seq = s.said("sx", X, 1_000, "Secret words there.");
+        s.raw.exclude(X, false).unwrap();
+        s.run();
+        embed_all(&s);
+        assert_eq!(stub.requests(), 0);
+        assert_eq!(skipped(&s, &s.key(seq)).as_deref(), Some("excluded"));
+        s.raw.exclude(X, true).unwrap();
+        s.run();
+        embed_all(&s);
+        assert_eq!(stub.texts().concat(), ["Secret words there."]);
+        assert!(
+            keys(&s)
+                .iter()
+                .any(|(_, k, why)| *k == s.key(seq) && why.is_none())
+        );
+    }
+
+    /// One poll's call, waited for, then what the next poll says.
+    fn call(s: &Store, k: &Connection, phase: &mut Phase) -> Step {
+        assert!(matches!(
+            phase.poll(&s.raw, k).unwrap(),
+            Step::Waiting { .. }
+        ));
+        while !phase.done() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(phase.poll(&s.raw, k).unwrap(), Step::Covered);
+        phase.poll(&s.raw, k).unwrap()
+    }
+
+    /// Rows 55-5 and 7.6 (Step 6): a 429, a 500 and a call past its timeout each rest the
+    /// embedder, and the documents wait for a later call. A text the model will not take alone is
+    /// `refused` once another part of its batch was answered, and the rest of the batch goes; with
+    /// no part answered, the embedder rests instead. Each request counts in the day's.
+    #[test]
+    fn a_refused_or_timed_out_embedding_waits_and_loses_nothing() {
+        use crate::providers_db as pdb;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let words = s.said("s", R, 1_000, "Words to embed.");
+        s.run();
+        let home = s.home.path();
+        let k = crate::knowledge::open(home).unwrap();
+        let db = pdb::open(home).unwrap();
+        let mut phase = Phase::new(home);
+        phase.timeout = Duration::from_millis(300);
+        let rested = |step: Step, at_least: i64| {
+            let Step::Waiting { until, up } = step else {
+                panic!("{step:?}")
+            };
+            assert!(until >= crate::db::now_ms() + at_least, "{step:?}");
+            assert!(up);
+            assert_eq!(skipped(&s, &s.key(words)), None);
+            assert!(!keys(&s).iter().any(|(_, key, _)| *key == s.key(words)));
+            pdb::set_state(&db, crate::embed::CALLS, pdb::State::default()).unwrap();
+        };
+        stub.fail_next(429, Some(2));
+        rested(call(&s, &k, &mut phase), 40_000);
+        stub.fail_next(500, None);
+        rested(call(&s, &k, &mut phase), 500_000);
+        let held = stub.hold();
+        rested(call(&s, &k, &mut phase), 500_000);
+        drop(held);
+        while stub.answered() < stub.requests() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // A 404 sets no rest at first (the breaker counts it), and the next answer clears the count.
+        stub.fail_next(404, None);
+        assert!(matches!(call(&s, &k, &mut phase), Step::Waiting { .. }));
+        assert_eq!(pdb::state(&db, crate::embed::CALLS).unwrap().fails, 1);
+        assert_eq!(call(&s, &k, &mut phase), Step::Idle);
+        assert_eq!(
+            pdb::state(&db, crate::embed::CALLS).unwrap(),
+            pdb::State::default()
+        );
+        assert!(
+            keys(&s)
+                .iter()
+                .any(|(_, key, why)| *key == s.key(words) && why.is_none())
+        );
+        assert_eq!(pdb::calls_in_a_day(&db, crate::embed::CALLS).unwrap().0, 5);
+
+        // Split down to the text alone; the other half answered: refused, and the rest embedded.
+        stub.refuse("Poison words.");
+        let poison = s.said("s", R, 2_000, "Poison words.");
+        let fine = s.said("s", R, 3_000, "Fine words.");
+        s.run();
+        until_idle(&s, &k, &mut phase);
+        assert_eq!(stub.requests(), 8);
+        assert_eq!(skipped(&s, &s.key(poison)).as_deref(), Some("refused"));
+        assert!(
+            keys(&s)
+                .iter()
+                .any(|(_, key, why)| *key == s.key(fine) && why.is_none())
+        );
+        assert_eq!(
+            pdb::state(&db, crate::embed::CALLS).unwrap(),
+            pdb::State::default()
+        );
+
+        // Alone with nothing answered: the embedder's failure, not the text's.
+        let alone = s.said("s", R, 4_000, "Poison words.");
+        s.run();
+        assert!(matches!(
+            phase.poll(&s.raw, &k).unwrap(),
+            Step::Waiting { .. }
+        ));
+        while !phase.done() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
+        assert_eq!(skipped(&s, &s.key(alone)), None);
+        assert_eq!(pdb::state(&db, crate::embed::CALLS).unwrap().fails, 1);
+        assert_eq!(
+            pdb::calls_in_a_day(&db, crate::embed::CALLS).unwrap().0 as usize,
+            stub.requests()
+        );
+    }
+
+    /// Steps 4 and 6: a text whose stored text changed while its split went on is not refused:
+    /// the mark would hold the old text's hash, and the new text would never be read again.
+    #[test]
+    fn a_text_changed_during_its_split_is_not_refused() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        stub.refuse("Poison words.");
+        let poison = s.said("s", R, 1_000, "Poison words.");
+        s.said("s", R, 2_000, "Fine words.");
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = Phase::new(s.home.path());
+        // The batch, then the poison alone: both refused, the other half still to go.
+        for _ in 0..2 {
+            assert!(matches!(call(&s, &k, &mut phase), Step::Waiting { .. }));
+        }
+        let body = serde_json::json!({ "prompt": "Poison words." }).to_string();
+        s.raw
+            .append_tombstone(crate::raw::Target::Range {
+                device: s.raw.device().to_owned(),
+                seq: poison,
+                offset: body.find("words").unwrap() as i64,
+                length: 5,
+            })
+            .unwrap();
+        s.run();
+        until_idle(&s, &k, &mut phase);
+        assert!(stub.texts().concat().iter().any(|t| t == "Poison *****."));
+        assert!(
+            keys(&s)
+                .iter()
+                .any(|(_, key, why)| *key == s.key(poison) && why.is_none())
+        );
+    }
+
+    /// Step 6: a split that nothing answers stops after `SPLIT_FAILS` requests: the embedder is
+    /// failing, not a text, so nothing is refused.
+    #[test]
+    fn a_split_nothing_answers_stops_at_its_bound() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        for i in 0..16 {
+            s.said("s", R, 1_000 + i, &format!("Words {i:02} to embed."));
+        }
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = Phase::new(s.home.path());
+        for _ in 0..SPLIT_FAILS {
+            stub.fail_next(400, None);
+            assert!(phase.flight.is_none());
+            assert!(matches!(
+                phase.poll(&s.raw, &k).unwrap(),
+                Step::Waiting { .. }
+            ));
+            while !phase.done() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
+        }
+        assert!(phase.split.is_none());
+        assert_eq!(stub.requests(), SPLIT_FAILS as usize);
+        assert!(keys(&s).is_empty());
+    }
+
+    /// The Global Constraints (Step 7): batches stop 40 requests short of `daily_requests`, kept
+    /// for query vectors, which pass until the day's are spent; batches stop at `monthly_usd` too;
+    /// embedding spend and the paid curators' spend are counted apart, so neither stops the other.
+    #[test]
+    fn the_embedding_cap_is_its_own_and_keeps_room_for_queries() {
+        use crate::providers_db as pdb;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        s.said("s", R, 1_000, "Words to embed.");
+        s.run();
+        let home = s.home.path().to_owned();
+        let home = home.as_path();
+        let k = crate::knowledge::open(home).unwrap();
+        let db = pdb::open(home).unwrap();
+        let row = |role: &'static str, usd: Option<f64>, provider: &'static str| pdb::Call {
+            provider,
+            role,
+            span: "",
+            outcome: "ok",
+            ms: 1,
+            detail: None,
+            bytes_out: 1,
+            est_tokens: Some(1),
+            usage: pdb::Usage::default(),
+            usd,
+        };
+        for _ in 0..159 {
+            pdb::record(&db, &row("embed", None, crate::embed::CALLS)).unwrap();
+        }
+        // A paid curator spent past the USD 5: the embedder is not stopped.
+        pdb::record(&db, &row("curator", Some(9.0), "paid")).unwrap();
+        let mut phase = Phase::new(home);
+        assert_eq!(call(&s, &k, &mut phase), Step::Idle);
+        assert_eq!(stub.requests(), 1);
+        s.said("s", R, 2_000, "More words to embed.");
+        s.run();
+        let Step::Waiting { until, up } = phase.poll(&s.raw, &k).unwrap() else {
+            panic!("160 requests in the day, and a batch went")
+        };
+        assert!(until > crate::db::now_ms() + 3_600_000 && !up);
+        assert_eq!(stub.requests(), 1);
+        // A query passes, from the 40 kept for queries, until the day's 200 are spent.
+        use crate::search::b::{Query, Vector, VectorSkip, query};
+        let q = Query {
+            text: "Words".into(),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        assert_eq!(query(home, &q).unwrap().vector, Vector::Used);
+        assert_eq!(stub.requests(), 2);
+        for _ in 0..39 {
+            pdb::record(&db, &row("query", None, crate::embed::CALLS)).unwrap();
+        }
+        let spent = Vector::Skipped(VectorSkip::Waiting);
+        assert_eq!(query(home, &q).unwrap().vector, spent);
+        assert_eq!(stub.requests(), 2);
+        // The month's embedding USD spent: no batch until next month, and the curators' spend
+        // leaves it out.
+        db.execute("DELETE FROM provider_calls WHERE role = 'embed'", [])
+            .unwrap();
+        pdb::record(&db, &row("embed", Some(1.0), crate::embed::CALLS)).unwrap();
+        assert_eq!(pdb::usd_this_month(&db).unwrap(), 9.0);
+        assert_eq!(pdb::embed_usd_this_month(&db).unwrap(), 1.0);
+        let Step::Waiting { until, up } = phase.poll(&s.raw, &k).unwrap() else {
+            panic!("the month's USD spent, and a batch went")
+        };
+        assert_eq!((until, up), (pdb::next_month(), false));
+        assert_eq!(stub.requests(), 2);
+        // The estimate: free inside the day's 10,000 neurons, USD 0.011 per 1,000 past them.
+        let tokens = |neurons: f64| (neurons * 1e6 / NEURONS_PER_M) as i64;
+        assert_eq!(usd(0, tokens(9_000.0)), 0.0);
+        let past = usd(tokens(9_000.0), tokens(2_000.0));
+        assert!((past - 0.011).abs() < 1e-4, "{past}");
+    }
+
+    /// Spec 1.7 (Steps 6 and 9): a rebuild makes no embedding call: the vectors of the
+    /// knowledge.db it sets aside are carried, and the next polls map them though the day's
+    /// requests are spent. A quarantined knowledge.db's vectors are carried too, and one whose
+    /// vectors cannot be read stops a rebuild before anything changes.
+    #[test]
+    fn a_rebuild_or_a_quarantine_keeps_the_vectors() {
+        use crate::providers_db as pdb;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        claim(
+            &mut s,
+            "Parser caches stay in Redis.",
+            "Parser caches go to Redis.",
+        );
+        s.imported("o1", "r", 2_000, "Deploy notes", "Notes.");
+        s.said("s", R, 3_000, "Words.");
+        s.run();
+        embed_all(&s);
+        let indexed = |s: &Store| keys(s).iter().filter(|(.., why)| why.is_none()).count();
+        let (sent, before) = (stub.requests(), indexed(&s));
+        assert!(before >= 4, "{before}");
+        let home = s.home.path().to_owned();
+        let db = pdb::open(&home).unwrap();
+        for _ in 0..200 {
+            let call = pdb::Call {
+                provider: crate::embed::CALLS,
+                role: ROLE,
+                span: "",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 1,
+                est_tokens: Some(1),
+                usage: pdb::Usage::default(),
+                usd: None,
+            };
+            pdb::record(&db, &call).unwrap();
+        }
+        // Blobs that are no vector: never carried.
+        let k = crate::knowledge::open(&home).unwrap();
+        k.execute(
+            "INSERT INTO vectors(embedder, src_sha, vec) VALUES ('bge-m3', 'short', x'00'),
+               ('bge-m3', 'nan', ?1)",
+            [vec![0xffu8; crate::embed::DIM * 4]],
+        )
+        .unwrap();
+        drop(k);
+        // With no store open, as `oboete rebuild` runs.
+        let Store { home: dir, raw } = s;
+        drop(raw);
+        crate::worker::rebuild(&home).unwrap();
+        let k = crate::knowledge::open(&home).unwrap();
+        let bad: i64 = k
+            .query_row(
+                "SELECT count(*) FROM vectors WHERE src_sha IN ('short', 'nan')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        drop(k);
+        assert_eq!(bad, 0);
+        let s = Store {
+            home: dir,
+            raw: crate::raw::open(&home).unwrap(),
+        };
+        embed_all(&s);
+        assert_eq!((stub.requests(), indexed(&s)), (sent, before));
+        let left = std::fs::read_dir(&home).unwrap().any(|e| {
+            let name = e.unwrap().file_name();
+            name.to_string_lossy()
+                .starts_with("knowledge.db.rebuilding-")
+        });
+        assert!(!left);
+
+        // A damaged page of another table: the worker sets the file aside and carries its vectors.
+        let file = home.join("knowledge.db");
+        {
+            let k = Connection::open(&file).unwrap();
+            k.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+            let page: i64 = k
+                .query_row(
+                    "SELECT rootpage FROM sqlite_master WHERE name = 'raw_docs'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let size: i64 = k.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+            drop(k);
+            let mut bytes = std::fs::read(&file).unwrap();
+            let at = ((page - 1) * size) as usize;
+            bytes[at..at + size as usize].fill(0xff);
+            std::fs::write(&file, bytes).unwrap();
+        }
+        s.run();
+        let quarantined = std::fs::read_dir(&home).unwrap().any(|e| {
+            let name = e.unwrap().file_name();
+            name.to_string_lossy()
+                .starts_with("knowledge.db.quarantined-")
+        });
+        assert!(quarantined);
+        embed_all(&s);
+        assert_eq!((stub.requests(), indexed(&s)), (sent, before));
+
+        // Vectors that cannot be read: the rebuild stops, and the file is back as it was.
+        let Store { home: dir, raw } = s;
+        drop(raw);
+        for ext in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(home.join(format!("knowledge.db{ext}")));
+        }
+        std::fs::write(&file, b"not a database").unwrap();
+        let err = crate::worker::rebuild(&home).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("nothing was changed"),
+            "{err:#}"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"not a database");
+        let aside = std::fs::read_dir(&home).unwrap().any(|e| {
+            let name = e.unwrap().file_name();
+            name.to_string_lossy()
+                .starts_with("knowledge.db.rebuilding-")
+        });
+        assert!(!aside);
+        drop(dir);
+    }
+
+    /// Step 11: doctor names the embedder and how far it is: what waits per kind, what was passed
+    /// over and why, the requests and USD against the caps, and the last error.
+    #[test]
+    fn doctor_names_the_embedder_and_how_far_it_is() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        let home = s.home.path().to_owned();
+        s.said("s", R, 1_000, "Words to embed.");
+        s.said("s", R, 1_500, "<private>all of it</private>");
+        s.run();
+        let k = crate::knowledge::open(&home).unwrap();
+        assert_eq!(doctor_lines(&home, &k).unwrap(), ["embeddings: off"]);
+        config(&s, &stub);
+        let lines = doctor_lines(&home, &k).unwrap();
+        assert!(lines[0].contains("(nothing embedded yet)"), "{lines:?}");
+        assert!(
+            lines[0].ends_with("0 claims, 0 imported, 2 records"),
+            "{lines:?}"
+        );
+        stub.fail_next(500, None);
+        let mut phase = Phase::new(&home);
+        assert!(matches!(call(&s, &k, &mut phase), Step::Waiting { .. }));
+        let db = crate::providers_db::open(&home).unwrap();
+        let none = crate::providers_db::State::default();
+        crate::providers_db::set_state(&db, crate::embed::CALLS, none).unwrap();
+        embed_all(&s);
+        let lines = doctor_lines(&home, &k).unwrap();
+        let want = [
+            "embeddings: bge-m3 (active), waiting: 0 claims, 0 imported, 0 records",
+            "  passed over: 1 empty",
+            "  requests in the last day: 2 of 200 (40 kept for queries); USD this month: 0.00 of 1.00",
+        ];
+        assert_eq!(lines[..3], want);
+        assert!(lines[3].starts_with("  last error (embed, "), "{lines:?}");
+    }
+
+    /// Rows 55-1 and 55-7: a call the embedder holds delays only the vectors: the worker indexes
+    /// what is recorded meanwhile and full-text search finds it, and it does not spin while the
+    /// call is out.
+    #[test]
+    fn a_held_embedding_call_delays_only_the_vectors() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let first = s.said("s", R, 1_000, "First words.");
+        let held = stub.hold();
+        let home = s.home.path().to_owned();
+        let mut phase = Phase::new(&home);
+        let second = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let phases = crate::worker::Phases {
+                    embed: Some(&mut phase),
+                    curation: None,
+                };
+                let consumers = crate::worker::consumers(&home);
+                crate::worker::run_holding(&home, 200, consumers, || {}, None, phases)
+            });
+            while stub.requests() == 0 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let second = s.said("s", R, 2_000, "Second words while it waits.");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let q = crate::search::b::Query {
+                    text: "Second words".into(),
+                    caller: Some(R.into()),
+                    limit: 5,
+                    ..Default::default()
+                };
+                let found = crate::search::b::query(&home, &q).unwrap();
+                if found.hits.iter().any(|h| h.key == s.key(second)) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "not indexed while the call was out"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::thread::sleep(Duration::from_millis(1_000));
+            drop(held);
+            worker.join().unwrap().unwrap();
+            second
+        });
+        assert!(phase.polls < 30, "{} polls", phase.polls);
+        for seq in [first, second] {
+            assert!(
+                keys(&s)
+                    .iter()
+                    .any(|(_, k, why)| *k == s.key(seq) && why.is_none())
+            );
+        }
+    }
+
+    /// D6 and A92 (Step 5): records of imported sources get no vector, and however many there
+    /// are they never hold up a live record behind them: one poll marks them `source`, page after
+    /// page, and sends the live one. A text the gate leaves empty is marked `empty`.
+    #[test]
+    fn records_of_imported_sources_and_empty_texts_are_passed_over() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        s.said("s", R, 1_000, "Live words.");
+        let empty = s.said("s", R, 1_500, "<private>all of it</private>");
+        let many = 3 * PAGE + 50;
+        for i in 0..many as i64 {
+            let body = serde_json::json!({ "prompt": format!("Old words {i}.") }).to_string();
+            let e = crate::raw::Event {
+                source: "transcript".into(),
+                session: "t".into(),
+                repo: Some(R.into()),
+                ts: 2_000 + i,
+                ..crate::raw::test_event(&body)
+            };
+            s.raw.append(&e).unwrap();
+        }
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = Phase::new(s.home.path());
+        assert!(matches!(
+            phase.poll(&s.raw, &k).unwrap(),
+            Step::Waiting { .. }
+        ));
+        while !phase.done() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
+        assert_eq!(stub.texts(), [vec!["Live words.".to_owned()]]);
+        assert_eq!(skipped(&s, &s.key(empty)).as_deref(), Some("empty"));
+        let source = keys(&s)
+            .iter()
+            .filter(|(.., why)| why.as_deref() == Some("source"))
+            .count();
+        assert_eq!(source, many);
+    }
+
+    /// Rows 30-1 and 30-14: what reaches the embedder has passed the gate: a token and a
+    /// `<private>` block in a claim, an import op and a record, and a secret across a prompt's
+    /// cut is hidden whole, not cut in two.
+    #[test]
+    fn texts_sent_to_the_embedder_pass_the_gate() {
+        let token = ["gh", "p_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"].concat();
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        // A curator's body can hold what its quote does not: the rescan masks a secret in raw,
+        // so a quote of one would no longer read there.
+        let uid = claim(
+            &mut s,
+            "Deploy with the token always.",
+            &format!("Deploy with {token} <private>for acme</private> always."),
+        );
+        // An import is not rescanned, so its token reaches the phase, here across the cut: the
+        // composed text is "decision: Deploy notes\n" and the body, and the cut keeps 12,000.
+        let pad = crate::embed::MAX_CHARS - "decision: Deploy notes\n".len() - 15;
+        let body = format!(
+            "<private>acme</private>{} {token} tail",
+            "x".repeat(pad - 23)
+        );
+        let imported = s.imported("o1", "r", 2_000, "Deploy notes", &body);
+        let seq = s.said("s", R, 3_000, "<private>acme corp</private> Deploy words.");
+        s.run();
+        embed_all(&s);
+        let sent: Vec<String> = stub.texts().concat();
+        assert!(!sent.is_empty());
+        for text in &sent {
+            assert!(!text.contains(&token[..12]), "{text}");
+            assert!(!text.contains("acme"), "{text}");
+        }
+        let got = keys(&s);
+        for key in [uid, imported, s.key(seq)] {
+            assert!(
+                got.iter()
+                    .any(|(_, k, skipped)| *k == key && skipped.is_none()),
+                "{key}: {got:?}"
+            );
+        }
+    }
+
+    /// Row 55-6: a correction or a tombstone that lands while a call is out keeps the vector made
+    /// from the old text off its document; the next batch embeds the new text.
+    #[test]
+    fn a_vector_is_never_kept_for_text_that_changed_while_it_was_embedded() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let uid = s.decided(R, 1_000, "Parser caches stay in Redis.", &[]);
+        let text = "Deploy words to mask.";
+        let seq = s.said("s", R, 2_000, text);
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = Phase::new(s.home.path());
+        let mapped = |k: &Connection, key: &str| -> Option<String> {
+            k.query_row(
+                "SELECT src_sha FROM vector_keys WHERE key = ?1 AND skipped IS NULL",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap()
+        };
+        let body = serde_json::json!({ "prompt": text }).to_string();
+        let changes: [&dyn Fn(&mut Store); 2] = [
+            &|s| {
+                crate::claims::correct(s.home.path(), &uid, None, Some("Caches go to files."))
+                    .unwrap()
+            },
+            &|s| {
+                let target = crate::raw::Target::Range {
+                    device: s.raw.device().to_owned(),
+                    seq,
+                    offset: body.find("mask").unwrap() as i64,
+                    length: 4,
+                };
+                s.raw.append_tombstone(target).unwrap();
+            },
+        ];
+        for (call, (change, key)) in changes.iter().zip([uid.clone(), s.key(seq)]).enumerate() {
+            let held = stub.hold();
+            assert!(matches!(
+                phase.poll(&s.raw, &k).unwrap(),
+                Step::Waiting { .. }
+            ));
+            while stub.requests() == call {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            change(&mut s);
+            s.run();
+            drop(held);
+            while !phase.done() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
+            assert_eq!(mapped(&k, &key), None, "{key}");
+        }
+        embed_all(&s);
+        let texts = stub.texts().concat();
+        assert!(
+            texts.iter().any(|t| t == "Caches go to files."),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "Deploy words to ****."),
+            "{texts:?}"
+        );
+        assert_eq!(mapped(&k, &uid), Some(sha("Caches go to files.")));
+        assert!(mapped(&k, &s.key(seq)).is_some());
+    }
+
+    /// Row 46-2: every way a document's stored text changes takes its vector off, and the next
+    /// polls give it the vector of the text it has now (embedded, or mapped when that text was
+    /// embedded before): a re-derivation, a correction, a tombstone's mask and its removal, a
+    /// second import of a uid, and the three rewinds. A status-only correction sends nothing, and
+    /// the same text imported again only moves its index row's time.
+    #[test]
+    fn every_way_a_documents_text_changes_replaces_its_vector() {
+        use crate::consumer::{claims::Claims, fts::Fts, imported::Imported};
+        use crate::worker::Consumer;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let quote = "Parser caches stay in Redis.";
+        let seq = s.said("s", R, 1_000, quote);
+        let uid = derive(&mut s, seq, quote, quote);
+        let masked = s.said("s", R, 2_000, "Deploy words to mask.");
+        let removed = s.said("s", R, 3_000, "Words to forget.");
+        let doc = s.imported("o1", "r", 4_000, "Deploy notes", "First notes.");
+        let (home, device) = (s.home.path().to_owned(), s.raw.device().to_owned());
+        let k = crate::knowledge::open(&home).unwrap();
+        // The key's vector, if any, is the one of its stored text now.
+        let follows = |s: &Store, kind: &str, key: &str| {
+            s.run();
+            embed_all(s);
+            let now = current(&k, kind, key).unwrap().map(|d| d.sha);
+            let got: Option<String> = k
+                .query_row(
+                    "SELECT src_sha FROM vector_keys WHERE key = ?1 AND skipped IS NULL",
+                    [key],
+                    |r| r.get(0),
+                )
+                .optional()
+                .unwrap();
+            assert_eq!(got, now, "{key}");
+        };
+        follows(&s, "c", &uid);
+        let first =
+            |sql: &str, key: &str| -> i64 { k.query_row(sql, [key], |r| r.get(0)).unwrap() };
+        let claim_op = first("SELECT MIN(op_seq) FROM derivations WHERE uid = ?1", &uid);
+        let import_op = first("SELECT MIN(op_seq) FROM imported WHERE uid = ?1", &doc);
+
+        derive(&mut s, seq, quote, "Parser caches go to disk.");
+        follows(&s, "c", &uid);
+        assert!(current(&k, "c", &uid).unwrap().unwrap().sha == sha("Parser caches go to disk."));
+        crate::claims::correct(&home, &uid, None, Some("Caches go to files.")).unwrap();
+        follows(&s, "c", &uid);
+        let sent = stub.requests();
+        crate::claims::correct(&home, &uid, Some("done"), None).unwrap();
+        follows(&s, "c", &uid);
+        assert_eq!(stub.requests(), sent);
+
+        let body = serde_json::json!({ "prompt": "Deploy words to mask." }).to_string();
+        s.raw
+            .append_tombstone(crate::raw::Target::Range {
+                device: device.clone(),
+                seq: masked,
+                offset: body.find("mask").unwrap() as i64,
+                length: 4,
+            })
+            .unwrap();
+        follows(&s, "r", &s.key(masked));
+        assert!(
+            stub.texts()
+                .concat()
+                .iter()
+                .any(|t| t == "Deploy words to ****.")
+        );
+        s.raw
+            .append_tombstone(crate::raw::Target::Record {
+                device: device.clone(),
+                seq: removed,
+            })
+            .unwrap();
+        follows(&s, "r", &s.key(removed));
+
+        s.imported("o1", "r", 4_000, "Deploy notes", "Second notes.");
+        follows(&s, "k", &doc);
+        let sent = stub.requests();
+        s.imported("o1", "r", 5_000, "Deploy notes", "Second notes.");
+        follows(&s, "k", &doc);
+        assert_eq!(stub.requests(), sent);
+        let id = first("SELECT id FROM vector_keys WHERE key = ?1", &doc);
+        let ts: i64 = k
+            .query_row("SELECT ts FROM vec_index WHERE rowid = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(ts, 5_000);
+
+        // A restore that lost the later ops and records: each consumer's rewind. The texts the
+        // claim and the import had before were embedded then, so they are mapped with no call.
+        Imported.rewind(&k, &device, import_op).unwrap();
+        follows(&s, "k", &doc);
+        Claims.rewind(&k, &device, claim_op).unwrap();
+        follows(&s, "c", &uid);
+        assert_eq!(stub.requests(), sent);
+        Fts.rewind(&k, &device, masked - 1).unwrap();
+        follows(&s, "r", &s.key(masked));
+        // The record the claim quotes goes, and the claim with it.
+        s.raw
+            .append_tombstone(crate::raw::Target::Record { device, seq })
+            .unwrap();
+        follows(&s, "c", &uid);
+        assert!(current(&k, "c", &uid).unwrap().is_none());
+        let (index, kept): (i64, i64) = k
+            .query_row(
+                "SELECT (SELECT count(*) FROM vec_index),
+                        (SELECT count(*) FROM vector_keys WHERE skipped IS NULL)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(index, kept);
+    }
+}

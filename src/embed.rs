@@ -18,20 +18,20 @@ pub const DIM: usize = 1024;
 /// it ran.
 pub const EMBEDDER: &str = "bge-m3";
 /// `provider_calls` name, for the daily cap.
-const CALLS: &str = "workers-ai-embed";
+pub(crate) const CALLS: &str = "workers-ai-embed";
 /// Workers AI takes at most 100 texts per request and counts every text as long as the longest
 /// (texts × longest ≤ 60,000 tokens, PR-A2): texts of similar length go together, count × longest
 /// ≤ 50,000 characters.
-const BATCH: usize = 100;
+pub(crate) const BATCH: usize = 100;
 const BATCH_CHARS: usize = 50_000;
 /// The model cuts beyond 8,192 tokens (`truncate_inputs`); sending more is wasted bytes.
-const MAX_CHARS: usize = 12_000;
+pub(crate) const MAX_CHARS: usize = 12_000;
 /// A prompt is embedded by its opening (the spike's texts).
-const PROMPT_CHARS: usize = 1_000;
+pub(crate) const PROMPT_CHARS: usize = 1_000;
 /// Documents read per round of a backlog.
 const PAGE: i64 = 2_000;
 /// A batch of up to 100 texts; a search query waits for its vector (MCP budget p95 1.5 s).
-const BATCH_TIMEOUT: Duration = Duration::from_secs(180);
+pub(crate) const BATCH_TIMEOUT: Duration = Duration::from_secs(180);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// One answer holds up to 100 × 1,024 floats as JSON (about 2 MB).
 const MAX_RESPONSE_BYTES: u64 = 8 << 20;
@@ -68,9 +68,109 @@ fn endpoint(cfg: &config::Embedding) -> Result<(String, String)> {
         .account_id
         .as_deref()
         .ok_or_else(|| anyhow!("[embedding] account_id is not set"))?;
-    let url =
-        format!("https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/@cf/baai/bge-m3");
+    let url = cfg.url.clone().unwrap_or_else(|| {
+        format!(
+            "{}client/v4/accounts/{account}/ai/run/@cf/baai/bge-m3",
+            config::WORKERS_AI
+        )
+    });
     Ok((url, config::read_key(&cfg.key_file)?))
+}
+
+/// The embedder `[embedding]` configures (milestone 4 D8): the model's id, where it runs, and the
+/// token. No `Debug`: it holds the token.
+pub struct Embedder {
+    pub id: String,
+    pub url: String,
+    key: String,
+}
+
+/// Why a request gave no vectors: its status and Retry-After, and whether the request may have
+/// left the machine; never the answer's body, which can quote the text sent (#91).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Failure {
+    pub status: Option<u16>,
+    pub retry_after_s: Option<f64>,
+    pub sent: bool,
+    pub message: String,
+}
+
+impl Embedder {
+    /// The embedder `[embedding]` names, or `None` for `provider = "none"`. The token is read
+    /// here, so a missing key file stops the phase before it reads anything to send.
+    pub fn from_config(cfg: &config::Embedding) -> Result<Option<Embedder>> {
+        if cfg.provider != "workers-ai" {
+            return Ok(None);
+        }
+        let (url, key) = endpoint(cfg)?;
+        Ok(Some(Embedder {
+            id: EMBEDDER.to_owned(),
+            url,
+            key,
+        }))
+    }
+
+    /// One request: the texts' unit vectors, in order.
+    pub fn run(
+        &self,
+        texts: &[&str],
+        timeout: Duration,
+    ) -> std::result::Result<Vec<Vec<f32>>, Failure> {
+        let failed = |status, retry_after_s, message: String| Failure {
+            status,
+            retry_after_s,
+            sent: true,
+            message,
+        };
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .http_status_as_error(false)
+            .user_agent(concat!("oboete/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .into();
+        let mut resp = agent
+            .post(&self.url)
+            .header("Authorization", &format!("Bearer {}", self.key))
+            .send_json(json!({"text": texts, "truncate_inputs": true}))
+            .map_err(|e| {
+                let why = crate::provider::transport(&e);
+                failed(None, None, format!("workers ai: {why}"))
+            })?;
+        let status = resp.status().as_u16();
+        let retry_after_s = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|s| s.is_finite() && *s >= 0.0);
+        let failed = |message: String| failed(Some(status), retry_after_s, message);
+        let mut raw = Vec::new();
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(resp.body_mut().as_reader(), MAX_RESPONSE_BYTES + 1),
+            &mut raw,
+        )
+        .map_err(|e| {
+            let why = crate::provider::read_error(&e);
+            failed(format!("workers ai: read body: {why}"))
+        })?;
+        if raw.len() as u64 > MAX_RESPONSE_BYTES {
+            return Err(failed(format!(
+                "workers ai: response larger than {MAX_RESPONSE_BYTES} bytes"
+            )));
+        }
+        let text = String::from_utf8_lossy(&raw);
+        // The body is not kept: a 400 can quote the stored text sent for embedding (issue #91).
+        if status != 200 {
+            let code = crate::provider::error_code(&text)
+                .map(|c| format!(": {c}"))
+                .unwrap_or_default();
+            return Err(failed(format!("workers ai: http {status}{code}")));
+        }
+        serde_json::from_str::<Value>(&text)
+            .context("workers ai: response is not JSON")
+            .and_then(|v| vectors(&v, texts.len()))
+            .map_err(|e| failed(format!("{e:#}")))
+    }
 }
 
 /// A search query's vector, gated like the documents. A search waits for it, so the call gets a
@@ -250,7 +350,7 @@ fn pending(conn: &Connection, limit: i64) -> Result<Vec<(String, String)>> {
 
 /// Requests of at most 100 texts whose count × longest stays under `BATCH_CHARS` (`todo` sorted by
 /// length, so each batch holds texts of similar length). A text longer than that goes alone.
-fn batches(todo: &[(String, String)]) -> Vec<&[(String, String)]> {
+pub(crate) fn batches(todo: &[(String, String)]) -> Vec<&[(String, String)]> {
     let mut out = Vec::new();
     let mut start = 0;
     for i in 0..todo.len() {
@@ -268,38 +368,14 @@ fn batches(todo: &[(String, String)]) -> Vec<&[(String, String)]> {
 
 /// One Workers AI call: the texts' vectors, in order.
 fn run_model(url: &str, key: &str, texts: &[&str], timeout: Duration) -> Result<Vec<Vec<f32>>> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .http_status_as_error(false)
-        .user_agent(concat!("oboete/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into();
-    let mut resp = agent
-        .post(url)
-        .header("Authorization", &format!("Bearer {key}"))
-        .send_json(json!({"text": texts, "truncate_inputs": true}))
-        .map_err(|e| anyhow!("workers ai: {}", crate::provider::transport(&e)))?;
-    let status = resp.status().as_u16();
-    let mut raw = Vec::new();
-    std::io::Read::read_to_end(
-        &mut std::io::Read::take(resp.body_mut().as_reader(), MAX_RESPONSE_BYTES + 1),
-        &mut raw,
-    )
-    .map_err(|e| anyhow!("workers ai: read body: {}", crate::provider::read_error(&e)))?;
-    anyhow::ensure!(
-        raw.len() as u64 <= MAX_RESPONSE_BYTES,
-        "workers ai: response larger than {MAX_RESPONSE_BYTES} bytes"
-    );
-    let text = String::from_utf8_lossy(&raw);
-    // The body is not kept: a 400 can quote the stored text sent for embedding (issue #91).
-    if status != 200 {
-        let code = crate::provider::error_code(&text)
-            .map(|c| format!(": {c}"))
-            .unwrap_or_default();
-        anyhow::bail!("workers ai: http {status}{code}");
-    }
-    let v: Value = serde_json::from_str(&text).context("workers ai: response is not JSON")?;
-    vectors(&v, texts.len())
+    let embedder = Embedder {
+        id: EMBEDDER.to_owned(),
+        url: url.to_owned(),
+        key: key.to_owned(),
+    };
+    embedder
+        .run(texts, timeout)
+        .map_err(|failed| anyhow!(failed.message))
 }
 
 /// `result.data` of a Workers AI answer as `n` unit vectors of finite numbers.
@@ -474,6 +550,188 @@ pub fn reindex(home: &Path) -> Result<Stats> {
     backlog(&mut conn, &cfg.embedding, None, &still)
 }
 
+/// A loopback Workers AI for tests (milestone 4 Task 5). Each request is answered with one unit
+/// vector per text, whose dimensions come from the text's words and the model id the url ends
+/// in, so a text is near the texts that share its words, and two ids' spaces differ. It records
+/// every request's texts, answers the next ones with a scripted status and Retry-After when told,
+/// and holds requests while a `Hold` lives.
+#[cfg(test)]
+pub(crate) mod stub {
+    use serde_json::{Value, json};
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Condvar, Mutex};
+
+    #[derive(Default)]
+    struct State {
+        texts: Vec<Vec<String>>,
+        script: std::collections::VecDeque<(u16, Option<u32>)>,
+        held: bool,
+        /// A text every request that holds it is answered 400 for.
+        refused: Option<String>,
+        /// Requests answered so far: a held one is answered after its client gave up.
+        answered: usize,
+    }
+
+    type Shared = Arc<(Mutex<State>, Condvar)>;
+
+    pub(crate) struct Stub {
+        pub(crate) url: String,
+        state: Shared,
+    }
+
+    /// While it lives, requests wait before they are answered (after they are recorded).
+    pub(crate) struct Hold(Shared);
+
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            self.0.0.lock().unwrap().held = false;
+            self.0.1.notify_all();
+        }
+    }
+
+    impl Stub {
+        /// bge-m3 at a free loopback port.
+        pub(crate) fn start() -> Stub {
+            Self::of(super::EMBEDDER)
+        }
+
+        /// The model `id` at a free loopback port.
+        pub(crate) fn of(id: &str) -> Stub {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/run/{id}", listener.local_addr().unwrap());
+            let state: Shared = Arc::default();
+            let shared = state.clone();
+            let id = id.to_owned();
+            std::thread::spawn(move || {
+                for conn in listener.incoming() {
+                    let (shared, id) = (shared.clone(), id.clone());
+                    std::thread::spawn(move || answer(conn.unwrap(), &shared, &id));
+                }
+            });
+            Stub { url, state }
+        }
+
+        /// The texts of each request so far, in order.
+        pub(crate) fn texts(&self) -> Vec<Vec<String>> {
+            self.state.0.lock().unwrap().texts.clone()
+        }
+
+        pub(crate) fn requests(&self) -> usize {
+            self.state.0.lock().unwrap().texts.len()
+        }
+
+        pub(crate) fn answered(&self) -> usize {
+            self.state.0.lock().unwrap().answered
+        }
+
+        /// The next request is answered `status`, with Retry-After `retry` seconds.
+        pub(crate) fn fail_next(&self, status: u16, retry: Option<u32>) {
+            self.state
+                .0
+                .lock()
+                .unwrap()
+                .script
+                .push_back((status, retry));
+        }
+
+        /// Every request that holds `text` is answered 400.
+        pub(crate) fn refuse(&self, text: &str) {
+            self.state.0.lock().unwrap().refused = Some(text.to_owned());
+        }
+
+        pub(crate) fn hold(&self) -> Hold {
+            self.state.0.lock().unwrap().held = true;
+            Hold(self.state.clone())
+        }
+    }
+
+    /// The stub's vector for `text` under model `id`: each word adds one to the dimension its
+    /// hash picks, then the vector is scaled to unit length.
+    pub(crate) fn vector(id: &str, text: &str) -> Vec<f32> {
+        use sha2::{Digest, Sha256};
+        let mut v = vec![0.0f32; super::DIM];
+        let words = text
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty());
+        for w in words {
+            let h = Sha256::digest(format!("{id}\n{}", w.to_lowercase()).as_bytes());
+            v[usize::from(u16::from_le_bytes([h[0], h[1]])) % super::DIM] += 1.0;
+        }
+        if v.iter().all(|x| *x == 0.0) {
+            v[0] = 1.0;
+        }
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        v.iter_mut().for_each(|x| *x /= norm);
+        v
+    }
+
+    fn answer(mut conn: std::net::TcpStream, shared: &Shared, id: &str) {
+        let mut req = Vec::new();
+        let mut buf = [0u8; 65536];
+        let body = loop {
+            let n = conn.read(&mut buf).unwrap_or(0);
+            req.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&req).to_string();
+            if let Some(end) = text.find("\r\n\r\n") {
+                let len = text
+                    .to_lowercase()
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:").map(str::to_string))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if req.len() >= end + 4 + len {
+                    break req[end + 4..end + 4 + len].to_vec();
+                }
+            }
+            if n == 0 {
+                return;
+            }
+        };
+        let texts: Vec<String> = serde_json::from_slice::<Value>(&body).unwrap()["text"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap().to_owned())
+            .collect();
+        let (lock, wake) = &**shared;
+        let scripted = {
+            let mut state = lock.lock().unwrap();
+            state.texts.push(texts.clone());
+            while state.held {
+                state = wake.wait(state).unwrap();
+            }
+            state.answered += 1;
+            match &state.refused {
+                Some(r) if texts.contains(r) => Some((400, None)),
+                _ => state.script.pop_front(),
+            }
+        };
+        let (status, extra, out) = match scripted {
+            Some((status, retry)) => (
+                status,
+                retry.map_or(String::new(), |s| format!("Retry-After: {s}\r\n")),
+                json!({"success": false, "errors": [{"code": status, "message": "stub"}]}),
+            ),
+            None => {
+                let data: Vec<Vec<f32>> = texts.iter().map(|t| vector(id, t)).collect();
+                let shape = [texts.len(), super::DIM];
+                (
+                    200,
+                    String::new(),
+                    json!({"result": {"shape": shape, "data": data}, "success": true}),
+                )
+            }
+        };
+        let out = out.to_string();
+        let head = format!(
+            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            out.len()
+        );
+        let _ = conn.write_all(head.as_bytes());
+        let _ = conn.write_all(out.as_bytes());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,64 +783,6 @@ mod tests {
         assert_eq!(bits(&v), [0x80, 0x40]);
     }
 
-    /// Localhost server answering each request with one vector per text (`[i, 1, 0, …]` for the
-    /// text's order in the request), counting requests.
-    fn model_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/run", listener.local_addr().unwrap());
-        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = hits.clone();
-        std::thread::spawn(move || {
-            for conn in listener.incoming() {
-                let mut conn = conn.unwrap();
-                let mut req = Vec::new();
-                let mut buf = [0u8; 65536];
-                let body = loop {
-                    let n = conn.read(&mut buf).unwrap();
-                    req.extend_from_slice(&buf[..n]);
-                    let text = String::from_utf8_lossy(&req).to_string();
-                    if let Some(end) = text.find("\r\n\r\n") {
-                        let len = text
-                            .to_lowercase()
-                            .lines()
-                            .find_map(|l| l.strip_prefix("content-length:").map(str::to_string))
-                            .and_then(|v| v.trim().parse::<usize>().ok())
-                            .unwrap_or(0);
-                        if req.len() >= end + 4 + len {
-                            break req[end + 4..end + 4 + len].to_vec();
-                        }
-                    }
-                    if n == 0 {
-                        break Vec::new();
-                    }
-                };
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let texts = serde_json::from_slice::<Value>(&body).unwrap()["text"]
-                    .as_array()
-                    .unwrap()
-                    .len();
-                let data: Vec<Vec<f32>> = (0..texts)
-                    .map(|i| {
-                        let mut v = vec![0.0f32; DIM];
-                        v[0] = i as f32 + 1.0;
-                        v[1] = 1.0;
-                        v
-                    })
-                    .collect();
-                let out = json!({"result": {"shape": [texts, DIM], "data": data}, "success": true})
-                    .to_string();
-                let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    out.len()
-                );
-                conn.write_all(head.as_bytes()).unwrap();
-                conn.write_all(out.as_bytes()).unwrap();
-            }
-        });
-        (url, hits)
-    }
-
     #[test]
     fn backlog_embeds_once_indexes_by_repo_and_follows_deletes_and_rekeys() {
         let dir = std::env::temp_dir().join(format!("oboete-embed-{}", std::process::id()));
@@ -594,7 +794,8 @@ mod tests {
         db::upsert_session(&conn, "s", "claude", &path_key, &path_key, 1).unwrap();
         db::insert_prompt(&conn, "s", 1, &format!("token {} here", fake_token())).unwrap();
         db::insert_prompt(&conn, "s", 2, "a second prompt").unwrap();
-        let (url, hits) = model_server();
+        let stub = stub::Stub::start();
+        let url = stub.url.clone();
 
         let stats = backlog_at(&mut conn, &url, "k", Some(5), &|| Ok(())).unwrap();
         assert_eq!((stats.embedded, stats.requests), (2, 1));
@@ -622,7 +823,7 @@ mod tests {
         // A second run has nothing to embed and makes no request.
         let stats = backlog_at(&mut conn, &url, "k", Some(5), &|| Ok(())).unwrap();
         assert_eq!((stats.embedded, stats.requests), (0, 0));
-        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(stub.requests(), 1);
         // The index answers within the repository's knowledge / prompt shard.
         let knn = |conn: &Connection, repo: &str| -> Vec<String> {
             let q = bits(&{
@@ -749,7 +950,8 @@ mod tests {
         for i in 1..=BATCH as i64 + 1 {
             db::insert_prompt(&conn, "s", i, "a prompt").unwrap();
         }
-        let (url, hits) = model_server();
+        let stub = stub::Stub::start();
+        let url = stub.url.clone();
         let asked = std::cell::Cell::new(0);
         let still = || {
             asked.set(asked.get() + 1);
@@ -758,7 +960,7 @@ mod tests {
         };
         let err = backlog_at(&mut conn, &url, "k", None, &still).unwrap_err();
         assert_eq!(err.to_string(), "excluded now");
-        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(stub.requests(), 1);
     }
 
     #[test]

@@ -74,12 +74,18 @@ impl Consumer for Imported {
                 "INSERT INTO imported_fts(rowid, text) VALUES(?1, ?2)",
                 params![k.last_insert_rowid(), format!("{}\n{}", d.title, d.body)],
             )?;
+            // A uid imported again: its text is this row's now.
+            crate::embed_phase::touched(k, "i", &d.uid)?;
         }
         Ok(last)
     }
 
     fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> {
         schema(k)?;
+        let uids: Vec<String> = k
+            .prepare("SELECT DISTINCT uid FROM imported WHERE op_device = ?1 AND op_seq > ?2")?
+            .query_map(params![device, to], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
         k.execute(
             "DELETE FROM imported_fts WHERE rowid IN
                (SELECT rowid FROM imported WHERE op_device = ?1 AND op_seq > ?2)",
@@ -89,6 +95,9 @@ impl Consumer for Imported {
             "DELETE FROM imported WHERE op_device = ?1 AND op_seq > ?2",
             params![device, to],
         )?;
+        for uid in uids {
+            crate::embed_phase::touched(k, "i", &uid)?;
+        }
         Ok(())
     }
 }

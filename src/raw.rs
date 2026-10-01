@@ -550,6 +550,20 @@ impl Raw {
         Ok(labels.map(|(a, s)| format!("{}\u{0}{}", a.unwrap_or_default(), s.unwrap_or_default())))
     }
 
+    /// `device`'s event `seq`: its session as `session_key` spells it, and its source, from the
+    /// row alone. What the embedding phase passes a record over for (milestone 4 D8, D13).
+    pub fn event_labels(&self, device: &str, seq: i64) -> Result<Option<(String, String)>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT COALESCE(agent, '') || char(0) || COALESCE(session, ''), source
+                 FROM records WHERE device = ?1 AND seq = ?2 AND type = 'event'",
+            )?
+            .query_row(params![device, seq], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?)
+    }
+
     /// This device's newest `limit` live event records (the sources `is_live` names), the newest
     /// first, by their labels alone (no body): where the curation phase looks for a session whose
     /// digest is due (milestone 3 Task 9), so an import never pushes a live session out (Codex on
