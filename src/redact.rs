@@ -498,7 +498,13 @@ fn hidden_lines(text: &str, rules: &Rules) -> Option<(Runs, Runs)> {
         blocks,
         mut masks,
     } = gated(text, rules)?;
-    for (view, from) in [plain, shown] {
+    // Where the whole pass masked nothing, what it shows is what it scans: one sweep.
+    let views = if masks.is_empty() {
+        vec![plain]
+    } else {
+        vec![plain, shown]
+    };
+    for (view, from) in views {
         let mut at = 0;
         for line in view.split('\n') {
             for (s, e) in hidden(line, rules)? {
