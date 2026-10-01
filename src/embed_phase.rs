@@ -2436,7 +2436,7 @@ mod tests {
             let worker = scope.spawn(|| {
                 let phases = crate::worker::Phases {
                     embed: Some(&mut phase),
-                    curation: None,
+                    ..crate::worker::Phases::default()
                 };
                 let consumers = crate::worker::consumers(&home);
                 crate::worker::run_holding(&home, 200, consumers, || {}, None, phases)
