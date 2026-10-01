@@ -126,7 +126,8 @@ import json, shutil, sys
 args = sys.argv[1:]
 if args[0] == 'transcript':
     for ts in ('2026-09-24T00:56:47Z', '2026-09-20T00:00:02Z', '2026-09-20T00:00:01Z'):
-        print(json.dumps({'agent': 'claude', 'event': 'UserPromptSubmit', 'session': 's', 'ts': ts, 'payload': {}}))
+        print(json.dumps({'agent': 'claude', 'event': 'UserPromptSubmit', 'session': 's', 'ts': ts,
+                          'payload': {'prompt': 'line\u2028separator'}}, ensure_ascii=False))
 else:
     shutil.copy(args[3], args[1] + '/replayed.jsonl')
     print('{}')
@@ -143,7 +144,8 @@ def test_a_second_replay_is_refused(tmp_path):
     sessions = [{'agent': 'claude', 'session': 's', 'path': 'unused'}]
     report = m4.replay(str(binary), str(home), sessions)
     # Events before the copy time only, each session's in time order.
-    replayed = [json.loads(line)['ts'] for line in (home / 'replayed.jsonl').read_text().splitlines()]
+    # A raw U+2028 inside a JSON string does not end its line.
+    replayed = [json.loads(line)['ts'] for line in (home / 'replayed.jsonl').open(encoding='utf-8')]
     assert replayed == ['2026-09-20T00:00:01Z', '2026-09-20T00:00:02Z']
     assert (report['sessions'], report['events']) == (1, 2)
     with pytest.raises(RuntimeError, match='already'):

@@ -194,7 +194,8 @@ def replay(binary, home, sessions):
         r = subprocess.run([binary, 'transcript', s['path'], '--agent', s['agent']],
                            capture_output=True, text=True, check=True, env=clean_env())
         events = []
-        for line in r.stdout.splitlines():
+        # split('\n'), not splitlines(): a JSON string may hold U+2028, which splitlines() breaks on.
+        for line in r.stdout.split('\n'):
             if line.strip() and (t := when(json.loads(line)['ts'])) < CUT:
                 events.append((t, len(events), line))
         events.sort()
