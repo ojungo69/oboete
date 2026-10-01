@@ -594,7 +594,8 @@ fn claim_text(raw: &Raw, k: &Connection, uid: &str) -> Result<Option<String>> {
 fn imported_text(k: &Connection, uid: &str) -> Result<Option<String>> {
     let doc = k
         .query_row(
-            "SELECT source, kind, repo, ts, title, body FROM imported WHERE uid = ?1 LIMIT 1",
+            "SELECT source, kind, repo, ts, title, body FROM imported WHERE uid = ?1
+             ORDER BY rowid DESC LIMIT 1",
             [uid],
             |r| {
                 Ok((
@@ -819,7 +820,7 @@ fn time_of(raw: &Raw, k: &Connection, id: &str) -> Result<i64> {
             })?
         }
         Some(Named::Imported(uid)) => k.query_row(
-            "SELECT ts FROM imported WHERE uid = ?1 LIMIT 1",
+            "SELECT ts FROM imported WHERE uid = ?1 ORDER BY rowid DESC LIMIT 1",
             [uid],
             |r| r.get(0),
         )?,
@@ -1369,6 +1370,23 @@ mod tests {
         });
         assert_eq!(found.hits.len(), 100);
         assert!(found.hits.iter().all(|h| h.class == Class::Current));
+    }
+
+    /// Codex on #306: an imported uid held twice resolves to its newest copy, the one search and
+    /// the timeline show: in `get`, and as a timeline's anchor.
+    #[test]
+    fn get_and_the_anchor_read_an_imported_uids_newest_copy() {
+        let mut s = Store::new();
+        let doc = s.imported("o1", "r", 1_000, "Notes", "First copy.");
+        s.imported("o1", "r", 2_000, "Notes", "Second copy.");
+        s.run();
+        let text = get(s.home.path(), &doc).unwrap().unwrap();
+        assert!(
+            text.contains("Second copy.") && !text.contains("First copy."),
+            "{text}"
+        );
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        assert_eq!(time_of(&s.raw, &k, &doc).unwrap(), 2_000);
     }
 
     /// Codex on #306: a session start removed from raw is left out of the timeline before the
