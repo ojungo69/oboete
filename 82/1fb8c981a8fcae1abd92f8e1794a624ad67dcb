@@ -1,0 +1,25 @@
+docs/eval/rerank.py
+  s_59cfa7617c8511::t_4a28f738b24564 50-52,243-245,278-280
+docs/eval/test_rerank.py
+  s_59cfa7617c8511::t_ed49ac5a2df430 166-189
+docs/milestone-4-plan.md
+  s_59cfa7617c8511::t_a15e7d401a3c8a 96,383
+docs/spec.md
+  s_59cfa7617c8511::t_35822676473564 1195,1447
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "821fb8c981a8fcae1abd92f8e1794a624ad67dcb",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
