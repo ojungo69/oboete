@@ -108,9 +108,13 @@ fn run_io(
         tried = true;
         std::fs::create_dir_all(home)?;
         let labels = agent_labels(agent, &payload);
-        if (agent, event) == ("cursor", "PreCompact") {
+        if matches!(
+            (agent, event),
+            ("cursor", "PreCompact") | ("grok", "PostCompact")
+        ) {
             // Before the write: a compaction whose record fails still reinjects at the next
-            // prompt. A flag that cannot be written costs that reinjection, not the record.
+            // prompt (Grok's next tool call). A flag that cannot be written costs that
+            // reinjection, not the record.
             if let Err(e) = crate::hookstate::set(home, agent, session_label(&labels), "compacted")
             {
                 eprintln!("oboete: compaction not noted: {e}");
@@ -150,6 +154,13 @@ fn run_io(
             if let Err(e) = kept {
                 eprintln!("oboete: the failed call is not kept for the next prompt: {e}");
             }
+        }
+        // agy's compaction is a CHECKPOINT in its transcript, which `adapt` reads (Step 7): taken
+        // at each PreInvocation, so the session's first injection covers one already there.
+        if (agent, event) == ("agy", "PreInvocation")
+            && crate::hookstate::take(home, agent, &session, "compacted")
+        {
+            injecting = true;
         }
         // A manifest that cannot be read is no recording failure: the row is written.
         if injecting {
@@ -268,17 +279,21 @@ fn run_io(
 /// Task 2b: whether this call is the agent's point to inject context. Claude Code, Codex, Pi and
 /// OpenCode read SessionStart (not on a resume: its context has it already; after a compaction it
 /// does not, so it is shown again). Grok ignores SessionStart's output, so the first tool call of
-/// a session injects, and agy reads PreInvocation, once per session too. Cursor reads SessionStart
+/// a session injects, and the first after its PostCompact. agy reads PreInvocation, once per
+/// session and after a compaction (`run_io`). Cursor reads SessionStart, once per conversation,
 /// and, after its compaction marker, the next prompt. A point is claimed before the manifest is
 /// read, so a session whose checkout has none yet gets none later either, as at SessionStart
 /// (Claude; overrulable).
 fn injects(home: &Path, agent: &str, event: &str, payload: &Value) -> bool {
     let session = session_label(payload);
     match (agent, event) {
-        ("grok", "PreToolUse") | ("agy", "PreInvocation") => {
+        ("grok", "PreToolUse") => {
+            crate::hookstate::claim(home, agent, session, "injected")
+                || crate::hookstate::take(home, agent, session, "compacted")
+        }
+        ("agy", "PreInvocation") | ("cursor", "SessionStart") => {
             crate::hookstate::claim(home, agent, session, "injected")
         }
-        ("cursor", "SessionStart") => true,
         ("cursor", "UserPromptSubmit") => crate::hookstate::take(home, agent, session, "compacted"),
         ("grok" | "agy" | "cursor", _) => false,
         (_, "SessionStart") => str_field(payload, &["source"]) != Some("resume"),
@@ -956,15 +971,29 @@ fn adapt(
                 let (text, _) = text.split_once("</USER_REQUEST>")?;
                 Some((step, text))
             });
+        let session = p["session_id"].as_str().unwrap().to_owned();
+        if matches!(event, "PreInvocation" | "Stop") {
+            // A compaction is a CHECKPOINT step past the first reply: the `CHECKPOINT 0` most
+            // sessions get before it is none (Step 7). Each is claimed once.
+            let index = |kind: &'static str| {
+                steps
+                    .iter()
+                    .filter(move |s| s["type"] == kind)
+                    .filter_map(|s| s["step_index"].as_i64())
+            };
+            let first = index("PLANNER_RESPONSE").min();
+            for step in index("CHECKPOINT").filter(|i| first.is_some_and(|f| *i > f)) {
+                if crate::hookstate::claim(home, agent, &session, &format!("checkpoint-{step}"))
+                    && let Err(e) = crate::hookstate::set(home, agent, &session, "compacted")
+                {
+                    eprintln!("oboete: compaction not noted: {e}");
+                }
+            }
+        }
         let mut events = Vec::new();
         if matches!(event, "PreInvocation" | "Stop")
             && let Some((step, text)) = prompt
-            && crate::hookstate::claim(
-                home,
-                agent,
-                p["session_id"].as_str().unwrap(),
-                &format!("step-{step}"),
-            )
+            && crate::hookstate::claim(home, agent, &session, &format!("step-{step}"))
         {
             let mut turn = p.clone();
             turn["prompt"] = json!(text);
@@ -2287,11 +2316,12 @@ mod tests {
             "{next}"
         );
         // A claim it was shown that changed comes at the next turn's first tool call, not at a
-        // later call of this turn, picks or none, and a turn with nothing to bring brings nothing.
+        // later call of this turn, and a turn without one keeps it.
         p.s.correct(&parser, None, Some("Parser errors go to the log."));
         p.s.run();
         assert_eq!(tool(), "");
         assert_eq!(prompt("tidy the readme"), "");
+        assert_eq!(prompt("tidy the readme again"), "");
         let changed = tool();
         assert!(changed.contains("have changed since"), "{changed}");
         assert!(
@@ -2299,14 +2329,69 @@ mod tests {
             "{changed}"
         );
         assert_eq!(tool(), "");
+        // After a compaction, the next tool call shows the manifest again, once.
+        let compact = json!({"sessionId": "g", "workspaceRoot": c,
+                             "hookEventName": "PostCompact", "compact_summary": "earlier"});
+        assert_eq!(hook(&home, "grok", "PostCompact", &compact), "");
+        let again = tool();
+        assert!(again.contains(crate::manifest::MEMORY), "{again}");
+        assert!(again.contains("Parser errors go to the log."), "{again}");
+        assert_eq!(tool(), "");
+        // A turn with nothing to bring brings nothing.
         assert_eq!(prompt("tidy the readme"), "");
         assert_eq!(tool(), "");
     }
 
-    /// D9: Cursor drops a field over 10,000 UTF-16 units, so each block is cut at a line within
-    /// 9,500, its fence closed, and the claims whose lines were cut are not shown.
+    /// Spec 4.7: agy has no compaction hook; a CHECKPOINT step in its transcript past the first
+    /// reply is one, and the next PreInvocation shows the manifest again. The `CHECKPOINT 0` most
+    /// sessions get before their first reply is none.
     #[test]
-    fn cursor_cuts_each_block_at_a_line_and_shows_what_came() {
+    fn agy_reinjects_after_a_later_checkpoint() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let transcript = home.join("agy.jsonl");
+        let mut steps = String::new();
+        let mut add = |kind: &str, content: &str| {
+            let step = steps.lines().count();
+            let mut s = json!({"type": kind, "step_index": step, "content": content});
+            if kind == "USER_INPUT" {
+                s["source"] = json!("USER_EXPLICIT");
+            }
+            steps += &(s.to_string() + "\n");
+            std::fs::write(&transcript, &steps).unwrap();
+        };
+        let c = p.c.clone();
+        let call = |id: &str, event: &str| {
+            let payload = json!({"conversationId": id, "workspacePaths": [c],
+                                 "transcriptPath": transcript, "invocationNum": 0});
+            injected("agy", &hook(&home, "agy", event, &payload))
+        };
+        add("USER_INPUT", "<USER_REQUEST>hello</USER_REQUEST>");
+        assert!(call("agy-c", "PreInvocation").contains(crate::manifest::MEMORY));
+        add("CHECKPOINT", "{{ CHECKPOINT 0 }}");
+        add("PLANNER_RESPONSE", "hi");
+        assert_eq!(call("agy-c", "PreInvocation"), "");
+        add("CHECKPOINT", "{{ CHECKPOINT 1 }}");
+        assert!(call("agy-c", "PreInvocation").contains(crate::manifest::MEMORY));
+        assert_eq!(call("agy-c", "PreInvocation"), "");
+        // One its Stop reads is shown at the next PreInvocation.
+        add("PLANNER_RESPONSE", "done");
+        add("CHECKPOINT", "{{ CHECKPOINT 2 }}");
+        assert_eq!(call("agy-c", "Stop"), "");
+        assert!(call("agy-c", "PreInvocation").contains(crate::manifest::MEMORY));
+        assert_eq!(call("agy-c", "PreInvocation"), "");
+        // A session whose transcript holds one already gets one injection for both.
+        assert!(call("agy-d", "PreInvocation").contains(crate::manifest::MEMORY));
+        assert_eq!(call("agy-d", "PreInvocation"), "");
+    }
+
+    /// D9, Step 7: Cursor's SessionStart injects once per conversation. Cursor drops a field over
+    /// 10,000 UTF-16 units, so each block is cut at a line within 9,500, its fence closed, and the
+    /// claims whose lines were cut are not shown.
+    #[test]
+    fn cursor_injects_once_per_conversation_within_its_cap() {
         let mut p = Prompts::new(false);
         for i in 0..30 {
             p.decided(
@@ -2329,6 +2414,7 @@ mod tests {
         let lines = text.lines().filter(|l| l.contains(" decision")).count();
         assert!((1..30).contains(&shown.len()), "{}", shown.len());
         assert_eq!(shown.len(), lines);
+        assert_eq!(hook(&home, "cursor", "SessionStart", &payload), "{}");
         // Every line whole, the others' text uncut.
         let blocks = [("what", "## A\n- one\n- two\n")];
         assert_eq!(
