@@ -47,10 +47,9 @@ with longest_first, including special tokens. Documents run one at a time to
 bound activation memory and give the later Rust implementation the same shape.
 --time excludes model loading and file I/O; it includes pair tokenization and
 scoring. Per question it prints the wall time and the process CPU time, the sum
-over ONNX Runtime's threads. Spec 8.2's Rerank line, CPU p95 per question at most
-1.5 s less the hybrid's MCP p95, is a share of MCP's 1.5 s latency budget, so it
-reads the wall time of the run on CPU; the CPU time shows what the threads cost
-together. p50 is the median, p95 the nearest rank, over the questions with hits.
+over ONNX Runtime's threads. Spec 8.2's Rerank line, the p95 wall time per question
+on CPU at most 1.5 s less the hybrid's MCP p95, is a share of MCP's 1.5 s latency
+budget; the CPU time shows what the threads cost together. p50 is the median, p95 the nearest rank, over the questions with hits.
 Peak RSS is process-wide, in kB on Linux or bytes on macOS.
 """
 import argparse, contextlib, gzip, io, json, math, os, resource, shutil, statistics, sys, tempfile, time
@@ -241,7 +240,9 @@ def export_model(out):
         from huggingface_hub import snapshot_download
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-        snapshot = snapshot_download(MODEL, revision=REVISION, token=False,
+        # The endpoint is named: HF_ENDPOINT or HUGGINGFACE_CO_STAGING would otherwise pick
+        # another host for the revision the output names (Codex on c091ddc).
+        snapshot = snapshot_download(MODEL, revision=REVISION, token=False, endpoint='https://huggingface.co',
                                      allow_patterns=['config.json', 'model.safetensors', *TOKENIZER_FILES],
                                      cache_dir=str(cache / 'hf/hub'))
         tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True, trust_remote_code=False)
@@ -272,10 +273,11 @@ def export_model(out):
                               opset_version=18)
         for name in TOKENIZER_FILES:
             shutil.copyfile(Path(snapshot) / name, stage / name)
-        for line in fingerprints(stage):
-            print(line, flush=True)
         for path in stage.iterdir():
             shutil.move(path, out / path.name)
+        # Printed once every file is in place: an export that stops leaves no hash to record.
+        for line in fingerprints(out):
+            print(line, flush=True)
 
 
 def public_sets(language):

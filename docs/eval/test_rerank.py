@@ -163,6 +163,30 @@ def test_a_wrong_export_directory_is_refused_before_anything_is_deleted(tmp_path
     assert (out / '.export-cache' / 'kept').read_text() == 'x'
 
 
+def test_the_download_names_huggingface_co_whatever_the_environment_says(tmp_path, monkeypatch):
+    import sys, types
+
+    asked = {}
+
+    class Stop(Exception):
+        pass
+
+    def download(*args, **kwargs):
+        asked.update(kwargs)
+        raise Stop
+
+    monkeypatch.setenv('HF_ENDPOINT', 'https://mirror.invalid')
+    monkeypatch.setenv('HUGGINGFACE_CO_STAGING', '1')
+    for name, module in (('torch', types.SimpleNamespace()),
+                         ('huggingface_hub', types.SimpleNamespace(snapshot_download=download)),
+                         ('transformers', types.SimpleNamespace(AutoModelForSequenceClassification=None,
+                                                                AutoTokenizer=None))):
+        monkeypatch.setitem(sys.modules, name, module)
+    with pytest.raises(Stop):
+        rerank.export_model(tmp_path / 'onnx')
+    assert (asked['endpoint'], asked['revision'], asked['token']) == ('https://huggingface.co', rerank.REVISION, False)
+
+
 def test_the_export_deletes_no_cache_itself(tmp_path, monkeypatch):
     # The command that made .export-cache deletes it; the script never does, so it cannot
     # delete one another export is using.
