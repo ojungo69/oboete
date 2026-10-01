@@ -562,7 +562,8 @@ fn question(line: &str, depth: usize) -> Result<(String, Query)> {
 }
 
 /// The run's sidecar (Task 6): one JSON line per printed key, its session, time, kind and text,
-/// gated as embedding gates it (`outbound_lines`) and cut where the judge cuts.
+/// gated as embedding gates it (`outbound_lines`; an imported document's fields each alone,
+/// `composed_out`) and cut where the judge cuts.
 fn sidecar(k: &Connection, keys: &[String]) -> Result<String> {
     let mut out = String::new();
     for key in keys {
@@ -576,7 +577,10 @@ fn sidecar(k: &Connection, keys: &[String]) -> Result<String> {
                      FROM raw_docs d JOIN raw_fts f ON f.rowid = d.rowid
                      WHERE d.device = ?1 AND d.seq = ?2",
                     params![device, seq.parse::<i64>()?],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    |r| {
+                        let text = redact::outbound_lines(&r.get::<_, String>(3)?);
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, text))
+                    },
                 )
                 .optional()?
             }
@@ -587,7 +591,7 @@ fn sidecar(k: &Connection, keys: &[String]) -> Result<String> {
                     [key],
                     |r| {
                         let kind: String = r.get(2)?;
-                        let text = crate::embed_phase::composed(
+                        let text = crate::embed_phase::composed_out(
                             &kind,
                             &r.get::<_, String>(3)?,
                             &r.get::<_, String>(4)?,
@@ -600,10 +604,7 @@ fn sidecar(k: &Connection, keys: &[String]) -> Result<String> {
         let Some((session, ts, kind, text)) = row else {
             anyhow::bail!("printed key {key} is not in the store");
         };
-        let text: String = redact::outbound_lines(&text)
-            .chars()
-            .take(JUDGE_CHARS)
-            .collect();
+        let text: String = text.chars().take(JUDGE_CHARS).collect();
         let line = serde_json::json!({"key": key, "session": session, "ts": ts, "kind": kind, "text": text});
         out.push_str(&line.to_string());
         out.push('\n');
@@ -3009,15 +3010,19 @@ mod tests {
     fn the_sidecar_gates_with_the_rules_of_the_run() {
         const HOME: &str = "OBOETE_TEST_SIDECAR_HOME";
         const SECRET: &str = "INTERNAL-BETA-7";
+        const TITLE: &str = "INTERNAL-GAMMA-3";
         let questions = r#"{"qid":"q1","text":"deploy"}"#;
         if let Ok(home) = std::env::var(HOME) {
             let home = std::path::PathBuf::from(home);
             crate::redact::set_home(&home).unwrap();
             let out = home.join("run");
-            trec_run(&home, questions, 10, &[RawArm::Only], &out).unwrap();
+            trec_run(&home, questions, 10, &[RawArm::Off, RawArm::Only], &out).unwrap();
             let docs = std::fs::read_to_string(out.join("b-docs.jsonl")).unwrap();
-            assert!(docs.contains("deploy"), "{docs}");
+            // The record and the imported note, each with its words and without its secret.
+            assert_eq!(docs.lines().count(), 2, "{docs}");
+            assert!(docs.lines().all(|l| l.contains("deploy")), "{docs}");
             assert!(!docs.contains(SECRET), "{docs}");
+            assert!(!docs.contains(TITLE), "{docs}");
             return;
         }
         let stub = crate::embed::stub::Stub::start();
@@ -3031,12 +3036,15 @@ mod tests {
             ..crate::raw::test_event(&body.to_string())
         };
         s.raw.append(&event).unwrap();
+        // A title the rule anchors to whole, which the sidecar prefixes with its kind.
+        s.imported("o1", "r", 2_000, TITLE, "deploy notes");
         s.run();
         embedded_by(&s, &stub);
         let config = s.home.path().join("config.toml");
         let plain = std::fs::read_to_string(&config).unwrap();
         let ruled = format!(
-            "{plain}[redaction]\nextra_rules = [{{ id = \"beta\", regex = '{SECRET}$' }}]\n"
+            "{plain}[redaction]\nextra_rules = [{{ id = \"beta\", regex = '{SECRET}$' }}, \
+             {{ id = \"gamma\", regex = '^{TITLE}$' }}]\n"
         );
         std::fs::write(&config, ruled).unwrap();
         let name = "search::b::tests::the_sidecar_gates_with_the_rules_of_the_run";
