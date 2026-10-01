@@ -214,6 +214,17 @@ enum Cmd {
         #[arg(long)]
         eval_store: bool,
     },
+    /// Move v1's store (oboete.db) into Design B (spec 7.4): its events as records, its documents
+    /// as imported documents, its settings into a home that has none. v1's store is never written;
+    /// run it again to import what v1 wrote since
+    Migrate {
+        /// v1's store (default: <home>/oboete.db)
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Import once more, then list v1's old files and delete them if you answer yes
+        #[arg(long)]
+        finish: bool,
+    },
     /// Evaluation: pass stdin through the outbound gate (what may leave the machine) to stdout
     #[command(hide = true)]
     Gate,
@@ -411,6 +422,20 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let _lock = import::lock(&home)?;
             let mut raw = raw::open(&home)?;
             let stats = import::claude_mem(&mut raw, &db)?;
+            println!("{}", serde_json::to_string(&stats)?);
+            Ok(())
+        }
+        Cmd::Migrate { from, finish } => {
+            let from = from.unwrap_or_else(|| home.join("oboete.db"));
+            let _lock = import::lock(&home)?;
+            if finish {
+                let mut out = std::io::stdout().lock();
+                return migrate::finish(&home, &from, std::io::stdin().lock(), &mut out);
+            }
+            for line in migrate::settings(&home, &from)? {
+                println!("{line}");
+            }
+            let stats = migrate::pass(&home, &mut raw::open(&home)?, &from)?;
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())
         }

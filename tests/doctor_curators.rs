@@ -66,7 +66,9 @@ fn doctor_counts_the_tables_of_a_legacy_store() {
     rusqlite::Connection::open(&db)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE sessions(id TEXT); CREATE TABLE events(id INTEGER);
+            "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO meta VALUES('device_id', 'd1');
+             CREATE TABLE sessions(id TEXT); CREATE TABLE events(id INTEGER);
              CREATE TABLE observations(id INTEGER); CREATE TABLE summaries(id INTEGER);
              CREATE TABLE provider_calls(id INTEGER PRIMARY KEY, ts INTEGER, provider TEXT,
                outcome TEXT, ms INTEGER, detail TEXT);",
@@ -84,6 +86,7 @@ fn doctor_counts_the_tables_of_a_legacy_store() {
         "{text}"
     );
     assert!(!text.contains("cannot read oboete.db"), "{text}");
+    assert!(text.contains("v1 events not migrated yet: 0"), "{text}");
     assert_eq!(std::fs::read(&db).unwrap(), bytes);
 }
 

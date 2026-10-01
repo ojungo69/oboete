@@ -13,7 +13,7 @@ use crate::raw::{Checkpoint, IMPORT_BATCH, ImportDoc, MAX_BATCH_BYTES, Raw, V1Ro
 const SOURCE: &str = "oboete-v1";
 
 /// What a pass imported.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, serde::Serialize)]
 pub struct Stats {
     /// v1 events read past the checkpoint, and the records they became.
     pub events: u64,
@@ -125,6 +125,59 @@ pub fn settings(home: &Path, from: &Path) -> Result<Vec<String>> {
         lines.push(format!(
             "not set, so their defaults apply: [{}]",
             unset.join("], [")
+        ));
+    }
+    Ok(lines)
+}
+
+/// Doctor's lines on the cut-over (spec 7.4): v1's events not migrated yet, v1's old files until
+/// `--finish`, and `eval/`, whose evaluation copies forget does not reach.
+pub fn doctor(home: &Path) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
+    let store = home.join("oboete.db");
+    if store.exists() {
+        let v1 = open_v1(&store)?;
+        let device: Option<String> = v1
+            .query_row("SELECT value FROM meta WHERE key = 'device_id'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if let Some(device) = device {
+            let key = format!("{SOURCE}:{device}");
+            let through = if crate::raw::exists(home) {
+                let raw = crate::raw::open(home)?;
+                raw.migration_checkpoints(&key)?
+                    .remove(&key)
+                    .map_or(0, |c| c.through)
+            } else {
+                0
+            };
+            let waiting: i64 = v1.query_row(
+                "SELECT count(*) FROM events WHERE id > ?1",
+                [through],
+                |r| r.get(0),
+            )?;
+            lines.push(format!(
+                "v1 events not migrated yet: {waiting} (`oboete migrate` imports them)"
+            ));
+        }
+    }
+    let old: Vec<String> = old_files(home)?
+        .iter()
+        .map(|(path, bytes)| format!("{} ({bytes} bytes)", path.display()))
+        .collect();
+    if !old.is_empty() {
+        lines.push(format!(
+            "v1's old files, kept until `oboete migrate --finish`: {}",
+            old.join(", ")
+        ));
+    }
+    let eval = home.join("eval");
+    if eval.is_dir() {
+        lines.push(format!(
+            "evaluation copies, which forget does not reach: {} ({} bytes)",
+            eval.display(),
+            size(&eval)?
         ));
     }
     Ok(lines)
@@ -1249,6 +1302,35 @@ key_file = "/k/CF_WORKERS_AI_KEY.md"
         let refused = finish(h, &v1.path, answer, &mut Vec::new()).unwrap_err();
         assert!(format!("{refused:#}").contains("changed after the import pass"));
         assert!(h.join("oboete.db").exists());
+    }
+
+    /// Spec 7.4: doctor counts v1's events not migrated yet, and lists v1's old files and the
+    /// evaluation copies.
+    #[test]
+    fn doctor_names_what_the_cut_over_leaves() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let v1 = V1::new(h);
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 110, "one");
+        v1.prompt("s1", 120, "two");
+        let lines = doctor(h).unwrap();
+        assert!(
+            lines[0].starts_with("v1 events not migrated yet: 2 "),
+            "{lines:?}"
+        );
+        let mut raw = raw::open(h).unwrap();
+        pass(h, &mut raw, &v1.path).unwrap();
+        v1.prompt("s1", 130, "three");
+        std::fs::create_dir(h.join("eval")).unwrap();
+        std::fs::write(h.join("eval").join("queries.jsonl"), "{}\n").unwrap();
+        let lines = doctor(h).unwrap();
+        assert!(
+            lines[0].starts_with("v1 events not migrated yet: 1 "),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains("oboete.db ("), "{lines:?}");
+        assert!(lines[2].ends_with("eval (3 bytes)"), "{lines:?}");
     }
 
     /// D6, A104: a v1 event and a document `denied` refuses are left out; the others land.

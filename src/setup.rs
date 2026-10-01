@@ -1765,6 +1765,16 @@ pub fn doctor(home: &Path) -> Result<()> {
             })(),
         );
     }
+    // Milestone 4 Task 9: what the cut-over (spec 7.4) leaves to do.
+    section(
+        &mut unhealthy,
+        "oboete.db",
+        crate::migrate::doctor(home).map(|lines| {
+            for l in lines {
+                println!("  {l}");
+            }
+        }),
+    );
     if home.join("providers.db").exists() {
         section(
             &mut unhealthy,
