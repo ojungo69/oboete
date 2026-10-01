@@ -1,8 +1,9 @@
-import os, sqlite3, sys
+import json, os, sqlite3, sys
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import calib
 from calib import against_others, draw, fleiss, kappa, majority, parse_grade, store_doc_text
 from common import split
 
@@ -134,3 +135,12 @@ def test_a_cli_judge_answers_like_an_api_judge_or_fails_like_one(monkeypatch):
     for _ in range(2):
         with pytest.raises(ConnectionError):
             calib.chat('gpt-6-astra', 'PROMPT-SENTINEL-7f3a')
+
+
+def test_a_judge_off_the_panel_is_not_read(tmp_path):
+    for run, rows in ((calib.RUN_2, [('c01', 'gpt-oss-120b', 3), ('c01', 'deepseek-v4-pro', 2)]),
+                      (calib.RUN_3, [('c01', 'grok-4.7', 1)]), (calib.RUN, [('c01', 'gpt-6-sol', 0)])):
+        (tmp_path / f'{run}.jsonl').write_text(''.join(json.dumps({'id': i, 'judge': j, 'grade': g}) + '\n'
+                                                       for i, j, g in rows))
+    got = {(r['judge'], r['grade']) for r in calib.read_runs(str(tmp_path))}
+    assert got == {('deepseek-v4-pro', 2), ('grok-4.7', 1), ('gpt-6-sol', 0)}

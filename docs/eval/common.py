@@ -6,8 +6,9 @@ E = os.path.expanduser(os.environ.get('OBOETE_EVAL', '~/.oboete/eval'))
 JA = re.compile(r'[぀-ヿ㐀-鿿]')
 # Every draw of milestone 1 is ordered by h(f'<purpose>:{SEED}:<id>'); recorded in docs/milestone-1.md.
 SEED = 'oboete-milestone-1-2026-09-26'
-GRADERS = ('gpt-oss-120b', 'deepseek-v4-pro', 'glm-5.3')
-PANEL = ('claude-sonnet-5', *GRADERS, 'kimi-k3', 'qwen3.8-max', 'grok-4.7', 'gpt-6-astra')
+GRADERS = ('gpt-6-astra', 'deepseek-v4-pro', 'glm-5.3')
+# The order fixes every draw; gpt-6-sol holds the place gpt-oss-120b had until 2026-10-02 (calib.py).
+PANEL = ('claude-sonnet-5', 'gpt-6-sol', 'deepseek-v4-pro', 'glm-5.3', 'kimi-k3', 'qwen3.8-max', 'grok-4.7', 'gpt-6-astra')
 
 
 def h(s):

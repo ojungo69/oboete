@@ -22,7 +22,7 @@ def test_a_cut_is_seeded_and_thirty_minutes_in():
     assert m5.choose_cut('s1', []) is None
 
 
-GRADERS = ('gpt-oss-120b', 'deepseek-v4-pro', 'glm-5.3')
+GRADERS = ('gpt-6-astra', 'deepseek-v4-pro', 'glm-5.3')
 
 
 def shown(kind, tier, yes):

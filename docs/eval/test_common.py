@@ -163,7 +163,7 @@ def test_an_invalid_answer_is_retried_once_before_success_and_cache_is_revalidat
 
 def test_votes_are_pending_until_all_graders_answer_and_agreement_omits_other_ties(monkeypatch):
     import calib
-    replies = {'gpt-oss-120b': '{"ok": true}', 'deepseek-v4-pro': '{"ok": false}',
+    replies = {'gpt-6-astra': '{"ok": true}', 'deepseek-v4-pro': '{"ok": false}',
                'glm-5.3': '{"ok": true}'}
 
     def chat(model, prompt):
@@ -179,7 +179,7 @@ def test_votes_are_pending_until_all_graders_answer_and_agreement_omits_other_ti
     assert common.voted(pending, 'ok') is None
     assert pending['glm-5.3'] is None
     assert common.agreement([full, pending], 'ok') == {
-        'gpt-oss-120b': {'n': 0, 'agreement': None},
+        'gpt-6-astra': {'n': 0, 'agreement': None},
         'deepseek-v4-pro': {'n': 1, 'agreement': 0.0},
         'glm-5.3': {'n': 0, 'agreement': None}}
     replies['glm-5.3'] = '{"ok": 1}'        # numeric truth is not a Boolean vote

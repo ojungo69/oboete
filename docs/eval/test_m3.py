@@ -255,7 +255,7 @@ def test_kinds_waits_for_a_missing_grader_and_reuses_the_other_answers(monkeypat
     unavailable = False
     done = m3.kinds(str(binary), str(home))
     assert done['complete'] and done['per_kind']['decision']['precision'] == 1.0
-    assert asked.count('gpt-oss-120b') == asked.count('deepseek-v4-pro') == 2
+    assert asked.count('gpt-6-astra') == asked.count('deepseek-v4-pro') == 2
     assert asked.count('glm-5.3') == 3
     assert 'PRIVATE FAILURE SENTINEL' not in (root / 'm6' / 'calls.jsonl').read_text()
 
