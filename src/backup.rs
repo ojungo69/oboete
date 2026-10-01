@@ -1147,49 +1147,53 @@ mod tests {
         assert!(export(p).unwrap().is_none()); // nothing new
     }
 
-    /// D6: a restore that lost an imported batch's records drops its checkpoint, so the next
-    /// pass imports the batch again; restored again, the checkpoint stays dropped.
+    /// D6: a restore that lost an imported batch's records, the newest or one with later
+    /// segments restored, drops its checkpoint and every later op, so the next pass imports the
+    /// batch again; restored again, the checkpoint stays dropped.
     #[test]
     fn a_restore_that_lost_a_batch_drops_its_checkpoint() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        segmented(p, 5, 5); // records 1-5
-        let batch = |n: usize| -> Vec<crate::capture::Captured> {
-            (0..n)
-                .map(|i| crate::capture::Captured {
-                    event: raw::Event {
-                        source: "oboete-v1".into(),
-                        ..raw::test_event(&format!("v1 zq{i:03}x"))
-                    },
-                    ledger: Vec::new(),
-                })
-                .collect()
-        };
-        let checkpoint = |through| raw::Checkpoint {
-            key: "oboete-v1:d1".into(),
-            through,
-            row: None,
-        };
-        let mut raw = raw::open(p).unwrap();
-        raw.append_imported(&batch(3), "v", Some(&checkpoint(3)))
-            .unwrap(); // records 6-8
-        export(p).unwrap();
-        raw.append_imported(&batch(2), "v", Some(&checkpoint(5)))
-            .unwrap(); // records 9-10
-        drop(raw);
-        export(p).unwrap();
-        let lost = segments(&p.join("backups"), Kind::Records)
-            .unwrap()
-            .remove(2);
-        assert_eq!((lost.first, lost.last), (9, 10));
-        std::fs::remove_file(&lost.path).unwrap();
-        for _ in 0..2 {
-            damage_raw(p);
-            crate::worker::run_once(p).unwrap();
-            let restored = raw::open(p).unwrap();
-            assert_eq!(restored.max_seq().unwrap(), 8);
-            let checkpoints = restored.migration_checkpoints("oboete-v1:").unwrap();
-            assert_eq!(checkpoints["oboete-v1:d1"].through, 3);
+        // The segment lost, its seqs, the highest seq restored and the checkpoint left.
+        for (lost, seqs, max, through) in [(3, (11, 12), 10, 5), (2, (9, 10), 12, 3)] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            segmented(p, 5, 5); // records 1-5
+            let batch = |n: usize| -> Vec<crate::capture::Captured> {
+                (0..n)
+                    .map(|i| crate::capture::Captured {
+                        event: raw::Event {
+                            source: "oboete-v1".into(),
+                            ..raw::test_event(&format!("v1 zq{i:03}x"))
+                        },
+                        ledger: Vec::new(),
+                    })
+                    .collect()
+            };
+            let checkpoint = |through| raw::Checkpoint {
+                key: "oboete-v1:d1".into(),
+                through,
+                row: None,
+            };
+            // Records 6-8, 9-10 and 11-12, a segment each.
+            for (n, through) in [(3, 3), (2, 5), (2, 7)] {
+                let mut raw = raw::open(p).unwrap();
+                raw.append_imported(&batch(n), "v", Some(&checkpoint(through)))
+                    .unwrap();
+                drop(raw);
+                export(p).unwrap();
+            }
+            let lost = segments(&p.join("backups"), Kind::Records)
+                .unwrap()
+                .remove(lost);
+            assert_eq!((lost.first, lost.last), seqs);
+            std::fs::remove_file(&lost.path).unwrap();
+            for _ in 0..2 {
+                damage_raw(p);
+                crate::worker::run_once(p).unwrap();
+                let restored = raw::open(p).unwrap();
+                assert_eq!(restored.max_seq().unwrap(), max);
+                let checkpoints = restored.migration_checkpoints("oboete-v1:").unwrap();
+                assert_eq!(checkpoints["oboete-v1:d1"].through, through);
+            }
         }
     }
 

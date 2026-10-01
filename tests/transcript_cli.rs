@@ -59,7 +59,7 @@ fn assert_fixture_counts(report: &serde_json::Value) {
     let codex = &report["agents"]["codex"];
     assert_eq!(codex["files"], 1);
     assert_eq!(codex["sessions"], 1);
-    assert_eq!(codex["events"], 9);
+    assert_eq!(codex["events"], 8);
     assert!(codex["bytes"].as_u64().unwrap() > 0);
 }
 

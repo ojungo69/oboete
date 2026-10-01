@@ -226,7 +226,7 @@ enum Cmd {
     /// run it again to import what v1 wrote since
     Migrate {
         /// v1's store (default: <home>/oboete.db)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "finish")]
         from: Option<PathBuf>,
         /// Import once more, then list v1's old files and delete them if you answer yes
         #[arg(long)]
@@ -456,7 +456,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let _lock = import::lock(&home)?;
             if finish {
                 let mut out = std::io::stdout().lock();
-                return migrate::finish(&home, &from, std::io::stdin().lock(), &mut out);
+                return migrate::finish(&home, std::io::stdin().lock(), &mut out);
             }
             for line in migrate::settings(&home, &from)? {
                 println!("{line}");

@@ -56,20 +56,26 @@ fn fingerprint(v1: &Connection) -> Result<Fingerprint> {
             |r| r.get(0),
         )?;
     }
-    let newest = v1
-        .query_row(
-            "SELECT id, ts, session_id FROM events WHERE id = ?1",
-            [highest[0]],
-            |r| {
-                Ok(V1Row {
-                    id: r.get(0)?,
-                    ts: r.get(1)?,
-                    session_id: r.get(2)?,
-                })
-            },
-        )
-        .optional()?;
-    Ok(Fingerprint { highest, newest })
+    Ok(Fingerprint {
+        highest,
+        newest: row_at(v1, highest[0])?,
+    })
+}
+
+/// v1's event `id`, fingerprinted, if there is one.
+fn row_at(v1: &Connection, id: i64) -> Result<Option<V1Row>> {
+    let sql = "SELECT id, ts, session_id FROM events WHERE id = ?1";
+    Ok(v1.query_row(sql, [id], v1_row).optional()?)
+}
+
+/// A v1 event's fingerprint from (id, ts, session_id): the session id by its SHA-256 only. The
+/// checkpoint is stored text, and only a record's labels pass the gate.
+fn v1_row(r: &rusqlite::Row) -> rusqlite::Result<V1Row> {
+    Ok(V1Row {
+        id: r.get(0)?,
+        ts: r.get(1)?,
+        session_id: crate::curate::sha256_hex(&r.get::<_, String>(2)?),
+    })
 }
 
 /// `pass`, with v1's fingerprint read in the same transaction.
@@ -77,11 +83,7 @@ fn read_pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<(Stats, Fingerpr
     let v1 = open_v1(from)?;
     // One read transaction: a consistent snapshot while v1's hooks keep writing.
     v1.execute_batch("BEGIN")?;
-    let device: String = v1
-        .query_row("SELECT value FROM meta WHERE key = 'device_id'", [], |r| {
-            r.get(0)
-        })
-        .optional()?
+    let device = crate::db::device_id(&v1)
         .with_context(|| format!("{} has no device_id: not a v1 store", from.display()))?;
     let settings = Settings {
         source: SOURCE,
@@ -108,8 +110,10 @@ pub fn settings(home: &Path, from: &Path) -> Result<Vec<String>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).with_context(|| format!("read {}", ours.display())),
     };
+    // Only the line in an error: the text can quote a value `[redaction]` hides.
     let table: toml::Table = text
         .parse()
+        .map_err(|e| crate::config::toml_error(&text, &e))
         .with_context(|| format!("parse {}", ours.display()))?;
     let mut lines = Vec::new();
     if table.get("summary").and_then(|s| s.get("curate")).is_none() {
@@ -186,24 +190,16 @@ pub fn doctor(home: &Path) -> Result<Vec<String>> {
 /// `oboete migrate --finish` (spec 7.4, A58): one more pass; then v1's old files in the home with
 /// their sizes, and the imported v1 sessions oboete.db no longer holds; then one line from
 /// `answer`. Only on `yes`, and only while v1 has written nothing since the pass, the files are
-/// deleted, each failure reported. `from` must be the home's own store: the files are the home's.
+/// deleted, each failure reported. It reads the home's own store: the files are the home's, so
+/// `--from` is refused with it.
 pub fn finish(
     home: &Path,
-    from: &Path,
     mut answer: impl std::io::BufRead,
     out: &mut impl std::io::Write,
 ) -> Result<()> {
-    let own = home.join("oboete.db");
-    let same = |a: &Path, b: &Path| -> Result<bool> {
-        Ok(std::fs::canonicalize(a)? == std::fs::canonicalize(b)?)
-    };
-    anyhow::ensure!(
-        own.exists() && same(from, &own)?,
-        "--finish deletes the old files of the home it runs on: --from must be {}",
-        own.display()
-    );
+    let from = &home.join("oboete.db");
     let (stats, before) = read_pass(home, &mut crate::raw::open(home)?, from)?;
-    let files = old_files(home)?;
+    let mut files = old_files(home)?;
     writeln!(out, "v1's old files in {}:", home.display())?;
     for (path, bytes) in &files {
         writeln!(out, "  {} ({bytes} bytes)", path.display())?;
@@ -229,6 +225,15 @@ pub fn finish(
         "oboete.db changed after the import pass (an old hook still writes to it): nothing was \
          deleted; run `oboete migrate --finish` again"
     );
+    // The store first, right after the recheck, since a v1 write between the two is lost.
+    // ponytail: so is one by a v1 process that still holds oboete.db open after it is deleted; spec
+    // 7.5 runs `--finish` once the sessions started before the switch have restarted, and the
+    // recheck catches most that have not. Excluding v1's writers would need v1's write lock.
+    files.sort_by_key(|(path, _)| {
+        !path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("oboete.db"))
+    });
     let mut failed = 0;
     for (path, _) in &files {
         // `remove_dir_all` removes a link, never what it points to.
@@ -308,19 +313,7 @@ fn events(
         None => 0,
         Some(c) => {
             // v1 reuses the ids of its newest events when the old viewer deletes their session.
-            let now = v1
-                .query_row(
-                    "SELECT id, ts, session_id FROM events WHERE id = ?1",
-                    [c.through],
-                    |r| {
-                        Ok(V1Row {
-                            id: r.get(0)?,
-                            ts: r.get(1)?,
-                            session_id: r.get(2)?,
-                        })
-                    },
-                )
-                .optional()?;
+            let now = row_at(v1, c.through)?;
             anyhow::ensure!(
                 now.is_some() && now == c.row,
                 "v1's event {} is not the one an earlier pass imported up to: the old viewer \
@@ -341,15 +334,11 @@ fn events(
     let ruleset = settings.rules.version();
     let mut batch = Batch::default();
     while let Some(r) = rows.next()? {
-        let row = V1Row {
-            id: r.get(0)?,
-            ts: r.get(1)?,
-            session_id: r.get(2)?,
-        };
-        let (event, stored): (String, String) = (r.get(3)?, r.get(4)?);
+        let row = v1_row(r)?;
+        let (session, event, stored): (String, String, String) = (r.get(2)?, r.get(3)?, r.get(4)?);
         let (agent, repo, cwd): (String, String, Option<String>) =
             (r.get(5)?, r.get(6)?, r.get(7)?);
-        let payload = payload(&row.session_id, &stored);
+        let payload = payload(&session, &stored);
         let captured = capture::imported(
             &agent,
             &event,
@@ -366,9 +355,7 @@ fn events(
             stats.records += batch.append(raw, &key, ruleset)?;
         }
         batch.bytes += bytes;
-        batch
-            .records
-            .extend(captured.into_iter().map(|c| (row.ts, row.id, c)));
+        batch.records.extend(captured);
         batch.last = Some(row);
         stats.events += 1;
     }
@@ -376,11 +363,11 @@ fn events(
     Ok(())
 }
 
-/// v1 events read since the last append: their records with their v1 (ts, id), and the last one's
+/// v1 events read since the last append, in v1's id order: their records, and the last one's
 /// fingerprint.
 #[derive(Default)]
 struct Batch {
-    records: Vec<(i64, i64, Captured)>,
+    records: Vec<Captured>,
     bytes: usize,
     last: Option<V1Row>,
 }
@@ -393,8 +380,8 @@ impl Batch {
             return Ok(0);
         };
         let mut records = std::mem::take(&mut self.records);
-        records.sort_by_key(|&(ts, id, _)| (ts, id));
-        let records: Vec<Captured> = records.into_iter().map(|(.., c)| c).collect();
+        // Stable, so (ts, id): at most one record per event, read in id order.
+        records.sort_by_key(|c| c.event.ts);
         self.bytes = 0;
         let checkpoint = Checkpoint {
             key: key.to_owned(),
@@ -470,13 +457,9 @@ fn repos(v1: &Connection, raw: &mut Raw, settings: &Settings, stats: &mut Stats)
                 batch.push(c);
             }
         }
-        if batch.len() == IMPORT_BATCH {
-            stats.repos += raw.append_imported(&batch, ruleset, None)?.len() as u64;
-            batch.clear();
-        }
     }
-    if !batch.is_empty() {
-        stats.repos += raw.append_imported(&batch, ruleset, None)?.len() as u64;
+    for chunk in batch.chunks(IMPORT_BATCH) {
+        stats.repos += raw.append_imported(chunk, ruleset, None)?.len() as u64;
     }
     Ok(())
 }
@@ -522,8 +505,9 @@ fn documents(
                 source: source.clone(),
                 source_id,
                 kind: r.get(5)?,
-                repo: r.get(3)?,
-                session: r.get(2)?,
+                // Labels are stored text too (spec 2.2), as capture gates a record's.
+                repo: gate(r.get(3)?),
+                session: gate(r.get(2)?),
                 ts: r.get(4)?,
                 title: gate(r.get(6)?),
                 body: gate(r.get(7)?),
@@ -547,7 +531,7 @@ pub fn open_v1(path: &Path) -> Result<Connection> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raw::{self, Event, Item};
+    use crate::raw::{self, Event, Item, OpKind};
     use rusqlite::params;
     use std::path::PathBuf;
 
@@ -863,7 +847,7 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
             .execute("VACUUM INTO ?1", [own.to_str().unwrap()])
             .unwrap();
         let mut out = Vec::new();
-        finish(h, &h.join("oboete.db"), "no\n".as_bytes(), &mut out).unwrap();
+        finish(h, "no\n".as_bytes(), &mut out).unwrap();
         let said = String::from_utf8(out).unwrap();
         assert!(said.contains("here too): a\n"), "{said}");
     }
@@ -1229,11 +1213,20 @@ key_file = "/k/CF_WORKERS_AI_KEY.md"
         let kept = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
         assert_eq!(kept, own);
         assert!(lines.iter().all(|l| !l.contains("curate")), "{lines:?}");
+        // A copied file that does not parse: its line, never its text, which can hold a value
+        // `[redaction]` hides.
+        let secret = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let broken = format!("[redaction]\nallowlist = [{secret}]\n");
+        std::fs::write(dir.path().join("config.toml"), broken).unwrap();
+        let fresh = tempfile::tempdir().unwrap();
+        let refused = settings(fresh.path(), &v1.path).unwrap_err();
+        let said = format!("{refused:#}");
+        assert!(said.contains("line 2") && !said.contains(&secret), "{said}");
     }
 
     /// A58: `--finish` imports once more, lists v1's old files with their sizes, and deletes them
     /// only on `yes`, and only while v1 has written nothing since its pass; Design B's files and
-    /// `eval/` stay. A `--from` that is not the home's own store is refused.
+    /// `eval/` stay; the store is deleted first.
     #[test]
     fn finish_deletes_only_on_yes() {
         let home = tempfile::tempdir().unwrap();
@@ -1250,7 +1243,7 @@ key_file = "/k/CF_WORKERS_AI_KEY.md"
         }
         let listed = |out: &[u8]| String::from_utf8(out.to_vec()).unwrap();
         let mut out = Vec::new();
-        finish(h, &v1.path, "no\n".as_bytes(), &mut out).unwrap();
+        finish(h, "no\n".as_bytes(), &mut out).unwrap();
         let said = listed(&out);
         assert!(said.contains("spool (3 bytes)") && said.ends_with("Nothing was deleted.\n"));
         assert!(
@@ -1274,26 +1267,25 @@ key_file = "/k/CF_WORKERS_AI_KEY.md"
             }
         }
         let answer = std::io::BufReader::new(Writing(&v1, false));
-        let refused = finish(h, &v1.path, answer, &mut Vec::new()).unwrap_err();
+        let refused = finish(h, answer, &mut Vec::new()).unwrap_err();
         assert!(format!("{refused:#}").contains("changed after the import pass"));
         assert!(h.join("oboete.db").exists() && h.join("spool").exists());
-        // A copy elsewhere is not the home's store.
-        let elsewhere = tempfile::tempdir().unwrap();
-        let copy = elsewhere.path().join("oboete.db");
-        std::fs::copy(&v1.path, &copy).unwrap();
-        let refused = finish(h, &copy, "yes\n".as_bytes(), &mut Vec::new()).unwrap_err();
-        assert!(
-            format!("{refused:#}").contains("--from must be"),
-            "{refused:#}"
-        );
         // A link named as an old directory goes, never what it points to.
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("kept"), "x").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), h.join("memory.db-wal")).unwrap();
         let mut out = Vec::new();
-        finish(h, &v1.path, "yes\n".as_bytes(), &mut out).unwrap();
+        finish(h, "yes\n".as_bytes(), &mut out).unwrap();
         assert!(outside.path().join("kept").exists());
+        // The store is deleted first, right after the recheck.
+        // The answer is read on the question's line, which the first deletion's line ends.
+        let said = listed(&out);
+        let first = said
+            .split_once("delete them: ")
+            .and_then(|(_, a)| a.lines().next());
+        let store = format!("deleted {}", h.join("oboete.db").display());
+        assert_eq!(first, Some(store.as_str()));
         for gone in [
             "oboete.db",
             "pre-1.db",
@@ -1333,7 +1325,7 @@ key_file = "/k/CF_WORKERS_AI_KEY.md"
             }
         }
         let answer = std::io::BufReader::new(Reusing(&v1, false));
-        let refused = finish(h, &v1.path, answer, &mut Vec::new()).unwrap_err();
+        let refused = finish(h, answer, &mut Vec::new()).unwrap_err();
         assert!(format!("{refused:#}").contains("changed after the import pass"));
         assert!(h.join("oboete.db").exists());
     }
@@ -1365,6 +1357,43 @@ key_file = "/k/CF_WORKERS_AI_KEY.md"
         );
         assert!(lines[1].contains("oboete.db ("), "{lines:?}");
         assert!(lines[2].ends_with("eval (3 bytes)"), "{lines:?}");
+    }
+
+    /// Labels are stored text (spec 2.2): what the gate masks in a v1 session id or a document's
+    /// repository is kept nowhere, not in a record's labels, a document's or the checkpoint.
+    #[test]
+    fn no_label_or_checkpoint_keeps_what_the_gate_masks() {
+        let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let dir = tempfile::tempdir().unwrap();
+        let v1 = V1::new(dir.path());
+        let session = format!("s-{token}");
+        v1.session(&session, "github.com/o/r", 100);
+        v1.prompt(&session, 110, "one");
+        v1.conn
+            .execute(
+                "INSERT INTO observations(session_id, repo, ts, kind, title, body, provider)
+                 VALUES(?1, ?2, 120, 'decision', 'Tabs', 'We use tabs.', 'groq')",
+                params![session, format!("github.com/o/{token}")],
+            )
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
+        assert_eq!((stats.records, stats.documents), (1, 1));
+        let ops = raw.ops_after(raw.device(), 0, 100).unwrap();
+        let kinds: Vec<OpKind> = ops.iter().map(|o| o.kind).collect();
+        assert!(
+            kinds.contains(&OpKind::Migration) && kinds.contains(&OpKind::Import),
+            "{kinds:?}"
+        );
+        for op in &ops {
+            assert!(!op.body.to_string().contains(&token), "{:?}", op.kind);
+        }
+        for e in records(&raw) {
+            assert!(!format!("{e:?}").contains(&token), "{}", e.kind);
+        }
+        // The fingerprint still matches: a rerun is not refused.
+        assert_eq!(pass(home.path(), &mut raw, &v1.path).unwrap().seen, 1);
     }
 
     /// D6, A104: a v1 event and a document `denied` refuses are left out; the others land.

@@ -207,6 +207,7 @@ pub struct Checkpoint {
 pub struct V1Row {
     pub id: i64,
     pub ts: i64,
+    /// The SHA-256 of v1's session id (`migrate::v1_row`): the op is stored text.
     pub session_id: String,
 }
 
@@ -518,6 +519,7 @@ impl Raw {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let from_seq = next_seq(&tx, &self.device)?;
         let mut seqs = Vec::with_capacity(batch.len());
         for c in batch {
             if !denied(&c.event.source, None, &c.event.body) {
@@ -532,6 +534,9 @@ impl Raw {
         }
         if let Some(checkpoint) = checkpoint {
             let mut body = serde_json::to_value(checkpoint)?;
+            // The batch's records, from_seq to to_seq with none between them under the write
+            // lock: a restore that lost any of them drops this op (`Rebuild::finish`).
+            body["from_seq"] = from_seq.into();
             body["to_seq"] = (next_seq(&tx, &self.device)? - 1).into();
             let op = within_batch_cap(&[(OpKind::Migration, body)])?;
             insert_ops(&tx, &self.device, &op)?;
@@ -1742,7 +1747,9 @@ impl Rebuild {
     /// or migration op past the restored records (their segment was damaged and skipped) goes,
     /// with every op after it: the curation checkpoint must never pass a seq the store does not
     /// hold, or the records that reuse those seqs would never be curated, and an import's must
-    /// not pass records it lost, or its next pass would skip them (D6). Returns how many ops went.
+    /// not pass records it lost, or its next pass would skip them (D6); so a migration op whose
+    /// batch lost a record goes too, even when later segments were restored. Returns how many ops
+    /// went.
     // ponytail: a restore keeping a batch's records but not its migration op imports them again;
     // a check of the restored records against the source's ids would catch it.
     pub fn finish(self) -> Result<usize> {
@@ -1750,8 +1757,13 @@ impl Rebuild {
             "DELETE FROM ops WHERE op_seq >= (
                SELECT MIN(w.op_seq) FROM ops w WHERE w.device = ops.device
                  AND w.type IN ('window', 'migration')
-                 AND json_extract(w.body, '$.to_seq') >
-                     (SELECT COALESCE(MAX(r.seq), 0) FROM records r WHERE r.device = w.device))",
+                 AND (json_extract(w.body, '$.to_seq') >
+                        (SELECT COALESCE(MAX(r.seq), 0) FROM records r WHERE r.device = w.device)
+                      OR w.type = 'migration' AND
+                        (SELECT COUNT(*) FROM records r WHERE r.device = w.device
+                           AND r.seq BETWEEN json_extract(w.body, '$.from_seq')
+                                         AND json_extract(w.body, '$.to_seq'))
+                        < json_extract(w.body, '$.to_seq') - json_extract(w.body, '$.from_seq') + 1))",
             [],
         )?;
         self.conn.execute_batch("COMMIT")?;
@@ -2461,7 +2473,7 @@ mod tests {
         assert_eq!(ops[0].kind, OpKind::Migration);
         assert_eq!(
             ops[0].body,
-            serde_json::json!({"key": "oboete-v1:d1", "through": 42, "to_seq": 3,
+            serde_json::json!({"key": "oboete-v1:d1", "through": 42, "from_seq": 2, "to_seq": 3,
                 "row": {"id": 42, "ts": 7, "session_id": "s1"}})
         );
         // A transcript's checkpoint has no row; one with nothing to record holds the last seq.
@@ -2476,7 +2488,9 @@ mod tests {
         let ops = raw.ops_after(raw.device(), 0, 10).unwrap();
         assert_eq!(
             ops[1].body,
-            serde_json::json!({"key": "transcript:claude:s1", "through": 9, "to_seq": 3})
+            // No record: an empty range, which no restore can lose.
+            serde_json::json!({"key": "transcript:claude:s1", "through": 9, "from_seq": 4,
+                "to_seq": 3})
         );
         assert_eq!(
             raw.migration_checkpoints("oboete-v1:").unwrap(),

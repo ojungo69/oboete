@@ -706,18 +706,8 @@ pub fn import(
     yes: bool,
     out: &mut impl Write,
 ) -> Result<ImportStats> {
-    for (agent, _) in roots {
-        anyhow::ensure!(
-            matches!(*agent, "claude" | "codex"),
-            "no transcript parser for {agent}: claude and codex have one"
-        );
-    }
-    let _lock = if yes {
-        Some(crate::import::lock(home)?)
-    } else {
-        None
-    };
-    let mut raw = if yes { Some(raw::open(home)?) } else { None };
+    let _lock = yes.then(|| crate::import::lock(home)).transpose()?;
+    let mut raw = yes.then(|| raw::open(home)).transpose()?;
     let v1 = home.join("oboete.db");
     if let Some(raw) = raw.as_mut()
         && v1.exists()
@@ -784,6 +774,11 @@ pub fn import(
             let mut batch = Vec::<Captured>::new();
             let mut bytes = 0;
             for line in lines {
+                // The parser ends every transcript with a SessionEnd of its own, where a session
+                // resumed later puts its next events: not imported or counted, so a rerun takes them.
+                if line.event == "SessionEnd" {
+                    continue;
+                }
                 let through = i64::try_from(line.seq)?;
                 if through <= seen {
                     stats.seen += 1;
@@ -816,21 +811,6 @@ pub fn import(
                 checkpoints.insert(key, checkpoint);
             }
         }
-    }
-    for (agent, s) in &stats.agents {
-        writeln!(
-            out,
-            "{agent}: {} files, {} sessions, {} events, {} bytes; {} cut, {} already imported, {} housekeeping sessions, {} sessions with a masked id, {} files waiting",
-            s.files,
-            s.sessions,
-            s.events,
-            s.bytes,
-            s.cut,
-            s.seen,
-            s.housekeeping,
-            s.masked,
-            s.waiting
-        )?;
     }
     if !yes {
         writeln!(
@@ -904,7 +884,6 @@ fn preview_cut(v1: &Path) -> Result<HashMap<(String, String), i64>> {
             "v1 changed during preview; run it again when the writes stop"
         );
         let conn = crate::migrate::open_v1(&scratch.0.join("oboete.db"))?;
-        conn.execute_batch("BEGIN")?;
         let mut st = conn.prepare(
             "SELECT s.agent, e.session_id, MIN(e.ts) FROM events e
              JOIN sessions s ON s.id = e.session_id GROUP BY s.agent, e.session_id",
@@ -1067,8 +1046,8 @@ mod tests {
     #[test]
     fn only_lines_before_the_sessions_first_raw_record_are_imported() {
         for (agent, session, cut, total) in [
-            ("claude", "claude-basic", CLAUDE_MS + 4_000, 19),
-            ("codex", CODEX_SESSION, CODEX_MS + 8_000, 9),
+            ("claude", "claude-basic", CLAUDE_MS + 4_000, 18),
+            ("codex", CODEX_SESSION, CODEX_MS + 8_000, 8),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let (claude, codex) = fixtures(dir.path());
@@ -1092,7 +1071,7 @@ mod tests {
             let other = if agent == "claude" { "codex" } else { "claude" };
             assert_eq!(
                 first.agents[other].events,
-                if other == "claude" { 19 } else { 9 }
+                if other == "claude" { 18 } else { 8 }
             );
             let got = records(&home);
             let imported: Vec<_> = got.iter().filter(|e| e.source == "transcript").collect();
@@ -1212,7 +1191,7 @@ mod tests {
             let preview = import(&home, &[(agent, root)], false, &mut Vec::new()).unwrap();
             assert_eq!(
                 preview.agents[agent].events,
-                if agent == "claude" { 6 } else { 9 }
+                if agent == "claude" { 6 } else { 8 }
             );
             assert!(
                 snapshot(&home) == before_preview,
@@ -1276,7 +1255,7 @@ mod tests {
                     stats.agents["claude"].sessions,
                     stats.agents["claude"].events
                 ),
-                (1, 1, 19)
+                (1, 1, 18)
             );
             assert_eq!(
                 (
@@ -1284,7 +1263,7 @@ mod tests {
                     stats.agents["codex"].sessions,
                     stats.agents["codex"].events
                 ),
-                (1, 1, 9)
+                (1, 1, 8)
             );
             assert!(stats.agents.values().all(|s| s.bytes > 0));
             let said = String::from_utf8(out).unwrap();
@@ -1338,7 +1317,7 @@ mod tests {
             let again = import(&home, &[(agent, root)], true, &mut Vec::new()).unwrap();
             assert_eq!(
                 again.agents[agent].events,
-                if agent == "claude" { 19 } else { 9 }
+                if agent == "claude" { 18 } else { 8 }
             );
             assert_eq!(again.agents[agent].waiting, 0);
         }
@@ -1365,6 +1344,45 @@ mod tests {
         for e in got {
             assert_ne!(e.repo.as_deref(), Some(here.as_str()), "{e:?}");
         }
+    }
+
+    /// The parser's own SessionEnd is not imported: a session resumed after an import gets its
+    /// next events in by a rerun.
+    #[test]
+    fn a_resumed_session_imports_its_next_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("claude/projects/-work-app");
+        std::fs::create_dir_all(&project).unwrap();
+        let prompt = |ts: &str, text: &str| {
+            let line = json!({"type": "user", "timestamp": ts, "sessionId": "resumed",
+                              "cwd": "/work/app", "message": {"role": "user", "content": text}});
+            format!("{line}\n")
+        };
+        let file = project.join("resumed.jsonl");
+        std::fs::write(&file, prompt("2026-09-01T00:00:01Z", "first")).unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let claude = dir.path().join("claude/projects");
+        import(&home, &[("claude", &claude)], true, &mut Vec::new()).unwrap();
+        let mut resumed = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap();
+        std::io::Write::write_all(
+            &mut resumed,
+            prompt("2026-09-02T00:00:01Z", "second").as_bytes(),
+        )
+        .unwrap();
+        import(&home, &[("claude", &claude)], true, &mut Vec::new()).unwrap();
+        let got = records(&home);
+        let prompts: Vec<&str> = got
+            .iter()
+            .filter(|e| e.kind == "prompt")
+            .map(|e| e.body.as_str())
+            .collect();
+        assert_eq!(prompts.len(), 2, "{prompts:?}");
+        assert!(prompts[0].contains("first") && prompts[1].contains("second"));
+        assert!(got.iter().all(|e| e.kind != "end"), "{got:?}");
     }
 
     #[test]
@@ -1424,12 +1442,12 @@ mod tests {
             assert!(killed.is_err());
             let landed = records(&home).len();
             assert!(
-                landed > 0 && landed < count as usize + 3,
+                landed > 0 && landed < count as usize + 2,
                 "{landed} landed: {killed:?}"
             );
             import(&home, &[("codex", &root)], true, &mut Vec::new()).unwrap();
             let got = records(&home);
-            assert_eq!(got.len(), count as usize + 3);
+            assert_eq!(got.len(), count as usize + 2);
             assert!(
                 got.iter()
                     .all(|e| e.source == "transcript" && e.repo.as_deref() == Some("/gone/repo"))
@@ -1450,7 +1468,7 @@ mod tests {
             let again = import(&home, &[("codex", &root)], true, &mut Vec::new()).unwrap();
             assert_eq!(
                 (again.agents["codex"].events, again.agents["codex"].seen),
-                (0, count as u64 + 3)
+                (0, count as u64 + 2)
             );
         }
     }
@@ -1467,9 +1485,9 @@ mod tests {
         std::fs::write(path, text).unwrap();
         let home = dir.path().join("home");
         let first = import(&home, &[("codex", &codex)], true, &mut Vec::new()).unwrap();
-        assert_eq!(first.agents["codex"].events, 8);
+        assert_eq!(first.agents["codex"].events, 7);
         let got = records(&home);
-        assert_eq!(got.len(), 8);
+        assert_eq!(got.len(), 7);
         assert!(got.iter().all(|e| !e.body.contains(raw::DENIED_IN_TESTS)));
         assert!(
             got.iter()
@@ -1478,7 +1496,7 @@ mod tests {
         let again = import(&home, &[("codex", &codex)], true, &mut Vec::new()).unwrap();
         assert_eq!(
             (again.agents["codex"].events, again.agents["codex"].seen),
-            (0, 9)
+            (0, 8)
         );
     }
 
@@ -1559,7 +1577,7 @@ mod tests {
             let stats = import(&home, &[("codex", &codex)], false, &mut Vec::new()).unwrap();
             assert_eq!(
                 (stats.agents["codex"].events, stats.agents["codex"].cut),
-                (4, 5)
+                (4, 4)
             );
             assert!(
                 snapshot(dir.path()) == before,

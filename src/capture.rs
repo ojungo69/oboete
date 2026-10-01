@@ -120,16 +120,13 @@ pub fn imported(
         "Touch" => Some(("touch", json!({}))),
         _ => shaped(event, payload, settings),
     };
-    let place = |kind, body| {
-        let place = Place {
-            repo: repo.to_owned(),
-            cwd: cwd.map(str::to_owned),
-            git: Git::default(),
-        };
-        labelled(agent, kind, body, payload, ts, place, settings)
+    let place = Place {
+        repo: repo.to_owned(),
+        cwd: cwd.map(str::to_owned),
+        git: Git::default(),
     };
     shaped
-        .map(|(kind, body)| place(kind, body))
+        .map(|(kind, body)| labelled(agent, kind, body, payload, ts, place, settings))
         .into_iter()
         .collect()
 }

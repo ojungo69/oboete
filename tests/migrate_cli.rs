@@ -60,6 +60,17 @@ fn migrate_imports_once_and_finish_asks_first() {
     assert!(finish.status.success(), "{said}");
     assert!(said.ends_with("Nothing was deleted.\n"), "{said}");
     assert!(home.path().join("oboete.db").exists());
+    // `--finish` reads the home's own store only: the files it deletes are the home's.
+    let elsewhere = home.path().join("elsewhere.db");
+    std::fs::copy(home.path().join("oboete.db"), &elsewhere).unwrap();
+    let args = [
+        "migrate",
+        "--finish",
+        "--from",
+        &elsewhere.to_string_lossy(),
+    ];
+    let refused = oboete(home.path(), &args, "yes\n");
+    assert!(!refused.status.success() && home.path().join("oboete.db").exists());
     let doctor = oboete(home.path(), &["doctor"], "");
     let said = String::from_utf8_lossy(&doctor.stdout);
     assert!(said.contains("v1 events not migrated yet: 0"), "{said}");
