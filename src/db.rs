@@ -135,6 +135,13 @@ pub(crate) fn wal_until(conn: &Connection, synchronous: &str, deadline: Instant)
     .context("journal mode")
 }
 
+#[cfg(test)]
+thread_local! {
+    // A test opener observes its first real retry, without replacing SQLite's busy handler.
+    pub(crate) static BUSY_RETRY_NOTICE: std::cell::Cell<Option<std::sync::mpsc::Sender<()>>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Retry an open-time write until the shared deadline, including SQLite's busy-handler waits.
 /// The connection keeps its busy timeout afterwards; non-lock errors return immediately.
 pub(crate) fn retry_busy<T>(
@@ -158,6 +165,12 @@ pub(crate) fn retry_busy<T>(
                     )
                 }) && Instant::now() < deadline =>
             {
+                #[cfg(test)]
+                BUSY_RETRY_NOTICE.with(|notice| {
+                    if let Some(retried) = notice.take() {
+                        let _ = retried.send(());
+                    }
+                });
                 std::thread::sleep(
                     Duration::from_millis(20)
                         .min(deadline.saturating_duration_since(Instant::now())),

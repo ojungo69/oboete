@@ -293,8 +293,20 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     crate::db::wal_until(&conn, "FULL", deadline)?;
     #[cfg(target_os = "macos")]
     conn.execute_batch("PRAGMA fullfsync=ON;")?;
-    crate::db::retry_busy(&conn, deadline, || Ok(conn.execute_batch(SCHEMA)?))
+    if !schema_present(&conn).context("raw schema")? {
+        // One write lock covers every CREATE. Autocommit would restart the busy timeout at
+        // each statement, so a contended schema batch could outlast a hook's whole deadline.
+        crate::db::retry_busy(&conn, deadline, || {
+            let tx = rusqlite::Transaction::new_unchecked(
+                &conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            tx.execute_batch(SCHEMA)?;
+            tx.commit()?;
+            Ok(())
+        })
         .context("raw schema")?;
+    }
     // A raw.db from before the ledger named its field (milestone 2 Task 1's schema).
     crate::db::ensure_column_until(
         &mut conn,
@@ -316,6 +328,35 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
         device,
         _swap: swap,
     })
+}
+
+/// SCHEMA uses single-line CREATE headers and unquoted names. Derive the required objects
+/// from those headers so adding a table or index cannot leave the read-only check behind.
+fn schema_present(conn: &Connection) -> Result<bool> {
+    let mut exists = conn.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = lower(?1) AND name = ?2 COLLATE NOCASE",
+    )?;
+    for create in SCHEMA
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("CREATE "))
+    {
+        let (kind, definition) = create
+            .split_once(" IF NOT EXISTS ")
+            .context("schema CREATE header")?;
+        let kind = kind
+            .split_ascii_whitespace()
+            .last()
+            .context("schema object type")?;
+        let name = definition
+            .trim_start()
+            .split(|c: char| c.is_ascii_whitespace() || c == '(')
+            .next()
+            .context("schema object name")?;
+        if !exists.exists(params![kind, name])? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// `open`'s error when a restore still holds raw.db after `OPEN_WAIT`: a reader answers "try
@@ -1780,9 +1821,39 @@ mod tests {
     }
 
     #[test]
+    fn missing_schema_objects_share_one_write_transaction_and_roll_back_together() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open(home.path()).unwrap();
+        let drop_tables = "DROP TABLE ledger; DROP TABLE ops;";
+        store.conn.execute_batch(drop_tables).unwrap();
+        crate::crash::off();
+        let reopened = open(home.path()).unwrap();
+        // One commit means no writer can interleave between the schema's CREATE statements.
+        assert_eq!(crate::crash::count(), 1);
+        let tables = || {
+            store
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'table'
+                     AND name IN ('ledger', 'ops')",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(tables(), 2);
+        reopened.conn.execute_batch(drop_tables).unwrap();
+        crate::crash::at(1);
+        let failed = open(home.path());
+        crate::crash::off();
+        assert!(failed.is_err());
+        assert_eq!(tables(), 0);
+    }
+
+    #[test]
     fn missing_open_state_waits_past_the_busy_timeout_for_a_writer() {
-        // Each case needs a different open-time write. Hold all locks together so the test
-        // takes one 2.5 s wait, rather than one wait per case.
+        // Each case needs a different open-time write. Observe each opener's first actual
+        // lock retry before holding the locks a little longer, rather than timing thread start.
         let changes = [
             "DROP INDEX ops_exclusions",
             "DROP TABLE ops",
@@ -1805,24 +1876,35 @@ mod tests {
             })
             .collect();
         std::thread::scope(|scope| {
-            let (started, received) = std::sync::mpsc::channel();
+            let (retried, received) = std::sync::mpsc::channel();
             let threads: Vec<_> = homes
                 .iter()
                 .map(|home| {
-                    let started = started.clone();
+                    let retried = retried.clone();
                     scope.spawn(move || {
-                        started.send(()).unwrap();
-                        open(home.path())
+                        crate::db::BUSY_RETRY_NOTICE.with(|notice| notice.set(Some(retried)));
+                        let opened = open(home.path());
+                        assert!(
+                            crate::db::BUSY_RETRY_NOTICE.with(|notice| notice.take().is_none()),
+                            "opening a contended store must retry"
+                        );
+                        opened
                     })
                 })
                 .collect();
-            for _ in &threads {
-                received.recv().unwrap();
+            drop(retried);
+            let observed: Result<Vec<_>, _> = threads
+                .iter()
+                .map(|_| received.recv_timeout(std::time::Duration::from_secs(5)))
+                .collect();
+            if observed.is_ok() {
+                // The ordinary write attempts have already exhausted SQLite's 2 s timeout.
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
-            std::thread::sleep(std::time::Duration::from_millis(2_500));
             for writer in &writers {
                 writer.conn.execute_batch("ROLLBACK").unwrap();
             }
+            observed.expect("every opener must retry before the write locks are released");
             for (index, thread) in threads.into_iter().enumerate() {
                 let mut opened = thread.join().unwrap().unwrap();
                 if index != 3 {
