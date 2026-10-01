@@ -36,3 +36,24 @@ Step 13, 2026-10-01: a copy of `~/.oboete/eval/b-import` (178,370 imported docum
 - **Disk**: 5.2 MB per 1,000 vectors (31.3 MB for 5,972). A 4 KB fp32 vector does not fit a 4 KB page beside its key, so each takes an overflow page (`vectors` holds 27.4 MB of it). All of b-import's vectors would add about 930 MB to its 864 MB knowledge.db.
 - **The whole store**, from its texts as they are sent (composed, cut at 12,000 characters): 57.8 million estimated tokens, about 93 million and 100,000 neurons by Cloudflare's count; about 4,700 requests at 37.7 documents each, so about 30 days at 160 requests a day, where the request cap binds and not the neurons, or about USD 1.0 if paid at once past one day's free allowance. v1's embedding of the same history counted 82,657 neurons with its 424 questions (docs/pr-d.md:14). Task 6's Raw corpus is not built yet; Task 6 counts it.
 - **A poll's time**: each poll read the imported documents with no key row by scanning and sorting all 178,370 (0.66-0.78 s), and the raw records the same way (0.51-0.59 s over the 70,904 records of milestone 3's base), waiting or not: an idle worker round with the day's requests spent took 1.45-1.49 s, against 0.68 s with embedding off. With the `vector_todo` queue the first round, which makes the queue over the 172,337 documents still waiting, took 1.25 s and the next ones 0.76-0.77 s. Between two batches the worker waited 0.84 s at p50, up to 200 ms of it until it saw the answer; the p95, 4.3 s, came about every 20 batches, which fits SQLite's automatic checkpoint of knowledge.db's WAL (1,000 pages, about 20 batches of vectors here), not traced further.
+
+## Task 7: the viewer on Design B
+
+Step 7 (row 53-6), 2026-10-01: a copy of `~/.oboete/eval/b-import` (178,370 imported documents, no claims, records or vectors, no embedding provider, so search answers from full text), a release build of the server side (9686a62) on WSL (ext4), started in this repository's checkout, deleted after. Each route ran in a fresh viewer: the first request after the copy's files were dropped from the guest's page cache (`posix_fadvise`; the Windows host may still hold them), then one pass discarded and 40 requests over the route's variants (the first 20 dev questions of `queries.jsonl` for search, 10 imported documents from a search for doc). Peak memory is the viewer's VmHWM.
+
+| route | first request | p50 | p95 | peak memory |
+|---|---|---|---|---|
+| `/` (the page) | 0.001 s | 0.001 s | 0.001 s | 8 MB |
+| search, the checkout's repository | 2.77 s | 0.13 s | 0.56 s | 27 MB |
+| search, `all` | 3.21 s | 0.26 s | 1.05 s | 28 MB |
+| search, `all`, `raw=only` (no records) | 0.009 s | 0.002 s | 0.003 s | 14 MB |
+| doc | 0.006 s | 0.002 s | 0.003 s | 14 MB |
+| timeline, the checkout's repository | 1.98 s | 0.09 s | 0.10 s | 16 MB |
+| timeline, `all` | 2.87 s | 0.27 s | 0.33 s | 17 MB |
+| timeline, `all`, the second page (`before`) | 2.93 s | 0.27 s | 0.29 s | 16 MB |
+| context | 0.007 s | 0.002 s | 0.003 s | 14 MB |
+| repos | 1.96 s | 0.18 s | 0.21 s | 20 MB |
+| version | 0.006 s | 0.002 s | 0.002 s | 13 MB |
+| stats | 0.006 s | 0.002 s | 0.002 s | 14 MB |
+
+No route's p95 passes 1.5 s, so none gets an index. A route's first request reads its index from disk (2-3 s, as Task 4's first search did). Search over records and vectors is the search core's, measured by Tasks 5 and 12b, not here.
