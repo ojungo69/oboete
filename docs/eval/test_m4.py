@@ -93,10 +93,11 @@ def claude(root, session, cwd, *times):
             f.write(json.dumps({'type': 'user', 'cwd': cwd, 'sessionId': session, 'timestamp': t}) + '\n')
 
 
-def codex(root, session, cwd, t):
+def codex(root, session, cwd, t, forked_from=None):
     os.makedirs(f'{root}/2026/08/23', exist_ok=True)
     with open(f'{root}/2026/08/23/rollout-2026-08-23T00-00-00-{session}.jsonl', 'w') as f:
-        f.write(json.dumps({'timestamp': t, 'type': 'session_meta', 'payload': {'id': session, 'cwd': cwd}}) + '\n')
+        meta = {'id': session, 'cwd': cwd, 'forked_from_id': forked_from}
+        f.write(json.dumps({'timestamp': t, 'type': 'session_meta', 'payload': meta}) + '\n')
 
 
 def test_the_corpus_leaves_out_late_tmp_observer_and_held_out_sessions(tmp_path):
@@ -112,9 +113,11 @@ def test_the_corpus_leaves_out_late_tmp_observer_and_held_out_sessions(tmp_path)
     one, two = '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002'
     codex(x, one, '/home/u/p', '2026-08-23T00:00:00Z')
     codex(x, two, '/tmp', '2026-09-01T00:00:00Z')
+    # A fork opens with a copy of its parent's history.
+    codex(x, '00000000-0000-0000-0000-000000000003', '/home/u/p', '2026-09-01T00:00:00Z', forked_from=one)
     got = m4.corpus(m4.transcripts(str(c), str(x)), {'held'})
     assert sorted(s['session'] for s in got['sessions']) == [one, 'kept', 'tmpfoo']
-    assert got['left_out'] == {'late': 1, 'tmp': 2, 'observer': 1, 'held-out': 1, 'no time': 1}
+    assert got['left_out'] == {'late': 1, 'tmp': 2, 'observer': 1, 'held-out': 1, 'no time': 1, 'fork': 1}
     assert got['window'] == {'claude': '2026-06-19', 'codex': '2026-08-23'}
 
 
@@ -188,8 +191,12 @@ def test_the_gate_fails(tmp_path):
     for name in ('b-off', 'hybrid-d2'):
         (tmp_path / f'{name}.trec').write_text('q1 Q0 o1 1 50 x\n')
         os.utime(tmp_path / f'{name}.trec', (1000, 1000))
-    assert m4.older(str(tmp_path), ['b-off', 'hybrid-d2'], 1000) == ['b-off: made before the pre-registration']
-    assert m4.older(str(tmp_path), ['b-off'], 999) == []
+    assert m4.older(str(tmp_path), ['b-off', 'hybrid-d2'], 1000, 1001) == ['b-off: made before the pre-registration']
+    assert m4.older(str(tmp_path), ['b-off'], 999, 1001) == []
+    # An eval that started before the commit and ended after it.
+    assert m4.older(str(tmp_path), ['b-off'], 999, 998) == ['the eval started before the pre-registration']
+    # A run file the gate does not check, which the judge would still pool.
+    assert m4.unexpected(str(tmp_path), ['b-off']) == ['hybrid-d2: a run the gate does not check']
     # A Raw question whose session has no record.
     k = sqlite3.connect(tmp_path / 'knowledge.db')
     k.execute('CREATE TABLE raw_docs(device TEXT, seq INTEGER, session TEXT)')

@@ -12,7 +12,7 @@ Every command that runs oboete takes the binary by path: `oboete` on PATH is the
   m4.py gate <runs> <home> <pre-registration commit> <owner's answer, ISO time> [--no-rerank]
                                    the checks before any grade; nothing is judged until it passes
 """
-import collections, datetime, functools, glob, json, os, re, sqlite3, subprocess, sys, tomllib
+import collections, datetime, functools, glob, json, os, re, sqlite3, subprocess, sys, time, tomllib
 
 from common import E, clean_env, h, owner_only, read_jsonl, sha256_file, write_jsonl
 
@@ -95,8 +95,9 @@ def when(s):
 
 
 def head(agent, path):
-    """(working directory, time of the first event) of a transcript, read until both are known."""
-    cwd = first = None
+    """(working directory, time of the first event, the session a Codex rollout was forked from) of
+    a transcript, read until the working directory and the time are known."""
+    cwd = first = forked = None
     with open(path, encoding='utf-8', errors='replace') as f:
         for line in f:
             try:
@@ -107,13 +108,14 @@ def head(agent, path):
                 continue
             if agent == 'claude' and cwd is None and isinstance(o.get('cwd'), str):
                 cwd = o['cwd']
-            elif agent == 'codex' and o.get('type') == 'session_meta' and isinstance(o.get('payload'), dict):
-                cwd = o['payload'].get('cwd')
+            elif agent == 'codex' and cwd is None and o.get('type') == 'session_meta' \
+                    and isinstance(o.get('payload'), dict):
+                cwd, forked = o['payload'].get('cwd'), o['payload'].get('forked_from_id')
             if first is None and isinstance(o.get('timestamp'), str):
                 first = when(o['timestamp'])
             if cwd is not None and first is not None:
                 break
-    return cwd, first
+    return cwd, first, forked
 
 
 def transcripts(claude='~/.claude/projects', codex='~/.codex/sessions'):
@@ -133,16 +135,20 @@ def under(path, root):
 def corpus(found, held_out):
     """Raw's corpus (D10): every transcript with an event before the copy time, but those run
     under /tmp, claude-mem's observer sessions and the replay set's held-out sessions; and each
-    agent's window, from the first event day of all its transcripts."""
+    agent's window, from the first event day of all its transcripts. A forked Codex rollout is left
+    out too: it opens with a copy of its parent's history, which would be replayed as the fork's
+    own records (the live hooks never send it again), past the question's own-session rule and
+    past the parent's exclusion (Codex on 67cf8f4); its own later turns go with it."""
     sessions, left, first = [], collections.Counter(), {}
     for agent, session, path in found:
-        cwd, start = head(agent, path)
+        cwd, start, forked = head(agent, path)
         if start is None:
             left['no time'] += 1
             continue
         first[agent] = min(first.get(agent, start), start)
         why = ('late' if start >= CUT else 'tmp' if cwd and under(cwd, '/tmp')
-               else 'observer' if cwd and under(cwd, OBSERVER) else 'held-out' if session in held_out else None)
+               else 'observer' if cwd and under(cwd, OBSERVER) else 'held-out' if session in held_out
+               else 'fork' if forked else None)
         if why:
             left[why] += 1
         else:
@@ -161,15 +167,17 @@ def replay(binary, home, sessions):
     records (D10). The mark is written first, so a replay that stopped is never added to: the home
     is made again from b-import."""
     mark = f'{home}/replay-m4.json'
-    if os.path.exists(mark):
-        raise RuntimeError(f'{home} holds a Raw replay already: a second would insert its events twice')
     with open(f'{home}/config.toml', 'rb') as f:
         config = tomllib.load(f)
     if config.get('summary', {}).get('curate') is not False or 'embedding' in config:
         raise RuntimeError('b-m4 curates nothing and has no embedding provider until the owner answers (D10)')
     report = {'binary': sha256_file(binary)[:12], 'sessions': 0, 'events': 0, 'parts': []}
-    with open(mark, 'w') as f:
-        json.dump({'started': report['binary']}, f)
+    # Made only if absent, so of two replays started together one stops here (Codex on 67cf8f4).
+    try:
+        with open(mark, 'x') as f:
+            json.dump({'started': report['binary']}, f)
+    except FileExistsError:
+        raise RuntimeError(f'{home} holds a Raw replay already: a second would insert its events twice') from None
     part = []
 
     def flush():
@@ -209,12 +217,13 @@ def hashes(binary, home):
 
 def run(binary, home, out):
     """`eval` of the test questions on `home`, no worker running: the stores hashed before and after
-    (Step 12)."""
+    (Step 12), and the time it started, which the gate compares with the pre-registration."""
+    started = time.time()
     before = hashes(binary, home)
     subprocess.run([binary, '--home', home, 'eval', f'{E}/questions-test-m4.jsonl', '--depth', str(DEPTH),
                     '--arms', ARMS, '--out', out], check=True, env=clean_env())
     with open(f'{out}/stores.json', 'w') as f:
-        json.dump({'before': before, 'after': hashes(binary, home)}, f, indent=1)
+        json.dump({'started': started, 'before': before, 'after': hashes(binary, home)}, f, indent=1)
 
 
 def map_runs(out, runs, eligible):
@@ -282,11 +291,20 @@ def own_session(runs, asked, session_of):
             if qid in asked and session_of(doc) == asked[qid]['session']]
 
 
-def older(runs, names, since):
-    """Each candidate run made before the pre-registration merged (`since`, its main commit's time)."""
-    return [f'{name}: made before the pre-registration'
-            for name in names if name.startswith('b-') and os.path.exists(f'{runs}/{name}.trec')
-            and os.path.getmtime(f'{runs}/{name}.trec') <= since]
+def older(runs, names, since, started):
+    """Each candidate run made, or the eval that made B's runs started, before the
+    pre-registration merged (`since`, its main commit's time; Codex on 67cf8f4)."""
+    out = [] if started > since else ['the eval started before the pre-registration']
+    return out + [f'{name}: made before the pre-registration'
+                  for name in names if name.startswith('b-') and os.path.exists(f'{runs}/{name}.trec')
+                  and os.path.getmtime(f'{runs}/{name}.trec') <= since]
+
+
+def unexpected(runs, names):
+    """Each run file the gate does not check: judge.py and report.py read every one (Codex on
+    67cf8f4)."""
+    return [f'{n[:-5]}: a run the gate does not check' for n in sorted(os.listdir(runs))
+            if n.endswith('.trec') and n[:-5] not in names]
 
 
 def recordless(eligible, asked, home):
@@ -346,7 +364,7 @@ def gate(runs_dir, home, commit, answered, rerank=True):
     names = [n for n in RUNS if rerank or n != 'b-rerank']
     runs = load(runs_dir, names)
     side = sidecar(runs_dir)
-    problems = [f'frozen: {b}' for b in check()]
+    problems = [f'frozen: {b}' for b in check()] + unexpected(runs_dir, names)
     if len(asked) != TEST_N or sum(q['lang'] == 'en' for q in asked.values()) != ENGLISH_N:
         problems.append(f'the test questions are not {TEST_N} with {ENGLISH_N} English (spec 8.2 M21)')
     problems += missing(runs, names, set(asked), eligible)
@@ -367,16 +385,16 @@ def gate(runs_dir, home, commit, answered, rerank=True):
     if not own_session({'control': {q['qid']: [q['qid']]}}, asked, session_of):
         problems.append('the own-session check misses its positive control')
     since = int(subprocess.run(['git', 'show', '-s', '--format=%ct', commit], capture_output=True, text=True,
-                               check=True, cwd=os.path.dirname(os.path.abspath(__file__))).stdout)
-    problems += older(runs_dir, names, since)
+                               check=True, cwd=os.path.dirname(os.path.abspath(__file__)), env=clean_env()).stdout)
+    with open(f'{runs_dir}/stores.json') as f:
+        stores = json.load(f)
+    problems += older(runs_dir, names, since, stores['started'])
     problems += recordless(eligible, asked, home)
     k = sqlite3.connect(f'file:{home}/knowledge.db?mode=ro', uri=True)
     waiting = k.execute('SELECT COUNT(*) FROM vector_todo').fetchone()[0]
     held = k.execute("SELECT COUNT(*) FROM vector_keys WHERE skipped = 'held'").fetchone()[0]
     if waiting or held:
         problems.append(f'vectors not complete: {waiting} waiting, {held} held')
-    with open(f'{runs_dir}/stores.json') as f:
-        stores = json.load(f)
     if stores['before'] != stores['after']:
         problems.append('the stores changed during the runs')
     # The eval refuses a home with an exclusion or a claim (search::b::trec_run), and raw.db's hash
