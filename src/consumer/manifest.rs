@@ -5,6 +5,7 @@
 
 use crate::manifest::{self, Line, Parts};
 use crate::raw::{Event, Item, Raw, Target};
+use crate::redact::Mapped;
 use crate::worker::Consumer;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -127,16 +128,26 @@ pub fn text(
     let k = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let manifest = stored(&k, raw, repo, branch, &stamp(rules.version()))?;
     let live = live(&k, raw, repo, branch, session, rules, now)?;
-    let Some((text, bodies)) = with_delivered(&k, raw, repo, manifest, &live, rules)? else {
+    let Some((packet, bodies)) = with_delivered(&k, raw, repo, manifest, &live, rules)? else {
         return Ok(None);
     };
-    let text = manifest::cut(&crate::redact::outbound_with(&text, rules), cap);
-    // A claim is shown when its line came through the whole text's gate and the cut unchanged: a
-    // line that gate changed is not found, so a claim may be injected again, never left out.
+    let (gated, from) = packet.outbound(rules);
+    let text = manifest::cut(&gated, cap);
+    // Match the surviving occurrence, not another claim with the same rendered line.
     let shown = bodies
         .into_iter()
-        .filter(|(line, _)| text.lines().any(|l| l == line))
-        .map(|(_, uid)| uid)
+        .filter_map(|(range, line, uid)| {
+            let at = from.iter().position(|&(s, _)| s == range.start)?;
+            let end = at + line.len();
+            (text.get(at..end) == Some(line.as_str())
+                && (at == 0 || text.as_bytes()[at - 1] == b'\n')
+                && text.as_bytes().get(end).is_none_or(|&b| b == b'\n')
+                && from.get(end - 1).is_some_and(|&(_, e)| e == range.end)
+                && from[at..end]
+                    .iter()
+                    .all(|&(s, e)| s >= range.start && e <= range.end))
+            .then_some(uid)
+        })
         .collect();
     Ok(Some(Start { text, shown }))
 }
@@ -295,8 +306,8 @@ fn stored(
     Ok(text.filter(|(_, built)| built == ruleset).map(|(t, _)| t))
 }
 
-/// A line that shows a claim's body, and the claim's uid.
-type Body = (String, String);
+/// A body line's source range, its field-gated text, and the claim's uid.
+type Body = (std::ops::Range<usize>, String, String);
 
 /// Spec 4.4's SessionStart around the checkout's `manifest`: the global preferences first; the
 /// manifest, with `repo`'s delivered decisions, preferences, open items and lessons (spec 3.4) in
@@ -319,7 +330,7 @@ fn with_delivered(
     manifest: Option<String>,
     live: &str,
     rules: &crate::redact::Rules,
-) -> Result<Option<(String, Vec<Body>)>> {
+) -> Result<Option<(Mapped, Vec<Body>)>> {
     use crate::claims::{self, Claim};
     let manifest = manifest.unwrap_or_default();
     let at = AFTER_DECISIONS
@@ -333,8 +344,9 @@ fn with_delivered(
         })
         .min()
         .unwrap_or(manifest.len());
-    let (mut first, mut middle, mut last) = (String::new(), String::new(), String::new());
-    let mut bodies: Vec<Body> = Vec::new();
+    let (mut first, mut middle, mut last) =
+        (Mapped::default(), Mapped::default(), Mapped::default());
+    let (mut bodies, mut middle_bodies): (Vec<Body>, Vec<Body>) = (Vec::new(), Vec::new());
     if exists(k, "view", "active")? {
         let pending = claims::Pending::read(raw, k)?;
         let hidden = |uid: &str| pending.touches(k, uid);
@@ -352,19 +364,23 @@ fn with_delivered(
         let (mut index, _) = claims::place(rest, INDEX);
         claims::newest_first(&mut units);
         claims::newest_first(&mut index);
-        let gate = |s: &str, n: usize| one_line(&crate::redact::lines_with(s, rules), n);
+        let gate = |s: &str, n: usize| crate::redact::flattened_with(s, rules, n, one_line);
         let date = |c: &Claim| crate::db::utc(c.valid_from)[..10].to_owned();
         // An earlier claim names the claim above it that ended it.
-        let mut full = |c: &Claim, unit: &[Claim]| {
+        let full = |out: &mut Mapped, bodies: &mut Vec<Body>, c: &Claim, unit: &[Claim]| {
             let ended = c
                 .later
                 .as_ref()
                 .and_then(|l| unit.iter().find(|u| u.uid == *l))
                 .map(|l| format!(", superseded by the {} {} above", date(l), l.kind))
                 .unwrap_or_default();
-            let line = format!("- {} {}{ended}: {}", date(c), c.kind, gate(&c.body, CLIP));
-            bodies.push((line.clone(), c.uid.clone()));
-            line + "\n"
+            let mut line = Mapped::default();
+            line.push_str(&format!("- {} {}{ended}: ", date(c), c.kind));
+            line.append(gate(&c.body, CLIP));
+            let at = out.text.len();
+            bodies.push((at..at + line.text.len(), line.masked(), c.uid.clone()));
+            out.append(line);
+            out.push_str("\n");
         };
         let id = |uid: &str| uid.chars().take(12).collect::<String>();
         let brief = |c: &Claim| {
@@ -373,51 +389,56 @@ fn with_delivered(
                 .as_ref()
                 .map(|l| format!(", superseded by {}", id(l)))
                 .unwrap_or_default();
-            format!(
-                "- {} {} {}{ended}: {}\n",
-                id(&c.uid),
-                date(c),
-                c.kind,
-                gate(&c.body, BRIEF)
-            )
+            let mut line = Mapped::default();
+            line.push_str(&format!("- {} {} {}{ended}: ", id(&c.uid), date(c), c.kind));
+            line.append(gate(&c.body, BRIEF));
+            line.push_str("\n");
+            line
         };
-        let section = |title: &str, lines: String| {
-            if lines.is_empty() {
-                String::new()
-            } else {
-                format!("## {title}\n{lines}")
+        if !prefs.is_empty() {
+            first.push_str("## Global preferences\n");
+            for c in &prefs {
+                full(&mut first, &mut bodies, c, &[]);
             }
-        };
-        first = section(
-            "Global preferences",
-            prefs.iter().map(|c| full(c, &[])).collect(),
-        );
-        middle = section(
-            "Decisions and open items",
-            units
-                .iter()
-                .flat_map(|u| u.iter().map(move |c| (c, u)))
-                .map(|(c, u)| full(c, u))
-                .collect(),
-        );
-        if let Some(digest) = crate::digest::fresh(k, repo, hidden)? {
-            let lines: String = digest
-                .iter()
-                .map(|l| format!("- {}\n", gate(l, CLIP)))
-                .collect();
-            middle.push_str(&section("Digest of the last session", lines));
+        }
+        if !units.is_empty() {
+            middle.push_str("## Decisions and open items\n");
+            for unit in &units {
+                for c in unit {
+                    full(&mut middle, &mut middle_bodies, c, unit);
+                }
+            }
+        }
+        if let Some(digest) = crate::digest::fresh(k, repo, hidden)?
+            && !digest.is_empty()
+        {
+            middle.push_str("## Digest of the last session\n");
+            for line in &digest {
+                middle.push_str("- ");
+                middle.append(gate(line, CLIP));
+                middle.push_str("\n");
+            }
         }
         if !(units.is_empty() && index.is_empty()) {
-            let lines: String = index.iter().flatten().map(brief).collect();
-            last = format!("## More from memory\n{TOOLS}\n{lines}");
+            last.push_str(&format!("## More from memory\n{TOOLS}\n"));
+            for c in index.iter().flatten() {
+                last.append(brief(c));
+            }
         }
     }
-    let text = format!(
-        "{first}{}{middle}{}{live}{last}",
-        &manifest[..at],
-        &manifest[at..]
+    let mut text = first;
+    text.push_str(&manifest[..at]);
+    let offset = text.text.len();
+    bodies.extend(
+        middle_bodies
+            .into_iter()
+            .map(|(range, line, uid)| (range.start + offset..range.end + offset, line, uid)),
     );
-    Ok((!text.is_empty()).then_some((text, bodies)))
+    text.append(middle);
+    text.push_str(&manifest[at..]);
+    text.push_str(live);
+    text.append(last);
+    Ok((!text.text.is_empty()).then_some((text, bodies)))
 }
 
 /// The words a claim may share with the checkout's manifest (D4): the names of the files touched,
@@ -1421,6 +1442,178 @@ mod tests {
         );
     }
 
+    #[test]
+    fn interacting_field_and_formatted_rules_hide_claims_and_digest_lines() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let body = "Header\nalpha code 654321";
+        let (claim, uid) = claimed(
+            &mut store,
+            said(cwd.path(), DAY, body),
+            "decision",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[claim]).unwrap();
+        store
+            .append_ops(&[digest("r", &[(body, &[&uid])])])
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let before = shown(home.path(), &store).unwrap();
+        assert!(before.contains("Header alpha code 654321"), "{before}");
+        let before = [
+            lines_of(&before, "Decisions and open items"),
+            lines_of(&before, "Digest of the last session"),
+        ]
+        .concat()
+        .join("\n");
+        for regex in [
+            "Header alpha code ([0-9]{6})",
+            "(?m)^alpha code ([0-9]{6})$",
+            "(?m)^- (?:1970-01-02 decision: )?Header alpha code ([0-9]{6})$",
+        ] {
+            std::fs::write(
+                home.path().join("config.toml"),
+                format!(
+                    "[redaction]\nextra_rules = [\
+                     {{ id = 'field', regex = '^Header\\n(alpha) code [0-9]{{6}}$', secret_group = 1 }}, \
+                     {{ id = 'other', regex = '{regex}', secret_group = 1 }}]\n"
+                ),
+            )
+            .unwrap();
+            let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+            if !regex.starts_with("(?m)^alpha") {
+                assert!(!crate::redact::outbound_with(&before, &rules).contains("654321"));
+            }
+            let after = shown_at(home.path(), &store, "none", NOW).unwrap();
+            assert_eq!(
+                after
+                    .text
+                    .matches("Header [REDACTED] code [REDACTED]")
+                    .count(),
+                2,
+                "{}",
+                after.text
+            );
+            if regex.starts_with("(?m)^- ") {
+                assert!(after.shown.is_empty(), "{after:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_packet_rule_keeps_the_original_clipped_view() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let name = "a".repeat(60);
+        let body = format!("Header\n{name} code 654321 {}", "x ".repeat(300));
+        let (claim, _) = claimed(
+            &mut store,
+            said(cwd.path(), DAY, &body),
+            "decision",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[claim]).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let before = shown(home.path(), &store).unwrap();
+        let line = lines_of(&before, "Decisions and open items").remove(0);
+        assert!(line.contains("654321") && line.ends_with('…'), "{line}");
+        let packet = regex::escape(&line).replace("654321", "([0-9]{6})");
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!(
+                "[redaction]\nextra_rules = [\
+                 {{ id = 'field', regex = '^Header\\n({name}) code', secret_group = 1 }}, \
+                 {{ id = 'packet', regex = '(?m)^{packet}$', secret_group = 1 }}]\n"
+            ),
+        )
+        .unwrap();
+        let after = shown(home.path(), &store).unwrap();
+        assert!(!after.contains("654321"), "{after}");
+    }
+
+    #[test]
+    fn a_packet_rule_keeps_spaces_around_a_field_mask() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let name = "a".repeat(60);
+        let body = format!("Head\n{name} code 654321 {}code 112233", "x ".repeat(163));
+        let (claim, _) = claimed(
+            &mut store,
+            said(cwd.path(), DAY, &body),
+            "decision",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[claim]).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let before = shown(home.path(), &store).unwrap();
+        assert!(!before.contains("112233"), "{before}");
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!(
+                "[redaction]\nextra_rules = [\
+                 {{ id = 'field', regex = '^Head(\\n{name} )code', secret_group = 1 }}, \
+                 {{ id = 'packet', regex = '(?m)^- 1970-01-02 decision: Head {name} code 654321 (?:x )+code ([0-9]{{6}})$', secret_group = 1 }}]\n"
+            ),
+        )
+        .unwrap();
+        let after = shown(home.path(), &store).unwrap();
+        assert!(!after.contains("112233"), "{after}");
+        assert!(after.contains("code [REDACTED]"), "{after}");
+    }
+
+    #[test]
+    fn field_projection_preserves_private_blocks_whitespace_and_utf8() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let mut ops = Vec::new();
+        for (i, body) in [
+            "左 <private>hidden</private> 右",
+            "a   b",
+            "山田\nalpha code 654321",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ops.push(
+                claimed(
+                    &mut store,
+                    said(cwd.path(), DAY + i as i64, body),
+                    "decision",
+                    "decided",
+                    vec![],
+                )
+                .0,
+            );
+        }
+        store.append_ops(&ops).unwrap();
+        worker::run_once(home.path()).unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [\
+             { id = 'space', regex = 'a  ( b)', secret_group = 1 }, \
+             { id = 'name', regex = '^山田\\n(alpha) code [0-9]{6}$', secret_group = 1 }, \
+             { id = 'code', regex = '山田 alpha code ([0-9]{6})', secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let after = shown(home.path(), &store).unwrap();
+        let lines = lines_of(&after, "Decisions and open items");
+        for body in ["左 右", "a [REDACTED]", "山田 [REDACTED] code [REDACTED]"] {
+            assert!(
+                lines.contains(&format!("- 1970-01-02 decision: {body}")),
+                "{after}"
+            );
+        }
+        assert!(!after.contains("hidden"), "{after}");
+    }
+
     /// Spec 4.7: `Start::shown` names the claims shown with their bodies, never an index line's,
     /// nor one the cut dropped.
     #[test]
@@ -1458,6 +1651,44 @@ mod tests {
             cut.shown,
             uids[8..].iter().rev().cloned().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn identical_body_lines_count_only_the_occurrence_before_the_cut() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let common = "Shared words ".repeat(40);
+        let (older, _) = claimed(
+            &mut store,
+            said(cwd.path(), DAY + 1, &format!("{common}older tail")),
+            "decision",
+            "decided",
+            vec![],
+        );
+        let (newer, uid) = claimed(
+            &mut store,
+            said(cwd.path(), DAY + 2, &format!("{common}newer tail")),
+            "decision",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[older, newer]).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+        let start = |cap| {
+            text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
+                .unwrap()
+                .unwrap()
+        };
+        let all = start(usize::MAX);
+        let lines = lines_of(&all.text, "Decisions and open items");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], lines[1]);
+        let end = all.text.find(&lines[0]).unwrap() + lines[0].len() + 1;
+        let cut = start(all.text[..end].chars().count());
+        assert_eq!(cut.shown, vec![uid], "{}", cut.text);
     }
 
     /// Task 8: a row built before the read-time lines carries the ruleset without the format tag:

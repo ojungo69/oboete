@@ -1072,6 +1072,298 @@ pub(crate) fn lines_with(text: &str, rules: &Rules) -> String {
     .join("\n")
 }
 
+/// Selected, untouched display text, with field findings kept until the composed packet's gate.
+pub(crate) struct Mapped {
+    pub text: String,
+    hidden: Option<Vec<(usize, usize)>>,
+    views: [(String, Vec<(usize, usize)>); 2],
+}
+
+impl Default for Mapped {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            hidden: Some(Vec::new()),
+            views: std::array::from_fn(|_| Default::default()),
+        }
+    }
+}
+
+impl Mapped {
+    pub fn push_str(&mut self, text: &str) {
+        let at = self.text.len();
+        self.text.push_str(text);
+        for (view, from) in &mut self.views {
+            view.push_str(text);
+            from.extend((at..at + text.len()).map(|i| (i, i + 1)));
+        }
+    }
+
+    pub fn append(&mut self, other: Self) {
+        let at = self.text.len();
+        self.text.push_str(&other.text);
+        for ((view, from), (more, origins)) in self.views.iter_mut().zip(other.views) {
+            view.push_str(&more);
+            from.extend(
+                origins
+                    .into_iter()
+                    .map(|(s, e)| if s < e { (at + s, at + e) } else { (0, 0) }),
+            );
+        }
+        self.hidden = match (self.hidden.take(), other.hidden) {
+            (Some(mut runs), Some(more)) => {
+                runs.extend(more.into_iter().map(|(s, e)| (at + s, at + e)));
+                Some(merged_runs(runs))
+            }
+            _ => None,
+        };
+    }
+
+    /// The field-only baseline; packet findings must not make a changed claim count as shown.
+    pub fn masked(&self) -> String {
+        match &self.hidden {
+            Some(runs) => mask_map(&self.text, runs).0,
+            None => MASK.to_owned(),
+        }
+    }
+
+    /// The whole packet still sees the original context, even where a field will be masked.
+    /// Origins name the range of `self.text` behind each output byte, masks included.
+    pub fn outbound(&self, rules: &Rules) -> (String, Vec<(usize, usize)>) {
+        let gated = || {
+            let mut runs = self.hidden.clone()?;
+            runs.extend(hidden(&self.text, rules)?);
+            // Field masking can move its clip or mask whitespace: the original clip and the
+            // normalized selected prefix are independently scanned with their original context.
+            for (view, from) in &self.views {
+                runs.extend(
+                    hidden(view, rules)?
+                        .into_iter()
+                        .map(|(s, e)| origin(&from[s..e]))
+                        .filter(|&(s, e)| s < e),
+                );
+            }
+            let (clean, from, _) = stripped_map(&self.text);
+            let runs = projected(&from, &merged_runs(runs));
+            let (masked, masked_from) = mask_map(&clean, &runs);
+            let (shown, shown_from, _) = hidden_map(&masked, rules)?;
+            let origins = shown_from
+                .into_iter()
+                .map(|(s, e)| {
+                    let (s, e) = origin(&masked_from[s..e]);
+                    origin(&from[s..e])
+                })
+                .collect();
+            Some((shown, origins))
+        };
+        gated().unwrap_or_else(|| (MASK.to_owned(), vec![(0, self.text.len()); MASK.len()]))
+    }
+}
+
+/// Gate independent original/line/flat views, then retain the exact prefix `clip` selects after
+/// field masking. Its shadow expands masks to their original flat text without restoring blocks.
+pub(crate) fn flattened_with(
+    text: &str,
+    rules: &Rules,
+    n: usize,
+    clip: fn(&str, usize) -> String,
+) -> Mapped {
+    let mapped = || {
+        let (clean, from, _) = stripped_map(text);
+        let identity: Vec<_> = (0..clean.len()).map(|i| (i, i + 1)).collect();
+        let (flat, flat_from) = flattened_map(&clean, &identity);
+        let mut runs = hidden_lines(text, rules)?;
+        runs.extend(hidden_views(text, line_views(text), rules)?);
+        // Project before flattening: a normalized space may bridge a removed private block,
+        // but the removed bytes must not turn that space into a mask.
+        let mut runs = projected(&from, &merged_runs(runs));
+        runs.extend(hidden_views(&clean, line_views(&clean), rules)?);
+        runs.extend(
+            hidden_lines(&flat, rules)?
+                .into_iter()
+                .map(|(s, e)| origin(&flat_from[s..e])),
+        );
+        let mut runs = merged_runs(runs);
+        if runs.len() > MAX_FINDINGS {
+            return None;
+        }
+        let (mut masked, mut masked_from) = mask_map(&clean, &runs);
+        for pass in 0..=MAX_PASSES {
+            let mut more: Vec<_> = hidden_lines(&masked, rules)?
+                .into_iter()
+                .map(|(s, e)| origin(&masked_from[s..e]))
+                .collect();
+            let (flat, flat_from) = flattened_map(&masked, &masked_from);
+            more.extend(
+                hidden_lines(&flat, rules)?
+                    .into_iter()
+                    .map(|(s, e)| origin(&flat_from[s..e])),
+            );
+            let next = merged_runs(runs.iter().copied().chain(more).collect());
+            if next == runs {
+                break;
+            }
+            if pass == MAX_PASSES || next.len() > MAX_FINDINGS {
+                return None;
+            }
+            runs = next;
+            (masked, masked_from) = mask_map(&clean, &runs);
+        }
+        let (masked, masked_from) = flattened_map(&masked, &masked_from);
+        let shown = clip(&masked, n);
+        let clipped = shown != masked;
+        let prefix = if clipped {
+            shown.strip_suffix('…')?
+        } else {
+            shown.as_str()
+        };
+        if !masked.starts_with(prefix) {
+            return None;
+        }
+        let (mut text, mut hidden, mut shadow_from, mut at) =
+            (String::new(), Vec::new(), Vec::new(), 0);
+        while at < prefix.len() {
+            let run = masked_from[at];
+            if prefix[at..].starts_with(MASK)
+                && masked_from[at..at + MASK.len()].iter().all(|&r| r == run)
+            {
+                let (original, origins) =
+                    flattened_map(&clean[run.0..run.1], &identity[run.0..run.1]);
+                let start = text.len();
+                if original.is_empty() {
+                    text.push(' ');
+                    shadow_from.push(run);
+                } else {
+                    text.push_str(&original);
+                    shadow_from.extend(origins);
+                }
+                hidden.push((start, text.len()));
+                at += MASK.len();
+            } else {
+                let end = at + prefix[at..].chars().next()?.len_utf8();
+                text.push_str(&prefix[at..end]);
+                shadow_from.extend_from_slice(&masked_from[at..end]);
+                at = end;
+            }
+        }
+        let ellipsis = (text.len(), text.len() + '…'.len_utf8());
+        if clipped {
+            text.push('…');
+        }
+        let base = clip(&flat, n);
+        let base_clipped = base != flat;
+        let base_prefix = if base_clipped {
+            base.strip_suffix('…')?
+        } else {
+            base.as_str()
+        };
+        if !flat.starts_with(base_prefix) {
+            return None;
+        }
+        let mut base_from = inverse(&flat_from[..base_prefix.len()], &shadow_from);
+        if base_clipped {
+            base_from.extend(std::iter::repeat_n(
+                if clipped { ellipsis } else { (0, 0) },
+                '…'.len_utf8(),
+            ));
+        }
+        let end = masked_from[..prefix.len()].last().map_or(0, |&(_, e)| e);
+        let (mut selected, selected_from) = flattened_map(&clean[..end], &identity[..end]);
+        let mut selected_from = inverse(&selected_from, &shadow_from);
+        if clipped {
+            selected.push('…');
+            selected_from.extend(std::iter::repeat_n(ellipsis, '…'.len_utf8()));
+        }
+        Some(Mapped {
+            text,
+            hidden: Some(hidden),
+            views: [(base, base_from), (selected, selected_from)],
+        })
+    };
+    mapped().unwrap_or(Mapped {
+        text: String::new(),
+        hidden: None,
+        views: std::array::from_fn(|_| Default::default()),
+    })
+}
+
+/// A normalized view's source bytes back to the selected shadow; absent bytes have no origin.
+fn inverse(from: &[(usize, usize)], shadow: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let (mut out, mut at) = (Vec::new(), 0);
+    for &(s, e) in from {
+        while at < shadow.len() && shadow[at].1 <= s {
+            at += 1;
+        }
+        let end = at + shadow[at..].iter().take_while(|&&(a, _)| a < e).count();
+        out.push(if at < end { (at, end) } else { (0, 0) });
+    }
+    out
+}
+
+fn flattened_map(text: &str, from: &[(usize, usize)]) -> (String, Vec<(usize, usize)>) {
+    let (mut out, mut origins, mut end) = (String::new(), Vec::new(), 0);
+    for word in text.split_whitespace() {
+        let start = word.as_ptr() as usize - text.as_ptr() as usize;
+        if !out.is_empty() {
+            out.push(' ');
+            origins.push(origin(&from[end..start]));
+        }
+        end = start + word.len();
+        out.push_str(word);
+        origins.extend_from_slice(&from[start..end]);
+    }
+    (out, origins)
+}
+
+fn line_views(text: &str) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+    let mut at = 0;
+    text.split('\n').map(move |line| {
+        let range = at..at + line.len();
+        at += line.len() + 1;
+        range
+    })
+}
+
+fn origin(from: &[(usize, usize)]) -> (usize, usize) {
+    from.iter()
+        .filter(|&&(s, e)| s < e)
+        .fold((usize::MAX, 0), |(a, b), &(s, e)| (a.min(s), b.max(e)))
+}
+
+/// Hidden source ranges projected onto the retained bytes of a stripped or flattened view.
+fn projected(from: &[(usize, usize)], runs: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let (mut out, mut run, mut start) = (Vec::new(), 0, None);
+    for (i, &(s, e)) in from.iter().enumerate() {
+        while run < runs.len() && runs[run].1 <= s {
+            run += 1;
+        }
+        if runs.get(run).is_some_and(|&(a, b)| a < e && s < b) {
+            start.get_or_insert(i);
+        } else if let Some(s) = start.take() {
+            out.push((s, i));
+        }
+    }
+    if let Some(s) = start {
+        out.push((s, from.len()));
+    }
+    out
+}
+
+/// Replace runs once, preserving both ordinary bytes and the source behind each mask.
+fn mask_map(text: &str, runs: &[(usize, usize)]) -> (String, Vec<(usize, usize)>) {
+    let (mut out, mut from, mut at) = (String::new(), Vec::new(), 0);
+    for &(s, e) in runs {
+        out.push_str(&text[at..s]);
+        from.extend((at..s).map(|i| (i, i + 1)));
+        out.push_str(MASK);
+        from.extend(std::iter::repeat_n((s, e), MASK.len()));
+        at = e;
+    }
+    out.push_str(&text[at..]);
+    from.extend((at..text.len()).map(|i| (i, i + 1)));
+    (out, from)
+}
+
 /// `outbound_lines` of a text joined from `parts` (byte ranges of it: an imported document's
 /// title and body under its kind), what `outbound_lines` hides in a part alone hidden too, as
 /// search gates each part alone. Each view's hiding (the whole's and each part's, line pass

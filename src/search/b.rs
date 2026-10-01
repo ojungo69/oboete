@@ -947,7 +947,17 @@ pub fn delivered_ranked(
             claims::DECIDED_WHERE
         ))?;
         let mut list = Vec::new();
-        for uid in near.knn(k, "c", &[repo.to_owned()], (None, None), None, depth)? {
+        for uid in near.knn(
+            k,
+            "c",
+            &[repo.to_owned()],
+            (None, None),
+            None,
+            CANDIDATES as usize,
+        )? {
+            if list.len() >= depth {
+                break;
+            }
             if decided.exists([&uid])? && keep(&uid)? {
                 list.push(uid);
             }
@@ -3703,6 +3713,69 @@ mod tests {
             .append_ops(&[(crate::raw::OpKind::Correction, op)])
             .unwrap();
         assert!(!uids(&s.raw, 100).contains(&corrected));
+    }
+
+    #[test]
+    fn delivered_ranked_filters_vector_neighbors_before_the_depth_limit() {
+        let mut s = Store::new();
+        let seq = s.said("s", R, 1_000, "A proposed parser rule.");
+        let proposal = s.claim(
+            seq,
+            "A proposed parser rule.",
+            ("decision", "proposed", "assistant proposal"),
+            &[],
+        );
+        let ended = s.decided(R, 1_001, "The old parser rule.", &[]);
+        s.decided(R, 1_001, "The replacement parser rule.", &[&ended]);
+        let pending = s.decided(R, 1_002, "A parser rule awaiting correction.", &[]);
+        let first = s.decided(R, 1_003, "The first eligible parser rule.", &[]);
+        let second = s.decided(R, 1_004, "The second eligible parser rule.", &[]);
+        s.run();
+        let op = serde_json::json!({"uid": pending, "status": "retracted"});
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Correction, op)])
+            .unwrap();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        k.execute(
+            "INSERT INTO vec_generation(embedder, state) VALUES ('test', 'active')",
+            [],
+        )
+        .unwrap();
+        for (i, uid) in [&proposal, &ended, &pending, &first, &second]
+            .into_iter()
+            .enumerate()
+        {
+            let mut v = vec![0.0_f32; crate::embed::DIM];
+            v[0] = 0.99 - i as f32 * 0.1;
+            v[1] = (1.0 - v[0] * v[0]).sqrt();
+            let blob: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+            let id = i as i64 + 1;
+            k.execute(
+                "INSERT INTO vectors(embedder, src_sha, vec) VALUES ('test', ?1, ?2)",
+                params![uid, blob],
+            )
+            .unwrap();
+            k.execute(
+                "INSERT INTO vector_keys(id, embedder, kind, key, src_sha)
+                 VALUES (?1, 'test', 'c', ?2, ?2)",
+                params![id, uid],
+            )
+            .unwrap();
+            k.execute(
+                "INSERT INTO vec_index(rowid, embedder, kind, repo, ts, session, embedding)
+                 VALUES (?1, 'test', 'c', ?2, 1000, 's', vec_bit(?3))",
+                params![id, R, crate::embed::bits(&v)],
+            )
+            .unwrap();
+        }
+        let mut vector = vec![0.0; crate::embed::DIM];
+        vector[0] = 1.0;
+        let found: Vec<String> = delivered_ranked(&s.raw, &k, &[], Some(&vector), R, 2)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.uid)
+            .collect();
+        assert_eq!(found, vec![first, second]);
     }
 
     /// Task 8 (D9): each text's full-text list and the vector list are fused by RRF, so a claim
