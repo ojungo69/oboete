@@ -134,6 +134,20 @@ fn run_io(
         )?;
         wrote = !events.is_empty();
         ended = crate::failure::now();
+        // MUST-M21 (D9): the session's last failed call, which its next prompt is matched against.
+        let failed = events.iter().rev().find(|(_, e)| {
+            e.kind == "tool"
+                && serde_json::from_str::<Value>(&e.body).is_ok_and(|b| b["failed"] == true)
+        });
+        if let Some((seq, _)) = failed {
+            let kept =
+                crate::hookstate::update(home, agent, session_label(&labels), "failed", |_| {
+                    Some(seq.to_string())
+                });
+            if let Err(e) = kept {
+                eprintln!("oboete: the failed call is not kept for the next prompt: {e}");
+            }
+        }
         // A manifest that cannot be read is no recording failure: the row is written.
         if injecting {
             manifest = checkout_manifest(home, &store, &labels, &settings);
@@ -272,7 +286,8 @@ fn injection(agent: &str, event: &str, text: &str) -> Value {
 }
 
 /// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db` with the
-/// event's time (`now` in a hook; the fixture's in a replay). Returns the appended events.
+/// event's time (`now` in a hook; the fixture's in a replay). Returns the appended events with
+/// their seqs.
 pub fn record(
     home: &Path,
     raw: &mut crate::raw::Raw,
@@ -281,7 +296,7 @@ pub fn record(
     payload: &Value,
     ts: i64,
     settings: &crate::capture::Settings,
-) -> Result<Vec<crate::raw::Event>> {
+) -> Result<Vec<(i64, crate::raw::Event)>> {
     // Count and append together so overlapping SessionEnd hooks cannot recover the same turn.
     // ponytail: one recovery lock per home; use per-session locks if end hooks contend.
     let _recovery = if agent == "cursor" && event == "SessionEnd" {
@@ -301,22 +316,26 @@ pub fn record(
     for (event, payload) in adapt(home, raw, agent, event, payload, settings)? {
         for mut c in crate::capture::events(agent, &event, &payload, ts, settings) {
             c.event.session = own_session(std::mem::take(&mut c.event.session), raw);
-            if let Err(e) = raw.append_with_ledger(&c.event, &c.ledger, settings.rules.version()) {
-                // The claim precedes capture; a failed append must let a later hook retry this step.
-                if agent == "agy"
-                    && event == "UserPromptSubmit"
-                    && let Some(step) = payload["step_index"].as_i64()
-                {
-                    crate::hookstate::take(
-                        home,
-                        agent,
-                        payload["session_id"].as_str().unwrap_or("unknown"),
-                        &format!("step-{step}"),
-                    );
+            let seq = match raw.append_with_ledger(&c.event, &c.ledger, settings.rules.version()) {
+                Ok(seq) => seq,
+                Err(e) => {
+                    // The claim precedes capture; a failed append must let a later hook retry this
+                    // step.
+                    if agent == "agy"
+                        && event == "UserPromptSubmit"
+                        && let Some(step) = payload["step_index"].as_i64()
+                    {
+                        crate::hookstate::take(
+                            home,
+                            agent,
+                            payload["session_id"].as_str().unwrap_or("unknown"),
+                            &format!("step-{step}"),
+                        );
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-            appended.push(c.event);
+            };
+            appended.push((seq, c.event));
         }
     }
     Ok(appended)
@@ -472,7 +491,11 @@ fn prompt_point(
         let session = own_session(session, raw);
         let branch = branch.unwrap_or_default();
         let text = strip_blocks(prompt, true);
-        let texts = [text.as_str()];
+        let failure = failed_call(home, raw, agent, label, rules);
+        let texts: Vec<&str> = [Some(text.as_str()), failure.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
         let candidates = match shortlist::of(&k, (agent, &session, &repo, &branch))? {
             Some(uids) => uids,
             None => {
@@ -523,6 +546,35 @@ fn prompt_point(
         }
     }
     Ok((!blocks.is_empty()).then(|| blocks.join("\n")))
+}
+
+/// MUST-M21 (D9): the call the session's hook kept as failed since its previous prompt, taken (a
+/// prompt reads it once): its tool and what it ran, never its output, gated with `rules`.
+fn failed_call(
+    home: &Path,
+    raw: &crate::raw::Raw,
+    agent: &str,
+    session: &str,
+    rules: &crate::redact::Rules,
+) -> Option<String> {
+    let mut kept = None;
+    let taken = crate::hookstate::update(home, agent, session, "failed", |v| {
+        kept = v;
+        None
+    });
+    if let Err(e) = taken {
+        eprintln!("oboete: the failed call is not read: {e}");
+    }
+    let seq: i64 = kept?.trim().parse().ok()?;
+    let e = crate::consumer::manifest::event(raw, raw.device(), seq).ok()??;
+    let b: Value = serde_json::from_str(&e.body).ok()?;
+    let input = b["input"].as_str().unwrap_or("");
+    let ran = crate::consumer::manifest::what_ran(input);
+    let text = redact::lines_with(
+        &format!("{} {ran}", b["tool"].as_str().unwrap_or("")),
+        rules,
+    );
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// A claim a prompt's block names: its lines, and its shown-set entry after it is named (`None`
@@ -1883,6 +1935,46 @@ mod tests {
         assert_eq!(p.prompt("c", "anything new"), "");
         std::fs::remove_file(p.s.home.path().join("config.toml")).unwrap();
         assert!(p.prompt("c", "anything new").contains("Kilo migrations"));
+    }
+
+    /// MUST-M21 (D9): a lesson SessionStart showed only as an index line comes back with its body
+    /// at the prompt after the session hits its failure, though the prompt shares no word with it;
+    /// the failure is read once.
+    #[test]
+    fn a_lesson_comes_back_when_a_later_session_hits_its_failure() {
+        let mut p = Prompts::new(true);
+        let text = "Cargo test needs the full feature.";
+        let repo = p.repo.clone();
+        let seq = p.s.said("s", &repo, 86_400_000, text);
+        let lesson = p.s.claim(seq, text, ("lesson", "decided", "user"), &[]);
+        for (i, text) in (2..).zip([
+            "Alpha builds use the nightly toolchain.",
+            "Bravo tests run under valgrind.",
+            "Charlie logs rotate every hour.",
+            "Delta configs live in yaml.",
+            "Echo services restart on failure.",
+            "Foxtrot caches expire after a day.",
+            "Golf deploys wait for approval.",
+            "Hotel queues drop stale messages.",
+            "India backups go to cold storage.",
+            "Juliet metrics export to statsd.",
+        ]) {
+            p.decided(i, text, &[]);
+        }
+        p.s.run();
+        p.hook("SessionStart", "a", json!({"source": "startup"}));
+        assert_eq!(
+            shown_set(p.s.home.path(), "claude", "a")[&lesson]["body"],
+            false
+        );
+        let failed = json!({"tool_name": "Bash", "tool_input": {"command": "cargo test --features full"},
+            "error": "error[E0432]: unresolved import"});
+        p.hook("PostToolUseFailure", "a", failed);
+        let asked = p.prompt("a", "why did that break?");
+        assert!(asked.contains(&format!("lesson: {text}")), "{asked}");
+        // Read once: the next prompt has no failure to match.
+        p.hook("SessionStart", "a", json!({"source": "compact"}));
+        assert_eq!(p.prompt("a", "why did that break?"), "");
     }
 
     /// Task 8 Step 5 (spec 4.7, 4.8): an injection keeps what it showed as the session's shown
