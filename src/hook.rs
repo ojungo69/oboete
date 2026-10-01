@@ -4,6 +4,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -119,7 +120,7 @@ fn run_io(
             took_compaction = Some(session_label(&labels).to_owned());
         }
         let settings = crate::capture::Settings::load(home)?;
-        let mut store = crate::raw::open(home)?;
+        let mut store = crate::raw::open_within(home, Duration::from_secs(2))?;
         let events = record(
             home,
             &mut store,
@@ -386,7 +387,7 @@ pub fn inject_text(home: &Path, cwd: &Path, session: Option<&str>) -> String {
     // the failure it reports.
     let manifest = (|| -> Result<Option<String>> {
         let settings = crate::capture::Settings::load(home)?;
-        let store = crate::raw::open(home)?;
+        let store = crate::raw::open_within(home, Duration::from_secs(2))?;
         let labels = json!({"session_id": session.unwrap_or("unknown"), "cwd": cwd});
         Ok(checkout_manifest(home, &store, &labels, &settings))
     })()
@@ -1187,6 +1188,41 @@ mod tests {
             .unwrap();
         assert!(text.contains("recording has failed since"), "{text}");
         assert_eq!(crate::failure::since(home).map(|f| f.1), Some(first));
+    }
+
+    #[test]
+    fn a_hook_open_timeout_marks_the_failure_before_its_agent_timeout() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        drop(crate::raw::open(home).unwrap());
+        let writer = Connection::open(home.join("raw.db")).unwrap();
+        writer
+            .execute_batch("DROP INDEX ops_exclusions; BEGIN IMMEDIATE;")
+            .unwrap();
+        let _contending = crate::worker::contending();
+        let _worker = crate::worker::lock(home).unwrap();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let prompt = br#"{"session_id":"s","prompt":"first"}"#;
+                started.send(()).unwrap();
+                let result = run_io(home, "claude", "UserPromptSubmit", &prompt[..], Vec::new());
+                sent.send(result).unwrap();
+            });
+            ready.recv().unwrap();
+            let result = received.recv_timeout(std::time::Duration::from_millis(2_500));
+            writer.execute_batch("ROLLBACK").unwrap();
+            assert!(
+                result
+                    .expect("a hook must return before its agent can kill it")
+                    .is_err()
+            );
+            assert_eq!(
+                crate::failure::since(home).map(|failure| failure.0),
+                Some(crate::failure::Class::Busy)
+            );
+        });
     }
 
     #[test]

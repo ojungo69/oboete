@@ -258,11 +258,23 @@ pub fn exists(home: &Path) -> bool {
     home.join("raw.db").exists() || home.join("raw.db.restored").exists()
 }
 
-/// `<home>/raw.db`: WAL, synchronous=FULL (and fullfsync on macOS), 2 s busy timeout.
+/// `<home>/raw.db`: WAL, synchronous=FULL (and fullfsync on macOS), 2 s SQLite busy timeout.
+/// Non-hook opens share a 10 s initialization deadline; hooks use `open_within` with 2 s.
 pub fn open(home: &Path) -> Result<Raw> {
+    open_within(home, crate::db::OPEN_WRITE_WAIT)
+}
+
+/// Open with one lock-wait budget for restore, WAL, schema, column and device initialization.
+/// Hooks pass 2 s so a failed open reaches MUST-M16's marker before the agent kills the hook.
+pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
+    let deadline = std::time::Instant::now() + wait;
     let path = home.join("raw.db");
     crate::db::private(home, 0o700);
-    let swap = swap_lock(home, false, OPEN_WAIT)?;
+    let swap = swap_lock(
+        home,
+        false,
+        OPEN_WAIT.min(deadline.saturating_duration_since(std::time::Instant::now())),
+    )?;
     // A restore that stopped after moving the damaged file aside and before renaming the rebuilt
     // one in: `raw.db.restored` is only ever a whole rebuild (it gets that name once its records
     // are committed), so the rename is finished here instead of creating an empty store.
@@ -278,17 +290,24 @@ pub fn open(home: &Path) -> Result<Raw> {
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     #[cfg(test)]
     crate::crash::arm(&conn);
-    crate::db::wal(&conn, "FULL")?;
+    crate::db::wal_until(&conn, "FULL", deadline)?;
     #[cfg(target_os = "macos")]
     conn.execute_batch("PRAGMA fullfsync=ON;")?;
-    conn.execute_batch(SCHEMA).context("raw schema")?;
+    crate::db::retry_busy(&conn, deadline, || Ok(conn.execute_batch(SCHEMA)?))
+        .context("raw schema")?;
     // A raw.db from before the ledger named its field (milestone 2 Task 1's schema).
-    crate::db::ensure_column(&mut conn, "ledger", "field", "TEXT NOT NULL DEFAULT ''")
-        .context("migrate ledger")?;
+    crate::db::ensure_column_until(
+        &mut conn,
+        "ledger",
+        "field",
+        "TEXT NOT NULL DEFAULT ''",
+        deadline,
+    )
+    .context("migrate ledger")?;
     for file in ["raw.db", "raw.db-wal", "raw.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
-    crate::db::ensure_device(&conn, &path).context("device id")?;
+    crate::db::ensure_device_until(&conn, &path, deadline).context("device id")?;
     let device = conn.query_row("SELECT value FROM meta WHERE key='device_id'", [], |r| {
         r.get(0)
     })?;
@@ -312,8 +331,8 @@ impl std::fmt::Display for Restoring {
 
 impl std::error::Error for Restoring {}
 
-/// How long an open waits for a restore to finish swapping the file, and how long a restore
-/// waits for open stores to close. A hook's write fails after its wait (MUST-M16's marker).
+/// Restore-lock waits: opens wait at most 2 s within their initialization budget (hooks 2 s,
+/// other callers 10 s); a restore waits at most 10 s for open stores to close.
 const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 const SWAP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -1743,6 +1762,85 @@ mod tests {
             })
             .collect();
         assert_eq!(bodies.len(), 100);
+    }
+
+    #[test]
+    fn an_initialized_store_opens_without_waiting_for_a_writer() {
+        let home = tempfile::tempdir().unwrap();
+        let writer = open(home.path()).unwrap();
+        writer.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| sent.send(open(home.path())).unwrap());
+            let opened = received.recv_timeout(std::time::Duration::from_secs(2));
+            writer.conn.execute_batch("ROLLBACK").unwrap();
+            let opened = opened.expect("opening an initialized store must not need a write lock");
+            assert_eq!(opened.unwrap().device(), writer.device());
+        });
+    }
+
+    #[test]
+    fn missing_open_state_waits_past_the_busy_timeout_for_a_writer() {
+        // Each case needs a different open-time write. Hold all locks together so the test
+        // takes one 2.5 s wait, rather than one wait per case.
+        let changes = [
+            "DROP INDEX ops_exclusions",
+            "DROP TABLE ops",
+            "ALTER TABLE ledger DROP COLUMN field",
+            "DELETE FROM meta",
+            "PRAGMA journal_mode=DELETE",
+        ];
+        let homes: Vec<_> = changes
+            .iter()
+            .map(|_| tempfile::tempdir().unwrap())
+            .collect();
+        let writers: Vec<_> = homes
+            .iter()
+            .zip(changes)
+            .map(|(home, sql)| {
+                let writer = open(home.path()).unwrap();
+                writer.conn.execute_batch(sql).unwrap();
+                writer.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                writer
+            })
+            .collect();
+        std::thread::scope(|scope| {
+            let (started, received) = std::sync::mpsc::channel();
+            let threads: Vec<_> = homes
+                .iter()
+                .map(|home| {
+                    let started = started.clone();
+                    scope.spawn(move || {
+                        started.send(()).unwrap();
+                        open(home.path())
+                    })
+                })
+                .collect();
+            for _ in &threads {
+                received.recv().unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2_500));
+            for writer in &writers {
+                writer.conn.execute_batch("ROLLBACK").unwrap();
+            }
+            for (index, thread) in threads.into_iter().enumerate() {
+                let mut opened = thread.join().unwrap().unwrap();
+                if index != 3 {
+                    assert_eq!(opened.device(), writers[index].device());
+                }
+                assert_eq!(opened.append(&test_event("after the lock")).unwrap(), 1);
+                let timeout: i64 = opened
+                    .conn
+                    .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(timeout, 2_000);
+                let synchronous: i64 = opened
+                    .conn
+                    .query_row("PRAGMA synchronous", [], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(synchronous, 2);
+            }
+        });
     }
 
     #[test]
