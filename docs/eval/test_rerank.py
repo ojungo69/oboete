@@ -130,8 +130,9 @@ def test_a_later_failure_or_a_failed_write_keeps_the_previous_run(tmp_path, monk
 
 def test_p50_is_the_median_and_p95_the_nearest_rank(tmp_path, monkeypatch, capsys):
     # Skewed so that the median, the mean, the nearest-rank p95 and the maximum all differ.
-    walls = [.1] * 10 + [1.] * 9 + [5.]
-    cpus = [.2] * 10 + [2.] * 9 + [8.]
+    # Not in order, so the percentiles must sort.
+    walls = [5.] + [1.] * 9 + [.1] * 10
+    cpus = [2.] * 9 + [8.] + [.2] * 10
     qids = [f'q{i:02}' for i in range(20)]
     argv = inputs(tmp_path, {q: ['a'] for q in qids}, {q: 'Q' for q in qids}, {'a': 'A'})
     clock = lambda spans: iter(t for d in spans for t in (0., d))
@@ -143,14 +144,17 @@ def test_p50_is_the_median_and_p95_the_nearest_rank(tmp_path, monkeypatch, capsy
     assert 'CPU p50=1.100000s p95=2.000000s n=20' in printed
 
 
-@pytest.mark.parametrize('case', ['not empty', 'symbolic link'])
+@pytest.mark.parametrize('case', ['not empty', 'symbolic link', 'claimed'])
 def test_a_wrong_export_directory_is_refused_before_anything_is_deleted(tmp_path, case):
     out = tmp_path / 'onnx'
     out.mkdir()
-    if case == 'not empty':
+    if case != 'symbolic link':
         (out / '.export-cache').mkdir()
         (out / '.export-cache' / 'kept').write_text('x')
+    if case == 'not empty':
         (out / 'model.onnx').write_text('earlier export')
+    elif case == 'claimed':
+        (out / '.export-cache' / 'claimed').write_text('')
     else:
         elsewhere = tmp_path / 'elsewhere'
         elsewhere.mkdir()

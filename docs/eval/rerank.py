@@ -13,7 +13,7 @@ From docs/eval, with Python 3.12:
 Export only when the owner has budgeted its disk use. Put uv's environment and
 caches inside the same disposable directory as the download and export scratch:
   out="$HOME/.oboete/eval/reranker-onnx"
-  mkdir -p "$out" && mkdir "$out/.export-cache" "$out/.export-cache/tmp"
+  mkdir -p "$out" && mkdir "$out/.export-cache" "$out/.export-cache/tmp" &&
   UV_CACHE_DIR="$out/.export-cache/uv" \
     UV_PYTHON_INSTALL_DIR="$out/.export-cache/python" \
     HF_HOME="$out/.export-cache/hf" XDG_CACHE_HOME="$out/.export-cache/xdg" \
@@ -29,9 +29,12 @@ already run on CPU. Keep every package version unchanged.
 
 The export directory must be empty except for .export-cache, which is deleted
 after the export, even on its failure. mkdir without -p refuses an existing
-.export-cache: one export per directory at a time, and a leftover is never
-reused. A directory that fails the check (not empty, or .export-cache a
-symbolic link) is left as it is; remove its .export-cache by hand. Only
+.export-cache, and uv runs only after it: one export per directory at a time,
+and a leftover is never reused. The export also claims .export-cache with a file
+only one invocation can create, so a run started without that command cannot
+take another's. A directory that fails a check (not empty, .export-cache a
+symbolic link, or already claimed) is left as it is; remove its .export-cache
+by hand. Only
 model.onnx, its external data, and the revision's tokenizer files survive.
 Downloads are anonymous (no token, no .netrc); no subprocess is started by this
 script.
@@ -149,12 +152,14 @@ def rerank_run(run, docs, questions, score=None, k=50, max_length=512, threads=4
                      for i, key in enumerate(ordered))
     # A scoring or write failure must neither leave a plausible but incomplete TREC run nor lose
     # the previous one: written beside it, then moved over it (Codex on d7b0be3).
-    part = out.with_name(out.name + '.part')
+    # A new file of its own (O_EXCL): no link is followed, and two runs never share one.
+    fd, part = tempfile.mkstemp(dir=out.parent, prefix=f'{out.name}.', suffix='.part')
     try:
-        part.write_text(''.join(lines), encoding='utf-8')
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(''.join(lines))
         os.replace(part, out)
     except BaseException:
-        part.unlink(missing_ok=True)
+        Path(part).unlink(missing_ok=True)
         raise
     if timed:
         timing_summary(times)
@@ -231,6 +236,12 @@ def export_model(out):
         raise ValueError('.export-cache must be a directory, not a symbolic link')
     if any(path.name != '.export-cache' for path in out.iterdir()):
         raise ValueError('export directory must be empty except for .export-cache')
+    (out / '.export-cache').mkdir(exist_ok=True)
+    try:
+        (out / '.export-cache' / 'claimed').open('x').close()
+    except FileExistsError:
+        raise ValueError('.export-cache belongs to another export, or one that stopped: '
+                         'remove it by hand') from None
     with export_cache(out) as cache:
         print(f'{MODEL} revision={REVISION}', flush=True)
         # Imports come after cache setup so even package initialization stays in scratch.
