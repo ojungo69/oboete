@@ -1279,6 +1279,14 @@ pub struct Change {
     pub body: Option<String>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test seam: run between `claim`'s history read and its `Pending` read, as a worker
+    /// committing there would.
+    static BETWEEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Claim `id` (a uid, or the first characters of one) as the viewer shows it: `None` when the id
 /// names no claim, several, or something else (milestone 4 D11).
 pub fn claim(home: &Path, id: &str) -> Result<Option<ClaimView>> {
@@ -1289,6 +1297,11 @@ pub fn claim(home: &Path, id: &str) -> Result<Option<ClaimView>> {
     let k = crate::knowledge::open(home)?;
     claims::schema(&k)?;
     crate::consumer::imported::schema(&k)?;
+    // One snapshot of knowledge.db for every read below, so the history and what `Pending`
+    // reads (Anchors' checkpoint, the evidence) agree: Anchors dropping a derivation and moving
+    // its checkpoint between them would show the body it dropped (Codex's security review of
+    // Task 7). After the schemas: one made inside the snapshot would have to write.
+    let _snapshot = k.unchecked_transaction()?;
     let Some(Named::Claim(uid)) = named(&raw, &k, id)? else {
         return Ok(None);
     };
@@ -1341,6 +1354,10 @@ pub fn claim(home: &Path, id: &str) -> Result<Option<ClaimView>> {
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
+    #[cfg(test)]
+    if let Some(between) = BETWEEN.take() {
+        between();
+    }
     // A derivation whose quote a tombstone the worker has yet to apply masks is left out, as
     // Anchors will drop it: its body may say what the mask hides (Codex's security review).
     let pending = claims::Pending::read(&raw, &k)?;
@@ -3328,61 +3345,75 @@ mod tests {
         use crate::raw::OpKind;
         use serde_json::json;
         const HOME: &str = "OBOETE_TEST_QUOTE_HOME";
-        const UID: &str = "OBOETE_TEST_QUOTE_UID";
-        const CODE: &str = "654321";
-        if let (Ok(home), Ok(uid)) = (std::env::var(HOME), std::env::var(UID)) {
+        const UIDS: &str = "OBOETE_TEST_QUOTE_UIDS";
+        // Each claim's quote, the words it still shows and the code it hides: one rule needs the
+        // record's words before the quote, and two others interfere, the record's mask (the name)
+        // taking the context the rule on the quote alone needs (Codex on 908b8bf).
+        const CASES: [(&str, &str, &str); 2] = [
+            ("ACME deploy; otp=654321.", "otp=654321", "otp="),
+            (
+                "Owner note: secret=ZETA pin=987654",
+                "ZETA pin=987654",
+                " pin=",
+            ),
+        ];
+        if let (Ok(home), Ok(uids)) = (std::env::var(HOME), std::env::var(UIDS)) {
             let home = std::path::PathBuf::from(home);
             crate::redact::set_home(&home).unwrap();
-            let view = claim(&home, &uid).unwrap().unwrap();
-            let quote = &view.quotes[0].text;
-            assert!(
-                quote.starts_with("otp=") && !quote.contains(CODE),
-                "{quote}"
-            );
-            let text = get(&home, &uid).unwrap().unwrap();
-            assert!(text.contains("otp=") && !text.contains(CODE), "{text}");
+            for (uid, (_, quote, shown)) in uids.split(',').zip(CASES) {
+                let code = &quote[quote.len() - 6..];
+                let view = claim(&home, uid).unwrap().unwrap();
+                let text = &view.quotes[0].text;
+                assert!(text.contains(shown) && !text.contains(code), "{text}");
+                let text = get(&home, uid).unwrap().unwrap();
+                assert!(text.contains(shown) && !text.contains(code), "{text}");
+            }
             return;
         }
         let mut s = Store::new();
-        let record = format!("ACME deploy; otp={CODE}.");
-        let seq = s.said("s", R, 1_000, &record);
-        let event = crate::raw::Event {
-            kind: "prompt".into(),
-            ..crate::raw::test_event(&json!({ "prompt": record }).to_string())
-        };
-        let quote = format!("otp={CODE}");
-        let long = crate::curate::long_text(&event).unwrap();
-        let evidence = Evidence {
-            device: s.raw.device().to_owned(),
-            seq,
-            offset: long.find(&quote).unwrap() as i64,
-            length: quote.len() as i64,
-            sentence: 0,
-            quote,
-            claim_at: None,
-        };
-        let uid = crate::claims::uid("decision", &evidence);
-        let op = ClaimOp {
-            id: "c".into(),
-            kind: "decision".into(),
-            status: "decided".into(),
-            speaker: "user".into(),
-            scope: "repo".into(),
-            body: "Deploy through ACME with the one-time code.".into(),
-            evidence: vec![evidence],
-            supersedes: Vec::new(),
-            recipe: "test".into(),
-            tier: 1,
-            why: String::new(),
-            tainted: false,
-        };
-        let op = serde_json::to_value(op).unwrap();
-        s.raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
+        let mut uids = Vec::new();
+        for (record, quote, _) in CASES {
+            let seq = s.said("s", R, 1_000, record);
+            let event = crate::raw::Event {
+                kind: "prompt".into(),
+                ..crate::raw::test_event(&json!({ "prompt": record }).to_string())
+            };
+            let long = crate::curate::long_text(&event).unwrap();
+            let evidence = Evidence {
+                device: s.raw.device().to_owned(),
+                seq,
+                offset: long.find(quote).unwrap() as i64,
+                length: quote.len() as i64,
+                sentence: 0,
+                quote: quote.into(),
+                claim_at: None,
+            };
+            uids.push(crate::claims::uid("decision", &evidence));
+            let op = ClaimOp {
+                id: "c".into(),
+                kind: "decision".into(),
+                status: "decided".into(),
+                speaker: "user".into(),
+                scope: "repo".into(),
+                body: "Deploy with the one-time code.".into(),
+                evidence: vec![evidence],
+                supersedes: Vec::new(),
+                recipe: "test".into(),
+                tier: 1,
+                why: String::new(),
+                tainted: false,
+            };
+            let op = serde_json::to_value(op).unwrap();
+            s.raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
+        }
         s.run();
-        // The rule comes after the claim, and no worker runs before the read.
+        // The rules come after the claims, and no worker runs before the read.
         std::fs::write(
             s.home.path().join("config.toml"),
-            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'ACME.*otp=([0-9]{6})', secret_group = 1 }]\n",
+            "[redaction]\nextra_rules = [\
+             { id = \"acme\", regex = 'ACME.*otp=([0-9]{6})', secret_group = 1 }, \
+             { id = \"name\", regex = 'secret=(ZETA)', secret_group = 1 }, \
+             { id = \"pin\", regex = '^ZETA pin=([0-9]{6})$', secret_group = 1 }]\n",
         )
         .unwrap();
         let out = std::process::Command::new(std::env::args_os().next().unwrap())
@@ -3391,7 +3422,7 @@ mod tests {
                 "search::b::tests::a_quote_is_gated_with_its_records_words",
             ])
             .env(HOME, s.home.path())
-            .env(UID, &uid)
+            .env(UIDS, uids.join(","))
             .output()
             .unwrap();
         let printed = String::from_utf8_lossy(&out.stdout);
@@ -3471,15 +3502,37 @@ mod tests {
                 "Use the staging deploy key."
             ]
         );
+        // The range is on the record's body as stored (`said`'s JSON).
+        let stored = serde_json::json!({ "prompt": leaked }).to_string();
         let target = crate::raw::Target::Range {
             device: s.raw.device().to_owned(),
             seq: second,
-            offset: leaked.find("acme").unwrap() as i64,
+            offset: stored.find("acme").unwrap() as i64,
             length: "acme-123456".len() as i64,
         };
         s.raw.append_tombstone(target).unwrap();
         assert_eq!(bodies(&s), ["Use the staging deploy key."]);
-        s.run();
+        // The worker applies it between `claim`'s history read and its `Pending` read: the one
+        // snapshot keeps the two in step, and the dropped derivation stays out.
+        let home = s.home.path().to_owned();
+        BETWEEN.set(Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+        })));
         assert_eq!(bodies(&s), ["Use the staging deploy key."]);
+        assert!(BETWEEN.take().is_none(), "the worker ran inside the read");
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let derivations: i64 = k
+            .query_row(
+                "SELECT COUNT(*) FROM derivations WHERE uid = ?1",
+                [&uid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(derivations, 1, "Anchors dropped the masked derivation");
+        let view = claim(s.home.path(), &uid).unwrap().unwrap();
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains("123456"), "{json}");
+        let record = get(s.home.path(), &s.key(second)).unwrap().unwrap();
+        assert!(!record.contains("123456"), "{record}");
     }
 }
