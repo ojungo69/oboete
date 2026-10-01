@@ -100,6 +100,12 @@ fn doctor_prints_inject_and_chain_as_they_apply() {
         text.contains("injection: the manifest, up to 2000 characters"),
         "{text}"
     );
+    // Task 8's settings, at their defaults.
+    assert!(text.contains("per-prompt injection: off\n"), "{text}");
+    assert!(
+        text.contains("corrections: on, up to 800 characters at the next prompt"),
+        "{text}"
+    );
     let providers = text.split_once("providers (chain order):").unwrap().1;
     let mut lines = providers.lines();
     lines
@@ -115,11 +121,18 @@ fn doctor_prints_inject_and_chain_as_they_apply() {
         text.contains("  warning: [chain] timeout_s: no chain entry is named \"nobody\""),
         "{text}"
     );
-    let off = doctor(&format!("{entries}[inject]\nsession_start = false\n"));
+    let off = doctor(&format!(
+        "{entries}[inject]\nsession_start = false\nper_prompt = true\nper_prompt_chars = 900\ncorrection = false\n"
+    ));
     assert!(
         off.contains("injection: off, no manifest is shown to an agent"),
         "{off}"
     );
+    assert!(
+        off.contains("per-prompt injection: on, up to 900 characters a prompt"),
+        "{off}"
+    );
+    assert!(off.contains("corrections: off\n"), "{off}");
     assert!(!off.contains("warning:"), "{off}");
     let wrong = doctor(&format!("{entries}[inject]\nsession_start = \"false\"\n"));
     // With the file it is about, as the capture line gives it (OpenCodeReview on #267).

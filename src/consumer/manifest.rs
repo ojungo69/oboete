@@ -5,6 +5,7 @@
 
 use crate::manifest::{self, Line, Parts};
 use crate::raw::{Event, Item, Raw, Target};
+use crate::redact::Mapped;
 use crate::worker::Consumer;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -53,8 +54,13 @@ const SESSIONS: usize = 5;
 /// ponytail: the owner lines a build reads (a negation older than these no longer matters); a
 /// claims table replaces the scan in milestone 3.
 const OWNER_LINES: i64 = 500;
-/// Spec 4.9: sessions with records this close to the checkout's last one are active.
+/// Spec 4.9, MUST-M8: sessions with a record this close to the time SessionStart reads are active.
 const ACTIVE_MS: i64 = 30 * 60 * 1000;
+/// MUST-M9: the backlog is shown once its oldest record has waited this long.
+const LAG_MS: i64 = 2 * 60 * 1000;
+/// The stored ruleset's format: a row built before the read-time lines (Task 8) holds the other
+/// sessions and the backlog count in its text, so it is built again.
+const FORMAT: &str = "m4";
 /// D9's `git status` in the worker, given up after this.
 const GIT_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -89,26 +95,165 @@ fn schema(k: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// What SessionStart shows for this checkout (spec 4.4, D4 of milestone 4's plan): the manifest
-/// its records built, with the delivered claims and the digest read from knowledge.db's indexes
-/// (`with_delivered`). Read-only: a hook never writes knowledge.db, and none is made when the
-/// worker has not run yet. The session it is shown to is left out of "Other active sessions"
-/// (after a compaction the text was built while that session was running).
+/// What SessionStart shows (`text`), and the claims shown with their bodies, which a later
+/// injection need not repeat (spec 4.7).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Start {
+    pub text: String,
+    pub shown: Vec<String>,
+}
+
+/// What SessionStart shows for this checkout (spec 4.4, D3 and D4 of milestone 4's plan): the
+/// manifest its records built, with the delivered claims and the digest read from knowledge.db's
+/// indexes (`with_delivered`), and the checkout's backlog and the repository's other live sessions
+/// read at `now` (`live`; MUST-M9, M8). Each field read is gated with `rules` before it is
+/// formatted, so a rule anchored to a field still matches it, the whole is gated again and cut to
+/// `cap` at a line. Read-only: a hook never writes knowledge.db, and none is made when the worker
+/// has not run yet. `session` is the reader's, which is no other session.
+#[allow(clippy::too_many_arguments)]
 pub fn text(
     home: &Path,
     raw: &Raw,
     repo: &str,
     branch: &str,
     session: &str,
-    ruleset: &str,
-) -> Result<Option<String>> {
+    rules: &crate::redact::Rules,
+    cap: usize,
+    now: i64,
+) -> Result<Option<Start>> {
     let path = home.join("knowledge.db");
     if !path.exists() {
         return Ok(None);
     }
     let k = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let manifest = stored(&k, raw, repo, branch, ruleset)?.map(|t| without_session(&t, session));
-    with_delivered(&k, raw, repo, manifest)
+    let manifest = stored(&k, raw, repo, branch, &stamp(rules.version()))?;
+    let live = live(&k, raw, repo, branch, session, rules, now)?;
+    let Some((packet, bodies)) = with_delivered(&k, raw, repo, manifest, &live, rules)? else {
+        return Ok(None);
+    };
+    let (gated, from) = packet.outbound(rules);
+    let text = manifest::cut(&gated, cap);
+    // Match the surviving occurrence, not another claim with the same rendered line.
+    let shown = bodies
+        .into_iter()
+        .filter_map(|(range, line, uid)| {
+            let at = from.iter().position(|&(s, _)| s == range.start)?;
+            let end = at + line.len();
+            (text.get(at..end) == Some(line.as_str())
+                && (at == 0 || text.as_bytes()[at - 1] == b'\n')
+                && text.as_bytes().get(end).is_none_or(|&b| b == b'\n')
+                && from.get(end - 1).is_some_and(|&(_, e)| e == range.end)
+                && from[at..end]
+                    .iter()
+                    .all(|&(s, e)| s >= range.start && e <= range.end))
+            .then_some(uid)
+        })
+        .collect();
+    Ok(Some(Start { text, shown }))
+}
+
+/// The stored ruleset of a row built under rules of `version` in this format.
+fn stamp(version: &str) -> String {
+    format!("{FORMAT}/{version}")
+}
+
+/// What `text` reads when it is read, not stored (D3): MUST-M9's backlog, the checkout's records
+/// past the device's curation checkpoint once the oldest has waited `LAG_MS`, and MUST-M8's other
+/// sessions on the repository (this device's; sync brings the others' in milestone 6): at most
+/// `SESSIONS`, each with a record in the `ACTIVE_MS` before `now` and no end, the newest first,
+/// with its agent, branch and minutes since. A stored list kept naming a checkout left idle.
+/// Nothing while a tombstone the worker has not applied may change the facts (as `stored`).
+fn live(
+    k: &Connection,
+    raw: &Raw,
+    repo: &str,
+    branch: &str,
+    session: &str,
+    rules: &crate::redact::Rules,
+    now: i64,
+) -> Result<String> {
+    let device = raw.device();
+    if !exists(k, "table", "manifest_facts")?
+        || !raw
+            .tombstones_after(
+                device,
+                crate::knowledge::checkpoint::get(k, "manifest", device)?,
+            )?
+            .is_empty()
+    {
+        return Ok(String::new());
+    }
+    let mut out = String::new();
+    // A record the checkpoint is inside of is curated only up to its offset.
+    let (checkpoint, part) = raw.curation_checkpoint(device)?;
+    let curated = if part.is_some() {
+        checkpoint - 1
+    } else {
+        checkpoint
+    };
+    let (waiting, oldest): (i64, Option<i64>) = k.query_row(
+        "SELECT COUNT(*), (SELECT ts FROM manifest_facts
+           WHERE device = ?1 AND repo = ?2 AND branch = ?3 AND fact = 'event' AND seq > ?4
+           ORDER BY seq LIMIT 1)
+         FROM manifest_facts
+         WHERE device = ?1 AND repo = ?2 AND branch = ?3 AND fact = 'event' AND seq > ?4",
+        params![device, repo, branch, curated],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if let Some(ts) = oldest.filter(|ts| now - ts > LAG_MS) {
+        out.push_str(&format!(
+            "## Backlog\n{waiting} record(s) / {} min not yet curated\n",
+            (now - ts) / 60_000
+        ));
+    }
+    // One aggregate, so SQLite takes the branch and time from each session's last record.
+    let sessions: Vec<(String, String, i64, i64)> = k
+        .prepare(
+            "SELECT session, branch, ts, MAX(seq) FROM manifest_facts
+             WHERE device = ?1 AND repo = ?2 AND fact = 'event' AND ts >= ?3
+             GROUP BY session ORDER BY ts DESC, session",
+        )?
+        .query_map(params![device, repo, now - ACTIVE_MS], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut lines = Vec::new();
+    for (other, on, ts, seq) in sessions {
+        if other == session {
+            continue;
+        }
+        let ended = k
+            .query_row(
+                "SELECT 1 FROM manifest_facts
+                 WHERE device = ?1 AND repo = ?2 AND fact = 'end' AND seq = ?3",
+                params![device, repo, seq],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        // Its last record read back for its agent: none once a tombstone removed it.
+        let Some(e) = event(raw, device, seq)?.filter(|_| !ended) else {
+            continue;
+        };
+        let gate = |s: &str| one_line(&crate::redact::outbound_with(s, rules), CLIP);
+        let on = if on.is_empty() {
+            "no branch".to_owned()
+        } else {
+            gate(&on)
+        };
+        lines.push(format!(
+            "- {} on {on}, {} min ago\n",
+            gate(&e.agent),
+            (now - ts).max(0) / 60_000
+        ));
+        if lines.len() == SESSIONS {
+            break;
+        }
+    }
+    if !lines.is_empty() {
+        out.push_str(&format!("## Other active sessions\n{}", lines.concat()));
+    }
+    Ok(out)
 }
 
 /// Whether knowledge.db has the table or view `name` (`kind`): absent until the worker has run
@@ -126,8 +271,8 @@ pub(crate) fn exists(k: &Connection, kind: &str, name: &str) -> Result<bool> {
 /// The manifest the worker keeps for the checkout, if its records built one. None while the saved
 /// text may show what raw now hides (D8): a tombstone the worker has not applied yet, or a
 /// checkout still marked for a rebuild. None too when it was built under other redaction rules
-/// than `ruleset` (the version now): its fields were flattened and clipped, so a rule of another
-/// shape cannot be applied to it after.
+/// or in another format than `ruleset` (`stamp`): its fields were flattened and clipped, so a rule
+/// of another shape cannot be applied to it after.
 fn stored(
     k: &Connection,
     raw: &Raw,
@@ -161,14 +306,19 @@ fn stored(
     Ok(text.filter(|(_, built)| built == ruleset).map(|(t, _)| t))
 }
 
+/// A body line's source range, its field-gated text, and the claim's uid.
+type Body = (std::ops::Range<usize>, String, String);
+
 /// Spec 4.4's SessionStart around the checkout's `manifest`: the global preferences first; the
 /// manifest, with `repo`'s delivered decisions, preferences, open items and lessons (spec 3.4) in
-/// its third place (spec 4.9's order) and the digest after them while it is fresh; last, the rest
-/// of the delivered claims one line each, after the tools that find more, so that the hook's cut
-/// drops them first. About 10 claims have bodies, chosen by the words they share with the
-/// manifest's files and last prompt, then by recency, each earlier claim with the later claim that
-/// ended it (`claims::units`), and listed newest first. A checkout with no manifest to show (a new
-/// branch, a dirty manifest, a tombstone not yet applied) still gets them (D4).
+/// its third place (spec 4.9's order) and the digest after them while it is fresh; `live` after
+/// the manifest; last, the rest of the delivered claims one line each, after the tools that find
+/// more, so that the cut drops them first. About 10 claims have bodies, chosen by the words they
+/// share with the manifest's files, last prompt and last failing command, then by recency, each
+/// earlier claim with the later claim that ended it (`claims::units`), and listed newest first. A
+/// checkout with no manifest to show (a new branch, a dirty manifest, a tombstone not yet applied)
+/// still gets them (D4). Each body and digest line is gated with `rules` before it is flattened
+/// and clipped. The text, with each line that shows a claim's body and its uid.
 /// Read when the text is (D3): claims come from curation, which runs while the owner is idle and
 /// appends no record this consumer steps on, so a section built with the text would miss the last
 /// session's decisions; and what the worker has not applied yet (`claims::Pending`) is left out.
@@ -178,89 +328,10 @@ fn with_delivered(
     raw: &Raw,
     repo: &str,
     manifest: Option<String>,
-) -> Result<Option<String>> {
+    live: &str,
+    rules: &crate::redact::Rules,
+) -> Result<Option<(Mapped, Vec<Body>)>> {
     use crate::claims::{self, Claim};
-    if !exists(k, "view", "active")? {
-        return Ok(manifest);
-    }
-    let pending = claims::Pending::read(raw, k)?;
-    let hidden = |uid: &str| pending.touches(k, uid);
-    let mut prefs = Vec::new();
-    for c in claims::global(k)? {
-        if !hidden(&c.uid)? {
-            prefs.push(c);
-        }
-    }
-    let words = manifest.as_deref().map(terms).unwrap_or_default();
-    let mut ranked = claims::decisions(k, repo, POOL)?;
-    // Stable: among claims that share as many words, the newest first.
-    ranked.sort_by_cached_key(|c| std::cmp::Reverse(shared(&c.body, &words)));
-    let (mut bodies, rest) = claims::place(claims::units(k, &ranked, hidden)?, BODIES);
-    let (mut index, _) = claims::place(rest, INDEX);
-    claims::newest_first(&mut bodies);
-    claims::newest_first(&mut index);
-    let date = |c: &Claim| crate::db::utc(c.valid_from)[..10].to_owned();
-    // An earlier claim names the claim above it that ended it.
-    let full = |c: &Claim, unit: &[Claim]| {
-        let ended = c
-            .later
-            .as_ref()
-            .and_then(|l| unit.iter().find(|u| u.uid == *l))
-            .map(|l| format!(", superseded by the {} {} above", date(l), l.kind))
-            .unwrap_or_default();
-        format!(
-            "- {} {}{ended}: {}\n",
-            date(c),
-            c.kind,
-            one_line(&c.body, CLIP)
-        )
-    };
-    let id = |uid: &str| uid.chars().take(12).collect::<String>();
-    let brief = |c: &Claim| {
-        let ended = c
-            .later
-            .as_ref()
-            .map(|l| format!(", superseded by {}", id(l)))
-            .unwrap_or_default();
-        format!(
-            "- {} {} {}{ended}: {}\n",
-            id(&c.uid),
-            date(c),
-            c.kind,
-            one_line(&c.body, BRIEF)
-        )
-    };
-    let section = |title: &str, lines: String| {
-        if lines.is_empty() {
-            String::new()
-        } else {
-            format!("## {title}\n{lines}")
-        }
-    };
-    let first = section(
-        "Global preferences",
-        prefs.iter().map(|c| full(c, &[])).collect(),
-    );
-    let mut middle = section(
-        "Decisions and open items",
-        bodies
-            .iter()
-            .flat_map(|u| u.iter().map(|c| full(c, u)))
-            .collect(),
-    );
-    if let Some(digest) = crate::digest::fresh(k, repo, hidden)? {
-        let lines: String = digest
-            .iter()
-            .map(|l| format!("- {}\n", one_line(l, CLIP)))
-            .collect();
-        middle.push_str(&section("Digest of the last session", lines));
-    }
-    let last = if bodies.is_empty() && index.is_empty() {
-        String::new()
-    } else {
-        let lines: String = index.iter().flatten().map(brief).collect();
-        format!("## More from memory\n{TOOLS}\n{lines}")
-    };
     let manifest = manifest.unwrap_or_default();
     let at = AFTER_DECISIONS
         .iter()
@@ -273,37 +344,146 @@ fn with_delivered(
         })
         .min()
         .unwrap_or(manifest.len());
-    let text = format!(
-        "{first}{}{middle}{}{last}",
-        &manifest[..at],
-        &manifest[at..]
+    let (mut first, mut middle, mut last) =
+        (Mapped::default(), Mapped::default(), Mapped::default());
+    let (mut bodies, mut middle_bodies): (Vec<Body>, Vec<Body>) = (Vec::new(), Vec::new());
+    if exists(k, "view", "active")? {
+        let pending = claims::Pending::read(raw, k)?;
+        let hidden = |uid: &str| pending.touches(k, uid);
+        let mut prefs = Vec::new();
+        for c in claims::global(k)? {
+            if !hidden(&c.uid)? {
+                prefs.push(c);
+            }
+        }
+        let words = terms(&manifest);
+        let mut ranked = claims::decisions(k, repo, POOL)?;
+        // Stable: among claims that share as many words, the newest first.
+        ranked.sort_by_cached_key(|c| std::cmp::Reverse(shared(&c.body, &words)));
+        let (mut units, rest) = claims::place(claims::units(k, &ranked, hidden)?, BODIES);
+        let (mut index, _) = claims::place(rest, INDEX);
+        claims::newest_first(&mut units);
+        claims::newest_first(&mut index);
+        let gate = |s: &str, n: usize| crate::redact::flattened_with(s, rules, n, one_line);
+        let date = |c: &Claim| crate::db::utc(c.valid_from)[..10].to_owned();
+        // An earlier claim names the claim above it that ended it.
+        let full = |out: &mut Mapped, bodies: &mut Vec<Body>, c: &Claim, unit: &[Claim]| {
+            let ended = c
+                .later
+                .as_ref()
+                .and_then(|l| unit.iter().find(|u| u.uid == *l))
+                .map(|l| format!(", superseded by the {} {} above", date(l), l.kind))
+                .unwrap_or_default();
+            let mut line = Mapped::default();
+            line.push_str(&format!("- {} {}{ended}: ", date(c), c.kind));
+            line.append(gate(&c.body, CLIP));
+            let at = out.text.len();
+            bodies.push((at..at + line.text.len(), line.masked(), c.uid.clone()));
+            out.append(line);
+            out.push_str("\n");
+        };
+        let id = |uid: &str| uid.chars().take(12).collect::<String>();
+        let brief = |c: &Claim| {
+            let ended = c
+                .later
+                .as_ref()
+                .map(|l| format!(", superseded by {}", id(l)))
+                .unwrap_or_default();
+            let mut line = Mapped::default();
+            line.push_str(&format!("- {} {} {}{ended}: ", id(&c.uid), date(c), c.kind));
+            line.append(gate(&c.body, BRIEF));
+            line.push_str("\n");
+            line
+        };
+        if !prefs.is_empty() {
+            first.push_str("## Global preferences\n");
+            for c in &prefs {
+                full(&mut first, &mut bodies, c, &[]);
+            }
+        }
+        if !units.is_empty() {
+            middle.push_str("## Decisions and open items\n");
+            for unit in &units {
+                for c in unit {
+                    full(&mut middle, &mut middle_bodies, c, unit);
+                }
+            }
+        }
+        if let Some(digest) = crate::digest::fresh(k, repo, hidden)?
+            && !digest.is_empty()
+        {
+            middle.push_str("## Digest of the last session\n");
+            for line in &digest {
+                middle.push_str("- ");
+                middle.append(gate(line, CLIP));
+                middle.push_str("\n");
+            }
+        }
+        if !(units.is_empty() && index.is_empty()) {
+            last.push_str(&format!("## More from memory\n{TOOLS}\n"));
+            for c in index.iter().flatten() {
+                last.append(brief(c));
+            }
+        }
+    }
+    let mut text = first;
+    text.push_str(&manifest[..at]);
+    let offset = text.text.len();
+    bodies.extend(
+        middle_bodies
+            .into_iter()
+            .map(|(range, line, uid)| (range.start + offset..range.end + offset, line, uid)),
     );
-    Ok((!text.is_empty()).then_some(text))
+    text.append(middle);
+    text.push_str(&manifest[at..]);
+    text.push_str(live);
+    text.append(last);
+    Ok((!text.text.is_empty()).then_some((text, bodies)))
 }
 
-/// The words a claim may share with the checkout's manifest (D4): the names of the files touched
-/// and the last prompt's words of four letters or more, lowercased.
+/// The words a claim may share with the checkout's manifest (D4): the names of the files touched,
+/// and the words of four letters or more, lowercased, of the last prompt and of what the last
+/// failing command ran (MUST-M21: a lesson about it gets its body), not of its tool or output.
 // ponytail: words are ASCII letters, digits and `_`, so a prompt in Japanese gives only the ASCII
 // words in it; bigrams for CJK text if SessionStart's choice needs them.
 fn terms(manifest: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut section = "";
+    let words_of = |p: &str| -> Vec<String> {
+        p.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map(str::to_owned)
+            .collect()
+    };
     for line in manifest.lines() {
         if let Some(h) = line.strip_prefix("## ") {
             section = h;
             continue;
         }
+        // `{tool}: {what ran}`, then `  failed with: {output}` (`build`).
+        if section == "Last failing command" {
+            if let Some((_, ran)) = line.split_once(": ").filter(|_| !line.starts_with(' ')) {
+                for w in words_of(ran) {
+                    let w = w.to_lowercase();
+                    if w.chars().count() >= 4 && !out.contains(&w) {
+                        out.push(w);
+                    }
+                }
+            }
+            continue;
+        }
         let Some(item) = line.strip_prefix("- ") else {
             continue;
         };
-        let words: Vec<&str> = match section {
-            "Files touched" => item.rsplit(['/', '\\']).next().into_iter().collect(),
+        let words: Vec<String> = match section {
+            "Files touched" => item
+                .rsplit(['/', '\\'])
+                .next()
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
             "Last exchange" => item
                 .strip_prefix("prompt: ")
-                .map(|p| {
-                    p.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                        .collect()
-                })
+                .map(words_of)
                 .unwrap_or_default(),
             _ => continue,
         };
@@ -324,35 +504,13 @@ fn shared(body: &str, terms: &[String]) -> usize {
 }
 
 /// Spec 4.9's sections after the current decisions, in the manifest's words.
-const AFTER_DECISIONS: [&str; 6] = [
+const AFTER_DECISIONS: [&str; 5] = [
     "Owner's directives",
     "Todo list",
     "Last exchange",
     "Files touched",
     "As of",
-    "Other active sessions",
 ];
-
-/// `text` without its line for `session` under "Other active sessions" (and the heading, when
-/// that was the only one).
-fn without_session(text: &str, session: &str) -> String {
-    let own = format!("- session {} on ", short(session));
-    let mut out = String::with_capacity(text.len());
-    let mut lines = text.lines().filter(|l| !l.starts_with(&own)).peekable();
-    while let Some(l) = lines.next() {
-        let empty = l == "## Other active sessions"
-            && lines.peek().is_none_or(|next| next.starts_with("## "));
-        if !empty {
-            out.push_str(l);
-            out.push('\n');
-        }
-    }
-    out
-}
-
-fn short(session: &str) -> String {
-    session.chars().take(8).collect()
-}
 
 impl Consumer for Manifest {
     fn name(&self) -> &'static str {
@@ -414,7 +572,7 @@ impl Consumer for Manifest {
             k.execute(
                 "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
                  SELECT repo, branch, device FROM manifests WHERE device = ?1 AND ruleset != ?2",
-                params![device, rules.version()],
+                params![device, stamp(rules.version())],
             )?;
             rebuild(raw, k, device, &rules)?;
         }
@@ -497,19 +655,6 @@ fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
         "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
          SELECT repo, branch, device FROM manifests WHERE repo = ?1 AND device = ?2",
         params![repo, device],
-    )?;
-    Ok(())
-}
-
-/// A window op that moves the curation checkpoint over `from..=to` of `device`: the checkouts
-/// with events there are built again, so their not-yet-curated count follows it.
-pub(crate) fn curated(k: &Connection, device: &str, from: i64, to: i64) -> Result<()> {
-    schema(k)?;
-    k.execute(
-        "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
-         SELECT DISTINCT repo, branch, device FROM manifest_facts
-         WHERE device = ?1 AND fact = 'event' AND seq BETWEEN ?2 AND ?3",
-        params![device, from, to],
     )?;
     Ok(())
 }
@@ -673,7 +818,7 @@ fn rebuild(raw: &Raw, k: &Connection, device: &str, rules: &crate::redact::Rules
                     device,
                     crate::db::now_ms(),
                     text,
-                    rules.version()
+                    stamp(rules.version())
                 ],
             )?,
             None => k.execute(
@@ -722,34 +867,19 @@ fn build(
             |r| r.get(0),
         )?)
     };
-    // Past the device's curation checkpoint: a record the checkpoint is inside of is curated
-    // only up to its offset. The checkpoint is the op log's, so a rebuild gives the same count.
-    let (checkpoint, part) = raw.curation_checkpoint(device)?;
-    let curated = if part.is_some() {
-        checkpoint - 1
-    } else {
-        checkpoint
-    };
-    let Some((last_seq, as_of, uncurated)) = k
+    let Some((last_seq, as_of)) = k
         .query_row(
-            "SELECT MAX(seq), MAX(ts), COALESCE(SUM(seq > ?4), 0) FROM manifest_facts
+            "SELECT MAX(seq), MAX(ts) FROM manifest_facts
              WHERE device = ?1 AND repo = ?2 AND fact = 'event' AND branch = ?3",
-            params![device, repo, branch, curated],
-            |r| {
-                Ok((
-                    r.get::<_, Option<i64>>(0)?,
-                    r.get::<_, i64>(1).unwrap_or(0),
-                    r.get::<_, i64>(2)?,
-                ))
-            },
+            params![device, repo, branch],
+            |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, i64>(1).unwrap_or(0))),
         )
-        .map(|(s, t, n)| s.map(|s| (s, t, n)))?
+        .map(|(s, t)| s.map(|s| (s, t)))?
     else {
         return Ok(None);
     };
     let mut p = Parts {
         as_of: crate::db::utc(as_of),
-        uncurated: u64::try_from(uncurated).unwrap_or(0),
         ..Parts::default()
     };
     if let Some(e) = event(raw, device, last_seq)?
@@ -857,40 +987,6 @@ fn build(
         .query_map(params![device, repo, branch, FILES as i64], |r| r.get(0))?
         .map(|f| f.map(|f: String| gate(&f)))
         .collect::<rusqlite::Result<_>>()?;
-    // Sessions on the repo with records in the 30 minutes before as-of that have not ended. One
-    // aggregate, so SQLite takes the branch and time from the session's last record.
-    let sessions: Vec<(String, String, i64, i64)> = k
-        .prepare(
-            "SELECT session, branch, ts, MAX(seq) FROM manifest_facts
-             WHERE device = ?1 AND repo = ?2 AND fact = 'event' AND ts >= ?3
-             GROUP BY session ORDER BY ts DESC, session",
-        )?
-        .query_map(params![device, repo, as_of - ACTIVE_MS], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    for (session, on, ts, seq) in sessions {
-        let ended = k
-            .query_row(
-                "SELECT 1 FROM manifest_facts WHERE device = ?1 AND repo = ?2 AND fact = 'end' AND seq = ?3",
-                params![device, repo, seq],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if !ended && p.others.len() < SESSIONS {
-            let short = short(&gate(&session));
-            let on = if on.is_empty() {
-                "no branch".to_owned()
-            } else {
-                gate(&on)
-            };
-            p.others.push(format!(
-                "session {short} on {on}, last at {}",
-                &crate::db::utc(ts)[11..]
-            ));
-        }
-    }
     Ok(Some(manifest::render(&p, CAP)))
 }
 
@@ -1124,21 +1220,33 @@ mod tests {
         }
     }
 
-    /// The not-yet-curated count follows the curation checkpoint (#204): a window op over some
-    /// of the checkout's records leaves the rest, one over all of them leaves none, and a record
-    /// a window stops inside of still counts. A rebuild gives the same count.
+    /// MUST-M9 at read time (D3): the checkout's records past the curation checkpoint, once the
+    /// oldest has waited two minutes, with the minutes it has waited when SessionStart reads, from
+    /// the same stored row. A window op over some of them leaves the rest, a record a window stops
+    /// inside of still counts, one over all of them leaves none, and a restore that lost window
+    /// ops counts them again, each read with no worker run between (#204).
     #[test]
-    fn the_not_yet_curated_count_follows_the_checkpoint() {
+    fn the_backlog_gains_its_minutes_when_read_later() {
         use crate::raw::OpKind;
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         session(home.path(), cwd.path());
         worker::run_once(home.path()).unwrap();
-        assert!(
-            manifest(home.path())
-                .0
-                .contains("9 record(s) not yet curated")
+        let store = raw::open(home.path()).unwrap();
+        let min = 60_000;
+        let backlog = |now: i64| {
+            lines_of(
+                &shown_at(home.path(), &store, "none", now).unwrap().text,
+                "Backlog",
+            )
+        };
+        // The first record is at minute 1.
+        assert_eq!(backlog(3 * min), Vec::<String>::new());
+        assert_eq!(
+            backlog(3 * min + 1),
+            ["9 record(s) / 2 min not yet curated"]
         );
+        assert_eq!(backlog(60 * min), ["9 record(s) / 59 min not yet curated"]);
         let window = |to: i64, to_offset: Option<i64>| {
             let op = serde_json::json!({"from_seq": 1, "from_offset": null, "to_seq": to,
                 "to_offset": to_offset, "outcome": "curated"});
@@ -1146,26 +1254,469 @@ mod tests {
                 .unwrap()
                 .append_ops(&[(OpKind::Window, op)])
                 .unwrap();
-            worker::run_once(home.path()).unwrap();
-            manifest(home.path()).0
+            backlog(60 * min)
         };
-        assert!(window(5, Some(3)).contains("5 record(s) not yet curated"));
-        assert!(window(5, None).contains("4 record(s) not yet curated"));
-        let all = window(9, None);
-        assert!(all.contains("0 record(s) not yet curated"), "{all}");
-        for f in ["knowledge.db", "knowledge.db-wal", "knowledge.db-shm"] {
-            std::fs::remove_file(home.path().join(f)).ok();
-        }
-        worker::run_once(home.path()).unwrap();
-        assert_eq!(manifest(home.path()).0, all);
+        assert_eq!(window(5, Some(3)), ["5 record(s) / 55 min not yet curated"]);
+        assert_eq!(window(5, None), ["4 record(s) / 54 min not yet curated"]);
+        assert_eq!(window(9, None), Vec::<String>::new());
         // A restore that lost the last two window ops while knowledge.db stays.
         rusqlite::Connection::open(home.path().join("raw.db"))
             .unwrap()
             .execute("DELETE FROM ops WHERE op_seq > 1", [])
             .unwrap();
+        assert_eq!(backlog(60 * min), ["5 record(s) / 55 min not yet curated"]);
+    }
+
+    /// MUST-M8 at read time (D3): the repository's other sessions with a record in the 30 minutes
+    /// before SessionStart reads and no end, with their agent, branch and minutes since; never the
+    /// reader's own, an ended one or one idle longer, and none once all are.
+    #[test]
+    fn other_live_sessions_are_named_at_read_time() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path()); // s1 until minute 7, s2 at minutes 8 and 9
+        let mut store = raw::open(home.path()).unwrap();
+        let min = 60_000;
+        let codex = Event {
+            agent: "codex".into(),
+            branch: Some("feature".into()),
+            ..ev(
+                "prompt",
+                "s4",
+                10 * min,
+                cwd.path(),
+                serde_json::json!({"prompt": "x"}),
+            )
+        };
+        store.append(&codex).unwrap();
+        store
+            .append(&ev(
+                "end",
+                "s5",
+                10 * min,
+                cwd.path(),
+                serde_json::json!({}),
+            ))
+            .unwrap();
         worker::run_once(home.path()).unwrap();
-        let back = manifest(home.path()).0;
-        assert!(back.contains("5 record(s) not yet curated"), "{back}");
+        let others = |session: &str, now: i64| {
+            let store = raw::open(home.path()).unwrap();
+            let start = shown_at(home.path(), &store, session, now);
+            lines_of(
+                &start.map(|s| s.text).unwrap_or_default(),
+                "Other active sessions",
+            )
+        };
+        assert_eq!(
+            others("s2", 12 * min),
+            [
+                "- codex on feature, 2 min ago",
+                "- claude on main, 5 min ago"
+            ]
+        );
+        assert_eq!(
+            others("s4", 38 * min),
+            ["- claude on main, 29 min ago"] // s1's last record is past 30 minutes
+        );
+        assert_eq!(others("none", 41 * min), Vec::<String>::new());
+        // Gated with the rules of the read.
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"b\", regex = 'feat[a-z]+' }]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            others("s2", 12 * min)[0],
+            "- codex on [REDACTED], 2 min ago"
+        );
+        // A tombstone the worker has not applied may change the facts: none until it has.
+        store
+            .append_tombstone(Target::Record {
+                device: store.device().to_owned(),
+                seq: 10,
+            })
+            .unwrap();
+        assert_eq!(others("s2", 12 * min), Vec::<String>::new());
+        worker::run_once(home.path()).unwrap();
+        assert_eq!(others("s2", 12 * min), ["- claude on main, 5 min ago"]);
+    }
+
+    /// MUST-M21 at SessionStart (D4): the words of what the last failing command ran choose the
+    /// claims with bodies too, so an old lesson about it gets its body while a lesson about another
+    /// failure stays an index line. `session` leaves `cargo test` failing.
+    #[test]
+    fn a_lesson_about_the_failing_command_gets_its_body() {
+        let (_h, _c, text) = start(
+            |store, cwd| {
+                let mut ops = vec![
+                    claimed(
+                        store,
+                        said(cwd, DAY, "Run cargo test with the full features."),
+                        "lesson",
+                        "decided",
+                        vec![],
+                    )
+                    .0,
+                    claimed(
+                        store,
+                        said(cwd, 2 * DAY, "npm audit needs the lockfile."),
+                        "lesson",
+                        "decided",
+                        vec![],
+                    )
+                    .0,
+                ];
+                for i in 1..=11 {
+                    let e = said(cwd, (2 + i) * DAY, &format!("Rule {i:02}."));
+                    ops.push(claimed(store, e, "decision", "decided", vec![]).0);
+                }
+                ops
+            },
+            None,
+        );
+        assert!(
+            text.contains("## Last failing command\nBash: cargo test"),
+            "{text}"
+        );
+        let bodies = lines_of(&text, "Decisions and open items");
+        assert_eq!(bodies.len(), 10);
+        assert!(
+            bodies.contains(&"- 1970-01-02 lesson: Run cargo test with the full features.".into()),
+            "{bodies:?}"
+        );
+        let more = lines_of(&text, "More from memory");
+        assert!(
+            more.iter()
+                .any(|l| l.ends_with("lesson: npm audit needs the lockfile.")),
+            "{more:?}"
+        );
+    }
+
+    /// Codex's security review of Task 7: each claim body and digest line is gated before it is
+    /// formatted, so a rule anchored to the whole field, or to a line of it, still matches it
+    /// behind the line's date and kind, and once its lines are joined into one.
+    #[test]
+    fn a_rule_anchored_to_a_claim_body_or_its_line_still_hides_it() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let (key, key_uid) = claimed(
+            &mut store,
+            said(cwd.path(), DAY, "Use key zq-778899."),
+            "decision",
+            "decided",
+            vec![],
+        );
+        let (pin, _) = claimed(
+            &mut store,
+            said(cwd.path(), 2 * DAY, "Deploy with the pin.\npin: zq-112233"),
+            "decision",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[key, pin]).unwrap();
+        store
+            .append_ops(&[digest("r", &[("Ship with zq-445566.", &[&key_uid])])])
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let before = shown(home.path(), &store).unwrap();
+        for code in ["778899", "112233", "445566"] {
+            assert!(before.contains(code), "{before}");
+        }
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [\
+             { id = \"key\", regex = '^Use key (zq-[0-9]{6})\\.$', secret_group = 1 }, \
+             { id = \"pin\", regex = '^pin: (zq-[0-9]{6})$', secret_group = 1 }, \
+             { id = \"ship\", regex = '^Ship with (zq-[0-9]{6})\\.$', secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let after = shown(home.path(), &store).unwrap();
+        for code in ["778899", "112233", "445566"] {
+            assert!(!after.contains(code), "{after}");
+        }
+        assert!(
+            after.contains("Use key ") && after.contains("Ship with "),
+            "{after}"
+        );
+    }
+
+    #[test]
+    fn interacting_field_and_formatted_rules_hide_claims_and_digest_lines() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let body = "Header\nalpha code 654321";
+        let (claim, uid) = claimed(
+            &mut store,
+            said(cwd.path(), DAY, body),
+            "decision",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[claim]).unwrap();
+        store
+            .append_ops(&[digest("r", &[(body, &[&uid])])])
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let before = shown(home.path(), &store).unwrap();
+        assert!(before.contains("Header alpha code 654321"), "{before}");
+        let before = [
+            lines_of(&before, "Decisions and open items"),
+            lines_of(&before, "Digest of the last session"),
+        ]
+        .concat()
+        .join("\n");
+        for regex in [
+            "Header alpha code ([0-9]{6})",
+            "(?m)^alpha code ([0-9]{6})$",
+            "(?m)^- (?:1970-01-02 decision: )?Header alpha code ([0-9]{6})$",
+        ] {
+            std::fs::write(
+                home.path().join("config.toml"),
+                format!(
+                    "[redaction]\nextra_rules = [\
+                     {{ id = 'field', regex = '^Header\\n(alpha) code [0-9]{{6}}$', secret_group = 1 }}, \
+                     {{ id = 'other', regex = '{regex}', secret_group = 1 }}]\n"
+                ),
+            )
+            .unwrap();
+            let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+            if !regex.starts_with("(?m)^alpha") {
+                assert!(!crate::redact::outbound_with(&before, &rules).contains("654321"));
+            }
+            let after = shown_at(home.path(), &store, "none", NOW).unwrap();
+            assert_eq!(
+                after
+                    .text
+                    .matches("Header [REDACTED] code [REDACTED]")
+                    .count(),
+                2,
+                "{}",
+                after.text
+            );
+            if regex.starts_with("(?m)^- ") {
+                assert!(after.shown.is_empty(), "{after:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_packet_rule_keeps_the_original_clipped_view() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let name = "a".repeat(60);
+        let body = format!("Header\n{name} code 654321 {}", "x ".repeat(300));
+        let (claim, _) = claimed(
+            &mut store,
+            said(cwd.path(), DAY, &body),
+            "decision",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[claim]).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let before = shown(home.path(), &store).unwrap();
+        let line = lines_of(&before, "Decisions and open items").remove(0);
+        assert!(line.contains("654321") && line.ends_with('…'), "{line}");
+        let packet = regex::escape(&line).replace("654321", "([0-9]{6})");
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!(
+                "[redaction]\nextra_rules = [\
+                 {{ id = 'field', regex = '^Header\\n({name}) code', secret_group = 1 }}, \
+                 {{ id = 'packet', regex = '(?m)^{packet}$', secret_group = 1 }}]\n"
+            ),
+        )
+        .unwrap();
+        let after = shown(home.path(), &store).unwrap();
+        assert!(!after.contains("654321"), "{after}");
+    }
+
+    #[test]
+    fn a_packet_rule_keeps_spaces_around_a_field_mask() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let name = "a".repeat(60);
+        let body = format!("Head\n{name} code 654321 {}code 112233", "x ".repeat(163));
+        let (claim, _) = claimed(
+            &mut store,
+            said(cwd.path(), DAY, &body),
+            "decision",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[claim]).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let before = shown(home.path(), &store).unwrap();
+        assert!(!before.contains("112233"), "{before}");
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!(
+                "[redaction]\nextra_rules = [\
+                 {{ id = 'field', regex = '^Head(\\n{name} )code', secret_group = 1 }}, \
+                 {{ id = 'packet', regex = '(?m)^- 1970-01-02 decision: Head {name} code 654321 (?:x )+code ([0-9]{{6}})$', secret_group = 1 }}]\n"
+            ),
+        )
+        .unwrap();
+        let after = shown(home.path(), &store).unwrap();
+        assert!(!after.contains("112233"), "{after}");
+        assert!(after.contains("code [REDACTED]"), "{after}");
+    }
+
+    #[test]
+    fn field_projection_preserves_private_blocks_whitespace_and_utf8() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let mut ops = Vec::new();
+        for (i, body) in [
+            "左 <private>hidden</private> 右",
+            "a   b",
+            "山田\nalpha code 654321",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ops.push(
+                claimed(
+                    &mut store,
+                    said(cwd.path(), DAY + i as i64, body),
+                    "decision",
+                    "decided",
+                    vec![],
+                )
+                .0,
+            );
+        }
+        store.append_ops(&ops).unwrap();
+        worker::run_once(home.path()).unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [\
+             { id = 'space', regex = 'a  ( b)', secret_group = 1 }, \
+             { id = 'name', regex = '^山田\\n(alpha) code [0-9]{6}$', secret_group = 1 }, \
+             { id = 'code', regex = '山田 alpha code ([0-9]{6})', secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let after = shown(home.path(), &store).unwrap();
+        let lines = lines_of(&after, "Decisions and open items");
+        for body in ["左 右", "a [REDACTED]", "山田 [REDACTED] code [REDACTED]"] {
+            assert!(
+                lines.contains(&format!("- 1970-01-02 decision: {body}")),
+                "{after}"
+            );
+        }
+        assert!(!after.contains("hidden"), "{after}");
+    }
+
+    /// Spec 4.7: `Start::shown` names the claims shown with their bodies, never an index line's,
+    /// nor one the cut dropped.
+    #[test]
+    fn start_names_the_claims_shown_with_their_bodies() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let mut ops = Vec::new();
+        let mut uids = Vec::new();
+        for i in 1..=12 {
+            let e = said(cwd.path(), i * DAY, &format!("Rule {i:02}."));
+            let (op, uid) = claimed(&mut store, e, "decision", "decided", vec![]);
+            ops.push(op);
+            uids.push(uid);
+        }
+        store.append_ops(&ops).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+        let start = |cap| {
+            text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
+                .unwrap()
+                .unwrap()
+        };
+        let all = start(usize::MAX);
+        let mut shown = all.shown.clone();
+        shown.sort();
+        let mut newest: Vec<String> = uids[2..].to_vec();
+        newest.sort();
+        assert_eq!(shown, newest); // the 2 oldest are index lines
+        // A cap that ends inside the bodies: the claims past it are not shown.
+        let at = all.text.find("- 1970-01-09 decision").unwrap();
+        let cut = start(all.text[..at].chars().count());
+        assert_eq!(
+            cut.shown,
+            uids[8..].iter().rev().cloned().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn identical_body_lines_count_only_the_occurrence_before_the_cut() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let common = "Shared words ".repeat(40);
+        let (older, _) = claimed(
+            &mut store,
+            said(cwd.path(), DAY + 1, &format!("{common}older tail")),
+            "decision",
+            "decided",
+            vec![],
+        );
+        let (newer, uid) = claimed(
+            &mut store,
+            said(cwd.path(), DAY + 2, &format!("{common}newer tail")),
+            "decision",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[older, newer]).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+        let start = |cap| {
+            text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
+                .unwrap()
+                .unwrap()
+        };
+        let all = start(usize::MAX);
+        let lines = lines_of(&all.text, "Decisions and open items");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], lines[1]);
+        let end = all.text.find(&lines[0]).unwrap() + lines[0].len() + 1;
+        let cut = start(all.text[..end].chars().count());
+        assert_eq!(cut.shown, vec![uid], "{}", cut.text);
+    }
+
+    /// Task 8: a row built before the read-time lines carries the ruleset without the format tag:
+    /// SessionStart leaves it out, and the worker's next pass builds it again, once.
+    #[test]
+    fn old_manifest_rows_are_rebuilt() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        worker::run_once(home.path()).unwrap();
+        let store = raw::open(home.path()).unwrap();
+        let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+        let k = knowledge::open(home.path()).unwrap();
+        k.execute(
+            "UPDATE manifests SET ruleset = ?1, text = '## As of\nold\n', built_at = 0",
+            [rules.version()],
+        )
+        .unwrap();
+        assert!(!shown(home.path(), &store).unwrap().contains("old"));
+        worker::run_once(home.path()).unwrap();
+        let (text, built) = manifest(home.path());
+        assert!(text.contains("prompt: look at it") && built > 0, "{text}");
+        let ruleset: String = k
+            .query_row("SELECT ruleset FROM manifests", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ruleset, stamp(rules.version()));
+        worker::run_once(home.path()).unwrap();
+        assert_eq!(manifest(home.path()), (text, built));
     }
 
     #[test]
@@ -1190,7 +1741,6 @@ mod tests {
         assert!(first.contains("[in_progress] fix the test"), "{first}");
         assert!(first.contains("- src/lib.rs"), "{first}");
         assert!(first.contains("prompt: look at it"), "{first}");
-        assert!(first.contains("9 record(s) not yet curated"), "{first}");
         worker::run_once(home.path()).unwrap(); // nothing new: nothing built
         assert_eq!(manifest(home.path()), (first.clone(), built));
         for f in ["knowledge.db", "knowledge.db-wal", "knowledge.db-shm"] {
@@ -1222,10 +1772,18 @@ mod tests {
         );
     }
 
+    /// When `shown` reads: a year after the tests' records, so no session is live then.
+    const NOW: i64 = 365 * DAY;
+
     /// The manifest SessionStart shows for checkout (r, main) under the rules the home has now.
     fn shown(home: &Path, store: &Raw) -> Option<String> {
+        shown_at(home, store, "none", NOW).map(|s| s.text)
+    }
+
+    /// `text` for checkout (r, main), uncut, read by `session` at `now`.
+    fn shown_at(home: &Path, store: &Raw, session: &str, now: i64) -> Option<Start> {
         let rules = crate::capture::Settings::load(home).unwrap().rules;
-        text(home, store, "r", "main", "none", rules.version()).unwrap()
+        text(home, store, "r", "main", session, &rules, usize::MAX, now).unwrap()
     }
 
     #[test]
@@ -1238,7 +1796,11 @@ mod tests {
         session(home.path(), cwd.path());
         worker::run_once(home.path()).unwrap();
         let shown = shown(home.path(), &store).unwrap();
-        assert_eq!(shown, manifest(home.path()).0);
+        let (stored, _) = manifest(home.path());
+        assert!(
+            shown.starts_with(&stored) && shown[stored.len()..].starts_with("## Backlog\n"),
+            "{shown}"
+        );
     }
 
     /// A claim op for an event appended now: quoting all of its text, of `kind` and `status`.
@@ -1620,8 +2182,9 @@ mod tests {
                 seq,
             })
             .unwrap();
-        // No worker step yet: the saved text still has the prompt, so none is shown.
-        assert_eq!(shown(home.path(), &store), None);
+        // No worker step yet: the saved text still has the prompt, so it is not shown.
+        let before = shown(home.path(), &store).unwrap_or_default();
+        assert!(!before.contains("## As of"), "{before}");
         worker::run_once(home.path()).unwrap();
         let shown = shown(home.path(), &store).unwrap();
         assert!(!shown.contains("look at it"), "{shown}");
@@ -1781,27 +2344,11 @@ mod tests {
                 .unwrap();
         }
         worker::run_once(home.path()).unwrap();
-        let main = manifest(home.path()).0;
-        assert!(
-            main.contains("session s1 on feature") && !main.contains("session s1 on main"),
-            "{main}"
-        );
-    }
-
-    #[test]
-    fn the_session_it_is_shown_to_is_no_other_session() {
-        let t = "## Other active sessions\n- session abcdefgh on main, last at 10:00 UTC\n\
-                 ## As of\nnow\n";
-        assert_eq!(without_session(t, "abcdefgh-1234"), "## As of\nnow\n");
-        let two = t.replace(
-            "## As of",
-            "- session zzzzzzzz on dev, last at 10:01 UTC\n## As of",
-        );
+        let start = shown_at(home.path(), &store, "s2", 240_000).unwrap();
         assert_eq!(
-            without_session(&two, "abcdefgh-1234"),
-            "## Other active sessions\n- session zzzzzzzz on dev, last at 10:01 UTC\n## As of\nnow\n"
+            lines_of(&start.text, "Other active sessions"),
+            ["- claude on feature, 2 min ago"]
         );
-        assert_eq!(without_session(t, "other"), t);
     }
 
     #[test]
@@ -1998,20 +2545,9 @@ mod tests {
         session(home.path(), cwd.path());
         worker::run_once(home.path()).unwrap();
         let mut store = raw::open(home.path()).unwrap();
-        let backlog = |store: &Raw| {
-            let text = shown(home.path(), store).unwrap();
-            let as_of = text.split("## As of\n").nth(1).unwrap();
-            as_of
-                .lines()
-                .next()
-                .unwrap()
-                .split("; ")
-                .nth(1)
-                .unwrap()
-                .to_owned()
-        };
+        let backlog = |store: &Raw| lines_of(&shown(home.path(), store).unwrap(), "Backlog");
         let before = backlog(&store);
-        assert!(before.ends_with("record(s) not yet curated"), "{before}");
+        assert!(before[0].starts_with("9 record(s) / "), "{before:?}");
         for i in 0..3 {
             let body = serde_json::json!({"prompt": format!("Imported {i}.")});
             let e = Event {
@@ -2383,7 +2919,8 @@ mod tests {
             more[2].ends_with(" 1970-01-02 decision: Rule 01."),
             "{more:?}"
         );
-        assert!(text.ends_with(&format!("{}\n", more[2])));
+        // The gate trims the text's end.
+        assert!(text.ends_with(&more[2]), "{text}");
     }
 
     /// Spec 4.4: claims are chosen by the words they share with the manifest's last prompt and
@@ -2492,9 +3029,19 @@ mod tests {
         );
         let store = raw::open(home.path()).unwrap();
         let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
-        let text = text(home.path(), &store, "r", "feature", "none", rules.version())
-            .unwrap()
-            .unwrap();
+        let text = text(
+            home.path(),
+            &store,
+            "r",
+            "feature",
+            "none",
+            &rules,
+            usize::MAX,
+            NOW,
+        )
+        .unwrap()
+        .unwrap()
+        .text;
         assert!(!text.contains("## As of"), "{text}");
         assert_eq!(
             lines_of(&text, "Decisions and open items"),

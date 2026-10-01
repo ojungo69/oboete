@@ -97,8 +97,6 @@ pub struct Parts {
     pub last_reply: Option<String>,
     pub files: Vec<String>,
     pub as_of: String,
-    pub uncurated: u64,
-    pub others: Vec<String>,
 }
 
 /// The manifest's text: spec 4.9's sections in its order, each dropped whole from the last while
@@ -142,11 +140,7 @@ pub fn render(p: &Parts, cap: usize) -> String {
         list("Todo list", &p.todo),
         list("Last exchange", &exchange),
         list("Files touched", &p.files),
-        Some(format!(
-            "## As of\n{}; {} record(s) not yet curated\n",
-            p.as_of, p.uncurated
-        )),
-        list("Other active sessions", &p.others),
+        Some(format!("## As of\n{}\n", p.as_of)),
     ]
     .into_iter()
     .flatten()
@@ -243,8 +237,6 @@ mod tests {
             last_reply: Some("done".into()),
             files: vec!["src/search.rs".into()],
             as_of: "2026-09-27 05:00".into(),
-            uncurated: 12,
-            others: vec!["codex, 5 minutes ago".into()],
         }
     }
 
@@ -260,7 +252,6 @@ mod tests {
             "Last exchange",
             "Files touched",
             "As of",
-            "Other active sessions",
         ];
         let at: Vec<usize> = order.iter().map(|t| full.find(t).unwrap()).collect();
         assert!(at.windows(2).all(|w| w[0] < w[1]), "{full}");

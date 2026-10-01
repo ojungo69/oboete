@@ -872,21 +872,39 @@ pub fn doctor_line(p: &Provider, chain: &ChainOverlay) -> String {
 }
 
 /// `[inject]` (#94): the manifest the hooks inject, wherever an agent takes it: at a session
-/// start, at the first event of an agent without one (grok, agy), after a Cursor compaction, and
-/// through `oboete inject` (OpenCode, pi).
+/// start, at the first event of an agent without one (grok, agy), after a Cursor compaction, in
+/// the hook's output (pi) and through `oboete inject` (OpenCode); and what a prompt adds (Task 8).
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Inject {
     pub session_start: bool,
-    /// The manifest's size in characters, 1,000 to 6,000: it is stored rendered at 6,000.
+    /// The manifest's size in characters (`SESSION_START_CHARS`): it is stored rendered at 6,000.
     pub session_start_chars: usize,
+    /// Delivered claims picked for each prompt (D9): off until the Inject harness has measured it.
+    pub per_prompt: bool,
+    /// Their block's size in characters (`PER_PROMPT_CHARS`).
+    pub per_prompt_chars: usize,
+    /// A claim shown in the session that changed since is named at the next prompt (spec 4.8).
+    pub correction: bool,
+    /// That block's size in characters (`CORRECTION_CHARS`).
+    pub correction_chars: usize,
 }
+
+/// `[inject]`'s sizes, which the settings page shows and checks too.
+pub const SESSION_START_CHARS: std::ops::RangeInclusive<usize> =
+    1_000..=crate::consumer::manifest::CAP;
+pub const PER_PROMPT_CHARS: std::ops::RangeInclusive<usize> = 500..=6_000;
+pub const CORRECTION_CHARS: std::ops::RangeInclusive<usize> = 300..=3_000;
 
 impl Default for Inject {
     fn default() -> Self {
         Self {
             session_start: true,
             session_start_chars: crate::consumer::manifest::CAP,
+            per_prompt: false,
+            per_prompt_chars: 1_500,
+            correction: true,
+            correction_chars: 800,
         }
     }
 }
@@ -912,11 +930,22 @@ pub(crate) fn parse_inject(text: &str) -> Result<Inject> {
     let i = toml::from_str::<File>(text)
         .map_err(|e| toml_error(text, &e))?
         .inject;
-    anyhow::ensure!(
-        (1_000..=crate::consumer::manifest::CAP).contains(&i.session_start_chars),
-        "[inject] session_start_chars is 1000 to {}",
-        crate::consumer::manifest::CAP
-    );
+    for (key, value, range) in [
+        (
+            "session_start_chars",
+            i.session_start_chars,
+            SESSION_START_CHARS,
+        ),
+        ("per_prompt_chars", i.per_prompt_chars, PER_PROMPT_CHARS),
+        ("correction_chars", i.correction_chars, CORRECTION_CHARS),
+    ] {
+        anyhow::ensure!(
+            range.contains(&value),
+            "[inject] {key} is {} to {}",
+            range.start(),
+            range.end()
+        );
+    }
     Ok(i)
 }
 
@@ -1578,7 +1607,8 @@ model = { gone = "m" }
             Inject::default(),
             Inject {
                 session_start: true,
-                session_start_chars: 6_000
+                session_start_chars: 6_000,
+                ..Inject::default()
             }
         );
         let set = at("[inject]\nsession_start = false\nsession_start_chars = 1000\n");
@@ -1586,7 +1616,8 @@ model = { gone = "m" }
             set.unwrap(),
             Inject {
                 session_start: false,
-                session_start_chars: 1_000
+                session_start_chars: 1_000,
+                ..Inject::default()
             }
         );
         assert_eq!(
@@ -1609,6 +1640,39 @@ model = { gone = "m" }
         // Other tables are not its business.
         let other = at("[chain]\noff = 3\n[inject]\nsession_start = false\n");
         assert!(!other.unwrap().session_start);
+    }
+
+    /// Task 8 (spec 1.5): the prompt's injection, off until the Inject harness has measured it,
+    /// and the corrections, on; each size in its range, one past either end refused.
+    #[test]
+    fn inject_settings_check_ranges_and_save_alone() {
+        let d = Inject::default();
+        assert_eq!(
+            (
+                d.per_prompt,
+                d.per_prompt_chars,
+                d.correction,
+                d.correction_chars
+            ),
+            (false, 1_500, true, 800)
+        );
+        for (key, low, high) in [
+            ("session_start_chars", 1_000, 6_000),
+            ("per_prompt_chars", 500, 6_000),
+            ("correction_chars", 300, 3_000),
+        ] {
+            for (value, ok) in [
+                (low, true),
+                (high, true),
+                (low - 1, false),
+                (high + 1, false),
+            ] {
+                let parsed = parse_inject(&format!("[inject]\n{key} = {value}\n"));
+                assert_eq!(parsed.is_ok(), ok, "{key} = {value}");
+            }
+        }
+        let set = parse_inject("[inject]\nper_prompt = true\ncorrection = false\n").unwrap();
+        assert!(set.per_prompt && !set.correction);
     }
 
     #[test]

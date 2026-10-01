@@ -718,9 +718,14 @@ fn by_rank(imports: Vec<Hit>, records: Vec<Hit>, offset: u32) -> Vec<Hit> {
 /// D8: a leg's full-text and vector lists as one, by reciprocal rank (1 / (61 + rank), rank from
 /// 0); ties keep the full-text order, then the vector order.
 pub fn rrf(fts: &[String], vec: &[String]) -> Vec<String> {
+    rrf_lists(&[fts, vec])
+}
+
+/// `rrf` over any number of lists: ties keep the order of the first list a key is in.
+fn rrf_lists(lists: &[&[String]]) -> Vec<String> {
     let mut score: HashMap<&str, f64> = HashMap::new();
     let mut order: Vec<&str> = Vec::new();
-    for list in [fts, vec] {
+    for list in lists {
         for (rank, key) in list.iter().enumerate() {
             let s = score.entry(key).or_insert_with(|| {
                 order.push(key);
@@ -774,17 +779,6 @@ fn claims_leg(
         args.push(Value::Text(r.to_owned()));
     }
     super::within(&mut clauses, &mut args, "a.valid_from", (q.since, q.until));
-    let order = if ranked {
-        "rank, a.valid_from DESC"
-    } else {
-        "a.valid_from DESC"
-    };
-    args.push(Value::Integer(super::sql_limit(depth)));
-    let sql = format!(
-        "SELECT c.uid FROM claims_fts f JOIN claims c ON c.rowid = f.rowid
-         JOIN active a ON a.uid = c.uid WHERE {} ORDER BY {order} LIMIT ? OFFSET ?",
-        clauses.join(" AND ")
-    );
     let pending = claims::Pending::read(raw, k)?;
     let hidden = |uid: &str| pending.touches(k, uid);
     // The ended claims with what ended them: kept out of `units`, which would pair them.
@@ -792,25 +786,14 @@ fn claims_leg(
     let (mut shown, mut ended) = (Vec::new(), Vec::new());
     // A pending claim is only hidden, and an ended or done one is lowered below the rest: the
     // claims after them take their places, so the leg holds `depth` it shows first (Codex on #306).
-    // ponytail: at most `PAGES` pages; a query whose first 1,000 matches are all hidden or lowered
-    // shows those.
-    let mut st = k.prepare(&sql)?;
-    for page in 0..PAGES {
-        let mut paged = args.clone();
-        paged.push(Value::Integer(super::sql_limit(depth.saturating_mul(page))));
-        let read: Vec<String> = st
-            .query_map(params_from_iter(paged), |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        let last = read.len() < depth;
+    claims_pages(k, (clauses, args, ranked), depth, |read| {
         for uid in read {
             if !hidden(&uid)? {
                 place_claim(k, uid, q.history, &mut ended_by, &mut shown, &mut ended)?;
             }
         }
-        if last || shown.len() >= depth {
-            break;
-        }
-    }
+        Ok(shown.len() >= depth)
+    })?;
     shown.truncate(depth);
     ended.truncate(depth);
     // The vector side's claims, hidden ones out and placed as above, each list fused with its
@@ -851,6 +834,142 @@ fn claims_leg(
     let shown = units.iter().flatten().map(hit).collect::<Result<_>>()?;
     let ended = ended.iter().map(hit).collect::<Result<_>>()?;
     Ok((shown, ended))
+}
+
+/// The claims a full-text query matches, the best first: `query_clauses`' clauses on `f` with
+/// more on `a`, the `active` row, page by page of `depth` uids to `page`, until it says it has
+/// enough or a page comes back short. ponytail: at most `PAGES` pages; a query whose first 1,000
+/// matches are all left out shows fewer.
+fn claims_pages(
+    k: &Connection,
+    (clauses, mut args, ranked): (Vec<String>, Vec<Value>, bool),
+    depth: usize,
+    mut page: impl FnMut(Vec<String>) -> Result<bool>,
+) -> Result<()> {
+    let order = if ranked {
+        "rank, a.valid_from DESC"
+    } else {
+        "a.valid_from DESC"
+    };
+    args.push(Value::Integer(super::sql_limit(depth)));
+    let sql = format!(
+        "SELECT c.uid FROM claims_fts f JOIN claims c ON c.rowid = f.rowid
+         JOIN active a ON a.uid = c.uid WHERE {} ORDER BY {order} LIMIT ? OFFSET ?",
+        clauses.join(" AND ")
+    );
+    let mut st = k.prepare(&sql)?;
+    for n in 0..PAGES {
+        let mut paged = args.clone();
+        paged.push(Value::Integer(super::sql_limit(depth.saturating_mul(n))));
+        let read: Vec<String> = st
+            .query_map(params_from_iter(paged), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let last = read.len() < depth;
+        if page(read)? || last {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// D9's candidates in `repo`: its delivered claims under `claims::DECIDED_WHERE` but those the
+/// worker has yet to apply an owner's change or a removal to (`claims::Pending`, D3), one
+/// full-text list per text and, with a query `vector` and an active index, the vector list, fused
+/// by RRF, the best `depth`. It writes nothing, no schema either, so a read-only connection can
+/// ask, and reads outside every transaction: the caller writes only what it returns.
+// The shortlist phase (Step 4) and the prompt point (Step 6) call it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn delivered_ranked(
+    raw: &Raw,
+    k: &Connection,
+    texts: &[&str],
+    vector: Option<&[f32]>,
+    repo: &str,
+    depth: usize,
+) -> Result<Vec<Claim>> {
+    debug_assert!(k.is_autocommit(), "delivered_ranked inside a transaction");
+    if !crate::consumer::manifest::exists(k, "view", "active")? {
+        return Ok(Vec::new());
+    }
+    let pending = claims::Pending::read(raw, k)?;
+    let mut kept: HashMap<String, Claim> = HashMap::new();
+    let mut keep = |uid: &String| -> Result<bool> {
+        if kept.contains_key(uid) {
+            return Ok(true);
+        }
+        if pending.touches(k, uid)? {
+            return Ok(false);
+        }
+        let Some(c) = claims::delivered_one(k, uid)? else {
+            return Ok(false);
+        };
+        kept.insert(uid.clone(), c);
+        Ok(true)
+    };
+    let mut lists: Vec<Vec<String>> = Vec::new();
+    for text in texts {
+        let Some((mut clauses, mut args, ranked)) =
+            super::query_clauses(text, "claims_fts", &["f.text"])
+        else {
+            continue;
+        };
+        clauses.push(format!("a.repo = ? AND {}", claims::DECIDED_WHERE));
+        args.push(Value::Text(repo.to_owned()));
+        let mut list = Vec::new();
+        claims_pages(k, (clauses, args, ranked), depth, |read| {
+            for uid in read {
+                if keep(&uid)? {
+                    list.push(uid);
+                }
+            }
+            Ok(list.len() >= depth)
+        })?;
+        list.truncate(depth);
+        lists.push(list);
+    }
+    let active: Option<String> = match vector {
+        Some(v) if v.len() == crate::embed::DIM => k
+            .query_row(
+                "SELECT embedder FROM vec_generation WHERE state = 'active'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?,
+        _ => None,
+    };
+    if let (Some(embedder), Some(v)) = (active, vector) {
+        let near = Near {
+            embedder,
+            vector: v.to_vec(),
+        };
+        let mut decided = k.prepare(&format!(
+            "SELECT 1 FROM active a WHERE a.uid = ?1 AND {}",
+            claims::DECIDED_WHERE
+        ))?;
+        let mut list = Vec::new();
+        for uid in near.knn(
+            k,
+            "c",
+            &[repo.to_owned()],
+            (None, None),
+            None,
+            CANDIDATES as usize,
+        )? {
+            if list.len() >= depth {
+                break;
+            }
+            if decided.exists([&uid])? && keep(&uid)? {
+                list.push(uid);
+            }
+        }
+        lists.push(list);
+    }
+    let lists: Vec<&[String]> = lists.iter().map(Vec::as_slice).collect();
+    Ok(rrf_lists(&lists)
+        .into_iter()
+        .filter_map(|uid| kept.remove(&uid))
+        .take(depth)
+        .collect())
 }
 
 /// `uid`'s claim as the claims leg places it: into `shown`, or into `ended` when it is lowered
@@ -3524,5 +3643,214 @@ mod tests {
         assert!(!json.contains("123456"), "{json}");
         let record = get(s.home.path(), &s.key(second)).unwrap().unwrap();
         assert!(!record.contains("123456"), "{record}");
+    }
+
+    /// Task 8 (D9): the shortlist's candidates are the repository's delivered claims of spec
+    /// 4.4's kinds, decided or open items not done, at most `depth`: no proposal, done item,
+    /// retraction, repo fact, claim of another repository or claim the worker has yet to apply
+    /// the owner's change to.
+    #[test]
+    fn delivered_ranked_keeps_the_repositorys_decided_delivered_claims() {
+        let mut s = Store::new();
+        for i in 0..60 {
+            s.decided(R, 1_000 + i, &format!("Parser rule {i:02} stays."), &[]);
+        }
+        let one = |s: &mut Store, ts: i64, text: &str, kind: (&str, &str, &str)| {
+            let seq = s.said("s", R, ts, text);
+            s.claim(seq, text, kind, &[])
+        };
+        let open = one(
+            &mut s,
+            2_000,
+            "Parser open item stays.",
+            ("open item", "proposed", "user"),
+        );
+        let left_out = [
+            one(
+                &mut s,
+                2_001,
+                "Parser proposal.",
+                ("decision", "proposed", "assistant proposal"),
+            ),
+            one(
+                &mut s,
+                2_002,
+                "Parser task done.",
+                ("open item", "done", "user"),
+            ),
+            one(
+                &mut s,
+                2_003,
+                "Parser retracted.",
+                ("decision", "retracted", "user"),
+            ),
+            one(
+                &mut s,
+                2_004,
+                "Parser fact.",
+                ("repo fact", "decided", "user"),
+            ),
+            s.decided("github.com/x/other", 2_005, "Parser elsewhere.", &[]),
+        ];
+        let corrected = s.decided(R, 2_006, "Parser corrected later.", &[]);
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let uids = |raw: &Raw, depth| -> Vec<String> {
+            delivered_ranked(raw, &k, &["parser"], None, R, depth)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.uid)
+                .collect()
+        };
+        let all = uids(&s.raw, 100);
+        assert_eq!(all.len(), 62);
+        assert!(all.contains(&open) && all.contains(&corrected));
+        assert!(left_out.iter().all(|u| !all.contains(u)));
+        assert_eq!(uids(&s.raw, 50).len(), 50);
+        // An owner's correction the worker has not applied yet hides the claim (D3).
+        let op = serde_json::json!({"uid": corrected, "status": "retracted"});
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Correction, op)])
+            .unwrap();
+        assert!(!uids(&s.raw, 100).contains(&corrected));
+    }
+
+    #[test]
+    fn delivered_ranked_filters_vector_neighbors_before_the_depth_limit() {
+        let mut s = Store::new();
+        let seq = s.said("s", R, 1_000, "A proposed parser rule.");
+        let proposal = s.claim(
+            seq,
+            "A proposed parser rule.",
+            ("decision", "proposed", "assistant proposal"),
+            &[],
+        );
+        let ended = s.decided(R, 1_001, "The old parser rule.", &[]);
+        s.decided(R, 1_001, "The replacement parser rule.", &[&ended]);
+        let pending = s.decided(R, 1_002, "A parser rule awaiting correction.", &[]);
+        let first = s.decided(R, 1_003, "The first eligible parser rule.", &[]);
+        let second = s.decided(R, 1_004, "The second eligible parser rule.", &[]);
+        s.run();
+        let op = serde_json::json!({"uid": pending, "status": "retracted"});
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Correction, op)])
+            .unwrap();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        k.execute(
+            "INSERT INTO vec_generation(embedder, state) VALUES ('test', 'active')",
+            [],
+        )
+        .unwrap();
+        for (i, uid) in [&proposal, &ended, &pending, &first, &second]
+            .into_iter()
+            .enumerate()
+        {
+            let mut v = vec![0.0_f32; crate::embed::DIM];
+            v[0] = 0.99 - i as f32 * 0.1;
+            v[1] = (1.0 - v[0] * v[0]).sqrt();
+            let blob: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+            let id = i as i64 + 1;
+            k.execute(
+                "INSERT INTO vectors(embedder, src_sha, vec) VALUES ('test', ?1, ?2)",
+                params![uid, blob],
+            )
+            .unwrap();
+            k.execute(
+                "INSERT INTO vector_keys(id, embedder, kind, key, src_sha)
+                 VALUES (?1, 'test', 'c', ?2, ?2)",
+                params![id, uid],
+            )
+            .unwrap();
+            k.execute(
+                "INSERT INTO vec_index(rowid, embedder, kind, repo, ts, session, embedding)
+                 VALUES (?1, 'test', 'c', ?2, 1000, 's', vec_bit(?3))",
+                params![id, R, crate::embed::bits(&v)],
+            )
+            .unwrap();
+        }
+        let mut vector = vec![0.0; crate::embed::DIM];
+        vector[0] = 1.0;
+        let found: Vec<String> = delivered_ranked(&s.raw, &k, &[], Some(&vector), R, 2)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.uid)
+            .collect();
+        assert_eq!(found, vec![first, second]);
+    }
+
+    /// Task 8 (D9): each text's full-text list and the vector list are fused by RRF, so a claim
+    /// only the query vector finds is a candidate, and a claim only one text matches is too; the
+    /// vector list keeps to the repository's decided claims as the full-text lists do.
+    #[test]
+    fn delivered_ranked_fuses_each_texts_list_and_the_vectors() {
+        use crate::embed::stub::Stub;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        let lexical = s.decided(R, 1_000, "Keep parser errors on stderr.", &[]);
+        let filed = s.decided(R, 1_001, "The config loader lives in src/config.rs.", &[]);
+        let meaning = s.decided(R, 1_002, "Retries back off exponentially.", &[]);
+        let seq = s.said("s", R, 1_003, "Retries might add jitter.");
+        let proposal = s.claim(
+            seq,
+            "Retries might add jitter.",
+            ("decision", "proposed", "assistant proposal"),
+            &[],
+        );
+        let elsewhere = s.decided("github.com/x/other", 1_004, "Retries stop at five.", &[]);
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let vec: Vec<u8> = k
+            .query_row(
+                "SELECT v.vec FROM vector_keys x JOIN vectors v
+                   ON v.embedder = x.embedder AND v.src_sha = x.src_sha
+                 WHERE x.kind = 'c' AND x.key = ?1",
+                [&meaning],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let vector: Vec<f32> = vec
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        let found: Vec<String> = delivered_ranked(
+            &s.raw,
+            &k,
+            &["parser errors", "config.rs"],
+            Some(&vector),
+            R,
+            10,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|c| c.uid)
+        .collect();
+        for uid in [&lexical, &filed, &meaning] {
+            assert!(found.contains(uid));
+        }
+        assert!(!found.contains(&proposal) && !found.contains(&elsewhere));
+        let two = delivered_ranked(
+            &s.raw,
+            &k,
+            &["parser errors", "config.rs"],
+            Some(&vector),
+            R,
+            2,
+        )
+        .unwrap();
+        assert_eq!(two.len(), 2);
+        // No vector, no claim that only the vector found; each text brings its own matches.
+        let plain = |texts: &[&str]| -> Vec<String> {
+            delivered_ranked(&s.raw, &k, texts, None, R, 10)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.uid)
+                .collect()
+        };
+        assert_eq!(plain(&["parser errors"]), std::slice::from_ref(&lexical));
+        assert_eq!(plain(&["parser errors", "config.rs"]), [lexical, filed]);
     }
 }

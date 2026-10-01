@@ -1937,11 +1937,30 @@ pub fn doctor(home: &Path) -> Result<()> {
         ),
     }
     match config::inject(home) {
-        Ok(i) if i.session_start => println!(
-            "injection: the manifest, up to {} characters",
-            i.session_start_chars
-        ),
-        Ok(_) => println!("injection: off, no manifest is shown to an agent"),
+        Ok(i) => {
+            if i.session_start {
+                println!(
+                    "injection: the manifest, up to {} characters",
+                    i.session_start_chars
+                );
+            } else {
+                println!("injection: off, no manifest is shown to an agent");
+            }
+            match i.per_prompt {
+                true => println!(
+                    "per-prompt injection: on, up to {} characters a prompt",
+                    i.per_prompt_chars
+                ),
+                false => println!("per-prompt injection: off"),
+            }
+            match i.correction {
+                true => println!(
+                    "corrections: on, up to {} characters at the next prompt",
+                    i.correction_chars
+                ),
+                false => println!("corrections: off"),
+            }
+        }
         Err(e) => {
             println!("injection: settings are wrong, so nothing is injected: {e:#}");
             unhealthy.push("injection settings are wrong");
