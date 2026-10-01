@@ -1,0 +1,27 @@
+docs/eval/m4.py
+  s_59cfa7617c8511::t_5cd1f278af586b 1-430
+docs/eval/test_m4.py
+  s_59cfa7617c8511::t_0814ac1db7a162 1-205
+docs/eval/judge.py
+  s_59cfa7617c8511::t_d88efcf5818a66 15-17,27-29,83-87,89-94,164-166,173-183
+docs/eval/report.py
+  s_59cfa7617c8511::t_72a6fc4c6ccafe 20,26,55-56,83-84
+docs/milestone-4.md
+  s_59cfa7617c8511::t_0f92ccf7a6fc60 39-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "67cf8f4a5cf28408173bb58374367a7259b9b910",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
