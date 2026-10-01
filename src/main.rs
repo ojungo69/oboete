@@ -22,7 +22,6 @@ mod gates;
 mod hook;
 mod hookstate;
 mod import;
-mod inject;
 mod isolation;
 mod keyfile;
 mod knowledge;
@@ -204,9 +203,6 @@ enum Cmd {
         #[arg(long)]
         open: bool,
     },
-    /// Semantic search: embed every document that has no vector yet (without the daily cap)
-    /// and rebuild the vector index. Needs `[embedding] provider = "workers-ai"`
-    Reindex,
     /// Copy another memory tool's store into this one (claude-mem's SQLite database)
     Import {
         /// Source tool: claude-mem
@@ -328,11 +324,6 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             Ok(())
         }
         Cmd::Worker { idle_ms } => worker::run(&home, idle_ms),
-        Cmd::Reindex => {
-            let stats = embed::reindex(&home)?;
-            println!("{}", serde_json::to_string(&stats)?);
-            Ok(())
-        }
         Cmd::Inject { session } => {
             let cwd = std::env::current_dir()?;
             print!("{}", hook::inject_text(&home, &cwd, session.as_deref()));
@@ -390,7 +381,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         Cmd::Timeline { all, anchor, limit } => {
             let mut out = String::new();
             let repo = repo_filter(all)?;
-            for i in search::b::timeline(&home, repo.as_deref(), anchor.as_deref(), limit)? {
+            for i in search::b::timeline(&home, repo.as_deref(), anchor.as_deref(), None, limit)? {
                 out.push_str(&search::b::item_line(&i, all));
             }
             emit(&out)

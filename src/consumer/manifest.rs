@@ -113,7 +113,7 @@ pub fn text(
 
 /// Whether knowledge.db has the table or view `name` (`kind`): absent until the worker has run
 /// this version's schema.
-fn exists(k: &Connection, kind: &str, name: &str) -> Result<bool> {
+pub(crate) fn exists(k: &Connection, kind: &str, name: &str) -> Result<bool> {
     Ok(k.query_row(
         "SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2",
         [kind, name],

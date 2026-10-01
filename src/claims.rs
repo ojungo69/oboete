@@ -649,7 +649,7 @@ pub fn active_one(k: &Connection, uid: &str) -> Result<Option<Claim>> {
 }
 
 /// The active claims `l` whose derivation links claim `a` (a row of the `active` view).
-const LINKERS: &str = "FROM edges e
+pub(crate) const LINKERS: &str = "FROM edges e
            JOIN claims x ON x.op_device = e.op_device AND x.op_seq = e.op_seq
            JOIN active l ON l.uid = x.uid
            WHERE e.to_uid = a.uid AND x.uid <> a.uid";

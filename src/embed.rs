@@ -1,16 +1,12 @@
-//! Document vectors for semantic search (PR-D, docs/pr-d.md): bge-m3 on Workers AI, one normalized
-//! fp32 vector per document in `embeddings` (the source), indexed as sign bits in `vec_docs`
-//! (sharded by repository and by knowledge / prompt) for a Hamming search rescored in fp32.
+//! Workers AI's bge-m3 (PR-D, docs/pr-d.md), as Design B's embedding phase and search call it
+//! (milestone 4 D8): the request, its limits, and the sign bits the vector index holds.
 
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
-use crate::{config, db, redact};
+use crate::config;
 
 pub const DIM: usize = 1024;
 /// The model, recorded with every vector: one vector space per store (proposal §2.3). Workers AI
@@ -28,39 +24,10 @@ const BATCH_CHARS: usize = 50_000;
 pub(crate) const MAX_CHARS: usize = 12_000;
 /// A prompt is embedded by its opening (the spike's texts).
 pub(crate) const PROMPT_CHARS: usize = 1_000;
-/// Documents read per round of a backlog.
-const PAGE: i64 = 2_000;
 /// A batch of up to 100 texts; a search query waits for its vector (MCP budget p95 1.5 s).
 pub(crate) const BATCH_TIMEOUT: Duration = Duration::from_secs(180);
-const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// One answer holds up to 100 × 1,024 floats as JSON (about 2 MB).
 const MAX_RESPONSE_BYTES: u64 = 8 << 20;
-
-#[derive(Debug, Default, serde::Serialize)]
-pub struct Stats {
-    pub embedded: usize,
-    pub indexed: usize,
-    pub requests: u32,
-}
-
-/// Embed documents that have no vector yet (newest first) and index vectors that are not in
-/// `vec_docs` (new ones, and those a re-key dropped). `max_requests` = None ignores the daily cap
-/// (`oboete reindex`). `still` is asked before each request, which it stops with its error.
-pub fn backlog(
-    conn: &mut Connection,
-    cfg: &config::Embedding,
-    max_requests: Option<u32>,
-    still: &dyn Fn() -> Result<()>,
-) -> Result<Stats> {
-    let (url, key) = endpoint(cfg)?;
-    let cap = max_requests.map(|n| {
-        n.min(
-            cfg.daily_requests
-                .saturating_sub(db::calls_today(conn, CALLS).unwrap_or(u32::MAX)),
-        )
-    });
-    backlog_at(conn, &url, &key, cap, still)
-}
 
 /// The model's URL and the token.
 fn endpoint(cfg: &config::Embedding) -> Result<(String, String)> {
@@ -177,181 +144,6 @@ impl Embedder {
     }
 }
 
-/// A search query's vector, gated like the documents. A search waits for it, so the call gets a
-/// short timeout; the caller falls back to full-text search when it fails.
-pub fn query(cfg: &config::Embedding, text: &str) -> Result<Vec<f32>> {
-    let (url, key) = endpoint(cfg)?;
-    let gated: String = redact::outbound(text).chars().take(MAX_CHARS).collect();
-    anyhow::ensure!(!gated.trim().is_empty(), "empty query");
-    let mut v = run_model(&url, &key, &[&gated], QUERY_TIMEOUT)?;
-    Ok(v.remove(0))
-}
-
-/// Up to `k` documents of one shard (a repository or all; knowledge or prompts) nearest to `q`:
-/// 4k candidates by Hamming distance on the sign bits, rescored by fp32 cosine from
-/// `embeddings` (docs/pr-d.md: top-10 agreement 0.987 with the exact ranking). `skip_session`
-/// (evaluation only) is left out of the candidates, which are fetched deeper until 4k remain.
-pub fn nearest(
-    conn: &Connection,
-    q: &[f32],
-    repo: Option<&str>,
-    prompts: bool,
-    skip_session: Option<&str>,
-    k: usize,
-) -> Result<Vec<String>> {
-    let kind = if prompts { "p" } else { "k" };
-    let mut sql = String::from(
-        "SELECT doc FROM vec_docs WHERE embedding MATCH vec_bit(?1) AND k = ?2 AND kind = ?3",
-    );
-    if repo.is_some() {
-        sql.push_str(" AND repo = ?4");
-    }
-    sql.push_str(" ORDER BY distance");
-    let mut stmt = conn.prepare(&sql)?;
-    let want = 4 * k;
-    // sqlite-vec refuses k above 4,096 (a large `--limit`, or a big skipped session).
-    let mut n = want.min(4_096);
-    let candidates = loop {
-        let docs: Vec<String> = match repo {
-            Some(r) => stmt
-                .query_map(params![bits(q), n as i64, kind, r], |r| r.get(0))?
-                .collect::<Result<_, _>>()?,
-            None => stmt
-                .query_map(params![bits(q), n as i64, kind], |r| r.get(0))?
-                .collect::<Result<_, _>>()?,
-        };
-        let fetched = docs.len();
-        let mut kept = Vec::with_capacity(want.min(fetched));
-        for doc in docs {
-            if kept.len() < want
-                && (skip_session.is_none()
-                    || db::doc_session(conn, &doc)?.as_deref() != skip_session)
-            {
-                kept.push(doc);
-            }
-        }
-        if kept.len() == want || fetched < n || n == 4_096 {
-            break kept;
-        }
-        n = (n * 2).min(4_096);
-    };
-    let mut get = conn.prepare("SELECT vec FROM embeddings WHERE doc = ?1")?;
-    let mut scored = Vec::with_capacity(candidates.len());
-    for doc in candidates {
-        let Some(bytes) = get
-            .query_row(params![doc], |r| r.get::<_, Vec<u8>>(0))
-            .optional()?
-        else {
-            continue;
-        };
-        let dot: f32 = bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(q)
-            .map(|(b, x)| f32::from_le_bytes(*b) * x)
-            .sum();
-        scored.push((dot, doc));
-    }
-    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
-    Ok(scored.into_iter().take(k).map(|(_, d)| d).collect())
-}
-
-fn backlog_at(
-    conn: &mut Connection,
-    url: &str,
-    key: &str,
-    cap: Option<u32>,
-    still: &dyn Fn() -> Result<()>,
-) -> Result<Stats> {
-    let mut stats = Stats {
-        indexed: index_pending(conn)?,
-        ..Stats::default()
-    };
-    loop {
-        let left = cap.map_or(u32::MAX, |n| n.saturating_sub(stats.requests));
-        // A page of the newest documents at a time keeps memory flat on a large backlog.
-        let limit = (i64::from(left) * BATCH as i64).min(PAGE);
-        let mut todo = if left == 0 {
-            Vec::new()
-        } else {
-            pending(conn, limit)?
-        };
-        if todo.is_empty() {
-            return Ok(stats);
-        }
-        todo.sort_by_key(|(_, text)| text.chars().count());
-        let before = stats.embedded;
-        embed_page(conn, url, key, cap, &todo, &mut stats, still)?;
-        if stats.embedded == before {
-            return Ok(stats);
-        }
-    }
-}
-
-fn embed_page(
-    conn: &mut Connection,
-    url: &str,
-    key: &str,
-    cap: Option<u32>,
-    todo: &[(String, String)],
-    stats: &mut Stats,
-    still: &dyn Fn() -> Result<()>,
-) -> Result<()> {
-    for batch in batches(todo) {
-        if cap.is_some_and(|n| stats.requests >= n) {
-            break;
-        }
-        still()?;
-        let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
-        let started = Instant::now();
-        let result = run_model(url, key, &texts, BATCH_TIMEOUT);
-        let ms = started.elapsed().as_millis() as i64;
-        stats.requests += 1;
-        let vecs = match result {
-            Ok(v) => {
-                db::record_call(conn, CALLS, "ok", ms, Some(&batch.len().to_string()))?;
-                v
-            }
-            Err(e) => {
-                db::record_call(conn, CALLS, "error", ms, Some(&format!("{e:#}")))?;
-                return Err(e);
-            }
-        };
-        stats.embedded += store(conn, batch, &vecs)?;
-    }
-    Ok(())
-}
-
-/// Documents without a vector from this model, newest first, as the gated text to embed: an
-/// observation's kind and title over its body, a summary's body, a prompt's first 1,000
-/// characters (the spike's texts). Cut after the gate: a secret across the cut is redacted whole.
-fn pending(conn: &Connection, limit: i64) -> Result<Vec<(String, String)>> {
-    let mut stmt = conn.prepare(
-        "SELECT d.doc, d.text FROM (
-           SELECT 'o' || id AS doc, kind || ': ' || title || char(10) || body AS text, ts
-             FROM observations
-           UNION ALL SELECT 's' || id, body, ts FROM summaries
-           UNION ALL SELECT 'p' || id, body, ts FROM prompts
-         ) d LEFT JOIN embeddings e ON e.doc = d.doc AND e.embedder = ?1
-         WHERE e.doc IS NULL AND trim(d.text) != '' ORDER BY d.ts DESC LIMIT ?2",
-    )?;
-    let rows = stmt.query_map(params![EMBEDDER, limit], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-    })?;
-    rows.map(|r| {
-        let (doc, text) = r?;
-        let keep = if doc.starts_with('p') {
-            PROMPT_CHARS
-        } else {
-            MAX_CHARS
-        };
-        let gated: String = redact::outbound(&text).chars().take(keep).collect();
-        Ok((doc, gated))
-    })
-    .collect()
-}
-
 /// Requests of at most 100 texts whose count × longest stays under `BATCH_CHARS` (`todo` sorted by
 /// length, so each batch holds texts of similar length). A text longer than that goes alone.
 pub(crate) fn batches(todo: &[(String, String)]) -> Vec<&[(String, String)]> {
@@ -368,18 +160,6 @@ pub(crate) fn batches(todo: &[(String, String)]) -> Vec<&[(String, String)]> {
         out.push(&todo[start..]);
     }
     out
-}
-
-/// One Workers AI call: the texts' vectors, in order.
-fn run_model(url: &str, key: &str, texts: &[&str], timeout: Duration) -> Result<Vec<Vec<f32>>> {
-    let embedder = Embedder {
-        id: EMBEDDER.to_owned(),
-        url: url.to_owned(),
-        key: key.to_owned(),
-    };
-    embedder
-        .run(texts, timeout)
-        .map_err(|failed| anyhow!(failed.message))
 }
 
 /// `result.data` of a Workers AI answer as `n` unit vectors of finite numbers.
@@ -418,77 +198,6 @@ fn vectors(v: &Value, n: usize) -> Result<Vec<Vec<f32>>> {
         .collect()
 }
 
-/// Write one batch's vectors and index them, skipping documents deleted meanwhile. The repository
-/// is read here, inside the transaction, so a re-key in between cannot index an old key.
-fn store(conn: &mut Connection, batch: &[(String, String)], vecs: &[Vec<f32>]) -> Result<usize> {
-    let tx = conn.transaction()?;
-    let mut n = 0;
-    for ((doc, text), vec) in batch.iter().zip(vecs) {
-        let Some(repo) = repo_of(&tx, doc)? else {
-            continue;
-        };
-        let bytes: Vec<u8> = vec.iter().flat_map(|x| x.to_le_bytes()).collect();
-        let sha = format!("{:x}", Sha256::digest(text.as_bytes()));
-        tx.execute(
-            "INSERT OR REPLACE INTO embeddings(doc, embedder, text_sha, vec, indexed)
-             VALUES(?1, ?2, ?3, ?4, 1)",
-            params![doc, EMBEDDER, sha, bytes],
-        )?;
-        index(&tx, doc, &repo, vec)?;
-        n += 1;
-    }
-    tx.commit()?;
-    Ok(n)
-}
-
-/// Index the vectors `vec_docs` does not have (a re-key drops a repository's rows; `reindex`
-/// drops them all), a page per transaction so a whole store's vectors are never in memory at once.
-pub(crate) fn index_pending(conn: &mut Connection) -> Result<usize> {
-    let mut n = 0;
-    loop {
-        let tx = conn.transaction()?;
-        let rows: Vec<(String, Vec<u8>)> = tx
-            .prepare(
-                "SELECT doc, vec FROM embeddings WHERE indexed = 0 AND embedder = ?1 LIMIT ?2",
-            )?
-            .query_map(params![EMBEDDER, PAGE], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<_, _>>()?;
-        if rows.is_empty() {
-            return Ok(n);
-        }
-        for (doc, bytes) in rows {
-            // A vector whose document is gone is dropped with it (no row stays unindexed forever).
-            let Some(repo) = repo_of(&tx, &doc)? else {
-                tx.execute("DELETE FROM embeddings WHERE doc = ?1", params![doc])?;
-                continue;
-            };
-            let vec: Vec<f32> = bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|b| f32::from_le_bytes(*b))
-                .collect();
-            index(&tx, &doc, &repo, &vec)?;
-            tx.execute(
-                "UPDATE embeddings SET indexed = 1 WHERE doc = ?1",
-                params![doc],
-            )?;
-            n += 1;
-        }
-        tx.commit()?;
-    }
-}
-
-fn index(conn: &Connection, doc: &str, repo: &str, vec: &[f32]) -> Result<()> {
-    let kind = if doc.starts_with('p') { "p" } else { "k" };
-    conn.execute("DELETE FROM vec_docs WHERE doc = ?1", params![doc])?;
-    conn.execute(
-        "INSERT INTO vec_docs(doc, repo, kind, embedding) VALUES(?1, ?2, ?3, vec_bit(?4))",
-        params![doc, repo, kind, bits(vec)],
-    )?;
-    Ok(())
-}
-
 /// Sign bits, most significant bit first in each byte (as the spike's `np.packbits`).
 pub fn bits(vec: &[f32]) -> Vec<u8> {
     vec.chunks(8)
@@ -498,60 +207,6 @@ pub fn bits(vec: &[f32]) -> Vec<u8> {
                 .fold(0u8, |b, (i, x)| if *x > 0.0 { b | (0x80 >> i) } else { b })
         })
         .collect()
-}
-
-/// The repository a document is filed under, or None once it is deleted.
-fn repo_of(conn: &Connection, doc: &str) -> Result<Option<String>> {
-    let table = match doc.split_at_checked(1) {
-        Some(("o", _)) => "observations",
-        Some(("s", _)) => "summaries",
-        Some(("p", _)) => "prompts",
-        _ => return Ok(None),
-    };
-    let Ok(id) = doc[1..].parse::<i64>() else {
-        return Ok(None);
-    };
-    Ok(conn
-        .query_row(
-            &format!("SELECT repo FROM {table} WHERE id = ?1"),
-            params![id],
-            |r| r.get(0),
-        )
-        .optional()?)
-}
-
-/// `oboete reindex`: rebuild `vec_docs` from the stored vectors and embed every document that has
-/// none, without the daily cap.
-pub fn reindex(home: &Path) -> Result<Stats> {
-    let cfg = config::load(home)?;
-    anyhow::ensure!(
-        cfg.embedding.provider == "workers-ai",
-        "[embedding] provider is \"{}\"; reindex needs \"workers-ai\"",
-        cfg.embedding.provider
-    );
-    // The account and the token are checked before the index is dropped: a failed reindex must
-    // not leave search without one.
-    anyhow::ensure!(
-        cfg.embedding.account_id.is_some(),
-        "[embedding] account_id is not set"
-    );
-    config::read_key(&cfg.embedding.key_file)?;
-    // v1's store knows no exclusion list (spec 5.5), so nothing is embedded while a repository is
-    // on it, read again before each request as the egress gate does (Codex on #304).
-    let still = || -> Result<()> {
-        let excluded = crate::raw::open(home)?.exclusions()?;
-        anyhow::ensure!(
-            excluded.is_empty(),
-            "reindex embeds v1's store, which the exclusion list does not reach: it stops while \
-             {} is excluded",
-            excluded.join(", ")
-        );
-        Ok(())
-    };
-    still()?;
-    let mut conn = db::open(home)?;
-    conn.execute_batch("DELETE FROM vec_docs; UPDATE embeddings SET indexed = 0;")?;
-    backlog(&mut conn, &cfg.embedding, None, &still)
 }
 
 /// A loopback Workers AI for tests (milestone 4 Task 5). Each request is answered with one unit
@@ -734,11 +389,6 @@ pub(crate) mod stub {
 mod tests {
     use super::*;
 
-    /// A GitHub-token-shaped fake, assembled here so secret scanners do not flag the source.
-    fn fake_token() -> String {
-        ["gh", "p_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"].concat()
-    }
-
     #[test]
     fn batches_stay_under_the_request_limits() {
         let doc = |n: usize| (String::new(), "x".repeat(n));
@@ -779,206 +429,5 @@ mod tests {
         v[0] = 0.5;
         v[9] = 0.1;
         assert_eq!(bits(&v), [0x80, 0x40]);
-    }
-
-    #[test]
-    fn backlog_embeds_once_indexes_by_repo_and_follows_deletes_and_rekeys() {
-        let dir = std::env::temp_dir().join(format!("oboete-embed-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let repo_dir = dir.join("r");
-        std::fs::create_dir_all(repo_dir.join(".git")).unwrap();
-        let path_key = crate::repo::key(&repo_dir);
-        let mut conn = db::open(&dir).unwrap();
-        db::upsert_session(&conn, "s", "claude", &path_key, &path_key, 1).unwrap();
-        db::insert_prompt(&conn, "s", 1, &format!("token {} here", fake_token())).unwrap();
-        db::insert_prompt(&conn, "s", 2, "a second prompt").unwrap();
-        let stub = stub::Stub::start();
-        let url = stub.url.clone();
-
-        let stats = backlog_at(&mut conn, &url, "k", Some(5), &|| Ok(())).unwrap();
-        assert_eq!((stats.embedded, stats.requests), (2, 1));
-        let count = |conn: &Connection, sql: &str| -> i64 {
-            conn.query_row(sql, [], |r| r.get(0)).unwrap()
-        };
-        assert_eq!(
-            count(&conn, "SELECT COUNT(*) FROM embeddings WHERE indexed = 1"),
-            2
-        );
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM vec_docs"), 2);
-        // Stored vectors are unit length.
-        let first: Vec<u8> = conn
-            .query_row("SELECT vec FROM embeddings WHERE doc = 'p1'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        let norm: f32 = first
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|b| f32::from_le_bytes(*b).powi(2))
-            .sum();
-        assert!((norm - 1.0).abs() < 1e-5);
-        // A second run has nothing to embed and makes no request.
-        let stats = backlog_at(&mut conn, &url, "k", Some(5), &|| Ok(())).unwrap();
-        assert_eq!((stats.embedded, stats.requests), (0, 0));
-        assert_eq!(stub.requests(), 1);
-        // The index answers within the repository's knowledge / prompt shard.
-        let knn = |conn: &Connection, repo: &str| -> Vec<String> {
-            let q = bits(&{
-                let mut v = vec![0.0f32; DIM];
-                v[0] = 1.0;
-                v[1] = 1.0;
-                v
-            });
-            conn.prepare(
-                "SELECT doc FROM vec_docs WHERE embedding MATCH vec_bit(?1) AND k = 5
-                 AND repo = ?2 AND kind = 'p'",
-            )
-            .unwrap()
-            .query_map(params![q, repo], |r| r.get(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap()
-        };
-        assert_eq!(knn(&conn, &path_key).len(), 2);
-
-        // The repository gets an origin: the re-key drops its index rows, the next run indexes
-        // them under the new key without calling the model.
-        std::fs::write(
-            repo_dir.join(".git/config"),
-            "[remote \"origin\"]\n\turl = https://github.com/o/r\n",
-        )
-        .unwrap();
-        assert_eq!(db::rekey_paths(&mut conn).unwrap(), 1);
-        assert!(knn(&conn, &path_key).is_empty());
-        let stats = backlog_at(&mut conn, &url, "k", Some(5), &|| Ok(())).unwrap();
-        assert_eq!((stats.indexed, stats.requests), (2, 0));
-        assert_eq!(knn(&conn, "github.com/o/r").len(), 2);
-
-        // Deleting a document deletes its vector and its index row.
-        assert!(db::delete_doc(&mut conn, "p1").unwrap());
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM embeddings"), 1);
-        assert_eq!(knn(&conn, "github.com/o/r"), ["p2"]);
-
-        // The daily cap: no request when none is left.
-        db::insert_prompt(&conn, "s", 3, "a third prompt").unwrap();
-        let stats = backlog_at(&mut conn, &url, "k", Some(0), &|| Ok(())).unwrap();
-        assert_eq!((stats.embedded, stats.requests), (0, 0));
-        drop(conn);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn reindex_keeps_the_index_when_the_token_is_missing_and_rebuilds_it_in_pages() {
-        let dir = std::env::temp_dir().join(format!("oboete-embed-pages-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut conn = db::open(&dir).unwrap();
-        db::upsert_session(&conn, "s", "claude", "/r", "/r", 1).unwrap();
-        // More vectors than one page, stored as if embedded earlier and not yet indexed.
-        let n = PAGE as usize + 500;
-        let tx = conn.transaction().unwrap();
-        let mut v = vec![0.0f32; DIM];
-        v[0] = 1.0;
-        let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
-        for i in 1..=n {
-            db::insert_prompt(&tx, "s", i as i64, "p").unwrap();
-            tx.execute(
-                "INSERT INTO embeddings(doc, embedder, text_sha, vec) VALUES(?1, ?2, '', ?3)",
-                params![format!("p{i}"), EMBEDDER, bytes],
-            )
-            .unwrap();
-        }
-        tx.commit().unwrap();
-        assert_eq!(index_pending(&mut conn).unwrap(), n);
-        let indexed: i64 = conn
-            .query_row("SELECT COUNT(*) FROM vec_docs", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(indexed, n as i64);
-        drop(conn);
-
-        std::fs::write(
-            dir.join("config.toml"),
-            format!(
-                "[embedding]\nprovider = \"workers-ai\"\naccount_id = \"a\"\nkey_file = \"{}\"\n",
-                dir.join("missing-key.md").display()
-            ),
-        )
-        .unwrap();
-        assert!(reindex(&dir).is_err());
-        let conn = db::open(&dir).unwrap();
-        let still: i64 = conn
-            .query_row("SELECT COUNT(*) FROM vec_docs", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(still, n as i64);
-        drop(conn);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Codex on #304: `exclude` keeps a repository from every embedder, and v1's cannot tell its
-    /// documents apart.
-    #[test]
-    fn reindex_stops_while_a_repository_is_excluded() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = dir.path().join("key.md");
-        std::fs::write(&key, format!("workers ai\n{}\n", fake_token())).unwrap();
-        std::fs::write(
-            dir.path().join("config.toml"),
-            format!(
-                "[embedding]\nprovider = \"workers-ai\"\naccount_id = \"a\"\nkey_file = '{}'\n",
-                key.display()
-            ),
-        )
-        .unwrap();
-        let mut raw = crate::raw::open(dir.path()).unwrap();
-        raw.exclude("github.com/o/secret", false).unwrap();
-        drop(raw);
-        let err = reindex(dir.path()).unwrap_err().to_string();
-        assert!(err.contains("github.com/o/secret is excluded"), "{err}");
-        assert!(!dir.path().join("oboete.db").exists());
-    }
-
-    /// Codex on #304: an exclusion made while a reindex runs stops its next request.
-    #[test]
-    fn every_request_asks_still_first() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut conn = db::open(dir.path()).unwrap();
-        db::upsert_session(&conn, "s", "claude", "/r", "/r", 1).unwrap();
-        // Two requests' worth.
-        for i in 1..=BATCH as i64 + 1 {
-            db::insert_prompt(&conn, "s", i, "a prompt").unwrap();
-        }
-        let stub = stub::Stub::start();
-        let url = stub.url.clone();
-        let asked = std::cell::Cell::new(0);
-        let still = || {
-            asked.set(asked.get() + 1);
-            anyhow::ensure!(asked.get() == 1, "excluded now");
-            Ok(())
-        };
-        let err = backlog_at(&mut conn, &url, "k", None, &still).unwrap_err();
-        assert_eq!(err.to_string(), "excluded now");
-        assert_eq!(stub.requests(), 1);
-    }
-
-    #[test]
-    fn pending_texts_are_gated() {
-        let dir = std::env::temp_dir().join(format!("oboete-embed-gate-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let conn = db::open(&dir).unwrap();
-        db::upsert_session(&conn, "s", "claude", "/r", "/r", 1).unwrap();
-        db::insert_prompt(&conn, "s", 1, &format!("token {} here", fake_token())).unwrap();
-        // A token across the 1,000-character cut is redacted whole, not cut first.
-        let long = format!("{} {} tail", "x".repeat(975), fake_token());
-        db::insert_prompt(&conn, "s", 2, &long).unwrap();
-        let todo = pending(&conn, 10).unwrap();
-        assert_eq!(todo.len(), 2);
-        for (_, text) in &todo {
-            assert!(!text.contains(&fake_token()[..20]), "{text}");
-            assert!(text.chars().count() <= 1_000);
-        }
-        drop(conn);
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

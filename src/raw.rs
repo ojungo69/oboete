@@ -299,6 +299,19 @@ pub fn open(home: &Path) -> Result<Raw> {
     })
 }
 
+/// `open`'s error when a restore still holds raw.db after `OPEN_WAIT`: a reader answers "try
+/// again" (the viewer's 503, milestone 4 D11).
+#[derive(Debug)]
+pub struct Restoring;
+
+impl std::fmt::Display for Restoring {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("raw.db is being restored")
+    }
+}
+
+impl std::error::Error for Restoring {}
+
 /// How long an open waits for a restore to finish swapping the file, and how long a restore
 /// waits for open stores to close. A hook's write fails after its wait (MUST-M16's marker).
 const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -328,11 +341,10 @@ fn swap_lock(home: &Path, exclusive: bool, wait: std::time::Duration) -> Result<
             Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(if exclusive {
+            Err(std::fs::TryLockError::WouldBlock) if exclusive => anyhow::bail!(
                 "raw.db is open elsewhere; try again when agents and workers have stopped"
-            } else {
-                "raw.db is being restored"
-            }),
+            ),
+            Err(std::fs::TryLockError::WouldBlock) => return Err(Restoring.into()),
             Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
         }
     }
@@ -470,6 +482,21 @@ impl Raw {
         )?;
         let rows = st.query_map(params![device, seq], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Each device's records, by its highest seq (one sequence holds a device's events and
+    /// tombstones): the viewer's stats, read from the primary key without a scan.
+    pub fn record_counts(&self) -> Result<Vec<(String, i64)>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT COALESCE(MAX(seq), 0) FROM records WHERE device = ?1")?;
+        self.devices()?
+            .into_iter()
+            .map(|d| {
+                let n = st.query_row([&d], |r| r.get(0))?;
+                Ok((d, n))
+            })
+            .collect()
     }
 
     /// Every device with records in this file: this one, and one a copied home left under its
