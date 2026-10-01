@@ -245,7 +245,9 @@ fn run_io(
             blocks.extend(p.blocks.iter().map(|(what, text)| (*what, text.as_str())));
         }
         let text = assembled(agent, line, &blocks);
-        // The shown set follows what the agent gets: a line a cut dropped shows nothing.
+        // The shown set follows what the agent gets: a line a cut dropped or the fence changed is
+        // not found, so its claim may be shown again, never counted as shown unseen (as
+        // `consumer::manifest::text` does after its gate).
         let came = |l: &str| text.lines().any(|t| t == l);
         if let Some(m) = &manifest {
             remember(
@@ -3218,6 +3220,21 @@ mod tests {
             );
             let out = String::from_utf8(out).unwrap();
             assert!(out.contains("recording has failed since"), "{agent}: {out}");
+        }
+        // Not at a prompt: the line stays at the points that showed it before.
+        for agent in ["claude", "codex", "pi", "opencode", "cursor"] {
+            let dir = tmp(&format!("fail-prompt-{agent}"));
+            let payload = match agent {
+                "cursor" => cursor_fixture(&dir)["UserPromptSubmit"].clone(),
+                _ => json!({"session_id": "s", "cwd": &*dir, "prompt": "hello"}),
+            };
+            std::fs::create_dir_all(dir.join("raw.db")).unwrap();
+            let mut out = Vec::new();
+            let input = payload.to_string();
+            assert!(run_io(&dir, agent, "UserPromptSubmit", input.as_bytes(), &mut out).is_err());
+            let out = String::from_utf8(out).unwrap();
+            assert!(!out.contains("recording has failed"), "{agent}: {out}");
+            std::fs::remove_dir_all(dir).ok();
         }
     }
 
