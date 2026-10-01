@@ -2,6 +2,7 @@
 Run: uv run --with pytest==9.1.1 pytest -q test_rerank.py
 """
 import json
+import os
 
 import pytest
 
@@ -144,17 +145,14 @@ def test_p50_is_the_median_and_p95_the_nearest_rank(tmp_path, monkeypatch, capsy
     assert 'CPU p50=1.100000s p95=2.000000s n=20' in printed
 
 
-@pytest.mark.parametrize('case', ['not empty', 'symbolic link', 'claimed'])
+@pytest.mark.parametrize('case', ['not empty', 'symbolic link'])
 def test_a_wrong_export_directory_is_refused_before_anything_is_deleted(tmp_path, case):
     out = tmp_path / 'onnx'
     out.mkdir()
-    if case != 'symbolic link':
+    if case == 'not empty':
         (out / '.export-cache').mkdir()
         (out / '.export-cache' / 'kept').write_text('x')
-    if case == 'not empty':
         (out / 'model.onnx').write_text('earlier export')
-    elif case == 'claimed':
-        (out / '.export-cache' / 'claimed').write_text('')
     else:
         elsewhere = tmp_path / 'elsewhere'
         elsewhere.mkdir()
@@ -163,3 +161,17 @@ def test_a_wrong_export_directory_is_refused_before_anything_is_deleted(tmp_path
     with pytest.raises(ValueError):
         rerank.export_model(out)
     assert (out / '.export-cache' / 'kept').read_text() == 'x'
+
+
+def test_the_export_deletes_no_cache_itself(tmp_path, monkeypatch):
+    # The command that made .export-cache deletes it; the script never does, so it cannot
+    # delete one another export is using.
+    out = tmp_path / 'onnx'
+    (out / '.export-cache').mkdir(parents=True)
+    (out / '.export-cache' / 'kept').write_text('x')
+    monkeypatch.setenv('HOME', str(tmp_path))
+    with pytest.raises(RuntimeError):
+        with rerank.export_cache(out):
+            raise RuntimeError('the export failed')
+    assert (out / '.export-cache' / 'kept').read_text() == 'x'
+    assert os.environ['HOME'] == str(tmp_path)

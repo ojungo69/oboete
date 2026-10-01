@@ -14,7 +14,7 @@ Export only when the owner has budgeted its disk use. Put uv's environment and
 caches inside the same disposable directory as the download and export scratch:
   out="$HOME/.oboete/eval/reranker-onnx"
   mkdir -p "$out" && mkdir "$out/.export-cache" "$out/.export-cache/tmp" &&
-  UV_CACHE_DIR="$out/.export-cache/uv" \
+  (UV_CACHE_DIR="$out/.export-cache/uv" \
     UV_PYTHON_INSTALL_DIR="$out/.export-cache/python" \
     HF_HOME="$out/.export-cache/hf" XDG_CACHE_HOME="$out/.export-cache/xdg" \
     TMPDIR="$out/.export-cache/tmp" PYTHONDONTWRITEBYTECODE=1 \
@@ -22,20 +22,18 @@ caches inside the same disposable directory as the download and export scratch:
     --with torch==2.8.0 --with transformers==4.55.4 --with onnx==1.18.0 \
     --with onnxscript==0.4.0 --with huggingface-hub==0.34.4 \
     --with safetensors==0.6.2 --with tokenizers==0.21.4 --with numpy==2.2.6 \
-    python rerank.py export "$out"
+    python rerank.py export "$out"; s=$?; rm -rf "$out/.export-cache"; exit $s)
 
 On macOS, omit --index https://download.pytorch.org/whl/cpu; its torch wheels
 already run on CPU. Keep every package version unchanged.
 
-The export directory must be empty except for .export-cache, which is deleted
-after the export, even on its failure. mkdir without -p refuses an existing
-.export-cache, and uv runs only after it: one export per directory at a time,
-and a leftover is never reused. The export also claims .export-cache with a file
-only one invocation can create, so a run started without that command cannot
-take another's. A directory that fails a check (not empty, .export-cache a
-symbolic link, or already claimed) is left as it is; remove its .export-cache
-by hand. Only
-model.onnx, its external data, and the revision's tokenizer files survive.
+The export directory must be empty except for .export-cache. The command
+above makes .export-cache itself (mkdir without -p refuses an existing one, and
+uv runs only after it: one export per directory at a time, and a leftover is
+never reused) and deletes it when uv ends, even on a failure; this script deletes
+nothing. A directory that fails a check (not empty, or .export-cache a symbolic
+link) is left as it is. Only model.onnx, its external data, and the revision's
+tokenizer files survive.
 Downloads are anonymous (no token, no .netrc); no subprocess is started by this
 script.
 Before running uv, remove environment variables whose names contain TOKEN, KEY,
@@ -215,10 +213,11 @@ def export_cache(out):
         tempfile.tempdir = None
         yield cache
     finally:
+        # The cache stays: the command that made it deletes it (above), so this script never
+        # deletes a cache another export may be using (Codex on 1264a73).
         os.environ.clear()
         os.environ.update(environment)
         tempfile.tempdir = previous_temp
-        shutil.rmtree(cache)
 
 
 def fingerprints(directory):
@@ -231,17 +230,10 @@ def fingerprints(directory):
 def export_model(out):
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    # Checked before the cleanup is armed, so a wrong directory loses nothing (Codex on d7b0be3).
     if (out / '.export-cache').is_symlink():
         raise ValueError('.export-cache must be a directory, not a symbolic link')
     if any(path.name != '.export-cache' for path in out.iterdir()):
         raise ValueError('export directory must be empty except for .export-cache')
-    (out / '.export-cache').mkdir(exist_ok=True)
-    try:
-        (out / '.export-cache' / 'claimed').open('x').close()
-    except FileExistsError:
-        raise ValueError('.export-cache belongs to another export, or one that stopped: '
-                         'remove it by hand') from None
     with export_cache(out) as cache:
         print(f'{MODEL} revision={REVISION}', flush=True)
         # Imports come after cache setup so even package initialization stays in scratch.
