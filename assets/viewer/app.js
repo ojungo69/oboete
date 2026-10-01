@@ -3,10 +3,13 @@
 const token = new URLSearchParams(location.hash.slice(1)).get('t') || '';
 const $ = (id) => document.getElementById(id);
 
+// append and replaceChildren would print a null as "null": a view leaves out a part with null.
+const present = (nodes) => nodes.filter((n) => n !== null && n !== undefined);
+
 function el(tag, cls, ...children) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
-  e.append(...children.filter((c) => c !== null && c !== undefined));
+  e.append(...present(children));
   return e;
 }
 
@@ -210,9 +213,6 @@ function setView(name) {
   }
 }
 
-// replaceChildren, like append, would print a null as "null": a view leaves out a part with null.
-const present = (nodes) => nodes.filter((n) => n !== null && n !== undefined);
-
 function draw(heading, list, panel) {
   $('heading').removeAttribute('lang');
   $('heading').replaceChildren(...(Array.isArray(heading) ? heading : [heading]));
@@ -232,7 +232,6 @@ async function showTimeline(repo) {
   return () => {
     const mine = generation;
     let next = page.next;
-    let count = page.items.length;
     const more = el('button', 'quiet more', 'More');
     more.type = 'button';
     const loadMore = async () => {
@@ -242,10 +241,9 @@ async function showTimeline(repo) {
         const page = await api('timeline', { ...params, before: next });
         if (mine !== generation || !more.isConnected) return;
         $('list').append(...page.items.map((item) => timelineEntry(item, !repo)));
-        count += page.items.length;
         next = page.next;
         if (!next) more.remove();
-        setStatus(`${count} entries loaded.`);
+        setStatus(`${$('list').childElementCount} entries loaded.`);
       } catch (e) {
         if (mine === generation) showError(e, loadMore);
       } finally {
@@ -254,7 +252,7 @@ async function showTimeline(repo) {
     };
     more.addEventListener('click', loadMore);
     draw('Timeline', page.items.map((item) => timelineEntry(item, !repo)), next ? [more] : []);
-    setStatus(count ? `${count} entries loaded.` : 'No entries recorded yet.');
+    setStatus(page.items.length ? `${page.items.length} entries loaded.` : 'No entries recorded yet.');
   };
 }
 
@@ -899,14 +897,11 @@ async function loadRepos() {
   currentRepo = current;
   const own = repos.find((r) => r.repo === current) ?? { repo: current, claims: 0, imported: 0, records: 0 };
   const options = [own, ...repos.filter((r) => r.repo !== current)].map((r) => {
-    const o = el('option', null, `${r.repo} (${r.claims} claims, ${r.imported} imported, ${r.records} records)`);
-    o.value = r.repo;
+    const o = new Option(`${r.repo} (${r.claims} claims, ${r.imported} imported, ${r.records} records)`, r.repo);
     o.title = `${r.repo}${r.repo === current ? ' (current checkout)' : ''}${r.last === undefined ? '' : `; last activity: ${new Date(r.last).toLocaleString('en-US')}`}`;
     return o;
   });
-  const all = el('option', null, 'All repositories');
-  all.value = '';
-  $('repo').replaceChildren(...options, all);
+  $('repo').replaceChildren(...options, new Option('All repositories', ''));
   $('repo').value = keep === '' || options.some((o) => o.value === keep) ? keep : current;
   reposLoaded = true;
 }
@@ -927,17 +922,11 @@ async function refresh() {
 
 let version = null;
 let polling = false;
-let pollTimer = null;
 let pollFailureNotice = null;
 const UNREACHABLE = 'The viewer is not answering. Start `oboete view` again and open the address it prints.';
 
 async function poll() {
-  if (polling) return;
-  clearTimeout(pollTimer);
-  if (document.visibilityState !== 'visible') {
-    pollTimer = setTimeout(poll, 3000);
-    return;
-  }
+  if (polling || document.visibilityState !== 'visible') return;
   polling = true;
   try {
     const { v } = await api('version');
@@ -956,7 +945,6 @@ async function poll() {
     else setStatus(UNREACHABLE, true);
   } finally {
     polling = false;
-    pollTimer = setTimeout(poll, 3000);
   }
 }
 
@@ -990,6 +978,7 @@ async function start() {
     if (!$('q').value) void show();
   });
   document.addEventListener('visibilitychange', () => void poll());
+  setInterval(poll, 3000);
   await poll();
 }
 

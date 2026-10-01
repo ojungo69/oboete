@@ -12,7 +12,7 @@ use aho_corasick::AhoCorasick;
 use regex::Regex;
 use serde::Deserialize;
 
-const MASK: &str = "[REDACTED]";
+pub(crate) const MASK: &str = "[REDACTED]";
 const RULES_TOML: &str = include_str!("../config/gitleaks.toml");
 const EXTRA_TOML: &str = include_str!("../config/oboete-rules.toml");
 
@@ -457,15 +457,7 @@ fn hidden_map(text: &str, rules: &Rules) -> Option<Shown> {
         }
         (work, from) = (next, next_from);
     }
-    hidden.sort_unstable();
-    let mut runs: Vec<(usize, usize)> = Vec::new();
-    for (s, e) in hidden {
-        match runs.last_mut() {
-            Some((_, last)) if s <= *last => *last = (*last).max(e),
-            _ => runs.push((s, e)),
-        }
-    }
-    Some((work, from, runs))
+    Some((work, from, merged_runs(hidden)))
 }
 
 /// The byte ranges of `text` that `outbound_lines(text)` does not show: `hidden`'s, and what its
@@ -1076,10 +1068,13 @@ fn hidden_views(
                 .map(|(s, e)| (view.start + s, view.start + e)),
         );
     }
+    Some(merged_runs(runs))
+}
+
+/// `runs` sorted, overlapping or touching ones joined (`merged`).
+fn merged_runs(mut runs: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
     runs.sort_unstable();
-    Some(merged(
-        &runs.into_iter().map(|(s, e)| (s, e, 0)).collect::<Vec<_>>(),
-    ))
+    merged(&runs.into_iter().map(|(s, e)| (s, e, 0)).collect::<Vec<_>>())
 }
 
 /// `outbound_lines` of `text[range]` with what `outbound_lines` of the whole `text` hides there
@@ -1095,10 +1090,8 @@ pub fn outbound_quote(text: &str, range: std::ops::Range<usize>) -> String {
 }
 
 fn quote_with(text: &str, range: std::ops::Range<usize>, rules: &Rules) -> String {
-    match hidden_views(text, [0..text.len(), range.clone()], rules) {
-        Some(runs) => lines_with(&outbound_range(text, range, Some(&runs), rules), rules),
-        None => MASK.to_string(),
-    }
+    let runs = hidden_views(text, [0..text.len(), range.clone()], rules);
+    lines_with(&outbound_range(text, range, runs.as_deref(), rules), rules)
 }
 
 /// The egress gate on a stored body, field by field as capture scanned it.
