@@ -13,7 +13,7 @@ From docs/eval, with Python 3.12:
 Export only when the owner has budgeted its disk use. Put uv's environment and
 caches inside the same disposable directory as the download and export scratch:
   out="$HOME/.oboete/eval/reranker-onnx"
-  mkdir -p "$out" && mkdir "$out/.export-cache" "$out/.export-cache/tmp" &&
+  mkdir -p "$out" && mkdir "$out/.export-cache" && mkdir "$out/.export-cache/tmp" &&
   (UV_CACHE_DIR="$out/.export-cache/uv" \
     UV_PYTHON_INSTALL_DIR="$out/.export-cache/python" \
     HF_HOME="$out/.export-cache/hf" XDG_CACHE_HOME="$out/.export-cache/xdg" \
@@ -34,6 +34,9 @@ never reused) and deletes it when uv ends, even on a failure; this script delete
 nothing. A directory that fails a check (not empty, or .export-cache a symbolic
 link) is left as it is. Only model.onnx, its external data, and the revision's
 tokenizer files survive.
+agreement replaces sets.jsonl and README.md together or keeps the previous pair; if putting
+one back fails too, the previous file stays in a .agreement-* directory beside them, named in
+the error. Run one agreement per directory at a time.
 Downloads are anonymous (no token, no .netrc); no subprocess is started by this
 script.
 Before running uv, remove environment variables whose names contain TOKEN, KEY,
