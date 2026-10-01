@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::capture::{self, Captured, Settings};
 use crate::raw::{self, Checkpoint, IMPORT_BATCH, MAX_BATCH_BYTES};
@@ -84,6 +85,8 @@ struct Line {
     session: String,
     ts: String,
     payload: Value,
+    #[serde(skip)]
+    synthetic: bool,
 }
 
 struct Emitter {
@@ -134,6 +137,7 @@ impl Emitter {
             session: self.session.clone(),
             ts: ts.clone(),
             payload,
+            synthetic: false,
         };
         // SessionStart sorts first whatever its time.
         let key = if event == "SessionStart" {
@@ -267,9 +271,14 @@ impl Emitter {
 
     /// End of one file: calls that never got a result, then the turn's last text.
     fn finish(&mut self) -> Result<()> {
+        let first = self.lines.len();
         self.interrupt(false)?;
         let ts = self.last_ts.clone();
-        self.stop(&ts)
+        self.stop(&ts)?;
+        for (_, line) in &mut self.lines[first..] {
+            line.synthetic = true;
+        }
+        Ok(())
     }
 }
 
@@ -707,8 +716,11 @@ pub fn import(
     out: &mut impl Write,
 ) -> Result<ImportStats> {
     let _lock = yes.then(|| crate::import::lock(home)).transpose()?;
-    let mut raw = yes.then(|| raw::open(home)).transpose()?;
     let v1 = home.join("oboete.db");
+    if yes {
+        crate::migrate::check_source(home, &v1)?;
+    }
+    let mut raw = yes.then(|| raw::open(home)).transpose()?;
     if let Some(raw) = raw.as_mut()
         && v1.exists()
     {
@@ -737,10 +749,16 @@ pub fn import(
         let stats = stats.agents.entry((*agent).to_owned()).or_default();
         for path in transcript_files(root, agent)? {
             stats.files += 1;
-            let Some(lines) = stable_lines(&path, agent)? else {
+            let Some(mut lines) = stable_lines(&path, agent)? else {
                 stats.waiting += 1;
                 continue;
             };
+            // EOF's interrupted calls, Stop and SessionEnd may be replaced when the file grows.
+            // Number only settled events, so none of those synthetic lines moves the checkpoint.
+            lines.retain(|line| !line.synthetic && line.event != "SessionEnd");
+            for (i, line) in lines.iter_mut().enumerate() {
+                line.seq = i as u64 + 1;
+            }
             let Some(first) = lines.first() else {
                 continue;
             };
@@ -765,30 +783,43 @@ pub fn import(
             }
             let key = format!("transcript:{agent}:{session}");
             let seen = checkpoints.get(&key).map_or(0, |c| c.through);
+            let mut prefix = Sha256::new();
+            if let Some(previous) = checkpoints.get(&key) {
+                for line in lines.iter().take_while(|line| line.seq <= seen as u64) {
+                    hash_line(&mut prefix, line)?;
+                }
+                let fingerprint = format!("{:x}", prefix.clone().finalize());
+                anyhow::ensure!(
+                    seen > 0
+                        && lines.iter().any(|line| line.seq == seen as u64)
+                        && previous.prefix.as_deref() == Some(fingerprint.as_str()),
+                    "a transcript's imported prefix changed or cannot be verified: nothing was \
+                     imported from this file"
+                );
+            }
             let earliest = cut.get(&((*agent).to_owned(), session.clone()));
             let mut checkpoint = Checkpoint {
                 key: key.clone(),
                 through: seen,
                 row: None,
+                prefix: checkpoints.get(&key).and_then(|c| c.prefix.clone()),
             };
             let mut batch = Vec::<Captured>::new();
             let mut bytes = 0;
             for line in lines {
-                // The parser ends every transcript with a SessionEnd of its own, where a session
-                // resumed later puts its next events: not imported or counted, so a rerun takes them.
-                if line.event == "SessionEnd" {
-                    continue;
-                }
                 let through = i64::try_from(line.seq)?;
                 if through <= seen {
                     stats.seen += 1;
                     continue;
                 }
+                hash_line(&mut prefix, &line)?;
+                let fingerprint = Some(format!("{:x}", prefix.clone().finalize()));
                 let ts = crate::replay::fixture_ms(&clock, &json!(line.ts))
                     .context("a transcript event has no valid timestamp")?;
                 if earliest.is_some_and(|cut| ts >= *cut) {
                     stats.cut += 1;
                     checkpoint.through = through;
+                    checkpoint.prefix = fingerprint;
                     continue;
                 }
                 // The parser writes "." where the transcript named no directory: that is this
@@ -805,6 +836,7 @@ pub fn import(
                 batch.extend(captured);
                 bytes += size;
                 checkpoint.through = through;
+                checkpoint.prefix = fingerprint;
             }
             if checkpoint.through > seen {
                 append_batch(&mut raw, &mut batch, &checkpoint, &settings, stats)?;
@@ -820,6 +852,23 @@ pub fn import(
     }
     writeln!(out, "{}", serde_json::to_string(&stats)?)?;
     Ok(stats)
+}
+
+fn hash_line(prefix: &mut Sha256, line: &Line) -> Result<()> {
+    // A copied transcript keeps its event contents; its file path is not its identity.
+    let mut payload = line.payload.clone();
+    if let Some(fields) = payload.as_object_mut() {
+        fields.remove("transcript_path");
+    }
+    prefix.update(serde_json::to_vec(&(
+        line.agent,
+        &line.event,
+        &line.session,
+        &line.ts,
+        payload,
+    ))?);
+    prefix.update(b"\n");
+    Ok(())
 }
 
 fn append_batch(
@@ -1415,6 +1464,93 @@ mod tests {
             (1, 1, 0)
         );
         assert!(records(&home).is_empty());
+    }
+
+    #[test]
+    fn appended_tool_results_are_imported_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sessions");
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("rollout-resumed.jsonl");
+        let fixture = std::fs::read_to_string(CODEX).unwrap();
+        let unfinished = fixture.lines().take(5).collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::write(&file, &unfinished).unwrap();
+        let home = dir.path().join("home");
+        let roots = [("codex", root.as_path())];
+        let first = import(&home, &roots, true, &mut Vec::new()).unwrap();
+        assert_eq!(first.agents["codex"].events, 2);
+        std::fs::write(&file, unfinished + fixture.lines().nth(5).unwrap() + "\n").unwrap();
+        import(&home, &roots, true, &mut Vec::new()).unwrap();
+        let got = records(&home);
+        let tools: Vec<_> = got.iter().filter(|e| e.kind == "tool").collect();
+        assert_eq!(tools.len(), 1, "{tools:?}");
+        let body: Value = serde_json::from_str(&tools[0].body).unwrap();
+        assert_eq!(body["output"], "src/http.ts:3");
+        assert!(body.get("interrupted").is_none());
+        assert_eq!(
+            import(&home, &roots, true, &mut Vec::new()).unwrap().agents["codex"].events,
+            0
+        );
+        assert_eq!(records(&home), got);
+    }
+
+    #[test]
+    fn late_subagent_events_refuse_a_changed_imported_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects/p");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("claude-basic.jsonl");
+        std::fs::copy(CLAUDE, &file).unwrap();
+        let home = dir.path().join("home");
+        let roots = [("claude", root.parent().unwrap())];
+        let first = import(&home, &roots, true, &mut Vec::new()).unwrap();
+        assert!(first.agents["claude"].events > 0);
+        let before = records(&home);
+        let subagents = file.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::copy(
+            "src/testdata/transcripts/claude-basic/subagents/agent-a1.jsonl",
+            subagents.join("agent-a1.jsonl"),
+        )
+        .unwrap();
+        let refused = import(&home, &roots, true, &mut Vec::new()).unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("imported prefix"),
+            "{refused:#}"
+        );
+        assert_eq!(records(&home), before);
+    }
+
+    #[test]
+    fn rewritten_or_truncated_imported_prefixes_are_refused() {
+        for truncate in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (_, root) = fixtures(dir.path());
+            let file = root.join("2026/09/02/rollout-basic.jsonl");
+            let home = dir.path().join("home");
+            let roots = [("codex", root.as_path())];
+            assert_eq!(
+                import(&home, &roots, true, &mut Vec::new()).unwrap().agents["codex"].events,
+                8
+            );
+            let before = records(&home);
+            let fixture = std::fs::read_to_string(&file).unwrap();
+            let changed = if truncate {
+                fixture.lines().take(5).collect::<Vec<_>>().join("\n") + "\n"
+            } else {
+                fixture.replace(
+                    "Add a 50ms timeout to fetchJson",
+                    "Rewrite the earlier prompt",
+                )
+            };
+            std::fs::write(file, changed).unwrap();
+            let refused = import(&home, &roots, true, &mut Vec::new()).unwrap_err();
+            assert!(
+                format!("{refused:#}").contains("imported prefix"),
+                "{refused:#}"
+            );
+            assert_eq!(records(&home), before);
+        }
     }
 
     #[test]

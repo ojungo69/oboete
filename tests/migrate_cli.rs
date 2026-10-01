@@ -9,6 +9,8 @@ fn oboete(home: &Path, args: &[&str], stdin: &str) -> Output {
         .args(["--home", &home.to_string_lossy()])
         .args(args)
         .env("OBOETE_NO_SPAWN", "1")
+        .env("CODEX_HOME", home.join("codex"))
+        .env("CLAUDE_CONFIG_DIR", home.join("claude"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -74,4 +76,99 @@ fn migrate_imports_once_and_finish_asks_first() {
     let doctor = oboete(home.path(), &["doctor"], "");
     let said = String::from_utf8_lossy(&doctor.stdout);
     assert!(said.contains("v1 events not migrated yet: 0"), "{said}");
+}
+
+#[cfg(unix)]
+#[test]
+fn migration_commands_refuse_source_aliases_without_writing_v1() {
+    for command in ["migrate", "finish", "transcripts"] {
+        for alias in ["identical", "symlink", "hardlink"] {
+            if command != "migrate" && alias == "identical" {
+                continue;
+            }
+            let home = tempfile::tempdir().unwrap();
+            let from = home.path().join(if alias == "identical" {
+                "raw.db"
+            } else {
+                "oboete.db"
+            });
+            let v1 = rusqlite::Connection::open(&from).unwrap();
+            v1.execute_batch(
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO meta VALUES('device_id', 'v1-device');",
+            )
+            .unwrap();
+            drop(v1);
+            match alias {
+                "symlink" => std::os::unix::fs::symlink(&from, home.path().join("raw.db")).unwrap(),
+                "hardlink" => std::fs::hard_link(&from, home.path().join("raw.db")).unwrap(),
+                _ => {}
+            }
+            let before = std::fs::read(&from).unwrap();
+            let args = match command {
+                "migrate" => vec!["migrate", "--from", from.to_str().unwrap()],
+                "finish" => vec!["migrate", "--finish"],
+                _ => vec!["import", "transcripts", "--yes"],
+            };
+            let out = oboete(home.path(), &args, "yes\n");
+            assert!(
+                std::fs::read(&from).unwrap() == before,
+                "{command} wrote its {alias} v1 source"
+            );
+            assert!(!out.status.success(), "{command} accepted a {alias} alias");
+            let said = String::from_utf8_lossy(&out.stderr);
+            assert!(said.contains("aliases destination raw.db"), "{said}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn invalid_v1_settings_stay_private_in_a_fresh_home() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::process::CommandExt;
+
+    let root = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let v1 = root.path().join("v1");
+    std::fs::create_dir(&v1).unwrap();
+    std::fs::set_permissions(&v1, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let secret = "private-config-regression-value";
+    let config = format!("[redaction]\nextra_rules = [{{ id = 'private', regex = '{secret}' }}\n");
+    std::fs::write(v1.join("config.toml"), &config).unwrap();
+    std::fs::set_permissions(
+        v1.join("config.toml"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let home = root.path().join("new-home");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_oboete"));
+    command
+        .arg("--home")
+        .arg(&home)
+        .args(["migrate", "--from"])
+        .arg(v1.join("oboete.db"));
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0o022);
+            Ok(())
+        });
+    }
+    let out = command.output().unwrap();
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("parse ") && !said.contains(secret), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(home.join("config.toml")).unwrap(),
+        config
+    );
+    assert_eq!(std::fs::metadata(&home).unwrap().mode() & 0o777, 0o700);
+    assert_eq!(
+        std::fs::metadata(home.join("config.toml")).unwrap().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::read_to_string(v1.join("config.toml")).unwrap(),
+        config
+    );
 }

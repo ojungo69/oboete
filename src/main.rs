@@ -453,6 +453,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         }
         Cmd::Migrate { from, finish } => {
             let from = from.unwrap_or_else(|| home.join("oboete.db"));
+            migrate::check_source(&home, &from)?;
             let _lock = import::lock(&home)?;
             if finish {
                 let mut out = std::io::stdout().lock();

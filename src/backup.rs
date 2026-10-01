@@ -1172,6 +1172,7 @@ mod tests {
                 key: "oboete-v1:d1".into(),
                 through,
                 row: None,
+                prefix: None,
             };
             // Records 6-8, 9-10 and 11-12, a segment each.
             for (n, through) in [(3, 3), (2, 5), (2, 7)] {

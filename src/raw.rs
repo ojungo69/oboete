@@ -201,6 +201,9 @@ pub struct Checkpoint {
     pub through: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<V1Row>,
+    /// SHA-256 of the settled transcript events through this checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2429,6 +2432,7 @@ mod tests {
                 ts: 7,
                 session_id: "s1".into(),
             }),
+            prefix: None,
         }
     }
 
@@ -2481,6 +2485,7 @@ mod tests {
             key: "transcript:claude:s1".into(),
             through: 9,
             row: None,
+            prefix: None,
         };
         assert!(raw.append_imported(&[], "v9", Some(&t)).unwrap().is_empty());
         raw.append_imported(&[imported("c")], "v9", Some(&v1_checkpoint(50)))

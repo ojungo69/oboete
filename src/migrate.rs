@@ -12,6 +12,20 @@ use crate::raw::{Checkpoint, IMPORT_BATCH, ImportDoc, MAX_BATCH_BYTES, Raw, V1Ro
 /// The source of what v1's store holds, as records and documents in Design B (D6).
 const SOURCE: &str = "oboete-v1";
 
+/// Refuse a source that a writable raw open would reuse, including a stopped restore's file.
+pub fn check_source(home: &Path, from: &Path) -> Result<()> {
+    let mut destination = home.join("raw.db");
+    if !destination.exists() && home.join("raw.db.restored").exists() {
+        destination = home.join("raw.db.restored");
+    }
+    let source = crate::db::store_file(from);
+    anyhow::ensure!(
+        source.is_empty() || source != crate::db::store_file(&destination),
+        "v1 source aliases destination raw.db: use a separate source and destination"
+    );
+    Ok(())
+}
+
 /// What a pass imported.
 #[derive(Debug, Default, PartialEq, serde::Serialize)]
 pub struct Stats {
@@ -26,6 +40,9 @@ pub struct Stats {
     /// Imported v1 sessions whose events oboete.db no longer holds: the old viewer deleted them
     /// after a pass, and the owner may forget them in Design B (spec 7.4, A105).
     pub deleted: Vec<String>,
+    /// Stored identifiers whose earlier redaction or clipping prevents a reliable match.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub uncertain: Vec<String>,
 }
 
 /// One pass of the v1 import (spec 7.4, D6): the events past the checkpoint as records, in
@@ -91,7 +108,7 @@ fn read_pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<(Stats, Fingerpr
     };
     let mut stats = Stats::default();
     events(&v1, raw, &device, &settings, &mut stats)?;
-    stats.deleted = deleted(&v1, raw, &settings)?;
+    deleted(&v1, raw, &settings, &mut stats)?;
     repos(&v1, raw, &settings, &mut stats)?;
     documents(&v1, raw, &device, &settings, &mut stats)?;
     Ok((stats, fingerprint(&v1)?))
@@ -103,11 +120,30 @@ pub fn settings(home: &Path, from: &Path) -> Result<Vec<String>> {
     let ours = home.join("config.toml");
     let theirs = from.with_file_name("config.toml");
     if !ours.exists() && theirs.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
+        }
         // Whole or not at all: a copy cut short would read as a file with nothing set, which a
         // rerun keeps. A link, not a rename, so a config.toml written meanwhile is never replaced.
         let part = home.join("config.toml.part");
-        std::fs::copy(&theirs, &part).with_context(|| format!("copy {}", theirs.display()))?;
-        std::fs::File::open(&part)?.sync_all()?;
+        match std::fs::remove_file(&part) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut staged = options.open(&part)?;
+        std::io::copy(&mut std::fs::File::open(&theirs)?, &mut staged)
+            .with_context(|| format!("copy {}", theirs.display()))?;
+        staged.sync_all()?;
+        drop(staged);
         match std::fs::hard_link(&part, &ours) {
             Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
             _ => std::fs::remove_file(&part)?,
@@ -206,6 +242,7 @@ pub fn finish(
     out: &mut impl std::io::Write,
 ) -> Result<()> {
     let from = &home.join("oboete.db");
+    check_source(home, from)?;
     // Open to the end: its shared lock keeps a restore from swapping raw.db, with the batches the
     // pass just checked, while the answer is read and v1 is deleted.
     let mut raw = crate::raw::open(home)?;
@@ -221,6 +258,13 @@ pub fn finish(
             "v1 sessions deleted from oboete.db after they were imported (forget them to remove \
              them here too): {}",
             stats.deleted.join(", ")
+        )?;
+    }
+    if !stats.uncertain.is_empty() {
+        writeln!(
+            out,
+            "v1 session deletion cannot be determined (earlier redaction or clipping): {}",
+            stats.uncertain.join(", ")
         )?;
     }
     write!(out, "Delete these files? Type yes to delete them: ")?;
@@ -403,6 +447,7 @@ impl Batch {
             key: key.to_owned(),
             through: last.id,
             row: Some(last),
+            prefix: None,
         };
         Ok(raw
             .append_imported(&records, ruleset, Some(&checkpoint))?
@@ -433,7 +478,7 @@ fn payload(session: &str, stored: &str) -> Value {
 }
 
 /// The imported v1 sessions none of whose events oboete.db still holds.
-fn deleted(v1: &Connection, raw: &Raw, settings: &Settings) -> Result<Vec<String>> {
+fn deleted(v1: &Connection, raw: &Raw, settings: &Settings, stats: &mut Stats) -> Result<()> {
     // Design B's labels passed the gate: v1's ids are compared as capture labels them, and each
     // is printed as the rules read now.
     let label = |id: &str| {
@@ -448,12 +493,15 @@ fn deleted(v1: &Connection, raw: &Raw, settings: &Settings) -> Result<Vec<String
         .query_map([], |r| r.get::<_, String>(0))?
         .map(|id| id.map(|id| label(&id)))
         .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
-    Ok(raw
-        .sessions_of(SOURCE)?
-        .into_iter()
-        .filter(|s| !held.contains(s))
-        .map(|s| label(&s))
-        .collect())
+    for stored in raw.sessions_of(SOURCE)? {
+        let current = label(&stored);
+        if stored.contains(crate::redact::MASK) || stored.contains("\n…[cut: ") {
+            stats.uncertain.push(current);
+        } else if !held.contains(&current) {
+            stats.deleted.push(current);
+        }
+    }
+    Ok(())
 }
 
 /// v1's `session_repos` rows as `touch` records at their session's start (A57), so the
@@ -836,6 +884,62 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         assert!(!listed[0].contains("acme-123456"), "{listed:?}");
     }
 
+    #[test]
+    fn a_stricter_rule_does_not_list_a_held_v1_session_as_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let v1 = V1::new(dir.path());
+        v1.session("acme-123456", "r", 100);
+        v1.prompt("acme-123456", 101, "one");
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        assert_eq!(pass(home.path(), &mut raw, &v1.path).unwrap().records, 1);
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+        std::fs::write(home.path().join("config.toml"), rule).unwrap();
+        let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
+        assert!(stats.deleted.is_empty(), "{:?}", stats.deleted);
+    }
+
+    #[test]
+    fn prior_redaction_reports_uncertainty_without_recommending_forget() {
+        let dir = tempfile::tempdir().unwrap();
+        let v1 = V1::new(dir.path());
+        v1.session("acme-123456", "r", 100);
+        v1.prompt("acme-123456", 101, "one");
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[redaction]\nextra_rules = [{ id = 'part', regex = '[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        assert_eq!(pass(home.path(), &mut raw, &v1.path).unwrap().records, 1);
+        std::fs::write(
+            &config,
+            "[redaction]\nextra_rules = [{ id = 'whole', regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
+        assert!(stats.deleted.is_empty(), "{:?}", stats.deleted);
+        let report = serde_json::to_value(&stats).unwrap();
+        assert_eq!(report["uncertain"], json!(["acme-[REDACTED]"]));
+        drop(raw);
+        v1.conn
+            .execute(
+                "VACUUM INTO ?1",
+                [home.path().join("oboete.db").to_str().unwrap()],
+            )
+            .unwrap();
+        let mut out = Vec::new();
+        finish(home.path(), "no\n".as_bytes(), &mut out).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(
+            said.contains("cannot be determined") && said.contains("acme-[REDACTED]"),
+            "{said}"
+        );
+        assert!(!said.contains("forget them"), "{said}");
+    }
+
     /// D6: v1 gives the ids of deleted newest events to new ones, so a pass refuses when the
     /// event at its checkpoint is gone or another, before it imports anything.
     #[test]
@@ -876,7 +980,7 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
             v1.session(id, "r", 100 * i as i64);
             v1.prompt(id, 100 * i as i64 + 1, id);
         }
-        // An id the gate masks: its records' labels are masked, so it is matched as they are.
+        // An id the gate masks: its original identifier cannot be recovered from its label.
         let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
         let masked = format!("s-{token}");
         v1.session(&masked, "r", 400);
@@ -897,8 +1001,10 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         assert_eq!(stats.deleted, ["a"]);
         v1.delete_session(&masked);
         let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
-        assert_eq!(stats.deleted.len(), 2, "{:?}", stats.deleted);
+        assert_eq!(stats.deleted, ["a"]);
+        assert_eq!(stats.uncertain.len(), 1, "{:?}", stats.uncertain);
         assert!(stats.deleted.iter().all(|s| !s.contains(&token)));
+        assert!(stats.uncertain.iter().all(|s| !s.contains(&token)));
         // And by `--finish`, from the home's own store.
         drop(raw);
         let h = home.path();
@@ -910,7 +1016,9 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         finish(h, "no\n".as_bytes(), &mut out).unwrap();
         let said = String::from_utf8(out).unwrap();
         assert!(
-            said.contains("here too): a, ") && !said.contains(&token),
+            said.contains("here too): a\n")
+                && said.contains("cannot be determined")
+                && !said.contains(&token),
             "{said}"
         );
     }
