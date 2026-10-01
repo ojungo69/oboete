@@ -267,8 +267,9 @@ async function showSearch(repo, q) {
       $('vector').textContent = `Results are full text only (${answer.vector})${answer.why ? `: ${answer.why}` : '.'}`;
       $('vector').hidden = false;
     }
-    setStatus(answer.hits.length === LIMIT ? `The ${LIMIT} best matches. Add words to narrow the search.`
-      : answer.hits.length ? `${answer.hits.length} found.` : 'Nothing found.');
+    if (answer.hits.length === LIMIT) setStatus(`The ${LIMIT} best matches. Add words to narrow the search.`);
+    else if (answer.hits.length) setStatus(`${answer.hits.length} found.`);
+    else setStatus('Nothing found.');
   };
 }
 
