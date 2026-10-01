@@ -780,6 +780,11 @@ fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
     out
 }
 
+/// A claim's first words as an index line shows them: gated with `rules`, flattened, clipped.
+pub(crate) fn first_words(body: &str, rules: &crate::redact::Rules) -> String {
+    one_line(&crate::redact::lines_with(body, rules), BRIEF)
+}
+
 /// A claim's line with its body, at SessionStart and at a prompt: its date and kind, the later
 /// claim of `unit` that ended it (shown above it), and its body gated with `rules` before it is
 /// flattened and clipped.
