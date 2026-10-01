@@ -160,6 +160,8 @@ pub enum Role {
 struct Source {
     start: usize,
     text: String,
+    /// Where a tool's JSON output or extra fields start, in the long text's byte offsets.
+    json: Option<usize>,
     /// What the window does not show of it, in the long text's offsets: what the gate hides, and
     /// the middle a shrink left out, so a quote is anchored where the curator saw it.
     hidden: Vec<(usize, usize)>,
@@ -677,6 +679,7 @@ struct Prepared<'r> {
     rules: &'r Rules,
     head: String,
     long: Option<(String, Hidden)>,
+    json: Option<usize>,
     role: Role,
     turn: bool,
     key: String,
@@ -775,12 +778,34 @@ impl<'r> Prepared<'r> {
             .chars()
             .take(HEADING_CHARS)
             .collect();
+        let json = if e.kind == "tool" {
+            let whole = match &body["output"] {
+                Value::Object(_) | Value::Array(_) => true,
+                Value::String(t) => matches!(
+                    serde_json::from_str::<Value>(t),
+                    Ok(Value::Object(_) | Value::Array(_))
+                ),
+                _ => false,
+            };
+            if whole {
+                Some(0)
+            } else {
+                let output = text(&body["output"]);
+                let end = output.as_ref().map_or(0, String::len);
+                long.as_ref()
+                    .filter(|l| l.len() > end)
+                    .map(|_| end + usize::from(output.is_some()))
+            }
+        } else {
+            None
+        };
         Self {
             rules,
             long: long.map(|l| {
                 let hidden = crate::redact::hidden(&l, rules);
                 (l, hidden)
             }),
+            json,
             head,
             role,
             turn: e.kind == "prompt",
@@ -836,6 +861,7 @@ impl<'r> Prepared<'r> {
                 start,
                 lead: sentence_start(&long[..start]),
                 text: long[start..end].to_owned(),
+                json: self.json,
                 hidden: runs
                     .iter()
                     .copied()
@@ -1042,26 +1068,36 @@ pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims:
         return None;
     }
     // Where the event's text has it, outside what the window hides.
-    let anchor = |quote: &str| {
+    let anchor = |quote: &str, escapes: bool| {
         source.text.match_indices(quote).find(|&(i, _)| {
             let (s, e) = (source.start + i, source.start + i + quote.len());
-            !source.hidden.iter().any(|&(hs, he)| hs < e && s < he)
+            (!escapes || source.json.is_some_and(|j| s >= j))
+                && !source.hidden.iter().any(|&(hs, he)| hs < e && s < he)
         })
     };
     // As the line shows it: the quote itself, or else a stretch of the line that holds the quote's
-    // characters but for whitespace (a line break written as a space, a space added), the first
-    // that is anchored: the line also shows a tool's input, which is not the event's text. A
+    // characters but for whitespace, compatibility forms or JSON escapes, the first that is
+    // anchored: the line also shows a tool's input, which is not the event's text. A
     // stretch is looked for once: a repetitive line has many that read the same.
     let mut tried = std::collections::HashSet::new();
     let (at, quote) = line
         .text
         .contains(quote)
-        .then(|| anchor(quote))
+        .then(|| anchor(quote, false))
         .flatten()
         .or_else(|| {
             spaced(&line.text, quote)
-                .filter(|q| tried.insert(*q))
-                .find_map(anchor)
+                .map(|q| (q, false))
+                .chain(
+                    [false, true]
+                        .into_iter()
+                        .filter(|&escapes| !escapes || source.json.is_some())
+                        .flat_map(|escapes| {
+                            compatible(&line.text, quote, escapes).map(move |q| (q, escapes))
+                        }),
+                )
+                .filter(|(q, _)| tried.insert(*q))
+                .find_map(|(q, escapes)| anchor(q, escapes))
         })?;
     let as_i64 = |n: usize| i64::try_from(n).ok();
     Some(crate::claims::Evidence {
@@ -1096,6 +1132,77 @@ fn spaced<'a>(text: &'a str, quote: &str) -> impl Iterator<Item = &'a str> {
             &text[start..last + c.len_utf8()]
         })
     })
+}
+
+/// Compatibility-equivalent stretches, with JSON escapes read once when `escapes` is set.
+fn compatible<'a>(text: &'a str, quote: &str, escapes: bool) -> impl Iterator<Item = &'a str> {
+    let want: Vec<char> = folded(quote, false)
+        .into_iter()
+        .map(|(_, _, c)| c)
+        .collect();
+    let have = folded(text, escapes);
+    let n = want.len();
+    let starts = if n == 0 {
+        0
+    } else {
+        (have.len() + 1).saturating_sub(n)
+    };
+    (0..starts).filter_map(move |at| {
+        let w = &have[at..at + n];
+        if !w.iter().map(|&(_, _, c)| c).eq(want.iter().copied()) {
+            return None;
+        }
+        let start = w.iter().map(|&(s, _, _)| s).min().unwrap();
+        let end = w.iter().map(|&(_, e, _)| e).max().unwrap();
+        let span = &text[start..end];
+        // A match must use the whole compatibility character or escape, not part of its expansion.
+        folded(span, escapes)
+            .iter()
+            .map(|&(_, _, c)| c)
+            .eq(want.iter().copied())
+            .then_some(span)
+    })
+}
+
+/// NFKD has NFKC's equivalence, with each character still mapped to its original byte span.
+fn folded(text: &str, escapes: bool) -> Vec<(usize, usize, char)> {
+    use unicode_normalization::char::{canonical_combining_class, decompose_compatible};
+    let mut have = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((start, mut c)) = chars.next() {
+        let mut end = start + c.len_utf8();
+        if escapes
+            && c == '\\'
+            && let Some(&(at, next)) = chars.peek()
+        {
+            let decoded = match next {
+                '"' | '\\' | '/' => Some(next),
+                'n' => Some('\n'),
+                't' => Some('\t'),
+                'r' => Some('\r'),
+                'b' => Some('\u{8}'),
+                'f' => Some('\u{c}'),
+                _ => None,
+            };
+            if let Some(decoded) = decoded {
+                c = decoded;
+                end = at + next.len_utf8();
+                chars.next();
+            }
+        }
+        decompose_compatible(c, |c| have.push((start, end, c)));
+    }
+    have.retain(|&(_, _, c)| !c.is_whitespace());
+    // Canonical order across adjacent characters, keeping the offsets when marks move.
+    let mut pending = 0;
+    for i in 0..have.len() {
+        if canonical_combining_class(have[i].2) == 0 {
+            have[pending..i].sort_by_key(|&(_, _, c)| canonical_combining_class(c));
+            pending = i + 1;
+        }
+    }
+    have[pending..].sort_by_key(|&(_, _, c)| canonical_combining_class(c));
+    have
 }
 
 /// The index in `window.lines` of the line a curator names. Models write `L4` as `4`, `[L4]` or
@@ -3620,6 +3727,7 @@ mod tests {
                 start,
                 lead: sentence_start(&long[..start]),
                 text: long[start..].to_owned(),
+                json: None,
                 hidden: Vec::new(),
             };
             assert_eq!(source.sentence(next - start), next, "split at {start}");
@@ -3688,6 +3796,243 @@ mod tests {
         let (_, found, lost) = located(&w, &answer).unwrap();
         assert!(lost.is_empty());
         assert_eq!(found[0].0.quote, "tabs\nin every  file");
+    }
+
+    #[test]
+    fn a_full_width_at_quote_is_anchored_to_the_lines_text() {
+        let (_h, mut raw, dev) = store();
+        let said = "送信先は dev@example.test に固定する。";
+        raw.append(&prompt(said)).unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        let quote = "dev＠example.test";
+        let e = locate(&w, "L1", quote).unwrap();
+        assert_eq!(e.quote, "dev@example.test");
+        assert_eq!(e.offset, said.find("dev@example.test").unwrap() as i64);
+        assert_eq!(e.length, 16);
+        let answer = json!({"claims": [{"id": "c1", "kind": "decision", "status": "decided",
+            "speaker": "user", "scope": "repo", "body": "b", "quote": quote,
+            "line": "L1", "supersedes": []}], "summary": "s"});
+        let (_, found, lost) = located(&w, &answer).unwrap();
+        assert!(lost.is_empty());
+        assert_eq!(found[0].0.quote, "dev@example.test");
+    }
+
+    #[test]
+    fn a_quote_with_unicode_compatibility_forms_is_anchored_to_the_lines_text() {
+        let (_h, mut raw, dev) = store();
+        let cases = [
+            ("Use ASCII 123!", "Ｕｓｅ　ＡＳＣＩＩ　１２３！"),
+            ("Ｕｓｅ　ＡＳＣＩＩ　１２３！", "Use ASCII 123!"),
+            ("oﬃce files", "office files"),
+            ("office files", "oﬃce files"),
+            ("ガイド", "ｶﾞｲﾄﾞ"),
+            ("ｶﾞｲﾄﾞ", "ガイド"),
+            ("A\u{315}\u{300} text", "À\u{315} text"),
+            ("A\u{301} \u{323}", "A\u{323}\u{301}"),
+            ("A\u{323}\u{301}", "A\u{301} \u{323}"),
+        ];
+        for (said, _) in cases {
+            raw.append(&prompt(&format!("前置き {said} 後置き")))
+                .unwrap();
+        }
+        raw.append(&prompt("＠ first, @ later")).unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        for (i, (said, quote)) in cases.iter().enumerate() {
+            let e = locate(&w, &format!("L{}", i + 1), quote).unwrap();
+            assert_eq!(e.quote, *said);
+            assert_eq!(e.offset, "前置き ".len() as i64);
+            assert_eq!(e.length, said.len() as i64);
+        }
+        let e = locate(&w, &format!("L{}", cases.len() + 1), "@").unwrap();
+        assert_eq!(e.offset, "＠ first, ".len() as i64);
+        assert_eq!(e.quote, "@");
+    }
+
+    fn tool_quote_window(code: &str) -> (Window, String) {
+        let (_h, mut raw, dev) = store();
+        let e = event(
+            "tool",
+            json!({"tool": "Bash", "input": {"code": code},
+                "output": {"code": format!("前置き {code} 後置き")}, "failed": false}),
+        );
+        let text = long_text(&e).unwrap();
+        raw.append(&e).unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        (w, text)
+    }
+
+    #[test]
+    fn a_json_escaped_double_quote_is_anchored_to_the_lines_text() {
+        let (w, text) = tool_quote_window("row.type === \"owner\" &&");
+        let e = locate(&w, "L1", "row.type === \"owner\" &&").unwrap();
+        assert_eq!(e.quote, r#"row.type === \"owner\" &&"#);
+        assert_eq!(e.offset, text.find("row.type").unwrap() as i64);
+        assert_eq!(e.length, 25);
+        let answer = json!({"claims": [{"id": "c1", "kind": "fix", "status": "done",
+            "speaker": "tool result", "scope": "repo", "body": "b",
+            "quote": "row.type === \"owner\" &&", "line": "L1", "supersedes": []}], "summary": "s"});
+        let (_, found, lost) = located(&w, &answer).unwrap();
+        assert!(lost.is_empty());
+        assert_eq!(found[0].0.quote, r#"row.type === \"owner\" &&"#);
+    }
+
+    #[test]
+    fn a_json_escaped_newline_quoted_as_a_line_break_is_anchored_to_the_lines_text() {
+        let (w, text) = tool_quote_window("string;\n/home/project");
+        let e = locate(&w, "L1", "string;\n/home/project").unwrap();
+        assert_eq!(e.quote, r"string;\n/home/project");
+        assert_eq!(e.offset, text.find("string;").unwrap() as i64);
+        assert_eq!(e.length, 22);
+    }
+
+    #[test]
+    fn a_json_escaped_newline_quoted_as_a_space_is_anchored_to_the_lines_text() {
+        let (w, text) = tool_quote_window("string;\n/home/project");
+        let e = locate(&w, "L1", "string; /home/project").unwrap();
+        assert_eq!(e.quote, r"string;\n/home/project");
+        assert_eq!(e.offset, text.find("string;").unwrap() as i64);
+        assert_eq!(e.length, 22);
+    }
+
+    #[test]
+    fn a_json_escaped_backslash_is_anchored_to_the_lines_text() {
+        let (w, text) = tool_quote_window(r"path C:\new\file");
+        let e = locate(&w, "L1", r"path C:\new\file").unwrap();
+        assert_eq!(e.quote, r"path C:\\new\\file");
+        assert_eq!(e.offset, text.find("path C:").unwrap() as i64);
+        assert_eq!(e.length, 18);
+    }
+
+    #[test]
+    fn a_json_escaped_tab_is_anchored_to_the_lines_text() {
+        let (w, text) = tool_quote_window("let\trow = 1;");
+        for quote in ["let\trow = 1;", "let row = 1;"] {
+            let e = locate(&w, "L1", quote).unwrap();
+            assert_eq!(e.quote, r"let\trow = 1;");
+            assert_eq!(e.offset, text.find("let").unwrap() as i64);
+            assert_eq!(e.length, 13);
+        }
+    }
+
+    #[test]
+    fn a_folded_quote_with_different_words_stays_unanchored() {
+        let (w, _) = tool_quote_window("row.type === \"owner\" && oﬃce files");
+        assert!(locate(&w, "L1", "row.type === \"owner\" && office files").is_some());
+        for quote in [
+            "row.type === \"user\" && office files",
+            "row.type === \"owner\" && other files",
+            "ROW.type === \"owner\" && office files",
+            "of",
+            "fice",
+            "",
+        ] {
+            assert_eq!(locate(&w, "L1", quote), None, "{quote}");
+        }
+    }
+
+    #[test]
+    fn json_escapes_in_plain_text_are_not_decoded() {
+        let (_h, mut raw, dev) = store();
+        let literal = r"Use literal \n in config";
+        for e in [
+            prompt(literal),
+            event("reply", json!({"assistant": literal})),
+            tool(literal),
+        ] {
+            raw.append(&e).unwrap();
+        }
+        raw.append(&tool(
+            &json!({"text": "Use literal\nin config"}).to_string(),
+        ))
+        .unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        for line in ["L1", "L2", "L3"] {
+            assert!(locate(&w, line, literal).is_some());
+            for quote in ["Use literal\nin config", "Use literal in config"] {
+                assert_eq!(locate(&w, line, quote), None, "{line}: {quote}");
+            }
+            assert_eq!(
+                locate(&w, line, r"Ｕｓｅ literal \n in config")
+                    .unwrap()
+                    .quote,
+                literal
+            );
+        }
+        let e = locate(&w, "L4", "Use literal in config").unwrap();
+        assert_eq!(e.quote, r"Use literal\nin config");
+    }
+
+    #[test]
+    fn json_escapes_in_extra_tool_fields_are_anchored_to_the_lines_text() {
+        let (_h, mut raw, dev) = store();
+        let literal = r"Use literal \n in config";
+        let quote = "row.type === \"owner\" &&\nnext";
+        let mut texts = Vec::new();
+        for output in [json!(literal), Value::Null] {
+            let e = event(
+                "tool",
+                json!({"tool": "Bash", "input": {}, "output": output,
+                "failed": false, "extra": {"code": quote}}),
+            );
+            texts.push(long_text(&e).unwrap());
+            raw.append(&e).unwrap();
+        }
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        for (i, text) in texts.iter().enumerate() {
+            let e = locate(&w, &format!("L{}", i + 1), quote).unwrap();
+            assert_eq!(e.quote, r#"row.type === \"owner\" &&\nnext"#);
+            assert_eq!(e.offset, text.find("row.type").unwrap() as i64);
+            assert_eq!(e.length, 31);
+        }
+        assert_eq!(locate(&w, "L1", "Use literal in config"), None);
+    }
+
+    #[test]
+    fn a_folded_quote_never_anchors_in_a_hidden_range() {
+        let (_h, mut raw, dev) = store();
+        let cases = [
+            ("dev＠example.test", "dev@example.test", "dev@example.test"),
+            (
+                "row.type === \"owner\" &&",
+                "row.type === \"owner\" &&",
+                r#"row.type === \"owner\" &&"#,
+            ),
+            ("keep files", "keep\nfiles", r"keep\nfiles"),
+        ];
+        let mut texts = Vec::new();
+        for (_, code, _) in cases {
+            for output in [
+                format!("<private>{code}</private> | {code}"),
+                format!("<private>{code}</private>"),
+            ] {
+                let e = event(
+                    "tool",
+                    json!({"tool": "Bash", "input": {"code": code},
+                    "output": {"code": output}, "failed": false}),
+                );
+                texts.push(long_text(&e).unwrap());
+                raw.append(&e).unwrap();
+            }
+        }
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        for (i, (quote, _, stored)) in cases.iter().enumerate() {
+            let e = locate(&w, &format!("L{}", i * 2 + 1), quote).unwrap();
+            assert_eq!(e.quote, *stored);
+            assert_eq!(e.offset, texts[i * 2].rfind(stored).unwrap() as i64);
+            assert_eq!(locate(&w, &format!("L{}", i * 2 + 2), quote), None);
+        }
     }
 
     /// A line shows a tool's input, which is not the event's text: a quote the line holds in the
