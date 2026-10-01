@@ -143,7 +143,7 @@ impl Phase {
         }
         // First: a knowledge.db the worker has just started takes its vectors before anything is
         // written to it, a call's answer included.
-        carry_quarantined(&self.home, k)?;
+        carry_set_aside(&self.home, k)?;
         if let Some(f) = &self.flight {
             if !f.thread.is_finished() {
                 // A thread past its call's timeout is asked again each second, never at once.
@@ -548,34 +548,38 @@ pub fn carry(k: &Connection, from: &Path) -> Result<usize> {
     Ok(carried)
 }
 
-/// After a restore or a damage quarantine (spec 1.7): the vectors of the newest quarantined
-/// knowledge.db, carried once into the one open now, whose checkpoint `carried` holds the time of
-/// the last file it took them from. One whose vectors cannot be read carries nothing, and says so
-/// once.
-fn carry_quarantined(home: &Path, k: &Connection) -> Result<()> {
+/// After a restore, a damage quarantine or a rebuild that stopped (spec 1.7): the vectors of
+/// every knowledge.db set aside since the one open now last took them, carried once, whose
+/// checkpoint `carried` holds the time of the newest file it took them from. Every one, not the
+/// newest only: a rebuild stopped twice leaves its vectors in the older file. One whose vectors
+/// cannot be read carries nothing, and says so once.
+fn carry_set_aside(home: &Path, k: &Connection) -> Result<()> {
     use crate::knowledge::checkpoint;
     let done = checkpoint::get(k, "carried", "")?;
-    let newest = std::fs::read_dir(home)
+    let aside: Vec<(i64, String)> = std::fs::read_dir(home)
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
-            let at = name
-                .strip_prefix("knowledge.db.quarantined-")?
+            let at = ["knowledge.db.quarantined-", "knowledge.db.rebuilding-"]
+                .iter()
+                .find_map(|p| name.strip_prefix(p))?
                 .parse()
                 .ok()?;
             Some((at, name))
         })
         .filter(|(at, _)| *at > done)
-        .max();
-    let Some((at, name)) = newest else {
-        return Ok(());
-    };
-    if let Err(e) = carry(k, &home.join(&name)) {
-        eprintln!("oboete: no vectors carried from {name}: {e:#}");
+        .collect();
+    for (_, name) in &aside {
+        if let Err(e) = carry(k, &home.join(name)) {
+            eprintln!("oboete: no vectors carried from {name}: {e:#}");
+        }
     }
-    checkpoint::set_in(k, checkpoint::SEQS, "carried", "", at)
+    match aside.iter().map(|(at, _)| *at).max() {
+        Some(newest) => checkpoint::set_in(k, checkpoint::SEQS, "carried", "", newest),
+        None => Ok(()),
+    }
 }
 
 /// A request counted before it is sent (Step 7): in one write transaction, a row that counts as
@@ -1246,6 +1250,27 @@ mod tests {
         uid
     }
 
+    /// The day's embedding requests spent, as earlier calls would have.
+    fn spend_the_day(home: &Path) {
+        use crate::providers_db as pdb;
+        let db = pdb::open(home).unwrap();
+        for _ in 0..200 {
+            let call = pdb::Call {
+                provider: crate::embed::CALLS,
+                role: ROLE,
+                span: "",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 1,
+                est_tokens: Some(1),
+                usage: pdb::Usage::default(),
+                usd: None,
+            };
+            pdb::record(&db, &call).unwrap();
+        }
+    }
+
     fn keys(s: &Store) -> Vec<(String, String, Option<String>)> {
         let k = crate::knowledge::open(s.home.path()).unwrap();
         k.prepare("SELECT kind, key, skipped FROM vector_keys ORDER BY kind, key")
@@ -1798,7 +1823,6 @@ mod tests {
     /// serves both files.
     #[test]
     fn a_worker_carries_into_each_knowledge_db_it_opens() {
-        use crate::providers_db as pdb;
         let stub = Stub::start();
         let mut s = Store::new();
         config(&s, &stub);
@@ -1825,22 +1849,7 @@ mod tests {
         drop(k);
         crate::backup::quarantine(&home, "knowledge.db").unwrap();
         s.run();
-        let db = pdb::open(&home).unwrap();
-        for _ in 0..200 {
-            let call = pdb::Call {
-                provider: crate::embed::CALLS,
-                role: ROLE,
-                span: "",
-                outcome: "ok",
-                ms: 1,
-                detail: None,
-                bytes_out: 1,
-                est_tokens: Some(1),
-                usage: pdb::Usage::default(),
-                usd: None,
-            };
-            pdb::record(&db, &call).unwrap();
-        }
+        spend_the_day(&home);
         let sent = stub.requests();
         drop(held);
         while !phase.done() {
@@ -1855,7 +1864,6 @@ mod tests {
     /// keeps no imported document or record from the vector its text already has.
     #[test]
     fn cached_vectors_are_mapped_while_a_call_waits() {
-        use crate::providers_db as pdb;
         let stub = Stub::start();
         let mut s = Store::new();
         config(&s, &stub);
@@ -1874,22 +1882,7 @@ mod tests {
             "Parser caches go to Redis.",
         );
         s.run();
-        let db = pdb::open(s.home.path()).unwrap();
-        for _ in 0..200 {
-            let call = pdb::Call {
-                provider: crate::embed::CALLS,
-                role: ROLE,
-                span: "",
-                outcome: "ok",
-                ms: 1,
-                detail: None,
-                bytes_out: 1,
-                est_tokens: Some(1),
-                usage: pdb::Usage::default(),
-                usd: None,
-            };
-            pdb::record(&db, &call).unwrap();
-        }
+        spend_the_day(s.home.path());
         let mut phase = Phase::new(s.home.path());
         assert!(matches!(
             phase.poll(&s.raw, &k).unwrap(),
@@ -1952,7 +1945,6 @@ mod tests {
     /// vectors cannot be read stops a rebuild before anything changes.
     #[test]
     fn a_rebuild_or_a_quarantine_keeps_the_vectors() {
-        use crate::providers_db as pdb;
         let stub = Stub::start();
         let mut s = Store::new();
         config(&s, &stub);
@@ -1969,22 +1961,7 @@ mod tests {
         let (sent, before) = (stub.requests(), indexed(&s));
         assert!(before >= 4, "{before}");
         let home = s.home.path().to_owned();
-        let db = pdb::open(&home).unwrap();
-        for _ in 0..200 {
-            let call = pdb::Call {
-                provider: crate::embed::CALLS,
-                role: ROLE,
-                span: "",
-                outcome: "ok",
-                ms: 1,
-                detail: None,
-                bytes_out: 1,
-                est_tokens: Some(1),
-                usage: pdb::Usage::default(),
-                usd: None,
-            };
-            pdb::record(&db, &call).unwrap();
-        }
+        spend_the_day(&home);
         // Blobs that are no vector: never carried.
         let k = crate::knowledge::open(&home).unwrap();
         let ones: Vec<u8> = (0..crate::embed::DIM)
@@ -2077,6 +2054,46 @@ mod tests {
         });
         assert!(!aside);
         drop(dir);
+    }
+
+    /// Spec 1.7: a rebuild stopped after it set knowledge.db aside, and stopped again when rerun,
+    /// loses no vectors: the next polls carry those of every file it left behind, though the
+    /// day's requests are spent.
+    #[test]
+    fn an_interrupted_rebuild_loses_no_vectors() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        s.imported("o1", "r", 2_000, "Deploy notes", "Notes.");
+        s.said("s", R, 3_000, "Words.");
+        s.run();
+        embed_all(&s);
+        let indexed = |s: &Store| keys(s).iter().filter(|(.., why)| why.is_none()).count();
+        let (sent, before) = (stub.requests(), indexed(&s));
+        assert!(before >= 2, "{before}");
+        let home = s.home.path().to_owned();
+        spend_the_day(&home);
+        let Store { home: dir, raw } = s;
+        drop(raw);
+        // Each stopped once the new knowledge.db was made, before the vectors were carried.
+        let at = crate::db::now_ms();
+        for stamp in [at, at + 1] {
+            for ext in ["-wal", "-shm", ""] {
+                let from = home.join(format!("knowledge.db{ext}"));
+                if from.exists() {
+                    let to = home.join(format!("knowledge.db.rebuilding-{stamp}{ext}"));
+                    std::fs::rename(&from, to).unwrap();
+                }
+            }
+            drop(crate::knowledge::open(&home).unwrap());
+        }
+        crate::worker::rebuild(&home).unwrap();
+        let s = Store {
+            home: dir,
+            raw: crate::raw::open(&home).unwrap(),
+        };
+        embed_all(&s);
+        assert_eq!((stub.requests(), indexed(&s)), (sent, before));
     }
 
     /// Step 11: doctor names the embedder and how far it is: what waits per kind, what was passed
