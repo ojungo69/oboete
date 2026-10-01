@@ -84,6 +84,9 @@ const KEPT_FOR_QUERIES: u32 = 40;
 /// past the allowance in USD per 1,000 neurons (Step 7).
 const FREE_NEURONS: f64 = 10_000.0;
 const NEURONS_PER_M: f64 = 1_075.0;
+/// Tokens Cloudflare counts per token `budget::estimate` gives (Step 13, docs/milestone-4.md: 1.61
+/// on b-import's observations; about 1.0 on short Japanese queries, which this over-counts).
+const COUNTED_PER_ESTIMATED: f64 = 1.61;
 const USD_PER_K_NEURONS: f64 = 0.011;
 
 /// The phase over one home: at most one call in flight.
@@ -107,7 +110,10 @@ struct Split {
     /// Whether one of its requests was answered: only then is a text it would not take alone that
     /// text's fault, not the embedder's.
     answered: bool,
-    /// The texts it would not take alone, marked `refused` once it is over, answered.
+    /// The texts it would not take alone before any answer: kept out of the batches (`pending`),
+    /// neither refused nor resting the embedder, until an answer sends them again.
+    held: Vec<Doc>,
+    /// The texts it would not take alone after an answer, marked `refused` once it is over.
     lone: Vec<Doc>,
     /// Its requests that failed.
     fails: u32,
@@ -187,12 +193,17 @@ impl Phase {
             None => self.next_half(raw, k, &embedder.id, &reading)?,
             Some(_) => None,
         };
+        let held: Vec<Doc> = self
+            .split
+            .as_ref()
+            .map_or_else(Vec::new, |s| s.held.clone());
         let batch = match half {
             Some(b) => b,
             // Cached vectors are mapped and documents passed over are marked whatever the rest
             // or the cap, each kind up to its first page with a text to send; only the call waits.
             None => {
-                let Some(b) = pending(raw, k, &embedder.id, &reading, wait.is_some())? else {
+                let Some(b) = pending(raw, k, &embedder.id, &reading, wait.is_some(), &held)?
+                else {
                     return Ok(Step::Idle);
                 };
                 if let Some(w) = wait {
@@ -346,6 +357,16 @@ impl Phase {
             None => {
                 if let Some(split) = &mut self.split {
                     split.answered = true;
+                    // The embedder answers: a text held since it failed alone goes once more,
+                    // alone, and only a failure now is that text's fault.
+                    for doc in std::mem::take(&mut split.held) {
+                        split.halves.push(Batch {
+                            embedder: batch.embedder.clone(),
+                            docs: vec![doc],
+                            texts: Vec::new(),
+                            reading: batch.reading.clone(),
+                        });
+                    }
                 }
                 rest = Some(None);
             }
@@ -353,7 +374,11 @@ impl Phase {
                 let split = self.split.get_or_insert_with(Split::default);
                 split.fails += 1;
                 if let [doc] = &batch.docs[..] {
-                    split.lone.push(doc.clone());
+                    if split.answered {
+                        split.lone.push(doc.clone());
+                    } else {
+                        split.held.push(doc.clone());
+                    }
                 } else {
                     let mid = batch.docs.len() / 2;
                     for (docs, texts) in [
@@ -371,11 +396,15 @@ impl Phase {
             }
             Some(f) => rest = Some(Some(f)),
         }
-        // A split that is over, or that failed past `SPLIT_FAILS` unanswered: answered, its lone
-        // texts are refused; unanswered, the embedder rests as for any failure.
+        // A split that is over (nothing left to send, nothing held), or that failed past
+        // `SPLIT_FAILS` unanswered: answered, its lone texts are refused; unanswered, the embedder
+        // rests as for any failure, and what it held goes back to the batches. Until then a text
+        // held waits for another document's answer, so one the model will not take, alone from the
+        // start, neither rests the embedder nor holds the rest back.
         let mut refused = Vec::new();
         if let Some(split) = &self.split
-            && (split.halves.is_empty() || (!split.answered && split.fails >= SPLIT_FAILS))
+            && ((split.halves.is_empty() && split.held.is_empty())
+                || (!split.answered && split.fails >= SPLIT_FAILS))
         {
             let split = self.split.take().expect("checked above");
             if split.answered {
@@ -649,7 +678,8 @@ pub(crate) fn billed_usd(db: &Connection, tokens: u32) -> Result<f64> {
 /// `before` tokens. ponytail: the allowance is the account's, shared with v1 and any other Workers
 /// AI use, and this sees only this store's calls; counting the account's needs its usage API.
 fn usd(before: i64, tokens: i64) -> f64 {
-    let past = |t: i64| (t as f64 * NEURONS_PER_M / 1e6 - FREE_NEURONS).max(0.0);
+    let past =
+        |t: i64| (t as f64 * COUNTED_PER_ESTIMATED * NEURONS_PER_M / 1e6 - FREE_NEURONS).max(0.0);
     (past(before + tokens) - past(before)) * USD_PER_K_NEURONS / 1_000.0
 }
 
@@ -704,6 +734,7 @@ fn pending(
     embedder: &str,
     reading: &Reading,
     waiting: bool,
+    held: &[Doc],
 ) -> Result<Option<Batch>> {
     crate::claims::schema(k)?;
     crate::consumer::imported::schema(k)?;
@@ -712,7 +743,15 @@ fn pending(
     let mut waits = None;
     for kind in ["c", "i", "r"] {
         loop {
-            let page = read_page(raw, k, embedder, kind)?;
+            // A text a split holds stays out; a page of nothing else ends this kind for now.
+            let page: Vec<Read> = read_page(raw, k, embedder, kind)?
+                .into_iter()
+                .filter(|r| {
+                    !held
+                        .iter()
+                        .any(|d| d.kind == r.doc.kind && d.key == r.doc.key)
+                })
+                .collect();
             if page.is_empty() {
                 break;
             }
@@ -1452,7 +1491,7 @@ mod tests {
         let config = crate::config::load(home).unwrap();
         let embedder = Embedder::from_config(&config.embedding).unwrap().unwrap();
         let reading = Reading::now(&s.raw, Reads::Live).unwrap();
-        let batch = pending(&s.raw, &k, &embedder.id, &reading, false)
+        let batch = pending(&s.raw, &k, &embedder.id, &reading, false, &[])
             .unwrap()
             .unwrap();
         let db = crate::providers_db::open(home).unwrap();
@@ -1626,13 +1665,14 @@ mod tests {
         );
         assert_eq!(pdb::calls_in_a_day(&db, crate::embed::CALLS).unwrap().0, 5);
 
-        // Split down to the text alone; the other half answered: refused, and the rest embedded.
+        // Split down to the text alone, which fails before the other half is answered: held, then
+        // sent once more alone after that answer, and refused; the rest embedded.
         stub.refuse("Poison words.");
         let poison = s.said("s", R, 2_000, "Poison words.");
         let fine = s.said("s", R, 3_000, "Fine words.");
         s.run();
         until_idle(&s, &k, &mut phase);
-        assert_eq!(stub.requests(), 8);
+        assert_eq!(stub.requests(), 9);
         assert_eq!(skipped(&s, &s.key(poison)).as_deref(), Some("refused"));
         assert!(
             keys(&s)
@@ -1644,9 +1684,12 @@ mod tests {
             pdb::State::default()
         );
 
-        // Alone with nothing answered: the embedder's failure, not the text's.
+        // Alone from the start with nothing answered: not refused, as the embedder may be what
+        // fails, and not sent again, rested on, or in the way of the rest: held until another
+        // document's answer, then sent once more alone and refused.
         let alone = s.said("s", R, 4_000, "Poison words.");
         s.run();
+        let sent = stub.requests();
         assert!(matches!(
             phase.poll(&s.raw, &k).unwrap(),
             Step::Waiting { .. }
@@ -1655,8 +1698,24 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
+        assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Idle);
+        assert_eq!(stub.requests(), sent + 1);
         assert_eq!(skipped(&s, &s.key(alone)), None);
-        assert_eq!(pdb::state(&db, crate::embed::CALLS).unwrap().fails, 1);
+        assert_eq!(
+            pdb::state(&db, crate::embed::CALLS).unwrap(),
+            pdb::State::default()
+        );
+        let later = s.said("s", R, 5_000, "Later words.");
+        s.run();
+        until_idle(&s, &k, &mut phase);
+        assert_eq!(stub.requests(), sent + 3);
+        assert_eq!(stub.texts()[sent + 1], ["Later words."]);
+        assert_eq!(skipped(&s, &s.key(alone)).as_deref(), Some("refused"));
+        assert!(
+            keys(&s)
+                .iter()
+                .any(|(_, key, why)| *key == s.key(later) && why.is_none())
+        );
         assert_eq!(
             pdb::calls_in_a_day(&db, crate::embed::CALLS).unwrap().0 as usize,
             stub.requests()
@@ -1866,7 +1925,7 @@ mod tests {
         assert!(until > now && until <= now + pdb::DAY_MS && until % pdb::DAY_MS == 0);
         assert_eq!(stub.requests(), 2);
         // The estimate: free inside the day's 10,000 neurons, USD 0.011 per 1,000 past them.
-        let tokens = |neurons: f64| (neurons * 1e6 / NEURONS_PER_M) as i64;
+        let tokens = |neurons: f64| (neurons * 1e6 / NEURONS_PER_M / COUNTED_PER_ESTIMATED) as i64;
         assert_eq!(usd(0, tokens(9_000.0)), 0.0);
         let past = usd(tokens(9_000.0), tokens(2_000.0));
         assert!((past - 0.011).abs() < 1e-4, "{past}");

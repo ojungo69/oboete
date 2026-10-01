@@ -188,7 +188,8 @@ mod tests {
         assert_eq!(nearest(&k), 7);
         drop(k);
         let name = "knowledge::tests::a_knowledge_db_opened_alone_reads_its_vector_index";
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
+        // The test binary, as the harness started it.
+        let out = std::process::Command::new(std::env::args_os().next().unwrap())
             .args(["--exact", name])
             .env(HOME, home.path())
             .output()
