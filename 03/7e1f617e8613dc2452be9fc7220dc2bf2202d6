@@ -1,0 +1,51 @@
+assets/viewer/app.js
+  s_59cfa7617c8511::t_0b26cc237a5534 241,243-244
+docs/eval/calib.py
+  s_59cfa7617c8511::t_46a93d4461ebda 134-136
+docs/eval/common.py
+  s_59cfa7617c8511::t_b236f518696ac3 3,9-10,22-56,60-65,82,88-98,106-125,128,136-344
+docs/eval/conftest.py
+  s_59cfa7617c8511::t_4c3b8e10ea286f 1-54
+docs/eval/m3.py
+  s_59cfa7617c8511::t_24bc71717222e1 2-3,7-8,20-23,26,32-51,68,71-73,78-86,88-93,122-128,131-139,142-143,145,156,158-342,827,836,841-842,844-855,859-865,881-884
+docs/eval/m5.py
+  s_59cfa7617c8511::t_8ca515f33f618c 1-341
+docs/eval/m6.py
+  s_59cfa7617c8511::t_f5baf696e75e47 1-566
+docs/eval/test_common.py
+  s_59cfa7617c8511::t_bab0ddab8bdb45 1-305
+docs/eval/test_m3.py
+  s_59cfa7617c8511::t_8706e32ac7763c 38-324
+docs/eval/test_m5.py
+  s_59cfa7617c8511::t_204dcab715a696 1-402
+docs/eval/test_m6.py
+  s_59cfa7617c8511::t_7eec187a27278e 1-410
+docs/milestone-3.md
+  s_59cfa7617c8511::t_6353dfdbf0d56e 409
+docs/milestone-4.md
+  s_59cfa7617c8511::t_fcfa2607c12dc1 69-305
+src/main.rs
+  s_59cfa7617c8511::t_76503b48eb69a6 227-230,448-454
+src/raw.rs
+  s_59cfa7617c8511::t_8379170d686a73 479-487
+src/search/b.rs
+  s_59cfa7617c8511::t_c662755da34fb4 1552-1587,3514-3598
+src/view.rs
+  s_59cfa7617c8511::t_bb4cb61906c8f1 769-771,782-788,1447-1454
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "037e1f617e8613dc2452be9fc7220dc2bf2202d6",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
