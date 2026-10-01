@@ -1,0 +1,21 @@
+docs/spike/curator-isolation.md
+  s_59cfa7617c8511::t_86029afeacd5c2 114
+src/provider.rs
+  s_59cfa7617c8511::t_e166455db6fad8 1242,2020-2024
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ceda2d3ca08839220cafbc5842cde49008b102b5",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
