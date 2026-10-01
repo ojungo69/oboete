@@ -77,3 +77,13 @@ Step 7 (row 53-6), 2026-10-01: a copy of `~/.oboete/eval/b-import` (178,370 impo
 | stats | 0.006 s | 0.002 s | 0.002 s | 14 MB |
 
 No route's p95 passes 1.5 s, so none gets an index. A route's first request reads its index from disk (2-3 s, as Task 4's first search did). Search over records and vectors is the search core's, measured by Tasks 5 and 12b, not here.
+
+## Task 9: the cut-over tools
+
+Step 9, 2026-10-01: the owner's v1 store copied with `sqlite3 -readonly ~/.oboete/oboete.db ".backup <dir>/oboete.db"`, its config.toml beside it, migrated into a temporary home under the scratch directory by a release build of 8577a2f on WSL (ext4), all deleted after. The copy held 64,608 events (its highest id is 64,608: v1 never deleted one), 123 sessions, 110 `session_repos` rows, 3,217 observations, 492 summaries and 319 prompts.
+
+- **`oboete migrate`:** 64,608 `oboete-v1` records, 110 `touch` labels and 4,028 import ops; 53.3 s, 49 MB peak memory. raw.db is 277 MB, its bodies plain until the worker's compression (v1's store is 302 MB).
+- **Run again:** nothing imported (the 4,028 documents seen before), 0.13 s, 16 MB.
+- **v1's store:** its SHA-256 is the same after both passes and doctor. At the first read-only open SQLite made an empty -wal and a 32 KB -shm beside the copy (the `sqlite3 -readonly` count did too), as v1's own hooks keep them while it runs.
+- **Settings:** the copied config.toml (`gemini` and `[embedding]`) went into the home unchanged; migrate printed `[summary] curate` as not set, and `[inject]`, `[capture]`, `[redaction]` and `[chain]` as at their defaults.
+- **doctor:** "v1 events not migrated yet: 0", and the old store listed until `--finish`.
