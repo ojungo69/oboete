@@ -56,3 +56,24 @@ Step 9, 2026-10-01: the evaluation home `b-m4`, a copy of `b-import` with `[summ
 - **Replay:** `m4.py corpus` (3,109 sessions; 324,943 events before the copy time, none failed to convert; 44 sessions have none), then `m4.py replay` with a release build of 33e7c9b (`~/.oboete/eval/bin/oboete-33e7c9b0adb3`, SHA-256 ce6c9f28c329b8857f45aa1b6ac38a3f0e6d005bcb4a7b5d8b92e14aa861fc53) and `oboete worker --idle-ms 5000` until it drained: 30 min 39 s, 99 MB peak, no worker error. Every consumer's checkpoint is at raw.db's highest seq, 325,577; 178,370 ops; `raw_docs` holds 324,943 records (302,052 of them tool outputs); no providers.db, no claim. The home is 8.5 GB.
 - **Raw's N** is 25, and 8 of those questions (5 sessions) are of the replay set's held-out sessions, which the corpus leaves out: they count with no record of their own session. The gate names them apart and checks every other counted question's session for a record (D10 as amended here); the pre-registration lists them.
 - **Embedding** waits for the owner (What needs the owner, item 8): Raw's corpus is about 542,000 neurons (22,726 requests, 98% of it tool output) and the imported history about 100,000, together about USD 7 at once or about 64 days inside the free allowance.
+
+## Task 7: the viewer on Design B
+
+Step 7 (row 53-6), 2026-10-01: a copy of `~/.oboete/eval/b-import` (178,370 imported documents, no claims, records or vectors, no embedding provider, so search answers from full text), a release build of the server side (9686a62) on WSL (ext4), started in this repository's checkout, deleted after. Each route ran in a fresh viewer: the first request after the copy's files were dropped from the guest's page cache (`posix_fadvise`; the Windows host may still hold them), then one pass discarded and 40 requests over the route's variants (the first 20 dev questions of `queries.jsonl` for search, 10 imported documents from a search for doc). Peak memory is the viewer's VmHWM.
+
+| route | first request | p50 | p95 | peak memory |
+|---|---|---|---|---|
+| `/` (the page) | 0.001 s | 0.001 s | 0.001 s | 8 MB |
+| search, the checkout's repository | 2.77 s | 0.13 s | 0.56 s | 27 MB |
+| search, `all` | 3.21 s | 0.26 s | 1.05 s | 28 MB |
+| search, `all`, `raw=only` (no records) | 0.009 s | 0.002 s | 0.003 s | 14 MB |
+| doc | 0.006 s | 0.002 s | 0.003 s | 14 MB |
+| timeline, the checkout's repository | 1.98 s | 0.09 s | 0.10 s | 16 MB |
+| timeline, `all` | 2.87 s | 0.27 s | 0.33 s | 17 MB |
+| timeline, `all`, the second page (`before`) | 2.93 s | 0.27 s | 0.29 s | 16 MB |
+| context | 0.007 s | 0.002 s | 0.003 s | 14 MB |
+| repos | 1.96 s | 0.18 s | 0.21 s | 20 MB |
+| version | 0.006 s | 0.002 s | 0.002 s | 13 MB |
+| stats | 0.006 s | 0.002 s | 0.002 s | 14 MB |
+
+No route's p95 passes 1.5 s, so none gets an index. A route's first request reads its index from disk (2-3 s, as Task 4's first search did). Search over records and vectors is the search core's, measured by Tasks 5 and 12b, not here.

@@ -774,20 +774,35 @@ impl Pending {
 
     /// Whether they touch the claim `uid`: its uid, or a quote of its active derivation.
     pub fn touches(&self, k: &Connection, uid: &str) -> Result<bool> {
-        if self.uids.contains(uid) {
-            return Ok(true);
-        }
+        Ok(self.uids.contains(uid)
+            || self.quoted(
+                k,
+                "SELECT q.device, q.seq FROM claims c
+                 JOIN evidence q ON q.op_device = c.op_device AND q.op_seq = c.op_seq
+                 WHERE c.uid = ?1",
+                [uid],
+            )?)
+    }
+
+    /// Whether they touch a quote of the derivation op `op_seq` of `op_device`, active or not: a
+    /// claim's history leaves such a derivation out, as Anchors will drop it.
+    pub fn touches_op(&self, k: &Connection, op_device: &str, op_seq: i64) -> Result<bool> {
+        self.quoted(
+            k,
+            "SELECT device, seq FROM evidence WHERE op_device = ?1 AND op_seq = ?2",
+            rusqlite::params![op_device, op_seq],
+        )
+    }
+
+    /// Whether a record `sql` names (device, seq) is one a pending tombstone touches.
+    fn quoted(&self, k: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<bool> {
         if self.records.is_empty() {
             return Ok(false);
         }
-        let mut st = k.prepare_cached(
-            "SELECT q.device, q.seq FROM claims c
-             JOIN evidence q ON q.op_device = c.op_device AND q.op_seq = c.op_seq
-             WHERE c.uid = ?1",
-        )?;
-        let quotes = st.query_map([uid], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        for q in quotes {
-            if self.records.contains(&q?) {
+        let mut st = k.prepare_cached(sql)?;
+        let mut rows = st.query(params)?;
+        while let Some(r) = rows.next()? {
+            if self.records.contains(&(r.get(0)?, r.get(1)?)) {
                 return Ok(true);
             }
         }

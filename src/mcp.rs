@@ -196,11 +196,12 @@ impl Oboete {
         };
         let limit = a.limit.unwrap_or(20).min(MAX_LIMIT);
         let anchor = a.anchor.filter(|a| !a.is_empty());
-        let items = match search::timeline(&self.home, repo.as_deref(), anchor.as_deref(), limit) {
-            Ok(items) => items,
-            Err(e) if anchor.is_some() => return failed(format!("{e:#}")),
-            Err(e) => return Err(internal(e)),
-        };
+        let items =
+            match search::timeline(&self.home, repo.as_deref(), anchor.as_deref(), None, limit) {
+                Ok(items) => items,
+                Err(e) if anchor.is_some() => return failed(format!("{e:#}")),
+                Err(e) => return Err(internal(e)),
+            };
         let out: String = items
             .iter()
             .map(|i| search::item_line(i, repo.is_none()))

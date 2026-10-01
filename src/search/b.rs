@@ -110,7 +110,8 @@ impl std::str::FromStr for RawArm {
 }
 
 /// What a hit is.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "class", rename_all = "lowercase")]
 pub enum Class {
     /// A chain tip (spec 3.4).
     Current,
@@ -128,7 +129,8 @@ pub enum Class {
 }
 
 /// How strong a hit's evidence is (MUST-M13).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Label {
     /// Its raw record is on this device.
     Citable,
@@ -138,10 +140,11 @@ pub enum Label {
     Imported,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Hit {
     /// What `get` takes: a claim's uid, an imported document's uid, a record's `device:seq`.
     pub key: String,
+    #[serde(flatten)]
     pub class: Class,
     pub repo: Option<String>,
     /// Unix ms: its own time (`Query::since`).
@@ -169,7 +172,8 @@ pub enum Vector {
     Skipped(VectorSkip),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum VectorSkip {
     /// No embedder is configured, or the caller gave no vector.
     Off,
@@ -1204,13 +1208,9 @@ fn named(raw: &Raw, k: &Connection, id: &str) -> Result<Option<Named>> {
 /// always (MUST-M11) and its quotes, the claims an id starts several of, an imported document,
 /// or a record.
 pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
-    if !crate::raw::exists(home) {
+    let Some((raw, k)) = stores(home)? else {
         return Ok(None);
-    }
-    let raw = crate::raw::open(home)?;
-    let k = crate::knowledge::open(home)?;
-    claims::schema(&k)?;
-    crate::consumer::imported::schema(&k)?;
+    };
     Ok(match named(&raw, &k, id)? {
         None => None,
         Some(Named::Claim(uid)) => claim_text(&raw, &k, &uid)?,
@@ -1234,57 +1234,244 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
     })
 }
 
-fn claim_text(raw: &Raw, k: &Connection, uid: &str) -> Result<Option<String>> {
-    let Some(c) = claims::active_one(k, uid)? else {
+/// The stores, raw.db first: its shared hold on raw.lock keeps a restore from swapping them while
+/// they are read. `None` before the first record.
+pub(crate) fn stores(home: &Path) -> Result<Option<(Raw, Connection)>> {
+    if !crate::raw::exists(home) {
+        return Ok(None);
+    }
+    let raw = crate::raw::open(home)?;
+    let k = crate::knowledge::open(home)?;
+    claims::schema(&k)?;
+    crate::consumer::imported::schema(&k)?;
+    crate::consumer::fts::schema(&k)?;
+    Ok(Some((raw, k)))
+}
+
+/// A claim as the viewer shows it (milestone 4 D11), every text through the egress gate.
+#[derive(Debug, serde::Serialize)]
+pub struct ClaimView {
+    pub uid: String,
+    pub kind: String,
+    pub status: String,
+    pub speaker: String,
+    pub scope: String,
+    pub repo: Option<String>,
+    /// Unix ms: its `valid_from`.
+    pub when: i64,
+    pub text: String,
+    /// Whether every surface delivers it (spec 3.4): a chain tip, or an earlier decision only
+    /// curator links ended, with the claim that ended it as `later`.
+    pub delivered: bool,
+    /// The newest claim whose link ended it, or, when none did, the newest that links it.
+    pub later: Option<String>,
+    /// What its active derivation links (one type: `supersedes`).
+    pub supersedes: Vec<String>,
+    /// The claims whose derivation links it, the newest first (`claims::LINKERS`).
+    pub ended_by: Vec<String>,
+    pub label: &'static str,
+    pub quotes: Vec<Quote>,
+    /// Its derivations and the owner's corrections, the oldest first.
+    pub history: Vec<Change>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct Quote {
+    /// The record it quotes: `device:seq`.
+    pub key: String,
+    pub text: String,
+}
+
+/// A derivation of a claim (its `tier` and `recipe`) or an owner's correction (neither); a field
+/// a correction leaves as it was is `None`.
+#[derive(Debug, serde::Serialize)]
+pub struct Change {
+    pub ts: i64,
+    pub tier: Option<i64>,
+    pub recipe: Option<String>,
+    pub status: Option<String>,
+    pub body: Option<String>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test seam: run between `claim`'s history read and its `Pending` read, as a worker
+    /// committing there would.
+    static BETWEEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Claim `id` (a uid, or the first characters of one) as the viewer shows it: `None` when the id
+/// names no claim, several, or something else (milestone 4 D11).
+pub fn claim(home: &Path, id: &str) -> Result<Option<ClaimView>> {
+    let Some((raw, k)) = stores(home)? else {
         return Ok(None);
     };
+    // One snapshot of knowledge.db for every read below, so the history and what `Pending`
+    // reads (Anchors' checkpoint, the evidence) agree: Anchors dropping a derivation and moving
+    // its checkpoint between them would show the body it dropped (Codex's security review of
+    // Task 7). After the schemas: one made inside the snapshot would have to write.
+    let _snapshot = k.unchecked_transaction()?;
+    match named(&raw, &k, id)? {
+        Some(Named::Claim(uid)) => claim_view(&raw, &k, uid),
+        _ => Ok(None),
+    }
+}
+
+/// Claim `uid` as the viewer shows it and `get` prints it, `None` when no active claim has it.
+fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView>> {
+    let Some(c) = claims::active_one(k, &uid)? else {
+        return Ok(None);
+    };
+    let strings = |sql: &str| -> Result<Vec<String>> {
+        let mut st = k.prepare(sql)?;
+        let rows = st.query_map([&uid], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    };
+    let supersedes = strings(
+        "SELECT e.to_uid FROM claims c
+         JOIN edges e ON e.op_device = c.op_device AND e.op_seq = c.op_seq
+         WHERE c.uid = ?1 ORDER BY e.to_uid",
+    )?;
+    let ended_by = strings(
+        "SELECT l.uid FROM edges e
+         JOIN claims x ON x.op_device = e.op_device AND x.op_seq = e.op_seq
+         JOIN active l ON l.uid = x.uid
+         WHERE e.to_uid = ?1 AND x.uid <> ?1
+         ORDER BY l.valid_from DESC, l.anchor_device DESC, l.anchor_seq DESC, l.uid DESC",
+    )?;
+    let quotes = active_quotes(k, &uid)?
+        .iter()
+        .map(|e| {
+            Ok(Quote {
+                key: format!("{}:{}", e.device, e.seq),
+                text: quote_text(raw, e)?,
+            })
+        })
+        .collect::<Result<_>>()?;
+    let mut st = k.prepare(
+        "SELECT ts, tier, recipe, status, body, op_device, op_seq FROM (
+           SELECT ts, tier, recipe, status, body, op_device, op_seq FROM derivations WHERE uid = ?1
+           UNION ALL
+           SELECT ts, NULL, NULL, status, body, op_device, op_seq FROM corrections WHERE uid = ?1)
+         ORDER BY ts, op_device, op_seq",
+    )?;
+    let rows = st
+        .query_map([&uid], |r| {
+            Ok((
+                Change {
+                    ts: r.get(0)?,
+                    tier: r.get(1)?,
+                    recipe: r.get(2)?,
+                    status: r.get(3)?,
+                    body: r.get::<_, Option<String>>(4)?.map(|b| redact::outbound(&b)),
+                },
+                r.get::<_, String>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    #[cfg(test)]
+    if let Some(between) = BETWEEN.take() {
+        between();
+    }
+    // A derivation whose quote a tombstone the worker has yet to apply masks is left out, as
+    // Anchors will drop it: its body may say what the mask hides (Codex's security review).
+    let pending = claims::Pending::read(raw, k)?;
+    let mut history = Vec::with_capacity(rows.len());
+    for (change, op_device, op_seq) in rows {
+        if !pending.touches_op(k, &op_device, op_seq)? {
+            history.push(change);
+        }
+    }
     let repo: Option<String> = k
-        .query_row("SELECT repo FROM active WHERE uid = ?1", [uid], |r| {
+        .query_row("SELECT repo FROM active WHERE uid = ?1", [&uid], |r| {
             r.get(0)
         })
         .optional()?
         .flatten();
-    let ended = match (&c.later, claims::delivered_one(k, uid)?) {
-        (Some(by), None) => format!("superseded by {by}\n"),
-        (Some(by), Some(_)) => format!("an earlier decision; later: {by}\n"),
+    Ok(Some(ClaimView {
+        delivered: claims::delivered_one(k, &uid)?.is_some(),
+        label: if on_this_device(raw, &c.device, c.seq)? {
+            "citable"
+        } else {
+            "quote-only"
+        },
+        text: redact::outbound(&c.body),
+        repo: repo.map(|r| redact::outbound(&r)),
+        uid,
+        kind: c.kind,
+        status: c.status,
+        speaker: c.speaker,
+        scope: c.scope,
+        when: c.valid_from,
+        later: c.later,
+        supersedes,
+        ended_by,
+        quotes,
+        history,
+    }))
+}
+
+fn claim_text(raw: &Raw, k: &Connection, uid: &str) -> Result<Option<String>> {
+    let Some(v) = claim_view(raw, k, uid.to_owned())? else {
+        return Ok(None);
+    };
+    let ended = match (&v.later, v.delivered) {
+        (Some(by), false) => format!("superseded by {by}\n"),
+        (Some(by), true) => format!("an earlier decision; later: {by}\n"),
         _ => String::new(),
     };
-    let label = if on_this_device(raw, &c.device, c.seq)? {
-        "citable"
-    } else {
-        "quote-only"
-    };
     let mut out = format!(
-        "{uid} {} {} {} {} ({label})\n{ended}speaker: {}, scope: {}\n\n{}\n",
-        crate::db::utc(c.valid_from),
-        c.kind,
-        c.status,
-        redact::outbound(repo.as_deref().unwrap_or("no repository")),
-        c.speaker,
-        c.scope,
-        redact::outbound(&c.body)
+        "{uid} {} {} {} {} ({})\n{ended}speaker: {}, scope: {}\n\n{}\n",
+        crate::db::utc(v.when),
+        v.kind,
+        v.status,
+        v.repo.as_deref().unwrap_or("no repository"),
+        v.label,
+        v.speaker,
+        v.scope,
+        v.text
     );
+    out.push_str("\nquotes:\n");
+    for q in &v.quotes {
+        out.push_str(&format!("- {}: {}\n", q.key, one_line(&q.text, 300)));
+    }
+    Ok(Some(out))
+}
+
+/// The quotes of `uid`'s active derivation, in order.
+fn active_quotes(k: &Connection, uid: &str) -> Result<Vec<claims::Evidence>> {
     let mut st = k.prepare(
-        "SELECT e.device, e.seq, e.quote FROM claims c
+        "SELECT e.device, e.seq, e.offset, e.length, e.sentence, e.quote FROM claims c
          JOIN evidence e ON e.op_device = c.op_device AND e.op_seq = c.op_seq
          WHERE c.uid = ?1 ORDER BY e.idx",
     )?;
     let quotes = st.query_map([uid], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, String>(2)?,
-        ))
+        Ok(claims::Evidence {
+            device: r.get(0)?,
+            seq: r.get(1)?,
+            offset: r.get(2)?,
+            length: r.get(3)?,
+            sentence: r.get(4)?,
+            quote: r.get(5)?,
+            claim_at: None,
+        })
     })?;
-    out.push_str("\nquotes:\n");
-    for q in quotes {
-        let (device, seq, quote) = q?;
-        out.push_str(&format!(
-            "- {device}:{seq}: {}\n",
-            one_line(&redact::outbound(&quote), 300)
-        ));
-    }
-    Ok(Some(out))
+    Ok(quotes.collect::<Result<_, _>>()?)
+}
+
+/// A quote as the gate shows it inside its record, with the words around it
+/// (`redact::outbound_quote`), so a rule added since that needs them hides it there too; the mask
+/// when it no longer reads verbatim in the record, whose derivation Anchors drops next.
+fn quote_text(raw: &Raw, e: &claims::Evidence) -> Result<String> {
+    let long = crate::consumer::claims::live(raw, e)?.and_then(|ev| crate::curate::long_text(&ev));
+    Ok(
+        match (long, usize::try_from(e.offset), usize::try_from(e.length)) {
+            (Some(long), Ok(start), Ok(len)) => redact::outbound_quote(&long, start..start + len),
+            _ => redact::MASK.to_owned(),
+        },
+    )
 }
 
 fn imported_text(k: &Connection, uid: &str) -> Result<Option<String>> {
@@ -1348,7 +1535,7 @@ fn one_line(text: &str, max: usize) -> String {
 }
 
 /// One entry of [`timeline`].
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, serde::Serialize)]
 pub struct Item {
     /// What `get` takes.
     pub key: String,
@@ -1358,46 +1545,48 @@ pub struct Item {
     pub repo: Option<String>,
     /// Through the egress gate, on one line.
     pub text: String,
+    /// `claim`, `imported` or `start`.
+    pub class: String,
 }
 
 /// Claims, imported documents and session starts in `repo` (every repository with `None`), the
-/// newest first: the `limit` newest, or with `anchor` (an id `get` takes) those around its time,
-/// half at or before it. A claim the worker has yet to apply an owner's change to is left out.
+/// newest first, by time and then key: the `limit` newest, those after `before` (the time and key
+/// of a page's last entry, the viewer's next page), or with `anchor` (an id `get` takes) those
+/// around its time, half at or before it. A claim the worker has yet to apply an owner's change to
+/// is left out.
 pub fn timeline(
     home: &Path,
     repo: Option<&str>,
     anchor: Option<&str>,
+    before: Option<(i64, String)>,
     limit: usize,
 ) -> Result<Vec<Item>> {
-    if !crate::raw::exists(home) {
+    let Some((raw, k)) = stores(home)? else {
         return Ok(Vec::new());
-    }
-    let raw = crate::raw::open(home)?;
-    let k = crate::knowledge::open(home)?;
-    claims::schema(&k)?;
-    crate::consumer::imported::schema(&k)?;
-    crate::consumer::fts::schema(&k)?;
+    };
     let at = anchor.map(|a| time_of(&raw, &k, a)).transpose()?;
     let pending = claims::Pending::read(&raw, &k)?;
     let [own, named] = repo.map(imported_repos).unwrap_or_default();
     let repo = repo.map(str::to_owned);
-    let items = "SELECT key, ts, kind, repo, text FROM (
+    let items = "SELECT key, ts, kind, repo, text, class FROM (
            SELECT a.uid AS key, a.valid_from AS ts, a.kind || ' ' || a.status AS kind,
-                  a.repo AS repo, a.body AS text
+                  a.repo AS repo, a.body AS text, 'claim' AS class
            FROM active a WHERE ?1 IS NULL OR a.repo = ?1
            UNION ALL
            SELECT i.uid, i.ts, i.kind, i.repo,
-                  CASE WHEN i.title <> '' THEN i.title ELSE i.body END
+                  CASE WHEN i.title <> '' THEN i.title ELSE i.body END, 'imported'
            FROM imported i WHERE (?1 IS NULL OR i.repo IN (?2, ?3))
              AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
            UNION ALL
            SELECT d.device || ':' || d.seq, d.ts, 'session start', d.repo,
-                  COALESCE(d.session, '')
+                  COALESCE(d.session, ''), 'start'
            FROM raw_docs d WHERE d.kind = 'start' AND (?1 IS NULL OR d.repo = ?1))";
     // Each key once (a document several devices imported is its newest row, as `imported_leg`
     // reads it). A claim with an owner's change still to apply is only hidden: the entries after
     // it fill its place (Codex on #306), read on in pages of `limit`.
-    let read = |sql: &str, at: i64| -> Result<Vec<Item>> {
+    // Entries strictly past (`at`, `key`) in the listing's order, the newest first and then by
+    // key: `key` is empty for an anchor, which keeps every entry of its time.
+    let read = |sql: &str, at: i64, key: &str| -> Result<Vec<Item>> {
         let mut st = k.prepare(sql)?;
         let mut out: Vec<Item> = Vec::new();
         for page in 0.. {
@@ -1408,7 +1597,8 @@ pub fn timeline(
                     named,
                     at,
                     super::sql_limit(limit),
-                    super::sql_limit(limit.saturating_mul(page))
+                    super::sql_limit(limit.saturating_mul(page)),
+                    key
                 ],
                 |r| {
                     Ok((
@@ -1417,13 +1607,14 @@ pub fn timeline(
                         r.get::<_, String>(2)?,
                         r.get::<_, Option<String>>(3)?,
                         r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
                     ))
                 },
             )?;
             let mut read = 0;
             for row in rows {
                 read += 1;
-                let (key, when, kind, repo, text) = row?;
+                let (key, when, kind, repo, text, class) = row?;
                 // A start raw no longer holds is left out before the index has caught up, as
                 // `get` leaves it out (Codex on #306).
                 if pending.touches(&k, &key)? || (kind == "session start" && !held(&raw, &key)?) {
@@ -1435,6 +1626,7 @@ pub fn timeline(
                     kind,
                     repo,
                     text: one_line(&redact::outbound(&text), 120),
+                    class,
                 });
             }
             if read < limit || out.len() >= limit {
@@ -1443,17 +1635,29 @@ pub fn timeline(
         }
         Ok(out)
     };
+    let (from, key) = match (at, before) {
+        (Some(at), _) => (at, String::new()),
+        (None, Some(page)) => page,
+        (None, None) => (i64::MAX, String::new()),
+    };
     let mut before = read(
-        &format!("{items} WHERE ts <= ?4 ORDER BY ts DESC, key LIMIT ?5 OFFSET ?6"),
-        at.unwrap_or(i64::MAX),
+        &format!(
+            "{items} WHERE ts < ?4 OR (ts = ?4 AND key > ?7)
+             ORDER BY ts DESC, key LIMIT ?5 OFFSET ?6"
+        ),
+        from,
+        &key,
     )?;
     let Some(at) = at else {
         before.truncate(limit);
         return Ok(before);
     };
     let mut after = read(
-        &format!("{items} WHERE ts > ?4 ORDER BY ts, key LIMIT ?5 OFFSET ?6"),
+        &format!(
+            "{items} WHERE ts > ?4 OR (ts = ?4 AND key < ?7) ORDER BY ts, key LIMIT ?5 OFFSET ?6"
+        ),
         at,
+        "",
     )?;
     // Half on each side, and what one side cannot fill to the other (Codex on #306).
     let later = after.len().min(limit - before.len().min(limit - limit / 2));
@@ -1482,16 +1686,9 @@ pub fn item_line(i: &Item, all: bool) -> String {
 
 /// Whether `repo` is one the stores know: a claim's, an imported document's or a record's.
 pub fn known(home: &Path, repo: &str) -> Result<bool> {
-    if !crate::raw::exists(home) {
+    let Some((_raw, k)) = stores(home)? else {
         return Ok(false);
-    }
-    // raw.db first, as `query` opens it: its shared hold on raw.lock keeps a restore from
-    // swapping the stores while this reads them.
-    let _raw = crate::raw::open(home)?;
-    let k = crate::knowledge::open(home)?;
-    claims::schema(&k)?;
-    crate::consumer::imported::schema(&k)?;
-    crate::consumer::fts::schema(&k)?;
+    };
     // Imported history under its claude-mem name too, as `imported_leg` and `timeline` search it.
     let [own, named] = imported_repos(repo);
     Ok(k.query_row(
@@ -2052,7 +2249,7 @@ mod tests {
         let listed = get(home, &claim[..12]).unwrap().unwrap();
         assert!(listed.starts_with("2 claims start with"), "{listed}");
         // The timeline's anchor reads ids as `get` does: several claims are no anchor.
-        let anchor = timeline(home, None, Some(&claim[..12]), 5).unwrap_err();
+        let anchor = timeline(home, None, Some(&claim[..12]), None, 5).unwrap_err();
         assert!(
             format!("{anchor:#}").contains("2 claims start with"),
             "{anchor:#}"
@@ -2078,7 +2275,7 @@ mod tests {
         let last = s.decided(R, 3_000, "Last decision.", &[]);
         s.run();
         let home = s.home.path();
-        let all: Vec<String> = timeline(home, Some(R), None, 10)
+        let all: Vec<String> = timeline(home, Some(R), None, None, 10)
             .unwrap()
             .into_iter()
             .map(|i| i.key)
@@ -2087,13 +2284,13 @@ mod tests {
             all,
             [last.clone(), doc.clone(), first.clone(), s.key(started)]
         );
-        let around: Vec<String> = timeline(home, Some(R), Some(&doc), 2)
+        let around: Vec<String> = timeline(home, Some(R), Some(&doc), None, 2)
             .unwrap()
             .into_iter()
             .map(|i| i.key)
             .collect();
         assert_eq!(around, [last, doc]);
-        assert!(timeline(home, Some(R), Some("nope"), 2).is_err());
+        assert!(timeline(home, Some(R), Some("nope"), None, 2).is_err());
     }
 
     /// Codex on #306: a claim the worker has yet to apply a removal to is only hidden, so the claim
@@ -2182,7 +2379,7 @@ mod tests {
             seq: started,
         };
         s.raw.append_tombstone(target).unwrap();
-        let keys: Vec<String> = timeline(s.home.path(), Some(R), None, 10)
+        let keys: Vec<String> = timeline(s.home.path(), Some(R), None, None, 10)
             .unwrap()
             .into_iter()
             .map(|i| i.key)
@@ -2200,7 +2397,7 @@ mod tests {
             s.decided(R, 2_000 + i, &format!("Later decision {i}."), &[]);
         }
         s.run();
-        let around = timeline(s.home.path(), Some(R), Some(&oldest), 4).unwrap();
+        let around = timeline(s.home.path(), Some(R), Some(&oldest), None, 4).unwrap();
         assert_eq!(around.len(), 4);
         assert_eq!(around[3].key, oldest);
     }
@@ -2230,7 +2427,7 @@ mod tests {
             };
             s.raw.append_tombstone(target).unwrap();
         }
-        let keys: Vec<String> = timeline(s.home.path(), Some(R), None, 2)
+        let keys: Vec<String> = timeline(s.home.path(), Some(R), None, None, 2)
             .unwrap()
             .into_iter()
             .map(|i| i.key)
@@ -2698,7 +2895,12 @@ mod tests {
             }
         }
         s.run();
-        assert_eq!(timeline(s.home.path(), Some(R), None, 3).unwrap().len(), 3);
+        assert_eq!(
+            timeline(s.home.path(), Some(R), None, None, 3)
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     /// Codex on #306: a repository known only by its imported history's name is known, as the
@@ -3121,5 +3323,206 @@ mod tests {
             assert!(run_files(out.path()).is_empty());
         }
         assert_eq!(stub.requests(), sent);
+    }
+
+    /// Codex's security review of Task 7: a claim's quote is gated with its record's words around
+    /// it, so a rule added after the claim that needs them (a code after a name) hides it in the
+    /// viewer's claim and in `get` as in the record, before the rescan masks the record. The read
+    /// runs in a child process: egress reads the rules of the home `redact::set_home` names.
+    #[test]
+    fn a_quote_is_gated_with_its_records_words() {
+        use crate::claims::{ClaimOp, Evidence};
+        use crate::raw::OpKind;
+        use serde_json::json;
+        const HOME: &str = "OBOETE_TEST_QUOTE_HOME";
+        const UIDS: &str = "OBOETE_TEST_QUOTE_UIDS";
+        // Each claim's quote, the words it still shows and the code it hides: one rule needs the
+        // record's words before the quote, and two others interfere, the record's mask (the name)
+        // taking the context the rule on the quote alone needs (Codex on 908b8bf).
+        const CASES: [(&str, &str, &str); 2] = [
+            ("ACME deploy; otp=654321.", "otp=654321", "otp="),
+            (
+                "Owner note: secret=ZETA pin=987654",
+                "ZETA pin=987654",
+                " pin=",
+            ),
+        ];
+        if let (Ok(home), Ok(uids)) = (std::env::var(HOME), std::env::var(UIDS)) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            for (uid, (_, quote, shown)) in uids.split(',').zip(CASES) {
+                let code = &quote[quote.len() - 6..];
+                let view = claim(&home, uid).unwrap().unwrap();
+                let text = &view.quotes[0].text;
+                assert!(text.contains(shown) && !text.contains(code), "{text}");
+                let text = get(&home, uid).unwrap().unwrap();
+                assert!(text.contains(shown) && !text.contains(code), "{text}");
+            }
+            return;
+        }
+        let mut s = Store::new();
+        let mut uids = Vec::new();
+        for (record, quote, _) in CASES {
+            let seq = s.said("s", R, 1_000, record);
+            let event = crate::raw::Event {
+                kind: "prompt".into(),
+                ..crate::raw::test_event(&json!({ "prompt": record }).to_string())
+            };
+            let long = crate::curate::long_text(&event).unwrap();
+            let evidence = Evidence {
+                device: s.raw.device().to_owned(),
+                seq,
+                offset: long.find(quote).unwrap() as i64,
+                length: quote.len() as i64,
+                sentence: 0,
+                quote: quote.into(),
+                claim_at: None,
+            };
+            uids.push(crate::claims::uid("decision", &evidence));
+            let op = ClaimOp {
+                id: "c".into(),
+                kind: "decision".into(),
+                status: "decided".into(),
+                speaker: "user".into(),
+                scope: "repo".into(),
+                body: "Deploy with the one-time code.".into(),
+                evidence: vec![evidence],
+                supersedes: Vec::new(),
+                recipe: "test".into(),
+                tier: 1,
+                why: String::new(),
+                tainted: false,
+            };
+            let op = serde_json::to_value(op).unwrap();
+            s.raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
+        }
+        s.run();
+        // The rules come after the claims, and no worker runs before the read.
+        std::fs::write(
+            s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [\
+             { id = \"acme\", regex = 'ACME.*otp=([0-9]{6})', secret_group = 1 }, \
+             { id = \"name\", regex = 'secret=(ZETA)', secret_group = 1 }, \
+             { id = \"pin\", regex = '^ZETA pin=([0-9]{6})$', secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let out = std::process::Command::new(std::env::args_os().next().unwrap())
+            .args([
+                "--exact",
+                "search::b::tests::a_quote_is_gated_with_its_records_words",
+            ])
+            .env(HOME, s.home.path())
+            .env(UIDS, uids.join(","))
+            .output()
+            .unwrap();
+        let printed = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && printed.contains("1 passed"),
+            "{printed}"
+        );
+    }
+
+    /// Codex's security review of Task 7: a claim's history leaves out a derivation whose quote a
+    /// tombstone the worker has yet to apply masks, as Anchors drops it at its next step, while the
+    /// claim, whose active derivation quotes a clean record, is still shown.
+    #[test]
+    fn a_history_entry_whose_quote_is_masked_waits_out_of_sight_until_anchors_drop_it() {
+        use crate::claims::{ClaimOp, Evidence};
+        use crate::raw::OpKind;
+        let mut s = Store::new();
+        let clean = "Use the staging deploy key.";
+        let leaked = "The staging key is acme-123456.";
+        let first = s.said("s", R, 1_000, clean);
+        let second = s.said("s", R, 2_000, leaked);
+        let quote = |seq: i64, text: &str| Evidence {
+            device: s.raw.device().to_owned(),
+            seq,
+            offset: 0,
+            length: text.len() as i64,
+            sentence: 0,
+            quote: text.into(),
+            claim_at: None,
+        };
+        let derivation = |id: &str, body: &str, evidence: Vec<Evidence>, tier: i64| ClaimOp {
+            id: id.into(),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: body.into(),
+            evidence,
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier,
+            why: String::new(),
+            tainted: false,
+        };
+        // One claim (its uid is the first quote's), two derivations: the paid one is active.
+        let older = derivation(
+            "a",
+            "Use acme-123456 for staging.",
+            vec![quote(first, clean), quote(second, leaked)],
+            1,
+        );
+        let active = derivation(
+            "b",
+            "Use the staging deploy key.",
+            vec![quote(first, clean)],
+            3,
+        );
+        let uid = crate::claims::uid("decision", &active.evidence[0]);
+        for op in [older, active] {
+            let op = serde_json::to_value(op).unwrap();
+            s.raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
+        }
+        s.run();
+        let bodies = |s: &Store| -> Vec<String> {
+            claim(s.home.path(), &uid)
+                .unwrap()
+                .unwrap()
+                .history
+                .into_iter()
+                .filter_map(|c| c.body)
+                .collect()
+        };
+        assert_eq!(
+            bodies(&s),
+            [
+                "Use acme-123456 for staging.",
+                "Use the staging deploy key."
+            ]
+        );
+        // The range is on the record's body as stored (`said`'s JSON).
+        let stored = serde_json::json!({ "prompt": leaked }).to_string();
+        let target = crate::raw::Target::Range {
+            device: s.raw.device().to_owned(),
+            seq: second,
+            offset: stored.find("acme").unwrap() as i64,
+            length: "acme-123456".len() as i64,
+        };
+        s.raw.append_tombstone(target).unwrap();
+        assert_eq!(bodies(&s), ["Use the staging deploy key."]);
+        // The worker applies it between `claim`'s history read and its `Pending` read: the one
+        // snapshot keeps the two in step, and the dropped derivation stays out.
+        let home = s.home.path().to_owned();
+        BETWEEN.set(Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+        })));
+        assert_eq!(bodies(&s), ["Use the staging deploy key."]);
+        assert!(BETWEEN.take().is_none(), "the worker ran inside the read");
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let derivations: i64 = k
+            .query_row(
+                "SELECT COUNT(*) FROM derivations WHERE uid = ?1",
+                [&uid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(derivations, 1, "Anchors dropped the masked derivation");
+        let view = claim(s.home.path(), &uid).unwrap().unwrap();
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains("123456"), "{json}");
+        let record = get(s.home.path(), &s.key(second)).unwrap().unwrap();
+        assert!(!record.contains("123456"), "{record}");
     }
 }
