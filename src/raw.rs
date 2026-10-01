@@ -484,21 +484,6 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Each device's records, by its highest seq (one sequence holds a device's events and
-    /// tombstones): the viewer's stats, read from the primary key without a scan.
-    pub fn record_counts(&self) -> Result<Vec<(String, i64)>> {
-        let mut st = self
-            .conn
-            .prepare("SELECT COALESCE(MAX(seq), 0) FROM records WHERE device = ?1")?;
-        self.devices()?
-            .into_iter()
-            .map(|d| {
-                let n = st.query_row([&d], |r| r.get(0))?;
-                Ok((d, n))
-            })
-            .collect()
-    }
-
     /// Every device with records in this file: this one, and one a copied home left under its
     /// old id (`ensure_device`). A skip-scan over the primary key, one step per device.
     pub fn devices(&self) -> Result<Vec<String>> {

@@ -539,11 +539,11 @@ impl Viewer {
                 query.caller = Some(self.checkout()?.0);
                 let answer = search::b::query(&self.home, &query)?;
                 let (vector, why) = match answer.vector {
-                    search::b::Vector::Used => ("used", None),
-                    search::b::Vector::Skipped(s) => (skip_name(s), Some(s.why())),
+                    search::b::Vector::Used => (json!("used"), None),
+                    search::b::Vector::Skipped(s) => (json!(s), Some(s.why())),
                 };
                 json!({
-                    "hits": answer.hits.iter().map(hit).collect::<Vec<_>>(),
+                    "hits": answer.hits,
                     "vector": vector,
                     "why": why,
                 })
@@ -575,7 +575,7 @@ impl Viewer {
                 };
                 json!({
                     "repo": repo,
-                    "items": items.iter().map(item).collect::<Vec<_>>(),
+                    "items": items,
                     "next": next,
                 })
             }
@@ -720,74 +720,9 @@ fn search_query(q: &HashMap<String, String>) -> std::result::Result<search::b::Q
     })
 }
 
-fn skip_name(s: search::b::VectorSkip) -> &'static str {
-    use search::b::VectorSkip as S;
-    match s {
-        S::Off => "off",
-        S::Excluded => "excluded",
-        S::NoVectors => "no-vectors",
-        S::Building => "building",
-        S::Waiting => "waiting",
-        S::Timeout => "timeout",
-        S::Error => "error",
-    }
-}
-
-fn hit(h: &search::b::Hit) -> Value {
-    use search::b::{Class, Label};
-    let (class, later, by) = match &h.class {
-        Class::Current => ("current", None, None),
-        Class::Delivered { later } => ("delivered", Some(later), None),
-        Class::Superseded { by } => ("superseded", None, by.as_ref()),
-        Class::Imported => ("imported", None, None),
-        Class::Raw => ("raw", None, None),
-    };
-    json!({
-        "key": h.key,
-        "class": class,
-        "later": later,
-        "by": by,
-        "label": match h.label {
-            Label::Citable => "citable",
-            Label::QuoteOnly => "quote-only",
-            Label::Imported => "imported",
-        },
-        "repo": h.repo,
-        "when": h.when,
-        "kind": h.kind,
-        "status": h.status,
-        "title": h.title,
-        "snippet": h.snippet,
-    })
-}
-
-fn item(i: &search::b::Item) -> Value {
-    json!({
-        "key": i.key,
-        "class": i.class,
-        "when": i.when,
-        "kind": i.kind,
-        "repo": i.repo,
-        "text": i.text,
-    })
-}
-
-/// The stores, raw.db first (a restore's swap waits for it), or `None` before the first record.
-fn stores(home: &Path) -> Result<Option<(crate::raw::Raw, rusqlite::Connection)>> {
-    if !crate::raw::exists(home) {
-        return Ok(None);
-    }
-    let raw = crate::raw::open(home)?;
-    let k = crate::knowledge::open(home)?;
-    crate::claims::schema(&k)?;
-    crate::consumer::imported::schema(&k)?;
-    crate::consumer::fts::schema(&k)?;
-    Ok(Some((raw, k)))
-}
-
 /// Another repository's branch for its Context page: its newest manifest's, or none.
 fn newest_branch(home: &Path, repo: &str) -> Result<String> {
-    let Some((_raw, k)) = stores(home)? else {
+    let Some((_raw, k)) = search::b::stores(home)? else {
         return Ok(String::new());
     };
     if !crate::consumer::manifest::exists(&k, "table", "manifests")? {
@@ -805,7 +740,7 @@ fn newest_branch(home: &Path, repo: &str) -> Result<String> {
 /// The repositories the stores know, the most recent first: claims (by their derivations),
 /// imported documents and records, each counted, with the newest time.
 fn repos(home: &Path) -> Result<Vec<Value>> {
-    let Some((_raw, k)) = stores(home)? else {
+    let Some((_raw, k)) = search::b::stores(home)? else {
         return Ok(Vec::new());
     };
     let mut st = k.prepare(
@@ -835,7 +770,7 @@ fn repos(home: &Path) -> Result<Vec<Value>> {
 /// an import), an op the worker applied, a session started or a prompt typed. Other records (tool
 /// calls, replies) do not move it, so a working agent does not redraw the page between prompts.
 fn version(home: &Path) -> Result<String> {
-    let Some((raw, k)) = stores(home)? else {
+    let Some((raw, k)) = search::b::stores(home)? else {
         return Ok("0".into());
     };
     let applied: (i64, i64) = k.query_row(
@@ -871,14 +806,19 @@ fn stats(home: &Path) -> Result<Value> {
                     .starts_with("knowledge.db.rebuilding-")
             })
         });
-    let (records, claims, skips) = match stores(home)? {
+    let (records, claims, skips) = match search::b::stores(home)? {
         None => (Vec::new(), Vec::new(), Vec::new()),
         Some((raw, k)) => {
+            // A device's records by its highest seq (one sequence holds its events and tombstones),
+            // read from the primary key without a scan.
             let records = raw
-                .record_counts()?
+                .devices()?
                 .into_iter()
-                .map(|(device, n)| json!({ "device": device, "records": n }))
-                .collect();
+                .map(|d| {
+                    let n = raw.max_seq_of(&d)?;
+                    Ok(json!({ "device": d, "records": n }))
+                })
+                .collect::<Result<_>>()?;
             let rows = |sql: &str, f: fn(&rusqlite::Row) -> rusqlite::Result<Value>| {
                 let mut st = k.prepare(sql)?;
                 let rows = st.query_map([], f)?;

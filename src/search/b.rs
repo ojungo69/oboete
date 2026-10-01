@@ -110,7 +110,8 @@ impl std::str::FromStr for RawArm {
 }
 
 /// What a hit is.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "class", rename_all = "lowercase")]
 pub enum Class {
     /// A chain tip (spec 3.4).
     Current,
@@ -128,7 +129,8 @@ pub enum Class {
 }
 
 /// How strong a hit's evidence is (MUST-M13).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Label {
     /// Its raw record is on this device.
     Citable,
@@ -138,10 +140,11 @@ pub enum Label {
     Imported,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Hit {
     /// What `get` takes: a claim's uid, an imported document's uid, a record's `device:seq`.
     pub key: String,
+    #[serde(flatten)]
     pub class: Class,
     pub repo: Option<String>,
     /// Unix ms: its own time (`Query::since`).
@@ -169,7 +172,8 @@ pub enum Vector {
     Skipped(VectorSkip),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum VectorSkip {
     /// No embedder is configured, or the caller gave no vector.
     Off,
@@ -1204,13 +1208,9 @@ fn named(raw: &Raw, k: &Connection, id: &str) -> Result<Option<Named>> {
 /// always (MUST-M11) and its quotes, the claims an id starts several of, an imported document,
 /// or a record.
 pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
-    if !crate::raw::exists(home) {
+    let Some((raw, k)) = stores(home)? else {
         return Ok(None);
-    }
-    let raw = crate::raw::open(home)?;
-    let k = crate::knowledge::open(home)?;
-    claims::schema(&k)?;
-    crate::consumer::imported::schema(&k)?;
+    };
     Ok(match named(&raw, &k, id)? {
         None => None,
         Some(Named::Claim(uid)) => claim_text(&raw, &k, &uid)?,
@@ -1232,6 +1232,20 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
         Some(Named::Imported(uid)) => imported_text(&k, &uid)?,
         Some(Named::Record(id, e)) => Some(record_text(&id, &e)),
     })
+}
+
+/// The stores, raw.db first: its shared hold on raw.lock keeps a restore from swapping them while
+/// they are read. `None` before the first record.
+pub(crate) fn stores(home: &Path) -> Result<Option<(Raw, Connection)>> {
+    if !crate::raw::exists(home) {
+        return Ok(None);
+    }
+    let raw = crate::raw::open(home)?;
+    let k = crate::knowledge::open(home)?;
+    claims::schema(&k)?;
+    crate::consumer::imported::schema(&k)?;
+    crate::consumer::fts::schema(&k)?;
+    Ok(Some((raw, k)))
 }
 
 /// A claim as the viewer shows it (milestone 4 D11), every text through the egress gate.
@@ -1290,22 +1304,23 @@ thread_local! {
 /// Claim `id` (a uid, or the first characters of one) as the viewer shows it: `None` when the id
 /// names no claim, several, or something else (milestone 4 D11).
 pub fn claim(home: &Path, id: &str) -> Result<Option<ClaimView>> {
-    if !crate::raw::exists(home) {
+    let Some((raw, k)) = stores(home)? else {
         return Ok(None);
-    }
-    let raw = crate::raw::open(home)?;
-    let k = crate::knowledge::open(home)?;
-    claims::schema(&k)?;
-    crate::consumer::imported::schema(&k)?;
+    };
     // One snapshot of knowledge.db for every read below, so the history and what `Pending`
     // reads (Anchors' checkpoint, the evidence) agree: Anchors dropping a derivation and moving
     // its checkpoint between them would show the body it dropped (Codex's security review of
     // Task 7). After the schemas: one made inside the snapshot would have to write.
     let _snapshot = k.unchecked_transaction()?;
-    let Some(Named::Claim(uid)) = named(&raw, &k, id)? else {
-        return Ok(None);
-    };
-    let Some(c) = claims::active_one(&k, &uid)? else {
+    match named(&raw, &k, id)? {
+        Some(Named::Claim(uid)) => claim_view(&raw, &k, uid),
+        _ => Ok(None),
+    }
+}
+
+/// Claim `uid` as the viewer shows it and `get` prints it, `None` when no active claim has it.
+fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView>> {
+    let Some(c) = claims::active_one(k, &uid)? else {
         return Ok(None);
     };
     let strings = |sql: &str| -> Result<Vec<String>> {
@@ -1318,17 +1333,19 @@ pub fn claim(home: &Path, id: &str) -> Result<Option<ClaimView>> {
          JOIN edges e ON e.op_device = c.op_device AND e.op_seq = c.op_seq
          WHERE c.uid = ?1 ORDER BY e.to_uid",
     )?;
-    let linkers = claims::LINKERS.trim_start().trim_start_matches("FROM ");
-    let ended_by = strings(&format!(
-        "SELECT l.uid FROM active a JOIN {linkers} AND a.uid = ?1
-         ORDER BY l.valid_from DESC, l.anchor_device DESC, l.anchor_seq DESC, l.uid DESC"
-    ))?;
-    let quotes = active_quotes(&k, &uid)?
+    let ended_by = strings(
+        "SELECT l.uid FROM edges e
+         JOIN claims x ON x.op_device = e.op_device AND x.op_seq = e.op_seq
+         JOIN active l ON l.uid = x.uid
+         WHERE e.to_uid = ?1 AND x.uid <> ?1
+         ORDER BY l.valid_from DESC, l.anchor_device DESC, l.anchor_seq DESC, l.uid DESC",
+    )?;
+    let quotes = active_quotes(k, &uid)?
         .iter()
         .map(|e| {
             Ok(Quote {
                 key: format!("{}:{}", e.device, e.seq),
-                text: quote_text(&raw, e)?,
+                text: quote_text(raw, e)?,
             })
         })
         .collect::<Result<_>>()?;
@@ -1360,10 +1377,10 @@ pub fn claim(home: &Path, id: &str) -> Result<Option<ClaimView>> {
     }
     // A derivation whose quote a tombstone the worker has yet to apply masks is left out, as
     // Anchors will drop it: its body may say what the mask hides (Codex's security review).
-    let pending = claims::Pending::read(&raw, &k)?;
+    let pending = claims::Pending::read(raw, k)?;
     let mut history = Vec::with_capacity(rows.len());
     for (change, op_device, op_seq) in rows {
-        if !pending.touches_op(&k, &op_device, op_seq)? {
+        if !pending.touches_op(k, &op_device, op_seq)? {
             history.push(change);
         }
     }
@@ -1374,8 +1391,8 @@ pub fn claim(home: &Path, id: &str) -> Result<Option<ClaimView>> {
         .optional()?
         .flatten();
     Ok(Some(ClaimView {
-        delivered: claims::delivered_one(&k, &uid)?.is_some(),
-        label: if on_this_device(&raw, &c.device, c.seq)? {
+        delivered: claims::delivered_one(k, &uid)?.is_some(),
+        label: if on_this_device(raw, &c.device, c.seq)? {
             "citable"
         } else {
             "quote-only"
@@ -1397,43 +1414,28 @@ pub fn claim(home: &Path, id: &str) -> Result<Option<ClaimView>> {
 }
 
 fn claim_text(raw: &Raw, k: &Connection, uid: &str) -> Result<Option<String>> {
-    let Some(c) = claims::active_one(k, uid)? else {
+    let Some(v) = claim_view(raw, k, uid.to_owned())? else {
         return Ok(None);
     };
-    let repo: Option<String> = k
-        .query_row("SELECT repo FROM active WHERE uid = ?1", [uid], |r| {
-            r.get(0)
-        })
-        .optional()?
-        .flatten();
-    let ended = match (&c.later, claims::delivered_one(k, uid)?) {
-        (Some(by), None) => format!("superseded by {by}\n"),
-        (Some(by), Some(_)) => format!("an earlier decision; later: {by}\n"),
+    let ended = match (&v.later, v.delivered) {
+        (Some(by), false) => format!("superseded by {by}\n"),
+        (Some(by), true) => format!("an earlier decision; later: {by}\n"),
         _ => String::new(),
     };
-    let label = if on_this_device(raw, &c.device, c.seq)? {
-        "citable"
-    } else {
-        "quote-only"
-    };
     let mut out = format!(
-        "{uid} {} {} {} {} ({label})\n{ended}speaker: {}, scope: {}\n\n{}\n",
-        crate::db::utc(c.valid_from),
-        c.kind,
-        c.status,
-        redact::outbound(repo.as_deref().unwrap_or("no repository")),
-        c.speaker,
-        c.scope,
-        redact::outbound(&c.body)
+        "{uid} {} {} {} {} ({})\n{ended}speaker: {}, scope: {}\n\n{}\n",
+        crate::db::utc(v.when),
+        v.kind,
+        v.status,
+        v.repo.as_deref().unwrap_or("no repository"),
+        v.label,
+        v.speaker,
+        v.scope,
+        v.text
     );
     out.push_str("\nquotes:\n");
-    for e in active_quotes(k, uid)? {
-        out.push_str(&format!(
-            "- {}:{}: {}\n",
-            e.device,
-            e.seq,
-            one_line(&quote_text(raw, &e)?, 300)
-        ));
+    for q in &v.quotes {
+        out.push_str(&format!("- {}: {}\n", q.key, one_line(&q.text, 300)));
     }
     Ok(Some(out))
 }
@@ -1467,7 +1469,7 @@ fn quote_text(raw: &Raw, e: &claims::Evidence) -> Result<String> {
     Ok(
         match (long, usize::try_from(e.offset), usize::try_from(e.length)) {
             (Some(long), Ok(start), Ok(len)) => redact::outbound_quote(&long, start..start + len),
-            _ => redact::outbound(""),
+            _ => redact::MASK.to_owned(),
         },
     )
 }
@@ -1533,7 +1535,7 @@ fn one_line(text: &str, max: usize) -> String {
 }
 
 /// One entry of [`timeline`].
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, serde::Serialize)]
 pub struct Item {
     /// What `get` takes.
     pub key: String,
@@ -1559,14 +1561,9 @@ pub fn timeline(
     before: Option<(i64, String)>,
     limit: usize,
 ) -> Result<Vec<Item>> {
-    if !crate::raw::exists(home) {
+    let Some((raw, k)) = stores(home)? else {
         return Ok(Vec::new());
-    }
-    let raw = crate::raw::open(home)?;
-    let k = crate::knowledge::open(home)?;
-    claims::schema(&k)?;
-    crate::consumer::imported::schema(&k)?;
-    crate::consumer::fts::schema(&k)?;
+    };
     let at = anchor.map(|a| time_of(&raw, &k, a)).transpose()?;
     let pending = claims::Pending::read(&raw, &k)?;
     let [own, named] = repo.map(imported_repos).unwrap_or_default();
@@ -1689,16 +1686,9 @@ pub fn item_line(i: &Item, all: bool) -> String {
 
 /// Whether `repo` is one the stores know: a claim's, an imported document's or a record's.
 pub fn known(home: &Path, repo: &str) -> Result<bool> {
-    if !crate::raw::exists(home) {
+    let Some((_raw, k)) = stores(home)? else {
         return Ok(false);
-    }
-    // raw.db first, as `query` opens it: its shared hold on raw.lock keeps a restore from
-    // swapping the stores while this reads them.
-    let _raw = crate::raw::open(home)?;
-    let k = crate::knowledge::open(home)?;
-    claims::schema(&k)?;
-    crate::consumer::imported::schema(&k)?;
-    crate::consumer::fts::schema(&k)?;
+    };
     // Imported history under its claude-mem name too, as `imported_leg` and `timeline` search it.
     let [own, named] = imported_repos(repo);
     Ok(k.query_row(
