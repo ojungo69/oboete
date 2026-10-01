@@ -473,6 +473,15 @@ impl Raw {
         Ok(at)
     }
 
+    /// How many tombstones raw.db holds: the viewer's `version` moves when one hides a record.
+    pub fn tombstones(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM records WHERE type = 'tombstone'",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     /// The targets of `device`'s tombstones after `seq`: what a reader must hide itself until
     /// its consumer has reached them.
     pub fn tombstones_after(&self, device: &str, seq: i64) -> Result<Vec<(String, i64)>> {

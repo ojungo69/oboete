@@ -767,8 +767,9 @@ fn repos(home: &Path) -> Result<Vec<Value>> {
 }
 
 /// Changes when what the page shows changes: an op appended (a claim, a correction, an exclusion,
-/// an import), an op the worker applied, a session started or a prompt typed. Other records (tool
-/// calls, replies) do not move it, so a working agent does not redraw the page between prompts.
+/// an import), an op the worker applied, a session started, a prompt typed, or a record hidden (a
+/// tombstone, which reads hide before the worker applies it). Other records (tool calls, replies)
+/// do not move it, so a working agent does not redraw the page between prompts.
 fn version(home: &Path) -> Result<String> {
     let Some((raw, k)) = search::b::stores(home)? else {
         return Ok("0".into());
@@ -779,7 +780,13 @@ fn version(home: &Path) -> Result<String> {
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    Ok(format!("{}:{}:{}", raw.max_op_seq()?, applied.0, applied.1))
+    Ok(format!(
+        "{}:{}:{}:{}",
+        raw.max_op_seq()?,
+        applied.0,
+        applied.1,
+        raw.tombstones()?
+    ))
 }
 
 /// Records per device, claims by kind and status, skipped claim ops by reason, the last seven
@@ -1452,7 +1459,14 @@ mod tests {
         let v0 = get(&v, "/api/version")["v"].as_str().unwrap().to_owned();
         assert_eq!(get(&v, "/api/version")["v"], v0);
         s.exclude("github.com/x/other");
-        assert_ne!(get(&v, "/api/version")["v"], v0);
+        let v1 = get(&v, "/api/version")["v"].as_str().unwrap().to_owned();
+        assert_ne!(v1, v0);
+        // A record hidden: the page redraws without it (CodeRabbit on #316).
+        let device = s.raw.device().to_owned();
+        s.raw
+            .append_tombstone(crate::raw::Target::Record { device, seq: 1 })
+            .unwrap();
+        assert_ne!(get(&v, "/api/version")["v"], v1);
     }
 
     /// D11: entries that share one time are paged by key, each reached once.
