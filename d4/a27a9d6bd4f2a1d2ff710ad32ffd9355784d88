@@ -1,0 +1,30 @@
+docs/eval/inject.py
+  s_3919dbff92053f::t_b0124f9968e4c0 59-105
+  s_3919dbff92053f::t_d06d89eade1712 289-363,367,379,381-384
+  s_3919dbff92053f::t_faeb0833b8d9ed 1-6,10-12,15-58,364-366,374-375,386-392
+  s_3919dbff92053f::t_e7a7923448e0f1 7-9,13-14,106-288,368-373,376-378,380,385
+docs/eval/test_inject.py
+  s_3919dbff92053f::t_8255beef7b8a96 220,222,237
+  s_3919dbff92053f::t_9e59306c880683 386-472
+  s_3919dbff92053f::t_49238d639a991e 19,86-152
+  s_3919dbff92053f::t_698cbf46e5073a 285-385
+  s_3919dbff92053f::t_be0cbfd44cfbf2 1,153-219,221,223-236,238-284
+  s_3919dbff92053f::t_3a3cf1751f84bf 2-10,13-18,20-55,57-67,72-85
+  s_3919dbff92053f::t_faeb0833b8d9ed 11-12,56,68-71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d4a27a9d6bd4f2a1d2ff710ad32ffd9355784d88",
+  "prompts": {},
+  "sessions": {
+    "s_3919dbff92053f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f849-40f6-7e82-b1b7-77395d94cc79",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
