@@ -170,7 +170,7 @@ fn vmhwm_kb() -> Option<u64> {
 
 /// A fixture line's `ts` (RFC 3339, as `oboete transcript` writes it) in unix ms; `None` when the
 /// line has none (events-1000.jsonl), so replay falls back to now (issue #65).
-fn fixture_ms(conn: &rusqlite::Connection, ts: &Value) -> Option<i64> {
+pub(crate) fn fixture_ms(conn: &rusqlite::Connection, ts: &Value) -> Option<i64> {
     conn.query_row(
         "SELECT CAST(round(unixepoch(?1, 'subsec') * 1000) AS INTEGER)",
         [ts.as_str()?],

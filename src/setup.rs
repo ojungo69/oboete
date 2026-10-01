@@ -529,7 +529,7 @@ fn merge_groups(root: &mut Value, wanted: Vec<(String, Value)>) {
 }
 
 /// Claude Code's config directory: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
-fn claude_dir() -> PathBuf {
+pub(crate) fn claude_dir() -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| config::home_dir().join(".claude"))
@@ -770,7 +770,7 @@ fn claude(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     Ok(vec![file.display().to_string()])
 }
 
-fn codex_home() -> PathBuf {
+pub(crate) fn codex_home() -> PathBuf {
     std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| config::home_dir().join(".codex"))
