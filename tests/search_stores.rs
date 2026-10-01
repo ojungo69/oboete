@@ -195,3 +195,100 @@ fn search_applies_a_rule_anchored_to_a_field_to_every_hit() {
         "{hits}"
     );
 }
+
+/// A loopback stand-in for Workers AI's bge-m3: every text gets the same unit vector.
+fn embedder() -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/run/bge-m3", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut conn) = conn else { continue };
+            std::thread::spawn(move || {
+                let (mut req, mut buf) = (Vec::new(), [0u8; 65536]);
+                let body = loop {
+                    let n = conn.read(&mut buf).unwrap_or(0);
+                    req.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&req).to_lowercase();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if req.len() >= end + 4 + len {
+                            break req[end + 4..end + 4 + len].to_vec();
+                        }
+                    }
+                    if n == 0 {
+                        return;
+                    }
+                };
+                let texts: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let n = texts["text"].as_array().unwrap().len();
+                let mut v = vec![0.0f32; 1024];
+                v[0] = 1.0;
+                let out = serde_json::json!({
+                    "result": {"shape": [n, 1024], "data": vec![v; n]},
+                    "success": true
+                })
+                .to_string();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    out.len()
+                );
+                let _ = conn.write_all(head.as_bytes());
+                let _ = conn.write_all(out.as_bytes());
+            });
+        }
+    });
+    url
+}
+
+/// Milestone 4 Task 6: `oboete eval` runs on Design B's stores through the binary and creates no
+/// v1 store (spec 7.4); its vectors come from `[embedding] url` at a loopback address (D8).
+#[test]
+fn an_eval_on_a_design_b_home_creates_no_oboete_db() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let (h, c) = (home.path(), cwd.path());
+    let key = h.join("key.md");
+    std::fs::write(&key, "workers ai\nk\n").unwrap();
+    let config = format!(
+        "[embedding]\nprovider = \"workers-ai\"\naccount_id = \"a\"\nkey_file = '{}'\nurl = \"{}\"\n",
+        key.display(),
+        embedder()
+    );
+    std::fs::write(h.join("config.toml"), config).unwrap();
+    let payload =
+        serde_json::json!({"session_id": "s", "prompt": "zebra crossing notes", "cwd": c});
+    oboete(
+        h,
+        c,
+        &["hook", "claude", "UserPromptSubmit"],
+        &payload.to_string(),
+    );
+    oboete(h, c, &["worker", "--idle-ms", "0"], "");
+    let questions = c.join("questions.jsonl");
+    std::fs::write(
+        &questions,
+        "{\"qid\":\"q1\",\"text\":\"zebra\",\"session\":\"other\"}\n",
+    )
+    .unwrap();
+    let out = c.join("runs");
+    let args = [
+        "eval",
+        questions.to_str().unwrap(),
+        "--depth",
+        "10",
+        "--arms",
+        "off,rrf:5,only",
+        "--out",
+        out.to_str().unwrap(),
+    ];
+    oboete(h, c, &args, "");
+    assert!(!h.join("oboete.db").exists());
+    let run = std::fs::read_to_string(out.join("b-only.trec")).unwrap();
+    assert!(run.starts_with("q1 Q0 r:"), "{run}");
+    assert!(out.join("b-rrf5.trec").exists() && out.join("b-docs.jsonl").exists());
+}

@@ -6,7 +6,7 @@
 //! query too short for any trigram falls back to literal LIKE terms, all required (ASCII case
 //! folding only), which is a scan the small tables can afford.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
@@ -243,92 +243,6 @@ pub fn search(
     Ok(hits.collect::<Result<_, _>>()?)
 }
 
-/// The first `want` hits outside `session`, asking `hits` for more until there are enough or the
-/// search runs out.
-fn outside(
-    conn: &Connection,
-    session: Option<&str>,
-    want: usize,
-    hits: impl Fn(usize) -> Result<Vec<Hit>>,
-) -> Result<Vec<Hit>> {
-    let mut n = want;
-    loop {
-        let all = hits(n)?;
-        let got = all.len();
-        let mut kept = Vec::new();
-        for h in all {
-            if kept.len() < want
-                && (session.is_none()
-                    || crate::db::doc_session(conn, &h.doc)?.as_deref() != session)
-            {
-                kept.push(h);
-            }
-        }
-        if kept.len() == want || got < n {
-            return Ok(kept);
-        }
-        n *= 2;
-    }
-}
-
-/// `oboete eval`: run each `{"qid","text"}` line through `search` over every repository and
-/// print the hits as a TREC run (`qid Q0 doc rank score method`), ranks from 1. The score only
-/// restates the order; the evaluator ranks by it. A line's optional `session` is the conversation
-/// the question came from: its documents hold the answer written after it, so they are left out
-/// before ranking (proposal §3.1) and the next hits move up.
-pub fn trec_run(
-    conn: &Connection,
-    queries: &str,
-    depth: usize,
-    embedding: Option<&crate::config::Embedding>,
-) -> Result<String> {
-    let method = if embedding.is_some() { "hybrid" } else { "fts" };
-    let mut out = String::new();
-    for line in queries.lines().filter(|l| !l.trim().is_empty()) {
-        let q: serde_json::Value = serde_json::from_str(line)?;
-        let (Some(qid), Some(text)) = (q["qid"].as_str(), q["text"].as_str()) else {
-            anyhow::bail!("each line needs string qid and text: {line}");
-        };
-        // A TREC run is whitespace-separated columns.
-        anyhow::ensure!(
-            !qid.is_empty() && !qid.contains(char::is_whitespace),
-            "qid must be one token without whitespace: {qid:?}"
-        );
-        // A malformed session must not quietly turn the same-session exclusion off.
-        let session = match &q["session"] {
-            serde_json::Value::Null => None,
-            serde_json::Value::String(s) => Some(s.as_str()),
-            _ => anyhow::bail!("session must be a string: {line}"),
-        };
-        // A hybrid run must not quietly become a full-text one: a query that cannot be embedded
-        // stops the run.
-        let qvec = match embedding {
-            Some(e) => Some(crate::embed::query(e, text).with_context(|| format!("embed {qid}"))?),
-            None => None,
-        };
-        let hits = match &qvec {
-            // The session leaves both candidate lists before fusion (as in the spike's
-            // `runs_kf.py`), so its documents neither take ranks nor crowd others out.
-            Some(q) => {
-                let lex = outside(conn, session, depth.max(HYBRID_DEPTH), |n| {
-                    search(conn, text, None, n)
-                })?;
-                fuse(conn, lex, Some(q), None, session, depth)?
-            }
-            None => outside(conn, session, depth, |n| search(conn, text, None, n))?,
-        };
-        let kept: Vec<String> = hits.into_iter().map(|h| h.doc).collect();
-        for (i, doc) in kept.iter().enumerate() {
-            out.push_str(&format!(
-                "{qid} Q0 {doc} {} {} {method}\n",
-                i + 1,
-                depth - i
-            ));
-        }
-    }
-    Ok(out)
-}
-
 /// `as i64` would wrap a huge `--limit` negative, which SQLite reads as "no limit".
 fn sql_limit(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
@@ -513,7 +427,7 @@ pub fn raw(
         None
     };
     let k = crate::knowledge::open(home)?;
-    let keys = raw_order(raw.as_ref(), &k, query, repo, (None, None), limit)?;
+    let keys = raw_order(raw.as_ref(), &k, query, repo, (None, None), None, limit)?;
     raw_rows(raw.as_ref(), &k, &keys, query)
 }
 
@@ -538,7 +452,8 @@ fn within(
 /// Search the none tier's index (`raw_fts` in knowledge.db, milestone 2 Task 6) the way
 /// [`search`] searches v1's: trigrams ORed and ranked by bm25, or literal terms (all required)
 /// for a query too short for a trigram. `repo = None` searches every repository; `span` is
-/// `within`'s. `raw` is `None` for a home with no raw.db. The records come as keys
+/// `within`'s; `skip_session`, an evaluation's, leaves that session's records out (one with no
+/// session stays). `raw` is `None` for a home with no raw.db. The records come as keys
 /// (`device:seq`), the best first, through the tombstone filter, with no text read: `raw_rows`
 /// reads them and gates their snippets, after a search's query call is back (Task 5), with the
 /// rules of that moment.
@@ -548,6 +463,7 @@ pub(crate) fn raw_order(
     query: &str,
     repo: Option<&str>,
     span: (Option<i64>, Option<i64>),
+    skip_session: Option<&str>,
     limit: usize,
 ) -> Result<Vec<String>> {
     crate::consumer::fts::schema(k)?;
@@ -559,6 +475,10 @@ pub(crate) fn raw_order(
         args.push(Value::Text(r.to_string()));
     }
     within(&mut clauses, &mut args, "d.ts", span);
+    if let Some(s) = skip_session {
+        clauses.push("COALESCE(d.session, '') <> ?".into());
+        args.push(Value::Text(s.to_owned()));
+    }
     let raw_db = fts_seen(raw, k)?;
     let before = hidden(&raw_db)?.len();
     let order = if ranked {
@@ -837,52 +757,6 @@ mod tests {
         )
         .unwrap();
         db::insert_prompt(conn, "s1", 1_699_999_990_000, "trigram 検索を足して").unwrap();
-    }
-
-    #[test]
-    fn eval_prints_a_trec_run_ranked_from_one() {
-        let dir = home("trec");
-        let mut conn = db::open(&dir).unwrap();
-        seed(&mut conn);
-        let queries = "{\"qid\":\"q1\",\"text\":\"Trigram\"}\n\n{\"qid\":\"q2\",\"text\":\"nothing matches this\"}\n";
-        assert_eq!(
-            trec_run(&conn, queries, 50, None).unwrap(),
-            "q1 Q0 o2 1 50 fts\nq1 Q0 p1 2 49 fts\n"
-        );
-        assert_eq!(
-            trec_run(&conn, queries, 1, None).unwrap(),
-            "q1 Q0 o2 1 1 fts\n"
-        );
-        assert!(trec_run(&conn, "{\"qid\":1,\"text\":\"x\"}", 5, None).is_err());
-        assert!(trec_run(&conn, "{\"qid\":\"q 1\",\"text\":\"x\"}", 5, None).is_err());
-        assert!(
-            trec_run(
-                &conn,
-                "{\"qid\":\"q1\",\"text\":\"x\",\"session\":7}",
-                5,
-                None
-            )
-            .is_err()
-        );
-        // The question's own session is left out and the next hit moves up.
-        let own = "{\"qid\":\"q1\",\"text\":\"Trigram\",\"session\":\"s1\"}\n";
-        assert_eq!(trec_run(&conn, own, 1, None).unwrap(), "");
-        let other = "{\"qid\":\"q1\",\"text\":\"Trigram\",\"session\":\"elsewhere\"}\n";
-        assert_eq!(
-            trec_run(&conn, other, 1, None).unwrap(),
-            "q1 Q0 o2 1 1 fts\n"
-        );
-        db::upsert_session(&conn, "s2", "claude", "/r", "/r", 1_700_000_000_000).unwrap();
-        db::insert_prompt(
-            &conn,
-            "s2",
-            1_700_000_100_000,
-            "trigram from another session",
-        )
-        .unwrap();
-        assert_eq!(trec_run(&conn, own, 1, None).unwrap(), "q1 Q0 p2 1 1 fts\n");
-        drop(conn); // Windows removes no file that is open
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

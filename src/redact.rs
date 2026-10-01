@@ -391,6 +391,14 @@ pub fn outbound_range(
 /// sees it (blocks removed tag by tag, trimmed, then masked pass by pass) and given in `text`'s own
 /// offsets, sorted and merged. `None` when the gate masks the whole text.
 pub fn hidden(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
+    hidden_map(text, rules).map(|(.., runs)| runs)
+}
+
+/// What the gate shows of a text, for each of its bytes the range of the text it stands for, and
+/// the ranges it hides (`hidden`).
+type Shown = (String, Vec<(usize, usize)>, Vec<(usize, usize)>);
+
+fn hidden_map(text: &str, rules: &Rules) -> Option<Shown> {
     // The text as the gate sees it, and for each of its bytes the range of `text` it stands for.
     let mut work = text.to_owned();
     let mut from: Vec<(usize, usize)> = (0..text.len()).map(|i| (i, i + 1)).collect();
@@ -456,6 +464,26 @@ pub fn hidden(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
             Some((_, last)) if s <= *last => *last = (*last).max(e),
             _ => runs.push((s, e)),
         }
+    }
+    Some((work, from, runs))
+}
+
+/// The byte ranges of `text` that `outbound_lines(text)` does not show: `hidden`'s, and what its
+/// line pass hides in each line of what the gate shows (where a removed block may have joined two
+/// lines), mapped back to `text`. Unmerged.
+fn hidden_lines(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
+    let (shown, from, mut runs) = hidden_map(text, rules)?;
+    let mut at = 0;
+    for line in shown.split('\n') {
+        for (s, e) in hidden(line, rules)? {
+            let run = from[at + s..at + e]
+                .iter()
+                .fold((usize::MAX, 0), |(a, b), &(x, y)| (a.min(x), b.max(y)));
+            if run.0 < run.1 {
+                runs.push(run);
+            }
+        }
+        at += line.len() + 1;
     }
     Some(runs)
 }
@@ -988,11 +1016,62 @@ pub fn field_ranges(body: &str, rules: &Rules) -> Vec<(usize, usize)> {
 /// The egress gate on indexed text (field values one per line): whole, then line by line, so a
 /// rule anchored to a field's end (`$`) matches each field as capture's did.
 pub fn outbound_lines(text: &str) -> String {
-    outbound(text)
+    match egress() {
+        Some(rules) => lines_with(text, &rules),
+        None => MASK.to_string(),
+    }
+}
+
+fn lines_with(text: &str, rules: &Rules) -> String {
+    outbound_with(text, rules)
         .split('\n')
-        .map(outbound)
+        .map(|line| outbound_with(line, rules))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `outbound_lines` of a text joined from `parts` (byte ranges of it: an imported document's
+/// title and body under its kind), what `outbound_lines` hides in a part alone hidden too, as
+/// search gates each part alone. Each view's hiding (the whole's and each part's, line pass
+/// included) is mapped back to the untouched text before anything is masked, so the result shows
+/// no byte that `outbound_lines` of the whole or of a part hides, and no view's mask takes away the
+/// context another view's rule needs (Codex on 6c19081 and 923bdd1); `outbound_lines` over the
+/// result can only add masks.
+pub fn outbound_joined(text: &str, parts: &[std::ops::Range<usize>]) -> String {
+    match egress() {
+        Some(rules) => joined_with(text, parts, &rules),
+        None => MASK.to_string(),
+    }
+}
+
+fn joined_with(text: &str, parts: &[std::ops::Range<usize>], rules: &Rules) -> String {
+    let mut runs = Vec::new();
+    for view in std::iter::once(0..text.len()).chain(parts.iter().cloned()) {
+        let Some(found) = hidden_lines(&text[view.clone()], rules) else {
+            return MASK.to_string();
+        };
+        runs.extend(
+            found
+                .into_iter()
+                .map(|(s, e)| (view.start + s, view.start + e)),
+        );
+    }
+    runs.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in runs {
+        match merged.last_mut() {
+            Some((_, last)) if s <= *last => *last = (*last).max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    let (mut masked, mut pos) = (String::with_capacity(text.len()), 0);
+    for (s, e) in merged {
+        masked.push_str(&text[pos..s]);
+        masked.push_str(MASK);
+        pos = e;
+    }
+    masked.push_str(&text[pos..]);
+    lines_with(&masked, rules)
 }
 
 /// The egress gate on a stored body, field by field as capture scanned it.
@@ -1569,6 +1648,40 @@ mod tests {
 
     fn user(toml: &str) -> anyhow::Result<Rules> {
         Rules::new(&crate::config::parse_capture(Some(toml))?.redaction)
+    }
+
+    /// Codex on 6c19081: a joined text's parts are gated alone, and a rule on the whole still
+    /// sees the whole as stored: masking the title first took away the context of a rule on the
+    /// composed text, and the body went out.
+    #[test]
+    fn a_joined_text_is_gated_in_each_view_without_losing_another_views_context() {
+        let text = "decision: Confidential\nprivate deployment value";
+        let parts = [10..22, 23..text.len()];
+        let title = "{ id = \"title\", regex = '^Confidential$' }";
+        let whole = "{ id = \"whole\", regex = '(?s)^decision: Confidential\\n.*$' }";
+        let rules = |list: &str| user(&format!("[redaction]\nextra_rules = [{list}]")).unwrap();
+        let both = joined_with(text, &parts, &rules(&format!("{title}, {whole}")));
+        assert!(!both.contains("Confidential"), "{both}");
+        assert!(!both.contains("private deployment"), "{both}");
+        let alone = joined_with(text, &parts, &rules(title));
+        assert_eq!(alone, format!("decision: {MASK}\nprivate deployment value"));
+        assert_eq!(joined_with(text, &parts, &rules(whole)), MASK);
+        // Codex on 923bdd1: a block that spans the title and the body, removed, joins two lines,
+        // and a rule anchored to the joined line holds, as it did in `outbound_lines`.
+        let joined = "decision: public\notp=<private>\nignored\n</private>654321\ntrailer";
+        let parts = [10..30, 31..joined.len()];
+        let otp = rules("{ id = \"otp\", regex = '^otp=([0-9]{6})$' }");
+        assert!(!lines_with(joined, &otp).contains("654321"));
+        let out = joined_with(joined, &parts, &otp);
+        assert!(!out.contains("654321") && !out.contains("ignored"), "{out}");
+        assert!(out.contains("public") && out.contains("trailer"), "{out}");
+        // With no part, it is `outbound_lines`: a rule anchored to a line's end holds.
+        let line = rules("{ id = \"line\", regex = 'value$' }");
+        assert_eq!(
+            joined_with("a value\nb", &[], &line),
+            lines_with("a value\nb", &line)
+        );
+        assert!(!joined_with("a value\nb", &[], &line).contains("value"));
     }
 
     fn sha(v: &str) -> String {

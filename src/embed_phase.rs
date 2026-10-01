@@ -720,7 +720,11 @@ fn cleared(k: &Connection, embedder: &str, reading: &Reading) -> Result<()> {
 /// A document read to embed: what it is, and its stored text.
 struct Read {
     doc: Doc,
+    /// Its text as stored; an imported document's body.
     text: String,
+    /// Imported documents only: their kind and title, composed with the body once each is gated
+    /// alone (`gated`).
+    title: Option<(String, String)>,
     /// Records only: its session as `Raw::event_labels` spells it, and its source.
     labels: Option<(String, String)>,
 }
@@ -935,6 +939,7 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
                         session: String::new(),
                     },
                     text,
+                    title: None,
                     labels: None,
                 })
             })?
@@ -949,19 +954,19 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
             )?;
             Ok(read
                 .query_row(params![embedder, uid], |r| {
-                    let doc_kind: String = r.get(0)?;
-                    let text =
-                        composed(&doc_kind, &r.get::<_, String>(1)?, &r.get::<_, String>(2)?);
+                    let (doc_kind, title, text): (String, String, String) =
+                        (r.get(0)?, r.get(1)?, r.get(2)?);
                     Ok(Read {
                         doc: Doc {
                             kind: if doc_kind == "prompt" { "p" } else { "k" },
                             key: uid.to_owned(),
-                            sha: sha(&text),
+                            sha: sha(&composed(&doc_kind, &title, &text)),
                             repo: r.get(3)?,
                             ts: r.get(4)?,
                             session: r.get(5)?,
                         },
                         text,
+                        title: Some((doc_kind, title)),
                         labels: None,
                     })
                 })
@@ -1000,6 +1005,7 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
                 },
                 labels: raw.event_labels(device, seq)?,
                 text,
+                title: None,
             }))
         })?,
     })
@@ -1007,11 +1013,31 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
 
 /// An imported document's text as v1 composed it (docs/pr-d.md): an observation's kind and title
 /// over its body, a summary's or a prompt's body.
-fn composed(kind: &str, title: &str, body: &str) -> String {
+pub(crate) fn composed(kind: &str, title: &str, body: &str) -> String {
+    composed_parts(kind, title, body).0
+}
+
+/// `composed`, with the byte ranges of the title and the body in it: one place for the format, so
+/// the ranges `composed_out` gates alone cannot drift from it (OpenCodeReview on #312).
+fn composed_parts(kind: &str, title: &str, body: &str) -> (String, Vec<std::ops::Range<usize>>) {
     match kind {
-        "prompt" | "summary" => body.to_owned(),
-        _ => format!("{kind}: {title}\n{body}"),
+        "prompt" | "summary" => (body.to_owned(), Vec::new()),
+        _ => {
+            let head = format!("{kind}: ");
+            let text = format!("{head}{title}\n{body}");
+            let title_at = head.len()..head.len() + title.len();
+            let body_at = title_at.end + 1..text.len();
+            (text, vec![title_at, body_at])
+        }
     }
+}
+
+/// `composed` for text that leaves this machine: gated whole, line by line, and in its title and
+/// its body alone (`redact::outbound_joined`), as search gates an imported hit's title and body,
+/// so a rule anchored to a title (`^...$`) holds once the kind is prefixed.
+pub(crate) fn composed_out(kind: &str, title: &str, body: &str) -> String {
+    let (text, parts) = composed_parts(kind, title, body);
+    crate::redact::outbound_joined(&text, &parts)
 }
 
 fn sha(text: &str) -> String {
@@ -1065,17 +1091,20 @@ pub(crate) fn import_excluded(repo: &str, list: &[String]) -> bool {
         .any(|x| *x == project || crate::import::repo(x.rsplit('/').next().unwrap_or(x)) == project)
 }
 
-/// The text sent for `r`: gated first, then cut (12,000 characters; a prompt 1,000), so a secret
-/// across the cut is hidden whole (D8).
+/// The text sent for `r`: gated first (an imported document's fields each alone, `composed_out`),
+/// then cut (12,000 characters; a prompt 1,000), so a secret across the cut is hidden whole (D8).
 fn gated(r: &Read) -> String {
     let keep = match r.doc.kind {
         "p" | "rp" => crate::embed::PROMPT_CHARS,
         _ => crate::embed::MAX_CHARS,
     };
-    crate::redact::outbound_lines(&r.text)
-        .chars()
-        .take(keep)
-        .collect()
+    match &r.title {
+        Some((kind, title)) => composed_out(kind, title, &r.text),
+        None => crate::redact::outbound_lines(&r.text),
+    }
+    .chars()
+    .take(keep)
+    .collect()
 }
 
 /// The repository the index files a document under: an import's claude-mem project, its worktree
@@ -1247,6 +1276,7 @@ fn current(k: &Connection, kind: &str, key: &str) -> Result<Option<Read>> {
     let read = |doc: Doc, text: String| Read {
         doc,
         text,
+        title: None,
         labels: None,
     };
     Ok(match kind {
@@ -1274,18 +1304,20 @@ fn current(k: &Connection, kind: &str, key: &str) -> Result<Option<Read>> {
                  ORDER BY rowid DESC LIMIT 1",
                 [key],
                 |r| {
-                    let doc_kind: String = r.get(0)?;
-                    let text =
-                        composed(&doc_kind, &r.get::<_, String>(1)?, &r.get::<_, String>(2)?);
+                    let (doc_kind, title, text): (String, String, String) =
+                        (r.get(0)?, r.get(1)?, r.get(2)?);
                     let doc = Doc {
                         kind: if doc_kind == "prompt" { "p" } else { "k" },
                         key: key.to_owned(),
-                        sha: sha(&text),
+                        sha: sha(&composed(&doc_kind, &title, &text)),
                         repo: r.get(3)?,
                         ts: r.get(4)?,
                         session: r.get(5)?,
                     };
-                    Ok(read(doc, text))
+                    Ok(Read {
+                        title: Some((doc_kind, title)),
+                        ..read(doc, text)
+                    })
                 },
             )
             .optional()?,
@@ -1341,12 +1373,12 @@ pub(crate) mod fixture {
     /// The phase polled until it has nothing left, each call waited for.
     pub(crate) fn embed_all(s: &Store) {
         let k = crate::knowledge::open(s.home.path()).unwrap();
-        until_idle(s, &k, &mut Phase::new(s.home.path()));
+        until_idle(&s.raw, &k, &mut Phase::new(s.home.path()));
     }
 
-    pub(crate) fn until_idle(s: &Store, k: &Connection, phase: &mut Phase) {
+    pub(crate) fn until_idle(raw: &Raw, k: &Connection, phase: &mut Phase) {
         for _ in 0..100 {
-            match phase.poll(&s.raw, k).unwrap() {
+            match phase.poll(raw, k).unwrap() {
                 Step::Idle => return,
                 Step::Waiting { .. } if phase.flight.is_some() => {
                     while !phase.done() {
@@ -1693,7 +1725,7 @@ mod tests {
         let poison = s.said("s", R, 2_000, "Poison words.");
         let fine = s.said("s", R, 3_000, "Fine words.");
         s.run();
-        until_idle(&s, &k, &mut phase);
+        until_idle(&s.raw, &k, &mut phase);
         assert_eq!(stub.requests(), 9);
         assert_eq!(skipped(&s, &s.key(poison)).as_deref(), Some("refused"));
         assert!(
@@ -1739,7 +1771,7 @@ mod tests {
         assert_eq!(stub.requests(), sent + 1);
         let later = s.said("s", R, 5_000, "Later words.");
         s.run();
-        until_idle(&s, &k, &mut phase);
+        until_idle(&s.raw, &k, &mut phase);
         assert_eq!(stub.requests(), sent + 3);
         assert_eq!(stub.texts()[sent + 1], ["Later words."]);
         assert_eq!(skipped(&s, &s.key(alone)).as_deref(), Some("refused"));
@@ -1781,7 +1813,7 @@ mod tests {
             })
             .unwrap();
         s.run();
-        until_idle(&s, &k, &mut phase);
+        until_idle(&s.raw, &k, &mut phase);
         assert!(stub.texts().concat().iter().any(|t| t == "Poison *****."));
         assert!(
             keys(&s)
@@ -1831,7 +1863,7 @@ mod tests {
         s.run();
         let db = pdb::open(s.home.path()).unwrap();
         pdb::set_state(&db, crate::embed::CALLS, pdb::State::default()).unwrap();
-        until_idle(&s, &k, &mut phase);
+        until_idle(&s.raw, &k, &mut phase);
         let after = stub.texts()[2..].concat();
         assert!(!after.iter().any(|t| t == "Poison words."), "{after:?}");
         assert!(after.iter().any(|t| t == "Poison *****."), "{after:?}");
@@ -2092,7 +2124,7 @@ mod tests {
         let home = s.home.path().to_owned();
         let mut phase = Phase::new(&home);
         let k = crate::knowledge::open(&home).unwrap();
-        until_idle(&s, &k, &mut phase);
+        until_idle(&s.raw, &k, &mut phase);
         let indexed = |s: &Store| keys(s).iter().filter(|(.., why)| why.is_none()).count();
         let before = indexed(&s);
         let held = stub.hold();
@@ -2529,6 +2561,81 @@ mod tests {
                 "{key}: {got:?}"
             );
         }
+    }
+
+    /// The ranges `composed_out` gates alone are the title and the body in the composed text.
+    #[test]
+    fn composed_parts_name_the_title_and_the_body() {
+        let (text, parts) = composed_parts("decision", "Tabs", "Use tabs.\nAlways.");
+        assert_eq!(text, composed("decision", "Tabs", "Use tabs.\nAlways."));
+        assert_eq!(&text[parts[0].clone()], "Tabs");
+        assert_eq!(&text[parts[1].clone()], "Use tabs.\nAlways.");
+        for kind in ["prompt", "summary"] {
+            assert_eq!(composed_parts(kind, "T", "B"), ("B".to_owned(), Vec::new()));
+        }
+    }
+
+    /// Codex on 52803e3: a rule anchored to an imported title (`^...$`), added after the import,
+    /// holds in the text sent as in search's hits: the title is gated alone before its kind is
+    /// prefixed. The rules are the process's, so the phase runs in a child.
+    #[test]
+    fn a_rule_anchored_to_an_imported_title_holds_in_the_text_sent() {
+        const HOME: &str = "OBOETE_TEST_TITLE_RULE_HOME";
+        const SECRET: &str = "INTERNAL-GAMMA-3";
+        const OTHER: &str = "INTERNAL-DELTA-5";
+        if let Ok(home) = std::env::var(HOME) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let raw = crate::raw::open(&home).unwrap();
+            let k = crate::knowledge::open(&home).unwrap();
+            until_idle(&raw, &k, &mut Phase::new(&home));
+            return;
+        }
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let uid = s.imported("o1", "r", 2_000, SECRET, "deploy notes");
+        // Codex on 6c19081: a rule on the whole composed text keeps its context though the
+        // title's own rule masks the title.
+        let other = s.imported("o2", "r", 2_000, OTHER, "private deployment value");
+        s.run();
+        let config = s.home.path().join("config.toml");
+        let plain = std::fs::read_to_string(&config).unwrap();
+        let ruled = format!(
+            "{plain}[redaction]\nextra_rules = [{{ id = \"gamma\", regex = '^{SECRET}$' }}, \
+             {{ id = \"delta\", regex = '^{OTHER}$' }}, \
+             {{ id = \"whole\", regex = '(?s)^decision: {OTHER}\\n.*$' }}]\n"
+        );
+        std::fs::write(&config, ruled).unwrap();
+        let name =
+            "embed_phase::tests::a_rule_anchored_to_an_imported_title_holds_in_the_text_sent";
+        let out = std::process::Command::new(std::env::args_os().next().unwrap())
+            .args(["--exact", name])
+            .env(HOME, s.home.path())
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains("1 passed"), "{said}");
+        let sent: Vec<String> = stub.texts().concat();
+        assert!(sent.iter().any(|t| t.contains("deploy notes")), "{sent:?}");
+        assert!(sent.iter().all(|t| !t.contains(SECRET)), "{sent:?}");
+        assert!(sent.iter().all(|t| !t.contains("private")), "{sent:?}");
+        let got = keys(&s);
+        assert!(
+            got.iter()
+                .any(|(_, k, skipped)| *k == uid && skipped.is_none())
+        );
+        // Gated to the mask whole: nothing to send.
+        assert!(
+            got.iter()
+                .any(|(_, k, skipped)| *k == other && skipped.as_deref() == Some("empty")),
+            "{got:?}"
+        );
     }
 
     /// Row 55-6: a correction or a tombstone that lands while a call is out keeps the vector made

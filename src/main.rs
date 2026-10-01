@@ -228,15 +228,19 @@ enum Cmd {
         #[arg(long)]
         agent: String,
     },
-    /// Evaluation: run `{"qid","text"}` JSONL queries through search, print a TREC run
+    /// Evaluation (milestone 4 Task 6): run `{"qid","text","session"}` JSONL questions through
+    /// Design B's search, one TREC run per arm and the sidecar of what they print
     #[command(hide = true)]
     Eval {
         queries: PathBuf,
         #[arg(long, default_value_t = 50)]
         depth: usize,
-        /// fts (full-text) or hybrid (full-text and vectors, needs [embedding])
-        #[arg(long, default_value = "fts")]
-        method: String,
+        /// Comma-separated: off, below, only, rrf:<n>
+        #[arg(long, default_value = "off")]
+        arms: String,
+        /// Directory for b-<arm>.trec and b-docs.jsonl
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Replay a JSONL fixture through the hook path and measure
     Replay {
@@ -360,6 +364,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                     other => anyhow::bail!("--raw {other}: use below, off or only"),
                 },
                 limit,
+                skip_session: None,
             };
             let answer = search::b::query(&home, &q)?;
             if let search::b::Vector::Skipped(why) = answer.vector
@@ -441,20 +446,20 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         Cmd::Eval {
             queries,
             depth,
-            method,
+            arms,
+            out,
         } => {
-            let embedding = match method.as_str() {
-                "fts" => None,
-                "hybrid" => Some(config::load(&home)?.embedding),
-                other => anyhow::bail!("--method {other}: use fts or hybrid"),
-            };
-            let conn = db::open(&home)?;
-            emit(&search::trec_run(
-                &conn,
+            let arms = arms
+                .split(',')
+                .map(str::parse)
+                .collect::<Result<Vec<search::b::RawArm>>>()?;
+            search::b::trec_run(
+                &home,
                 &std::fs::read_to_string(queries)?,
                 depth,
-                embedding.as_ref(),
-            )?)
+                &arms,
+                &out,
+            )
         }
         Cmd::Doctor => setup::doctor(&home),
         Cmd::Pref {
