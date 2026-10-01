@@ -1,0 +1,33 @@
+docs/eval/common.py
+  s_59cfa7617c8511::t_69869982cbf704 106-112,115-116,203,220,244-250,286,309-310
+docs/eval/m3.py
+  s_59cfa7617c8511::t_ce0bb8a7c4bf21 23,78-85,88,122-128,131,133,206,215-223,228,230
+docs/eval/m5.py
+  s_59cfa7617c8511::t_4e3b11bcf11bc1 10,60-62,65-80,94,127,132,186-187,194,196,227,242,252-254,294,319
+docs/eval/m6.py
+  s_59cfa7617c8511::t_0a8a9ce17146ab 6,111-112,115-117,134,165-166,168-169,171-172,176,182,211,312,325,336,351,362,370-371,449,452,472,474-475,479,489,491,493,505,509-511,559
+docs/eval/test_common.py
+  s_59cfa7617c8511::t_88ccc91dfe8534 28-29,47
+docs/eval/test_m3.py
+  s_59cfa7617c8511::t_45a7faf6d66fbb 127,184
+docs/eval/test_m5.py
+  s_59cfa7617c8511::t_53ba405d9b705c 393,401-402
+docs/eval/test_m6.py
+  s_59cfa7617c8511::t_b700e26e7fed7b 165,344,349,353,355,367
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f4c677f04ed28d992f0af770ee33454192247f0b",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
