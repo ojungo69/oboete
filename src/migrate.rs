@@ -33,6 +33,47 @@ pub struct Stats {
 /// records; then the documents as import ops. Everything is read in one read transaction of the
 /// store at `from`, which is never written; a rerun imports nothing twice.
 pub fn pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<Stats> {
+    Ok(read_pass(home, raw, from)?.0)
+}
+
+/// v1's highest ids (events, observations, summaries, prompts) and its newest event: what
+/// `--finish` checks v1 has not moved since its pass.
+#[derive(Debug, PartialEq)]
+struct Fingerprint {
+    highest: [i64; 4],
+    newest: Option<V1Row>,
+}
+
+fn fingerprint(v1: &Connection) -> Result<Fingerprint> {
+    let mut highest = [0; 4];
+    for (n, table) in ["events", "observations", "summaries", "prompts"]
+        .into_iter()
+        .enumerate()
+    {
+        highest[n] = v1.query_row(
+            &format!("SELECT COALESCE(MAX(id), 0) FROM {table}"),
+            [],
+            |r| r.get(0),
+        )?;
+    }
+    let newest = v1
+        .query_row(
+            "SELECT id, ts, session_id FROM events WHERE id = ?1",
+            [highest[0]],
+            |r| {
+                Ok(V1Row {
+                    id: r.get(0)?,
+                    ts: r.get(1)?,
+                    session_id: r.get(2)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(Fingerprint { highest, newest })
+}
+
+/// `pass`, with v1's fingerprint read in the same transaction.
+fn read_pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<(Stats, Fingerprint)> {
     let v1 = open_v1(from)?;
     // One read transaction: a consistent snapshot while v1's hooks keep writing.
     v1.execute_batch("BEGIN")?;
@@ -51,7 +92,151 @@ pub fn pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<Stats> {
     stats.deleted = deleted(&v1, raw)?;
     repos(&v1, raw, &settings, &mut stats)?;
     documents(&v1, raw, &device, &settings, &mut stats)?;
-    Ok(stats)
+    Ok((stats, fingerprint(&v1)?))
+}
+
+/// Spec 7.4, A106: v1's `config.toml` (beside its store) into a home that has none, unchanged; a
+/// home's own file is never edited. Then what the home's file leaves unanswered, one line each.
+pub fn settings(home: &Path, from: &Path) -> Result<Vec<String>> {
+    let ours = home.join("config.toml");
+    let theirs = from.with_file_name("config.toml");
+    if !ours.exists() && theirs.exists() {
+        std::fs::copy(&theirs, &ours).with_context(|| format!("copy {}", theirs.display()))?;
+    }
+    let text = match std::fs::read_to_string(&ours) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("read {}", ours.display())),
+    };
+    let table: toml::Table = text
+        .parse()
+        .with_context(|| format!("parse {}", ours.display()))?;
+    let mut lines = Vec::new();
+    if table.get("summary").and_then(|s| s.get("curate")).is_none() {
+        lines.push(
+            "[summary] curate is not set: nothing is curated until it is (spec 7.4)".to_owned(),
+        );
+    }
+    let unset: Vec<&str> = ["inject", "capture", "redaction", "chain"]
+        .into_iter()
+        .filter(|t| !table.contains_key(*t))
+        .collect();
+    if !unset.is_empty() {
+        lines.push(format!(
+            "not set, so their defaults apply: [{}]",
+            unset.join("], [")
+        ));
+    }
+    Ok(lines)
+}
+
+/// `oboete migrate --finish` (spec 7.4, A58): one more pass; then v1's old files in the home with
+/// their sizes, and the imported v1 sessions oboete.db no longer holds; then one line from
+/// `answer`. Only on `yes`, and only while v1 has written nothing since the pass, the files are
+/// deleted, each failure reported. `from` must be the home's own store: the files are the home's.
+pub fn finish(
+    home: &Path,
+    from: &Path,
+    mut answer: impl std::io::BufRead,
+    out: &mut impl std::io::Write,
+) -> Result<()> {
+    let own = home.join("oboete.db");
+    let same = |a: &Path, b: &Path| -> Result<bool> {
+        Ok(std::fs::canonicalize(a)? == std::fs::canonicalize(b)?)
+    };
+    anyhow::ensure!(
+        own.exists() && same(from, &own)?,
+        "--finish deletes the old files of the home it runs on: --from must be {}",
+        own.display()
+    );
+    let (stats, before) = read_pass(home, &mut crate::raw::open(home)?, from)?;
+    let files = old_files(home)?;
+    writeln!(out, "v1's old files in {}:", home.display())?;
+    for (path, bytes) in &files {
+        writeln!(out, "  {} ({bytes} bytes)", path.display())?;
+    }
+    if !stats.deleted.is_empty() {
+        writeln!(
+            out,
+            "v1 sessions deleted from oboete.db after they were imported (forget them to remove \
+             them here too): {}",
+            stats.deleted.join(", ")
+        )?;
+    }
+    write!(out, "Delete these files? Type yes to delete them: ")?;
+    out.flush()?;
+    let mut line = String::new();
+    answer.read_line(&mut line)?;
+    if line.trim() != "yes" {
+        writeln!(out, "Nothing was deleted.")?;
+        return Ok(());
+    }
+    anyhow::ensure!(
+        fingerprint(&open_v1(from)?)? == before,
+        "oboete.db changed after the import pass (an old hook still writes to it): nothing was \
+         deleted; run `oboete migrate --finish` again"
+    );
+    let mut failed = 0;
+    for (path, _) in &files {
+        let gone = if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        match gone {
+            Ok(()) => writeln!(out, "deleted {}", path.display())?,
+            Err(e) => {
+                failed += 1;
+                writeln!(out, "not deleted {}: {e}", path.display())?;
+            }
+        }
+    }
+    anyhow::ensure!(failed == 0, "{failed} file(s) not deleted");
+    Ok(())
+}
+
+/// v1's runtime files in the home, spec 7.4's list (what ~/.oboete held on WSL on 2026-09-25):
+/// oboete.db and memory.db with their -wal and -shm, the pre-*.db snapshots with theirs, and the
+/// pre-rollout-*, spool, cache and logs directories; with their sizes, a directory's in all.
+/// `eval/` is not among them.
+fn old_files(home: &Path) -> Result<Vec<(std::path::PathBuf, u64)>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(home)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let dir = entry.file_type()?.is_dir();
+        let db = |stem: &str| {
+            ["", "-wal", "-shm"]
+                .iter()
+                .any(|end| name == format!("{stem}{end}"))
+        };
+        let snapshot = name.starts_with("pre-")
+            && [".db", ".db-wal", ".db-shm"]
+                .iter()
+                .any(|e| name.ends_with(e));
+        let old = if dir {
+            name.starts_with("pre-rollout-") || ["spool", "cache", "logs"].contains(&name.as_str())
+        } else {
+            db("oboete.db") || db("memory.db") || snapshot
+        };
+        if old {
+            files.push((entry.path(), size(&entry.path())?));
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn size(path: &Path) -> Result<u64> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.is_dir() {
+        return Ok(meta.len());
+    }
+    let mut total = 0;
+    for entry in std::fs::read_dir(path)? {
+        total += size(&entry?.path())?;
+    }
+    Ok(total)
 }
 
 /// v1's events past the checkpoint, read in id order and cut into batches by `IMPORT_BATCH`
@@ -614,6 +799,17 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         v1.delete_session("a");
         let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
         assert_eq!(stats.deleted, ["a"]);
+        // And by `--finish`, from the home's own store.
+        drop(raw);
+        let h = home.path();
+        let own = h.join("oboete.db");
+        v1.conn
+            .execute("VACUUM INTO ?1", [own.to_str().unwrap()])
+            .unwrap();
+        let mut out = Vec::new();
+        finish(h, &h.join("oboete.db"), "no\n".as_bytes(), &mut out).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("here too): a\n"), "{said}");
     }
 
     /// Spec 7.4: each batch commits with its checkpoint, so a pass killed between two resumes after
@@ -876,6 +1072,183 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         assert_eq!(migrated.len(), 1_200);
         let (first, last) = (migrated[0], migrated[1_199]);
         assert!(live.iter().any(|s| (first..last).contains(s)), "{live:?}");
+    }
+
+    /// R05, A106: v1's config.toml goes unchanged into a home that has none, and loads under
+    /// Design B with its providers in order, their models, and the key files by path; a home's
+    /// own file is never edited; what the file leaves unanswered is printed.
+    #[test]
+    fn the_v1_config_loads_under_b() {
+        let dir = tempfile::tempdir().unwrap();
+        let v1 = V1::new(dir.path());
+        let text = r#"gemini = "after-subscriptions"
+
+[[providers]]
+kind = "openai"
+name = "groq"
+base_url = "https://api.groq.com/openai/v1"
+key_file = "/k/GROQ_KEY.md"
+model = "llama-3.3-70b-versatile"
+
+[[providers]]
+kind = "cli"
+name = "codex"
+cli = "codex"
+model = "gpt-5.5"
+
+[embedding]
+provider = "workers-ai"
+account_id = "acct"
+key_file = "/k/CF_WORKERS_AI_KEY.md"
+"#;
+        std::fs::write(dir.path().join("config.toml"), text).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let lines = settings(home.path(), &v1.path).unwrap();
+        let copied = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        assert_eq!(copied, text);
+        assert!(
+            lines[0].starts_with("[summary] curate is not set"),
+            "{lines:?}"
+        );
+        let cfg = crate::config::load(home.path()).unwrap();
+        let chain: Vec<(&str, Option<&str>, Option<&Path>)> = cfg
+            .providers
+            .iter()
+            .map(|p| match p {
+                crate::config::Provider::Openai {
+                    name,
+                    model,
+                    key_file,
+                    ..
+                } => (name.as_str(), Some(model.as_str()), key_file.as_deref()),
+                crate::config::Provider::Cli { name, model, .. } => {
+                    (name.as_str(), model.as_deref(), None)
+                }
+            })
+            .collect();
+        assert_eq!(
+            chain[..2],
+            [
+                (
+                    "groq",
+                    Some("llama-3.3-70b-versatile"),
+                    Some(Path::new("/k/GROQ_KEY.md"))
+                ),
+                ("codex", Some("gpt-5.5"), None),
+            ]
+        );
+        assert_eq!(chain.last().map(|c| c.0), Some("gemini"));
+        let key = cfg.embedding.key_file.clone();
+        assert_eq!(key, Path::new("/k/CF_WORKERS_AI_KEY.md"));
+        assert!(!cfg.summary.curate);
+        // A home with its own file keeps it as it is.
+        let own = "[summary]\ncurate = true\n";
+        std::fs::write(home.path().join("config.toml"), own).unwrap();
+        let lines = settings(home.path(), &v1.path).unwrap();
+        let kept = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        assert_eq!(kept, own);
+        assert!(lines.iter().all(|l| !l.contains("curate")), "{lines:?}");
+    }
+
+    /// A58: `--finish` imports once more, lists v1's old files with their sizes, and deletes them
+    /// only on `yes`, and only while v1 has written nothing since its pass; Design B's files and
+    /// `eval/` stay. A `--from` that is not the home's own store is refused.
+    #[test]
+    fn finish_deletes_only_on_yes() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let v1 = V1::new(h);
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 110, "one");
+        for f in ["pre-1.db", "pre-1.db-wal", "memory.db", "notes.txt"] {
+            std::fs::write(h.join(f), "x").unwrap();
+        }
+        for d in ["spool", "cache", "logs", "pre-rollout-1", "eval"] {
+            std::fs::create_dir(h.join(d)).unwrap();
+            std::fs::write(h.join(d).join("f"), "xyz").unwrap();
+        }
+        let listed = |out: &[u8]| String::from_utf8(out.to_vec()).unwrap();
+        let mut out = Vec::new();
+        finish(h, &v1.path, "no\n".as_bytes(), &mut out).unwrap();
+        let said = listed(&out);
+        assert!(said.contains("spool (3 bytes)") && said.ends_with("Nothing was deleted.\n"));
+        assert!(
+            !said.contains("eval") && !said.contains("notes.txt"),
+            "{said}"
+        );
+        assert!(h.join("oboete.db").exists() && h.join("spool").exists());
+        let raw = raw::open(h).unwrap();
+        assert_eq!(of_kind(&raw, "prompt"), [json!({"prompt": "one"})]);
+        drop(raw);
+        // An old hook writes while the answer is read: nothing is deleted.
+        struct Writing<'a>(&'a V1, bool);
+        impl std::io::Read for Writing<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if std::mem::replace(&mut self.1, true) {
+                    return Ok(0);
+                }
+                self.0.prompt("s1", 120, "written meanwhile");
+                buf[..4].copy_from_slice(b"yes\n");
+                Ok(4)
+            }
+        }
+        let answer = std::io::BufReader::new(Writing(&v1, false));
+        let refused = finish(h, &v1.path, answer, &mut Vec::new()).unwrap_err();
+        assert!(format!("{refused:#}").contains("changed after the import pass"));
+        assert!(h.join("oboete.db").exists() && h.join("spool").exists());
+        // A copy elsewhere is not the home's store.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let copy = elsewhere.path().join("oboete.db");
+        std::fs::copy(&v1.path, &copy).unwrap();
+        let refused = finish(h, &copy, "yes\n".as_bytes(), &mut Vec::new()).unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("--from must be"),
+            "{refused:#}"
+        );
+        let mut out = Vec::new();
+        finish(h, &v1.path, "yes\n".as_bytes(), &mut out).unwrap();
+        for gone in [
+            "oboete.db",
+            "pre-1.db",
+            "pre-1.db-wal",
+            "memory.db",
+            "spool",
+            "cache",
+        ] {
+            assert!(!h.join(gone).exists(), "{gone}: {}", listed(&out));
+        }
+        for kept in ["raw.db", "eval", "notes.txt"] {
+            assert!(h.join(kept).exists(), "{kept}");
+        }
+        let raw = raw::open(h).unwrap();
+        let prompts = of_kind(&raw, "prompt");
+        assert_eq!(prompts.len(), 2, "the write during the answer was imported");
+        // The old viewer deletes the newest session while the answer is read, and a hook writes
+        // as many events again: the same highest ids, another newest event.
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let v1 = V1::new(h);
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 110, "one");
+        v1.session("s2", "r", 200);
+        v1.prompt("s2", 210, "two");
+        struct Reusing<'a>(&'a V1, bool);
+        impl std::io::Read for Reusing<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if std::mem::replace(&mut self.1, true) {
+                    return Ok(0);
+                }
+                self.0.delete_session("s2");
+                self.0.session("s3", "r", 300);
+                self.0.prompt("s3", 310, "three");
+                buf[..4].copy_from_slice(b"yes\n");
+                Ok(4)
+            }
+        }
+        let answer = std::io::BufReader::new(Reusing(&v1, false));
+        let refused = finish(h, &v1.path, answer, &mut Vec::new()).unwrap_err();
+        assert!(format!("{refused:#}").contains("changed after the import pass"));
+        assert!(h.join("oboete.db").exists());
     }
 
     /// D6, A104: a v1 event and a document `denied` refuses are left out; the others land.
