@@ -15,6 +15,8 @@ use crate::redact;
 
 /// Candidates each leg reads before the ranking and the pair rule take their part.
 const DEPTH: usize = 100;
+/// Pages of `DEPTH` the claims leg reads at most to fill its depth past hidden and lowered claims.
+const PAGES: usize = 10;
 /// A snippet's width in characters.
 pub(crate) const WIDTH: usize = 160;
 
@@ -208,11 +210,15 @@ fn claims_leg(
     );
     let pending = claims::Pending::read(raw, k)?;
     let hidden = |uid: &str| pending.touches(k, uid);
-    // A pending claim is only hidden: the claims after it take its place, so the leg still holds
-    // `depth` (Codex on #306).
+    // The ended claims with what ended them: kept out of `units`, which would pair them.
+    let mut ended_by: HashMap<String, Option<String>> = HashMap::new();
+    let (mut shown, mut ended) = (Vec::new(), Vec::new());
+    // A pending claim is only hidden, and an ended or done one is lowered below the rest: the
+    // claims after them take their places, so the leg holds `depth` it shows first (Codex on #306).
+    // ponytail: at most `PAGES` pages; a query whose first 1,000 matches are all hidden or lowered
+    // shows those.
     let mut st = k.prepare(&sql)?;
-    let mut uids = Vec::new();
-    for page in 0.. {
+    for page in 0..PAGES {
         let mut paged = args.clone();
         paged.push(Value::Integer(super::sql_limit(depth.saturating_mul(page))));
         let read: Vec<String> = st
@@ -220,36 +226,32 @@ fn claims_leg(
             .collect::<rusqlite::Result<_>>()?;
         let last = read.len() < depth;
         for uid in read {
-            if !hidden(&uid)? {
-                uids.push(uid);
+            if hidden(&uid)? {
+                continue;
+            }
+            let c = match claims::delivered_one(k, &uid)? {
+                Some(c) => c,
+                None => {
+                    let Some(mut c) = claims::active_one(k, &uid)? else {
+                        continue;
+                    };
+                    ended_by.insert(uid, c.later.take());
+                    c
+                }
+            };
+            let lowered = ended_by.contains_key(&c.uid) || c.status == "done";
+            if lowered && !q.history {
+                ended.push(c);
+            } else {
+                shown.push(c);
             }
         }
-        if last || uids.len() >= depth {
+        if last || shown.len() >= depth {
             break;
         }
     }
-    uids.truncate(depth);
-    // The ended claims with what ended them: kept out of `units`, which would pair them.
-    let mut ended_by: HashMap<String, Option<String>> = HashMap::new();
-    let (mut shown, mut ended) = (Vec::new(), Vec::new());
-    for uid in uids {
-        let c = match claims::delivered_one(k, &uid)? {
-            Some(c) => c,
-            None => {
-                let Some(mut c) = claims::active_one(k, &uid)? else {
-                    continue;
-                };
-                ended_by.insert(uid, c.later.take());
-                c
-            }
-        };
-        let lowered = ended_by.contains_key(&c.uid) || c.status == "done";
-        if lowered && !q.history {
-            ended.push(c);
-        } else {
-            shown.push(c);
-        }
-    }
+    shown.truncate(depth);
+    ended.truncate(depth);
     // A unit brings the claim that ended its earlier decision whatever that claim's time: an
     // earlier decision is never shown without it (D2), which `since` and `until` do not lift.
     let (units, _) = claims::place(claims::units(k, &shown, hidden)?, q.limit);
@@ -1372,6 +1374,32 @@ mod tests {
         assert!(found.hits.iter().all(|h| h.class == Class::Current));
     }
 
+    /// Codex on #306: done open items that outrank a current claim are lowered, and the current
+    /// claim after them is still read and shown first.
+    #[test]
+    fn many_done_items_do_not_crowd_out_a_current_claim() {
+        let mut s = Store::new();
+        for i in 0..110 {
+            let text = format!("Fix the parser test {i:03}.");
+            let seq = s.said("s", R, 1_000 + i, &text);
+            s.claim(seq, &text, ("open item", "done", "user"), &[]);
+        }
+        let current = s.decided(
+            R,
+            500,
+            "We keep a parser test suite in one long file of many tests.",
+            &[],
+        );
+        s.run();
+        let found = s.query(&Query {
+            raw: RawArm::Off,
+            limit: 20,
+            ..q("parser test")
+        });
+        assert_eq!(found.hits[0].key, current);
+        assert_eq!(found.hits.len(), 20);
+    }
+
     /// Codex on #306: an imported uid held twice resolves to its newest copy, the one search and
     /// the timeline show: in `get`, and as a timeline's anchor.
     #[test]
@@ -1381,10 +1409,7 @@ mod tests {
         s.imported("o1", "r", 2_000, "Notes", "Second copy.");
         s.run();
         let text = get(s.home.path(), &doc).unwrap().unwrap();
-        assert!(
-            text.contains("Second copy.") && !text.contains("First copy."),
-            "{text}"
-        );
+        assert!(text.contains("Second copy.") && !text.contains("First copy."));
         let k = crate::knowledge::open(s.home.path()).unwrap();
         assert_eq!(time_of(&s.raw, &k, &doc).unwrap(), 2_000);
     }
