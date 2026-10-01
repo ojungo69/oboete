@@ -1,0 +1,46 @@
+src/db.rs
+  s_36d797d5e4f9d5::t_8f30dfa2d29597 5,116-117,121-123,129,138-144,146,148,159,162-163,322-324,338,351,565-574,579
+  s_36d797d5e4f9d5::t_57e79ffcb3c0ab 832-833
+  s_36d797d5e4f9d5::t_00a43581c7bb99 105-106,118-119,125,130,132,856-866
+  s_36d797d5e4f9d5::t_ae6360c39cf85b 819-831,834-855,867-868
+  s_36d797d5e4f9d5::t_40410d47dbf98d 133-137,147,149-154,158,160-161,164,166,168-170,339-344,352-356,358-367,582-587
+  s_36d797d5e4f9d5::t_07da6f54188149 155-157,580-581
+  s_36d797d5e4f9d5::t_4ee117e6a99540 124,325
+  s_36d797d5e4f9d5::t_51419c483cd4a2 145
+  s_1c6879e741c216::t_e001980dc9d549 818
+src/raw.rs
+  s_36d797d5e4f9d5::t_8f30dfa2d29597 293,299-306,310
+  s_36d797d5e4f9d5::t_40410d47dbf98d 297
+  s_36d797d5e4f9d5::t_dbf76a4903ffd6 1775
+  s_36d797d5e4f9d5::t_a78caebab468e1 1767-1774,1776-1784,1786-1821,1823-1845
+  s_36d797d5e4f9d5::t_00a43581c7bb99 261-262,264-270,273-277,296,334-335,1785,1822
+src/hook.rs
+  s_36d797d5e4f9d5::t_9c6f09cef26a50 1194-1209,1211-1227
+  s_36d797d5e4f9d5::t_0717eadeab1ad6 1210
+  s_36d797d5e4f9d5::t_00a43581c7bb99 7,123,390
+  s_36d797d5e4f9d5::t_609d26ccd738b7 1193
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "938de76c76fb9dce05c24c3146f7743736964197",
+  "prompts": {},
+  "sessions": {
+    "s_1c6879e741c216": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f966-46f7-7710-a5ce-f68360d7cae1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_36d797d5e4f9d5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f901-33a2-7053-906a-33ad2d1b09bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
