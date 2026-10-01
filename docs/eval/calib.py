@@ -131,6 +131,9 @@ def chat(member, prompt, timeout=300):
     """(answer text, the model the provider reports) of one chat completion from a panel judge,
     temperature 0. A 429 is retried after its Retry-After (Groq's tokens per minute) up to four times;
     one that asks for more than two minutes (OpenCode Go's 5-hour limit) fails at once."""
+    if member == 'claude-sonnet-5':
+        from common import claude_json
+        return claude_json(prompt, member, timeout), member
     base, key_file, headers, model = PANEL[member]
     if base == 'dogfood':
         return cli_chat(key_file, model, prompt, timeout)
