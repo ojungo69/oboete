@@ -169,9 +169,15 @@ def test_the_export_deletes_no_cache_itself(tmp_path, monkeypatch):
     out = tmp_path / 'onnx'
     (out / '.export-cache').mkdir(parents=True)
     (out / '.export-cache' / 'kept').write_text('x')
-    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setenv('HF_HOME', 'before')
+    monkeypatch.delenv('NETRC', raising=False)
+    monkeypatch.setattr(rerank.tempfile, 'tempdir', 'before')
     with pytest.raises(RuntimeError):
         with rerank.export_cache(out):
+            assert os.environ['NETRC'] == os.devnull
+            assert os.environ['HF_HOME'] == str(out / '.export-cache' / 'hf')
             raise RuntimeError('the export failed')
     assert (out / '.export-cache' / 'kept').read_text() == 'x'
-    assert os.environ['HOME'] == str(tmp_path)
+    # The environment and the temporary directory are as they were.
+    assert (os.environ['HF_HOME'], 'NETRC' in os.environ) == ('before', False)
+    assert rerank.tempfile.tempdir == 'before'

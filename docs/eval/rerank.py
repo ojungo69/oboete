@@ -22,7 +22,7 @@ caches inside the same disposable directory as the download and export scratch:
     --with torch==2.8.0 --with transformers==4.55.4 --with onnx==1.18.0 \
     --with onnxscript==0.4.0 --with huggingface-hub==0.34.4 \
     --with safetensors==0.6.2 --with tokenizers==0.21.4 --with numpy==2.2.6 \
-    python rerank.py export "$out"; s=$?; rm -rf "$out/.export-cache"; exit $s)
+    python rerank.py export "$out" && s=0 || s=$?; rm -rf "$out/.export-cache"; exit $s)
 
 On macOS, omit --index https://download.pytorch.org/whl/cpu; its torch wheels
 already run on CPU. Keep every package version unchanged.
