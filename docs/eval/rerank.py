@@ -93,7 +93,11 @@ def read_run(path):
             if len(fields) != 6 or fields[1] != 'Q0':
                 raise ValueError(f'{path}:{number}: expected qid Q0 key rank score tag')
             qid, _, key, rank, score, _ = fields
-            if int(rank) < 1 or not math.isfinite(float(score)):
+            try:
+                valid = int(rank) >= 1 and math.isfinite(float(score))
+            except ValueError:
+                valid = False
+            if not valid:
                 raise ValueError(f'{path}:{number}: invalid rank or score')
             # File order defines the shortlist and ties, rather than the printed rank.
             hits.setdefault(qid, []).append(key)

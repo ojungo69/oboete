@@ -98,6 +98,14 @@ def test_time_reports_wall_and_cpu_and_names_rss_units(tmp_path, monkeypatch, ca
     assert ('bytes (macOS)' if rerank.sys.platform == 'darwin' else 'kB (Linux)') in printed
 
 
+@pytest.mark.parametrize('line', ['q Q0 a x 1.0 b-off', 'q Q0 a 1 nan b-off', 'q Q0 a 0 1.0 b-off'])
+def test_a_bad_rank_or_score_names_its_line(tmp_path, line):
+    run = tmp_path / 'b-off.trec'
+    run.write_text('q Q0 b 1 2.0 b-off\n' + line + '\n', encoding='utf-8')
+    with pytest.raises(ValueError, match=r'b-off\.trec:2: invalid rank or score'):
+        rerank.read_run(str(run))
+
+
 @pytest.mark.parametrize('scores', [[], [1., 2.], [float('nan')], [float('inf')]])
 def test_invalid_scorer_results_do_not_write_a_run(tmp_path, capsys, scores):
     argv = inputs(tmp_path, {'q': ['a']}, {'q': 'Q'}, {'a': 'A'})
