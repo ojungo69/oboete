@@ -1014,9 +1014,21 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
 /// An imported document's text as v1 composed it (docs/pr-d.md): an observation's kind and title
 /// over its body, a summary's or a prompt's body.
 pub(crate) fn composed(kind: &str, title: &str, body: &str) -> String {
+    composed_parts(kind, title, body).0
+}
+
+/// `composed`, with the byte ranges of the title and the body in it: one place for the format, so
+/// the ranges `composed_out` gates alone cannot drift from it (OpenCodeReview on #312).
+fn composed_parts(kind: &str, title: &str, body: &str) -> (String, Vec<std::ops::Range<usize>>) {
     match kind {
-        "prompt" | "summary" => body.to_owned(),
-        _ => format!("{kind}: {title}\n{body}"),
+        "prompt" | "summary" => (body.to_owned(), Vec::new()),
+        _ => {
+            let head = format!("{kind}: ");
+            let text = format!("{head}{title}\n{body}");
+            let title_at = head.len()..head.len() + title.len();
+            let body_at = title_at.end + 1..text.len();
+            (text, vec![title_at, body_at])
+        }
     }
 }
 
@@ -1024,13 +1036,7 @@ pub(crate) fn composed(kind: &str, title: &str, body: &str) -> String {
 /// its body alone (`redact::outbound_joined`), as search gates an imported hit's title and body,
 /// so a rule anchored to a title (`^...$`) holds once the kind is prefixed.
 pub(crate) fn composed_out(kind: &str, title: &str, body: &str) -> String {
-    let text = composed(kind, title, body);
-    let parts = if text.len() == body.len() {
-        Vec::new()
-    } else {
-        let at = kind.len() + 2;
-        vec![at..at + title.len(), text.len() - body.len()..text.len()]
-    };
+    let (text, parts) = composed_parts(kind, title, body);
     crate::redact::outbound_joined(&text, &parts)
 }
 
@@ -2554,6 +2560,18 @@ mod tests {
                     .any(|(_, k, skipped)| *k == key && skipped.is_none()),
                 "{key}: {got:?}"
             );
+        }
+    }
+
+    /// The ranges `composed_out` gates alone are the title and the body in the composed text.
+    #[test]
+    fn composed_parts_name_the_title_and_the_body() {
+        let (text, parts) = composed_parts("decision", "Tabs", "Use tabs.\nAlways.");
+        assert_eq!(text, composed("decision", "Tabs", "Use tabs.\nAlways."));
+        assert_eq!(&text[parts[0].clone()], "Tabs");
+        assert_eq!(&text[parts[1].clone()], "Use tabs.\nAlways.");
+        for kind in ["prompt", "summary"] {
+            assert_eq!(composed_parts(kind, "T", "B"), ("B".to_owned(), Vec::new()));
         }
     }
 
