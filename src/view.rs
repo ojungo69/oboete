@@ -1,6 +1,6 @@
 //! `oboete view`: the memory in a browser, on 127.0.0.1. std `TcpListener` + `httparse`, one
-//! thread per connection, one bundled page and a small JSON API over `search` (reads) plus two
-//! delete endpoints and the settings page's save (#94), the one request with a body. Every
+//! thread per connection, one bundled page and a small JSON API: reads over `search`, and the two
+//! requests with a body, the settings page's saves of the settings and of a key (#94). Every
 //! `/api` request carries the per-launch token, which the page reads from the URL fragment and
 //! sends as a header. docs/m1.md decisions 11 and 14 have the reasons (tiny_http's open CVEs) and
 //! the threat model; spec 6.6 has the save's.
