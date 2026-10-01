@@ -1871,6 +1871,26 @@ pub(crate) mod fixture {
             self.raw.append(&e).unwrap()
         }
 
+        /// An event of `kind` of `session` on checkout `(repo, branch)` at `ts`: its seq.
+        pub fn event(
+            &mut self,
+            kind: &str,
+            session: &str,
+            (repo, branch): (&str, &str),
+            ts: i64,
+            body: serde_json::Value,
+        ) -> i64 {
+            let e = Event {
+                kind: kind.into(),
+                session: session.into(),
+                repo: Some(repo.into()),
+                branch: Some(branch.into()),
+                ts,
+                ..crate::raw::test_event(&body.to_string())
+            };
+            self.raw.append(&e).unwrap()
+        }
+
         /// A claim that quotes record `seq` whole (`text`, the record's), and its uid.
         pub fn claim(
             &mut self,

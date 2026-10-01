@@ -38,6 +38,7 @@ mod repo;
 mod search;
 mod settings;
 mod setup;
+mod shortlist;
 mod transcript;
 mod view;
 mod worker;
