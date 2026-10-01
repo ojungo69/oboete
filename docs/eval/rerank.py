@@ -226,6 +226,27 @@ def fingerprints(directory):
             for path in paths]
 
 
+def publish(stage, out):
+    """Moves each file of stage into out by one rename. If one fails, those already moved
+    are taken back: out holds the whole new bundle or what it held before (Codex on d45266a)."""
+    done = []
+    try:
+        for path in sorted(stage.iterdir()):
+            final, kept = out / path.name, None
+            if final.exists():
+                kept = path.with_name(path.name + '.kept')
+                os.link(final, kept)
+            os.replace(path, final)
+            done.append((final, kept))
+    except BaseException:
+        for final, kept in reversed(done):
+            if kept:
+                os.replace(kept, final)
+            else:
+                final.unlink()
+        raise
+
+
 def export_model(out):
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -273,8 +294,7 @@ def export_model(out):
                               opset_version=18)
         for name in TOKENIZER_FILES:
             shutil.copyfile(Path(snapshot) / name, stage / name)
-        for path in stage.iterdir():
-            shutil.move(path, out / path.name)
+        publish(stage, out)
         # Printed once every file is in place: an export that stops leaves no hash to record.
         for line in fingerprints(out):
             print(line, flush=True)
@@ -331,8 +351,13 @@ def agreement(directory, out, max_length=512, threads=4):
               + '\n\n## Source IDs in file order\n\n' + '\n'.join(sources) + '\n')
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / 'sets.jsonl').write_text(''.join(lines), encoding='utf-8')
-    (out / 'README.md').write_text(readme, encoding='utf-8')
+    stage = Path(tempfile.mkdtemp(dir=out, prefix='.agreement-'))
+    try:
+        (stage / 'sets.jsonl').write_text(''.join(lines), encoding='utf-8')
+        (stage / 'README.md').write_text(readme, encoding='utf-8')
+        publish(stage, out)
+    finally:
+        shutil.rmtree(stage)
 
 
 def positive(value):

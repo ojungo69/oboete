@@ -205,3 +205,55 @@ def test_the_export_deletes_no_cache_itself(tmp_path, monkeypatch):
     # The environment and the temporary directory are as they were.
     assert (os.environ['HF_HOME'], 'NETRC' in os.environ) == ('before', False)
     assert rerank.tempfile.tempdir == 'before'
+
+
+def failing_on(n, real, monkeypatch, owner, name):
+    calls = []
+
+    def call(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == n:
+            raise OSError('disk full')
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, call)
+
+
+def test_a_failed_move_takes_the_exported_files_back_out(tmp_path, monkeypatch):
+    # The export's out held only .export-cache, so a failure after the first move leaves it so
+    # and a rerun is not refused (Codex on d45266a).
+    stage, out = tmp_path / 'onnx' / '.export-cache' / 'exported', tmp_path / 'onnx'
+    stage.mkdir(parents=True)
+    for name in ('model.onnx', 'model.onnx.data', 'tokenizer.json'):
+        (stage / name).write_text(name, encoding='utf-8')
+    failing_on(2, os.replace, monkeypatch, rerank.os, 'replace')
+    with pytest.raises(OSError):
+        rerank.publish(stage, out)
+    assert [p.name for p in out.iterdir()] == ['.export-cache']
+
+
+@pytest.mark.parametrize('fails', [None, 'write', 'replace'])
+def test_agreement_publishes_both_files_or_keeps_the_previous_ones(tmp_path, monkeypatch, fails):
+    out = tmp_path / 'agreement'
+    out.mkdir()
+    for name in ('README.md', 'sets.jsonl'):
+        (out / name).write_text(f'previous {name}\n', encoding='utf-8')
+    monkeypatch.setattr(rerank, 'onnx_scorer', lambda *args: lambda query, docs: [1.] * len(docs))
+    monkeypatch.setattr(rerank, 'public_sets', lambda language: [(f'{language} Q', ['D'], 'q', ['d'])])
+    monkeypatch.setattr(rerank, 'fingerprints', lambda directory: ['model.onnx: SHA-256=0 size=0 bytes'])
+    if fails == 'write':
+        failing_on(2, rerank.Path.write_text, monkeypatch, rerank.Path, 'write_text')
+    elif fails == 'replace':
+        failing_on(2, os.replace, monkeypatch, rerank.os, 'replace')
+    if fails:
+        with pytest.raises(OSError):
+            rerank.agreement('onnx', out)
+    else:
+        rerank.agreement('onnx', out)
+    assert sorted(p.name for p in out.iterdir()) == ['README.md', 'sets.jsonl']
+    sets, readme = (out / 'sets.jsonl').read_text(encoding='utf-8'), (out / 'README.md').read_text(encoding='utf-8')
+    if fails:
+        assert (sets, readme) == ('previous sets.jsonl\n', 'previous README.md\n')
+    else:
+        assert [json.loads(line)['query'] for line in sets.split('\n')[:-1]] == ['ja Q', 'en Q']
+        assert readme.startswith('# Reranker agreement sets') and 'model.onnx: SHA-256=0' in readme
