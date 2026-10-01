@@ -465,6 +465,31 @@ def gate(runs_dir, home, commit, answered, rerank=True):
     return problems
 
 
+def holm(ps):
+    """Holm step-down adjusted p-values, in the input's order."""
+    adjusted, previous = [0.0] * len(ps), 0.0
+    for rank, i in enumerate(sorted(range(len(ps)), key=ps.__getitem__)):
+        previous = max(previous, min(1.0, (len(ps) - rank) * ps[i]))
+        adjusted[i] = previous
+    return adjusted
+
+
+def gap(en, ja):
+    """English minus Japanese mean nDCG, with Welch's two-sided 95% interval."""
+    import math, statistics
+    from scipy.stats import t
+
+    if min(len(en), len(ja)) < 2:
+        raise ValueError('each language needs at least two questions')
+    diff = statistics.fmean(en) - statistics.fmean(ja)
+    a, b = statistics.variance(en) / len(en), statistics.variance(ja) / len(ja)
+    if a + b == 0:
+        return diff, diff, diff
+    df = (a + b) ** 2 / (a * a / (len(en) - 1) + b * b / (len(ja) - 1))
+    half = float(t.ppf(0.975, df)) * math.sqrt(a + b)
+    return diff, diff - half, diff + half
+
+
 if __name__ == '__main__':
     owner_only()
     cmd, args = sys.argv[1:2], sys.argv[2:]

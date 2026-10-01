@@ -259,3 +259,181 @@ def test_the_gate_lists_hits_it_cannot_read_instead_of_stopping(ev, monkeypatch,
     # A held-out session's question is named apart, not a problem.
     assert "of held-out sessions (no records): 1 ['p1']" in capsys.readouterr().out
     assert not [p for p in problems if p.startswith('p1:')]
+
+
+def test_holm_adjusts_step_down():
+    assert m4.holm([0.04, 0.01, 0.03]) == pytest.approx([0.06, 0.03, 0.06])
+    assert m4.holm([]) == []
+    assert m4.holm([0.7, 0.7]) == [1.0, 1.0]
+
+
+def test_the_english_gap_has_a_welch_interval():
+    import math
+
+    en = [0.51 - 0.19 * math.sqrt(59 / 60), 0.51 + 0.19 * math.sqrt(59 / 60)] * 30
+    ja = [0.5 - 0.19, 0.5 + 0.19] * 51 + [0.5]
+    diff, low, high = m4.gap(en, ja)
+    assert diff == pytest.approx(0.01)
+    assert 0.055 < (high - low) / 2 < 0.065
+    assert (high + low) / 2 == pytest.approx(diff)
+    assert m4.gap([0.6] * 3, [0.5] * 5) == pytest.approx((0.1, 0.1, 0.1))
+    with pytest.raises(ValueError, match='two questions'):
+        m4.gap([0.5], [0.5, 0.6])
+
+
+def test_cross_lingual_tables_pick_by_language_not_grade(report_module):
+    report = report_module
+
+    queries = {name: q(name, lang=lang) for name, lang in (('ja', 'ja'), ('en', 'en'))}
+    judged = {name: {'o107': 3, 'o108': 2, 'o109': 1, 'o110': 1} for name in queries}
+    runs = {'b-off': {name: list(judged[name]) for name in queries}}
+    shown = {'o107': '日本語の記録', 'o108': 'English note', 'o109': 'related English', 'o110': '関連する記録'}
+    views = report.tables(runs, judged, queries, {}, 0, shown, {}, m4_mode=True)
+    ja_qrels, ja_runs = views['Japanese questions, documents without Japanese characters']
+    en_qrels, en_runs = views['English questions, documents with Japanese characters']
+    assert ja_qrels == {'ja': {'o108': 2, 'o109': 1}}
+    assert en_qrels == {'en': {'o107': 3, 'o110': 1}}
+    assert ja_runs == {'b-off': {'ja': ['o108', 'o109']}}
+    assert en_runs == {'b-off': {'en': ['o107', 'o110']}}
+
+
+def test_r_keys_and_the_132_leave_runs_and_qrels(report_module):
+    report = report_module
+
+    own = {f'{kind}{i}' for kind, end in (('o', 106), ('s', 14), ('p', 12)) for i in range(1, end + 1)}
+    assert len(own) == 132
+    queries = {name: q(name) for name in ('imported', 'raw-only', 'v1-only')}
+    judged = {'imported': {'o1': 3, 's1': 3, 'p1': 3, 'r:d:1': 3, 'o107': 2},
+              'raw-only': {'r:d:1': 3}, 'v1-only': {'o1': 3}}
+    runs = {name: {qid: list(grades) for qid, grades in judged.items()} for name in m4.RUNS}
+    grades, filtered = report.table_data(runs, judged, queries, own=own)
+    assert grades == {'imported': {'o107': 2}}
+    assert all(per == {'imported': ['o107']} for per in filtered.values())
+    raw_grades, raw_runs = report.table_data(runs, judged, queries, own=own, raw=True)
+    assert raw_grades == {'imported': {'r:d:1': 3, 'o107': 2}, 'raw-only': {'r:d:1': 3}}
+    assert all(per == {'imported': ['r:d:1', 'o107'], 'raw-only': ['r:d:1']} for per in raw_runs.values())
+    assert runs['b-off']['imported'] == ['o1', 's1', 'p1', 'r:d:1', 'o107']
+
+
+def test_a_slice_drop_is_named_and_a_small_slice_counted(capsys, report_module):
+    report = report_module
+
+    queries = {f'q{i}': q(f'q{i}', lang='ja' if i < 5 else 'en') for i in range(9)}
+    judged = {qid: {'o107': 3} for qid in queries}
+    runs = {name: {qid: ['o107'] for qid in queries} for name in m4.RUNS if name != 'b-rerank'}
+    runs['b-off'] = {qid: [] if queries[qid]['lang'] == 'ja' else ['o107'] for qid in queries}
+    report.m4_report(runs, judged, queries, set(), set(), {}, 0, {'o107': 'a memory'}, {})
+    out = capsys.readouterr().out
+    assert 'FAIL b-off [question in Japanese] recall@10' in out
+    assert 'question in English: 4 questions with an answer' in out
+    assert 'b-off [question in English]' not in out
+    assert 'Holm family: m=3' in out
+    assert 'NO-GO b-rerank: absent' in out
+
+
+def test_the_english_gap_line_is_one_sided(capsys, report_module):
+    report = report_module
+
+    queries = {f'q{i}': q(f'q{i}', lang='ja' if i < 6 else 'en') for i in range(12)}
+    judged = {qid: {'o107': 3, 'o108': 0} for qid in queries}
+    for better in ('en', 'ja'):
+        runs = {name: {qid: ['o108', 'o107'] for qid in queries} for name in m4.RUNS}
+        runs['b-off'] = {qid: ['o107', 'o108'] if queries[qid]['lang'] == better else ['o108', 'o107']
+                         for qid in queries}
+        report.m4_report(runs, judged, queries, set(), set(), {}, 0, {'o107': 'a memory', 'o108': 'x'}, {})
+        gap = capsys.readouterr().out.split('English-minus-Japanese gap')[1]
+        assert ('PASS b-off' if better == 'en' else 'FAIL b-off') in gap
+        assert 'hybrid-d2: English N=6' in gap and '(holds no line)' in gap
+
+
+def test_report_import_does_not_open_the_evaluation_store(monkeypatch, report_module):
+    import builtins, importlib
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('import must not access evaluation files or databases')
+
+    with monkeypatch.context() as guard:
+        guard.setattr(builtins, 'open', forbidden)
+        guard.setattr(sqlite3, 'connect', forbidden)
+        guard.setattr(os, 'listdir', forbidden)
+        guard.setattr(os.path, 'getmtime', forbidden)
+        importlib.reload(report_module)
+
+
+def test_paired_statistics_and_detectable_difference(report_module):
+    import math
+    from scipy.stats import nct, t
+
+    report = report_module
+    result = report.paired([0.1, 0.2, 0.3, 0.4], [0.0] * 4)
+    assert result['diff'] == pytest.approx(0.25)
+    assert result['sd'] == pytest.approx(0.1290994449)
+    assert result['p'] == pytest.approx(0.03046629166)
+    assert (result['low'], result['high']) == pytest.approx((0.04457397433, 0.45542602567))
+    assert report.paired([0.5] * 5, [0.5] * 5)['p'] == 1.0
+    assert report.paired([0.6] * 5, [0.5] * 5)['p'] == 0.0
+    assert report.paired([], [])['p'] == 1.0
+    assert math.isnan(report.detectable(1, 0.19))
+    detectable = report.detectable(25, 0.19)
+    critical = t.ppf(0.975, 24)
+    noncentrality = detectable * 5 / 0.19
+    assert nct.sf(critical, 24, noncentrality) + nct.cdf(-critical, 24, noncentrality) == pytest.approx(0.8)
+    assert 0.11 < detectable < 0.112
+
+
+def test_raw_uses_only_eligible_questions_and_near_copy_is_reported_only(capsys, report_module):
+    report = report_module
+
+    queries = {f'q{i}': dict(q(f'q{i}', lang='ja' if i % 10 < 5 else 'en'),
+                             text='Where is the persisted record kept?') for i in range(20)}
+    eligible = {f'q{i}' for i in range(10)}
+    judged = {qid: {'o107': 3, 'o108': 0, **({'r:d:1': 3} if qid in eligible else {})} for qid in queries}
+    runs = {name: {qid: ['o108', 'o107'] for qid in queries} for name in m4.RUNS}
+    runs['b-rerank'] = {qid: ['o107'] for qid in queries}
+    runs['claude-mem'] = runs['claude-mem-nowindow'] = runs['b-rerank']
+    runs['b-rrf5'] = {qid: ['r:d:1', 'o107'] for qid in eligible}
+    runs['b-only'] = {qid: ['r:d:1'] for qid in eligible}
+    shown = {'o107': 'A useful memory', 'o108': 'unrelated', 'r:d:1': queries['q0']['text']}
+    now = 200 * report.DAY
+    asked = {qid: now - (89 if qid in eligible else 90) * report.DAY for qid in queries}
+    report.m4_report(runs, judged, queries, set(), eligible, asked, now, shown, {})
+    out = capsys.readouterr().out
+    primary, clean = out.split('## Raw, near-copy records removed:')
+    assert 'Holm family: m=4' in primary
+    assert 'b-rerank against b-off: N=20' in primary
+    assert 'b-rrf5 against b-off: N=10' in primary
+    assert '\nGO b-rerank:' in primary
+    assert 'Raw N = 10 questions with an answer' in primary
+    assert '\nGO b-rrf5:' in primary and '\nGO b-only:' in primary
+    assert 'Raw [prompts typed 90 days ago or earlier]: 0 questions with an answer (holds no line)' in primary
+    assert 'near-copy records in Raw pools: 1 unique, 10 question-record pairs' in primary
+    assert '(reported only)' in clean and '\nNO-GO b-only:' in clean
+    assert 'paired SD=' in primary and 'detectable difference=' in primary
+
+
+def test_dev_tables_keep_the_existing_slices_and_documents(report_module):
+    report = report_module
+
+    queries = {'agent': dict(q('agent'), set='agent'), 'prompt': q('prompt')}
+    judged = {qid: {'o1': 3, 'r:d:1': 3} for qid in queries}
+    runs = {'dev': {qid: list(judged[qid]) for qid in queries}}
+    views = report.tables(runs, judged, queries, {}, 0, {'o1': 'x', 'r:d:1': 'y'}, {})
+    assert len(views) == 10
+    assert views['all'] == (judged, runs)
+    assert views['agent searches'][0] == {'agent': judged['agent']}
+
+
+@pytest.fixture
+def report_module(monkeypatch):
+    import builtins, importlib, ranx
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('import must not access evaluation files or databases')
+
+    # Load the dependency first, then guard the report's first import as well as its reload.
+    with monkeypatch.context() as guard:
+        guard.setattr(builtins, 'open', forbidden)
+        guard.setattr(sqlite3, 'connect', forbidden)
+        guard.setattr(os, 'listdir', forbidden)
+        guard.setattr(os.path, 'getmtime', forbidden)
+        return importlib.import_module('report')
