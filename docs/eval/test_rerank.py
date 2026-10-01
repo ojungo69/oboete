@@ -257,3 +257,29 @@ def test_agreement_publishes_both_files_or_keeps_the_previous_ones(tmp_path, mon
     else:
         assert [json.loads(line)['query'] for line in sets.split('\n')[:-1]] == ['ja Q', 'en Q']
         assert readme.startswith('# Reranker agreement sets') and 'model.onnx: SHA-256=0' in readme
+
+
+def test_an_undo_that_fails_too_leaves_the_previous_file_in_the_stage(tmp_path, monkeypatch):
+    # The second rename fails, then putting README.md back fails: the previous README.md stays
+    # in the stage, which agreement keeps (Codex on 10c8a25).
+    out = tmp_path / 'agreement'
+    out.mkdir()
+    for name in ('README.md', 'sets.jsonl'):
+        (out / name).write_text(f'previous {name}\n', encoding='utf-8')
+    monkeypatch.setattr(rerank, 'onnx_scorer', lambda *args: lambda query, docs: [1.] * len(docs))
+    monkeypatch.setattr(rerank, 'public_sets', lambda language: [(f'{language} Q', ['D'], 'q', ['d'])])
+    monkeypatch.setattr(rerank, 'fingerprints', lambda directory: ['model.onnx: SHA-256=0 size=0 bytes'])
+    replace, calls = os.replace, []
+
+    def second_and_third_fail(*args):
+        calls.append(args)
+        if len(calls) in (2, 3):
+            raise OSError('disk full')
+        return replace(*args)
+
+    monkeypatch.setattr(rerank.os, 'replace', second_and_third_fail)
+    with pytest.raises(OSError):
+        rerank.agreement('onnx', out)
+    [stage] = out.glob('.agreement-*')
+    assert (stage / 'README.md.kept').read_text(encoding='utf-8') == 'previous README.md\n'
+    assert (out / 'sets.jsonl').read_text(encoding='utf-8') == 'previous sets.jsonl\n'

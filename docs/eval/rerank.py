@@ -228,7 +228,9 @@ def fingerprints(directory):
 
 def publish(stage, out):
     """Moves each file of stage into out by one rename. If one fails, those already moved
-    are taken back: out holds the whole new bundle or what it held before (Codex on d45266a)."""
+    are taken back: out holds the whole new bundle or what it held before (Codex on d45266a).
+    Each file out held is linked in stage as <name>.kept until out is whole again, new or old, so
+    an undo that fails too leaves them there, named in the error."""
     done = []
     try:
         for path in sorted(stage.iterdir()):
@@ -244,7 +246,11 @@ def publish(stage, out):
                 os.replace(kept, final)
             else:
                 final.unlink()
+        for path in stage.glob('*.kept'):
+            path.unlink()
         raise
+    for path in stage.glob('*.kept'):
+        path.unlink()
 
 
 def export_model(out):
@@ -357,7 +363,9 @@ def agreement(directory, out, max_length=512, threads=4):
         (stage / 'README.md').write_text(readme, encoding='utf-8')
         publish(stage, out)
     finally:
-        shutil.rmtree(stage)
+        # A previous file publish could not put back is still here: the stage stays with it.
+        if not any(stage.glob('*.kept')):
+            shutil.rmtree(stage)
 
 
 def positive(value):
