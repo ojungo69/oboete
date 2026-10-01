@@ -179,19 +179,34 @@ pub fn run_with(
     consumers: Vec<Box<dyn Consumer>>,
     before_exit: impl FnMut(),
 ) -> Result<()> {
-    run_holding(home, idle_ms, consumers, before_exit, None, None)
+    run_holding(
+        home,
+        idle_ms,
+        consumers,
+        before_exit,
+        None,
+        Phases::default(),
+    )
 }
 
 /// The curation phase a worker runs after its consumers have drained (milestone 3 D3).
 pub type CurationPhase<'a> = dyn FnMut(&mut Raw, &Connection) -> Result<Phase> + 'a;
 
-fn run_holding(
+/// The phases a worker runs after its consumers have drained, in this order (milestone 4 D8):
+/// embedding, then curation. `rebuild`, `run_once` and `drained` run neither.
+#[derive(Default)]
+pub struct Phases<'a, 'f> {
+    pub embed: Option<&'a mut crate::embed_phase::Phase>,
+    pub curation: Option<&'a mut CurationPhase<'f>>,
+}
+
+pub(crate) fn run_holding(
     home: &Path,
     idle_ms: u64,
     mut consumers: Vec<Box<dyn Consumer>>,
     mut before_exit: impl FnMut(),
     taken: Option<Lock>,
-    mut phase: Option<&mut CurationPhase>,
+    mut phases: Phases,
 ) -> Result<()> {
     let mut holding = Holding::default();
     if let Some(l) = taken {
@@ -203,7 +218,7 @@ fn run_holding(
         &mut consumers,
         &mut before_exit,
         &mut holding,
-        &mut phase,
+        &mut phases,
     );
     // Released first: a hook that finds the lock free starts a worker for what it appended.
     holding.lock = None;
@@ -235,7 +250,7 @@ fn serve_until_done(
     consumers: &mut [Box<dyn Consumer>],
     before_exit: &mut impl FnMut(),
     holding: &mut Holding,
-    phase: &mut Option<&mut CurationPhase>,
+    phases: &mut Phases,
 ) -> Result<()> {
     // ponytail: D11's 30-minute deadline in memory; every idle exit backs up too, so a lost
     // deadline only brings the next backup forward. It is checked between batches and while
@@ -254,7 +269,7 @@ fn serve_until_done(
             holding,
             &mut next_backup,
             before_exit,
-            phase,
+            phases,
         ) {
             Ok(true) => {}
             Ok(false) => return Ok(()),
@@ -276,7 +291,7 @@ fn serve(
     holding: &mut Holding,
     next_backup: &mut Instant,
     before_exit: &mut impl FnMut(),
-    phase: &mut Option<&mut CurationPhase>,
+    phases: &mut Phases,
 ) -> Result<bool> {
     if holding.lock.is_none() {
         match lock(home)? {
@@ -311,16 +326,29 @@ fn serve(
             due(&raw);
         }
         due(&raw);
-        // D3: one window once the consumers have drained. A window that waits only on time, and
-        // within D10's 30 minutes, keeps the worker up until then.
-        let mut stay = None;
-        if let Some(phase) = phase.as_mut() {
-            match phase(&mut raw, &k)? {
-                Phase::Covered if crate::backup::restore_requested(home) => return Ok(true),
-                Phase::Covered => continue,
+        // D3 and milestone 4's D8: once the consumers have drained, the embedding phase, then one
+        // window. A call in flight, or a window that waits only on time within D10's 30 minutes,
+        // keeps the worker up until then; either phase's progress starts the next round.
+        let (mut stay, mut again) = (None, false);
+        if let Some(embed) = phases.embed.as_mut() {
+            match embed.poll(&raw, &k)? {
+                Phase::Covered => again = true,
                 Phase::Waiting { until, up: true } => stay = Some(until),
                 Phase::Waiting { .. } | Phase::Idle => {}
             }
+        }
+        if let Some(phase) = phases.curation.as_mut() {
+            match phase(&mut raw, &k)? {
+                Phase::Covered if crate::backup::restore_requested(home) => return Ok(true),
+                Phase::Covered => again = true,
+                Phase::Waiting { until, up: true } => {
+                    stay = Some(stay.map_or(until, |s: i64| s.min(until)));
+                }
+                Phase::Waiting { .. } | Phase::Idle => {}
+            }
+        }
+        if again {
+            continue;
         }
         // A window's time replaces the idle wait: the phase runs again then, and the idle wait
         // starts once it has nothing left to wait for.
@@ -334,7 +362,10 @@ fn serve(
             if crate::backup::restore_requested(home) {
                 return Ok(true);
             }
-            if (raw.max_seq()?, raw.max_op_seq_of(raw.device())?) != seen {
+            // A call that came back is written at once.
+            if (raw.max_seq()?, raw.max_op_seq_of(raw.device())?) != seen
+                || phases.embed.as_ref().is_some_and(|e| e.done())
+            {
                 more = true;
                 break;
             }
@@ -369,15 +400,13 @@ pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
     let Some(held) = lock(home)? else {
         return Ok(());
     };
-    let mut phase = curation(home);
-    run_holding(
-        home,
-        idle_ms,
-        consumers(home),
-        || {},
-        Some(held),
-        Some(&mut *phase),
-    )
+    let mut curation = curation(home);
+    let mut embed = crate::embed_phase::Phase::new(home);
+    let phases = Phases {
+        embed: Some(&mut embed),
+        curation: Some(&mut *curation),
+    };
+    run_holding(home, idle_ms, consumers(home), || {}, Some(held), phases)
 }
 
 #[cfg(test)]
@@ -385,7 +414,14 @@ fn run_consumers(home: &Path, idle_ms: u64, consumers: Vec<Box<dyn Consumer>>) -
     let Some(held) = lock(home)? else {
         return Ok(());
     };
-    run_holding(home, idle_ms, consumers, || {}, Some(held), None)
+    run_holding(
+        home,
+        idle_ms,
+        consumers,
+        || {},
+        Some(held),
+        Phases::default(),
+    )
 }
 
 /// The curation phase: it curates while `[summary] curate` asks for it, off until the cut-over
@@ -585,9 +621,29 @@ pub fn rebuild(home: &Path) -> Result<()> {
     let held = lock(home)?
         .ok_or_else(|| anyhow::anyhow!("a worker is running; try again when it has exited"))?;
     let name = format!("knowledge.db.rebuilding-{}", crate::db::now_ms());
-    let aside = set_aside(home, &name)?;
+    set_aside(home, &name)?;
     let kept = home.join(&name);
-    run_holding(home, 0, consumers(home), || {}, Some(held), None).with_context(|| {
+    // Spec 1.7: a rebuild makes no AI call, so its vectors come from the file set aside. One whose
+    // vectors cannot be read stops it before anything else changes: the file goes back.
+    if kept.exists() {
+        let carried =
+            crate::knowledge::open(home).and_then(|k| crate::embed_phase::carry(&k, &kept));
+        if let Err(e) = carried {
+            put_back(home, &name)?;
+            return Err(e.context(
+                "rebuild: the vectors of knowledge.db could not be read; nothing was changed",
+            ));
+        }
+    }
+    run_holding(
+        home,
+        0,
+        consumers(home),
+        || {},
+        Some(held),
+        Phases::default(),
+    )
+    .with_context(|| {
         // A home with no knowledge.db yet set nothing aside.
         if kept.exists() {
             format!(
@@ -599,8 +655,12 @@ pub fn rebuild(home: &Path) -> Result<()> {
         }
     })?;
     // The rebuild is complete: an old file that will not go is left and named, not a failure.
-    for f in aside {
-        if let Err(e) = std::fs::remove_file(&f) {
+    // Its sidecars too, which reading its vectors may have made.
+    for ext in ["", "-wal", "-shm"] {
+        let f = home.join(format!("{name}{ext}"));
+        if f.exists()
+            && let Err(e) = std::fs::remove_file(&f)
+        {
             eprintln!(
                 "oboete: rebuilt; {} is left ({e}): delete it by hand",
                 f.display()
@@ -642,6 +702,27 @@ fn set_aside(home: &Path, name: &str) -> Result<Vec<std::path::PathBuf>> {
     Ok(moved.into_iter().map(|(_, to)| to).collect())
 }
 
+/// `set_aside` undone: the new knowledge.db removed, and the one set aside as `name` back, the
+/// file before its sidecars, under raw.lock as it was moved.
+fn put_back(home: &Path, name: &str) -> Result<()> {
+    use anyhow::Context;
+    let _swap = crate::raw::lock_for_swap(home)?;
+    for ext in ["", "-wal", "-shm"] {
+        let new = home.join(format!("knowledge.db{ext}"));
+        if new.exists() {
+            std::fs::remove_file(&new).with_context(|| format!("remove {}", new.display()))?;
+        }
+    }
+    for ext in ["", "-wal", "-shm"] {
+        let kept = home.join(format!("{name}{ext}"));
+        if kept.exists() {
+            std::fs::rename(&kept, home.join(format!("knowledge.db{ext}")))
+                .with_context(|| format!("put {} back", kept.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// One run now, for `oboete restore` and tests. It waits up to 2 s for the lock rather than
 /// return at once: a worker a hook started holds it only while it drains, and a lock just
 /// released can still be held for a moment by a child another thread forked (it keeps the open
@@ -654,11 +735,19 @@ pub fn run_once(home: &Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(10));
         held = lock(home)?;
     }
-    run_holding(home, 0, consumers(home), || {}, held, None)
+    run_holding(home, 0, consumers(home), || {}, held, Phases::default())
 }
 
 #[cfg(test)]
 mod tests {
+    /// A worker's phases with only `p`, the curation phase.
+    fn curating<'a, 'f>(p: &'a mut CurationPhase<'f>) -> Phases<'a, 'f> {
+        Phases {
+            curation: Some(p),
+            ..Phases::default()
+        }
+    }
+
     use super::*;
     use crate::knowledge;
     use crate::raw;
@@ -1025,7 +1114,7 @@ mod tests {
             vec![Box::new(Seen)],
             || {},
             None,
-            Some(p),
+            curating(p),
         )
         .unwrap();
         let again = again.get().expect("the phase did not run again");
@@ -1043,7 +1132,15 @@ mod tests {
         };
         let started = Instant::now();
         let p: &mut CurationPhase = &mut phase;
-        run_holding(home.path(), 0, vec![Box::new(Seen)], || {}, None, Some(p)).unwrap();
+        run_holding(
+            home.path(),
+            0,
+            vec![Box::new(Seen)],
+            || {},
+            None,
+            curating(p),
+        )
+        .unwrap();
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(calls.get(), 1);
     }
@@ -1440,7 +1537,7 @@ mod tests {
                 at_exit.set(at_exit.get().or(Some(passed.unwrap())));
             },
             held,
-            Some(&mut phase),
+            curating(&mut phase),
         )
         .unwrap();
         assert_eq!(at_exit.get(), Some(1));
@@ -1560,7 +1657,7 @@ mod tests {
             consumers(home),
             || {},
             Some(held),
-            Some(&mut phase),
+            curating(&mut phase),
         )
     }
 

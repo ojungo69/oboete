@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use rusqlite::types::Value;
@@ -17,6 +18,10 @@ use crate::redact;
 const DEPTH: usize = 100;
 /// Pages of `DEPTH` the claims leg reads at most to fill its depth past hidden and lowered claims.
 const PAGES: usize = 10;
+/// Candidates the bit index gives a leg's vector side before they are scored in fp32 (D8).
+const CANDIDATES: i64 = 400;
+/// The query embedding's own timeout (D8): past it, search answers from full text.
+const QUERY_TIMEOUT: Duration = Duration::from_millis(1_200);
 /// A snippet's width in characters.
 pub(crate) const WIDTH: usize = 160;
 
@@ -110,10 +115,57 @@ pub struct Hit {
 #[derive(Debug)]
 pub struct Answer {
     pub hits: Vec<Hit>,
-    /// Row 30-2: the caller's repository, or one searched, is excluded (D13), so the query leaves
-    /// the machine for no remote leg. Task 5's vector leg reads it; Task 4 has none.
+    pub vector: Vector,
+}
+
+/// Whether the hits' vector side ran (spec 4.10, A93): when it did not, they are full text alone,
+/// and this says why.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Vector {
+    Used,
+    Skipped(VectorSkip),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VectorSkip {
+    /// No embedder is configured, or the caller gave no vector.
+    Off,
+    /// Row 30-2: the caller's repository or one searched is excluded (D13), so the query text is
+    /// not sent out.
+    Excluded,
+    /// The embedder has made no vectors yet.
+    NoVectors,
+    /// A new embedder's vectors are still being made (row 30-16).
+    Building,
+    /// The embedder rests after a failure, or its cap is spent.
+    Waiting,
+    Timeout,
+    Error,
+}
+
+impl VectorSkip {
+    /// Why, as the CLI prints it.
+    pub fn why(self) -> &'static str {
+        match self {
+            VectorSkip::Off => "embedding is off",
+            VectorSkip::Excluded => {
+                "this repository or the one searched is excluded, so the query is not sent out"
+            }
+            VectorSkip::NoVectors => "no document has a vector yet",
+            VectorSkip::Building => "the new embedder's vectors are still being made",
+            VectorSkip::Waiting => "the embedder is resting, or its cap is spent",
+            VectorSkip::Timeout => "the query's embedding took too long",
+            VectorSkip::Error => "the query could not be embedded",
+        }
+    }
+}
+
+/// Where the query's vector comes from.
+enum Ask<'a> {
+    // Task 6's evaluation and Task 10's local model give theirs (`query_with`).
     #[cfg_attr(not(test), allow(dead_code))]
-    pub full_text_only: bool,
+    Given(Option<&'a [f32]>),
+    Embed,
 }
 
 /// The hits for `q`, at most `q.limit`: the delivered and current claims first, each earlier
@@ -122,50 +174,317 @@ pub struct Answer {
 /// claims (MUST-M11). Each leg ranks by bm25 and keeps what `q.since`/`q.until` and the repository
 /// allow before it takes its part (MUST-M12).
 pub fn query(home: &Path, q: &Query) -> Result<Answer> {
+    search(home, q, Ask::Embed)
+}
+
+/// `query` with a vector the caller made (Task 6's evaluation, Task 10's local model): nothing is
+/// sent out. `None` is full text alone.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn query_with(home: &Path, q: &Query, vector: Option<&[f32]>) -> Result<Answer> {
+    search(home, q, Ask::Given(vector))
+}
+
+fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
     if !crate::raw::exists(home) {
         return Ok(Answer {
             hits: Vec::new(),
-            full_text_only: false,
+            vector: Vector::Skipped(VectorSkip::NoVectors),
         });
     }
     // raw.db first: its shared hold on raw.lock keeps a restore from swapping the stores while
     // this reads them (Task 8).
     let raw = crate::raw::open(home)?;
     let k = crate::knowledge::open(home)?;
-    let full_text_only = excluded(&raw.exclusions()?, q);
+    // The index the vector side reads: the active embedder's (Step 8's switch to a new one comes
+    // with the second embedder, Task 10).
+    let active: Option<String> = k
+        .query_row(
+            "SELECT embedder FROM vec_generation WHERE state = 'active'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    // `None` when the query is to be embedded.
+    let ready = match ask {
+        Ask::Given(None) => Some((Vector::Skipped(VectorSkip::Off), None)),
+        Ask::Given(Some(v)) if v.len() != crate::embed::DIM => {
+            anyhow::bail!(
+                "a query vector of {} dimensions, not {}",
+                v.len(),
+                crate::embed::DIM
+            )
+        }
+        Ask::Given(Some(v)) => Some(match active.clone() {
+            Some(embedder) => (
+                Vector::Used,
+                Some(Near {
+                    embedder,
+                    vector: v.to_vec(),
+                }),
+            ),
+            None => (Vector::Skipped(VectorSkip::NoVectors), None),
+        }),
+        // Before anything else: an excluded repository's query is never sent (row 30-2).
+        Ask::Embed if excluded(&raw.exclusions()?, q) => {
+            Some((Vector::Skipped(VectorSkip::Excluded), None))
+        }
+        Ask::Embed => None,
+    };
     let terms = super::terms(&q.text);
     let depth = q.limit.max(DEPTH);
-    let (mut hits, mut lowered) = (Vec::new(), Vec::new());
-    if q.raw != RawArm::Only {
-        (hits, lowered) = claims_leg(&raw, &k, q, depth, &terms)?;
-        hits.extend(imported_leg(&k, q, depth, &terms)?);
-    }
-    if q.raw != RawArm::Off {
-        let span = (q.since, q.until);
-        for h in super::raw_in(Some(&raw), &k, &q.text, q.searched(), span, depth)? {
-            hits.push(Hit {
-                key: format!("{}:{}", h.device, h.seq),
-                class: Class::Raw,
-                repo: h.repo,
-                when: h.ts,
-                kind: h.kind,
-                status: String::new(),
-                label: Label::Citable,
-                title: String::new(),
-                snippet: h.snippet,
-            });
+    let span = (q.since, q.until);
+    // Every leg reads one snapshot of knowledge.db: a hit is read back as it was found, never
+    // after a write between (a tombstone applied, a uid imported again). The schemas first: one
+    // made inside the snapshot would have to write.
+    crate::claims::schema(&k)?;
+    crate::consumer::imported::schema(&k)?;
+    crate::consumer::fts::schema(&k)?;
+    let _snapshot = k.unchecked_transaction()?;
+    std::thread::scope(|s| {
+        // D8: the query's call goes out while the full-text sides read (on the 178k store they
+        // take longer than the call). Its thread opens raw.db for itself, to read the exclusions
+        // again just before the call. `Err` is the call on its way.
+        let asked = ready.ok_or_else(|| {
+            s.spawn(move || match crate::raw::open(home) {
+                Ok(raw) => embedded(home, &raw, q, active).unwrap_or(Err(VectorSkip::Error)),
+                Err(_) => Err(VectorSkip::Error),
+            })
+        });
+        let imported = match q.raw {
+            RawArm::Only => None,
+            _ => Some([false, true].map(|prompts| imported_fts(&k, q, depth, prompts))),
+        };
+        let rows = match q.raw {
+            RawArm::Off => Ok(Vec::new()),
+            _ => super::raw_order(Some(&raw), &k, &q.text, q.searched(), span, depth),
+        };
+        let (vector, near) = match asked {
+            Ok(ready) => ready,
+            Err(call) => match call.join() {
+                Ok(Ok(near)) => (Vector::Used, Some(near)),
+                Ok(Err(skip)) => (Vector::Skipped(skip), None),
+                Err(_) => (Vector::Skipped(VectorSkip::Error), None),
+            },
+        };
+        let (mut hits, mut lowered) = (Vec::new(), Vec::new());
+        if let Some([knowledge, prompts]) = imported {
+            (hits, lowered) = claims_leg(&raw, &k, q, depth, &terms, near.as_ref())?;
+            let fts = [knowledge?, prompts?];
+            hits.extend(imported_leg(&k, q, depth, &terms, fts, near.as_ref())?);
         }
-    }
-    hits.extend(lowered);
-    hits.truncate(q.limit);
-    Ok(Answer {
-        hits,
-        full_text_only,
+        if q.raw != RawArm::Off {
+            let mut order = rows?;
+            if let Some(near) = &near {
+                let repos: Vec<String> = q.searched().map(str::to_owned).into_iter().collect();
+                order = rrf(&order, &near.knn(&k, "r", &repos, span, depth)?);
+                order.truncate(depth);
+            }
+            // The records read and their snippets gated now, whatever became of the call: the
+            // order was read before it came back, so a tombstone raw.db took meanwhile and a rule
+            // added meanwhile both hold here (D8).
+            for h in super::raw_rows(Some(&raw), &k, &order, &q.text)? {
+                hits.push(Hit {
+                    key: format!("{}:{}", h.device, h.seq),
+                    class: Class::Raw,
+                    repo: h.repo,
+                    when: h.ts,
+                    kind: h.kind,
+                    status: String::new(),
+                    label: Label::Citable,
+                    title: String::new(),
+                    snippet: h.snippet,
+                });
+            }
+        }
+        hits.extend(lowered);
+        hits.truncate(q.limit);
+        Ok(Answer { hits, vector })
     })
 }
 
+/// The query's vector from the configured embedder (D8), or why there is none: off, no vectors,
+/// a new embedder's still being made, the embedder resting or its cap spent, an exclusion made
+/// since `search` checked (nothing is sent), a timeout or an error. A request is counted in
+/// providers.db (role `query`) before it is sent, from the requests batches leave for queries,
+/// and the exclusions are read again just before the call (row 30-2); a failure sets no rest.
+/// One that cannot open or write providers.db sends nothing.
+fn embedded(
+    home: &Path,
+    raw: &crate::raw::Raw,
+    q: &Query,
+    active: Option<String>,
+) -> Result<Result<Near, VectorSkip>> {
+    use crate::providers_db as pdb;
+    let Ok(config) = crate::config::load(home) else {
+        return Ok(Err(VectorSkip::Error));
+    };
+    let embedder = match crate::embed::Embedder::from_config(&config.embedding) {
+        Ok(Some(e)) => e,
+        Ok(None) => return Ok(Err(VectorSkip::Off)),
+        Err(_) => return Ok(Err(VectorSkip::Error)),
+    };
+    match active {
+        None => return Ok(Err(VectorSkip::NoVectors)),
+        Some(a) if a != embedder.id => return Ok(Err(VectorSkip::Building)),
+        Some(_) => {}
+    }
+    let Ok(db) = pdb::open(home) else {
+        return Ok(Err(VectorSkip::Error));
+    };
+    match pdb::state(&db, crate::embed::CALLS) {
+        Ok(state) if state.down_until > crate::db::now_ms() => {
+            return Ok(Err(VectorSkip::Waiting));
+        }
+        Ok(_) => {}
+        Err(_) => return Ok(Err(VectorSkip::Error)),
+    }
+    // Gated, then cut, as a prompt is (D8).
+    let sent: String = redact::outbound_lines(&q.text)
+        .chars()
+        .take(crate::embed::PROMPT_CHARS)
+        .collect();
+    if sent.trim().is_empty() || sent.trim() == "[REDACTED]" {
+        return Ok(Err(VectorSkip::Error));
+    }
+    // Counted before it is sent, from the day's whole allowance (Step 7).
+    let reserved = crate::embed_phase::reserve(
+        &db,
+        "query",
+        "1 query",
+        &sent,
+        config.embedding.daily_requests,
+        config.embedding.monthly_usd,
+    );
+    let call = match reserved {
+        Ok(Ok(call)) => call,
+        Ok(Err(_)) => return Ok(Err(VectorSkip::Waiting)),
+        Err(_) => return Ok(Err(VectorSkip::Error)),
+    };
+    // Again as near the call as it can be: an exclusion made since the first check holds.
+    let excluded_now = raw.exclusions().map(|list| excluded(&list, q));
+    if !matches!(excluded_now, Ok(false)) {
+        if let Err(e) = pdb::unreserve(&db, call) {
+            eprintln!("oboete: a query embedding not sent stays counted: {e:#}");
+        }
+        return Ok(Err(match excluded_now {
+            Ok(_) => VectorSkip::Excluded,
+            Err(_) => VectorSkip::Error,
+        }));
+    }
+    let started = Instant::now();
+    let result = embedder.run(&[&sent], QUERY_TIMEOUT);
+    let (outcome, detail, billed) = match &result {
+        Ok(_) => ("ok", "1 query".to_owned(), true),
+        Err(f) => ("error", f.message.clone(), f.billed()),
+    };
+    let ms = started.elapsed().as_millis() as i64;
+    if let Err(e) = pdb::settle(&db, call, outcome, ms, &detail, billed) {
+        eprintln!("oboete: a query embedding is not settled: {e:#}");
+    }
+    Ok(match result {
+        Ok(mut v) => match v.pop() {
+            Some(vector) if vector.len() == crate::embed::DIM => Ok(Near {
+                embedder: embedder.id,
+                vector,
+            }),
+            _ => Err(VectorSkip::Error),
+        },
+        Err(f) if f.status.is_none() && f.message.contains("timeout") => Err(VectorSkip::Timeout),
+        Err(_) => Err(VectorSkip::Error),
+    })
+}
+
+/// A query's vector, for the index of `embedder`.
+struct Near {
+    embedder: String,
+    vector: Vec<f32>,
+}
+
+impl Near {
+    /// The keys of the `kind` documents nearest the query, the best first: `CANDIDATES` from the
+    /// bit index, kept to `repos` (any of them; none for every one) and the time span inside the
+    /// KNN (MUST-M12), each scored again by its fp32 vector, the best `depth`.
+    fn knn(
+        &self,
+        k: &Connection,
+        kind: &str,
+        repos: &[String],
+        span: (Option<i64>, Option<i64>),
+        depth: usize,
+    ) -> Result<Vec<String>> {
+        let mut clauses = vec![
+            "embedding MATCH vec_bit(?)".to_owned(),
+            "k = ?".into(),
+            "embedder = ?".into(),
+            "kind = ?".into(),
+        ];
+        let mut args = vec![
+            Value::Blob(crate::embed::bits(&self.vector)),
+            Value::Integer(CANDIDATES),
+            Value::Text(self.embedder.clone()),
+            Value::Text(kind.to_owned()),
+        ];
+        if !repos.is_empty() {
+            clauses.push(format!("repo IN ({})", vec!["?"; repos.len()].join(", ")));
+            args.extend(repos.iter().cloned().map(Value::Text));
+        }
+        super::within(&mut clauses, &mut args, "ts", span);
+        let sql = format!(
+            "SELECT rowid FROM vec_index WHERE {}",
+            clauses.join(" AND ")
+        );
+        let ids: Vec<i64> = k
+            .prepare(&sql)?
+            .query_map(params_from_iter(args), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut st = k.prepare_cached(
+            "SELECT x.key, v.vec FROM vector_keys x
+             JOIN vectors v ON v.embedder = x.embedder AND v.src_sha = x.src_sha WHERE x.id = ?1",
+        )?;
+        let mut scored = Vec::with_capacity(ids.len());
+        for id in ids {
+            let row: Option<(String, Vec<u8>)> = st
+                .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?;
+            if let Some((key, blob)) = row {
+                let dot: f32 = blob
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(&self.vector)
+                    .map(|(b, q)| f32::from_le_bytes(*b) * q)
+                    .sum();
+                scored.push((key, dot));
+            }
+        }
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        scored.truncate(depth);
+        Ok(scored.into_iter().map(|(key, _)| key).collect())
+    }
+}
+
+/// D8: a leg's full-text and vector lists as one, by reciprocal rank (1 / (61 + rank), rank from
+/// 0); ties keep the full-text order, then the vector order.
+pub fn rrf(fts: &[String], vec: &[String]) -> Vec<String> {
+    let mut score: HashMap<&str, f64> = HashMap::new();
+    let mut order: Vec<&str> = Vec::new();
+    for list in [fts, vec] {
+        for (rank, key) in list.iter().enumerate() {
+            let s = score.entry(key).or_insert_with(|| {
+                order.push(key);
+                0.0
+            });
+            *s += 1.0 / (61.0 + rank as f64);
+        }
+    }
+    order.sort_by(|a, b| score[b].total_cmp(&score[a]));
+    order.into_iter().map(str::to_owned).collect()
+}
+
 /// Row 30-2 over D13's `list`: whether the caller's repository or the one `q` searches is
-/// excluded. A search of every repository searches the excluded ones too.
+/// excluded, with what the imported leg reads for it (`imported_match`): the claude-mem project
+/// its last part names and that project's worktree sessions, as D13 maps them. A search of every
+/// repository searches the excluded ones too.
 pub fn excluded(list: &[String], q: &Query) -> bool {
     if q.all {
         return !list.is_empty();
@@ -173,7 +492,12 @@ pub fn excluded(list: &[String], q: &Query) -> bool {
     [q.caller.as_deref(), q.searched()]
         .into_iter()
         .flatten()
-        .any(|r| list.iter().any(|x| x == r))
+        .any(|r| {
+            let ([own, named], worktrees) = imported_scope(r);
+            crate::embed_phase::import_excluded(&own, list)
+                || crate::embed_phase::import_excluded(&named, list)
+                || list.iter().any(|x| x.starts_with(&worktrees))
+        })
 }
 
 /// The claims `q` finds: the delivered and current ones in units (`claims::units`, the pair rule)
@@ -185,6 +509,7 @@ fn claims_leg(
     q: &Query,
     depth: usize,
     terms: &[String],
+    near: Option<&Near>,
 ) -> Result<(Vec<Hit>, Vec<Hit>)> {
     claims::schema(k)?;
     let Some((mut clauses, mut args, ranked)) =
@@ -226,24 +551,8 @@ fn claims_leg(
             .collect::<rusqlite::Result<_>>()?;
         let last = read.len() < depth;
         for uid in read {
-            if hidden(&uid)? {
-                continue;
-            }
-            let c = match claims::delivered_one(k, &uid)? {
-                Some(c) => c,
-                None => {
-                    let Some(mut c) = claims::active_one(k, &uid)? else {
-                        continue;
-                    };
-                    ended_by.insert(uid, c.later.take());
-                    c
-                }
-            };
-            let lowered = ended_by.contains_key(&c.uid) || c.status == "done";
-            if lowered && !q.history {
-                ended.push(c);
-            } else {
-                shown.push(c);
+            if !hidden(&uid)? {
+                place_claim(k, uid, q.history, &mut ended_by, &mut shown, &mut ended)?;
             }
         }
         if last || shown.len() >= depth {
@@ -252,6 +561,26 @@ fn claims_leg(
     }
     shown.truncate(depth);
     ended.truncate(depth);
+    // The vector side's claims, hidden ones out and placed as above, each list fused with its
+    // full-text one (D8).
+    if let Some(near) = near {
+        let repos: Vec<String> = q.searched().map(str::to_owned).into_iter().collect();
+        let (mut near_shown, mut near_ended) = (Vec::new(), Vec::new());
+        for uid in near.knn(k, "c", &repos, (q.since, q.until), depth)? {
+            if !hidden(&uid)? {
+                place_claim(
+                    k,
+                    uid,
+                    q.history,
+                    &mut ended_by,
+                    &mut near_shown,
+                    &mut near_ended,
+                )?;
+            }
+        }
+        shown = fuse_claims(shown, near_shown, depth);
+        ended = fuse_claims(ended, near_ended, depth);
+    }
     // A unit brings the claim that ended its earlier decision whatever that claim's time: an
     // earlier decision is never shown without it (D2), which `since` and `until` do not lift.
     let (units, _) = claims::place(claims::units(k, &shown, hidden)?, q.limit);
@@ -270,6 +599,53 @@ fn claims_leg(
     let shown = units.iter().flatten().map(hit).collect::<Result<_>>()?;
     let ended = ended.iter().map(hit).collect::<Result<_>>()?;
     Ok((shown, ended))
+}
+
+/// `uid`'s claim as the claims leg places it: into `shown`, or into `ended` when it is lowered
+/// (ended, with what ended it into `ended_by`, or done) and `history` is not asked for. Nothing
+/// for a uid with no active derivation.
+fn place_claim(
+    k: &Connection,
+    uid: String,
+    history: bool,
+    ended_by: &mut HashMap<String, Option<String>>,
+    shown: &mut Vec<Claim>,
+    ended: &mut Vec<Claim>,
+) -> Result<()> {
+    let c = match claims::delivered_one(k, &uid)? {
+        Some(c) => c,
+        None => {
+            let Some(mut c) = claims::active_one(k, &uid)? else {
+                return Ok(());
+            };
+            ended_by.insert(uid, c.later.take());
+            c
+        }
+    };
+    let lowered = ended_by.contains_key(&c.uid) || c.status == "done";
+    if lowered && !history {
+        ended.push(c);
+    } else {
+        shown.push(c);
+    }
+    Ok(())
+}
+
+/// A full-text list of claims and a vector side's as one by `rrf`, the best `depth`.
+fn fuse_claims(fts: Vec<Claim>, near: Vec<Claim>, depth: usize) -> Vec<Claim> {
+    let order = rrf(
+        &fts.iter().map(|c| c.uid.clone()).collect::<Vec<_>>(),
+        &near.iter().map(|c| c.uid.clone()).collect::<Vec<_>>(),
+    );
+    let mut by_uid: HashMap<String, Claim> = HashMap::new();
+    for c in near.into_iter().chain(fts) {
+        by_uid.insert(c.uid.clone(), c);
+    }
+    order
+        .into_iter()
+        .filter_map(|uid| by_uid.remove(&uid))
+        .take(depth)
+        .collect()
 }
 
 fn claim_hit(raw: &Raw, k: &Connection, c: &Claim, class: Class, terms: &[String]) -> Result<Hit> {
@@ -319,24 +695,68 @@ fn on_this_device(raw: &Raw, device: &str, seq: i64) -> Result<bool> {
 
 /// The repositories whose imported documents are `repo`'s: claude-mem names a project, not a
 /// repository, and its documents are `claude-mem:<project>` (`import::repo`), so a repository's
-/// are those of the project its key ends in. ponytail: by name, as PR-H is to map them.
+/// are those of the project its key ends in, and a claude-mem name's those of its own project (a
+/// worktree session's too, as the index files them). ponytail: by name, as PR-H is to map them.
 fn imported_repos(repo: &str) -> [String; 2] {
-    let name = repo.rsplit('/').next().unwrap_or(repo);
-    [repo.to_owned(), crate::import::repo(name)]
+    let project = match repo.strip_prefix("claude-mem:") {
+        Some(name) => name.split('/').next().unwrap_or(name),
+        None => repo.rsplit('/').next().unwrap_or(repo),
+    };
+    [repo.to_owned(), crate::import::repo(project)]
 }
 
-/// The imported documents `q` finds, once per uid (two devices' imports of one are one).
-fn imported_leg(k: &Connection, q: &Query, depth: usize, terms: &[String]) -> Result<Vec<Hit>> {
-    crate::consumer::imported::schema(k)?;
+/// The imported documents `q` finds, once per uid (two devices' imports of one are one): the
+/// knowledge claude-mem kept, then the prompts it recorded (D7), each kind's full-text list
+/// (`imported_fts`, read while the query's call is out) fused with its vector side's.
+fn imported_leg(
+    k: &Connection,
+    q: &Query,
+    depth: usize,
+    terms: &[String],
+    fts: [Vec<String>; 2],
+    near: Option<&Near>,
+) -> Result<Vec<Hit>> {
+    let mut out = Vec::new();
+    for (mut uids, kind) in fts.into_iter().zip(["k", "p"]) {
+        if let Some(near) = near {
+            // The index holds an import's repository as its claude-mem project (`vec_repo`).
+            let repos: Vec<String> = q
+                .searched()
+                .map(|r| imported_repos(r).to_vec())
+                .unwrap_or_default();
+            uids = rrf(
+                &uids,
+                &near.knn(k, kind, &repos, (q.since, q.until), depth)?,
+            );
+            uids.truncate(depth);
+        }
+        for uid in uids {
+            out.extend(imported_hit(k, &uid, terms)?);
+        }
+    }
+    Ok(out)
+}
+
+/// The full-text side of `imported_leg` for one kind: uids, the best first.
+fn imported_fts(k: &Connection, q: &Query, depth: usize, prompts: bool) -> Result<Vec<String>> {
     // The index keeps no text (`content=''`): a query too short for a trigram reads the rows.
     let Some((mut clauses, mut args, ranked)) =
         super::query_clauses(&q.text, "imported_fts", &["i.title", "i.body"])
     else {
         return Ok(Vec::new());
     };
+    clauses.push(
+        if prompts {
+            "i.kind = 'prompt'"
+        } else {
+            "i.kind <> 'prompt'"
+        }
+        .into(),
+    );
     if let Some(r) = q.searched() {
-        clauses.push("i.repo IN (?, ?)".into());
-        args.extend(imported_repos(r).map(Value::Text));
+        let (sql, values) = imported_match("i.repo", r);
+        clauses.push(sql);
+        args.extend(values);
     }
     super::within(&mut clauses, &mut args, "i.ts", (q.since, q.until));
     // Once per uid before the limit: two devices' imports of one document are one (Codex on
@@ -349,38 +769,53 @@ fn imported_leg(k: &Connection, q: &Query, depth: usize, terms: &[String]) -> Re
     };
     args.push(Value::Integer(super::sql_limit(depth)));
     let sql = format!(
-        "SELECT i.uid, i.kind, i.repo, i.ts, i.title, i.body
-         FROM imported_fts f JOIN imported i ON i.rowid = f.rowid
+        "SELECT i.uid FROM imported_fts f JOIN imported i ON i.rowid = f.rowid
          WHERE {} ORDER BY {order} LIMIT ?",
         clauses.join(" AND ")
     );
-    let mut st = k.prepare(&sql)?;
-    let rows = st.query_map(params_from_iter(args), |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, i64>(3)?,
-            r.get::<_, String>(4)?,
-            r.get::<_, String>(5)?,
-        ))
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (uid, kind, repo, ts, title, body) = row?;
-        out.push(Hit {
-            key: uid,
+    Ok(k.prepare(&sql)?
+        .query_map(params_from_iter(args), |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// An imported uid's hit: its newest row.
+fn imported_hit(k: &Connection, uid: &str, terms: &[String]) -> Result<Option<Hit>> {
+    Ok(k.prepare_cached(
+        "SELECT kind, repo, ts, title, body FROM imported WHERE uid = ?1
+             ORDER BY rowid DESC LIMIT 1",
+    )?
+    .query_row([uid], |r| {
+        let (title, body): (String, String) = (r.get(3)?, r.get(4)?);
+        Ok(Hit {
+            key: uid.to_owned(),
             class: Class::Imported,
-            repo: Some(repo),
-            when: ts,
-            kind,
+            repo: Some(r.get(1)?),
+            when: r.get(2)?,
+            kind: r.get(0)?,
             status: String::new(),
             label: Label::Imported,
             title: redact::outbound(&title),
             snippet: super::snippet(&redact::outbound(&body), terms, WIDTH),
-        });
-    }
-    Ok(out)
+        })
+    })
+    .optional()?)
+}
+
+/// The imported documents a search of `repo` reads: those of `imported_repos`, and of the
+/// claude-mem project's worktree sessions, whose repository starts with the prefix given.
+fn imported_scope(repo: &str) -> ([String; 2], String) {
+    let [own, named] = imported_repos(repo);
+    let worktrees = format!("{named}/");
+    ([own, named], worktrees)
+}
+
+/// SQL over `col` for `imported_scope(repo)`, with the four values it takes.
+fn imported_match(col: &str, repo: &str) -> (String, [Value; 4]) {
+    let ([own, named], worktrees) = imported_scope(repo);
+    (
+        format!("({col} IN (?, ?) OR substr({col}, 1, length(?)) = ?)"),
+        [own, named, worktrees.clone(), worktrees].map(Value::Text),
+    )
 }
 
 /// A hit on one line, as the CLI prints it and MCP returns it: its key (a claim's first 12
@@ -686,7 +1121,7 @@ pub fn timeline(
     let at = anchor.map(|a| time_of(&raw, &k, a)).transpose()?;
     let pending = claims::Pending::read(&raw, &k)?;
     let [own, named] = repo.map(imported_repos).unwrap_or_default();
-    let repo = repo.map(|r| r.to_owned());
+    let repo = repo.map(str::to_owned);
     let items = "SELECT key, ts, kind, repo, text FROM (
            SELECT a.uid AS key, a.valid_from AS ts, a.kind || ' ' || a.status AS kind,
                   a.repo AS repo, a.body AS text
@@ -1258,12 +1693,41 @@ mod tests {
             );
         }
         assert!(!excluded(&[], &ask(open, None, true)));
+        // What the imported leg reads too (`imported_match`): the claude-mem project a key's last
+        // part names and its worktree sessions, excluded as D13 maps them.
+        for (list, caller, repo, want) in [
+            ("claude-mem:jura", "/home/jura", None, true),
+            ("github.com/o/foo", open, Some("claude-mem:foo"), true),
+            (
+                "claude-mem:private/wt",
+                open,
+                Some("github.com/o/private"),
+                true,
+            ),
+            (
+                "claude-mem:private/wt",
+                open,
+                Some("github.com/o/other"),
+                false,
+            ),
+            // A claude-mem project searched by its own name: its worktree sessions too.
+            ("claude-mem:foo/wt", open, Some("claude-mem:foo"), true),
+            ("claude-mem:foo", open, Some("claude-mem:foo/wt"), true),
+            ("claude-mem:bar/wt", open, Some("claude-mem:foo"), false),
+        ] {
+            assert_eq!(
+                excluded(&[list.to_owned()], &ask(caller, repo, false)),
+                want,
+                "{list} {caller} {repo:?}"
+            );
+        }
         let mut s = Store::new();
         s.decided(open, 1_000, "Open words.", &[]);
         s.exclude(secret);
         s.run();
-        assert!(s.query(&ask(open, Some(secret), false)).full_text_only);
-        assert!(!s.query(&ask(open, None, false)).full_text_only);
+        let skipped = Vector::Skipped(VectorSkip::Excluded);
+        assert_eq!(s.query(&ask(open, Some(secret), false)).vector, skipped);
+        assert_ne!(s.query(&ask(open, None, false)).vector, skipped);
     }
 
     /// `get` takes a claim's uid or its first 12 characters (SessionStart's index, #302 item 4),
@@ -1488,6 +1952,449 @@ mod tests {
             .map(|i| i.key)
             .collect();
         assert_eq!(keys, [older[1].clone(), older[0].clone()]);
+    }
+
+    /// Row 30-2 (Task 5): a query whose caller's repository or the one searched is excluded never
+    /// reaches the embedder, nor does a search of every repository while any is excluded; the
+    /// others do.
+    #[test]
+    fn an_excluded_callers_query_never_reaches_the_embedder() {
+        use crate::embed::stub::Stub;
+        const SECRET: &str = "github.com/o/secret";
+        let stub = Stub::start();
+        let mut s = Store::new();
+        crate::embed_phase::fixture::config(&s, &stub);
+        s.said("s", R, 1_000, "Open words.");
+        s.run();
+        crate::embed_phase::fixture::embed_all(&s);
+        s.raw.exclude(SECRET, false).unwrap();
+        let sent = stub.requests();
+        let ask = |caller: &str, repo: Option<&str>, all: bool| Query {
+            text: "Open words".into(),
+            caller: Some(caller.into()),
+            repo: repo.map(str::to_owned),
+            all,
+            limit: 5,
+            ..Default::default()
+        };
+        for q in [
+            ask(SECRET, None, false),
+            ask(R, Some(SECRET), false),
+            ask(R, None, true),
+        ] {
+            assert_eq!(s.query(&q).vector, Vector::Skipped(VectorSkip::Excluded));
+        }
+        assert_eq!(stub.requests(), sent);
+        assert_eq!(s.query(&ask(R, None, false)).vector, Vector::Used);
+        assert_eq!(stub.requests(), sent + 1);
+        // What is sent has passed the gate (row 30-14).
+        let token = ["gh", "p_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"].concat();
+        let gated = Query {
+            text: format!("Open words {token} <private>acme</private>"),
+            ..ask(R, None, false)
+        };
+        assert_eq!(s.query(&gated).vector, Vector::Used);
+        let last = stub.texts().pop().unwrap().pop().unwrap();
+        assert!(last.starts_with("Open words"));
+        assert!(!last.contains(&token[..12]) && !last.contains("acme"));
+    }
+
+    /// D8 (Task 5): a query that cannot be embedded is answered from full text and says why, each
+    /// reason in turn. Each request sent is recorded with role `query`, and a failure sets no rest.
+    #[test]
+    fn a_failing_query_embedding_falls_back_to_full_text_and_says_why() {
+        use crate::embed::stub::Stub;
+        use crate::providers_db as pdb;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.said("s", R, 1_000, "Open words.");
+        s.run();
+        let home = s.home.path().to_owned();
+        let ask = Query {
+            text: "Open words".into(),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        let why = |s: &Store| {
+            let answer = s.query(&ask);
+            assert!(!answer.hits.is_empty());
+            answer.vector
+        };
+        let skipped = |why: VectorSkip| Vector::Skipped(why);
+        assert_eq!(why(&s), skipped(VectorSkip::Off));
+        crate::embed_phase::fixture::config(&s, &stub);
+        let k = crate::knowledge::open(&home).unwrap();
+        assert_eq!(why(&s), skipped(VectorSkip::NoVectors));
+        crate::embed_phase::fixture::embed_all(&s);
+        let sent = stub.requests();
+        assert_eq!(why(&s), Vector::Used);
+        // The active vectors another embedder's: the configured one's are still being made.
+        let generation = |from: &str, to: &str| {
+            k.execute(
+                "UPDATE vec_generation SET embedder = ?2 WHERE embedder = ?1",
+                [from, to],
+            )
+            .unwrap()
+        };
+        generation(crate::embed::EMBEDDER, "older");
+        assert_eq!(why(&s), skipped(VectorSkip::Building));
+        generation("older", crate::embed::EMBEDDER);
+        let db = pdb::open(&home).unwrap();
+        let rest = pdb::State {
+            down_until: crate::db::now_ms() + 60_000,
+            ..Default::default()
+        };
+        pdb::set_state(&db, crate::embed::CALLS, rest).unwrap();
+        assert_eq!(why(&s), skipped(VectorSkip::Waiting));
+        pdb::set_state(&db, crate::embed::CALLS, pdb::State::default()).unwrap();
+        assert_eq!(stub.requests(), sent + 1);
+        stub.fail_next(500, None);
+        assert_eq!(why(&s), skipped(VectorSkip::Error));
+        let held = stub.hold();
+        assert_eq!(why(&s), skipped(VectorSkip::Timeout));
+        drop(held);
+        assert_eq!(stub.requests(), sent + 3);
+        assert_eq!(
+            pdb::state(&db, crate::embed::CALLS).unwrap(),
+            pdb::State::default()
+        );
+        let outcomes: Vec<String> = db
+            .prepare("SELECT outcome FROM provider_calls WHERE role = 'query' ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(outcomes, ["ok", "error", "error"]);
+    }
+
+    /// D8 with the query's call beside the full-text sides: a tombstone raw.db takes while the call
+    /// is out hides its record, whatever becomes of the call (here a timeout: full text alone),
+    /// though the record's full-text list was read before it.
+    #[test]
+    fn a_tombstone_taken_while_the_query_is_out_hides_its_record() {
+        use crate::embed::stub::Stub;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        let seq = s.said("s", R, 1_000, "Deploy words.");
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let home = s.home.path().to_owned();
+        let ask = Query {
+            text: "Deploy words".into(),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        let records = |a: &Answer| a.hits.iter().filter(|h| h.class == Class::Raw).count();
+        assert_eq!(records(&query(&home, &ask).unwrap()), 1);
+        let sent = stub.requests();
+        let held = stub.hold();
+        let search = std::thread::spawn(move || query(&home, &ask).unwrap());
+        // The call is out, and the full-text lists have been read beside it.
+        while stub.requests() == sent {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let target = crate::raw::Target::Record {
+            device: s.raw.device().to_owned(),
+            seq,
+        };
+        s.raw.append_tombstone(target).unwrap();
+        let answer = search.join().unwrap();
+        drop(held);
+        assert_eq!(answer.vector, Vector::Skipped(VectorSkip::Timeout));
+        assert_eq!(records(&answer), 0, "{:?}", keys(&answer));
+    }
+
+    /// D8 with the query's call beside the full-text sides: a redaction rule added while the call
+    /// is out holds in the snippets, whether the call is answered or times out (the records are
+    /// read and gated after it), though no tombstone has been written yet. The search runs in a
+    /// child process: egress reads the rules of the home `redact::set_home` names, the process's.
+    #[test]
+    fn a_rule_added_while_the_query_is_out_masks_the_snippets() {
+        use crate::embed::stub::Stub;
+        const HOME: &str = "OBOETE_TEST_RULE_HOME";
+        const SECRET: &str = "INTERNAL-ALPHA-42";
+        let ask = Query {
+            text: "deploy".into(),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        if let Ok(home) = std::env::var(HOME) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let answer = query(&home, &ask).unwrap();
+            let shown: Vec<&str> = answer.hits.iter().map(|h| h.snippet.as_str()).collect();
+            assert!(shown.iter().any(|s| s.contains("deploy")), "{shown:?}");
+            assert!(shown.iter().all(|s| !s.contains(SECRET)), "{shown:?}");
+            return;
+        }
+        let stub = Stub::start();
+        let mut s = Store::new();
+        // Two fields, so the rule anchored to a field's end matches only line by line.
+        let body = serde_json::json!({"prompt": format!("deploy {SECRET}"), "result": "tail"});
+        let event = crate::raw::Event {
+            session: "s".into(),
+            repo: Some(R.into()),
+            ts: 1_000,
+            ..crate::raw::test_event(&body.to_string())
+        };
+        s.raw.append(&event).unwrap();
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let home = s.home.path().to_owned();
+        let config = home.join("config.toml");
+        let plain = std::fs::read_to_string(&config).unwrap();
+        let ruled = format!(
+            "{plain}[redaction]\nextra_rules = [{{ id = \"alpha\", regex = '{SECRET}$' }}]\n"
+        );
+        let name = "search::b::tests::a_rule_added_while_the_query_is_out_masks_the_snippets";
+        for answered in [true, false] {
+            std::fs::write(&config, &plain).unwrap();
+            let sent = stub.requests();
+            let held = stub.hold();
+            let child = std::process::Command::new(std::env::args_os().next().unwrap())
+                .args(["--exact", name])
+                .env(HOME, &home)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            // The call is out, and the full-text order has been read beside it.
+            while stub.requests() == sent {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let next = home.join("config.toml.next");
+            std::fs::write(&next, &ruled).unwrap();
+            std::fs::rename(&next, &config).unwrap();
+            if !answered {
+                std::thread::sleep(QUERY_TIMEOUT + std::time::Duration::from_millis(300));
+            }
+            drop(held);
+            let out = child.wait_with_output().unwrap();
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(out.status.success(), "answered {answered}: {said}");
+            assert!(said.contains("1 passed"), "{said}");
+        }
+    }
+
+    /// D7: claude-mem's knowledge comes before the prompts it recorded, whatever the full-text
+    /// rank: a note that names the words once ranks above a prompt full of them.
+    #[test]
+    fn imported_knowledge_ranks_before_imported_prompts() {
+        let mut s = Store::new();
+        let prompt = crate::raw::ImportDoc {
+            uid: "claude-mem:test:p1".into(),
+            source: "claude-mem:test".into(),
+            source_id: "p1".into(),
+            kind: "prompt".into(),
+            repo: crate::import::repo("r"),
+            session: "cm".into(),
+            ts: 2_000,
+            title: String::new(),
+            body: "Redis Redis caches in Redis, Redis.".into(),
+        };
+        s.raw.append_imports(vec![prompt]).unwrap();
+        let note = s.imported("o1", "r", 1_000, "Caching", "We picked Redis once.");
+        s.run();
+        let found = s.query(&q("Redis"));
+        let imported: Vec<&str> = found
+            .hits
+            .iter()
+            .filter(|h| h.class == Class::Imported)
+            .map(|h| h.key.as_str())
+            .collect();
+        assert_eq!(imported, [note.as_str(), "claude-mem:test:p1"]);
+    }
+
+    /// MUST-M12 (Task 5): the vector side keeps to the repository searched and the time span
+    /// inside its KNN, before fusion: documents of another repository, another time or none are
+    /// left out; a search of every repository has them all, the repo-less one too.
+    #[test]
+    fn since_until_and_repo_filter_the_vector_leg_before_fusion() {
+        use crate::embed::stub::{self, Stub};
+        let stub = Stub::start();
+        let mut s = Store::new();
+        crate::embed_phase::fixture::config(&s, &stub);
+        let words = "Parser caches live in Redis.";
+        let here = s.said("s", R, 1_000, words);
+        s.said("s", R, 5_000, words);
+        s.said("s", "github.com/o/other", 1_000, words);
+        let body = serde_json::json!({ "prompt": words }).to_string();
+        let nowhere = s
+            .raw
+            .append(&crate::raw::Event {
+                repo: None,
+                ts: 1_000,
+                ..crate::raw::test_event(&body)
+            })
+            .unwrap();
+        s.imported("o1", "other", 1_000, "Parser", words);
+        s.imported("o2", "r/wt", 1_000, "Parser", words);
+        let decision = ("decision", "decided", "user");
+        let quoted = s.said("s", R, 1_000, words);
+        let claim = s.claim(quoted, words, decision, &[]);
+        let elsewhere = s.said("s", "github.com/o/other", 1_000, words);
+        s.claim(elsewhere, words, decision, &[]);
+        s.run();
+        crate::embed_phase::fixture::embed_all(&s);
+        let v = stub::vector(crate::embed::EMBEDDER, words);
+        let ask = |since, until, all| Query {
+            text: "zzzz".into(),
+            caller: Some(R.into()),
+            all,
+            since,
+            until,
+            limit: 20,
+            ..Default::default()
+        };
+        let keys = |q: &Query| -> Vec<String> {
+            query_with(s.home.path(), q, Some(&v))
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|h| h.key)
+                .collect()
+        };
+        let found = keys(&ask(Some(500), Some(2_000), false));
+        assert_eq!(found[..2], [claim, "claude-mem:test:o2".to_owned()]);
+        let mut records = found[2..].to_vec();
+        records.sort();
+        let mut want = vec![s.key(here), s.key(quoted)];
+        want.sort();
+        assert_eq!(records, want);
+        let every = keys(&ask(None, None, true));
+        assert_eq!(every.len(), 10, "{every:?}");
+        assert!(every.contains(&s.key(nowhere)));
+        // The full-text side finds a worktree session's import under its repository too.
+        let text = s.query(&q("Parser"));
+        assert!(text.hits.iter().any(|h| h.key == "claude-mem:test:o2"));
+        assert!(!text.hits.iter().any(|h| h.key == "claude-mem:test:o1"));
+    }
+
+    /// Row 46-1 (Task 5): a leg's vector side reads 100 deep: a document only it finds, at its
+    /// 90th place, is still among 100 hits.
+    #[test]
+    fn the_vector_side_of_a_leg_reads_a_hundred_deep() {
+        use crate::embed::stub::{self, Stub};
+        let stub = Stub::start();
+        let mut s = Store::new();
+        crate::embed_phase::fixture::config(&s, &stub);
+        let id = crate::embed::EMBEDDER;
+        let dim = |w: &str| -> usize {
+            let v = stub::vector(id, w);
+            (0..v.len()).max_by(|a, b| v[*a].total_cmp(&v[*b])).unwrap()
+        };
+        // Words that share no dimension with "alpha" or with one another, so record i, "alpha"
+        // and i of them, is the i-th nearest "alpha".
+        let mut taken = vec![dim("alpha")];
+        let fillers: Vec<String> = (0..2_000)
+            .map(|j| format!("w{j}"))
+            .filter(|w| {
+                let d = dim(w);
+                !taken.contains(&d) && {
+                    taken.push(d);
+                    true
+                }
+            })
+            .take(130)
+            .collect();
+        let seqs: Vec<i64> = (0..130)
+            .map(|i| {
+                let text = format!("alpha {}", fillers[..i].join(" "));
+                s.said("s", R, 1_000 + i as i64, &text)
+            })
+            .collect();
+        s.run();
+        crate::embed_phase::fixture::embed_all(&s);
+        let q = Query {
+            text: "zzzz".into(),
+            caller: Some(R.into()),
+            raw: RawArm::Only,
+            limit: 100,
+            ..Default::default()
+        };
+        let found = query_with(s.home.path(), &q, Some(&stub::vector(id, "alpha"))).unwrap();
+        assert_eq!(found.hits.len(), 100);
+        assert_eq!(found.hits[89].key, s.key(seqs[89]));
+    }
+
+    /// MUST-M11 and M13 (Task 5): a hit only the vector side found is ranked by the fusion,
+    /// labelled as its leg's full-text hits are, and hidden as they are: a tombstone the index has
+    /// not reached hides it. With no vector, the same query finds nothing.
+    #[test]
+    fn a_vector_only_hit_is_hidden_ranked_and_labelled_as_a_full_text_hit() {
+        use crate::embed::stub::{self, Stub};
+        let stub = Stub::start();
+        let mut s = Store::new();
+        crate::embed_phase::fixture::config(&s, &stub);
+        let target = s.said("s", R, 1_000, "Parser caches live in Redis.");
+        let decision = ("decision", "decided", "user");
+        let claim = s.claim(target, "Parser caches live in Redis.", decision, &[]);
+        let done = ("open item", "done", "user");
+        let item = s.claim(target, "Parser caches live in Redis.", done, &[]);
+        s.said("s", R, 2_000, "Deploy on Fridays never.");
+        s.run();
+        crate::embed_phase::fixture::embed_all(&s);
+        let home = s.home.path();
+        let v = stub::vector(crate::embed::EMBEDDER, "Parser caches live in Redis.");
+        let q = Query {
+            text: "zzzz".into(),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        let found = query_with(home, &q, Some(&v)).unwrap();
+        assert_eq!(found.vector, Vector::Used);
+        assert_eq!(
+            (found.hits[0].key.as_str(), &found.hits[0].class),
+            (claim.as_str(), &Class::Current)
+        );
+        let raw = &found.hits[1];
+        assert_eq!(
+            (raw.key.as_str(), &raw.class, raw.label),
+            (s.key(target).as_str(), &Class::Raw, Label::Citable)
+        );
+        assert!(found.hits.iter().any(|h| h.key == item));
+        let none = query_with(home, &q, None).unwrap();
+        assert!(none.hits.is_empty() && none.vector == Vector::Skipped(VectorSkip::Off));
+        let removed = crate::raw::Target::Record {
+            device: s.raw.device().to_owned(),
+            seq: target,
+        };
+        s.raw.append_tombstone(removed).unwrap();
+        let found = query_with(home, &q, Some(&v)).unwrap();
+        let gone = [s.key(target), claim, item];
+        assert!(!found.hits.iter().any(|h| gone.contains(&h.key)));
+        assert!(!found.hits.is_empty());
+    }
+
+    /// D8: reciprocal rank fusion: 1 / (61 + rank), so a document both sides hold far down ranks
+    /// below one a side holds first; ties keep the full-text order.
+    #[test]
+    fn rrf_scores_by_reciprocal_rank_and_keeps_full_text_order_on_ties() {
+        let fts: Vec<String> = std::iter::once("a".to_owned())
+            .chain((0..99).map(|i| format!("f{i}")))
+            .chain(["z".to_owned()])
+            .collect();
+        let vec: Vec<String> = (0..100)
+            .map(|i| format!("v{i}"))
+            .chain(["z".to_owned()])
+            .collect();
+        let fused = rrf(&fts, &vec);
+        let at = |k: &str| fused.iter().position(|x| x == k).unwrap();
+        assert!(at("a") < at("z"));
+        assert_eq!(fused[..3], ["a", "v0", "f0"]);
     }
 
     /// Codex on #306: three devices' imports of a document are one entry before the limit, so the

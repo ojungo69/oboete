@@ -96,9 +96,19 @@ pub struct Embedding {
     #[serde(default = "default_embedding_key")]
     pub key_file: PathBuf,
     /// Workers AI requests per day (up to 100 documents each). 200 is about 9,000 neurons with
-    /// the texts measured in docs/pr-d.md, inside the free 10,000 a day.
+    /// the texts measured in docs/pr-d.md, inside the free 10,000 a day. Batches stop 40 short,
+    /// kept for query vectors: at 40 or fewer, only queries are embedded.
     #[serde(default = "default_embedding_requests")]
     pub daily_requests: u32,
+    /// USD a month the embedder may cost past Workers AI's free allowance, more than 0, counted
+    /// apart from `paid_usd_per_month` (milestone 4 D8, What needs the owner item 1). Reached, no
+    /// request goes until the next month.
+    #[serde(default = "default_embedding_usd")]
+    pub monthly_usd: f64,
+    /// Where the model runs instead of Cloudflare's endpoint: only the Workers AI host or a
+    /// loopback address loads (a stub for tests and harnesses, D8).
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 impl Default for Embedding {
@@ -108,6 +118,8 @@ impl Default for Embedding {
             account_id: None,
             key_file: default_embedding_key(),
             daily_requests: default_embedding_requests(),
+            monthly_usd: default_embedding_usd(),
+            url: None,
         }
     }
 }
@@ -117,6 +129,9 @@ fn default_embedding_key() -> PathBuf {
 }
 fn default_embedding_requests() -> u32 {
     200
+}
+fn default_embedding_usd() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -595,6 +610,9 @@ fn default_providers() -> Vec<Provider> {
     chain
 }
 
+/// Workers AI's API host, where `[embedding] url` may point besides a loopback address.
+pub const WORKERS_AI: &str = "https://api.cloudflare.com/";
+
 /// The `[embedding]` section for a search: a config.toml that does not load falls back to
 /// full-text search with a line on stderr, like every other reason the hybrid cannot run.
 pub fn search_embedding(home: &Path) -> Embedding {
@@ -656,11 +674,29 @@ pub(crate) fn from_text(path: &Path, text: &str) -> Result<Config> {
     }
     match cfg.embedding.provider.as_str() {
         "none" => {}
-        "workers-ai" => anyhow::ensure!(
-            cfg.embedding.account_id.is_some(),
-            "{}: [embedding] provider = \"workers-ai\" needs account_id",
-            path.display()
-        ),
+        "workers-ai" => {
+            anyhow::ensure!(
+                cfg.embedding.account_id.is_some(),
+                "{}: [embedding] provider = \"workers-ai\" needs account_id",
+                path.display()
+            );
+            // Anywhere else would receive the stored text and the token (D8).
+            if let Some(url) = &cfg.embedding.url {
+                anyhow::ensure!(
+                    url.starts_with(WORKERS_AI) || crate::provider::is_loopback(url),
+                    "{}: [embedding] url must start with {WORKERS_AI} or name a loopback address",
+                    path.display()
+                );
+            }
+            let usd = cfg.embedding.monthly_usd;
+            // 0 would stop every call, the free allowance's too: no embedding is `provider =
+            // "none"`.
+            anyhow::ensure!(
+                usd.is_finite() && usd > 0.0,
+                "{}: [embedding] monthly_usd must be a number of USD more than 0",
+                path.display()
+            );
+        }
         other => anyhow::bail!(
             "{}: [embedding] provider = \"{other}\" does not exist yet; use \"none\" (full-text search) or \"workers-ai\"",
             path.display()
@@ -1618,5 +1654,42 @@ model = { gone = "m" }
         assert_eq!(cfg.embedding.daily_requests, 200);
         assert!(cfg.embedding.key_file.ends_with("CF_WORKERS_AI_KEY.md"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Milestone 4 D8: the embedder's own monthly cap, and a url only where Workers AI or a
+    /// loopback stub listens.
+    #[test]
+    fn embedding_monthly_usd_and_url_load_or_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |rest: &str| {
+            let text =
+                format!("[embedding]\nprovider = \"workers-ai\"\naccount_id = \"a\"\n{rest}");
+            std::fs::write(dir.path().join("config.toml"), text).unwrap();
+            load(dir.path())
+        };
+        let cfg = at("").unwrap();
+        assert_eq!((cfg.embedding.monthly_usd, cfg.embedding.url), (1.0, None));
+        for url in [
+            "https://api.cloudflare.com/client/v4/accounts/a/ai/run/@cf/baai/bge-m3",
+            "http://127.0.0.1:8787/run",
+            "http://localhost:8787/run",
+            "http://[::1]:8787/run",
+        ] {
+            let cfg = at(&format!("url = \"{url}\"\nmonthly_usd = 2.5\n")).unwrap();
+            assert_eq!(cfg.embedding.url.as_deref(), Some(url));
+            assert_eq!(cfg.embedding.monthly_usd, 2.5);
+        }
+        for bad in [
+            "url = \"https://example.com/run\"",
+            "url = \"http://api.cloudflare.com/run\"",
+            "url = \"https://api.cloudflare.com.example.com/run\"",
+            "url = \"http://127.0.0.1.example.com/run\"",
+            "monthly_usd = -1.0",
+            "monthly_usd = nan",
+            "monthly_usd = 0",
+            "monthly_usd = 0.0",
+        ] {
+            assert!(at(bad).is_err(), "{bad}");
+        }
     }
 }

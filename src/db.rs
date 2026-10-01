@@ -501,7 +501,7 @@ fn ensure_fts(conn: &mut Connection) -> Result<()> {
 
 /// sqlite-vec, compiled in and registered for every connection this process opens (`vec_docs`
 /// is a `vec0` table, which a connection without the module cannot read).
-fn register_sqlite_vec() {
+pub(crate) fn register_sqlite_vec() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         type Init = unsafe extern "C" fn(

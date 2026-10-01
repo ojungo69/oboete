@@ -452,7 +452,7 @@ fn activate(k: &Connection, uid: &str) -> Result<()> {
     }
     let Some((op_device, op_seq, text)) = active else {
         k.execute("DELETE FROM claims WHERE uid = ?1", [uid])?;
-        return Ok(());
+        return crate::embed_phase::touched(k, "c", uid);
     };
     let rowid: i64 = k.query_row(
         "INSERT INTO claims(uid, op_device, op_seq) VALUES(?1, ?2, ?3)
@@ -465,7 +465,7 @@ fn activate(k: &Connection, uid: &str) -> Result<()> {
         "INSERT INTO claims_fts(rowid, text) VALUES(?1, ?2)",
         params![rowid, text],
     )?;
-    Ok(())
+    crate::embed_phase::touched(k, "c", uid)
 }
 
 #[cfg(test)]
@@ -737,8 +737,9 @@ mod tests {
         run(&raw, &mut k);
         let passed = current(&k, "r").unwrap();
         assert_eq!(passed.len(), 100);
-        // The other order, step by step.
-        let other = Connection::open_in_memory().unwrap();
+        // The other order, step by step, into another home's knowledge.db.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let other = crate::knowledge::open(elsewhere.path()).unwrap();
         for id in devices.iter().rev() {
             Claims.step(&raw, &other, id, 0).unwrap();
         }

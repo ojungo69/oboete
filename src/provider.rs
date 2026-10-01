@@ -124,6 +124,21 @@ pub(crate) struct CallError {
     rate: Option<providers_db::RateLeft>,
 }
 
+/// An embedding request's failure, rested as a curator's is (milestone 4 Task 5, Step 6).
+impl From<&crate::embed::Failure> for CallError {
+    fn from(f: &crate::embed::Failure) -> Self {
+        Self {
+            status: f.status,
+            retry_after_s: f.retry_after_s,
+            message: f.message.clone(),
+            usage: Usage::default(),
+            sent: f.sent,
+            cool_until: None,
+            rate: None,
+        }
+    }
+}
+
 impl CallError {
     fn other(message: impl Into<String>) -> Self {
         Self {
@@ -494,7 +509,7 @@ fn cooldown_for(e: &CallError) -> Option<Duration> {
 /// A 429 that names no reset doubles its cooldown each time, up to an hour: Mistral's key at
 /// 0 requests a minute refused every request that way, and a flat 45 s re-sent each window to it
 /// (2026-09-27).
-fn next_state(was: providers_db::State, e: &CallError) -> providers_db::State {
+pub(crate) fn next_state(was: providers_db::State, e: &CallError) -> providers_db::State {
     // A rest its own allowance set before anything was sent (codex at its usage line) is neither
     // an outage nor a failure: only the rest, to the millisecond.
     if !e.sent
@@ -680,7 +695,7 @@ fn free_limit(url: &str, key: &str) -> Option<u32> {
 /// An agent for requests to `url`: `timeout` in all, any status as an answer, at most
 /// `redirects` redirects, and a server on this machine (Ollama, the tests' servers) never reached
 /// through the environment's proxy.
-fn agent(url: &str, timeout: Duration, redirects: u32) -> ureq::Agent {
+pub(crate) fn agent(url: &str, timeout: Duration, redirects: u32) -> ureq::Agent {
     let mut config = ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .http_status_as_error(false)
@@ -859,7 +874,7 @@ fn usage_cli(cli: &str, stdout: &str) -> Usage {
     }
 }
 
-fn is_loopback(url: &str) -> bool {
+pub(crate) fn is_loopback(url: &str) -> bool {
     let host = url.split_once("://").map_or(url, |(_, rest)| rest);
     let host = host.split(['/', '?', '#']).next().unwrap_or("");
     let host = host.rsplit_once('@').map_or(host, |(_, h)| h);

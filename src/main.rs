@@ -16,6 +16,7 @@ mod curate;
 mod db;
 mod digest;
 mod embed;
+mod embed_phase;
 mod failure;
 mod gates;
 mod hook;
@@ -361,6 +362,11 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 limit,
             };
             let answer = search::b::query(&home, &q)?;
+            if let search::b::Vector::Skipped(why) = answer.vector
+                && why != search::b::VectorSkip::Off
+            {
+                eprintln!("oboete: full text only: {}", why.why());
+            }
             let shown = q.searched().is_none();
             emit(
                 &answer
