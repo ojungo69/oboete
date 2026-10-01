@@ -145,8 +145,9 @@ example), but not a fault of the model itself. It is tried only once.
 
 ## Triggers and limits
 
-- Non-draft PRs whose head branch belongs to this repository run on open, reopen,
-  and transition from draft to ready for review, not on each push: every run is
+- With the `pull_request_target` trigger (off since 2026-10-02, below), non-draft
+  PRs whose head branch belongs to this repository run on open, reopen, and
+  transition from draft to ready for review, not on each push: every run is
   paid, through the owner's DeepSeek key (US$0.03 to 0.08 measured, an estimated
   US$0.15 to 0.18 for the largest PR), or from OpenRouter credits for the calls
   another provider serves when that key fails (Routing, above), and a run on every
@@ -155,6 +156,12 @@ example), but not a fault of the model itself. It is tried only once.
   2026-09-29 to review a PR when it opens and after the push taken as its last,
   run by hand, as CodeRabbit is. While Codex or cubic cannot review (a usage
   limit), run it after each push instead.
+- On 2026-10-02 the OpenRouter account had USD 2.19 of its USD 49 credits left,
+  and the owner chose to run reviews only by hand, at a decisive moment: the
+  final head of a PR in security scope or with a large change of behaviour, when
+  the other review lanes leave it thin. The review at a PR's opening is off: the
+  `pull_request_target` trigger is removed and its conditions are kept, so adding
+  it back restores that review.
 - A maintainer can review any open, non-draft PR, a fork's too (fork PRs do not
   consume quota automatically), from **Actions > OpenCodeReview > Run workflow**,
   selecting the default branch and supplying the PR number. For example:
@@ -169,9 +176,9 @@ example), but not a fault of the model itself. It is tried only once.
   shared one review slot (a job-level `concurrency` group with `queue: max`): on
   2026-10-01, at about an hour and a half a review, #318's opening review waited
   2 hours 44 minutes for its turn and #319's more than three and a half hours.
-  Parallel reviews share the providers' rate limits: NIM's
-  fallback answers 504 to slow calls already (below), and it may do so more often
-  with several reviews at once.
+  Parallel reviews share the providers' limits: a call the DeepSeek key does not
+  serve goes to OpenRouter's credits (Routing, above), and NIM's fallback, which
+  already answers 504 to slow calls (below), may do so more often.
 - At the start of a job, the workflow fetches the current PR metadata. Automatic
   reviews skip closed/draft PRs; one that started after a push (a job can wait for
   a runner) reviews the current head, as manual reviews do, since no push queues a

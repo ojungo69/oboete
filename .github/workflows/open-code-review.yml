@@ -1,10 +1,12 @@
 name: OpenCodeReview
 
 on:
-  # Not on each push: every run is paid, so a PR's last push is reviewed by hand with
-  # workflow_dispatch (owner, 2026-09-29; docs/open-code-review.md).
-  pull_request_target:
-    types: [opened, reopened, ready_for_review]
+  # By hand only, at a decisive moment: every run is paid, and the OpenRouter credits that pay
+  # for the calls the owner's DeepSeek key does not serve are nearly spent (owner, 2026-10-02;
+  # docs/open-code-review.md). The pull_request_target conditions below are kept, so adding
+  #   pull_request_target:
+  #     types: [opened, reopened, ready_for_review]
+  # back here restores the review at a PR's opening.
   workflow_dispatch:
     inputs:
       pr_number:
