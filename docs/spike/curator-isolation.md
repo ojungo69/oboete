@@ -111,6 +111,7 @@ The profile does not govern tools that act outside commands:
 - `--bare` would skip them, but it reads only an API key and never the subscription login, so it is not used.
 - They are turned off in `--settings`, with `"enabledPlugins": {"agents-md@builtin": false, "telemetry@builtin": false}`. The init then lists `plugins: []` and the answer is kept (probe of 2026-09-28: `tools: []`, `plugins: []`, result `success`).
 - The rule does not change: an init that lists any plugin still discards the answer. A built-in plugin that a later version adds therefore stops the claude entry (the chain goes on to the next entry) until its name is added to the settings.
+- Claude Code 2.1.287 (2026-10-02) added a third, `cc-plugin-plugin-authoring` (`"source": "cc-plugin-plugin-authoring@builtin"`), and every Haiku call of milestone 4's dev run failed the isolation check on it ("claude isolation: its init reported a tool, MCP server, plugin, ..."). It is turned off the same way; with it in `--settings` the init lists `plugins: []` again (probe of 2026-10-02, the owner's user, 2.1.287).
 
 ## The gate (2026-09-27, milestone 3, Task 3; codex 0.155.1, dogfood user)
 
