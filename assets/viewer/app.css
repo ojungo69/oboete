@@ -91,6 +91,13 @@ body {
 .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 .field.grow { flex: 1 1 18rem; }
 
+#controls .field { min-width: 0; }
+#controls > .field:first-child { flex: 0 1 22rem; }
+#controls select, #controls input:not([type="checkbox"]) { width: 100%; max-width: 100%; }
+.filters { display: flex; flex: 1 1 100%; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.history-filter { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); padding-bottom: 7px; }
+.history-filter input { margin: 0; }
+
 select, input, button {
   font: inherit;
   font-size: 14px;
@@ -110,22 +117,19 @@ button {
   cursor: pointer;
 }
 
-button.quiet, .entry button, .card button {
+button.quiet, .entry button {
   background: transparent;
   color: var(--text);
   border-color: var(--line);
 }
 button.small { font-size: 12px; padding: 3px 8px; }
 
-button.danger { color: var(--muted); }
-button.danger.armed { color: var(--red); border-color: var(--red); background: var(--red-bg); }
-
 button:active { transform: scale(0.98); }
 button:disabled { opacity: 0.6; cursor: default; }
 
 :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 
-#tabs { display: flex; gap: 4px; margin-top: 10px; max-width: 60rem; }
+#tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; max-width: 60rem; }
 .tab {
   background: transparent;
   color: var(--muted);
@@ -145,11 +149,12 @@ main { max-width: 60rem; padding: 8px 24px 64px; }
 #status:empty { margin: 0; }
 #status.error { color: var(--red); }
 
-.entries, .cards { list-style: none; margin: 0; padding: 0; }
+.entries { list-style: none; margin: 0; padding: 0; }
 
 .entry { border-bottom: 1px solid var(--line); padding: 16px 0; }
+.entry.delivered { margin-left: 16px; padding-left: 16px; border-left: 3px solid var(--blue); }
 
-.meta { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; font: 12px/1.5 var(--mono); color: var(--muted); }
+.meta { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; font: 12px/1.5 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
 
 .title { font-weight: 600; margin: 6px 0 0; }
 
@@ -158,28 +163,30 @@ main { max-width: 60rem; padding: 8px 24px 64px; }
 .lead { color: var(--muted); margin: 8px 0; }
 
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.entry button, .card button { font-size: 13px; padding: 4px 10px; }
+.entry button { font-size: 13px; padding: 4px 10px; }
+.relation { font-size: 13px; color: var(--muted); margin: 8px 0; }
+.relation button, .claim-links button { overflow-wrap: anywhere; text-align: left; max-width: 100%; }
 
-/* Cards: one summary, prompt or observation, in the feed and under a session. */
-.card {
+/* Full documents and claims expand next to the entry or link that opened them. */
+.detail {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 12px 14px;
   margin: 10px 0;
+  overflow-wrap: anywhere;
 }
-.card .head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
-.card .head .title { margin: 0; }
-.card .glyph { font-size: 14px; width: 1.4em; text-align: center; color: var(--muted); }
-.card.summary { border-left: 3px solid var(--yellow); }
-.card.decision { border-left: 3px solid var(--blue); }
-.card.bugfix { border-left: 3px solid var(--red); }
-.card.discovery, .card.feature { border-left: 3px solid var(--green); }
-.card.preference, .card.change { border-left: 3px solid var(--gray); }
-.card.prompt { border-left: 3px solid var(--accent); }
-.card .meta { margin-top: 8px; }
-.card button { margin-top: 8px; }
-.cards { margin: 12px 0 0; padding: 0 0 0 16px; border-left: 1px solid var(--line); }
+.detail h3 { font-size: 14px; margin: 0 0 6px; }
+.detail h4 { font-size: 13px; margin: 12px 0 4px; }
+.document-text { font: 13px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; }
+.claim-meta { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 16px; margin: 8px 0; }
+.claim-meta dt { color: var(--muted); }
+.claim-meta dd { margin: 0; overflow-wrap: anywhere; }
+.quotes, .claim-links { list-style: none; padding: 0; margin: 4px 0; }
+.quotes > li, .claim-history > li { margin: 10px 0; }
+.claim-history { padding-left: 24px; }
+.vector-note { color: var(--muted); }
+.more { margin-top: 12px; }
 
 .badge {
   display: inline-block;
@@ -195,6 +202,9 @@ main { max-width: 60rem; padding: 8px 24px 64px; }
 .badge.bugfix { background: var(--red-bg); color: var(--red); }
 .badge.discovery, .badge.feature { background: var(--green-bg); color: var(--green); }
 .badge.preference, .badge.summary { background: var(--yellow-bg); color: var(--yellow); }
+.badge.current, .badge.citable { background: var(--green-bg); color: var(--green); }
+.badge.delivered, .badge.quote-only { background: var(--blue-bg); color: var(--blue); }
+.badge.superseded { background: var(--yellow-bg); color: var(--yellow); }
 
 /* Context: the exact text an agent is handed. */
 .context {
@@ -214,10 +224,10 @@ main { max-width: 60rem; padding: 8px 24px 64px; }
 .stat dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 0; }
 .stat dt { color: var(--muted); }
 .stat dd { margin: 0; font-variant-numeric: tabular-nums; }
-.kinds { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; }
-.providers { border-collapse: collapse; font-variant-numeric: tabular-nums; }
-.providers th, .providers td { text-align: left; padding: 4px 14px 4px 0; border-bottom: 1px solid var(--line); }
-.providers th { font-size: 12px; color: var(--muted); font-weight: 600; }
+.table-scroll { overflow-x: auto; }
+.stats-table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.stats-table th, .stats-table td { text-align: left; padding: 4px 14px 4px 0; border-bottom: 1px solid var(--line); }
+.stats-table th { font-size: 12px; color: var(--muted); font-weight: 600; }
 
 /* Settings (#94) */
 .settings section { margin: 20px 0; }

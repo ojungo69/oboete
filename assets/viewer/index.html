@@ -22,14 +22,35 @@
     </label>
     <label class="field grow">
       <span>Search</span>
-      <input id="q" type="search" autocomplete="off" placeholder="Words from prompts, decisions, fixes, summaries">
+      <input id="q" type="search" autocomplete="off" placeholder="Words from claims, imported history or records">
     </label>
     <button type="submit">Search</button>
     <button type="button" id="refresh" class="quiet">Refresh</button>
+    <div class="filters">
+      <label class="field">
+        <span>Since</span>
+        <input id="since" type="date">
+      </label>
+      <label class="field">
+        <span>Until (whole day included)</span>
+        <input id="until" type="date">
+      </label>
+      <label class="field">
+        <span>Raw records</span>
+        <select id="raw">
+          <option value="below">Below claims and imported history</option>
+          <option value="off">Off</option>
+          <option value="only">Only raw records</option>
+        </select>
+      </label>
+      <label class="history-filter">
+        <input id="history" type="checkbox">
+        <span>Include ended claims in their place</span>
+      </label>
+    </div>
   </form>
   <nav id="tabs" aria-label="Views">
-    <button type="button" data-view="feed" class="tab">Feed</button>
-    <button type="button" data-view="sessions" class="tab">Sessions</button>
+    <button type="button" data-view="timeline" class="tab">Timeline</button>
     <button type="button" data-view="context" class="tab">Context</button>
     <button type="button" data-view="stats" class="tab">Stats</button>
     <button type="button" data-view="settings" class="tab">Settings</button>
@@ -37,7 +58,8 @@
 </header>
 <main>
   <output id="status" aria-live="polite"></output>
-  <h2 id="heading">Feed</h2>
+  <h2 id="heading">Timeline</h2>
+  <p id="vector" class="vector-note" hidden></p>
   <ol id="list" class="entries"></ol>
   <div id="panel"></div>
 </main>

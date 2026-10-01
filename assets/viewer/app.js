@@ -1,5 +1,4 @@
-// Loaded as a module (strict, deferred, top-level await). Everything from the store is rendered
-// with text nodes only: bodies are model-written text that may contain HTML.
+// Loaded as a module (strict, deferred, top-level await). Store text is rendered as text nodes.
 
 const token = new URLSearchParams(location.hash.slice(1)).get('t') || '';
 const $ = (id) => document.getElementById(id);
@@ -20,19 +19,35 @@ function setStatus(text, isError = false, textLang = null) {
   else $('status').removeAttribute('lang');
 }
 
-async function api(name, params = {}, method = 'GET') {
-  const res = await fetch(`/api/${name}?${new URLSearchParams(params)}`, {
-    method,
-    headers: { 'X-Oboete-Token': token },
+function showError(error, retry) {
+  setStatus(error.message, true);
+  const notice = $('status').firstChild;
+  if (error.status !== 503) return notice;
+  const button = el('button', 'quiet small', 'Retry');
+  button.type = 'button';
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try { await retry(); } finally { button.disabled = false; }
   });
-  if (res.status === 401) {
-    throw new Error('This page needs the full address printed by `oboete view` (it carries the access key after #).');
-  }
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
-  return res.status === 204 ? null : res.json();
+  $('status').append(' ', button);
+  return notice;
 }
 
-const base = (path) => path.split('/').findLast(Boolean) || path;
+async function api(name, params = {}) {
+  const res = await fetch(`/api/${name}?${new URLSearchParams(params)}`, {
+    headers: { 'X-Oboete-Token': token },
+  });
+  if (!res.ok) {
+    let message = `${res.status}: ${await res.text()}`;
+    if (res.status === 401) {
+      message += '. This page needs the full address printed by `oboete view` (it carries the access key after #).';
+    }
+    const error = new Error(message);
+    error.status = res.status;
+    throw error;
+  }
+  return res.json();
+}
 
 // localStorage is a convenience: a private window or blocked storage just forgets.
 function remember(key, value) {
@@ -53,199 +68,141 @@ function applyTheme() {
   $('theme').textContent = `Theme: ${theme}`;
 }
 
-// --- Cards ----------------------------------------------------------------------------------
-
-const GLYPH = new Map([
-  ['summary', '🎯'], ['prompt', '💬'], ['decision', '⚖'], ['bugfix', '●'], ['feature', '◆'],
-  ['discovery', '○'], ['change', '✓'], ['preference', '★'],
-]);
-const HEADINGS = new Map([['summary', 'Session summary'], ['prompt', 'User prompt']]);
+// --- Entries and their details --------------------------------------------------------------
 
 function badge(kind) {
   return el('span', `badge ${kind}`, kind);
 }
 
-// A button that loads a panel below it once, then shows and hides it. `key` names the panel so a
-// redraw can reopen what was open.
+function localTime(ms) {
+  const date = new Date(ms);
+  const time = el('time', null, date.toLocaleString('en-US'));
+  if (!Number.isNaN(date.getTime())) time.dateTime = date.toISOString();
+  return time;
+}
+
+// A redraw reopens details the owner left open.
 const opened = new Set();
 
-function expander(label, key, load) {
+function expander(label, key, load, restore = true) {
   const button = el('button', null, label);
   button.type = 'button';
   button.setAttribute('aria-expanded', 'false');
   let panel = null;
+  let failureNotice = null;
   const toggle = async () => {
+    if (button.disabled) return;
     const open = button.getAttribute('aria-expanded') === 'true';
     if (panel) {
       panel.hidden = open;
       button.setAttribute('aria-expanded', String(!open));
-      if (open) opened.delete(key); else opened.add(key);
+      if (restore) {
+        if (open) opened.delete(key); else opened.add(key);
+      }
       return;
     }
     button.disabled = true;
     try {
-      panel = await load();
-      // Below the whole button row when the button sits in one.
+      const loaded = await load();
+      if (!button.isConnected) return;
+      panel = loaded;
       const row = button.parentElement;
       (row?.classList.contains('actions') ? row : button).after(panel);
       button.setAttribute('aria-expanded', 'true');
-      opened.add(key);
+      if (restore) opened.add(key);
+      if (failureNotice?.isConnected) setStatus('');
     } catch (e) {
-      setStatus(e.message, true);
+      if (button.isConnected) failureNotice = showError(e, toggle);
     } finally {
       button.disabled = false;
     }
   };
   button.addEventListener('click', toggle);
-  if (opened.has(key)) toggle();
+  if (restore && opened.has(key)) void toggle();
   return button;
 }
 
-// Delete in two clicks, no dialog: the first arms the button for five seconds.
-function deleter(label, run) {
-  const button = el('button', 'danger', label);
-  button.type = 'button';
-  let armed = false;
-  let timer = null;
-  const disarm = () => {
-    armed = false;
-    button.textContent = label;
-    button.classList.remove('armed');
-    clearTimeout(timer);
-  };
-  button.addEventListener('click', async () => {
-    if (!armed) {
-      armed = true;
-      button.textContent = `Confirm ${label.toLowerCase()}`;
-      button.classList.add('armed');
-      timer = setTimeout(disarm, 5000);
-      return;
-    }
-    clearTimeout(timer);
-    button.disabled = true;
-    try {
-      await run();
-    } catch (e) {
-      setStatus(e.message, true);
-      button.disabled = false;
-      disarm();
-    }
+function fullText(key, label = 'Full text') {
+  const button = expander(label, `doc:${key}`, async () => {
+    const doc = await api('doc', { id: key });
+    return el('section', 'detail', el('h4', null, doc.id), el('pre', 'document-text', doc.text));
   });
+  button.setAttribute('aria-label', `Full text of ${key}`);
   return button;
 }
 
-function deleteDoc(d, card) {
-  return deleter('Delete', async () => {
-    await api('doc', { id: d.doc }, 'DELETE');
-    card.remove();
-    setStatus(`Deleted ${d.doc}.`);
-  });
+function claimLink(uid, label = uid, restore = false) {
+  // Reciprocal claim links open only on a click; restoring them would follow a cycle forever.
+  const button = expander(label, `claim:${uid}`, () => claimPanel(uid), restore);
+  button.setAttribute('aria-label', `View claim ${uid}`);
+  return button;
 }
 
-// Long text (a pasted log, a task written for another agent) starts folded to its head: the
-// first lines, at most so many characters. `unfolded` holds the doc ids opened in full (here or
-// through a search hit's Full text), so a redraw keeps them open.
-const FOLD_LINES = 8;
-const FOLD_CHARS = 600;
-const unfolded = new Set();
-
-function folded(text, key) {
-  const head = Array.from(text.split('\n').slice(0, FOLD_LINES).join('\n')).slice(0, FOLD_CHARS).join('');
-  if (head === text || unfolded.has(key)) return [el('p', 'text', text)];
-  const p = el('p', 'text', `${head}…`);
-  const all = el('button', 'quiet small', 'Show all');
-  all.type = 'button';
-  all.addEventListener('click', () => {
-    p.textContent = text;
-    all.remove();
-    unfolded.add(key);
-  });
-  return [p, all];
+function claimLinks(heading, uids) {
+  return el('section', null, el('h4', null, heading),
+    uids.length ? el('ul', 'claim-links', ...uids.map((uid) => el('li', null, claimLink(uid)))) : el('p', 'text pending', 'None.'));
 }
 
-// One summary, prompt or observation. `extra` are meta cells shown before the id (agent,
-// repository).
-function card(d, extra = []) {
-  const kind = d.kind || 'summary';
-  const li = el('li', `card ${kind}`);
-  const head = el('div', 'head',
-    el('span', 'glyph', GLYPH.get(kind) || '·'),
-    badge(kind),
-    el('span', 'title', HEADINGS.get(kind) || d.title));
-  const meta = el('div', 'meta', el('span', null, d.when), ...extra, el('span', null, d.doc));
-  li.append(head, ...folded(d.text, d.doc), meta, deleteDoc(d, li));
-  return li;
+async function claimPanel(uid) {
+  const c = await api('claim', { id: uid });
+  const quotes = c.quotes.map((q) => el('li', null,
+    el('p', 'text', q.text), fullText(q.key, q.key)));
+  const history = c.history.map((change) => el('li', null,
+    el('div', 'meta', localTime(change.ts),
+      change.tier === null && change.recipe === null ? el('span', null, "Owner's correction") : null,
+      change.tier === null ? null : el('span', null, `Tier: ${change.tier}`),
+      change.recipe === null ? null : el('span', null, `Recipe: ${change.recipe}`),
+      el('span', null, change.status === null ? 'Status unchanged' : `Status: ${change.status}`)),
+    el('p', change.body === null ? 'text pending' : 'text', change.body ?? 'Text unchanged')));
+  return el('section', 'detail claim-view',
+    el('h3', null, `Claim ${c.uid}`),
+    el('div', 'meta', badge(c.kind), badge(c.status), badge(c.label), localTime(c.when)),
+    el('dl', 'claim-meta', ...row('Delivered', c.delivered ? 'Yes' : 'No'),
+      ...row('Speaker', c.speaker), ...row('Scope', c.scope), ...row('Repository', c.repo ?? '–')),
+    el('p', 'text', c.text),
+    c.later ? el('p', 'relation', 'Later claim: ', claimLink(c.later)) : null,
+    el('section', null, el('h4', null, 'Evidence quotes'),
+      quotes.length ? el('ul', 'quotes', ...quotes) : el('p', 'text pending', 'No evidence quotes.')),
+    claimLinks('Supersedes', c.supersedes), claimLinks('Ended by', c.ended_by),
+    el('section', null, el('h4', null, 'History (oldest first)'),
+      history.length ? el('ol', 'claim-history', ...history) : el('p', 'text pending', 'No changes.')));
 }
 
-function sessionEntry(s) {
-  const summary = s.summary
-    ? el('p', 'text', s.summary)
-    : el('p', 'text pending', 'Not summarized yet.');
-  const li = el('li', 'entry');
-  const more = expander('Prompts and observations', s.id, async () => {
-    const docs = await api('session', { id: s.id });
-    const rows = docs.filter((d) => d.kind !== 'summary');
-    return rows.length
-      ? el('ul', 'cards', ...rows.map((d) => card(d)))
-      : el('p', 'text pending', 'No prompts or observations for this session.');
-  });
-  const del = deleter('Delete session', async () => {
-    await api('session', { id: s.id }, 'DELETE');
-    li.remove();
-    setStatus(`Deleted session ${s.id.slice(-8)} with everything it left.`);
-  });
-  li.append(
-    el('div', 'meta',
-      el('span', null, s.when),
-      el('span', null, s.agent),
-      el('span', null, base(s.repo)),
-      el('span', null, s.id.slice(-8))),
-    summary,
-    el('div', 'actions', more, del));
-  return li;
+function entryMeta(d, all) {
+  return el('div', 'meta', badge(d.class), d.label ? badge(d.label) : null,
+    badge(d.kind), d.status ? badge(d.status) : null, localTime(d.when),
+    all ? el('span', null, d.repo ?? '–') : null, el('span', null, d.key));
 }
 
-function hitEntry(h) {
-  const text = el('p', 'text', h.text);
-  // The snippet becomes the full text in place, and stays so when the page redraws.
-  const full = el('button', null, 'Full text');
-  full.type = 'button';
-  const expand = async () => {
-    full.disabled = true;
-    // Before the await: a redraw landing while the text loads must expand this hit too.
-    unfolded.add(h.doc);
-    try {
-      text.textContent = (await api('doc', { id: h.doc })).text;
-      full.remove();
-    } catch (e) {
-      unfolded.delete(h.doc);
-      setStatus(e.message, true);
-      full.disabled = false;
-    }
-  };
-  full.addEventListener('click', expand);
-  if (unfolded.has(h.doc)) expand();
-  const li = el('li', 'entry');
-  li.append(
-    el('div', 'meta', badge(h.kind), el('span', null, h.doc), el('span', null, h.when), el('span', null, base(h.repo))),
-    h.title ? el('p', 'title', h.title) : null,
-    text,
-    el('div', 'actions', full, deleteDoc(h, li)));
-  return li;
+function entryActions(key, isClaim) {
+  return el('div', 'actions', fullText(key), isClaim ? claimLink(key, 'View claim', true) : null);
+}
+
+// Built through el(), which leaves out the nulls: Element.append would print them as "null".
+function hitEntry(h, all) {
+  return el('li', h.class === 'delivered' ? 'entry delivered' : 'entry', entryMeta(h, all),
+    h.class === 'delivered' ? el('p', 'relation', 'Earlier decision, paired with later claim: ', claimLink(h.later)) : null,
+    h.class === 'superseded' && h.by ? el('p', 'relation', 'Superseded by ', claimLink(h.by)) : null,
+    h.title ? el('p', 'title', h.title) : null, el('p', 'text', h.snippet),
+    entryActions(h.key, ['current', 'delivered', 'superseded'].includes(h.class)));
+}
+
+function timelineEntry(item, all) {
+  return el('li', 'entry', entryMeta(item, all), el('p', 'text', item.text),
+    entryActions(item.key, item.class === 'claim'));
 }
 
 // --- Views ----------------------------------------------------------------------------------
 
-// The API returns at most this many rows; the page says so when a list is cut there.
 const LIMIT = 100;
-
-const VIEWS = ['feed', 'sessions', 'context', 'stats', 'settings'];
-let view = VIEWS.includes(recall('oboete-view', 'feed')) ? recall('oboete-view', 'feed') : 'feed';
+const VIEWS = ['timeline', 'context', 'stats', 'settings'];
+let view = VIEWS.includes(recall('oboete-view', 'timeline')) ? recall('oboete-view', 'timeline') : 'timeline';
+let currentRepo = '';
+let reposLoaded = false;
 
 function setView(name) {
   view = name;
   remember('oboete-view', name);
-  // The repository picker, search and Refresh redraw the view, which would drop unsaved settings.
   $('controls').hidden = name === 'settings';
   for (const b of document.querySelectorAll('#tabs .tab')) {
     b.classList.toggle('active', b.dataset.view === name);
@@ -253,53 +210,79 @@ function setView(name) {
   }
 }
 
+// replaceChildren, like append, would print a null as "null": a view leaves out a part with null.
+const present = (nodes) => nodes.filter((n) => n !== null && n !== undefined);
+
 function draw(heading, list, panel) {
-  // The page's own language; the settings view marks its heading with its own (#274).
   $('heading').removeAttribute('lang');
   $('heading').replaceChildren(...(Array.isArray(heading) ? heading : [heading]));
-  $('list').replaceChildren(...list);
-  $('panel').replaceChildren(...panel);
+  $('list').replaceChildren(...present(list));
+  $('panel').replaceChildren(...present(panel));
+  $('vector').textContent = '';
+  $('vector').hidden = true;
 }
 
-function cutNotice(n, what, more) {
-  return n === LIMIT ? `The newest ${LIMIT} ${what}. ${more}` : '';
+function scope(repo) {
+  return repo ? { repo } : { all: '1' };
 }
 
-async function showFeed(repo) {
-  const rows = await api('feed', { repo, limit: LIMIT });
+async function showTimeline(repo) {
+  const params = { ...scope(repo), limit: LIMIT };
+  const page = await api('timeline', params);
   return () => {
-    draw('Feed', rows.map((d) => card(d, [el('span', null, d.agent), el('span', null, base(d.repo)), el('span', null, d.session.slice(-8))])), []);
-    setStatus(rows.length ? cutNotice(rows.length, 'entries', 'Search to find older ones.') : 'Nothing remembered yet.');
-  };
-}
-
-async function showSessions(repo) {
-  const sessions = await api('timeline', { repo, limit: LIMIT });
-  return () => {
-    draw('Sessions', sessions.map(sessionEntry), []);
-    setStatus(sessions.length ? cutNotice(sessions.length, 'sessions', 'Search to find older ones.') : 'No sessions recorded yet.');
+    const mine = generation;
+    let next = page.next;
+    let count = page.items.length;
+    const more = el('button', 'quiet more', 'More');
+    more.type = 'button';
+    const loadMore = async () => {
+      if (more.disabled) return;
+      more.disabled = true;
+      try {
+        const page = await api('timeline', { ...params, before: next });
+        if (mine !== generation || !more.isConnected) return;
+        $('list').append(...page.items.map((item) => timelineEntry(item, !repo)));
+        count += page.items.length;
+        next = page.next;
+        if (!next) more.remove();
+        setStatus(`${count} entries loaded.`);
+      } catch (e) {
+        if (mine === generation) showError(e, loadMore);
+      } finally {
+        more.disabled = false;
+      }
+    };
+    more.addEventListener('click', loadMore);
+    draw('Timeline', page.items.map((item) => timelineEntry(item, !repo)), next ? [more] : []);
+    setStatus(count ? `${count} entries loaded.` : 'No entries recorded yet.');
   };
 }
 
 async function showSearch(repo, q) {
-  const hits = await api('search', { q, repo, limit: LIMIT });
+  const answer = await api('search', { q, ...scope(repo), limit: LIMIT,
+    since: $('since').value, until: $('until').value,
+    history: $('history').checked ? '1' : '0', raw: $('raw').value });
   return () => {
-    draw(['Search: ', el('span', 'query', q)], hits.map(hitEntry), []);
-    if (hits.length === LIMIT) setStatus(`The ${LIMIT} best matches. Add words to narrow the search.`);
-    else if (hits.length) setStatus(`${hits.length} found`);
-    else setStatus('Nothing found.');
+    // The server puts each delivered decision immediately after the claim that ended it.
+    draw(['Search: ', el('span', 'query', q)], answer.hits.map((h) => hitEntry(h, !repo)), []);
+    if (answer.vector !== 'used') {
+      $('vector').textContent = `Results are full text only (${answer.vector})${answer.why ? `: ${answer.why}` : '.'}`;
+      $('vector').hidden = false;
+    }
+    setStatus(answer.hits.length === LIMIT ? `The ${LIMIT} best matches. Add words to narrow the search.`
+      : answer.hits.length ? `${answer.hits.length} found.` : 'Nothing found.');
   };
 }
 
 async function showContext(repo) {
-  const c = await api('context', { repo });
+  // Omitting the viewer's own label also preserves its actual checkout branch.
+  const c = await api('context', repo && repo !== currentRepo ? { repo } : {});
   return () => {
-    const body = c.text
-      ? el('pre', 'context', c.text)
-      : el('p', 'text pending', 'Nothing to hand over yet: this repository has no summaries or observations.');
     draw('Context handed to a new session', [], [
-      el('p', 'lead', `What an agent starting in ${base(c.repo)} reads first. ${c.chars} characters.`),
-      body,
+      !repo ? el('p', 'lead', "Context shows one checkout; All repositories uses the viewer's checkout.") : null,
+      el('dl', 'claim-meta', ...row('Repository', c.repo), ...row('Branch', c.branch || '–'),
+        ...row('SessionStart', c.on ? 'On' : 'Off'), ...row('Size', `${c.chars} characters`)),
+      c.text ? el('pre', 'context', c.text) : el('p', 'text pending', 'Nothing is handed over for this checkout yet.'),
     ]);
     setStatus('');
   };
@@ -309,37 +292,35 @@ function row(term, value) {
   return [el('dt', null, term), el('dd', null, String(value))];
 }
 
-async function showStats(repo) {
-  const s = await api('stats', { repo });
+function statsTable(headers, rows, empty) {
+  if (!rows.length) return el('p', 'text pending', empty);
+  return el('div', 'table-scroll', el('table', 'stats-table',
+    el('thead', null, el('tr', null, ...headers.map((h) => {
+      const th = el('th', null, h);
+      th.scope = 'col';
+      return th;
+    }))),
+    el('tbody', null, ...rows.map((cells) => el('tr', null,
+      ...cells.map((cell) => el('td', null, String(cell ?? '–'))))))));
+}
+
+async function showStats() {
+  const s = await api('stats');
   return () => {
-    const kinds = s.observations.kinds.map((k) => el('li', null, badge(k.kind), ` ${k.count}`));
-    const providers = s.providers.length
-      ? el('table', 'providers',
-        el('thead', null, el('tr', null, ...['Provider', 'OK', 'Failed', 'Waited', 'Avg ms'].map((h) => {
-          const th = el('th', null, h);
-          th.scope = 'col';
-          return th;
-        }))),
-        el('tbody', null, ...s.providers.map((p) => el('tr', null,
-          el('td', null, p.provider), el('td', null, String(p.ok)), el('td', null, String(p.failed)),
-          el('td', null, String(p.waited)), el('td', null, p.avg_ms === null ? '–' : String(p.avg_ms))))))
-      : el('p', 'text pending', 'No provider calls in the last seven days.');
-    draw('Stats', [], [
-      el('section', 'stat', el('h3', null, 'Sessions'), el('dl', null,
-        ...row('Total', s.sessions.total),
-        ...row('Summarized', s.sessions.summarized),
-        ...row('Awaiting summary', s.sessions.pending),
-        ...row('Handed context', s.sessions.injected),
-        ...row('First', s.sessions.first || '–'),
-        ...row('Last activity', s.sessions.last || '–'))),
-      el('section', 'stat', el('h3', null, 'Knowledge'), el('dl', null,
-        ...row('Observations', s.observations.total),
-        ...row('Summaries', s.summaries),
-        ...row('Prompts', s.prompts)),
-        kinds.length ? el('ul', 'kinds', ...kinds) : null),
+    draw('Stats (all repositories)', [], [
+      el('section', 'stat', el('h3', null, 'Records per device'),
+        statsTable(['Device', 'Records'], s.records.map((r) => [r.device, r.records]), 'No records.')),
+      el('section', 'stat', el('h3', null, 'Claims by kind and status'),
+        statsTable(['Kind', 'Status', 'Count'], s.claims.map((c) => [c.kind, c.status, c.count]), 'No claims.')),
+      el('section', 'stat', el('h3', null, 'Skipped claims'),
+        statsTable(['Reason', 'Count'], s.claim_skips.map((c) => [c.reason, c.count]), 'No skipped claims.')),
       el('section', 'stat', el('h3', null, 'Store'), el('dl', null,
-        ...row('Database', `${(s.db_bytes / 1048576).toFixed(1)} MB (all repositories)`))),
-      el('section', 'stat', el('h3', null, 'Providers, last 7 days (all repositories)'), providers),
+        ...row('Size', `${s.bytes.toLocaleString('en-US')} bytes (${(s.bytes / 1048576).toFixed(1)} MB)`),
+        ...row('Rebuilding', s.rebuilding ? 'Yes' : 'No'))),
+      el('section', 'stat', el('h3', null, 'Providers, last 7 days'),
+        statsTable(['Provider', 'Role', 'OK', 'Failed', 'Waited', 'Avg ms'],
+          s.providers.map((p) => [p.provider, p.role, p.ok, p.failed, p.waited, p.avg_ms]),
+          'No provider calls in the last seven days.')),
     ]);
     setStatus('');
   };
@@ -885,110 +866,114 @@ function drawIn(panel) {
 }
 
 const LOADERS = new Map([
-  ['feed', showFeed], ['sessions', showSessions], ['context', showContext], ['stats', showStats],
-  ['settings', showSettings],
+  ['timeline', showTimeline], ['context', showContext], ['stats', showStats], ['settings', showSettings],
 ]);
 
 // Only the latest request may draw: an earlier, slower one must not overwrite it.
 let generation = 0;
-// A view drawn before the live baseline was taken may already be stale.
 let drawnWithoutBaseline = false;
 
 async function show() {
+  if (!reposLoaded) return refresh();
   const mine = ++generation;
   const repo = $('repo').value;
   const q = $('q').value.trim();
   setStatus('Loading…');
   try {
-    // The settings view has no search: its controls are hidden, and a query left in them is not its.
     const search = q && view !== 'settings';
-    const render = search ? await showSearch(repo, q) : await (LOADERS.get(view) || showFeed)(repo);
+    const render = search ? await showSearch(repo, q) : await LOADERS.get(view)(repo);
     if (mine !== generation) return false;
     render();
     if (version === null) drawnWithoutBaseline = true;
     return true;
   } catch (e) {
-    if (mine === generation) setStatus(e.message, true);
+    if (mine === generation) showError(e, show);
     return false;
   }
 }
 
-// The picker: every repository with sessions. The first load selects the one the viewer was
-// started in; later loads (Refresh) keep the current choice.
-async function loadRepos(first) {
+// The current checkout always has the first option, including before its first stored record.
+async function loadRepos() {
   const { current, repos } = await api('repos');
-  const keep = first ? current : $('repo').value;
-  const all = el('option', null, 'All repositories');
-  all.value = '';
-  const options = repos.map((r) => {
-    const o = el('option', null, `${base(r.repo)} (${r.sessions})`);
+  const keep = reposLoaded ? $('repo').value : current;
+  currentRepo = current;
+  const own = repos.find((r) => r.repo === current) ?? { repo: current, claims: 0, imported: 0, records: 0 };
+  const options = [own, ...repos.filter((r) => r.repo !== current)].map((r) => {
+    const o = el('option', null, `${r.repo} (${r.claims} claims, ${r.imported} imported, ${r.records} records)`);
     o.value = r.repo;
-    o.title = r.repo;
+    o.title = `${r.repo}${r.repo === current ? ' (current checkout)' : ''}${r.last === undefined ? '' : `; last activity: ${new Date(r.last).toLocaleString('en-US')}`}`;
     return o;
   });
-  $('repo').replaceChildren(all, ...options);
-  $('repo').value = repos.some((r) => r.repo === keep) ? keep : '';
+  const all = el('option', null, 'All repositories');
+  all.value = '';
+  $('repo').replaceChildren(...options, all);
+  $('repo').value = keep === '' || options.some((o) => o.value === keep) ? keep : current;
+  reposLoaded = true;
 }
 
-// True when the page now shows the store as it is.
 async function refresh() {
   try {
-    await loadRepos(false);
+    await loadRepos();
   } catch (e) {
-    setStatus(e.message, true);
+    showError(e, refresh);
     return false;
   }
-  // A poll that began on another view does not redraw the settings opened meanwhile: that would
-  // drop what is typed and not saved.
-  if (view === 'settings') return true;
+  // Preserve unsaved settings, including when a poll began before the Settings tab opened.
+  if (view === 'settings' && $('panel').querySelector('.settings')) return true;
   return show();
 }
 
-// --- Live: redraw when the store changes -----------------------------------------------------
+// --- Live: one request at a time, including visibility changes -------------------------------
 
 let version = null;
+let polling = false;
+let pollTimer = null;
+let pollFailureNotice = null;
 const UNREACHABLE = 'The viewer is not answering. Start `oboete view` again and open the address it prints.';
 
 async function poll() {
-  if (document.visibilityState !== 'visible') return;
+  if (polling) return;
+  clearTimeout(pollTimer);
+  if (document.visibilityState !== 'visible') {
+    pollTimer = setTimeout(poll, 3000);
+    return;
+  }
+  polling = true;
   try {
     const { v } = await api('version');
-    if ($('live').classList.contains('off')) {
-      $('live').classList.remove('off');
-      if ($('status').textContent === UNREACHABLE) setStatus('');
-    }
+    $('live').classList.remove('off');
+    if (pollFailureNotice?.isConnected || $('status').textContent === UNREACHABLE) setStatus('');
     const changed = version === null ? drawnWithoutBaseline : v !== version;
-    // Stats also counts raw events, provider calls and handed-over context, which the marker
-    // leaves out on purpose; that view is cheap, so it just follows every poll.
-    // Never the settings: a redraw would drop what is typed and not saved.
-    const wanted = view !== 'settings' && (changed || (view === 'stats' && !$('q').value.trim()));
-    // The marker moves on only once the page shows that state; a failed redraw is retried by
-    // the next poll.
+    // Provider calls and tool records do not move v, so Stats also follows each poll.
+    const wanted = !reposLoaded || (view !== 'settings' && (changed || (view === 'stats' && !$('q').value.trim())));
     if (wanted && !(await refresh())) return;
+    // A failed redraw leaves the marker unchanged, so the next poll retries it.
     version = v;
     drawnWithoutBaseline = false;
-  } catch {
-    // The dot is for the eye; the status line is the page's live region.
+  } catch (e) {
     $('live').classList.add('off');
-    setStatus(UNREACHABLE, true);
+    if (e.status) pollFailureNotice = showError(e, poll);
+    else setStatus(UNREACHABLE, true);
+  } finally {
+    polling = false;
+    pollTimer = setTimeout(poll, 3000);
   }
 }
 
 async function start() {
   applyTheme();
   setView(view);
-  try {
-    await loadRepos(true);
-  } catch (e) {
-    setStatus(e.message, true);
-    return;
-  }
   $('controls').addEventListener('submit', (e) => {
     e.preventDefault();
-    show();
+    void show();
   });
-  $('repo').addEventListener('change', show);
-  $('refresh').addEventListener('click', refresh);
+  $('repo').addEventListener('change', () => void show());
+  $('refresh').addEventListener('click', () => void refresh());
+  for (const id of ['since', 'until', 'history', 'raw']) {
+    $(id).addEventListener('change', () => {
+      if ($('q').value.trim()) void show();
+    });
+  }
   $('theme').addEventListener('click', () => {
     theme = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
     remember('oboete-theme', theme);
@@ -998,21 +983,16 @@ async function start() {
     b.addEventListener('click', () => {
       setView(b.dataset.view);
       $('q').value = '';
-      show();
+      void show();
     });
   }
-  // Clearing the search box (its x button included) goes back to the current view.
   $('q').addEventListener('search', () => {
-    if (!$('q').value) show();
+    if (!$('q').value) void show();
   });
-  // Baseline first, then draw: a change between the two is caught by the next poll.
+  document.addEventListener('visibilitychange', () => void poll());
   await poll();
-  show();
-  setInterval(poll, 3000);
-  document.addEventListener('visibilitychange', poll);
 }
 
-// A restarted viewer prints a new key; pasting its address into this tab only changes the part
-// after #, which does not reload the page by itself.
+// Pasting a restarted viewer's address changes its fragment without reloading the page.
 window.addEventListener('hashchange', () => location.reload());
 await start();
