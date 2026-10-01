@@ -50,10 +50,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    concurrency:
-      group: open-code-review
-      cancel-in-progress: false
-      queue: max
     steps:
       - name: Resolve queued pull request
         id: pr
@@ -79,7 +75,8 @@ jobs:
               return;
             }
             // No push queues a review (a PR's last push is reviewed by hand), so an opening review
-            // that waited in the queue past a push reviews the current head, as a manual one does.
+            // that started after a push (a job can wait for a runner) reviews the current head, as a
+            // manual one does.
             const eventPr = context.payload.pull_request;
             if (eventPr && (pr.head.sha !== eventPr.head.sha || pr.base.ref !== eventPr.base.ref)) {
               core.notice('The pull request moved while this review was queued: reviewing its current head.');

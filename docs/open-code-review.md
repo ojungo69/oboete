@@ -165,14 +165,16 @@ example), but not a fault of the model itself. It is tried only once.
 
 - A newer eligible run for the same PR cancels its older queued or running run.
   Skipped fork/draft events and ordinary PR comments do not cancel eligible reviews.
-- All PRs in this repository share one review slot. GitHub's native
-  `queue: max` keeps up to 100 pending jobs, instead of replacing another PR's
-  pending review. Jobs wait until the active review finishes; additional jobs are
-  cancelled if that queue is full. Other applications or repositories using the
-  same keys are outside this queue.
-- At the start of a queued job, the workflow fetches the current PR metadata.
-  Automatic reviews skip closed/draft PRs; one that waited in the queue past a
-  push reviews the current head, as manual reviews do, since no push queues a
+- Reviews of different PRs run in parallel (owner, 2026-10-02). Until then all PRs
+  shared one review slot (a job-level `concurrency` group with `queue: max`): on
+  2026-10-01, at about an hour and a half a review, #318's opening review waited
+  2 hours 44 minutes for its turn and #319's more than three and a half hours.
+  Parallel reviews share the providers' rate limits: NIM's
+  fallback answers 504 to slow calls already (below), and it may do so more often
+  with several reviews at once.
+- At the start of a job, the workflow fetches the current PR metadata. Automatic
+  reviews skip closed/draft PRs; one that started after a push (a job can wait for
+  a runner) reviews the current head, as manual reviews do, since no push queues a
   review of its own. Manual reviews reject closed/draft PRs.
 - Each attempt reviews one file group at a time, with a 600-second LLM request
   timeout and a 6,000,000-token budget. The CLI multiplies the fifteen-minute task
@@ -180,8 +182,8 @@ example), but not a fault of the model itself. It is tried only once.
   group a 45-minute deadline. Fallback can consume a second budget.
 - The job's 120-minute timeout is a cap, not the sum of those deadlines: a review
   whose every file group runs to its 45-minute deadline is cut after about two
-  and a half groups, and a cancelled job runs no fallback. The cap keeps one
-  review from holding the slot that every PR shares.
+  and a half groups, and a cancelled job runs no fallback. The cap bounds what one
+  review can spend.
 - These limits are sized from local runs of OCR 1.12.9 on 2026-09-29. With the
   new 15-minute task setting but the old 500,000-token budget, NIM failed PR #218's
   one file: a planning call and 21 review calls, each resending the growing
@@ -191,8 +193,7 @@ example), but not a fault of the model itself. It is tried only once.
   (134, against NIM's 60), reading and searching more files: with a
   3,000,000-token budget it stopped in the third group after 8 minutes, two files
   unreviewed, and with 6,000,000 it finished in 9 minutes 16 seconds with 4,450,691
-  tokens. PRs pushed close together wait about that long for each other in the
-  shared slot.
+  tokens.
 - NIM's gateway answers 504 to a request still running at about 300 seconds, and
   OCR sends it again, so one slow call can cost a file group five minutes or more.
   DeepSeek's planning call on #218 got a 504 after 302 seconds, then answered in
@@ -221,9 +222,6 @@ must not check out or run the PR's code. Its only write permission is
 
 Validate the workflow against the current GitHub Actions schema and check its
 expressions with `actionlint .github/workflows/open-code-review.yml` after edits.
-Actionlint 1.7.12 has a known false positive for the supported `concurrency.queue`
-property ([upstream issue](https://github.com/rhysd/actionlint/issues/657)); do not
-remove the queue or ignore other diagnostics to accommodate that older schema.
 GitHub's workflow parser and a current schema must accept the complete file.
 After merging it to the default branch and configuring the provider, dispatch a
 review of an open PR and verify the run's head SHA, review summary, and any inline
@@ -231,7 +229,7 @@ findings. The original CI remains the merge gate.
 
 Existing runs retain their old concurrency groups when a workflow changes.
 During rollout, let old OpenCodeReview runs finish or cancel them and requeue the
-still-open PRs before relying on the shared slot. Leave other CI workflows alone.
+still-open PRs. Leave other CI workflows alone.
 
 To pause reviews, delete the `OCR_LLM_MODEL` repository variable. To remove the
 integration, revert the commit that added this workflow and document. Provider
