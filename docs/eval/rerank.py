@@ -13,7 +13,7 @@ From docs/eval, with Python 3.12:
 Export only when the owner has budgeted its disk use. Put uv's environment and
 caches inside the same disposable directory as the download and export scratch:
   out="$HOME/.oboete/eval/reranker-onnx"
-  mkdir -p "$out/.export-cache/tmp"
+  mkdir -p "$out" && mkdir "$out/.export-cache" "$out/.export-cache/tmp"
   UV_CACHE_DIR="$out/.export-cache/uv" \
     UV_PYTHON_INSTALL_DIR="$out/.export-cache/python" \
     HF_HOME="$out/.export-cache/hf" XDG_CACHE_HOME="$out/.export-cache/xdg" \
@@ -28,8 +28,13 @@ On macOS, omit --index https://download.pytorch.org/whl/cpu; its torch wheels
 already run on CPU. Keep every package version unchanged.
 
 The export directory must be empty except for .export-cache, which is deleted
-even on failure. Only model.onnx, its external data, and the revision's tokenizer
-files survive. Downloads are anonymous; no subprocess is started by this script.
+after the export, even on its failure. mkdir without -p refuses an existing
+.export-cache: one export per directory at a time, and a leftover is never
+reused. A directory that fails the check (not empty, or .export-cache a
+symbolic link) is left as it is; remove its .export-cache by hand. Only
+model.onnx, its external data, and the revision's tokenizer files survive.
+Downloads are anonymous (no token, no .netrc); no subprocess is started by this
+script.
 Before running uv, remove environment variables whose names contain TOKEN, KEY,
 SECRET or PASSWORD. main() also removes them before importing model packages.
 
@@ -40,11 +45,12 @@ Scores are raw fp32 logits, without sigmoid. Each pair is truncated together
 with longest_first, including special tokens. Documents run one at a time to
 bound activation memory and give the later Rust implementation the same shape.
 --time excludes model loading and file I/O; it includes pair tokenization and
-scoring. Per question it prints the wall time, which a search would wait and
-which spec 8.2's Rerank line (1.5 s less the hybrid's MCP p95) reads, and the
-process CPU time, the sum over ONNX Runtime's threads. p50 is the median, p95 the
-nearest rank, over the questions with hits. Peak RSS is process-wide, in kB on
-Linux or bytes on macOS.
+scoring. Per question it prints the wall time and the process CPU time, the sum
+over ONNX Runtime's threads. Spec 8.2's Rerank line, CPU p95 per question at most
+1.5 s less the hybrid's MCP p95, is a share of MCP's 1.5 s latency budget, so it
+reads the wall time of the run on CPU; the CPU time shows what the threads cost
+together. p50 is the median, p95 the nearest rank, over the questions with hits.
+Peak RSS is process-wide, in kB on Linux or bytes on macOS.
 """
 import argparse, contextlib, gzip, io, json, math, os, resource, shutil, statistics, sys, tempfile, time
 from pathlib import Path
@@ -141,8 +147,15 @@ def rerank_run(run, docs, questions, score=None, k=50, max_length=512, threads=4
         ordered = head + keys[k:]
         lines.extend(f'{qid} Q0 {key} {i + 1} {len(keys) - i} b-rerank\n'
                      for i, key in enumerate(ordered))
-    # A scoring failure must not leave a plausible but incomplete TREC run.
-    out.write_text(''.join(lines), encoding='utf-8')
+    # A scoring or write failure must neither leave a plausible but incomplete TREC run nor lose
+    # the previous one: written beside it, then moved over it (Codex on d7b0be3).
+    part = out.with_name(out.name + '.part')
+    try:
+        part.write_text(''.join(lines), encoding='utf-8')
+        os.replace(part, out)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
     if timed:
         timing_summary(times)
     return out
@@ -191,6 +204,9 @@ def export_cache(out):
             path = cache / suffix
             path.mkdir(parents=True, exist_ok=True)
             os.environ[name] = str(path)
+        # requests reads ~/.netrc for a host it has no token for: token=False alone does not keep
+        # a download anonymous (Codex on d7b0be3).
+        os.environ['NETRC'] = os.devnull
         tempfile.tempdir = None
         yield cache
     finally:
@@ -210,9 +226,12 @@ def fingerprints(directory):
 def export_model(out):
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    # Checked before the cleanup is armed, so a wrong directory loses nothing (Codex on d7b0be3).
+    if (out / '.export-cache').is_symlink():
+        raise ValueError('.export-cache must be a directory, not a symbolic link')
+    if any(path.name != '.export-cache' for path in out.iterdir()):
+        raise ValueError('export directory must be empty except for .export-cache')
     with export_cache(out) as cache:
-        if any(path.name != '.export-cache' for path in out.iterdir()):
-            raise ValueError('export directory must be empty except for .export-cache')
         print(f'{MODEL} revision={REVISION}', flush=True)
         # Imports come after cache setup so even package initialization stays in scratch.
         import torch
