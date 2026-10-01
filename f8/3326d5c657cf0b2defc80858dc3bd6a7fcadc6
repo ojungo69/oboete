@@ -1,0 +1,27 @@
+docs/eval/common.py
+  s_59cfa7617c8511::t_866ee8c1d17dfb 146-164
+docs/eval/conftest.py
+  s_59cfa7617c8511::t_00a04e877ffc01 19,29-30,32-37
+docs/eval/test_common.py
+  s_59cfa7617c8511::t_46519f9c1f3dc8 77,84-88
+docs/eval/test_m5.py
+  s_59cfa7617c8511::t_230e181fba10a2 288-289
+docs/eval/test_m6.py
+  s_59cfa7617c8511::t_fddb7940347b42 253-256
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f83326d5c657cf0b2defc80858dc3bd6a7fcadc6",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
