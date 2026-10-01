@@ -194,9 +194,9 @@ impl Phase {
         let batch = match half {
             Some(b) => b,
             // Cached vectors are mapped and documents passed over are marked whatever the rest
-            // or the cap; only the call waits.
+            // or the cap, each kind up to its first page with a text to send; only the call waits.
             None => {
-                let Some(b) = pending(raw, k, &embedder.id, &reading)? else {
+                let Some(b) = pending(raw, k, &embedder.id, &reading, wait.is_some())? else {
                     return Ok(Step::Idle);
                 };
                 if let Some(w) = wait {
@@ -683,11 +683,19 @@ struct Read {
 /// The next batch of documents with no vector from `embedder`: claims, then imported documents,
 /// then raw records, the newest first. A document passed over is marked (`excluded`, `source`,
 /// `empty`), and one whose stored text is already embedded is mapped to that vector, so neither
-/// comes back; the rest of a page is sent as one batch of its shortest texts.
-fn pending(raw: &Raw, k: &Connection, embedder: &str, reading: &Reading) -> Result<Option<Batch>> {
+/// comes back; the rest of a page is sent as one batch of its shortest texts. While a call
+/// `waiting` goes nowhere, the later kinds are mapped and marked too.
+fn pending(
+    raw: &Raw,
+    k: &Connection,
+    embedder: &str,
+    reading: &Reading,
+    waiting: bool,
+) -> Result<Option<Batch>> {
     crate::claims::schema(k)?;
     crate::consumer::imported::schema(k)?;
     crate::consumer::fts::schema(k)?;
+    let mut waits = None;
     for kind in ["c", "i", "r"] {
         loop {
             let page = read_page(raw, k, embedder, kind)?;
@@ -711,15 +719,24 @@ fn pending(raw: &Raw, k: &Connection, embedder: &str, reading: &Reading) -> Resu
                 .collect();
             let first = crate::embed::batches(&pairs)[0].len();
             let (docs, texts) = todo.into_iter().take(first).unzip();
-            return Ok(Some(Batch {
+            let batch = Batch {
                 embedder: embedder.to_owned(),
                 docs,
                 texts,
                 reading: reading.clone(),
-            }));
+            };
+            if !waiting {
+                return Ok(Some(batch));
+            }
+            // ponytail: while a call waits, each kind is mapped up to its first page with a text
+            // to send, not past it (`read_page` reads that page again until it is sent), so a
+            // rebuild during a wait maps the rest of that kind when the wait ends. Page past it
+            // with a cursor if that wait shows in search.
+            waits.get_or_insert(batch);
+            break;
         }
     }
-    Ok(None)
+    Ok(waits)
 }
 
 /// What becomes of `r`, a document read to embed: passed over and marked (D13, A92), mapped to the
@@ -987,17 +1004,16 @@ fn index(k: &Connection, embedder: &str, doc: &Doc, vec: &[u8]) -> Result<()> {
 /// The document `key` of `family` (`c` a claim, `i` an import, `r` a record) was written, in the
 /// consumer's transaction that wrote it (row 46-2): a key whose text is gone or differs loses its
 /// rows, so a poll gives it the vector of its text now; the same text keeps its vector, under the
-/// document's repository and time now.
+/// document's repository and time now, but not an `excluded` mark (D13), judged again.
 pub fn touched(k: &Connection, family: &str, key: &str) -> Result<()> {
     let kinds = match family {
         "i" => "'k', 'p'",
         "c" => "'c'",
         _ => "'r'",
     };
-    let rows: Vec<(i64, String, Option<String>, bool)> = k
+    let rows: Vec<(i64, String, Option<String>, Option<String>)> = k
         .prepare_cached(&format!(
-            "SELECT id, kind, src_sha, skipped IS NULL FROM vector_keys
-             WHERE kind IN ({kinds}) AND key = ?1"
+            "SELECT id, kind, src_sha, skipped FROM vector_keys WHERE kind IN ({kinds}) AND key = ?1"
         ))?
         .query_map([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
@@ -1005,10 +1021,13 @@ pub fn touched(k: &Connection, family: &str, key: &str) -> Result<()> {
         return Ok(());
     };
     let now = current(k, kind, key)?.map(|r| r.doc);
-    for (id, _, src_sha, indexed) in rows {
+    for (id, _, src_sha, skipped) in rows {
         match &now {
-            Some(d) if src_sha.as_ref() == Some(&d.sha) => {
-                if indexed {
+            // An `excluded` mark goes whatever the text: what excluded it may have changed.
+            Some(d)
+                if src_sha.as_ref() == Some(&d.sha) && skipped.as_deref() != Some("excluded") =>
+            {
+                if skipped.is_none() {
                     k.execute(
                         "UPDATE vec_index SET repo = ?2, ts = ?3, session = ?4 WHERE rowid = ?1",
                         params![id, vec_repo(d.kind, &d.repo), d.ts, d.session],
@@ -1300,7 +1319,7 @@ mod tests {
         let config = crate::config::load(home).unwrap();
         let embedder = Embedder::from_config(&config.embedding).unwrap().unwrap();
         let reading = Reading::now(&s.raw, Reads::Live).unwrap();
-        let batch = pending(&s.raw, &k, &embedder.id, &reading)
+        let batch = pending(&s.raw, &k, &embedder.id, &reading, false)
             .unwrap()
             .unwrap();
         let db = crate::providers_db::open(home).unwrap();
@@ -1744,6 +1763,80 @@ mod tests {
         s.run();
         embed_all(&s);
         assert_eq!((stub.requests(), indexed(&s)), (sent, before));
+    }
+
+    /// Step 6: while a call waits, each kind's cached vectors are still mapped: one claim to send
+    /// keeps no imported document or record from the vector its text already has.
+    #[test]
+    fn cached_vectors_are_mapped_while_a_call_waits() {
+        use crate::providers_db as pdb;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        s.imported("o1", "r", 1_000, "Notes", "Project notes.");
+        s.said("s", R, 2_000, "Words.");
+        s.run();
+        embed_all(&s);
+        let sent = stub.requests();
+        // A new index over the cache, as after a rebuild, and a claim with no vector yet.
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        k.execute_batch("DELETE FROM vector_keys; DELETE FROM vec_index;")
+            .unwrap();
+        claim(
+            &mut s,
+            "Parser caches stay in Redis.",
+            "Parser caches go to Redis.",
+        );
+        s.run();
+        let db = pdb::open(s.home.path()).unwrap();
+        for _ in 0..200 {
+            let call = pdb::Call {
+                provider: crate::embed::CALLS,
+                role: ROLE,
+                span: "",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 1,
+                est_tokens: Some(1),
+                usage: pdb::Usage::default(),
+                usd: None,
+            };
+            pdb::record(&db, &call).unwrap();
+        }
+        let mut phase = Phase::new(s.home.path());
+        assert!(matches!(
+            phase.poll(&s.raw, &k).unwrap(),
+            Step::Waiting { .. }
+        ));
+        assert_eq!(stub.requests(), sent);
+        let mapped: Vec<String> = keys(&s)
+            .into_iter()
+            .filter(|(kind, _, why)| kind != "c" && why.is_none())
+            .map(|(kind, ..)| kind)
+            .collect();
+        assert_eq!(mapped, ["k", "r"]);
+    }
+
+    /// Steps 4 and 5 (D13): an `excluded` mark goes whenever its document is written again, its
+    /// text the same or not, since what excluded it can change under the same text: a uid
+    /// imported again under another project.
+    #[test]
+    fn a_document_written_again_is_judged_again() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let uid = s.imported("o1", "secret", 1_000, "Notes", "Project notes.");
+        s.raw.exclude("github.com/o/secret", false).unwrap();
+        s.run();
+        embed_all(&s);
+        assert_eq!(skipped(&s, &uid).as_deref(), Some("excluded"));
+        assert_eq!(stub.requests(), 0);
+        s.imported("o1", "r", 1_000, "Notes", "Project notes.");
+        s.run();
+        embed_all(&s);
+        assert_eq!(skipped(&s, &uid), None);
+        assert_eq!(stub.requests(), 1);
     }
 
     /// Rows 55-1 and 55-7: a providers.db that will not open holds back the vectors only: the

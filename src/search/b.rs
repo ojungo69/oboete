@@ -1091,7 +1091,7 @@ pub fn timeline(
     let at = anchor.map(|a| time_of(&raw, &k, a)).transpose()?;
     let pending = claims::Pending::read(&raw, &k)?;
     let [own, named] = repo.map(imported_repos).unwrap_or_default();
-    let repo = repo.map(|r| r.to_owned());
+    let repo = repo.map(str::to_owned);
     let items = "SELECT key, ts, kind, repo, text FROM (
            SELECT a.uid AS key, a.valid_from AS ts, a.kind || ' ' || a.status AS kind,
                   a.repo AS repo, a.body AS text

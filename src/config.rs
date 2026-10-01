@@ -100,8 +100,9 @@ pub struct Embedding {
     /// kept for query vectors: at 40 or fewer, only queries are embedded.
     #[serde(default = "default_embedding_requests")]
     pub daily_requests: u32,
-    /// USD a month the embedder may cost past Workers AI's free allowance, counted apart from
-    /// `paid_usd_per_month` (milestone 4 D8, What needs the owner item 1).
+    /// USD a month the embedder may cost past Workers AI's free allowance, more than 0, counted
+    /// apart from `paid_usd_per_month` (milestone 4 D8, What needs the owner item 1). Reached, no
+    /// request goes until the next month.
     #[serde(default = "default_embedding_usd")]
     pub monthly_usd: f64,
     /// Where the model runs instead of Cloudflare's endpoint: only the Workers AI host or a
@@ -688,9 +689,11 @@ pub(crate) fn from_text(path: &Path, text: &str) -> Result<Config> {
                 );
             }
             let usd = cfg.embedding.monthly_usd;
+            // 0 would stop every call, the free allowance's too: no embedding is `provider =
+            // "none"`.
             anyhow::ensure!(
-                usd.is_finite() && usd >= 0.0,
-                "{}: [embedding] monthly_usd must be a number of USD, 0 or more",
+                usd.is_finite() && usd > 0.0,
+                "{}: [embedding] monthly_usd must be a number of USD more than 0",
                 path.display()
             );
         }
@@ -1683,6 +1686,8 @@ model = { gone = "m" }
             "url = \"http://127.0.0.1.example.com/run\"",
             "monthly_usd = -1.0",
             "monthly_usd = nan",
+            "monthly_usd = 0",
+            "monthly_usd = 0.0",
         ] {
             assert!(at(bad).is_err(), "{bad}");
         }
