@@ -1162,6 +1162,31 @@ impl Raw {
         Ok(out)
     }
 
+    /// The sessions of `source`'s records, its `touch` records left out (D6: the sessions a v1
+    /// pass checks oboete.db still holds).
+    pub fn sessions_of(&self, source: &str) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare(
+            "SELECT DISTINCT session FROM records WHERE type = 'event' AND source = ?1
+               AND kind != 'touch' AND session IS NOT NULL ORDER BY session",
+        )?;
+        let rows = st.query_map([source], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The (session, repo) labels of `source`'s `touch` records (D6): the `session_repos` rows a
+    /// v1 pass has recorded.
+    pub fn touches(
+        &self,
+        source: &str,
+    ) -> Result<std::collections::HashSet<(String, Option<String>)>> {
+        let mut st = self.conn.prepare(
+            "SELECT session, repo FROM records WHERE type = 'event' AND source = ?1
+               AND kind = 'touch'",
+        )?;
+        let rows = st.query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The time of each (agent, session)'s earliest record that neither the transcript import
     /// wrote nor labels a v1 repository (`touch`): where that session's transcript import stops
     /// (D6).
