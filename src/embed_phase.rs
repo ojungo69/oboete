@@ -708,6 +708,7 @@ fn pending(
     crate::claims::schema(k)?;
     crate::consumer::imported::schema(k)?;
     crate::consumer::fts::schema(k)?;
+    queue(k)?;
     let mut waits = None;
     for kind in ["c", "i", "r"] {
         loop {
@@ -777,8 +778,109 @@ fn sort_out(
     Ok(Some((r.doc, sent)))
 }
 
+/// Step 13's queue: the imported documents and records with no key row, kept by triggers on the
+/// tables that hold them and on `vector_keys`, so a poll reads a page of what waits and never the
+/// whole store (over b-import's 178,370 documents each poll scanned them all, 0.7 s, waiting or
+/// not). A new document is queued unless its key row exists (an import a second device holds), and
+/// a key row that goes (`touched`, `cleared`) puts its document back; one keyed leaves the queue
+/// when a read next reaches it (`queued`). Made
+/// once for each knowledge.db, with what waits already: what its consumers wrote before the first
+/// poll (a new home, a rebuild, a restore), or all of a file from before the queue. Claims stay a
+/// read of `active`, a view, and few.
+// ponytail: one embedder's queue (a new document's key row of any embedder keeps it out); the
+// second embedder's generation (Task 10) needs a queue of its own.
+const QUEUE: &str = "
+    CREATE TABLE vector_todo(
+      family TEXT NOT NULL, key TEXT NOT NULL, ord INTEGER NOT NULL,
+      PRIMARY KEY (family, key)
+    ) WITHOUT ROWID;
+    CREATE INDEX vector_todo_ord ON vector_todo(family, ord);
+    CREATE TRIGGER vector_todo_imported AFTER INSERT ON imported
+      WHEN NOT EXISTS (SELECT 1 FROM vector_keys WHERE kind IN ('k', 'p') AND key = NEW.uid)
+    BEGIN
+      INSERT OR IGNORE INTO vector_todo(family, key, ord) VALUES ('i', NEW.uid, NEW.ts);
+    END;
+    CREATE TRIGGER vector_todo_record AFTER INSERT ON raw_docs
+      WHEN NOT EXISTS (SELECT 1 FROM vector_keys
+                       WHERE kind = 'r' AND key = NEW.device || ':' || NEW.seq)
+    BEGIN
+      INSERT OR IGNORE INTO vector_todo(family, key, ord)
+        VALUES ('r', NEW.device || ':' || NEW.seq, NEW.seq);
+    END;
+    CREATE TRIGGER vector_todo_unkeyed AFTER DELETE ON vector_keys WHEN OLD.kind <> 'c'
+    BEGIN
+      INSERT OR IGNORE INTO vector_todo(family, key, ord)
+        SELECT 'i', OLD.key,
+          COALESCE((SELECT ts FROM imported WHERE uid = OLD.key ORDER BY rowid DESC LIMIT 1), 0)
+        WHERE OLD.kind IN ('k', 'p');
+      INSERT OR IGNORE INTO vector_todo(family, key, ord)
+        SELECT 'r', OLD.key, CAST(substr(OLD.key, instr(OLD.key, ':') + 1) AS INTEGER)
+        WHERE OLD.kind = 'r';
+    END;
+    INSERT OR IGNORE INTO vector_todo(family, key, ord)
+      SELECT 'i', i.uid, i.ts FROM imported i
+      WHERE i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
+        AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.kind IN ('k', 'p') AND v.key = i.uid);
+    INSERT OR IGNORE INTO vector_todo(family, key, ord)
+      SELECT 'r', d.device || ':' || d.seq, d.seq FROM raw_docs d
+      WHERE NOT EXISTS (SELECT 1 FROM vector_keys v
+                        WHERE v.kind = 'r' AND v.key = d.device || ':' || d.seq);";
+
+/// `QUEUE`, made in one transaction the first time a knowledge.db is polled.
+fn queue(k: &Connection) -> Result<()> {
+    let made: bool = k.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vector_todo')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !made {
+        let tx = k.unchecked_transaction()?;
+        tx.execute_batch(QUEUE)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+/// A page of `family`'s queued documents, the newest first, each as `read` finds it: a key whose
+/// document is gone or has its key row leaves the queue, and the next page is read.
+fn queued(
+    k: &Connection,
+    family: &str,
+    mut read: impl FnMut(&str) -> Result<Option<Read>>,
+) -> Result<Vec<Read>> {
+    loop {
+        let keys: Vec<String> = k
+            .prepare_cached(
+                "SELECT key FROM vector_todo WHERE family = ?1 ORDER BY ord DESC, key DESC LIMIT ?2",
+            )?
+            .query_map(params![family, PAGE as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (mut out, mut gone) = (Vec::new(), Vec::new());
+        for key in keys {
+            match read(&key)? {
+                Some(r) => out.push(r),
+                None => gone.push(key),
+            }
+        }
+        let tx = k.unchecked_transaction()?;
+        for key in &gone {
+            tx.execute(
+                "DELETE FROM vector_todo WHERE family = ?1 AND key = ?2",
+                params![family, key],
+            )?;
+        }
+        tx.commit()?;
+        if !out.is_empty() {
+            return Ok(out);
+        }
+    }
+}
+
 /// A page of `kind`'s documents (`i` reads both imported kinds) with no key row for `embedder`,
-/// the newest first.
+/// the newest first: claims from `active`, the rest from the queue.
 fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Vec<Read>> {
     let limit = PAGE as i64;
     Ok(match kind {
@@ -805,72 +907,69 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
                 })
             })?
             .collect::<rusqlite::Result<_>>()?,
-        "i" => k
-            .prepare_cached(
-                "SELECT i.uid, i.kind, i.title, i.body, i.repo, i.ts, i.session FROM imported i
-                 WHERE i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
+        "i" => queued(k, "i", |uid| {
+            let mut read = k.prepare_cached(
+                "SELECT i.kind, i.title, i.body, i.repo, i.ts, i.session FROM imported i
+                 WHERE i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = ?2)
                    AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
                      AND v.kind = CASE i.kind WHEN 'prompt' THEN 'p' ELSE 'k' END
-                     AND v.key = i.uid)
-                 ORDER BY i.ts DESC LIMIT ?2",
-            )?
-            .query_map(params![embedder, limit], |r| {
-                let doc_kind: String = r.get(1)?;
-                let text = composed(&doc_kind, &r.get::<_, String>(2)?, &r.get::<_, String>(3)?);
-                Ok(Read {
-                    doc: Doc {
-                        kind: if doc_kind == "prompt" { "p" } else { "k" },
-                        key: r.get(0)?,
-                        sha: sha(&text),
-                        repo: r.get(4)?,
-                        ts: r.get(5)?,
-                        session: r.get(6)?,
-                    },
-                    text,
-                    labels: None,
+                     AND v.key = i.uid)",
+            )?;
+            Ok(read
+                .query_row(params![embedder, uid], |r| {
+                    let doc_kind: String = r.get(0)?;
+                    let text =
+                        composed(&doc_kind, &r.get::<_, String>(1)?, &r.get::<_, String>(2)?);
+                    Ok(Read {
+                        doc: Doc {
+                            kind: if doc_kind == "prompt" { "p" } else { "k" },
+                            key: uid.to_owned(),
+                            sha: sha(&text),
+                            repo: r.get(3)?,
+                            ts: r.get(4)?,
+                            session: r.get(5)?,
+                        },
+                        text,
+                        labels: None,
+                    })
                 })
-            })?
-            .collect::<rusqlite::Result<_>>()?,
-        _ => {
-            let rows: Vec<(String, i64, String, i64, String, String, String)> = k
-                .prepare_cached(
-                    "SELECT d.device, d.seq, d.kind, d.ts, COALESCE(d.repo, ''),
-                       COALESCE(d.session, ''), f.text
-                     FROM raw_docs d JOIN raw_fts f ON f.rowid = d.rowid
-                     WHERE NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
-                                         AND v.kind = 'r' AND v.key = d.device || ':' || d.seq)
-                     ORDER BY d.seq DESC LIMIT ?2",
-                )?
-                .query_map(params![embedder, limit], |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            let mut out = Vec::with_capacity(rows.len());
-            for (device, seq, record_kind, ts, repo, session, text) in rows {
-                let labels = raw.event_labels(&device, seq)?;
-                out.push(Read {
-                    doc: Doc {
-                        kind: if record_kind == "prompt" { "rp" } else { "r" },
-                        key: format!("{device}:{seq}"),
-                        sha: sha(&text),
-                        repo,
-                        ts,
-                        session,
-                    },
-                    text,
-                    labels,
-                });
-            }
-            out
-        }
+                .optional()?)
+        })?,
+        _ => queued(k, "r", |key| {
+            let Some((device, seq)) = key
+                .rsplit_once(':')
+                .and_then(|(d, s)| Some((d, s.parse().ok()?)))
+            else {
+                return Ok(None);
+            };
+            let mut read = k.prepare_cached(
+                "SELECT d.kind, d.ts, COALESCE(d.repo, ''), COALESCE(d.session, ''), f.text
+                 FROM raw_docs d JOIN raw_fts f ON f.rowid = d.rowid
+                 WHERE d.device = ?2 AND d.seq = ?3
+                   AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
+                                     AND v.kind = 'r' AND v.key = ?4)",
+            )?;
+            let row: Option<(String, i64, String, String, String)> = read
+                .query_row(params![embedder, device, seq, key], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
+                .optional()?;
+            let Some((record_kind, ts, repo, session, text)) = row else {
+                return Ok(None);
+            };
+            Ok(Some(Read {
+                doc: Doc {
+                    kind: if record_kind == "prompt" { "rp" } else { "r" },
+                    key: key.to_owned(),
+                    sha: sha(&text),
+                    repo,
+                    ts,
+                    session,
+                },
+                labels: raw.event_labels(device, seq)?,
+                text,
+            }))
+        })?,
     })
 }
 
@@ -1398,6 +1497,66 @@ mod tests {
             keys(&s)
                 .iter()
                 .any(|(_, k, why)| *k == s.key(seq) && why.is_none())
+        );
+    }
+
+    /// Step 13: a poll reads a page of `vector_todo`, never the whole store. The queue holds the
+    /// imported documents and records with no key row, those a home held before its first poll
+    /// included, and nothing once they are embedded; a new record, a text changed and an exclusion
+    /// undone each put their document back.
+    #[test]
+    fn the_queue_holds_only_what_waits_for_a_vector() {
+        const X: &str = "github.com/o/secret";
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        s.imported("o1", "r", 1_000, "Deploy notes", "Notes.");
+        let seq = s.said("s", R, 2_000, "Words to mask.");
+        let secret = s.said("sx", X, 3_000, "Secret words there.");
+        s.raw.exclude(X, false).unwrap();
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let queued = || -> Vec<String> {
+            k.prepare("SELECT family || ' ' || key FROM vector_todo ORDER BY family, key")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        embed_all(&s);
+        assert!(queued().is_empty(), "{:?}", queued());
+        let more = s.said("s", R, 4_000, "More words.");
+        s.run();
+        assert_eq!(queued(), [format!("r {}", s.key(more))]);
+        embed_all(&s);
+        assert!(queued().is_empty(), "{:?}", queued());
+        let body = serde_json::json!({ "prompt": "Words to mask." }).to_string();
+        s.raw
+            .append_tombstone(crate::raw::Target::Range {
+                device: s.raw.device().to_owned(),
+                seq,
+                offset: body.find("mask").unwrap() as i64,
+                length: 4,
+            })
+            .unwrap();
+        s.run();
+        assert_eq!(queued(), [format!("r {}", s.key(seq))]);
+        embed_all(&s);
+        s.raw.exclude(X, true).unwrap();
+        s.run();
+        embed_all(&s);
+        assert!(queued().is_empty(), "{:?}", queued());
+        assert!(
+            stub.texts()
+                .concat()
+                .iter()
+                .any(|t| t == "Secret words there.")
+        );
+        assert!(
+            keys(&s)
+                .iter()
+                .any(|(_, key, why)| *key == s.key(secret) && why.is_none())
         );
     }
 
