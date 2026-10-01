@@ -207,7 +207,10 @@ def test_the_gate_fails(tmp_path):
     k.execute('CREATE TABLE raw_docs(device TEXT, seq INTEGER, session TEXT)')
     k.execute("INSERT INTO raw_docs VALUES ('d', 1, 's2')")
     k.commit()
-    assert m4.recordless({'q1', 'q2'}, asked, str(tmp_path)) == ['q1: no record of its session']
+    # A Raw question whose session has no record in the corpus's replay, or is not in the corpus.
+    asked['q3'] = {'qid': 'q3', 'session': 's3'}
+    assert m4.recordless({'q1', 'q2', 'q3'}, asked, str(tmp_path), {'s1', 's2'}) == [
+        'q1: no record of its session', 'q3: its session is not in the corpus']
     # B's text against v1's for the mapped documents: one matches, one is another document.
     write_jsonl(f'{tmp_path}/b-docs.jsonl', [
         {'key': 'u1', 'doc': 'o1', 'session': 'a', 'ts': 1, 'kind': 'decision', 'text': 'decision: cache\nkeep it on disk'},
@@ -217,7 +220,7 @@ def test_the_gate_fails(tmp_path):
     assert m4.matches(str(tmp_path), v1_text) == {'o': (1, 2)}
 
 
-def test_the_gate_lists_hits_it_cannot_read_instead_of_stopping(ev, monkeypatch):
+def test_the_gate_lists_hits_it_cannot_read_instead_of_stopping(ev, monkeypatch, capsys):
     import freeze, judge
     monkeypatch.setattr(freeze, 'check', lambda: [])
     monkeypatch.setattr(judge, 'E', str(ev))
@@ -230,12 +233,15 @@ def test_the_gate_lists_hits_it_cannot_read_instead_of_stopping(ev, monkeypatch)
     db.executescript("CREATE TABLE observations(id INTEGER PRIMARY KEY, title TEXT, body TEXT, session_id TEXT);"
                      "CREATE TABLE summaries(id INTEGER PRIMARY KEY, body TEXT, session_id TEXT);"
                      "CREATE TABLE prompts(id INTEGER PRIMARY KEY, body TEXT, session_id TEXT);"
-                     "INSERT INTO sessions VALUES ('s-p1', 'claude', 0);"
+                     "INSERT INTO sessions VALUES ('s-p1', 'claude', 1790000000000);"
                      "INSERT INTO prompts VALUES (1, 'x', 's-p1');"
                      "INSERT INTO observations VALUES (1, 'title', 'body', 's-p1');")
     db.commit()
     write_jsonl(f'{ev}/questions-test-m4.jsonl', [q('p1')])
-    (ev / 'corpus-m4.json').write_text(json.dumps({'window': {'claude': '2026-06-19'}}))
+    (ev / 'corpus-m4.json').write_text(json.dumps({'window': {'claude': '2026-06-19'}, 'sessions': []}))
+    # p1 counts on Raw's N; its session is a held-out one, which the corpus leaves out.
+    (ev / 'replay').mkdir()
+    (ev / 'replay' / 'manifest.json').write_text(json.dumps({'sessions': [{'session': 's-p1', 'side': 'held-out'}]}))
     runs.mkdir()
     # o+1 reads o1, of the question's own session; the other two the judge cannot read at all.
     hits = ['o+1', 'claude-mem:db:o5', 'r:d:9']
@@ -250,3 +256,6 @@ def test_the_gate_lists_hits_it_cannot_read_instead_of_stopping(ev, monkeypatch)
     for line in ('b-off: unsupported id o+1', 'b-off: unmapped claude-mem:db:o5', 'b-off: no sidecar row for r:d:9',
                  'b-docs.jsonl: no doc id for u1'):
         assert line in problems
+    # A held-out session's question is named apart, not a problem.
+    assert "of held-out sessions (no records): 1 ['p1']" in capsys.readouterr().out
+    assert not [p for p in problems if p.startswith('p1:')]
