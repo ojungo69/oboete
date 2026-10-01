@@ -3011,6 +3011,7 @@ mod tests {
         const HOME: &str = "OBOETE_TEST_SIDECAR_HOME";
         const SECRET: &str = "INTERNAL-BETA-7";
         const TITLE: &str = "INTERNAL-GAMMA-3";
+        const OTHER: &str = "INTERNAL-DELTA-5";
         let questions = r#"{"qid":"q1","text":"deploy"}"#;
         if let Ok(home) = std::env::var(HOME) {
             let home = std::path::PathBuf::from(home);
@@ -3018,11 +3019,13 @@ mod tests {
             let out = home.join("run");
             trec_run(&home, questions, 10, &[RawArm::Off, RawArm::Only], &out).unwrap();
             let docs = std::fs::read_to_string(out.join("b-docs.jsonl")).unwrap();
-            // The record and the imported note, each with its words and without its secret.
-            assert_eq!(docs.lines().count(), 2, "{docs}");
-            assert!(docs.lines().all(|l| l.contains("deploy")), "{docs}");
-            assert!(!docs.contains(SECRET), "{docs}");
-            assert!(!docs.contains(TITLE), "{docs}");
+            // The record and the two imported notes, without their secrets: the first note keeps
+            // its words, the second is masked whole by the rule on its composed text.
+            assert_eq!(docs.lines().count(), 3, "{docs}");
+            assert_eq!(docs.matches("deploy").count(), 2, "{docs}");
+            for hidden in [SECRET, TITLE, OTHER, "private"] {
+                assert!(!docs.contains(hidden), "{hidden}: {docs}");
+            }
             return;
         }
         let stub = crate::embed::stub::Stub::start();
@@ -3038,13 +3041,15 @@ mod tests {
         s.raw.append(&event).unwrap();
         // A title the rule anchors to whole, which the sidecar prefixes with its kind.
         s.imported("o1", "r", 2_000, TITLE, "deploy notes");
+        s.imported("o2", "r", 3_000, OTHER, "private deploy value");
         s.run();
         embedded_by(&s, &stub);
         let config = s.home.path().join("config.toml");
         let plain = std::fs::read_to_string(&config).unwrap();
         let ruled = format!(
             "{plain}[redaction]\nextra_rules = [{{ id = \"beta\", regex = '{SECRET}$' }}, \
-             {{ id = \"gamma\", regex = '^{TITLE}$' }}]\n"
+             {{ id = \"gamma\", regex = '^{TITLE}$' }}, {{ id = \"delta\", regex = '^{OTHER}$' }}, \
+             {{ id = \"whole\", regex = '(?s)^decision: {OTHER}\\n.*$' }}]\n"
         );
         std::fs::write(&config, ruled).unwrap();
         let name = "search::b::tests::the_sidecar_gates_with_the_rules_of_the_run";

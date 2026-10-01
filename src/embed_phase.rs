@@ -1020,16 +1020,18 @@ pub(crate) fn composed(kind: &str, title: &str, body: &str) -> String {
     }
 }
 
-/// `composed` for text that leaves this machine: the title and the body gated each alone, as
-/// search gates an imported hit's, so a rule anchored to a title (`^...$`) holds once the kind
-/// is prefixed; then the whole, as any text is.
+/// `composed` for text that leaves this machine: gated whole, line by line, and in its title and
+/// its body alone (`redact::outbound_joined`), as search gates an imported hit's title and body,
+/// so a rule anchored to a title (`^...$`) holds once the kind is prefixed.
 pub(crate) fn composed_out(kind: &str, title: &str, body: &str) -> String {
-    use crate::redact::outbound_lines;
-    outbound_lines(&composed(
-        kind,
-        &outbound_lines(title),
-        &outbound_lines(body),
-    ))
+    let text = composed(kind, title, body);
+    let parts = if text.len() == body.len() {
+        Vec::new()
+    } else {
+        let at = kind.len() + 2;
+        vec![at..at + title.len(), text.len() - body.len()..text.len()]
+    };
+    crate::redact::outbound_joined(&text, &parts)
 }
 
 fn sha(text: &str) -> String {
@@ -2562,6 +2564,7 @@ mod tests {
     fn a_rule_anchored_to_an_imported_title_holds_in_the_text_sent() {
         const HOME: &str = "OBOETE_TEST_TITLE_RULE_HOME";
         const SECRET: &str = "INTERNAL-GAMMA-3";
+        const OTHER: &str = "INTERNAL-DELTA-5";
         if let Ok(home) = std::env::var(HOME) {
             let home = std::path::PathBuf::from(home);
             crate::redact::set_home(&home).unwrap();
@@ -2574,11 +2577,16 @@ mod tests {
         let mut s = Store::new();
         config(&s, &stub);
         let uid = s.imported("o1", "r", 2_000, SECRET, "deploy notes");
+        // Codex on 6c19081: a rule on the whole composed text keeps its context though the
+        // title's own rule masks the title.
+        let other = s.imported("o2", "r", 2_000, OTHER, "private deployment value");
         s.run();
         let config = s.home.path().join("config.toml");
         let plain = std::fs::read_to_string(&config).unwrap();
         let ruled = format!(
-            "{plain}[redaction]\nextra_rules = [{{ id = \"gamma\", regex = '^{SECRET}$' }}]\n"
+            "{plain}[redaction]\nextra_rules = [{{ id = \"gamma\", regex = '^{SECRET}$' }}, \
+             {{ id = \"delta\", regex = '^{OTHER}$' }}, \
+             {{ id = \"whole\", regex = '(?s)^decision: {OTHER}\\n.*$' }}]\n"
         );
         std::fs::write(&config, ruled).unwrap();
         let name =
@@ -2598,10 +2606,17 @@ mod tests {
         let sent: Vec<String> = stub.texts().concat();
         assert!(sent.iter().any(|t| t.contains("deploy notes")), "{sent:?}");
         assert!(sent.iter().all(|t| !t.contains(SECRET)), "{sent:?}");
+        assert!(sent.iter().all(|t| !t.contains("private")), "{sent:?}");
+        let got = keys(&s);
         assert!(
-            keys(&s)
-                .iter()
+            got.iter()
                 .any(|(_, k, skipped)| *k == uid && skipped.is_none())
+        );
+        // Gated to the mask whole: nothing to send.
+        assert!(
+            got.iter()
+                .any(|(_, k, skipped)| *k == other && skipped.as_deref() == Some("empty")),
+            "{got:?}"
         );
     }
 

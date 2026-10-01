@@ -988,11 +988,69 @@ pub fn field_ranges(body: &str, rules: &Rules) -> Vec<(usize, usize)> {
 /// The egress gate on indexed text (field values one per line): whole, then line by line, so a
 /// rule anchored to a field's end (`$`) matches each field as capture's did.
 pub fn outbound_lines(text: &str) -> String {
-    outbound(text)
+    match egress() {
+        Some(rules) => lines_with(text, &rules),
+        None => MASK.to_string(),
+    }
+}
+
+fn lines_with(text: &str, rules: &Rules) -> String {
+    outbound_with(text, rules)
         .split('\n')
-        .map(outbound)
+        .map(|line| outbound_with(line, rules))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `outbound_lines` of a text joined from `parts` (byte ranges of it: an imported document's
+/// title and body under its kind), what the gate hides in a part alone hidden too, as search
+/// gates each part alone. Every view (the whole, each line, each part) is scanned on the
+/// untouched text before anything is masked, so no view's mask takes away the context another
+/// view's rule needs (Codex on 6c19081); `outbound_lines` over the result can only add masks.
+pub fn outbound_joined(text: &str, parts: &[std::ops::Range<usize>]) -> String {
+    match egress() {
+        Some(rules) => joined_with(text, parts, &rules),
+        None => MASK.to_string(),
+    }
+}
+
+fn joined_with(text: &str, parts: &[std::ops::Range<usize>], rules: &Rules) -> String {
+    let mut at = 0;
+    let lines = text.split('\n').map(|line| {
+        let view = at..at + line.len();
+        at = view.end + 1;
+        view
+    });
+    let mut runs = Vec::new();
+    for view in std::iter::once(0..text.len())
+        .chain(lines)
+        .chain(parts.iter().cloned())
+    {
+        let Some(found) = hidden(&text[view.clone()], rules) else {
+            return MASK.to_string();
+        };
+        runs.extend(
+            found
+                .into_iter()
+                .map(|(s, e)| (view.start + s, view.start + e)),
+        );
+    }
+    runs.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in runs {
+        match merged.last_mut() {
+            Some((_, last)) if s <= *last => *last = (*last).max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    let (mut masked, mut pos) = (String::with_capacity(text.len()), 0);
+    for (s, e) in merged {
+        masked.push_str(&text[pos..s]);
+        masked.push_str(MASK);
+        pos = e;
+    }
+    masked.push_str(&text[pos..]);
+    lines_with(&masked, rules)
 }
 
 /// The egress gate on a stored body, field by field as capture scanned it.
@@ -1569,6 +1627,31 @@ mod tests {
 
     fn user(toml: &str) -> anyhow::Result<Rules> {
         Rules::new(&crate::config::parse_capture(Some(toml))?.redaction)
+    }
+
+    /// Codex on 6c19081: a joined text's parts are gated alone, and a rule on the whole still
+    /// sees the whole as stored: masking the title first took away the context of a rule on the
+    /// composed text, and the body went out.
+    #[test]
+    fn a_joined_text_is_gated_in_each_view_without_losing_another_views_context() {
+        let text = "decision: Confidential\nprivate deployment value";
+        let parts = [10..22, 23..text.len()];
+        let title = "{ id = \"title\", regex = '^Confidential$' }";
+        let whole = "{ id = \"whole\", regex = '(?s)^decision: Confidential\\n.*$' }";
+        let rules = |list: &str| user(&format!("[redaction]\nextra_rules = [{list}]")).unwrap();
+        let both = joined_with(text, &parts, &rules(&format!("{title}, {whole}")));
+        assert!(!both.contains("Confidential"), "{both}");
+        assert!(!both.contains("private deployment"), "{both}");
+        let alone = joined_with(text, &parts, &rules(title));
+        assert_eq!(alone, format!("decision: {MASK}\nprivate deployment value"));
+        assert_eq!(joined_with(text, &parts, &rules(whole)), MASK);
+        // With no part, it is `outbound_lines`: a rule anchored to a line's end holds.
+        let line = rules("{ id = \"line\", regex = 'value$' }");
+        assert_eq!(
+            joined_with("a value\nb", &[], &line),
+            lines_with("a value\nb", &line)
+        );
+        assert!(!joined_with("a value\nb", &[], &line).contains("value"));
     }
 
     fn sha(v: &str) -> String {
