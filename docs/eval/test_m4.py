@@ -191,7 +191,7 @@ def test_the_gate_fails(tmp_path):
     assert m4.own_session(runs, asked, session) == ['b-only: q2 has r:d:1 of its own session']
     # A key the gate already reports as missing or unmapped has no session: it does not stop the gate.
     of = m4.session_of({'r:d:1': {'session': 's2'}}, {'o1': ('text', 's1', 4)}.__getitem__)
-    assert [of(d) for d in ('r:d:1', 'r:d:9', 'o1', 'claude-mem:db:o5')] == ['s2', None, 's1', None]
+    assert [of(d) for d in ('r:d:1', 'r:d:9', 'o1', 'o+1', 'claude-mem:db:o5')] == ['s2', None, 's1', None, None]
     # A candidate run made before the pre-registration's main commit; a baseline's time is its own.
     for name in ('b-off', 'hybrid-d2'):
         (tmp_path / f'{name}.trec').write_text('q1 Q0 o1 1 50 x\n')
@@ -215,3 +215,38 @@ def test_the_gate_fails(tmp_path):
         {'key': 'r:d:1', 'doc': 'r:d:1', 'session': 's2', 'ts': 1, 'kind': 'prompt', 'text': 'x'}])
     v1_text = {'o1': 'cache\nkeep it on disk', 'o2': 'a different note entirely'}.get
     assert m4.matches(str(tmp_path), v1_text) == {'o': (1, 2)}
+
+
+def test_the_gate_lists_hits_it_cannot_read_instead_of_stopping(ev, monkeypatch):
+    import freeze, judge
+    monkeypatch.setattr(freeze, 'check', lambda: [])
+    monkeypatch.setattr(judge, 'E', str(ev))
+    runs, home = ev / 'runs', ev / 'b'
+    for key, value in (('OBOETE_EVAL_RUNS', str(runs)), ('OBOETE_EVAL_DEPTH', '50'),
+                       ('OBOETE_EVAL_QUESTIONS', f'{ev}/questions-test-m4.jsonl')):
+        monkeypatch.setenv(key, value)  # gate() sets them too: these restore them afterwards
+    monkeypatch.setattr(judge, 'RUNS', str(runs))
+    db = v1_db(ev)
+    db.executescript("CREATE TABLE observations(id INTEGER PRIMARY KEY, title TEXT, body TEXT, session_id TEXT);"
+                     "CREATE TABLE summaries(id INTEGER PRIMARY KEY, body TEXT, session_id TEXT);"
+                     "CREATE TABLE prompts(id INTEGER PRIMARY KEY, body TEXT, session_id TEXT);"
+                     "INSERT INTO sessions VALUES ('s-p1', 'claude', 0);"
+                     "INSERT INTO prompts VALUES (1, 'x', 's-p1');"
+                     "INSERT INTO observations VALUES (1, 'title', 'body', 's-p1');")
+    db.commit()
+    write_jsonl(f'{ev}/questions-test-m4.jsonl', [q('p1')])
+    (ev / 'corpus-m4.json').write_text(json.dumps({'window': {'claude': '2026-06-19'}}))
+    runs.mkdir()
+    # o+1 reads o1, of the question's own session; the other two the judge cannot read at all.
+    hits = ['o+1', 'claude-mem:db:o5', 'r:d:9']
+    (runs / 'b-off.trec').write_text(''.join(f'p1 Q0 {d} {i} 1 b-off\n' for i, d in enumerate(hits, 1)))
+    write_jsonl(f'{runs}/b-docs.jsonl', [{'key': 'u1', 'session': 's', 'ts': 1, 'kind': 'decision', 'text': 'x'}])
+    (runs / 'stores.json').write_text(json.dumps({'started': 2 ** 40, 'before': {}, 'after': {}}))
+    home.mkdir()
+    sqlite3.connect(home / 'knowledge.db').executescript(
+        'CREATE TABLE raw_docs(session TEXT); CREATE TABLE vector_todo(x); CREATE TABLE vector_keys(skipped TEXT);')
+    sqlite3.connect(home / 'providers.db').executescript('CREATE TABLE provider_calls(role TEXT, ts INTEGER);')
+    problems = m4.gate(str(runs), str(home), 'HEAD', '2026-10-01T00:00:00+09:00', rerank=False)
+    for line in ('b-off: unsupported id o+1', 'b-off: unmapped claude-mem:db:o5', 'b-off: no sidecar row for r:d:9',
+                 'b-docs.jsonl: no doc id for u1'):
+        assert line in problems

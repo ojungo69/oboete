@@ -253,8 +253,9 @@ def map_runs(out, runs, eligible):
 
 
 def sidecar(runs):
-    """The run's sidecar by doc id: a record's text, session and time, which the v1 store lacks."""
-    return {r['doc']: r for r in read_jsonl(f'{runs}/b-docs.jsonl')}
+    """The run's sidecar by doc id: a record's text, session and time, which the v1 store lacks. A
+    row with no doc id was never mapped: it is left out, and the gate reports it."""
+    return {r['doc']: r for r in read_jsonl(f'{runs}/b-docs.jsonl') if 'doc' in r}
 
 
 def record(rows, key):
@@ -287,14 +288,32 @@ def missing(runs, names, every, eligible):
     return out
 
 
+# A v1 document's id as a mapped run holds it. judge.py reads the row by int(), so an alias such as
+# o+1 or o01 would read o1's row under another id (Codex on 4cc0ad2).
+V1_DOC = re.compile('[osp][1-9][0-9]*')
+
+
+def unreadable(runs, side):
+    """Each hit the judge cannot read as its run meant it: an imported uid with no v1 doc id, a record
+    with no sidecar row, or any other id."""
+    def why(doc):
+        if doc.startswith('claude-mem:'):
+            return 'unmapped'
+        if doc.startswith('r:'):
+            return None if doc in side else 'no sidecar row for'
+        return None if V1_DOC.fullmatch(doc) else 'unsupported id'
+    return [f'{name}: {why(doc)} {doc}' for name, per in runs.items() for docs in per.values()
+            for doc in docs if why(doc)]
+
+
 def session_of(side, doc_text):
     """The session of a hit, for the own-session check: a record's from the sidecar, a v1 document's
-    from `doc_text`; None for a key the checks before it already report as missing or unmapped, so
-    the gate lists its problems and never stops on one (OpenCodeReview on 606fadc)."""
+    from `doc_text`; None for a hit `unreadable` reports, so the gate lists its problems and never
+    stops on one (OpenCodeReview on 606fadc)."""
     def of(doc):
         if doc.startswith('r:'):
             return side[doc]['session'] if doc in side else None
-        return doc_text(doc)[1] if doc[:1] in 'osp' and doc[1:].isdigit() else None
+        return doc_text(doc)[1] if V1_DOC.fullmatch(doc) else None
     return of
 
 
@@ -337,8 +356,8 @@ def matches(runs_dir, v1_text):
     v1's text of the doc id it maps to, so the mapping holds the same documents (D10)."""
     by_kind = collections.defaultdict(list)
     for row in read_jsonl(f'{runs_dir}/b-docs.jsonl'):
-        # A sidecar that was never mapped has no `doc`: the unmapped check reports it.
-        if row.get('doc', 'r:')[:1] in 'osp':
+        # A row that was never mapped has no `doc`: the gate reports it.
+        if V1_DOC.fullmatch(row.get('doc', '')):
             by_kind[row['doc'][0]].append(row)
     out = {}
     for kind, rows in sorted(by_kind.items()):
@@ -383,10 +402,9 @@ def gate(runs_dir, home, commit, answered, rerank=True):
     if len(asked) != TEST_N or sum(q['lang'] == 'en' for q in asked.values()) != ENGLISH_N:
         problems.append(f'the test questions are not {TEST_N} with {ENGLISH_N} English (spec 8.2 M21)')
     problems += missing(runs, names, set(asked), eligible)
-    problems += [f'{name}: unmapped {doc}' for name, per in runs.items() for docs in per.values()
-                 for doc in docs if doc.startswith('claude-mem:')]
-    problems += [f'{name}: no sidecar row for {doc}' for name, per in runs.items() for docs in per.values()
-                 for doc in docs if doc.startswith('r:') and doc not in side]
+    problems += unreadable(runs, side)
+    problems += [f'b-docs.jsonl: no doc id for {r.get("key")}' for r in read_jsonl(f'{runs_dir}/b-docs.jsonl')
+                 if 'doc' not in r]
     db = v1()
     session = session_of(side, lambda doc: judge.doc_text(db, doc))
     problems += own_session(runs, asked, session)
@@ -428,7 +446,9 @@ def gate(runs_dir, home, commit, answered, rerank=True):
     backup = f'{E}/judgments.jsonl.m4'
     if not (os.path.exists(backup) and sha256_file(backup) == sha256_file(f'{E}/judgments.jsonl')):
         problems.append(f'judgments.jsonl has no current backup at {backup}')
-    print(f'judge.py would make {len(judge.jobs_for(db, list(asked.values()), judge.load_runs(), judge.latest()))} calls')
+    # judge.py reads every run file, so a gate that failed may hand it a hit it cannot read.
+    if not problems:
+        print(f'judge.py would make {len(judge.jobs_for(db, list(asked.values()), judge.load_runs(), judge.latest()))} calls')
     return problems
 
 
