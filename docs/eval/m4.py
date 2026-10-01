@@ -340,14 +340,14 @@ def unexpected(runs, names):
             if n.endswith('.trec') and n[:-5] not in names]
 
 
-def recordless(eligible, asked, home, corpus):
+def recordless(eligible, asked, home, corpus_sessions):
     """Each Raw question whose session the corpus replays and `home` holds no record of, or whose
     session the corpus does not hold (D10). The gate names the held-out sessions' questions apart."""
     k = sqlite3.connect(f'file:{home}/knowledge.db?mode=ro', uri=True)
     out = []
     for qid in sorted(eligible):
         session = asked[qid]['session']
-        if session not in corpus:
+        if session not in corpus_sessions:
             out.append(f'{qid}: its session is not in the corpus')
         elif not k.execute('SELECT 1 FROM raw_docs WHERE session = ? LIMIT 1', (session,)).fetchone():
             out.append(f'{qid}: no record of its session')
@@ -393,16 +393,16 @@ def gate(runs_dir, home, commit, answered, rerank=True):
     import judge
     asked = {q['qid']: q for q in read_jsonl(f'{E}/questions-test-m4.jsonl')}
     with open(f'{E}/corpus-m4.json') as f:
-        corpus = json.load(f)
-    window = corpus['window']
+        corpus_m4 = json.load(f)
+    window = corpus_m4['window']
     eligible = {qid for qid, q in asked.items() if raw_eligible(q, window)}
     by = collections.Counter((v1().execute('SELECT agent FROM sessions WHERE id = ?', (asked[q]['session'],))
                               .fetchone()[0], asked[q]['lang']) for q in eligible)
     print(f'Raw N = {len(eligible)}; by agent and language: {dict(sorted(by.items()))}')
     # The corpus leaves the replay set's held-out sessions out (D10): their questions count on
     # Raw's N with no record of their own session.
-    held = held_out()
-    apart = sorted(qid for qid in eligible if asked[qid]['session'] in held)
+    held_sessions = held_out()
+    apart = sorted(qid for qid in eligible if asked[qid]['session'] in held_sessions)
     print(f'of them, of held-out sessions (no records): {len(apart)} {apart}')
     print(f'questions {len(asked)}: ' + ', '.join(f'{k} {v}' for k, v in sorted(collections.Counter(
         f'{q["lang"]}/{q["set"]}' for q in asked.values()).items())))
@@ -430,7 +430,7 @@ def gate(runs_dir, home, commit, answered, rerank=True):
     with open(f'{runs_dir}/stores.json') as f:
         stores = json.load(f)
     problems += older(runs_dir, names, since, stores['started'])
-    problems += recordless(eligible - set(apart), asked, home, {s['session'] for s in corpus['sessions']})
+    problems += recordless(eligible - set(apart), asked, home, {s['session'] for s in corpus_m4['sessions']})
     k = sqlite3.connect(f'file:{home}/knowledge.db?mode=ro', uri=True)
     waiting = k.execute('SELECT COUNT(*) FROM vector_todo').fetchone()[0]
     held = k.execute("SELECT COUNT(*) FROM vector_keys WHERE skipped = 'held'").fetchone()[0]

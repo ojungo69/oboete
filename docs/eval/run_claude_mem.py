@@ -18,11 +18,11 @@ os.umask(0o077)
 os.makedirs(E, mode=0o700, exist_ok=True)
 os.chmod(E, 0o700)
 DEPTH = 50
-args = argparse.ArgumentParser()
-args.add_argument('--no-window', action='store_true')
-args.add_argument('--questions', default=f'{E}/queries.jsonl')
-args.add_argument('--out', default=f'{E}/runs')
-args = args.parse_args()
+parser = argparse.ArgumentParser()
+parser.add_argument('--no-window', action='store_true')
+parser.add_argument('--questions', default=f'{E}/queries.jsonl')
+parser.add_argument('--out', default=f'{E}/runs')
+args = parser.parse_args()
 os.makedirs(args.out, exist_ok=True)
 NAME = 'claude-mem-nowindow' if args.no_window else 'claude-mem'
 WINDOW = {'dateStart': '2000-01-01'} if args.no_window else {}
