@@ -43,7 +43,7 @@ CREATE INDEX IF NOT EXISTS ledger_seq ON ledger(device, seq);
 CREATE TABLE IF NOT EXISTS ops (
   device TEXT NOT NULL,
   op_seq INTEGER NOT NULL,
-  type TEXT NOT NULL,          -- 'window', 'claim', 'correction', 'digest', 'exclusion'
+  type TEXT NOT NULL,          -- 'window', 'claim', 'correction', 'digest', 'exclusion', ...
   ts INTEGER NOT NULL,         -- unix ms, when it was appended
   body TEXT NOT NULL,          -- JSON, at most MAX_OP_BYTES
   batch INTEGER NOT NULL,      -- the first op_seq of the append it came in: a backup keeps it whole
@@ -118,6 +118,9 @@ pub enum OpKind {
     Exclusion,
     /// A document another memory tool kept (milestone 4 D5): an `ImportDoc`.
     Import,
+    /// Where an import of records stands in its source (milestone 4 D6): a `Checkpoint` and
+    /// `to_seq`, the last seq when its batch was appended.
+    Migration,
 }
 
 impl OpKind {
@@ -129,6 +132,7 @@ impl OpKind {
             OpKind::Digest => "digest",
             OpKind::Exclusion => "exclusion",
             OpKind::Import => "import",
+            OpKind::Migration => "migration",
         }
     }
     fn from_name(name: &str) -> Option<Self> {
@@ -139,6 +143,7 @@ impl OpKind {
             Self::Digest,
             Self::Exclusion,
             Self::Import,
+            Self::Migration,
         ]
         .into_iter()
         .find(|k| k.name() == name)
@@ -183,8 +188,39 @@ pub struct ImportDoc {
     pub body: String,
 }
 
-/// Documents per `append_imports` append (D5).
+/// Documents per `append_imports` append (D5), and the most records an `append_imported` takes.
 pub const IMPORT_BATCH: usize = 500;
+
+/// Where an import of records stands in its source (D6), written with each batch as a `migration`
+/// op. `key` is `oboete-v1:<device_id>` or `transcript:<agent>:<session>`; `through` is the last
+/// v1 event id or transcript line imported. v1's `row` fingerprints its event at `through`, whose
+/// id v1 reuses when its newest events are deleted.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Checkpoint {
+    pub key: String,
+    pub through: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<V1Row>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct V1Row {
+    pub id: i64,
+    pub ts: i64,
+    pub session_id: String,
+}
+
+/// Whether an import must leave an item out because the owner forgot it (spec 8.4, A104): each
+/// import path asks it of every record and document before appending. It allows everything until
+/// milestone 5's forget brings the deny-list; in tests a text holding `DENIED_IN_TESTS` stands for
+/// a forgotten one, so the tests pin where it is asked.
+pub fn denied(source: &str, source_id: Option<&str>, text: &str) -> bool {
+    let _ = (source, source_id);
+    cfg!(test) && text.contains(DENIED_IN_TESTS)
+}
+
+/// What `denied` refuses in tests.
+pub const DENIED_IN_TESTS: &str = "oboete-test:forgotten";
 
 /// A title longer than this is cut when its op is over the cap: a title as long as a body is a
 /// malformed row.
@@ -454,47 +490,54 @@ impl Raw {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let seq = next_seq(&tx, &self.device)?;
-        tx.execute(
-            "INSERT INTO records(device, seq, type, ts, kind, agent, session, repo, branch, head,
-                                 gitdir, cwd, source, body, original_bytes)
-             VALUES(?1, ?2, 'event', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
-                self.device,
-                seq,
-                e.ts,
-                e.kind,
-                e.agent,
-                e.session,
-                e.repo,
-                e.branch,
-                e.head,
-                e.gitdir,
-                e.cwd,
-                e.source,
-                e.body.as_bytes(),
-                e.original_bytes
-            ],
-        )?;
-        let now = crate::db::now_ms();
-        for (field, f) in ledger {
-            tx.execute(
-                "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    self.device,
-                    seq,
-                    field,
-                    f.rule,
-                    f.offset as i64,
-                    f.length as i64,
-                    now,
-                    ruleset
-                ],
-            )?;
-        }
+        let seq = insert_event(&tx, &self.device, e, ledger, ruleset)?;
         tx.commit()?;
         Ok(seq)
+    }
+
+    /// Imported records (`oboete-v1`, `transcript`; D6) with their ledger rows and, when given,
+    /// the import's checkpoint as a `migration` op, in one transaction: a backup carries a batch
+    /// with its checkpoint, and a killed import leaves neither. A record `denied` asks to leave out
+    /// is not recorded; the checkpoint still moves past it. Refuses a record of a live source, and
+    /// more than `IMPORT_BATCH` records or `MAX_BATCH_BYTES` of bodies. The seqs recorded.
+    pub fn append_imported(
+        &mut self,
+        batch: &[crate::capture::Captured],
+        ruleset: &str,
+        checkpoint: Option<&Checkpoint>,
+    ) -> Result<Vec<i64>> {
+        let bytes: usize = batch.iter().map(|c| c.event.body.len()).sum();
+        anyhow::ensure!(
+            batch.len() <= IMPORT_BATCH && bytes <= MAX_BATCH_BYTES,
+            "an import of {} records and {bytes} bytes is over the cap of {IMPORT_BATCH} records and {MAX_BATCH_BYTES} bytes",
+            batch.len()
+        );
+        if let Some(c) = batch.iter().find(|c| is_live(&c.event.source)) {
+            anyhow::bail!("an import cannot record a {} record", c.event.source);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut seqs = Vec::with_capacity(batch.len());
+        for c in batch {
+            if !denied(&c.event.source, None, &c.event.body) {
+                seqs.push(insert_event(
+                    &tx,
+                    &self.device,
+                    &c.event,
+                    &c.ledger,
+                    ruleset,
+                )?);
+            }
+        }
+        if let Some(checkpoint) = checkpoint {
+            let mut body = serde_json::to_value(checkpoint)?;
+            body["to_seq"] = (next_seq(&tx, &self.device)? - 1).into();
+            let op = within_batch_cap(&[(OpKind::Migration, body)])?;
+            insert_ops(&tx, &self.device, &op)?;
+        }
+        tx.commit()?;
+        Ok(seqs)
     }
 
     /// D8: a tombstone as this device's next seq. It hides its target in every later read: a
@@ -898,44 +941,11 @@ impl Raw {
     /// D1: `ops` as this device's next op seqs, in one transaction: a window op and the claims
     /// it yields commit together, and with them the curation checkpoint (D2).
     pub fn append_ops(&mut self, ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<i64>> {
-        let bodies = ops
-            .iter()
-            .map(|(kind, body)| {
-                let text = body.to_string();
-                anyhow::ensure!(
-                    text.len() <= MAX_OP_BYTES,
-                    "a {} op of {} bytes is over the {MAX_OP_BYTES}-byte cap",
-                    kind.name(),
-                    text.len()
-                );
-                Ok((kind.name(), text))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let total: usize = bodies.iter().map(|(_, b)| b.len()).sum();
-        anyhow::ensure!(
-            bodies.len() <= MAX_BATCH_OPS && total <= MAX_BATCH_BYTES,
-            "an append of {} ops and {total} bytes is over the cap of {MAX_BATCH_OPS} ops and {MAX_BATCH_BYTES} bytes",
-            bodies.len()
-        );
+        let bodies = within_batch_cap(ops)?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let mut op_seq: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
-            [&self.device],
-            |r| r.get(0),
-        )?;
-        let (ts, batch) = (crate::db::now_ms(), op_seq + 1);
-        let mut seqs = Vec::with_capacity(bodies.len());
-        for (kind, body) in &bodies {
-            op_seq += 1;
-            tx.execute(
-                "INSERT INTO ops(device, op_seq, type, ts, body, batch)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                params![self.device, op_seq, kind, ts, body, batch],
-            )?;
-            seqs.push(op_seq);
-        }
+        let seqs = insert_ops(&tx, &self.device, &bodies)?;
         tx.commit()?;
         Ok(seqs)
     }
@@ -1061,7 +1071,8 @@ impl Raw {
     ) -> Result<std::collections::BTreeMap<String, i64>> {
         let mut st = self.conn.prepare(
             "SELECT source, count(*) FROM records
-             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event' GROUP BY source",
+             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event' AND kind != 'touch'
+             GROUP BY source",
         )?;
         let mut out = std::collections::BTreeMap::new();
         for &(from, to) in ranges {
@@ -1126,13 +1137,56 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The furthest checkpoint of each import whose key starts with `prefix`, on any device: where
+    /// its next pass starts (D6).
+    pub fn migration_checkpoints(
+        &self,
+        prefix: &str,
+    ) -> Result<std::collections::HashMap<String, Checkpoint>> {
+        let mut st = self.conn.prepare(
+            "SELECT op_seq, body FROM ops WHERE type = 'migration'
+               AND substr(json_extract(body, '$.key'), 1, length(?1)) = ?1",
+        )?;
+        let rows = st.query_map([prefix], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = std::collections::HashMap::<String, Checkpoint>::new();
+        for row in rows {
+            let (op_seq, body) = row?;
+            let c: Checkpoint = serde_json::from_str(&body)
+                .with_context(|| format!("op {op_seq}: a migration body"))?;
+            if out.get(&c.key).is_none_or(|kept| kept.through < c.through) {
+                out.insert(c.key.clone(), c);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The time of each (agent, session)'s earliest record that neither the transcript import
+    /// wrote nor labels a v1 repository (`touch`): where that session's transcript import stops
+    /// (D6).
+    pub fn earliest_by_session(&self) -> Result<std::collections::HashMap<(String, String), i64>> {
+        let mut st = self.conn.prepare(
+            "SELECT agent, session, MIN(ts) FROM records
+             WHERE type = 'event' AND source != 'transcript' AND kind != 'touch'
+               AND agent IS NOT NULL AND session IS NOT NULL
+             GROUP BY agent, session",
+        )?;
+        let rows = st.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// `docs` as this device's `import` ops (D5), in appends of at most `IMPORT_BATCH` documents
     /// and `MAX_BATCH_BYTES`, each its own batch: an import stopped midway keeps what it appended.
-    /// A body that would take its op over `MAX_OP_BYTES` is clipped with a marker. The ops
-    /// appended.
+    /// A body that would take its op over `MAX_OP_BYTES` is clipped with a marker; a document
+    /// `denied` asks to leave out is not appended. The ops appended.
     pub fn append_imports(&mut self, docs: Vec<ImportDoc>) -> Result<usize> {
         let (mut batch, mut bytes, mut appended) = (Vec::new(), 0, 0);
         for doc in docs {
+            let text = format!("{}\n{}", doc.title, doc.body);
+            if denied(&doc.source, Some(&doc.source_id), &text) {
+                continue;
+            }
             let body = serde_json::to_value(within_op_cap(doc)?)?;
             let size = body.to_string().len();
             if batch.len() == IMPORT_BATCH || bytes + size > MAX_BATCH_BYTES {
@@ -1660,13 +1714,17 @@ impl Rebuild {
     }
 
     /// Commit and close, so the file is whole on disk before it is renamed into place. A window
-    /// op past the restored records (their segment was damaged and skipped) goes, with every op
-    /// after it: the curation checkpoint must never pass a seq the store does not hold, or the
-    /// records that reuse those seqs would never be curated. Returns how many ops went.
+    /// or migration op past the restored records (their segment was damaged and skipped) goes,
+    /// with every op after it: the curation checkpoint must never pass a seq the store does not
+    /// hold, or the records that reuse those seqs would never be curated, and an import's must
+    /// not pass records it lost, or its next pass would skip them (D6). Returns how many ops went.
+    // ponytail: a restore keeping a batch's records but not its migration op imports them again;
+    // a check of the restored records against the source's ids would catch it.
     pub fn finish(self) -> Result<usize> {
         let dropped = self.conn.execute(
             "DELETE FROM ops WHERE op_seq >= (
-               SELECT MIN(w.op_seq) FROM ops w WHERE w.device = ops.device AND w.type = 'window'
+               SELECT MIN(w.op_seq) FROM ops w WHERE w.device = ops.device
+                 AND w.type IN ('window', 'migration')
                  AND json_extract(w.body, '$.to_seq') >
                      (SELECT COALESCE(MAX(r.seq), 0) FROM records r WHERE r.device = w.device))",
             [],
@@ -1703,6 +1761,105 @@ fn next_seq(tx: &rusqlite::Transaction, device: &str) -> Result<i64> {
         [device],
         |r| r.get(0),
     )?)
+}
+
+/// `e` and its ledger rows as `device`'s next seq, inside a write transaction.
+fn insert_event(
+    tx: &rusqlite::Transaction,
+    device: &str,
+    e: &Event,
+    ledger: &[(String, crate::redact::Finding)],
+    ruleset: &str,
+) -> Result<i64> {
+    let seq = next_seq(tx, device)?;
+    tx.execute(
+        "INSERT INTO records(device, seq, type, ts, kind, agent, session, repo, branch, head,
+                             gitdir, cwd, source, body, original_bytes)
+         VALUES(?1, ?2, 'event', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            device,
+            seq,
+            e.ts,
+            e.kind,
+            e.agent,
+            e.session,
+            e.repo,
+            e.branch,
+            e.head,
+            e.gitdir,
+            e.cwd,
+            e.source,
+            e.body.as_bytes(),
+            e.original_bytes
+        ],
+    )?;
+    let now = crate::db::now_ms();
+    for (field, f) in ledger {
+        tx.execute(
+            "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                device,
+                seq,
+                field,
+                f.rule,
+                f.offset as i64,
+                f.length as i64,
+                now,
+                ruleset
+            ],
+        )?;
+    }
+    Ok(seq)
+}
+
+/// `ops` serialized, each within `MAX_OP_BYTES` and all within one append's caps.
+fn within_batch_cap(ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<(&'static str, String)>> {
+    let bodies = ops
+        .iter()
+        .map(|(kind, body)| {
+            let text = body.to_string();
+            anyhow::ensure!(
+                text.len() <= MAX_OP_BYTES,
+                "a {} op of {} bytes is over the {MAX_OP_BYTES}-byte cap",
+                kind.name(),
+                text.len()
+            );
+            Ok((kind.name(), text))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let total: usize = bodies.iter().map(|(_, b)| b.len()).sum();
+    anyhow::ensure!(
+        bodies.len() <= MAX_BATCH_OPS && total <= MAX_BATCH_BYTES,
+        "an append of {} ops and {total} bytes is over the cap of {MAX_BATCH_OPS} ops and {MAX_BATCH_BYTES} bytes",
+        bodies.len()
+    );
+    Ok(bodies)
+}
+
+/// `bodies` as `device`'s next ops, one batch, inside a write transaction.
+fn insert_ops(
+    tx: &rusqlite::Transaction,
+    device: &str,
+    bodies: &[(&str, String)],
+) -> Result<Vec<i64>> {
+    let mut op_seq: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
+        [device],
+        |r| r.get(0),
+    )?;
+    let (ts, batch) = (crate::db::now_ms(), op_seq + 1);
+    let mut seqs = Vec::with_capacity(bodies.len());
+    for (kind, body) in bodies {
+        op_seq += 1;
+        tx.execute(
+            "INSERT INTO ops(device, op_seq, type, ts, body, batch)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![device, op_seq, kind, ts, body, batch],
+        )?;
+        seqs.push(op_seq);
+    }
+    Ok(seqs)
 }
 
 /// Records `compress_through` reads per batch, and the bytes of their bodies it loads at once.
@@ -2214,6 +2371,209 @@ mod tests {
         raw.append_ops(&ops.map(|op| (OpKind::Import, op))).unwrap();
         let keys = raw.import_keys("claude-mem").unwrap();
         assert_eq!(keys, ["o1".to_owned()].into_iter().collect());
+    }
+
+    fn imported(body: &str) -> crate::capture::Captured {
+        crate::capture::Captured {
+            event: Event {
+                source: "oboete-v1".into(),
+                ..test_event(body)
+            },
+            ledger: Vec::new(),
+        }
+    }
+
+    fn v1_checkpoint(through: i64) -> Checkpoint {
+        Checkpoint {
+            key: "oboete-v1:d1".into(),
+            through,
+            row: Some(V1Row {
+                id: through,
+                ts: 7,
+                session_id: "s1".into(),
+            }),
+        }
+    }
+
+    /// D6: a batch of imported records, their ledger rows and the checkpoint op commit together;
+    /// the op says through which seq the batch went, and each key's furthest checkpoint reads
+    /// back by its prefix.
+    #[test]
+    fn an_imported_batch_lands_with_its_ledger_and_checkpoint() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        raw.append(&test_event("live")).unwrap();
+        let mut masked = imported("b");
+        let finding = crate::redact::Finding {
+            rule: "r".into(),
+            offset: 1,
+            length: 2,
+        };
+        masked.ledger.push(("/prompt".into(), finding));
+        let seqs = raw
+            .append_imported(&[imported("a"), masked], "v9", Some(&v1_checkpoint(42)))
+            .unwrap();
+        assert_eq!(seqs, [2, 3]);
+        let sources: Vec<String> = raw
+            .after(raw.device(), 1, 10)
+            .unwrap()
+            .into_iter()
+            .map(|r| match r.item {
+                Item::Event(e) => e.source,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(sources, ["oboete-v1", "oboete-v1"]);
+        let ledger: (i64, String) = raw
+            .conn
+            .query_row("SELECT seq, ruleset FROM ledger", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(ledger, (3, "v9".to_owned()));
+        let ops = raw.ops_after(raw.device(), 0, 10).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].kind, OpKind::Migration);
+        assert_eq!(
+            ops[0].body,
+            serde_json::json!({"key": "oboete-v1:d1", "through": 42, "to_seq": 3,
+                "row": {"id": 42, "ts": 7, "session_id": "s1"}})
+        );
+        // A transcript's checkpoint has no row; one with nothing to record holds the last seq.
+        let t = Checkpoint {
+            key: "transcript:claude:s1".into(),
+            through: 9,
+            row: None,
+        };
+        assert!(raw.append_imported(&[], "v9", Some(&t)).unwrap().is_empty());
+        raw.append_imported(&[imported("c")], "v9", Some(&v1_checkpoint(50)))
+            .unwrap();
+        let ops = raw.ops_after(raw.device(), 0, 10).unwrap();
+        assert_eq!(
+            ops[1].body,
+            serde_json::json!({"key": "transcript:claude:s1", "through": 9, "to_seq": 3})
+        );
+        assert_eq!(
+            raw.migration_checkpoints("oboete-v1:").unwrap(),
+            [("oboete-v1:d1".to_owned(), v1_checkpoint(50))]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            raw.migration_checkpoints("transcript:").unwrap(),
+            [(t.key.clone(), t)].into_iter().collect()
+        );
+    }
+
+    /// D6: an append of imported records is one transaction, bounded as an op batch is, and it
+    /// never takes a record of a live source, which curation and the manifest read.
+    #[test]
+    fn an_imported_batch_over_a_cap_or_with_a_live_record_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let many: Vec<_> = (0..=IMPORT_BATCH).map(|_| imported("x")).collect();
+        assert!(raw.append_imported(&many, "v", None).is_err());
+        let big: Vec<_> = (0..5).map(|_| imported(&"x".repeat(1 << 20))).collect();
+        assert!(raw.append_imported(&big, "v", None).is_err());
+        for source in LIVE {
+            let mut live = imported("x");
+            live.event.source = source.into();
+            let batch = [imported("y"), live];
+            assert!(
+                raw.append_imported(&batch, "v", Some(&v1_checkpoint(1)))
+                    .is_err()
+            );
+        }
+        assert_eq!((raw.max_seq().unwrap(), raw.max_op_seq().unwrap()), (0, 0));
+        // At the caps it lands.
+        assert_eq!(raw.append_imported(&big[1..], "v", None).unwrap().len(), 4);
+        let seqs = raw.append_imported(&many[1..], "v", None).unwrap();
+        assert_eq!(seqs.len(), IMPORT_BATCH);
+    }
+
+    /// spec 8.4, A104: both import paths ask `denied` of each item and leave a denied one out. A
+    /// batch left with nothing still moves its checkpoint, so the next pass does not read it again.
+    #[test]
+    fn every_append_path_calls_denied() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let forgotten = format!("x {DENIED_IN_TESTS} y");
+        let batch = [imported(&forgotten), imported("kept")];
+        let seqs = raw
+            .append_imported(&batch, "v", Some(&v1_checkpoint(2)))
+            .unwrap();
+        assert_eq!(seqs, [1]);
+        let batch = [imported(&forgotten)];
+        let seqs = raw
+            .append_imported(&batch, "v", Some(&v1_checkpoint(3)))
+            .unwrap();
+        assert!(seqs.is_empty());
+        let kept = raw.after(raw.device(), 0, 10).unwrap();
+        assert!(
+            matches!(&kept[..], [r] if r.item == Item::Event(Box::new(imported("kept").event)))
+        );
+        let checkpoints = raw.migration_checkpoints("oboete-v1:").unwrap();
+        assert_eq!(checkpoints["oboete-v1:d1"].through, 3);
+        let docs = vec![
+            import_doc(1, forgotten.clone()),
+            ImportDoc {
+                title: forgotten,
+                ..import_doc(2, "b".into())
+            },
+            import_doc(3, "kept".into()),
+        ];
+        assert_eq!(raw.append_imports(docs).unwrap(), 1);
+        let keys = raw.import_keys("claude-mem:abc").unwrap();
+        assert_eq!(keys, ["o3".to_owned()].into_iter().collect());
+    }
+
+    /// D6, the transcript cut: each session's earliest record that is neither the transcript's
+    /// own nor a v1 repository label.
+    #[test]
+    fn earliest_by_session_leaves_out_transcript_and_touch_records() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let at = |agent: &str, session: &str, ts: i64, source: &str, kind: &str| Event {
+            agent: agent.into(),
+            session: session.into(),
+            ts,
+            source: source.into(),
+            kind: kind.into(),
+            ..test_event("x")
+        };
+        for e in [
+            at("claude", "s1", 50, "hook", "prompt"),
+            at("claude", "s1", 30, "oboete-v1", "prompt"),
+            at("claude", "s1", 10, "transcript", "prompt"),
+            at("claude", "s1", 5, "oboete-v1", "touch"),
+            at("codex", "s1", 70, "replay", "tool"),
+            at("codex", "s2", 3, "transcript", "prompt"),
+        ] {
+            raw.append(&e).unwrap();
+        }
+        let key = |a: &str, s: &str| (a.to_owned(), s.to_owned());
+        assert_eq!(
+            raw.earliest_by_session().unwrap(),
+            [(key("claude", "s1"), 30), (key("codex", "s1"), 70)]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    /// D6: v1's repository labels are records, never counted as imported events.
+    #[test]
+    fn imported_counts_leave_touch_records_out() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let mut touch = imported("{}");
+        touch.event.kind = "touch".into();
+        raw.append_imported(&[imported("a"), touch], "v", None)
+            .unwrap();
+        let dev = raw.device().to_owned();
+        assert_eq!(
+            raw.imported_counts(&dev, &[(1, 10)]).unwrap(),
+            [("oboete-v1".to_owned(), 1)].into_iter().collect()
+        );
     }
 
     /// OpenCodeReview on #304: an event's agent and session labels may be NULL; `sessions_in`
