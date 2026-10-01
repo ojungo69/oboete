@@ -475,7 +475,9 @@ fn repos(v1: &Connection, raw: &mut Raw, settings: &Settings, stats: &mut Stats)
             batch.clear();
         }
     }
-    stats.repos += raw.append_imported(&batch, ruleset, None)?.len() as u64;
+    if !batch.is_empty() {
+        stats.repos += raw.append_imported(&batch, ruleset, None)?.len() as u64;
+    }
     Ok(())
 }
 
@@ -894,6 +896,31 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
             .collect();
         let want: Vec<String> = (0..100).map(|i| format!("file {i}")).collect();
         assert_eq!(inputs, want);
+    }
+
+    /// D5: `append_imports` commits `IMPORT_BATCH` documents at a time, so a pass stopped between
+    /// two keeps the first and the next adds the rest, once.
+    #[test]
+    fn a_killed_pass_keeps_the_documents_it_appended() {
+        let dir = tempfile::tempdir().unwrap();
+        let v1 = V1::new(dir.path());
+        v1.session("s1", "r", 100);
+        for i in 0..600 {
+            v1.observation("s1", 110 + i, "Note", &format!("Note {i}."));
+        }
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        // The touch label commits first, then the documents' first batch.
+        crate::crash::at(3);
+        let killed = pass(home.path(), &mut raw, &v1.path);
+        crate::crash::off();
+        assert!(killed.is_err());
+        assert_eq!(
+            raw.import_keys("oboete-v1:d1e5").unwrap().len(),
+            IMPORT_BATCH
+        );
+        let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
+        assert_eq!((stats.documents, stats.seen), (100, 500));
     }
 
     /// D6: events that record nothing still move the checkpoint, so the next pass does not read
