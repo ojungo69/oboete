@@ -273,10 +273,10 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
 
 /// The query's vector from the configured embedder (D8), or why there is none: off, no vectors,
 /// a new embedder's still being made, the embedder resting or its cap spent, an exclusion made
-/// since `search` checked (nothing is sent), a timeout or an error. The exclusions are read again
-/// just before the call (row 30-2). A sent request is recorded in providers.db with role `query`, from the
-/// requests batches leave for queries; a failure sets no rest. One that cannot open providers.db
-/// sends nothing.
+/// since `search` checked (nothing is sent), a timeout or an error. A request is counted in
+/// providers.db (role `query`) before it is sent, from the requests batches leave for queries,
+/// and the exclusions are read again just before the call (row 30-2); a failure sets no rest.
+/// One that cannot open or write providers.db sends nothing.
 // ponytail: the call runs before the full-text legs, not beside them on a thread; that saves the
 // legs' few ms only.
 fn embedded(
@@ -302,12 +302,12 @@ fn embedded(
     let Ok(db) = pdb::open(home) else {
         return Ok(Err(VectorSkip::Error));
     };
-    let calls = crate::embed::CALLS;
-    if pdb::state(&db, calls)?.down_until > crate::db::now_ms()
-        || pdb::calls_in_a_day(&db, calls)?.0 >= config.embedding.daily_requests
-        || pdb::embed_usd_this_month(&db)? >= config.embedding.monthly_usd
-    {
-        return Ok(Err(VectorSkip::Waiting));
+    match pdb::state(&db, crate::embed::CALLS) {
+        Ok(state) if state.down_until > crate::db::now_ms() => {
+            return Ok(Err(VectorSkip::Waiting));
+        }
+        Ok(_) => {}
+        Err(_) => return Ok(Err(VectorSkip::Error)),
     }
     // Gated, then cut, as a prompt is (D8).
     let sent: String = redact::outbound_lines(&q.text)
@@ -317,36 +317,40 @@ fn embedded(
     if sent.trim().is_empty() || sent.trim() == "[REDACTED]" {
         return Ok(Err(VectorSkip::Error));
     }
+    // Counted before it is sent, from the day's whole allowance (Step 7).
+    let reserved = crate::embed_phase::reserve(
+        &db,
+        "query",
+        "1 query",
+        &sent,
+        config.embedding.daily_requests,
+        config.embedding.monthly_usd,
+    );
+    let call = match reserved {
+        Ok(Some(call)) => call,
+        Ok(None) => return Ok(Err(VectorSkip::Waiting)),
+        Err(_) => return Ok(Err(VectorSkip::Error)),
+    };
     // Again as near the call as it can be: an exclusion made since the first check holds.
-    if excluded(&raw.exclusions()?, q) {
-        return Ok(Err(VectorSkip::Excluded));
+    let excluded_now = raw.exclusions().map(|list| excluded(&list, q));
+    if !matches!(excluded_now, Ok(false)) {
+        if let Err(e) = pdb::unreserve(&db, call) {
+            eprintln!("oboete: a query embedding not sent stays counted: {e:#}");
+        }
+        return Ok(Err(match excluded_now {
+            Ok(_) => VectorSkip::Excluded,
+            Err(_) => VectorSkip::Error,
+        }));
     }
     let started = Instant::now();
     let result = embedder.run(&[&sent], QUERY_TIMEOUT);
     let (outcome, detail, billed) = match &result {
         Ok(_) => ("ok", "1 query".to_owned(), true),
-        Err(f) => ("error", f.message.clone(), f.sent && f.status.is_none()),
+        Err(f) => ("error", f.message.clone(), f.billed()),
     };
-    let est = crate::budget::estimate(&sent);
-    let usd = if billed {
-        Some(crate::embed_phase::billed_usd(&db, est)?)
-    } else {
-        None
-    };
-    let call = pdb::Call {
-        provider: calls,
-        role: "query",
-        span: "1 query",
-        outcome,
-        ms: started.elapsed().as_millis() as i64,
-        detail: Some(&detail),
-        bytes_out: sent.len(),
-        est_tokens: Some(est),
-        usage: pdb::Usage::default(),
-        usd,
-    };
-    if let Err(e) = pdb::record(&db, &call) {
-        eprintln!("oboete: a query embedding is not recorded: {e:#}");
+    let ms = started.elapsed().as_millis() as i64;
+    if let Err(e) = pdb::settle(&db, call, outcome, ms, &detail, billed) {
+        eprintln!("oboete: a query embedding is not settled: {e:#}");
     }
     Ok(match result {
         Ok(mut v) => match v.pop() {

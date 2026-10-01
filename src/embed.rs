@@ -95,6 +95,14 @@ pub struct Failure {
     pub message: String,
 }
 
+impl Failure {
+    /// Whether the request may have been run, and so billed: sent, and not answered with an
+    /// error status (an answer whose body could not be read or used was run).
+    pub fn billed(&self) -> bool {
+        self.sent && self.status.is_none_or(|s| (200..300).contains(&s))
+    }
+}
+
 impl Embedder {
     /// The embedder `[embedding]` names, or `None` for `provider = "none"`. The token is read
     /// here, so a missing key file stops the phase before it reads anything to send.

@@ -70,6 +70,8 @@ pub fn send(home: &Path, batch: &Batch, embedder: &Embedder, timeout: Duration) 
 /// A call on its thread.
 struct InFlight {
     batch: Arc<Batch>,
+    /// Its `provider_calls` row, counted since before it was sent.
+    call: i64,
     thread: std::thread::JoinHandle<(Sent, i64)>,
     /// When the call's own timeout has passed (unix ms).
     until: i64,
@@ -154,7 +156,7 @@ impl Phase {
                     0,
                 )
             });
-            self.finish(k, &f.batch, sent, ms)?;
+            self.finish(k, &f.batch, f.call, sent, ms)?;
             return Ok(Step::Covered);
         }
         // Read again each poll: a worker that stays up follows the owner's edits.
@@ -170,7 +172,14 @@ impl Phase {
         };
         let reading = Reading::now(raw, Reads::Live)?;
         cleared(k, &embedder.id, &reading)?;
-        let wait = self.held_back(&cfg)?;
+        let wait = match self.held_back(&cfg) {
+            Ok(wait) => wait,
+            // A providers.db that will not open or read holds back the vectors only.
+            Err(e) => {
+                eprintln!("oboete: no embedding for now: {e:#}");
+                return Ok(Step::Idle);
+            }
+        };
         let half = match wait {
             None => self.next_half(raw, k, &embedder.id, &reading)?,
             Some(_) => None,
@@ -189,12 +198,31 @@ impl Phase {
                 b
             }
         };
+        // Counted before it is sent (Step 7); one that cannot be counted is not sent.
+        let cap = cfg.daily_requests.saturating_sub(KEPT_FOR_QUERIES);
+        let (span, texts) = (
+            format!("{} documents", batch.docs.len()),
+            batch.texts.join("\n"),
+        );
+        let reserved = self
+            .providers()
+            .and_then(|db| reserve(db, ROLE, &span, &texts, cap, cfg.monthly_usd));
+        let call = match reserved {
+            Ok(Some(call)) => call,
+            // Another process took the last of the cap meanwhile.
+            Ok(None) => return Ok(self.held_back(&cfg).ok().flatten().unwrap_or(Step::Idle)),
+            Err(e) => {
+                eprintln!("oboete: no embedding for now: {e:#}");
+                return Ok(Step::Idle);
+            }
+        };
         let batch = Arc::new(batch);
         let (home, sending, timeout) = (self.home.clone(), batch.clone(), self.timeout);
         let thread = std::thread::spawn(move || send(&home, &sending, &embedder, timeout));
         let until = crate::db::now_ms() + timeout.as_millis() as i64;
         self.flight = Some(InFlight {
             batch,
+            call,
             thread,
             until,
         });
@@ -279,23 +307,44 @@ impl Phase {
         }))
     }
 
-    /// A finished call: its vectors written in one transaction, each document's only while its
-    /// stored text is still the one sent (row 55-6); or the batch split, its lone texts refused,
-    /// or the embedder rested; and the call recorded with what it is estimated to cost.
-    fn finish(&mut self, k: &Connection, batch: &Batch, sent: Sent, ms: i64) -> Result<()> {
+    /// A finished call. providers.db first: the call settled (its outcome, and its estimated cost
+    /// unless the embedder answered with an error status) and the rest it sets, only logged when
+    /// that fails, as the call was counted before it was sent. Then knowledge.db: its vectors in
+    /// one transaction, each document's only while its stored text is still the one sent (row
+    /// 55-6), or the batch split and its lone texts refused.
+    fn finish(
+        &mut self,
+        k: &Connection,
+        batch: &Batch,
+        call: i64,
+        sent: Sent,
+        ms: i64,
+    ) -> Result<()> {
         use crate::providers_db as pdb;
-        let was = pdb::state(self.providers()?, crate::embed::CALLS)?;
-        let mut next = None;
-        let (outcome, detail) = match &sent {
-            Sent::Vectors(vecs) => {
-                write(k, batch, vecs)?;
+        let failure = match &sent {
+            // Nothing left: the call is no longer counted, and no rest is set. A split's other
+            // halves were read under the same list: the next poll reads them again.
+            Sent::Unsent(e) => {
+                eprintln!("oboete: embedding not sent: {e:#}");
+                self.split = None;
+                if let Err(e) = self.providers().and_then(|db| pdb::unreserve(db, call)) {
+                    eprintln!("oboete: an embedding call not sent stays counted: {e:#}");
+                }
+                return Ok(());
+            }
+            Sent::Vectors(_) => None,
+            Sent::Failed(f) => Some(f),
+        };
+        // The embedder's state after it: unchanged (None), cleared (Some(None)) or rested.
+        let mut rest = None;
+        match failure {
+            None => {
                 if let Some(split) = &mut self.split {
                     split.answered = true;
                 }
-                next = Some(pdb::State::default());
-                ("ok", batch.docs.len().to_string())
+                rest = Some(None);
             }
-            Sent::Failed(f) if matches!(f.status, Some(400 | 413 | 422)) => {
+            Some(f) if matches!(f.status, Some(400 | 413 | 422)) => {
                 let split = self.split.get_or_insert_with(Split::default);
                 split.fails += 1;
                 if let [doc] = &batch.docs[..] {
@@ -314,70 +363,49 @@ impl Phase {
                         });
                     }
                 }
-                ("error", f.message.clone())
             }
-            Sent::Failed(f) => {
-                next = Some(crate::provider::next_state(was, &f.into()));
-                ("error", f.message.clone())
-            }
-            // Nothing left: nothing to record, and no rest set. A split's other halves were read
-            // under the same list: the next poll reads them again.
-            Sent::Unsent(e) => {
-                eprintln!("oboete: embedding not sent: {e:#}");
-                self.split = None;
-                return Ok(());
-            }
-        };
+            Some(f) => rest = Some(Some(f)),
+        }
         // A split that is over, or that failed past `SPLIT_FAILS` unanswered: answered, its lone
         // texts are refused; unanswered, the embedder rests as for any failure.
+        let mut refused = Vec::new();
         if let Some(split) = &self.split
             && (split.halves.is_empty() || (!split.answered && split.fails >= SPLIT_FAILS))
         {
             let split = self.split.take().expect("checked above");
             if split.answered {
-                for doc in &split.lone {
-                    if stored(k, doc)? {
-                        mark(k, &batch.embedder, doc, "refused")?;
-                    }
-                }
-            } else if let Sent::Failed(f) = &sent {
-                next = Some(crate::provider::next_state(was, &f.into()));
+                refused = split.lone;
+            } else if failure.is_some() {
+                rest = Some(failure);
             }
         }
-        // Billed: an answer, or a request that may have been run (a timeout, a dropped answer);
-        // an HTTP error status was not.
-        let billed = match &sent {
-            Sent::Vectors(_) => true,
-            Sent::Failed(f) => f.sent && f.status.is_none(),
-            Sent::Unsent(_) => false,
+        let (outcome, detail, billed) = match failure {
+            None => ("ok", batch.docs.len().to_string(), true),
+            Some(f) => ("error", f.message.clone(), f.billed()),
         };
-        let texts = batch.texts.join("\n");
-        let est = crate::budget::estimate(&texts);
-        let db = self.providers()?;
-        let usd = if billed {
-            Some(billed_usd(db, est)?)
-        } else {
-            None
-        };
-        pdb::record(
-            db,
-            &pdb::Call {
-                provider: crate::embed::CALLS,
-                role: ROLE,
-                span: &format!("{} documents", batch.docs.len()),
-                outcome,
-                ms,
-                detail: Some(&detail),
-                bytes_out: texts.len(),
-                est_tokens: Some(est),
-                usage: pdb::Usage::default(),
-                usd,
-            },
-        )?;
-        if let Some(next) = next
-            && next != was
-        {
-            pdb::set_state(db, crate::embed::CALLS, next)?;
+        let settled = self.providers().and_then(|db| {
+            pdb::settle(db, call, outcome, ms, &detail, billed)?;
+            if let Some(rest) = rest {
+                let was = pdb::state(db, crate::embed::CALLS)?;
+                let next = rest.map_or_else(pdb::State::default, |f| {
+                    crate::provider::next_state(was, &f.into())
+                });
+                if next != was {
+                    pdb::set_state(db, crate::embed::CALLS, next)?;
+                }
+            }
+            Ok(())
+        });
+        if let Err(e) = settled {
+            eprintln!("oboete: an embedding call is not settled: {e:#}");
+        }
+        if let Sent::Vectors(vecs) = &sent {
+            write(k, batch, vecs)?;
+        }
+        for doc in &refused {
+            if stored(k, doc)? {
+                mark(k, &batch.embedder, doc, "refused")?;
+            }
         }
         Ok(())
     }
@@ -509,6 +537,47 @@ pub fn carry(k: &Connection, from: &Path) -> Result<usize> {
     }
     tx.commit()?;
     Ok(carried)
+}
+
+/// A request counted before it is sent (Step 7): in one write transaction, unless the day's
+/// requests reached `cap` or the month's USD `monthly_usd`, a row that counts as sent and billed as
+/// estimated until `providers_db::settle` says what became of it. A process that dies first leaves
+/// it counted, and one that checks meanwhile (the CLI, MCP, the worker) sees it.
+pub(crate) fn reserve(
+    db: &Connection,
+    role: &str,
+    span: &str,
+    texts: &str,
+    cap: u32,
+    monthly_usd: f64,
+) -> Result<Option<i64>> {
+    use crate::providers_db as pdb;
+    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+    if pdb::calls_in_a_day(&tx, crate::embed::CALLS)?.0 >= cap
+        || pdb::embed_usd_this_month(&tx)? >= monthly_usd
+    {
+        return Ok(None);
+    }
+    let est = crate::budget::estimate(texts);
+    let usd = billed_usd(&tx, est)?;
+    pdb::record(
+        &tx,
+        &pdb::Call {
+            provider: crate::embed::CALLS,
+            role,
+            span,
+            outcome: "sent",
+            ms: 0,
+            detail: None,
+            bytes_out: texts.len(),
+            est_tokens: Some(est),
+            usage: pdb::Usage::default(),
+            usd: Some(usd),
+        },
+    )?;
+    let id = tx.last_insert_rowid();
+    tx.commit()?;
+    Ok(Some(id))
 }
 
 /// What a billed call of `tokens` costs, after the UTC day's billed embedding calls so far.
@@ -1178,7 +1247,8 @@ mod tests {
     }
 
     /// D13: a batch read under one exclusion list is not sent once the list changed: `send` makes
-    /// no request and the phase records nothing; the next poll reads again and sends what may go.
+    /// no request and the phase keeps nothing of it, its count included; the next poll reads again
+    /// and sends what may go.
     #[test]
     fn a_batch_read_before_an_exclusion_is_never_sent() {
         let stub = Stub::start();
@@ -1194,12 +1264,15 @@ mod tests {
         let batch = pending(&s.raw, &k, &embedder.id, &reading)
             .unwrap()
             .unwrap();
+        let db = crate::providers_db::open(home).unwrap();
+        let call = reserve(&db, ROLE, "1 documents", "Open words.", 160, 1.0)
+            .unwrap()
+            .unwrap();
         s.raw.exclude("github.com/o/elsewhere", false).unwrap();
         let (sent, _) = send(home, &batch, &embedder, Duration::from_secs(5));
         assert!(matches!(&sent, Sent::Unsent(e) if e.is::<crate::curate::ListChanged>()));
-        Phase::new(home).finish(&k, &batch, sent, 0).unwrap();
+        Phase::new(home).finish(&k, &batch, call, sent, 0).unwrap();
         assert_eq!(stub.requests(), 0);
-        let db = crate::providers_db::open(home).unwrap();
         let rows: i64 = db
             .query_row(
                 "SELECT (SELECT count(*) FROM provider_calls) + (SELECT count(*) FROM provider_state)",
@@ -1527,6 +1600,92 @@ mod tests {
         assert_eq!(usd(0, tokens(9_000.0)), 0.0);
         let past = usd(tokens(9_000.0), tokens(2_000.0));
         assert!((past - 0.011).abs() < 1e-4, "{past}");
+    }
+
+    /// Step 7: a request is counted, with what it may cost, before it is sent: a call that never
+    /// comes back, a process that dies, or a write that fails after it leaves it counted. An
+    /// answer whose body cannot be used was run, so it is billed as an answer is.
+    #[test]
+    fn a_request_is_counted_before_it_is_sent() {
+        use crate::providers_db as pdb;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        s.said("s", R, 1_000, "Words to embed.");
+        s.run();
+        let home = s.home.path();
+        let k = crate::knowledge::open(home).unwrap();
+        let db = pdb::open(home).unwrap();
+        let rows = || -> Vec<(String, Option<f64>)> {
+            db.prepare("SELECT outcome, usd FROM provider_calls WHERE role = 'embed' ORDER BY id")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let mut phase = Phase::new(home);
+        let held = stub.hold();
+        assert!(matches!(
+            phase.poll(&s.raw, &k).unwrap(),
+            Step::Waiting { .. }
+        ));
+        while stub.requests() == 0 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(pdb::calls_in_a_day(&db, crate::embed::CALLS).unwrap().0, 1);
+        assert_eq!(rows(), [("sent".to_owned(), Some(0.0))]);
+        drop(held);
+        while !phase.done() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
+        assert_eq!(rows(), [("ok".to_owned(), Some(0.0))]);
+        // Past the day's free neurons, an answer of 200 that holds no vectors is billed.
+        pdb::record(
+            &db,
+            &pdb::Call {
+                provider: crate::embed::CALLS,
+                role: "elsewhere",
+                span: "",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 1,
+                est_tokens: Some(10_000_000),
+                usage: pdb::Usage::default(),
+                usd: Some(0.0),
+            },
+        )
+        .unwrap();
+        s.said("s", R, 2_000, "More words to embed.");
+        s.run();
+        stub.fail_next(200, None);
+        assert!(matches!(call(&s, &k, &mut phase), Step::Waiting { .. }));
+        let last = rows().pop().unwrap();
+        assert_eq!(last.0, "error");
+        assert!(last.1.is_some_and(|usd| usd > 0.0), "{last:?}");
+    }
+
+    /// Rows 55-1 and 55-7: a providers.db that will not open holds back the vectors only: the
+    /// phase sends nothing and is idle, so the worker goes on with curation and its backups.
+    #[test]
+    fn a_providers_db_that_will_not_open_holds_back_only_the_vectors() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        s.said("s", R, 1_000, "Words to embed.");
+        s.run();
+        let home = s.home.path();
+        let k = crate::knowledge::open(home).unwrap();
+        let db = home.join("providers.db");
+        if db.exists() {
+            std::fs::remove_file(&db).unwrap();
+        }
+        std::fs::create_dir(&db).unwrap();
+        let mut phase = Phase::new(home);
+        assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Idle);
+        assert_eq!(stub.requests(), 0);
     }
 
     /// Spec 1.7 (Steps 6 and 9): a rebuild makes no embedding call: the vectors of the

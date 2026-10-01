@@ -284,7 +284,8 @@ pub fn set_rate(conn: &Connection, provider: &str, r: RateLeft) -> Result<()> {
 pub fn calls_in_a_day(conn: &Connection, provider: &str) -> Result<(u32, Option<i64>)> {
     Ok(conn.query_row(
         "SELECT COUNT(*), MIN(ts) FROM provider_calls WHERE provider=?1 AND ts>=?2
-           AND outcome IN ('ok','error','invalid','wait','empty','prose','shape','over_cap','unanchored')",
+           AND outcome IN ('ok','error','invalid','wait','empty','prose','shape','over_cap','unanchored',
+                           'sent')",
         params![provider, now_ms() - DAY_MS],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
@@ -390,6 +391,34 @@ pub fn embed_usd_this_month(conn: &Connection) -> Result<f64> {
         [chrono_free_month_start(now_ms())],
         |r| r.get(0),
     )?)
+}
+
+/// What became of a request `embed_phase::reserve` counted (milestone 4 D8): its outcome, time
+/// and detail, its estimated cost kept only when it may have been run (`billed`).
+pub fn settle(
+    conn: &Connection,
+    id: i64,
+    outcome: &str,
+    ms: i64,
+    detail: &str,
+    billed: bool,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE provider_calls SET outcome = ?2, ms = ?3, detail = ?4,
+           usd = CASE WHEN ?5 THEN usd END
+         WHERE id = ?1",
+        params![id, outcome, ms, detail, billed],
+    )?;
+    Ok(())
+}
+
+/// A request `embed_phase::reserve` counted that never left: no longer counted.
+pub fn unreserve(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM provider_calls WHERE id = ?1 AND outcome = 'sent'",
+        [id],
+    )?;
+    Ok(())
 }
 
 /// When the monthly spend starts again: the first of the next UTC month.
