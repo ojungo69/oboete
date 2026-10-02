@@ -1,0 +1,19 @@
+src/hook.rs
+  s_17c3dc80287a78::t_9048073ad552e4 2228-2229,2231
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "43476e290af6e96b914e8a525099b552c540c5a7",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
