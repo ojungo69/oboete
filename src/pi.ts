@@ -85,22 +85,23 @@ export default function (pi) {
     if (text) pending = pending ? `${pending}\n${text}` : text;
   });
   pi.on("tool_result", (event, ctx) => {
-    send(event.isError ? "PostToolUseFailure" : "PostToolUse", ctx, {
+    // Capture calls stay queued; send handles rejection and later context calls await the queue.
+    void send(event.isError ? "PostToolUseFailure" : "PostToolUse", ctx, {
       tool_name: event.toolName, tool_input: event.input, tool_response: textParts(event.content),
     });
   });
   pi.on("agent_end", (event, ctx) => {
     const last = [...(event.messages ?? [])].reverse().find((message) => message?.role === "assistant");
-    send("Stop", ctx, { last_assistant_message: last ? textParts(last.content) : "" });
+    void send("Stop", ctx, { last_assistant_message: last ? textParts(last.content) : "" });
   });
   pi.on("session_compact", async (event, ctx) => {
     pending = "";
-    send("PostCompact", ctx, { compact_summary: event.compactionEntry?.summary, trigger: event.reason });
+    void send("PostCompact", ctx, { compact_summary: event.compactionEntry?.summary, trigger: event.reason });
     pending = contextOf(await wait(send("SessionStart", ctx, { source: "compact" })));
   });
   pi.on("session_shutdown", async (event, ctx) => {
     if (event.reason === "reload") return;
-    send("SessionEnd", ctx, { reason: event.reason });
+    void send("SessionEnd", ctx, { reason: event.reason });
     await wait(chain);
   });
 
