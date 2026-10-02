@@ -165,7 +165,9 @@ writes the file again when the other took it away. The worker looks for the file
 between rounds and on the 200 ms tick beside the restore request: it backs up (a restore reads the
 backups), closes its stores, releases the lock, records a clean outcome and exits. It does not
 step aside while an embedding call is out: the call is paid for and counted, so its answer is
-written first, and a command whose 30 s pass meanwhile says the worker is busy. The lock goes
+written first, and a command whose 30 s pass meanwhile says the worker is busy. Once a command
+has asked, the worker sends no other batch or query, so a backlog cannot keep the command waiting
+for longer than the call that was out. The lock goes
 only after the stores are closed: the command that takes it may swap them at once. Only `oboete
 worker` steps aside, resident or not; a command that borrows the worker's loop runs to its end.
 The worker ignores a file older than a minute, and one dated after now (a clock that went back):
@@ -228,6 +230,13 @@ left as a setting to add before a public release.
   `resident` off and on, or restart WSL, after changing it.
 - An update at the moment an embedding call is out sends that one call again. The page follows an
   update within a minute.
+- "The home is gone" (R3) is a check before each write by path, not a lock on the directory. A
+  home removed and made again in the moment between a check and its write can get that one write:
+  a backup segment, an outcome note, or the ops of a redaction rescan, which opens raw.db by its
+  path. Closing the gap means writing through a handle on the directory the worker started in
+  (start in the home, relative paths: Linux refuses a new file in a removed directory); it is a
+  candidate for the slice that starts the processes in the home (R8), with a test that replaces
+  the home inside the rescan.
 
 ## Tests (through `oboete worker`, `oboete view`, and HTTP requests to the listener)
 
@@ -319,3 +328,11 @@ Codex's adversarial review of the first build (PR #359), each with a test that f
 
 CodeRabbit on the same PR: a resident worker whose config.toml stopped saying `resident = true`
 left at its next idle time with an embedding call out; it now leaves once the call is settled (R3).
+
+Codex's second round, on the fixes:
+
+- A worker that waited for a call to settle sent the next batch in the same step, and with a
+  backlog of batches and of prompt queries some call was always out: a command could wait for as
+  long as the backlog lasted. Once asked, the worker now sends nothing new (R12).
+- The check before a write by path leaves the moment between the two. Not closed in this slice: it
+  is written under Limits with the way to close it.

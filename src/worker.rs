@@ -476,7 +476,13 @@ fn serve(
         // An embedding call that is out is work in flight: its answer is settled before the
         // worker steps aside (R12) and before its outcome says all is well (R10).
         let calling = |phases: &Phases| phases.embed.as_ref().is_some_and(|e| e.busy());
-        if yields && !calling(phases) && steps_aside(home, &raw, holding) {
+        // And once a command has asked, no other call is sent: a backlog of batches and queries
+        // would keep the command waiting for as long as it lasts.
+        let asked = yields && asked_aside(home);
+        if let Some(e) = phases.embed.as_mut() {
+            e.hold(asked);
+        }
+        if asked && !calling(phases) && steps_aside(home, &raw, holding) {
             return Ok(false);
         }
         ran = true;
@@ -2362,6 +2368,55 @@ mod tests {
         });
         worker.join().unwrap().unwrap();
         assert!(last_failure(p).is_none());
+    }
+
+    /// R12 with more to embed: a worker asked to step aside settles the call that is out and
+    /// sends no other, so a backlog of batches and queries cannot keep a command waiting (Codex
+    /// on #359, second round).
+    #[test]
+    fn a_worker_asked_to_step_aside_sends_no_new_embedding_call() {
+        let _contending = contending();
+        let mut s = crate::search::b::fixture::Store::new();
+        s.decided(
+            "github.com/o/r",
+            1_000,
+            "The parser reads one line at a time.",
+            &[],
+        );
+        s.run();
+        let stub = crate::embed::stub::Stub::start();
+        crate::embed_phase::fixture::config(&s, &stub);
+        let p = s.home.path().to_path_buf();
+        let mut embed = crate::embed_phase::Phase::new(&p);
+        let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+        let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+        // A command asks before the worker's first round.
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        std::fs::write(yield_request(&p), "").unwrap();
+        let worker = {
+            let p = p.clone();
+            std::thread::spawn(move || {
+                let phases = Phases {
+                    embed: Some(&mut embed),
+                    yields: true,
+                    ..Phases::default()
+                };
+                run_holding(&p, 600_000, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+            })
+        };
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(!worker.is_finished(), "it left a call unsettled");
+        assert_eq!(
+            stub.requests(),
+            0,
+            "a batch was sent for a command to wait on"
+        );
+        release.send(()).unwrap();
+        until("it steps aside once the call is settled", || {
+            worker.is_finished()
+        });
+        worker.join().unwrap().unwrap();
+        assert_eq!(stub.requests(), 0);
     }
 
     /// R12 with two commands: one that gives up takes the request file away, and the other puts
