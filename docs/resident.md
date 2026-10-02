@@ -58,9 +58,10 @@ and waits again: an idle time starts no round. No hook starts a resident worker 
 for every wait of a phase, not only D10's short ones, and runs the phase again at the time the
 phase named; the idle step is taken within such a wait too. At every idle time it re-reads
 config.toml and checks its home:
-- only a config.toml that loads and does not say `resident = true` ends it. A file that does not
-  load (one the owner is editing) leaves the mode as it was. A worker that starts while the file
-  does not load is not resident, as today, and doctor says so;
+- only a config.toml that loads and does not say `resident = true` ends it, and not while an
+  embedding call is out: the call's answer is written first (R10). A file that does not load (one
+  the owner is editing) leaves the mode as it was. A worker that starts while the file does not
+  load is not resident, as today, and doctor says so;
 - a config.toml that changed since the worker last looked (its time or its size) starts a round,
   so a setting the owner changed is followed without a new record;
 - "the home is gone" means the path `state/worker.lock` is missing or no longer names the file this
@@ -315,3 +316,6 @@ Codex's adversarial review of the first build (PR #359), each with a test that f
   until the answer is written (R10, R12).
 - A command that gave up removed the request of another command still waiting: the one that waits
   writes it again (R12).
+
+CodeRabbit on the same PR: a resident worker whose config.toml stopped saying `resident = true`
+left at its next idle time with an embedding call out; it now leaves once the call is settled (R3).

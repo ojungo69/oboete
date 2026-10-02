@@ -582,7 +582,8 @@ fn serve(
             }
             // Only a config.toml that loads and does not say `resident = true` ends it: one the
             // owner is still editing leaves it as it is.
-            if crate::config::worker(home).is_ok_and(|w| !w.resident) {
+            // A call that is out is settled first: the next idle time looks again.
+            if !calling(phases) && crate::config::worker(home).is_ok_and(|w| !w.resident) {
                 break true;
             }
             // A setting the owner changed is followed without a new record.
@@ -2312,6 +2313,51 @@ mod tests {
         assert!(!worker.is_finished(), "it left a call unsettled");
         release.send(()).unwrap();
         until("it steps aside once the call is settled", || {
+            worker.is_finished()
+        });
+        worker.join().unwrap().unwrap();
+        assert!(last_failure(p).is_none());
+    }
+
+    /// R3 with an embedding call out: a worker whose config.toml stops saying `resident = true`
+    /// leaves once the call's answer is settled, not at the next idle time (CodeRabbit on #359).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_worker_told_to_leave_settles_its_embedding_call_first() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        let mut embed = crate::embed_phase::Phase::new(p);
+        let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+        let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+        let worker = {
+            let p = p.to_path_buf();
+            std::thread::spawn(move || {
+                let phases = Phases {
+                    embed: Some(&mut embed),
+                    resident: true,
+                    ..Phases::default()
+                };
+                run_holding(&p, 300, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+            })
+        };
+        let device = raw::open(p).unwrap().device().to_owned();
+        until("the first round", || {
+            knowledge::open(p)
+                .and_then(|k| checkpoint::get(&k, "seen", &device))
+                .is_ok_and(|at| at == 1)
+        });
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+        // Several idle times.
+        std::thread::sleep(Duration::from_millis(1_200));
+        assert!(!worker.is_finished(), "it left a call unsettled");
+        release.send(()).unwrap();
+        until("it leaves once the call is settled", || {
             worker.is_finished()
         });
         worker.join().unwrap().unwrap();
