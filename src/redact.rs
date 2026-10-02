@@ -549,11 +549,11 @@ fn hidden_lines(text: &str, rules: &Rules) -> Option<(Runs, Runs)> {
             masks.extend(more_masks.into_iter().map(source).filter(|&(s, e)| s < e));
             at += line.len() + 1;
         }
-        let next = merged_runs(masks.clone());
-        if next == runs {
+        masks = merged_runs(masks);
+        if masks == runs {
             return Some((blocks, masks));
         }
-        runs = next;
+        runs = masks.clone();
     }
     None // Alternating whole/line cascades past the scan bound mask the view whole.
 }
