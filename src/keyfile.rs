@@ -822,6 +822,11 @@ mod tests {
                 .map(|e| e.file_name())
                 .collect();
             assert_eq!(names, ["GROQ_KEY.md"]);
+            // The kernel's own answer, with no seam: /proc is on no filesystem of the list.
+            assert_eq!(
+                write(Path::new("/proc/GROQ_KEY.md"), KEY, &home),
+                Err(Refused::NotPrivate)
+            );
         }
 
         /// The staged file's own filesystem decides, before the key is written: 9p (a Windows
