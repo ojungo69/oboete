@@ -37,16 +37,25 @@ def _worker(pid, exit_code=None):
 
 
 def test_d16_uses_the_slowdown_ratio_and_the_two_upper_quantiles():
-    idle = [{'ms': 100, 'embeds': 1}] * 40
-    written = [{'ms': 120, 'embeds': 1}] * 40
+    # With 80 samples, p50, p95 and p97.5 select samples 41, 77 and 79.
+    idle = [{'ms': i * 5, 'embeds': 1} for i in range(1, 81)]
+    written = [{'ms': i * 5 + 77, 'embeds': 1} for i in range(1, 81)]
     latency = {'provider': 'workers-ai', 'model': '@cf/baai/bge-m3',
-               'source': 'real', 'samples_ms': [300] * 40}
+               'source': 'real', 'samples_ms': [i * 10 for i in range(1, 81)]}
     result = m22.metrics(idle, written, latency)
+    assert m22.percentile([r['ms'] for r in idle], 50) == 205
+    assert m22.percentile([r['ms'] for r in written], 50) == 282
+    assert result['idle_p95_ms'] == 385
+    assert result['writer_p95_ms'] == 462
     assert result['slowdown_p95'] == pytest.approx(0.2)
+    assert result['slowdown_p50'] == pytest.approx(0.37560975609756097)
     assert result['slowdown_pass'] is True
-    assert result['combined_p95_bound_ms'] == 420
+    assert result['store_p97_5_ms'] == 472
+    assert result['embedding_p97_5_ms'] == 790
+    assert result['combined_p95_bound_ms'] == 1262
     assert result['mcp_pass'] is True
-    assert m22.metrics(idle, [{'ms': 121, 'embeds': 1}] * 40, latency)['slowdown_pass'] is False
+    assert m22.metrics(idle, [{'ms': i * 5 + 78, 'embeds': 1} for i in range(1, 81)],
+                       latency)['slowdown_pass'] is False
 
 
 def test_too_few_samples_or_a_missing_embed_cannot_set_a_metric():
@@ -226,15 +235,35 @@ def test_manifest_discovery_skips_held_out_before_read_and_refuses_duplicate_ses
         m22.source_sessions(found + [found[1]], manifest, [], now - timedelta(days=90))
 
 
-def test_run_public_command_always_deletes_its_owned_home(tmp_path, monkeypatch):
+def test_run_public_command_deletes_its_owned_home_after_measurement_failure(tmp_path, monkeypatch):
     import common
     monkeypatch.setattr(common, 'E', str(tmp_path / 'eval'))
     home = m22.new_home()
+    monkeypatch.setattr(m22, 'preflight', lambda *args: args)
     monkeypatch.setattr(m22, 'evaluate', lambda *args, **kwargs: (_ for _ in ()).throw(ValueError('fixture failure')))
     with pytest.raises(ValueError, match='fixture failure'):
         m22.main(['run', '--binary', '/unused', '--home', str(home), '--checkout', str(tmp_path),
                   '--workers-ai-latency', '/injected', '--lines', '/injected', '--wsl-dev', '/injected'])
     assert not home.exists()
+
+
+def test_run_with_missing_lines_preserves_its_owned_home_without_a_run_marker(tmp_path, monkeypatch):
+    import common
+    monkeypatch.setattr(common, 'E', str(tmp_path / 'eval'))
+    home = m22.new_home()
+    binary = tmp_path / 'fixture-binary'
+    binary.write_text('offline fixture')
+    m22.save(home / 'm22-build.json', {'complete': True, 'binary_sha256': common.sha256_file(binary)})
+    latency = tmp_path / 'latency.json'
+    m22.save(latency, {'provider': 'workers-ai', 'model': '@cf/baai/bge-m3',
+                       'source': 'real', 'samples_ms': [300] * 40})
+    with pytest.raises(FileNotFoundError, match='missing-lines.json'):
+        m22.main(['run', '--binary', str(binary), '--home', str(home), '--checkout', str(tmp_path),
+                  '--workers-ai-latency', str(latency), '--lines', str(tmp_path / 'missing-lines.json'),
+                  '--wsl-dev', '/injected'])
+    assert home.is_dir()
+    assert not (home / 'm22-run.json').exists()
+    m22.cleanup(home)
 
 
 def test_a_second_run_cannot_delete_the_first_runs_owned_home(tmp_path, monkeypatch):
@@ -330,6 +359,11 @@ def test_construct_uses_copied_recorded_transcripts_and_preserves_the_dev_home(t
                            found=[('claude', 'dev', str(source))], now=now)
     assert result['actual']['records'] == 2 and result['replay']['events'] == 1
     assert result['scale_target_reached'] is True
+    # The original window covers one event; the new window adds one event and one claim.
+    assert result['new_curated_events'] == 1
+    assert result['new_claims_per_record'] == 1.0
+    assert result['new_claims_target'] == 1
+    assert result['claim_rate_target_reached'] is True
     assert result['imported_documents'] == 2
     assert result['rates_recorded_before_build'] is True
     assert result['replay_sessions'][0]['files']['dev/claude/dev.jsonl'] == common.sha256_file(source)

@@ -6,7 +6,8 @@ run --binary PATH --home PATH --checkout PATH --workers-ai-latency FILE
 
 The external latency JSON has provider=workers-ai, model=@cf/baai/bge-m3,
 source=real and samples_ms (at least 30 successful query embeddings). It must
-be measured separately. build leaves an owned home; run removes it even on failure.
+be measured separately. build leaves an owned home; run removes it after measurement
+starts, even on failure.
 """
 import argparse, copy, http.server, json, math, os, re, shutil, sqlite3, subprocess
 import tempfile, threading, time, tomllib
@@ -768,9 +769,11 @@ def read_fixture(home):
     return path
 
 
-def evaluate(binary, home, checkout, workers_ai_latency, lines, wsl_dev):
+def preflight(binary, home, checkout, workers_ai_latency, lines, wsl_dev):
     import hooks                         # supplied by Task 12b's independent hooks writer
     home = owned_home(home)
+    if (home / 'm22-run.json').exists():
+        raise ValueError('This scale home is already running; do not replay or delete it twice')
     binary, checkout = str(Path(binary).expanduser().resolve()), Path(checkout).expanduser().resolve()
     if not checkout.is_dir():
         raise ValueError('Checkout is not a directory')
@@ -796,6 +799,12 @@ def evaluate(binary, home, checkout, workers_ai_latency, lines, wsl_dev):
                   lines_sha256=common.sha256_file(lines), wsl_dev_sha256=common.sha256_file(wsl_dev),
                   complete=False, forget='milestone 5; not measured', first_sync='milestone 6; not measured',
                   imac_scale='not measured; run on the iMac at the size its disk holds')
+    return binary, home, checkout, latency, all_lines, dev_summary, questions, result
+
+
+def evaluate(binary, home, checkout, latency, all_lines, dev_summary, questions, result):
+    import hooks
+    built = result['build']
     path = directory() / (home.name + '-result.json')
     save(path, result)
     with loopback(built['observed']['claims_per_record']) as server, no_auto_worker():
@@ -854,13 +863,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == 'run':
         home = owned_home(args.home)
+        inputs = preflight(args.binary, home, args.checkout, args.workers_ai_latency, args.lines, args.wsl_dev)
         try:
             with (home / 'm22-run.json').open('x') as f:
                 json.dump({'pid': os.getpid()}, f)
         except FileExistsError:
             raise ValueError('This scale home is already running; do not replay or delete it twice') from None
         try:
-            return evaluate(args.binary, home, args.checkout, args.workers_ai_latency, args.lines, args.wsl_dev)
+            return evaluate(*inputs)
         except Exception:
             path = directory() / (home.name + '-result.json')
             result = load(path) if path.exists() else {'home': str(home), 'complete': False}
