@@ -49,7 +49,7 @@ This is coverage of accepted functionality, not a promise that arbitrary models,
 
 ## Security and platform boundaries
 
-Preserve the local loopback-only viewer, per-run token, Host/Origin checks, bounded requests, redaction/egress gates, budget controls, owner corrections and explicit destructive confirmations. This is not a remote dashboard, generic shell terminal, arbitrary-file editor, or a bypass for fixed decision/global-scope/deletion rules.
+Preserve the local loopback-only viewer, its token (per run; in a resident home one kept in an owner-only file, which carries every right of the page: spec 6.6, owner decision 37), Host/Origin checks, bounded requests, redaction/egress gates, budget controls, owner corrections and explicit destructive confirmations. This is not a remote dashboard, generic shell terminal, arbitrary-file editor, or a bypass for fixed decision/global-scope/deletion rules.
 
 Key input is write-only: no saved key in GET responses, HTML, logs, errors or process arguments. Use platform-appropriate owner-only storage and existing safe-write protections. Carry #281 (macOS/Windows) and #285 (renameable ancestors) into the implementation rather than removing their checks. Where a location cannot meet the security contract, refuse it and provide a safe managed location; do not turn manual key-file creation into the normal fallback. Retain the existing provider credential boundaries; oboete does not collect third-party subscription session credentials.
 
