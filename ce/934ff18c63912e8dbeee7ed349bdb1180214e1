@@ -1,0 +1,45 @@
+src/cards.rs
+  s_821f8fcda60ea0::t_092b1a1790bcde 123-214,225,237,252,254-255,261,298,317,346,374,378,396-397
+  s_821f8fcda60ea0::t_52bc675b8cbedc 45-56
+  s_821f8fcda60ea0::t_998249a0bf84fa 215-224,226-236,238-251,253,256-260,262-271,283-286,292-297,299-316,319-345,347-356,359-373,375-377,379-395,398-436
+docs/cards.md
+  s_821f8fcda60ea0::t_78a267f244c419 197-198
+  s_821f8fcda60ea0::t_a1403ca915648f 188-196,199-248
+  s_821f8fcda60ea0::t_a2aa5c49c4ced3 286-300
+Cargo.lock
+  s_821f8fcda60ea0::t_c8e3729a3d98bf 830
+Cargo.toml
+  s_821f8fcda60ea0::t_e73f06f2b0eac0 9-10
+docs/spec.md
+  s_821f8fcda60ea0::t_ce55c0ab86f259 332-333
+src/config.rs
+  s_821f8fcda60ea0::t_b71da6181a08f1 881-882,1611,1634,1661
+src/consumer/cards.rs
+  s_821f8fcda60ea0::t_268440decee23b 376-410
+src/consumer/manifest.rs
+  s_821f8fcda60ea0::t_10325107905b1f 33-35,53-54,157-158,373,388-393,458-459,461-465,481-496,501-502,2762-2853
+src/main.rs
+  s_821f8fcda60ea0::t_b671f3598a0a18 187-188
+src/mcp.rs
+  s_821f8fcda60ea0::t_84506ba92558be 183
+src/search/b.rs
+  s_821f8fcda60ea0::t_b62668f119805a 1340-1344,1369-1406,2570-2609
+src/settings.rs
+  s_821f8fcda60ea0::t_bcfb1b60e44ac0 1165,1200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ce934ff18c63912e8dbeee7ed349bdb1180214e1",
+  "prompts": {},
+  "sessions": {
+    "s_821f8fcda60ea0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3c3ad270-2ec6-4f00-abc6-a7903bd32508",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
