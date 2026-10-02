@@ -1,0 +1,23 @@
+docs/resident.md
+  s_821f8fcda60ea0::t_e296210b5b63dd 168-170,233-239,331-338
+src/embed_phase.rs
+  s_821f8fcda60ea0::t_0fb1ad65a80098 133-134,173,197-202,247,383-385
+src/worker.rs
+  s_821f8fcda60ea0::t_0effd82410103c 479-485,2373-2421
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "805230fc63b61223446132ea9b48421a2d95da6f",
+  "prompts": {},
+  "sessions": {
+    "s_821f8fcda60ea0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3c3ad270-2ec6-4f00-abc6-a7903bd32508",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
