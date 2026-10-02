@@ -349,20 +349,7 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     crate::db::wal_until(&conn, "FULL", deadline)?;
     #[cfg(target_os = "macos")]
     conn.execute_batch("PRAGMA fullfsync=ON;")?;
-    if !schema_present(&conn).context("raw schema")? {
-        // One write lock covers every CREATE. Autocommit would restart the busy timeout at
-        // each statement, so a contended schema batch could outlast a hook's whole deadline.
-        crate::db::retry_busy(&conn, deadline, || {
-            let tx = rusqlite::Transaction::new_unchecked(
-                &conn,
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            tx.execute_batch(SCHEMA)?;
-            tx.commit()?;
-            Ok(())
-        })
-        .context("raw schema")?;
-    }
+    crate::db::ensure_schema_until(&conn, SCHEMA, deadline).context("raw schema")?;
     // A raw.db from before the ledger named its field (milestone 2 Task 1's schema).
     crate::db::ensure_column_until(
         &mut conn,
@@ -384,35 +371,6 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
         device,
         _swap: swap,
     })
-}
-
-/// SCHEMA uses single-line CREATE headers and unquoted names. Derive the required objects
-/// from those headers so adding a table or index cannot leave the read-only check behind.
-fn schema_present(conn: &Connection) -> Result<bool> {
-    let mut exists = conn.prepare(
-        "SELECT 1 FROM sqlite_master WHERE type = lower(?1) AND name = ?2 COLLATE NOCASE",
-    )?;
-    for create in SCHEMA
-        .lines()
-        .filter_map(|line| line.trim_start().strip_prefix("CREATE "))
-    {
-        let (kind, definition) = create
-            .split_once(" IF NOT EXISTS ")
-            .context("schema CREATE header")?;
-        let kind = kind
-            .split_ascii_whitespace()
-            .last()
-            .context("schema object type")?;
-        let name = definition
-            .trim_start()
-            .split(|c: char| c.is_ascii_whitespace() || c == '(')
-            .next()
-            .context("schema object name")?;
-        if !exists.exists(params![kind, name])? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 /// `open`'s error when a restore still holds raw.db after `OPEN_WAIT`: a reader answers "try

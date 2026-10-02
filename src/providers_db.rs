@@ -93,13 +93,14 @@ CREATE TABLE IF NOT EXISTS digest_pending(
 ";
 
 pub fn open(home: &Path) -> Result<Connection> {
+    let deadline = std::time::Instant::now() + crate::db::OPEN_WRITE_WAIT;
     let path = home.join("providers.db");
     crate::db::private(home, 0o700);
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     #[cfg(test)]
     crate::crash::arm(&conn);
-    crate::db::wal(&conn, "NORMAL")?;
-    conn.execute_batch(SCHEMA).context("providers schema")?;
+    crate::db::wal_until(&conn, "NORMAL", deadline)?;
+    crate::db::ensure_schema_until(&conn, SCHEMA, deadline).context("providers schema")?;
     // Columns added after the table's first version (milestone 3, Task 4).
     for column in [
         "tokens_left",
@@ -107,9 +108,9 @@ pub fn open(home: &Path) -> Result<Connection> {
         "requests_left",
         "requests_reset_at",
     ] {
-        crate::db::ensure_column(&mut conn, "provider_state", column, "INTEGER")?;
+        crate::db::ensure_column_until(&mut conn, "provider_state", column, "INTEGER", deadline)?;
     }
-    crate::db::ensure_column(&mut conn, "provider_calls", "usd", "REAL")?;
+    crate::db::ensure_column_until(&mut conn, "provider_calls", "usd", "REAL", deadline)?;
     for file in ["providers.db", "providers.db-wal", "providers.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -630,6 +631,98 @@ pub fn clear_digest_pending(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_upgrade_is_atomic_and_keeps_the_cooldown_and_call_ledger() {
+        let home = tempfile::tempdir().unwrap();
+        let writer = open(home.path()).unwrap();
+        set_state(
+            &writer,
+            "kept",
+            State {
+                down_until: OWNER_HOLD,
+                fails: 2,
+                backoff: 1,
+            },
+        )
+        .unwrap();
+        record(
+            &writer,
+            &Call {
+                provider: "kept",
+                role: "curator",
+                span: "schema-test",
+                outcome: "ok",
+                ms: 7,
+                detail: None,
+                bytes_out: 1,
+                est_tokens: None,
+                usage: Usage::default(),
+                usd: Some(0.25),
+            },
+        )
+        .unwrap();
+        let missing = "DROP TABLE key_limits; DROP INDEX provider_calls_day;";
+        writer.execute_batch(missing).unwrap();
+        crate::crash::off();
+        let reopened = open(home.path()).unwrap();
+        assert_eq!(crate::crash::count(), 1);
+        reopened.execute_batch(missing).unwrap();
+        crate::crash::at(1);
+        let failed = open(home.path());
+        crate::crash::off();
+        assert!(failed.is_err());
+        let remaining: i64 = writer.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('key_limits', 'provider_calls_day')",
+            [], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(remaining, 0);
+        let recovered = open(home.path()).unwrap();
+        assert_eq!(state(&recovered, "kept").unwrap().down_until, OWNER_HOLD);
+        let kept: (i64, f64) = recovered
+            .query_row(
+                "SELECT count(*), SUM(usd) FROM provider_calls WHERE provider='kept'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, (1, 0.25));
+    }
+
+    #[test]
+    fn a_non_lock_schema_error_returns_immediately_without_partial_tables() {
+        let home = tempfile::tempdir().unwrap();
+        let writer = Connection::open(home.path().join("providers.db")).unwrap();
+        crate::db::wal(&writer, "NORMAL").unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE provider_calls_day(kept TEXT);
+                              INSERT INTO provider_calls_day VALUES ('unchanged');",
+            )
+            .unwrap();
+        let started = std::time::Instant::now();
+        let error = open(home.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("already a table named provider_calls_day"),
+            "{error:#}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let tables: i64 = writer
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 1);
+        assert_eq!(
+            writer
+                .query_row("SELECT kept FROM provider_calls_day", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "unchanged"
+        );
+    }
 
     /// `oboete resume` makes a window that waited on the owner due now; one that waits on time
     /// keeps its time.
