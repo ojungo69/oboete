@@ -551,7 +551,7 @@ pub fn global(k: &Connection) -> Result<Vec<Claim>> {
     )
 }
 
-/// `repo`'s delivered claims (`delivered`) of spec 4.4's kinds, decided or open items not done: at
+/// `repo`'s delivered claims (`delivered`) of spec 4.4's kinds, all decided: at
 /// most `limit`, the newest first (`current`'s order reversed). SessionStart chooses among these
 /// at every start, so the filter, the order and the limit are the query's.
 pub fn decisions(k: &Connection, repo: &str, limit: usize) -> Result<Vec<Claim>> {
@@ -842,11 +842,12 @@ pub fn anchored_through(
     )
 }
 
-// `DECIDED_WHERE`'s text, which `DECIDED` repeats byte for byte.
+// `DECIDED_WHERE`'s text, which `DECIDED` repeats byte for byte. #320: an open item's
+// speaker can be the user who pasted or questioned it; only settled status grants delivery.
 macro_rules! decided_where {
     () => {
         "a.kind IN ('decision', 'preference', 'open item', 'lesson')
-     AND (a.status = 'decided' OR (a.kind = 'open item' AND a.status <> 'done'))"
+     AND a.status = 'decided'"
     };
 }
 

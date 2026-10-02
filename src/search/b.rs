@@ -993,7 +993,9 @@ fn place_claim(
             c
         }
     };
-    let lowered = ended_by.contains_key(&c.uid) || c.status == "done";
+    let lowered = ended_by.contains_key(&c.uid)
+        || c.status == "done"
+        || c.kind == "open item" && c.status != "decided";
     if lowered && !history {
         ended.push(c);
     } else {
@@ -1510,7 +1512,8 @@ fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView
         .optional()?
         .flatten();
     Ok(Some(ClaimView {
-        delivered: claims::delivered_one(k, &uid)?.is_some(),
+        delivered: claims::delivered_one(k, &uid)?.is_some()
+            && (c.kind != "open item" || c.status == "decided"),
         label: if on_this_device(raw, &c.device, c.seq)? {
             "citable"
         } else {
@@ -2511,15 +2514,22 @@ mod tests {
         assert!(found.hits.iter().all(|h| h.class == Class::Current));
     }
 
-    /// Codex on #306: done open items that outrank a current claim are lowered, and the current
-    /// claim after them is still read and shown first.
+    /// #320 and #306: unapproved or done open items that match better cannot crowd out
+    /// approved work. Search keeps reading until it finds the current claim after them.
     #[test]
-    fn many_done_items_do_not_crowd_out_a_current_claim() {
+    fn many_unapproved_or_done_items_do_not_crowd_out_a_current_claim() {
         let mut s = Store::new();
         for i in 0..110 {
             let text = format!("Fix the parser test {i:03}.");
             let seq = s.said("s", R, 1_000 + i, &text);
-            s.claim(seq, &text, ("open item", "done", "user"), &[]);
+            let (status, speaker) = match i % 5 {
+                0 => ("proposed", "tool result"),
+                1 => ("proposed", "assistant proposal"),
+                2 => ("proposed", "user"),
+                3 => ("unverified", "user"),
+                _ => ("done", "user"),
+            };
+            s.claim(seq, &text, ("open item", status, speaker), &[]);
         }
         let current = s.decided(
             R,
@@ -3804,7 +3814,7 @@ mod tests {
     }
 
     /// Task 8 (D9): the shortlist's candidates are the repository's delivered claims of spec
-    /// 4.4's kinds, decided or open items not done, at most `depth`: no proposal, done item,
+    /// 4.4's kinds, all decided, at most `depth`: no proposal, done item,
     /// retraction, repo fact, claim of another repository or claim the worker has yet to apply
     /// the owner's change to.
     #[test]
@@ -3821,7 +3831,7 @@ mod tests {
             &mut s,
             2_000,
             "Parser open item stays.",
-            ("open item", "proposed", "user"),
+            ("open item", "decided", "user"),
         );
         let left_out = [
             one(

@@ -2166,9 +2166,9 @@ mod tests {
         );
         let (flaky, _) = claimed(
             &mut store,
-            said(12 * min, "The CI test is flaky."),
+            said(12 * min, "Fix the flaky CI test."),
             "open item",
-            "proposed",
+            "decided",
             vec![],
         );
         let (cache, _) = claimed(
@@ -2210,7 +2210,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             section,
-            "- 1970-01-01 open item: The CI test is flaky.\n\
+            "- 1970-01-01 open item: Fix the flaky CI test.\n\
              - 1970-01-01 decision: Use spaces instead.\n\
              - 1970-01-01 decision, superseded by the 1970-01-01 decision above: Use tabs."
         );
@@ -2226,7 +2226,7 @@ mod tests {
             .into_iter()
             .map(|c| c.body)
             .collect();
-        assert_eq!(newest, ["The CI test is flaky."]);
+        assert_eq!(newest, ["Fix the flaky CI test."]);
         // Through the indexes, newest first: no scan of the claims, however many there are.
         let sql = format!(
             "EXPLAIN QUERY PLAN {} {}",
