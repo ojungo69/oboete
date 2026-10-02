@@ -36,6 +36,7 @@ impl Consumer for Claims {
 
     fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64> {
         schema(k)?;
+        retry(raw, k)?;
         let ops = whole_batches(raw, device, after)?;
         let Some(last) = ops.last().map(|o| o.op_seq) else {
             return Ok(after);
@@ -216,6 +217,39 @@ fn correction(k: &Connection, op: &Op) -> Result<Option<String>> {
         params![op.device, op.op_seq, fault],
     )?;
     Ok(None)
+}
+
+/// The corrections a consumer passed without keeping them, read again at each step (one query
+/// when there is none). A worker of an older oboete passes one it does not understand (a mute,
+/// to a consumer that knew none) and moves its checkpoint beyond it: the first step of a consumer
+/// that understands it keeps it, with no rewind. One that corrects nothing is only read.
+fn retry(raw: &Raw, k: &Connection) -> Result<()> {
+    let passed: Vec<(String, i64)> = k
+        .prepare(
+            "SELECT op_device, op_seq FROM claim_skips
+             WHERE reason IN ('corrects nothing', 'not a correction')",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (device, seq) in passed {
+        let op = raw.ops_after(&device, seq - 1, 1)?.into_iter().next();
+        let Some(op) = op.filter(|o| o.op_seq == seq && o.kind == OpKind::Correction) else {
+            continue;
+        };
+        let kept = serde_json::from_value::<CorrectionOp>(op.body.clone())
+            .is_ok_and(|c| c.fault().is_none());
+        if !kept {
+            continue;
+        }
+        if let Some(uid) = correction(k, &op)? {
+            k.execute(
+                "DELETE FROM claim_skips WHERE op_device = ?1 AND op_seq = ?2",
+                params![device, seq],
+            )?;
+            activate(k, &uid)?;
+        }
+    }
+    Ok(())
 }
 
 fn is_uid(s: &str) -> bool {
@@ -990,6 +1024,61 @@ mod tests {
             .unwrap();
         run(&raw, &mut k);
         assert_eq!(state(&k), (0, "decided".into(), "Ship on Fridays.".into()));
+    }
+
+    /// A worker of an older oboete can still hold the lock while a newer command mutes: it knows
+    /// no `muted`, passes the op as one that corrects nothing and moves its checkpoint beyond it.
+    /// The next run of this consumer keeps it, with no rewind (Codex on #358).
+    #[test]
+    fn a_correction_an_older_consumer_passed_is_kept_by_the_next_run() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let text = "Ship on Fridays.";
+        let seq = raw.append(&event(text, 5)).unwrap();
+        let dev = raw.device().to_owned();
+        let ship = claim("c", "decision", text, vec![quote(&dev, seq, text, text, 0)]);
+        let uid = crate::claims::uid("decision", &ship.evidence[0]);
+        raw.append_ops(&[op(&ship)]).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        // What the older consumer left of a mute, and of an op that does correct nothing.
+        let correction = |body: serde_json::Value| (OpKind::Correction, body);
+        let anchor = json!({"device": dev, "seq": seq});
+        let passed = raw
+            .append_ops(&[
+                correction(json!({"uid": uid, "anchor": anchor, "muted": true})),
+                correction(json!({"uid": uid, "anchor": anchor})),
+            ])
+            .unwrap();
+        for at in &passed {
+            k.execute(
+                "INSERT INTO claim_skips(op_device, op_seq, reason)
+                 VALUES(?1, ?2, 'corrects nothing')",
+                params![dev, at],
+            )
+            .unwrap();
+        }
+        use crate::knowledge::checkpoint;
+        checkpoint::set_in(&k, checkpoint::OPS, "claims", &dev, passed[1]).unwrap();
+        run(&raw, &mut k);
+        let muted: bool = k
+            .query_row("SELECT muted FROM active WHERE uid = ?1", [&uid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(muted, "the mute an older consumer passed was not kept");
+        let skipped: Vec<i64> = k
+            .prepare("SELECT op_seq FROM claim_skips ORDER BY op_seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            skipped,
+            [passed[1]],
+            "only the empty correction stays skipped"
+        );
     }
 
     #[test]

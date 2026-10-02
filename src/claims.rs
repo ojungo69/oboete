@@ -335,7 +335,20 @@ fn correction(
     let device = raw.device().to_owned();
     drop(raw);
     // A search or a SessionStart right after never shows the old claim.
-    applied(home, &k, &device, &seqs, "correction")
+    applied(home, &k, &device, &seqs, "correction")?;
+    // A worker of an older oboete that still held the lock passes a correction it does not
+    // understand; the next worker of this one keeps it (`consumer::claims::retry`).
+    let kept: bool = k.query_row(
+        "SELECT EXISTS(SELECT 1 FROM corrections WHERE op_device = ?1 AND op_seq = ?2)",
+        rusqlite::params![device, seqs.last()],
+        |r| r.get(0),
+    )?;
+    anyhow::ensure!(
+        kept,
+        "the correction is recorded; the worker running now is an older oboete and did not \
+         apply it: the next worker does"
+    );
+    Ok(())
 }
 
 /// The owner's ops `seqs`, applied before the command returns: by this process or by the worker
