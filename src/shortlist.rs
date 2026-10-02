@@ -108,6 +108,19 @@ impl Builder {
         let answer = embed
             .as_deref_mut()
             .and_then(crate::embed_phase::Phase::answer);
+        // A query refused at its send releases its key's cooldown, whatever this call does next.
+        if let Some(id) = embed
+            .as_deref_mut()
+            .and_then(crate::embed_phase::Phase::unasked)
+            && let Some((agent, rest)) = id.split_once('\0')
+            && let Some((session, _)) = rest.split_once('\0')
+        {
+            schema(k)?;
+            k.execute(
+                "DELETE FROM shortlist_asks WHERE agent = ?1 AND session = ?2",
+                params![agent, session],
+            )?;
+        }
         let on = crate::config::inject(&self.home)
             .inspect_err(|e| eprintln!("oboete: no shortlist for now: {e:#}"))
             .is_ok_and(|i| i.per_prompt);
@@ -124,19 +137,16 @@ impl Builder {
             }
         };
         schema(k)?;
-        if let Some(id) = embed
-            .as_deref_mut()
-            .and_then(crate::embed_phase::Phase::unasked)
-            && let Some((agent, rest)) = id.split_once('\0')
-            && let Some((session, _)) = rest.split_once('\0')
-        {
-            k.execute(
-                "DELETE FROM shortlist_asks WHERE agent = ?1 AND session = ?2",
-                params![agent, session],
-            )?;
-        }
         let device = raw.device();
-        let live = keys(raw, k, now)?;
+        let mut live = keys(raw, k, now)?;
+        // The answered key first: `KEYS` newer keys due meanwhile never leave its vector unused.
+        if let Some(i) = answer
+            .as_ref()
+            .and_then(|a| live.iter().position(|key| key.id() == a.key))
+        {
+            let key = live.remove(i);
+            live.insert(0, key);
+        }
         // The exclusion list and the sessions it holds (every repository they touched), once.
         let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
         let tombstones = raw.tombstones()?;
@@ -464,7 +474,11 @@ fn parts(
             continue;
         };
         let b: Value = serde_json::from_str(&e.body).unwrap_or(Value::Null);
-        let input: Value = serde_json::from_str(&field(&b, "input")).unwrap_or(Value::Null);
+        let input = field(&b, "input");
+        let Some(input) = untouched(&input, rules) else {
+            continue;
+        };
+        let input: Value = serde_json::from_str(input).unwrap_or(Value::Null);
         if crate::consumer::manifest::paths(&input, e.cwd.as_deref()).contains(&label) {
             files.push(label);
         }
@@ -485,10 +499,11 @@ fn parts(
         )
         .optional()?;
     let failed = match failing.map(body).transpose()?.flatten() {
-        Some(b) => vec![
-            field(&b, "tool"),
-            what_ran(&joined(&[field(&b, "input")], "", rules)),
-        ],
+        Some(b) => {
+            let input = field(&b, "input");
+            let ran = untouched(&input, rules).map(what_ran).unwrap_or_default();
+            vec![field(&b, "tool"), ran]
+        }
         None => Vec::new(),
     };
     Ok([(prompts, "\n"), (files, "\n"), (failed, " ")]
@@ -496,6 +511,13 @@ fn parts(
         .map(|(fields, sep)| joined(fields, sep, rules))
         .filter(|t| !t.trim().is_empty())
         .collect())
+}
+
+/// A stored input the rules leave as it is, else none: what a call ran or the files it named are
+/// read from it only then, so no rule written against the input is undone by reading a part of it
+/// out (Codex's reviews of #333). The part read is gated again with the rest of the query.
+fn untouched<'a>(input: &'a str, rules: &crate::redact::Rules) -> Option<&'a str> {
+    (joined(&[input.to_owned()], "", rules) == input).then_some(input)
 }
 
 /// `fields` joined by `sep`, gated whole, line by line and in each field alone
@@ -1153,6 +1175,52 @@ mod tests {
         assert!(text.ends_with(" parser"), "{text}");
     }
 
+    /// A query refused at its send releases its cooldown even when the rules then do not load:
+    /// a worker that stops there keeps nothing in memory to release it later.
+    #[test]
+    fn an_unsent_query_releases_its_cooldown_while_the_rules_do_not_load() {
+        let mut s = Store::new();
+        s.event(
+            "prompt",
+            "live",
+            (R, "main"),
+            NOW - MIN,
+            json!({"prompt": "parser"}),
+        );
+        s.run();
+        per_prompt(&s, true);
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut b = Builder::new(s.home.path());
+        b.run(&s.raw, &mut k, None, NOW).unwrap();
+        let mut phase = crate::embed_phase::Phase::new(s.home.path());
+        let sent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("the rules changed"));
+        let release = crate::embed_phase::fixture::hold_query(
+            &mut phase,
+            "claude\0live\0github.com/x/r\0main",
+            "parser",
+            sent,
+        );
+        k.execute(
+            "INSERT INTO shortlist_asks VALUES('claude', 'live', ?1)",
+            [NOW],
+        )
+        .unwrap();
+        release.send(()).unwrap();
+        wait(|| phase.done());
+        phase.poll(&s.raw, &k).unwrap();
+        std::fs::write(
+            s.home.path().join("config.toml"),
+            "[inject]\nper_prompt = true\n[redaction]\nextra_rules = [{ id = \"bad\", regex = '(' }]\n",
+        )
+        .unwrap();
+        let phase_now = b.run(&s.raw, &mut k, Some(&mut phase), NOW + 1).unwrap();
+        assert_eq!(phase_now, Phase::Idle);
+        let asks: i64 = k
+            .query_row("SELECT count(*) FROM shortlist_asks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(asks, 0);
+    }
+
     /// Rows 30-1 and 30-2, spec 5.5 (D9): a session with an event in an excluded repository asks
     /// for no query vector, whatever checkout its key is on; another session's words are sent,
     /// gated: never its token or a `<private>` block.
@@ -1323,8 +1391,118 @@ mod tests {
         let rules = crate::redact::Rules::load(s.home.path()).unwrap();
         let asked = parts(&s.raw, &k, &key, &rules).unwrap();
         assert_eq!(asked.len(), 1, "{asked:?}");
-        assert!(!asked[0].contains("opaque_canary"), "{asked:?}");
-        assert!(asked[0].starts_with("Bash echo "), "{asked:?}");
+        // An input the rules change gives no command: only its tool is asked with.
+        assert_eq!(asked[0].trim(), "Bash", "{asked:?}");
+    }
+
+    /// The query of the session's first key, with these rules written after its records.
+    fn asked_with(s: &Store, rules: &str) -> Vec<String> {
+        std::fs::write(s.home.path().join("config.toml"), rules).unwrap();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let key = keys(&s.raw, &k, NOW).unwrap().pop().unwrap();
+        let rules = crate::redact::Rules::load(s.home.path()).unwrap();
+        parts(&s.raw, &k, &key, &rules).unwrap()
+    }
+
+    /// Spec 6.4: a rule on the stored input still holds for the files read out of it.
+    #[test]
+    fn a_rule_on_the_stored_input_keeps_its_files_out_of_the_query() {
+        let mut s = Store::new();
+        let main = (R, "main");
+        s.event(
+            "tool",
+            "live",
+            main,
+            NOW - 2 * MIN,
+            json!({"tool": "Edit", "input": "{\"file_path\":\"proprietary_canary.txt\"}"}),
+        );
+        s.event(
+            "prompt",
+            "live",
+            main,
+            NOW - MIN,
+            json!({"prompt": "the parser"}),
+        );
+        s.run();
+        let asked = asked_with(
+            &s,
+            "[redaction]\nextra_rules = [{ id = \"input\", \
+             regex = '^\\{\"file_path\":\"([a-z_.]+)\"\\}$', secret_group = 1 }]\n",
+        );
+        assert_eq!(asked, ["the parser"]);
+    }
+
+    /// Spec 6.4: a rule on the input and one on its command each hold, though the first one's
+    /// mask would hide the second one's context.
+    #[test]
+    fn rules_on_the_input_and_on_its_command_both_hold() {
+        let mut s = Store::new();
+        s.event(
+            "tool",
+            "live",
+            (R, "main"),
+            NOW - MIN,
+            json!({"tool": "Bash", "input": "{\"command\":\"echo opaque_canary\"}",
+                "output": "error", "failed": true}),
+        );
+        s.run();
+        let asked = asked_with(
+            &s,
+            "[redaction]\nextra_rules = [\
+             { id = \"input\", regex = '^\\{\"command\":\"(echo) opaque_canary\"\\}$', \
+               secret_group = 1 }, \
+             { id = \"command\", regex = '^echo (opaque_canary)$', secret_group = 1 }]\n",
+        );
+        assert!(
+            asked.iter().all(|p| !p.contains("opaque_canary")),
+            "{asked:?}"
+        );
+    }
+
+    /// An answer is used though `KEYS` newer keys are due with it: its key is built first.
+    #[test]
+    fn an_answer_is_kept_behind_newer_due_keys() {
+        let mut s = Store::new();
+        s.decided(R, MIN, "Db ok.", &[]);
+        let main = (R, "main");
+        s.event(
+            "prompt",
+            "old",
+            main,
+            NOW - 20 * MIN,
+            json!({"prompt": "parser db ok"}),
+        );
+        for i in 0..KEYS {
+            let session = format!("new{i}");
+            s.event(
+                "prompt",
+                &session,
+                main,
+                NOW - MIN,
+                json!({"prompt": "lexer"}),
+            );
+        }
+        s.run();
+        per_prompt(&s, true);
+        crate::embed_phase::fixture::vectors(&s);
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = crate::embed_phase::Phase::new(s.home.path());
+        crate::embed_phase::fixture::answer(
+            &mut phase,
+            "claude\0old\0github.com/x/r\0main",
+            "parser db ok",
+        );
+        Builder::new(s.home.path())
+            .run(&s.raw, &mut k, Some(&mut phase), NOW)
+            .unwrap();
+        let kept: i64 = k
+            .query_row(
+                "SELECT count(*) FROM shortlist_vectors WHERE session = 'old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1);
     }
 
     /// A file fact is read through raw even before the consumer applies its tombstone.
