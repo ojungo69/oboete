@@ -7,7 +7,7 @@
 --pool test needs --decide matching deciding.json before any held-out contents are read.
 Successful model calls share common.Calls' private cache; a failed call is retried next command.
 """
-import argparse, json, os, shutil, sqlite3, subprocess, sys
+import argparse, json, os, shutil, sqlite3, sys
 
 import common, m3
 

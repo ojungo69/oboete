@@ -232,7 +232,7 @@ def test_overturned_counts_linked_pairs_and_reports_the_rest_apart(monkeypatch, 
 
 
 def test_kinds_waits_for_a_missing_grader_and_reuses_the_other_answers(monkeypatch, tmp_path):
-    import json, subprocess
+    import subprocess
     import calib, common, m3
     root, home, binary, db = _m3_home(tmp_path, monkeypatch)
     for seq, text in [(1, 'use tabs'), (2, 'other work')]:

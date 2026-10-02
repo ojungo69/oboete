@@ -199,7 +199,7 @@ def test_a_stopped_run_resumes_without_asking_again(monkeypatch, tmp_path):
 
 
 def test_questions_check_every_dev_event_and_preserve_json_line_numbers(monkeypatch, tmp_path):
-    import common, m3, m6
+    import m3, m6
     qs, _, _ = draft_pool(monkeypatch, tmp_path)
     assert m6.questions() == qs
     path = Path(m3.M, 'fixtures/s0.jsonl')
@@ -392,7 +392,7 @@ def test_score_refuses_changed_keys_before_any_grader(monkeypatch, tmp_path):
 
 
 def test_the_v1_metadata_guard_cannot_write_to_its_source(tmp_path):
-    import common, m6, sqlite3
+    import m6, sqlite3
     home = str(tmp_path)
     with sqlite3.connect(f'{home}/oboete.db') as db:
         db.execute('PRAGMA journal_mode=WAL')
