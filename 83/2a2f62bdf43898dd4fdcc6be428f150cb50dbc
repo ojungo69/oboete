@@ -1,0 +1,23 @@
+src/opencode.js
+  s_17c3dc80287a78::t_69f15b2dca2926 83,93,152,158
+src/shortlist.rs
+  s_17c3dc80287a78::t_2a93dc62d44bbb 1929,1932,1940,1953-1954
+src/hook.rs
+  s_17c3dc80287a78::t_2a93dc62d44bbb 1966
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "832a2f62bdf43898dd4fdcc6be428f150cb50dbc",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
