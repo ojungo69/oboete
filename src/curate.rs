@@ -162,6 +162,8 @@ struct Source {
     text: String,
     /// Where a tool's JSON output or extra fields start, in the long text's byte offsets.
     json: Option<usize>,
+    /// Byte boundaries outside JSON escape units, in this piece's offsets, including both ends.
+    boundaries: Vec<bool>,
     /// What the window does not show of it, in the long text's offsets: what the gate hides, and
     /// the middle a shrink left out, so a quote is anchored where the curator saw it.
     hidden: Vec<(usize, usize)>,
@@ -693,6 +695,7 @@ struct Prepared<'r> {
     head: String,
     long: Option<(String, Hidden)>,
     json: Option<usize>,
+    boundaries: Vec<bool>,
     role: Role,
     turn: bool,
     key: String,
@@ -804,6 +807,10 @@ impl<'r> Prepared<'r> {
         } else {
             None
         };
+        let boundaries = match (&long, json) {
+            (Some(text), Some(json)) => escape_boundaries(text, json),
+            _ => Vec::new(),
+        };
         Self {
             rules,
             long: long.map(|l| {
@@ -811,6 +818,7 @@ impl<'r> Prepared<'r> {
                 (l, hidden)
             }),
             json,
+            boundaries,
             head,
             role,
             turn: e.kind == "prompt",
@@ -867,6 +875,7 @@ impl<'r> Prepared<'r> {
                 lead: sentence_start(&long[..start]),
                 text: long[start..end].to_owned(),
                 json: self.json,
+                boundaries: self.boundaries.get(start..=end).unwrap_or(&[]).to_vec(),
                 hidden: runs
                     .iter()
                     .copied()
@@ -1074,32 +1083,59 @@ pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims:
         return None;
     }
     // Where the event's text has it, outside what the window hides.
-    let anchor = |quote: &str, escapes: bool| {
-        source.text.match_indices(quote).find(|&(i, _)| {
-            let (s, e) = (source.start + i, source.start + i + quote.len());
-            (!escapes || source.json.is_some_and(|j| s >= j))
-                && !source.hidden.iter().any(|&(hs, he)| hs < e && s < he)
-        })
+    let visible = |i: usize, quote: &str| {
+        let (s, e) = (source.start + i, source.start + i + quote.len());
+        (source.json.is_none()
+            || source.boundaries.get(i) == Some(&true)
+                && source.boundaries.get(i + quote.len()) == Some(&true))
+            && !source.hidden.iter().any(|&(hs, he)| hs < e && s < he)
     };
-    // As the line shows it: the quote itself, or else a stretch of the line that holds the quote's
-    // characters but for whitespace, compatibility forms or JSON escapes, the first that is
-    // anchored: the line also shows a tool's input, which is not the event's text. A
-    // stretch is looked for once: a repetitive line has many that read the same.
+    // Exact first, then the event's spans that hold the quote but for whitespace, compatibility
+    // forms or JSON escapes and are shown in the line. Its tool input is not the event's text.
+    // A repeated span is checked against the line once, after the hidden ranges are excluded.
     let mut tried = std::collections::HashSet::new();
     let (at, quote) = line
         .text
         .contains(quote)
-        .then(|| anchor(quote, false))
+        .then(|| {
+            let at = source.text.find(quote)?;
+            if visible(at, quote) {
+                return Some((at, &source.text[at..at + quote.len()]));
+            }
+            overlapping(source.text.as_str(), quote)
+                .map(|m| (m.start(), &source.text[m.start()..m.end()]))
+                .find(|&(i, q)| visible(i, q))
+        })
         .flatten()
         .or_else(|| {
             [false, true]
                 .into_iter()
                 .filter(|&escapes| !escapes || source.json.is_some())
                 .flat_map(|escapes| {
-                    compatible(&line.text, quote, escapes).map(move |q| (q, escapes))
+                    let mut start = if escapes {
+                        source
+                            .json
+                            .unwrap()
+                            .saturating_sub(source.start)
+                            .min(source.text.len())
+                    } else {
+                        0
+                    };
+                    let mut end = source.text.len();
+                    if source.json.is_some() {
+                        while start < end && source.boundaries.get(start) != Some(&true) {
+                            start += 1;
+                        }
+                        while end > start && source.boundaries.get(end) != Some(&true) {
+                            end -= 1;
+                        }
+                    }
+                    compatible(&source.text[start..end], quote, escapes)
+                        .map(move |(i, q)| (start + i, q))
                 })
-                .filter(|(q, _)| tried.insert(*q))
-                .find_map(|(q, escapes)| anchor(q, escapes))
+                .filter(|&(i, q)| visible(i, q))
+                .filter(|(_, q)| tried.insert(*q))
+                .find(|&(_, q)| line.text.contains(q))
         })?;
     let as_i64 = |n: usize| i64::try_from(n).ok();
     Some(crate::claims::Evidence {
@@ -1114,32 +1150,94 @@ pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims:
 }
 
 /// Compatibility-equivalent stretches, with JSON escapes read once when `escapes` is set.
-fn compatible<'a>(text: &'a str, quote: &str, escapes: bool) -> impl Iterator<Item = &'a str> {
-    let want: Vec<char> = folded(quote, false)
+fn compatible<'a>(
+    text: &'a str,
+    quote: &str,
+    escapes: bool,
+) -> impl Iterator<Item = (usize, &'a str)> {
+    let want: String = folded(quote, false)
         .into_iter()
         .map(|(_, _, c)| c)
         .collect();
     let have = folded(text, escapes);
-    let n = want.len();
-    let starts = if n == 0 {
-        0
-    } else {
-        (have.len() + 1).saturating_sub(n)
-    };
-    (0..starts).filter_map(move |at| {
-        let w = &have[at..at + n];
-        if !w.iter().map(|&(_, _, c)| c).eq(want.iter().copied()) {
+    let n = want.chars().count();
+    let (mut normalized, mut offsets) = (String::new(), Vec::with_capacity(have.len()));
+    for &(_, _, c) in &have {
+        offsets.push(normalized.len());
+        normalized.push(c);
+    }
+    let mut at = 0;
+    overlapping(normalized, &want).filter_map(move |found| {
+        while offsets.get(at).is_some_and(|&i| i < found.start()) {
+            at += 1;
+        }
+        let end = at + n;
+        if end > have.len() || offsets.get(at) != Some(&found.start()) {
             return None;
         }
-        let (start, end) = (w[0].0, w[n - 1].1);
-        let span = &text[start..end];
-        // A match must use the whole compatibility character or escape, not part of its expansion.
-        folded(span, escapes)
-            .iter()
-            .map(|&(_, _, c)| c)
-            .eq(want.iter().copied())
-            .then_some(span)
+        // Each end must use a whole original character or escape, not part of its expansion.
+        if at > 0 && have[at - 1].0 == have[at].0
+            || end < have.len() && have[end - 1].0 == have[end].0
+        {
+            return None;
+        }
+        let start = have[at].0;
+        Some((start, &text[start..have[end - 1].1]))
     })
+}
+
+/// Matches in text order, including overlaps, without building a DFA for each quote.
+fn overlapping<T: AsRef<str>>(
+    text: T,
+    quote: &str,
+) -> impl Iterator<Item = aho_corasick::Match> + use<T> {
+    use aho_corasick::{AhoCorasick, AhoCorasickKind, automaton::OverlappingState};
+    let matcher = (!quote.is_empty() && !text.as_ref().is_empty()).then(|| {
+        AhoCorasick::builder()
+            .kind(Some(AhoCorasickKind::NoncontiguousNFA))
+            .build([quote])
+            .expect("quote matcher")
+    });
+    let mut state = OverlappingState::start();
+    std::iter::from_fn(move || {
+        matcher
+            .as_ref()?
+            .try_find_overlapping(text.as_ref(), &mut state)
+            .expect("quote search");
+        state.get_match()
+    })
+}
+
+/// Escape units in the whole event, so a cut retains the backslash context at either end.
+fn escape_boundaries(text: &str, json: usize) -> Vec<bool> {
+    let bytes = text.as_bytes();
+    let mut boundaries = vec![true; bytes.len() + 1];
+    let unit = |at: usize| {
+        let raw = bytes.get(at..at + 6)?;
+        (raw.starts_with(b"\\u"))
+            .then(|| std::str::from_utf8(&raw[2..]).ok())
+            .flatten()
+            .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+    };
+    let mut at = json;
+    while at < bytes.len() {
+        if bytes[at] != b'\\' {
+            at += 1;
+            continue;
+        }
+        let mut end = (at + 2).min(bytes.len());
+        if let Some(code) = unit(at) {
+            end = at + 6;
+            if (0xd800..=0xdbff).contains(&code)
+                && unit(end).is_some_and(|low| (0xdc00..=0xdfff).contains(&low))
+            {
+                end += 6;
+            }
+        }
+        boundaries[at + 1..end].fill(false);
+        at = end;
+    }
+    boundaries
 }
 
 /// Compatibility decomposition, with each character mapped to its original byte span.
@@ -3697,6 +3795,7 @@ mod tests {
                 lead: sentence_start(&long[..start]),
                 text: long[start..].to_owned(),
                 json: None,
+                boundaries: Vec::new(),
                 hidden: Vec::new(),
             };
             assert_eq!(source.sentence(next - start), next, "split at {start}");
@@ -3894,6 +3993,106 @@ mod tests {
         assert_eq!(e.quote, r"path C:\\new\\file");
         assert_eq!(e.offset, text.find("path C:").unwrap() as i64);
         assert_eq!(e.length, 18);
+    }
+
+    #[test]
+    fn a_decoded_input_escape_never_anchors_inside_an_output_escape() {
+        let (_h, mut raw, dev) = store();
+        let quote = "\u{8}failed";
+        let event = event(
+            "tool",
+            json!({"tool": "Bash", "input": {"code": quote},
+            "output": {"code": r"\bfailed"}, "failed": false}),
+        );
+        let text = long_text(&event).unwrap();
+        raw.append(&event).unwrap();
+        let rules = Rules::default();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        assert!(w.lines[0].text.contains(r"\bfailed"));
+        assert!(w.lines[0].source_text().contains(r"\\bfailed"));
+        assert_eq!(locate(&w, "L1", quote), None);
+        let e = locate(&w, "L1", r"\bfailed").unwrap();
+        assert_eq!(e.quote, r"\\bfailed");
+        assert_eq!(
+            e.offset,
+            w.lines[0].source_text().find(r"\\bfailed").unwrap() as i64
+        );
+        let cut = text.find(r"\\bfailed").unwrap() as i64 + 1;
+        let part = window_at(
+            &raw,
+            &dev,
+            (1, Some(cut)),
+            None,
+            Cut {
+                tokens: WINDOW_TOKENS,
+                shrink: false,
+            },
+            &rules,
+            &w.reading,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(part.from_offset, Some(cut));
+        assert_eq!(locate(&part, "L1", quote), None);
+        let e = locate(&part, "L1", "failed").unwrap();
+        assert_eq!(e.offset, text.find("failed").unwrap() as i64);
+        let mut repeated = event.clone();
+        let mut body: Value = serde_json::from_str(&repeated.body).unwrap();
+        body["output"]["code"] = json!(r"\\\bfailed");
+        repeated.body = body.to_string();
+        let text = long_text(&repeated).unwrap();
+        raw.append(&repeated).unwrap();
+        let cut = text.find('\\').unwrap() as i64 + 1;
+        let part = window_at(
+            &raw,
+            &dev,
+            (2, Some(cut)),
+            None,
+            Cut {
+                tokens: WINDOW_TOKENS,
+                shrink: false,
+            },
+            &rules,
+            &w.reading,
+        )
+        .unwrap()
+        .unwrap();
+        let e = locate(&part, "L1", r"\bfailed").unwrap();
+        assert_eq!(e.quote, r"\\bfailed");
+        assert_eq!(e.offset, text.find(r"\\bfailed").unwrap() as i64);
+    }
+
+    #[test]
+    fn a_repetitive_compatibility_output_rejects_partial_units_in_linear_time() {
+        let (_h, mut raw, dev) = store();
+        let output = "ﬃ".repeat(16_000);
+        raw.append(&event(
+            "tool",
+            json!({"tool": "Bash", "input": {},
+            "output": {"code": output}, "failed": false}),
+        ))
+        .unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert!(w.elided.is_empty());
+        assert!(w.lines[0].source_text().contains(&output));
+        let partial = format!("i{}ff", "ffi".repeat(1999));
+        let mismatch = format!("{}ffx", "ffi".repeat(1999));
+        let start = std::time::Instant::now();
+        for quote in [partial, mismatch] {
+            assert_eq!(locate(&w, "L1", &quote), None);
+        }
+        let e = locate(&w, "L1", &"ffi".repeat(2000)).unwrap();
+        assert_eq!(e.quote, "ﬃ".repeat(2000));
+        // About 0.2 s here; the quadratic search took 12 s. CI's runners are slower, so 5 s.
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "partial compatibility units took {elapsed:?}"
+        );
     }
 
     #[test]
