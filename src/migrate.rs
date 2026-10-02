@@ -1267,12 +1267,22 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
     /// between migrated batches.
     #[test]
     fn migrate_and_a_hook_append_together() {
+        migrate_with_hooks(std::time::Duration::from_millis(1));
+    }
+
+    #[test]
+    fn migrate_progresses_while_hooks_append_without_a_pause() {
+        migrate_with_hooks(std::time::Duration::ZERO);
+    }
+
+    fn migrate_with_hooks(pause: std::time::Duration) {
         let dir = tempfile::tempdir().unwrap();
         let v1 = V1::new(dir.path());
         v1.session("s1", "r", 100);
         for i in 0..1_200 {
             v1.prompt("s1", 1_000 + i, &format!("old {i}"));
         }
+        v1.observation("s1", 2_200, "Migrated document", "Kept once.");
         let home = tempfile::tempdir().unwrap();
         let mut raw = raw::open(home.path()).unwrap();
         let done = std::sync::atomic::AtomicBool::new(false);
@@ -1282,7 +1292,7 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
                 let mut seqs = Vec::new();
                 while !done.load(std::sync::atomic::Ordering::SeqCst) {
                     seqs.push(store.append(&raw::test_event("live")).unwrap());
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    std::thread::sleep(pause);
                 }
                 seqs
             });
@@ -1304,6 +1314,17 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         assert_eq!(migrated.len(), 1_200);
         let (first, last) = (migrated[0], migrated[1_199]);
         assert!(live.iter().any(|s| (first..last).contains(s)), "{live:?}");
+        assert_eq!(
+            all.iter().filter(|e| e.source == "hook").count(),
+            live.len()
+        );
+        assert_eq!(
+            raw.migration_checkpoints("oboete-v1:").unwrap()["oboete-v1:d1e5"].through,
+            1_200
+        );
+        let rerun = pass(home.path(), &mut raw, &v1.path).unwrap();
+        assert_eq!((rerun.events, rerun.records, rerun.documents), (0, 0, 0));
+        assert_eq!(rerun.seen, 1);
     }
 
     /// R05, A106: v1's config.toml goes unchanged into a home that has none, and loads under

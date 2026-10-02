@@ -5,6 +5,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -531,9 +532,7 @@ impl Raw {
         if let Some(c) = batch.iter().find(|c| is_live(&c.event.source)) {
             anyhow::bail!("an import cannot record a {} record", c.event.source);
         }
-        let tx = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = begin_batch(&mut self.conn)?;
         let from_seq = next_seq(&tx, &self.device)?;
         let mut seqs = Vec::with_capacity(batch.len());
         for c in batch {
@@ -962,9 +961,7 @@ impl Raw {
     /// it yields commit together, and with them the curation checkpoint (D2).
     pub fn append_ops(&mut self, ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<i64>> {
         let bodies = within_batch_cap(ops)?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = begin_batch(&mut self.conn)?;
         let seqs = insert_ops(&tx, &self.device, &bodies)?;
         tx.commit()?;
         Ok(seqs)
@@ -1806,6 +1803,34 @@ fn masked(body: &str, offset: i64, length: i64) -> String {
     )
 }
 
+/// SQLite's increasing busy sleeps miss the short gaps between hooks' writes. Poll only the
+/// batch's BEGIN at 1 ms, within the connection's existing timeout, then restore that timeout
+/// before its statements and commit. Nothing in an acquired transaction is retried.
+fn begin_batch(conn: &mut Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    let timeout: u32 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
+    let timeout = Duration::from_millis(timeout.into());
+    let deadline = Instant::now() + timeout;
+    conn.busy_timeout(Duration::ZERO)?;
+    let result = loop {
+        match rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate) {
+            Err(e)
+                if matches!(
+                    e.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                ) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(
+                    Duration::from_millis(1)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            result => break result,
+        }
+    };
+    conn.busy_timeout(timeout)?;
+    result
+}
+
 /// The next seq of `device`, inside a write transaction.
 fn next_seq(tx: &rusqlite::Transaction, device: &str) -> Result<i64> {
     Ok(tx.query_row(
@@ -2445,6 +2470,80 @@ mod tests {
                 session_id: "s1".into(),
             }),
             prefix: None,
+        }
+    }
+
+    #[test]
+    fn batch_lock_failures_restore_the_timeout_without_committing() {
+        for records in [true, false] {
+            let home = tempfile::tempdir().unwrap();
+            let mut raw = open(home.path()).unwrap();
+            let append = |raw: &mut Raw| {
+                if records {
+                    raw.append_imported(&[imported("kept")], "v", Some(&v1_checkpoint(1)))
+                } else {
+                    raw.append_ops(&[(OpKind::Claim, serde_json::json!({"text": "kept"}))])
+                }
+            };
+            let timeout = |raw: &Raw| {
+                raw.conn
+                    .query_row("PRAGMA busy_timeout", [], |r| r.get::<_, u32>(0))
+                    .unwrap()
+            };
+            assert_eq!(timeout(&raw), 2_000);
+            raw.conn.busy_timeout(Duration::from_millis(100)).unwrap();
+            let writer = Connection::open(home.path().join("raw.db")).unwrap();
+            writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let started = Instant::now();
+            let error = append(&mut raw).unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<rusqlite::Error>()
+                    .unwrap()
+                    .sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+            assert!(started.elapsed() >= Duration::from_millis(100));
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert_eq!(timeout(&raw), 100);
+            assert_eq!((raw.max_seq().unwrap(), raw.max_op_seq().unwrap()), (0, 0));
+            writer.execute_batch("ROLLBACK").unwrap();
+
+            // A non-lock error returns promptly and restores the original timeout too.
+            raw.conn.busy_timeout(Duration::from_secs(2)).unwrap();
+            raw.conn.execute_batch("PRAGMA query_only=ON").unwrap();
+            let started = Instant::now();
+            let error = append(&mut raw).unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<rusqlite::Error>()
+                    .unwrap()
+                    .sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ReadOnly)
+            );
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert_eq!(timeout(&raw), 2_000);
+            raw.conn.execute_batch("PRAGMA query_only=OFF").unwrap();
+
+            // A failed commit is attempted once; neither the rows nor their checkpoint lands.
+            crate::crash::at(1);
+            let failed = append(&mut raw);
+            let commits = crate::crash::count();
+            crate::crash::off();
+            assert!(failed.is_err());
+            assert_eq!(commits, 1);
+            assert_eq!((raw.max_seq().unwrap(), raw.max_op_seq().unwrap()), (0, 0));
+            assert!(raw.migration_checkpoints("oboete-v1:").unwrap().is_empty());
+            assert_eq!(append(&mut raw).unwrap(), [1]);
+            assert_eq!(timeout(&raw), 2_000);
+            assert_eq!(raw.max_op_seq().unwrap(), 1);
+            if records {
+                assert_eq!(raw.max_seq().unwrap(), 1);
+                assert_eq!(
+                    raw.migration_checkpoints("oboete-v1:").unwrap()["oboete-v1:d1"],
+                    v1_checkpoint(1)
+                );
+            }
         }
     }
 

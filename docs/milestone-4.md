@@ -93,6 +93,12 @@ Step 9, 2026-10-01: the owner's v1 store copied with `sqlite3 -readonly ~/.oboet
 - The current transcript import also excludes synthetic end-of-file events: a dangling tool call and a final Stop without a turn-end record. A transcript checkpoint from before prefix verification and this filtering refuses a resume; recovery imports the source again into a fresh home with `--home <new-directory>`.
 - **The worker on that home** (a debug build of 842b08c, `curate = false`, no embedder; no providers.db was made, so nothing was sent): 39 min, 82 MB peak. The transcript records' 1.02 GB of bodies are 359 MB of zstd (153,404 records; 3,986 too small to gain stay plain); raw.db is 1.42 GB on disk, 842 MB in use. knowledge.db is 3.17 GB: the raw index's trigram data 1,990 MB and its copy of the text 997 MB, 97% of that text tool output (issue #317). The home was a copy, so its v1 records are under the old device, which the record consumers leave to milestone 6's sync: they stayed plain and unindexed here.
 
+Concurrency follow-up, 2026-10-02 (#337), synthetic temporary stores only:
+
+- With the hook pause removed, the migration fixture failed 10/10 times on WSL at `append_imported`'s `BEGIN IMMEDIATE`, after about 2.002 s. Hooks all succeeded; their longest append was 20 ms, and acquired migration batches held the lock for about 15 ms. SQLite's busy handler backs off to 100 ms and misses short gaps between these writes.
+- Polling only the batch's BEGIN every 1 ms, within the same 2 s budget, passed 10/10 runs: longest acquisition 757 ms, longest hook append 36 ms. The regression now checks both record and document import, retained hook records, the checkpoint and an empty rerun. Separate checks cover timeout restoration, non-lock errors and an aborted commit without partial rows or a consumed sequence.
+- A native Windows SQL reproduction using Python's SQLite 3.45.1 likewise changed from 8/8 failures to 8/8 passes. This was not the Rust test binary: its offline native build lacked `link.exe`. Windows Rust CI remains the platform verification. No owner store or provider was used.
+
 ## Task 12a: the dev harnesses' protocol (D12)
 
 Fixed on 2026-10-01 in this commit, before any M6, M5, MUST-M11 or per-kind run reads a result (plan Task 12a Step 2). A later change is a dated subsection below, written before the run it applies to and naming what changed and why. Dev runs decide nothing (spec 8.1); the deciding runs on the held-out transcripts use this protocol after A88.
