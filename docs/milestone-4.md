@@ -2,6 +2,12 @@
 
 The plan is docs/milestone-4-plan.md. This note keeps what the tasks measured.
 
+## Settings key-file path safety (#285)
+
+2026-10-02: Linux key saves reject a configured or resolved directory path with a foreign-owned component or group/other-writable directory. A sticky ancestor is allowed only with trusted owners (the effective user or root) along the path; the key directory itself must not be shared-writable. Private symlink aliases and private directories beneath `/tmp` remain usable. This is #285's path-refusal option; macOS/Windows still refuse saves under #281.
+
+Offline synthetic checks: 13 keyfile tests and two settings key-save tests pass, including 0600, unchanged surrounding bytes, conflict refusal, staged-file cleanup and post-rename durability. The ancestor-swap regression substitutes a symlink to the synthetic oboete home after destination approval: disabling the two ancestry guards makes the save wrongly succeed; with the guards it is refused before any read or stage. Separate cases cover writable ancestors hidden by `..` or a symlink, and trusted sticky ancestors/private aliases. No owner keys, configuration or services are used.
+
 ## Task 3: claude-mem's history on Design B
 
 `oboete --home ~/.oboete/eval/b-import import claude-mem ~/.oboete/eval/claude-mem-2026-09-24.db --eval-store`, a release build on WSL (ext4), then `oboete rebuild` (every consumer, no AI call).

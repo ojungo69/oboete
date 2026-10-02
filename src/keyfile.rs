@@ -120,11 +120,17 @@ fn destination(path: &Path, home: &Path) -> Result<(PathBuf, PathBuf), Refused> 
         .and_then(|n| n.to_str())
         .filter(|n| n.ends_with("_KEY.md"))
         .ok_or(Refused::NotAKeyFile)?;
-    let dir = path
-        .parent()
-        .and_then(|p| p.canonicalize().ok())
+    let parent = path.parent().ok_or(Refused::NoDir)?;
+    // Check before resolving links/`..`, which can hide an unsafe part of the configured path.
+    #[cfg(target_os = "linux")]
+    linux::check_dirs(parent)?;
+    let dir = parent
+        .canonicalize()
+        .ok()
         .filter(|p| p.is_dir())
         .ok_or(Refused::NoDir)?;
+    #[cfg(target_os = "linux")]
+    linux::check_dirs(&dir)?;
     let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
     if dir.starts_with(&home) {
         return Err(Refused::Protected);
@@ -181,6 +187,8 @@ thread_local! {
     static FS: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
     static BEFORE_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    static BEFORE_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn step(at: Step) -> std::io::Result<()> {
@@ -196,10 +204,44 @@ fn step(at: Step) -> std::io::Result<()> {
 mod linux {
     use super::*;
     use std::io::{Read, Write};
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    /// No other user may replace a path component (#285). Check from the root down so each
+    /// parent protects the next check. A trusted sticky ancestor (e.g. /tmp) protects a trusted
+    /// child, but the key folder itself must not let other users create/replace key-file names.
+    pub(super) fn check_dirs(path: &Path) -> Result<(), Refused> {
+        // SAFETY: geteuid has no arguments and cannot fail.
+        let uid = unsafe { libc::geteuid() };
+        let ancestors: Vec<_> = path.ancestors().collect();
+        for ancestor in ancestors.into_iter().rev() {
+            let entry = std::fs::symlink_metadata(ancestor).map_err(|_| Refused::NoDir)?;
+            if ![0, uid].contains(&entry.uid()) {
+                return Err(Refused::NotPrivate);
+            }
+            // In a sticky parent a link's owner matters as well as its target's owner.
+            let dir = if entry.file_type().is_symlink() {
+                std::fs::metadata(ancestor).map_err(|_| Refused::NoDir)?
+            } else {
+                entry
+            };
+            if !dir.is_dir() {
+                return Err(Refused::NoDir);
+            }
+            if ![0, uid].contains(&dir.uid())
+                || (dir.mode() & 0o022 != 0 && (ancestor == path || dir.mode() & 0o1000 == 0))
+            {
+                return Err(Refused::NotPrivate);
+            }
+        }
+        Ok(())
+    }
 
     pub(super) fn write(path: &Path, key: &str, home: &Path) -> Result<Written, Refused> {
         let (dest, dir) = destination(path, home)?;
+        #[cfg(test)]
+        if let Some(f) = BEFORE_WRITE.with(|b| b.borrow_mut().take()) {
+            f();
+        }
         let old = read(&dest)?;
         let new = with_key(old.as_deref(), key);
         let mut tag = [0u8; 8];
@@ -424,6 +466,78 @@ mod tests {
             let missing = keys.join("no-such-dir").join("X_KEY.md");
             assert_eq!(write(&missing, KEY, &home), Err(Refused::NoDir));
             assert!(!keys.join("no-such-dir").exists());
+        }
+
+        #[test]
+        fn an_ancestor_swap_is_refused_before_any_key_is_written() {
+            let (root, _keys, home) = setup();
+            let shared = root.path().join("shared");
+            let keys = shared.join("keys");
+            let moved = root.path().join("moved");
+            std::fs::create_dir_all(&keys).unwrap();
+            std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let path = keys.join("GROQ_KEY.md");
+            let before = "Groq\nold-key-123\n";
+            std::fs::write(&path, before).unwrap();
+            let (swap, into, target) = (keys.clone(), moved.clone(), home.clone());
+            BEFORE_WRITE.with(|b| {
+                *b.borrow_mut() = Some(Box::new(move || {
+                    std::fs::rename(&swap, &into).unwrap();
+                    std::os::unix::fs::symlink(&target, &swap).unwrap();
+                }))
+            });
+            // Without the ancestry check this swaps in the home after destination() has
+            // approved the old key folder, and the save writes the key into that home.
+            let result = write(&path, KEY, &home);
+            let swap = BEFORE_WRITE.with(|b| b.borrow_mut().take());
+            assert_eq!(result, Err(Refused::NotPrivate));
+            assert!(swap.is_some(), "must refuse before the read/stage/write");
+            swap.unwrap()();
+            assert_eq!(
+                std::fs::read_to_string(moved.join("GROQ_KEY.md")).unwrap(),
+                before
+            );
+            assert!(!path.exists());
+            assert!(holding(&[&moved, &home], KEY).is_empty());
+            assert_eq!(std::fs::read_dir(&moved).unwrap().count(), 1);
+            assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+        }
+
+        #[test]
+        fn original_and_resolved_ancestors_must_both_be_protected() {
+            let (root, keys, home) = setup();
+            let shared = root.path().join("shared");
+            let nested = shared.join("nested");
+            let alias = root.path().join("alias");
+            std::fs::create_dir_all(&nested).unwrap();
+            std::os::unix::fs::symlink(&nested, &alias).unwrap();
+            for mode in [0o775, 0o757, 0o777] {
+                std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(mode)).unwrap();
+                for path in [
+                    nested.join("GROQ_KEY.md"),
+                    shared.join("..").join("keys").join("GROQ_KEY.md"),
+                    alias.join("GROQ_KEY.md"),
+                ] {
+                    assert_eq!(write(&path, KEY, &home), Err(Refused::NotPrivate));
+                }
+            }
+            assert!(holding(&[&keys, &nested, &home], KEY).is_empty());
+        }
+
+        #[test]
+        fn trusted_sticky_ancestors_and_private_aliases_keep_working() {
+            let (root, keys, home) = setup();
+            let alias = root.path().join("alias");
+            std::os::unix::fs::symlink(&keys, &alias).unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o1777)).unwrap();
+            let path = alias.join("GROQ_KEY.md");
+            assert_eq!(write(&path, KEY, &home), Ok(Written { durable: true }));
+            assert_eq!(mode(&path), 0o600);
+            // The key folder cannot itself be shared: a new key's name has no owner yet.
+            std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o1777)).unwrap();
+            let new = keys.join("NEW_KEY.md");
+            assert_eq!(write(&new, KEY, &home), Err(Refused::NotPrivate));
+            assert!(!new.exists());
         }
 
         #[test]
