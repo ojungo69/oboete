@@ -1,0 +1,19 @@
+docs/milestone-4-plan.md
+  s_17c3dc80287a78::t_70a5b9ceeb7f12 477,491
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "420d3992eca8bc08f65ca66acb895c74d1fa8e4a",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
