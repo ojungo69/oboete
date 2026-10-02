@@ -7,6 +7,7 @@ use rusqlite::Connection;
 use std::path::Path;
 
 pub fn open(home: &Path) -> Result<Connection> {
+    let deadline = std::time::Instant::now() + crate::db::OPEN_WRITE_WAIT;
     let path = home.join("knowledge.db");
     crate::db::private(home, 0o700);
     // Before the open: `vec_index` is a vec0 table, which a connection without the module cannot
@@ -15,9 +16,11 @@ pub fn open(home: &Path) -> Result<Connection> {
     let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     #[cfg(test)]
     crate::crash::arm(&conn);
-    crate::db::wal(&conn, "NORMAL")?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS checkpoints(
+    crate::db::wal_until(&conn, "NORMAL", deadline)?;
+    // The base and vector objects commit together, including vec0's shadow tables.
+    let schema = format!(
+        concat!(
+            "CREATE TABLE IF NOT EXISTS checkpoints(
            consumer TEXT NOT NULL, device TEXT NOT NULL, seq INTEGER NOT NULL,
            PRIMARY KEY (consumer, device)
          );
@@ -31,15 +34,12 @@ pub fn open(home: &Path) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS rewinds(
            ts INTEGER NOT NULL, consumer TEXT NOT NULL, device TEXT NOT NULL,
            was INTEGER NOT NULL, now INTEGER NOT NULL
-         );",
-    )
-    .context("knowledge schema")?;
-    // Milestone 4 D8: vectors by embedder and the SHA-256 of the stored text they were made from
-    // (fp32, little-endian); each document's key (a claim uid, an imported uid, a record's
-    // `device:seq`) to its vector, or why it has none; the searched index, whose rowid is the
-    // key's id; and the embedders' generations.
-    conn.execute_batch(&format!(
-        "CREATE TABLE IF NOT EXISTS vectors(
+         );\n",
+            // Milestone 4 D8: vectors by embedder and the SHA-256 of the stored text they were made from
+            // (fp32, little-endian); each document's key (a claim uid, an imported uid, a record's
+            // `device:seq`) to its vector, or why it has none; the searched index, whose rowid is the
+            // key's id; and the embedders' generations.
+            "CREATE TABLE IF NOT EXISTS vectors(
            embedder TEXT NOT NULL, src_sha TEXT NOT NULL, vec BLOB NOT NULL,
            PRIMARY KEY (embedder, src_sha)
          ) WITHOUT ROWID;
@@ -55,10 +55,11 @@ pub fn open(home: &Path) -> Result<Connection> {
          );
          CREATE TABLE IF NOT EXISTS vec_generation(
            embedder TEXT PRIMARY KEY, state TEXT NOT NULL, exclusions TEXT
-         );",
+         );"
+        ),
         crate::embed::DIM
-    ))
-    .context("knowledge vector schema")?;
+    );
+    crate::db::ensure_schema_until(&conn, &schema, deadline).context("knowledge schema")?;
     for file in ["knowledge.db", "knowledge.db-wal", "knowledge.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -156,6 +157,70 @@ pub mod checkpoint {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_upgrade_is_atomic_with_vec_shadows_and_keeps_existing_data() {
+        let home = tempfile::tempdir().unwrap();
+        let writer = open(home.path()).unwrap();
+        checkpoint::set_in(&writer, checkpoint::SEQS, "kept", "device", 17).unwrap();
+        let vector = vec![0u8; crate::embed::DIM * 4];
+        writer
+            .execute("INSERT INTO vectors VALUES ('kept', 'sha', ?1)", [&vector])
+            .unwrap();
+        let missing = "DROP TABLE rewinds; DROP TABLE vec_index;";
+        writer.execute_batch(missing).unwrap();
+        crate::crash::off();
+        let reopened = open(home.path()).unwrap();
+        assert_eq!(crate::crash::count(), 1);
+        reopened.execute_batch(missing).unwrap();
+        crate::crash::at(1);
+        let failed = open(home.path());
+        let commits = crate::crash::count();
+        crate::crash::off();
+        assert!(failed.is_err());
+        assert_eq!(commits, 1);
+        let remaining: i64 = writer
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'rewinds'
+             OR name = 'vec_index' OR name GLOB 'vec_index_*'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+        let recovered = open(home.path()).unwrap();
+        assert_eq!(checkpoint::get(&recovered, "kept", "device").unwrap(), 17);
+        assert_eq!(
+            recovered
+                .query_row("SELECT vec FROM vectors WHERE embedder='kept'", [], |r| r
+                    .get::<_, Vec<
+                    u8,
+                >>(
+                    0
+                ))
+                .unwrap(),
+            vector
+        );
+        let bits = vec![0u8; crate::embed::DIM / 8];
+        recovered
+            .execute(
+                "INSERT INTO vec_index(rowid, embedder, kind, repo, ts, session, embedding)
+             VALUES(7, 'kept', 'c', '', 0, '', vec_bit(?1))",
+                [&bits],
+            )
+            .unwrap();
+        let nearest: i64 = recovered
+            .query_row(
+                "SELECT rowid FROM vec_index WHERE embedding MATCH vec_bit(?1) AND k=1
+             AND embedder='kept' AND kind='c'",
+                [&bits],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(nearest, 7);
+    }
+
     /// Milestone 4 D8: a process whose first store is knowledge.db reads `vec_index`, so `open`
     /// registers sqlite-vec itself. Run again in a child process of its own, since another test's
     /// `db::open` registers the module for every connection of this one.
