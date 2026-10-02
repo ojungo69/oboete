@@ -898,9 +898,10 @@ let generation = 0;
 let drawnWithoutBaseline = false;
 
 async function show() {
+  // First, so a settings render still out cannot draw over the tab opened after it.
+  const mine = ++generation;
   // The settings tab needs no repository: it names the config.toml mistake that fails their list (#325).
   if (!reposLoaded && view !== 'settings') return refresh();
-  const mine = ++generation;
   const repo = $('repo').value;
   const q = $('q').value.trim();
   setStatus('Loading…');
