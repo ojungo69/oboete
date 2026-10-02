@@ -898,7 +898,8 @@ let generation = 0;
 let drawnWithoutBaseline = false;
 
 async function show() {
-  if (!reposLoaded) return refresh();
+  // The settings tab needs no repository: it names the config.toml mistake that fails their list (#325).
+  if (!reposLoaded && view !== 'settings') return refresh();
   const mine = ++generation;
   const repo = $('repo').value;
   const q = $('q').value.trim();
@@ -933,14 +934,19 @@ async function loadRepos() {
 }
 
 async function refresh() {
+  let listed = true;
   try {
     await loadRepos();
   } catch (e) {
-    showError(e, refresh);
-    return false;
+    if (view !== 'settings') {
+      showError(e, refresh);
+      return false;
+    }
+    listed = false;
   }
-  // Preserve unsaved settings, including when a poll began before the Settings tab opened.
-  if (view === 'settings' && $('panel').querySelector('.settings')) return true;
+  // Preserve unsaved settings, including when a poll began before the Settings tab opened. The
+  // note of a config.toml mistake stays while the list still fails, and goes once it loads.
+  if (view === 'settings' && $('panel').querySelector('.settings') && (form || !listed)) return true;
   return show();
 }
 
