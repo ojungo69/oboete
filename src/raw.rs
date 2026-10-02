@@ -193,8 +193,9 @@ pub const IMPORT_BATCH: usize = 500;
 
 /// Where an import of records stands in its source (D6), written with each batch as a `migration`
 /// op. `key` is `oboete-v1:<device_id>` or `transcript:<agent>:<session>`; `through` is the last
-/// v1 event id or transcript line imported. v1's `row` fingerprints its event at `through`, whose
-/// id v1 reuses when its newest events are deleted.
+/// v1 event id or settled transcript event ordinal, excluding synthetic end-of-file events.
+/// v1's `row` fingerprints its event at `through`, whose id v1 reuses when its newest events are
+/// deleted.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Checkpoint {
     pub key: String,
@@ -295,10 +296,21 @@ pub struct Raw {
     _swap: std::fs::File,
 }
 
+/// The raw store file, including a stopped restore's file when raw.db has not been renamed in.
+pub fn path(home: &Path) -> std::path::PathBuf {
+    let path = home.join("raw.db");
+    let restored = home.join("raw.db.restored");
+    if !path.exists() && restored.exists() {
+        restored
+    } else {
+        path
+    }
+}
+
 /// Whether the home has a raw store: `raw.db`, or `raw.db.restored` alone (a restore stopped
 /// mid-swap, which `open` finishes).
 pub fn exists(home: &Path) -> bool {
-    home.join("raw.db").exists() || home.join("raw.db.restored").exists()
+    path(home).exists()
 }
 
 /// `<home>/raw.db`: WAL, synchronous=FULL (and fullfsync on macOS), 2 s SQLite busy timeout.
@@ -321,8 +333,8 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     // A restore that stopped after moving the damaged file aside and before renaming the rebuilt
     // one in: `raw.db.restored` is only ever a whole rebuild (it gets that name once its records
     // are committed), so the rename is finished here instead of creating an empty store.
-    let restored = home.join("raw.db.restored");
-    if !path.exists() && restored.exists() {
+    let restored = self::path(home);
+    if restored != path {
         // Failed, and no other open finished it: an error, never a new empty store beside it.
         if let Err(e) = std::fs::rename(&restored, &path)
             && !path.exists()

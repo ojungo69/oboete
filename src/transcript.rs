@@ -703,6 +703,8 @@ pub struct AgentStats {
     /// Sessions whose identifier the redaction gate masks or clips: never imported.
     pub masked: u64,
     pub waiting: u64,
+    /// Files whose stored import prefix no longer matches or cannot be verified.
+    pub refused: u64,
     /// Bytes of captured bodies selected for import, before the store's deny-list check.
     pub bytes: u64,
 }
@@ -781,6 +783,10 @@ pub fn import(
                 stats.masked += u64::from(new_session);
                 continue;
             }
+            if !new_session {
+                stats.seen += lines.len() as u64;
+                continue;
+            }
             let key = format!("transcript:{agent}:{session}");
             let seen = checkpoints.get(&key).map_or(0, |c| c.through);
             let mut prefix = Sha256::new();
@@ -789,13 +795,15 @@ pub fn import(
                     hash_line(&mut prefix, line)?;
                 }
                 let fingerprint = format!("{:x}", prefix.clone().finalize());
-                anyhow::ensure!(
-                    seen > 0
-                        && lines.iter().any(|line| line.seq == seen as u64)
-                        && previous.prefix.as_deref() == Some(fingerprint.as_str()),
-                    "a transcript's imported prefix changed or cannot be verified: nothing was \
-                     imported from this file"
-                );
+                if previous.prefix.as_deref() != Some(fingerprint.as_str()) {
+                    stats.refused += 1;
+                    writeln!(
+                        out,
+                        "refused {}: its imported prefix changed or cannot be verified",
+                        crate::redact::outbound_with(&path.display().to_string(), &settings.rules)
+                    )?;
+                    continue;
+                }
             }
             let earliest = cut.get(&((*agent).to_owned(), session.clone()));
             let mut checkpoint = Checkpoint {
@@ -851,6 +859,12 @@ pub fn import(
         )?;
     }
     writeln!(out, "{}", serde_json::to_string(&stats)?)?;
+    let refused: u64 = stats.agents.values().map(|agent| agent.refused).sum();
+    anyhow::ensure!(
+        refused == 0,
+        "{refused} transcript file(s) refused: imported prefixes changed or cannot be verified; \
+         use a fresh --home to reimport them"
+    );
     Ok(stats)
 }
 
@@ -1513,11 +1527,16 @@ mod tests {
             subagents.join("agent-a1.jsonl"),
         )
         .unwrap();
-        let refused = import(&home, &roots, true, &mut Vec::new()).unwrap_err();
+        let mut out = Vec::new();
+        let refused = import(&home, &roots, true, &mut out).unwrap_err();
         assert!(
             format!("{refused:#}").contains("imported prefix"),
             "{refused:#}"
         );
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains(file.to_str().unwrap()), "{said}");
+        let report: Value = serde_json::from_str(said.lines().last().unwrap()).unwrap();
+        assert_eq!(report["agents"]["claude"]["refused"], 1);
         assert_eq!(records(&home), before);
     }
 
@@ -1543,12 +1562,17 @@ mod tests {
                     "Rewrite the earlier prompt",
                 )
             };
-            std::fs::write(file, changed).unwrap();
-            let refused = import(&home, &roots, true, &mut Vec::new()).unwrap_err();
+            std::fs::write(&file, changed).unwrap();
+            let mut out = Vec::new();
+            let refused = import(&home, &roots, true, &mut out).unwrap_err();
             assert!(
                 format!("{refused:#}").contains("imported prefix"),
                 "{refused:#}"
             );
+            let said = String::from_utf8(out).unwrap();
+            assert!(said.contains(file.to_str().unwrap()), "{said}");
+            let report: Value = serde_json::from_str(said.lines().last().unwrap()).unwrap();
+            assert_eq!(report["agents"]["codex"]["refused"], 1);
             assert_eq!(records(&home), before);
         }
     }

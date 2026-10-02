@@ -14,10 +14,7 @@ const SOURCE: &str = "oboete-v1";
 
 /// Refuse a source that a writable raw open would reuse, including a stopped restore's file.
 pub fn check_source(home: &Path, from: &Path) -> Result<()> {
-    let mut destination = home.join("raw.db");
-    if !destination.exists() && home.join("raw.db.restored").exists() {
-        destination = home.join("raw.db.restored");
-    }
+    let destination = crate::raw::path(home);
     let source = crate::db::store_file(from);
     anyhow::ensure!(
         source.is_empty() || source != crate::db::store_file(&destination),
@@ -120,11 +117,7 @@ pub fn settings(home: &Path, from: &Path) -> Result<Vec<String>> {
     let ours = home.join("config.toml");
     let theirs = from.with_file_name("config.toml");
     if !ours.exists() && theirs.exists() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
-        }
+        crate::db::private(home, 0o700);
         // Whole or not at all: a copy cut short would read as a file with nothing set, which a
         // rerun keeps. A link, not a rename, so a config.toml written meanwhile is never replaced.
         let part = home.join("config.toml.part");
@@ -242,7 +235,6 @@ pub fn finish(
     out: &mut impl std::io::Write,
 ) -> Result<()> {
     let from = &home.join("oboete.db");
-    check_source(home, from)?;
     // Open to the end: its shared lock keeps a restore from swapping raw.db, with the batches the
     // pass just checked, while the answer is read and v1 is deleted.
     let mut raw = crate::raw::open(home)?;
@@ -495,9 +487,12 @@ fn deleted(v1: &Connection, raw: &Raw, settings: &Settings, stats: &mut Stats) -
         .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
     for stored in raw.sessions_of(SOURCE)? {
         let current = label(&stored);
+        if held.contains(&current) {
+            continue;
+        }
         if stored.contains(crate::redact::MASK) || stored.contains("\n…[cut: ") {
             stats.uncertain.push(current);
-        } else if !held.contains(&current) {
+        } else {
             stats.deleted.push(current);
         }
     }
@@ -990,15 +985,13 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         v1.prompt("d", 501, "five");
         let home = tempfile::tempdir().unwrap();
         let mut raw = raw::open(home.path()).unwrap();
-        assert!(
-            pass(home.path(), &mut raw, &v1.path)
-                .unwrap()
-                .deleted
-                .is_empty()
-        );
+        let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
+        assert!(stats.deleted.is_empty());
+        assert!(stats.uncertain.is_empty(), "{:?}", stats.uncertain);
         v1.delete_session("a");
         let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
         assert_eq!(stats.deleted, ["a"]);
+        assert!(stats.uncertain.is_empty(), "{:?}", stats.uncertain);
         v1.delete_session(&masked);
         let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
         assert_eq!(stats.deleted, ["a"]);
@@ -1464,6 +1457,7 @@ key_file = "/k/CF_WORKERS_AI_KEY.md"
         let refused = finish(h, answer, &mut Vec::new()).unwrap_err();
         assert!(format!("{refused:#}").contains("changed after the import pass"));
         assert!(h.join("oboete.db").exists() && h.join("spool").exists());
+        drop(v1);
         // A link named as an old directory goes, never what it points to.
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("kept"), "x").unwrap();

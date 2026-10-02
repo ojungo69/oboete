@@ -147,6 +147,83 @@ fn yes_imports_the_fixture_once_and_leaves_its_source_unchanged() {
 }
 
 #[test]
+fn refused_files_do_not_block_later_files_and_exit_nonzero() {
+    let root = tempfile::tempdir().unwrap();
+    fixture(root.path());
+    let day = root.path().join("codex/sessions/2026/09/02");
+    let refused = day.join("rollout-cli-test.jsonl");
+    let original = std::fs::read_to_string(&refused).unwrap();
+    let home = root.path().join("home");
+    let args = ["import", "transcripts", "--agent", "codex", "--yes"];
+    assert_fixture_counts(&report(&oboete(&home, root.path(), &args, "")));
+    std::fs::write(
+        &refused,
+        original.replace(
+            "Add a 50ms timeout to fetchJson",
+            "Rewrite the earlier prompt",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        day.join("rollout-z-good.jsonl"),
+        original.replace(
+            "22222222-2222-4222-8222-222222222222",
+            "44444444-4444-4444-8444-444444444444",
+        ),
+    )
+    .unwrap();
+    for events in [8, 0] {
+        let out = oboete(&home, root.path(), &args, "");
+        assert!(!out.status.success());
+        let raw = rusqlite::Connection::open_with_flags(
+            home.join("raw.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let records: i64 = raw
+            .query_row("SELECT count(*) FROM records", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(records, 16);
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(said.contains(refused.to_str().unwrap()), "{said}");
+        let counts: serde_json::Value = serde_json::from_str(said.lines().last().unwrap()).unwrap();
+        assert_eq!(counts["agents"]["codex"]["files"], 2);
+        assert_eq!(counts["agents"]["codex"]["refused"], 1);
+        assert_eq!(counts["agents"]["codex"]["events"], events);
+    }
+}
+
+#[test]
+fn two_files_with_one_session_are_imported_once() {
+    let root = tempfile::tempdir().unwrap();
+    fixture(root.path());
+    let day = root.path().join("codex/sessions/2026/09/02");
+    let original = std::fs::read_to_string(day.join("rollout-cli-test.jsonl")).unwrap();
+    std::fs::write(
+        day.join("rollout-copy.jsonl"),
+        original.replace(
+            "Add a 50ms timeout to fetchJson",
+            "Continue the forked session",
+        ),
+    )
+    .unwrap();
+    let source = tree(&root.path().join("codex"));
+    let home = root.path().join("home");
+    let args = ["import", "transcripts", "--agent", "codex", "--yes"];
+    for (events, seen) in [(8, 8), (0, 16)] {
+        let out = oboete(&home, root.path(), &args, "");
+        let counts = report(&out);
+        let codex = &counts["agents"]["codex"];
+        assert_eq!(codex["files"], 2);
+        assert_eq!(codex["sessions"], 1);
+        assert_eq!(codex["events"], events);
+        assert_eq!(codex["seen"], seen);
+        assert_eq!(codex["refused"], 0);
+    }
+    assert_eq!(tree(&root.path().join("codex")), source);
+}
+
+#[test]
 fn claude_mem_keeps_its_everyday_store_refusal() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join(".oboete");

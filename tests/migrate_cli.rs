@@ -122,11 +122,37 @@ fn migration_commands_refuse_source_aliases_without_writing_v1() {
     }
 }
 
+#[test]
+fn migration_commands_refuse_a_stopped_restore_alias() {
+    for args in [
+        vec!["migrate"],
+        vec!["migrate", "--finish"],
+        vec!["import", "transcripts", "--yes"],
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let from = home.path().join("oboete.db");
+        let v1 = rusqlite::Connection::open(&from).unwrap();
+        v1.execute_batch(
+            "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO meta VALUES('device_id', 'v1-device');",
+        )
+        .unwrap();
+        drop(v1);
+        std::fs::hard_link(&from, home.path().join("raw.db.restored")).unwrap();
+        let before = std::fs::read(&from).unwrap();
+        let out = oboete(home.path(), &args, "yes\n");
+        assert!(!out.status.success());
+        assert!(std::fs::read(&from).unwrap() == before);
+        assert!(!home.path().join("raw.db").exists());
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(said.contains("aliases destination raw.db"), "{said}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn invalid_v1_settings_stay_private_in_a_fresh_home() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    use std::os::unix::process::CommandExt;
 
     let root = tempfile::tempdir().unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -148,12 +174,6 @@ fn invalid_v1_settings_stay_private_in_a_fresh_home() {
         .arg(&home)
         .args(["migrate", "--from"])
         .arg(v1.join("oboete.db"));
-    unsafe {
-        command.pre_exec(|| {
-            libc::umask(0o022);
-            Ok(())
-        });
-    }
     let out = command.output().unwrap();
     assert!(!out.status.success());
     let said = String::from_utf8_lossy(&out.stderr);
