@@ -169,7 +169,7 @@ pub fn resume(home: &Path) -> Result<Vec<Status>> {
 
 pub fn status(home: &Path) -> Result<Vec<Status>> {
     let Some(journal) = Journal::read(home)? else {
-        if crate::raw::exists(home) {
+        if home.join("raw.db").try_exists()? {
             let conn = Connection::open_with_flags(
                 crate::raw::path(home),
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -183,9 +183,15 @@ pub fn status(home: &Path) -> Result<Vec<Status>> {
                 !expected,
                 "privacy journal is missing; refusing an empty history"
             );
+        } else {
+            before_new_raw(home)?;
         }
         return Ok(Vec::new());
     };
+    anyhow::ensure!(
+        journal.head_present,
+        "privacy head is missing; initialization is unfinished"
+    );
     journal
         .controls(0)?
         .into_iter()
@@ -297,6 +303,7 @@ impl Control {
 struct Journal {
     conn: Connection,
     head: Head,
+    head_present: bool,
 }
 
 impl Journal {
@@ -349,6 +356,7 @@ impl Journal {
         }
         Ok(Some(Self {
             conn,
+            head_present: head.is_some(),
             head: Head {
                 version: 1,
                 identity,
@@ -358,7 +366,11 @@ impl Journal {
     }
 
     fn create(home: &Path) -> Result<Self> {
-        if let Some(j) = Self::read(home)? {
+        if let Some(mut j) = Self::read(home)? {
+            if !j.head_present {
+                write_head(home, &j.head)?;
+                j.head_present = true;
+            }
             return Ok(j);
         }
         let path = home.join("privacy.db.initializing");
@@ -452,7 +464,14 @@ impl Journal {
 }
 
 pub(crate) fn version(home: &Path) -> Result<Option<Head>> {
-    Ok(Journal::read(home)?.map(|j| j.head))
+    let journal = Journal::read(home)?;
+    if let Some(j) = &journal {
+        anyhow::ensure!(
+            j.head_present,
+            "privacy head is missing; initialization is unfinished"
+        );
+    }
+    Ok(journal.map(|j| j.head))
 }
 
 /// Called while raw's writer transaction is held: another registration cannot interleave.
@@ -531,8 +550,17 @@ pub(crate) fn apply(conn: &Connection, home: &Path, device: &str) -> Result<()> 
     let applied = applied_head(conn)?;
     let journal = Journal::read(home)?;
     check_applied(applied.as_ref(), journal.as_ref().map(|j| &j.head))?;
-    let Some(journal) = journal else {
-        return Ok(());
+    let journal = match journal {
+        Some(j) if j.head_present => j,
+        _ => {
+            // A readable raw store with no marker proves this is initialization, never a
+            // replacement for a lost history. Persist zero controls before raw records it.
+            anyhow::ensure!(
+                applied.is_none(),
+                "privacy head is missing; refusing an empty deny-list"
+            );
+            Journal::create(home)?
+        }
     };
     for c in journal.controls(applied.as_ref().map_or(0, |h| h.through))? {
         let status = c.status(&journal.head.identity)?;
@@ -562,9 +590,17 @@ pub(crate) fn apply(conn: &Connection, home: &Path, device: &str) -> Result<()> 
 
 pub(crate) fn needs_apply(conn: &Connection, home: &Path) -> Result<bool> {
     let got = applied_head(conn)?;
-    let expected = version(home)?;
-    check_applied(got.as_ref(), expected.as_ref())?;
-    Ok(got != expected)
+    let journal = Journal::read(home)?;
+    let expected = journal.as_ref().map(|j| &j.head);
+    check_applied(got.as_ref(), expected)?;
+    if journal.as_ref().is_none_or(|j| !j.head_present) {
+        anyhow::ensure!(
+            got.is_none(),
+            "privacy head is missing; refusing an empty deny-list"
+        );
+        return Ok(true);
+    }
+    Ok(got.as_ref() != expected)
 }
 
 fn applied_head(conn: &Connection) -> Result<Option<Head>> {
@@ -594,8 +630,14 @@ fn check_applied(applied: Option<&Head>, current: Option<&Head>) -> Result<()> {
 /// controls existed. A fresh Rebuild cannot check that: its meta table has no privacy head yet.
 /// Called under raw.lock exclusively, before any file is moved or a staged restore is removed.
 pub(crate) fn before_restore(home: &Path) -> Result<()> {
-    let current = version(home)?;
-    if !crate::raw::exists(home) {
+    let journal = Journal::read(home)?;
+    let current = journal.as_ref().map(|j| &j.head);
+    let verified = journal.as_ref().is_some_and(|j| j.head_present);
+    if !home.join("raw.db").try_exists()? {
+        anyhow::ensure!(
+            verified,
+            "cannot restore: raw and deletion authority are missing; zero controls are not proven"
+        );
         return Ok(());
     }
     let read = || -> Result<Option<Head>> {
@@ -607,12 +649,69 @@ pub(crate) fn before_restore(home: &Path) -> Result<()> {
         applied_head(&conn)
     };
     match read() {
-        Ok(applied) => check_applied(applied.as_ref(), current.as_ref()),
-        // A corrupt source cannot supply its meta table; the independently checked journal is
-        // still applied to the rebuilt file. This also retains pre-forget corruption recovery.
-        Err(e) if crate::backup::corrupt(&e) => Ok(()),
+        Ok(applied) => {
+            check_applied(applied.as_ref(), current)?;
+            if !verified {
+                anyhow::ensure!(
+                    applied.is_none(),
+                    "privacy head is missing; refusing an empty deny-list"
+                );
+                Journal::create(home)?;
+            }
+            Ok(())
+        }
+        Err(e) if crate::backup::corrupt(&e) => {
+            anyhow::ensure!(
+                verified,
+                "cannot restore: raw is corrupt and deletion authority is missing; zero controls are not proven"
+            );
+            Ok(())
+        }
         Err(e) => Err(e).context("check current raw deletion authority before restore"),
     }
+}
+
+/// Missing/unreadable raw beside old stores/backups is not a fresh home. Do not manufacture an
+/// unmarked raw file that would then falsely justify initializing an empty control history.
+pub(crate) fn before_new_raw(home: &Path) -> Result<()> {
+    let journal = Journal::read(home)?;
+    if journal.as_ref().is_some_and(|j| j.head_present) {
+        return Ok(());
+    }
+    let path = home.join("raw.db");
+    if path.try_exists()? {
+        let read = || -> Result<Option<Head>> {
+            let conn =
+                Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            applied_head(&conn)
+        };
+        if let Ok(applied) = read() {
+            check_applied(applied.as_ref(), journal.as_ref().map(|j| &j.head))?;
+            anyhow::ensure!(
+                applied.is_none(),
+                "privacy head is missing; refusing an empty deny-list"
+            );
+            return Ok(()); // a readable, unmarked current raw store proves legacy zero history
+        }
+    }
+    let mut old = crate::backup::has_segments(home)?;
+    for name in [
+        "knowledge.db",
+        "knowledge.db-wal",
+        "knowledge.db-shm",
+        "raw.db.restoring",
+        "raw.db.restored",
+    ] {
+        old |= home.join(name).try_exists()?;
+    }
+    if !path.try_exists()? {
+        old |= home.join("raw.db-wal").try_exists()? || home.join("raw.db-shm").try_exists()?;
+    }
+    anyhow::ensure!(
+        !old,
+        "deletion authority is unknown beside existing stores or backups; refusing to initialize empty controls"
+    );
+    Ok(())
 }
 
 fn write_head(home: &Path, head: &Head) -> Result<()> {
@@ -830,7 +929,19 @@ mod tests {
             }
         };
         if phase == "initialize" {
+            // A readable, unmarked legacy raw store is trustworthy evidence for zero controls.
+            // Initialize it under interruption; do not remove an accepted deletion request.
+            drop(raw);
+            for name in ["privacy.db", "privacy.head"] {
+                std::fs::remove_file(home.join(name)).unwrap();
+            }
+            let conn = Connection::open(home.join("raw.db")).unwrap();
+            conn.execute("DELETE FROM meta WHERE key='privacy_head'", [])
+                .unwrap();
+            drop(conn);
             INITIALIZING.set(Some(stopped));
+            let _ = raw::open(home);
+            panic!("the parent should kill legacy initialization");
         } else if phase == "journal" {
             JOURNAL_WRITING.set(Some(stopped));
         } else {

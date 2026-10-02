@@ -401,6 +401,7 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
         false,
         OPEN_WAIT.min(deadline.saturating_duration_since(std::time::Instant::now())),
     )?;
+    crate::forget::before_new_raw(home)?;
     // A restore that stopped after moving the damaged file aside and before renaming the rebuilt
     // one in: `raw.db.restored` is only ever a whole rebuild (it gets that name once its records
     // are committed), so the rename is finished here instead of creating an empty store.
@@ -2883,7 +2884,9 @@ mod tests {
         assert_eq!(open(home.path()).unwrap().device(), first);
         // The same store copied elsewhere (another machine's home) is another device.
         let copy = tempfile::tempdir().unwrap();
-        std::fs::copy(home.path().join("raw.db"), copy.path().join("raw.db")).unwrap();
+        for file in ["raw.db", "privacy.db", "privacy.head"] {
+            std::fs::copy(home.path().join(file), copy.path().join(file)).unwrap();
+        }
         let other = open(copy.path()).unwrap();
         assert_ne!(other.device(), first);
         assert_eq!(open(copy.path()).unwrap().device(), other.device());
@@ -2950,7 +2953,9 @@ mod tests {
             .unwrap();
         drop(raw);
         let copy = tempfile::tempdir().unwrap();
-        std::fs::copy(home.path().join("raw.db"), copy.path().join("raw.db")).unwrap();
+        for file in ["raw.db", "privacy.db", "privacy.head"] {
+            std::fs::copy(home.path().join(file), copy.path().join(file)).unwrap();
+        }
         let mut other = open(copy.path()).unwrap();
         other.exclude("x", false).unwrap();
         assert_eq!(other.exclusions().unwrap(), ["x"]);

@@ -140,6 +140,12 @@ fn segments(dir: &Path, kind: Kind) -> Result<Vec<Segment>> {
     Ok(out)
 }
 
+/// Metadata only: raw creation must not mistake a lost store with backups for a new home.
+pub(crate) fn has_segments(home: &Path) -> Result<bool> {
+    let dir = dir(home)?;
+    Ok(!segments(&dir, Kind::Records)?.is_empty() || !segments(&dir, Kind::Ops)?.is_empty())
+}
+
 /// The records of this home's raw.db above the last backed-up seq, then its ops above the last
 /// backed-up op seq, as sealed segments (records first: a restore then never holds a window op
 /// whose records it lacks).

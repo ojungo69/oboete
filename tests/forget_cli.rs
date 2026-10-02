@@ -77,7 +77,7 @@ fn a_record_without_native_provenance_is_refused_before_registration() {
     );
     assert!(String::from_utf8_lossy(&result.stderr).contains("native source identity"));
     assert!(ok(run(home, &["get", &id], "")).contains(CANARY));
-    assert!(!home.join("privacy.db").exists());
+    assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
 }
 
 fn record(home: &Path, body: &str) -> String {
@@ -129,7 +129,7 @@ fn forgetting_a_record_hides_it_and_reports_the_unfinished_purge() {
     let preview = ok(run(home, &["forget", "--record", &id], "no\n"));
     assert!(preview.contains("raw records: 1"), "{preview}");
     assert!(
-        !home.join("privacy.db").exists(),
+        ok(run(home, &["forget", "--status"], "")).is_empty(),
         "a rejected preview registered a request"
     );
     assert!(ok(run(home, &["get", &id], "")).contains(CANARY));
@@ -176,6 +176,76 @@ fn losing_the_control_files_never_looks_like_an_empty_history() {
     assert_eq!(std::fs::read(home.join("raw.db")).unwrap(), raw);
     assert_eq!(std::fs::read(home.join("knowledge.db")).unwrap(), knowledge);
     assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
+}
+
+fn missing_controls_with_lost_raw_refuses_restore(damage: &str) {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let id = record(home, CANARY);
+    ok(run(home, &["forget", "--record", &id, "--yes"], ""));
+    std::fs::remove_file(home.join("privacy.db")).unwrap();
+    std::fs::remove_file(home.join("privacy.head")).unwrap();
+    match damage {
+        "corrupt" => std::fs::write(home.join("raw.db"), b"broken source SQLite header").unwrap(),
+        "empty" => std::fs::write(home.join("raw.db"), b"").unwrap(),
+        _ => std::fs::remove_file(home.join("raw.db")).unwrap(),
+    }
+    let before = std::fs::read(home.join("raw.db")).ok();
+    let restored = run(home, &["restore"], "");
+    assert!(
+        !restored.status.success(),
+        "restore accepted unknown deletion authority: {}",
+        String::from_utf8_lossy(&restored.stdout)
+    );
+    assert_eq!(std::fs::read(home.join("raw.db")).ok(), before);
+    assert!(
+        !run(home, &["worker", "--idle-ms", "0"], "")
+            .status
+            .success()
+    );
+    assert_eq!(std::fs::read(home.join("raw.db")).ok(), before);
+    assert!(!run(home, &["forget", "--status"], "").status.success());
+    assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
+    assert!(
+        !home.join("privacy.db").exists(),
+        "recreated a lost control history as empty"
+    );
+}
+
+#[test]
+fn lost_controls_and_a_corrupt_raw_store_refuse_restore() {
+    for damage in ["corrupt", "empty"] {
+        missing_controls_with_lost_raw_refuses_restore(damage);
+    }
+}
+
+#[test]
+fn lost_controls_and_a_missing_raw_store_refuse_restore() {
+    missing_controls_with_lost_raw_refuses_restore("missing");
+}
+
+#[test]
+fn explicit_zero_control_history_preserves_normal_restore() {
+    for corrupt in [true, false] {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+        let id = record(home, CANARY);
+        assert!(
+            home.join("privacy.db").exists(),
+            "no durable zero-control history"
+        );
+        assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
+        if corrupt {
+            std::fs::write(home.join("raw.db"), b"broken SQLite header").unwrap();
+        } else {
+            std::fs::remove_file(home.join("raw.db")).unwrap();
+        }
+        ok(run(home, &["restore"], ""));
+        assert!(ok(run(home, &["get", &id], "")).contains(CANARY));
+        assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
+    }
 }
 
 #[test]
@@ -230,7 +300,7 @@ fn a_restored_seq_reused_for_another_record_invalidates_the_preview() {
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("stale"));
     assert!(ok(run(home, &["get", &id], "")).contains(replacement));
-    assert!(!home.join("privacy.db").exists());
+    assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
 }
 
 fn copy_backup(from: &Path, to: &Path) {
