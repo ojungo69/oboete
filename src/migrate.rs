@@ -419,7 +419,13 @@ fn events(
             }
         }
         batch.bytes += bytes;
-        batch.records.extend(captured);
+        let identity = serde_json::to_string(&(&row, crate::forget::hash(stored.as_bytes())))?;
+        batch.records.extend(
+            captured
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| (c, crate::forget::origin(&key, &format!("{identity}:{i}")))),
+        );
         batch.last = Some(row);
         stats.events += 1;
     }
@@ -431,7 +437,7 @@ fn events(
 /// fingerprint.
 #[derive(Default)]
 struct Batch {
-    records: Vec<Captured>,
+    records: Vec<(Captured, String)>,
     bytes: usize,
     last: Option<V1Row>,
 }
@@ -445,7 +451,8 @@ impl Batch {
         };
         let mut records = std::mem::take(&mut self.records);
         // Stable, so (ts, id): at most one record per event, read in id order.
-        records.sort_by_key(|c| c.event.ts);
+        records.sort_by_key(|(c, _)| c.event.ts);
+        let (records, origins): (Vec<_>, Vec<_>) = records.into_iter().unzip();
         self.bytes = 0;
         let checkpoint = Checkpoint {
             key: key.to_owned(),
@@ -454,7 +461,7 @@ impl Batch {
             prefix: None,
         };
         Ok(raw
-            .append_imported(&records, ruleset, Some(&checkpoint))?
+            .append_imported_origins(&records, &origins, ruleset, Some(&checkpoint))?
             .len() as u64)
     }
 }

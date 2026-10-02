@@ -412,6 +412,7 @@ pub fn restore(home: &Path) -> Result<String> {
             ops += 1;
         }
     }
+    rebuild.apply_privacy(home, &device);
     let dropped = rebuild.finish()?;
     let whole = home.join("raw.db.restored");
     std::fs::rename(&tmp, &whole)?;

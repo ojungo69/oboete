@@ -812,7 +812,7 @@ pub fn import(
                 row: None,
                 prefix: checkpoints.get(&key).and_then(|c| c.prefix.clone()),
             };
-            let mut batch = Vec::<Captured>::new();
+            let mut batch = Vec::<(Captured, String)>::new();
             let mut bytes = 0;
             for line in lines {
                 let through = i64::try_from(line.seq)?;
@@ -841,7 +841,15 @@ pub fn import(
                     append_batch(&mut raw, &mut batch, &checkpoint, &settings, stats)?;
                     bytes = 0;
                 }
-                batch.extend(captured);
+                let mut native = Sha256::new();
+                hash_line(&mut native, &line)?;
+                let identity = format!("{through}:{:x}", native.finalize());
+                batch.extend(
+                    captured
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, c)| (c, crate::forget::origin(&key, &format!("{identity}:{i}")))),
+                );
                 bytes += size;
                 checkpoint.through = through;
                 checkpoint.prefix = fingerprint;
@@ -887,19 +895,27 @@ fn hash_line(prefix: &mut Sha256, line: &Line) -> Result<()> {
 
 fn append_batch(
     raw: &mut Option<raw::Raw>,
-    batch: &mut Vec<Captured>,
+    batch: &mut Vec<(Captured, String)>,
     checkpoint: &Checkpoint,
     settings: &Settings,
     stats: &mut AgentStats,
 ) -> Result<()> {
+    let (records, origins): (Vec<_>, Vec<_>) = std::mem::take(batch).into_iter().unzip();
     stats.events += match raw.as_mut() {
         Some(raw) => raw
-            .append_imported(batch, settings.rules.version(), Some(checkpoint))?
+            .append_imported_origins(
+                &records,
+                &origins,
+                settings.rules.version(),
+                Some(checkpoint),
+            )?
             .len() as u64,
-        None => batch.len() as u64,
+        None => records.len() as u64,
     };
-    stats.bytes += batch.iter().map(|c| c.event.body.len() as u64).sum::<u64>();
-    batch.clear();
+    stats.bytes += records
+        .iter()
+        .map(|c| c.event.body.len() as u64)
+        .sum::<u64>();
     Ok(())
 }
 
