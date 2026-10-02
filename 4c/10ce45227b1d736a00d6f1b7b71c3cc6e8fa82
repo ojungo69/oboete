@@ -1,0 +1,47 @@
+src/consumer/cards.rs
+  s_821f8fcda60ea0::t_aa57ba60acf525 33-38
+  s_821f8fcda60ea0::t_8e2beeca496ebe 320-356
+  s_821f8fcda60ea0::t_8536eb06e5f2bb 1-4,6-7,9-11,39,41-49,51,94,105-107,138,140-143,145-147,149-217,425
+  s_821f8fcda60ea0::t_a1726d0b75c5ee 357-383
+  s_821f8fcda60ea0::t_7cdaf7152c9837 50,52
+  s_821f8fcda60ea0::t_88f9ea43090c8a 32,218-263,409-424
+  s_821f8fcda60ea0::t_433e4282cfa0e6 264-319
+  s_821f8fcda60ea0::t_4402964e7d0b95 137,384-408
+  s_821f8fcda60ea0::t_3c05fbc497c48d 17-18
+  s_821f8fcda60ea0::t_2c4841aa265871 12-16
+  s_821f8fcda60ea0::t_36c64ed2f1fc76 5,8,19-31,40,53-93,95-104,108-136,139,144,148,426-428
+docs/cards.md
+  s_821f8fcda60ea0::t_1e6e9ad0dffda5 1-121
+  s_821f8fcda60ea0::t_75019bb627c5d7 122-127
+src/cards.rs
+  s_821f8fcda60ea0::t_37a3dcad328ad4 1-45
+  s_821f8fcda60ea0::t_5ab51064ade1e1 46-111
+src/consumer.rs
+  s_821f8fcda60ea0::t_41a0ab3433b4b6 4
+src/curate.rs
+  s_821f8fcda60ea0::t_6a608b5238d933 95-97,393-394,528,2360,2617,4865-4886,8276
+src/main.rs
+  s_821f8fcda60ea0::t_1d3f8f47ea8aed 9
+src/provider.rs
+  s_821f8fcda60ea0::t_7e08aab83a58f4 3543
+src/raw.rs
+  s_821f8fcda60ea0::t_ee9c38027dbf88 110-120,591-603,682-717
+src/worker.rs
+  s_821f8fcda60ea0::t_0354e7e3b0b2d1 65-66
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4c10ce45227b1d736a00d6f1b7b71c3cc6e8fa82",
+  "prompts": {},
+  "sessions": {
+    "s_821f8fcda60ea0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3c3ad270-2ec6-4f00-abc6-a7903bd32508",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
