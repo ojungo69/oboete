@@ -606,6 +606,7 @@ impl Viewer {
             let raw = crate::raw::open(&self.home)?;
             let session = crate::hook::own_session("unknown".into(), &raw);
             crate::hook::start_text_read(&self.home, &raw, &repo, &branch, &session, &settings)?
+                .map(|s| s.text)
         } else {
             None
         };
@@ -1057,21 +1058,7 @@ mod tests {
 
     /// The owner's correction of claim `uid` (`oboete correct`'s op), applied.
     fn correct(s: &mut Store, uid: &str, status: Option<&str>, body: Option<&str>) {
-        let k = crate::knowledge::open(s.home.path()).unwrap();
-        let c = crate::claims::active_one(&k, uid).unwrap().unwrap();
-        let op = crate::claims::CorrectionOp {
-            uid: uid.into(),
-            anchor: crate::claims::Anchor {
-                device: c.device,
-                seq: c.seq,
-            },
-            status: status.map(Into::into),
-            body: body.map(Into::into),
-        };
-        let op = serde_json::to_value(op).unwrap();
-        s.raw
-            .append_ops(&[(crate::raw::OpKind::Correction, op)])
-            .unwrap();
+        s.correct(uid, status, body);
         s.run();
     }
 

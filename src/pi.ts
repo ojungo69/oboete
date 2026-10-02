@@ -78,8 +78,11 @@ export default function (pi) {
     pending = "";
     return { message: { customType: "oboete", content, display: false } };
   });
-  pi.on("input", (event, ctx) => {
-    if (event.source !== "extension") send("UserPromptSubmit", ctx, { prompt: event.text });
+  // Pi awaits this before the run starts: what the prompt gets joins the stash.
+  pi.on("input", async (event, ctx) => {
+    if (event.source === "extension") return;
+    const text = contextOf(await wait(send("UserPromptSubmit", ctx, { prompt: event.text })));
+    if (text) pending = pending ? `${pending}\n${text}` : text;
   });
   pi.on("tool_result", (event, ctx) => {
     send(event.isError ? "PostToolUseFailure" : "PostToolUse", ctx, {

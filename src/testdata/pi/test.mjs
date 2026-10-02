@@ -230,8 +230,8 @@ assert.equal(await malformed.emit("before_agent_start", { prompt: "malformed" },
 const recovering = await load();
 const { state: changing, ctx: changingCtx } = session("old-session");
 recovering.failNextHook = true;
-assert.equal(recovering.handlers.get("input")({ source: "interactive", text: "first" }, changingCtx), undefined);
-assert.equal(recovering.handlers.get("input")({ source: "interactive", text: "second" }, changingCtx), undefined);
+assert.equal(await recovering.emit("input", { source: "interactive", text: "first" }, changingCtx), undefined);
+assert.equal(await recovering.emit("input", { source: "interactive", text: "second" }, changingCtx), undefined);
 changing.id = "new-session";
 await recovering.emit("session_shutdown", { reason: "quit" }, changingCtx);
 assert.deepEqual(recovering.hooks.map(h => h.payload.session_id), ["old-session", "old-session", "new-session"]);
@@ -244,7 +244,10 @@ for (const [eventName, event, expected] of [
 ]) {
   const bounded = await load({}, true);
   bounded.stallNextHook = true;
-  await bounded.emit("input", { source: "interactive", text: "stalled" }, ctx);
+  const typing = bounded.emit("input", { source: "interactive", text: "stalled" }, ctx);
+  await Promise.resolve();
+  bounded.fireFirstTimer(); // the prompt's wait, while its spawn is stuck
+  await typing;
   assert.equal(bounded.hooks.length, 1);
   const waiting = bounded.emit(eventName, event, ctx);
   await Promise.resolve();
@@ -261,6 +264,23 @@ for (const [eventName, event, expected] of [
     assert.equal(await bounded.emit("before_agent_start", { prompt: "after drain" }, ctx), undefined);
   }
 }
+
+// What a prompt gets joins the stash its run starts with, after SessionStart's, once.
+const prompted = await load();
+const { ctx: promptCtx } = session("prompted");
+await prompted.emit("session_start", { reason: "startup" }, promptCtx);
+prompted.nextHookOutput = JSON.stringify({ hookSpecificOutput: { additionalContext: "picked" } });
+await prompted.emit("input", { source: "interactive", text: "a prompt" }, promptCtx);
+assert.equal(prompted.hooks[1].payload.prompt, "a prompt");
+assert.deepEqual(plain(await prompted.emit("before_agent_start", { prompt: "a prompt" }, promptCtx)), {
+  message: { customType: "oboete", content: "context:startup\npicked", display: false },
+});
+prompted.nextHookOutput = JSON.stringify({ hookSpecificOutput: { additionalContext: "next" } });
+await prompted.emit("input", { source: "interactive", text: "another" }, promptCtx);
+assert.deepEqual(plain(await prompted.emit("before_agent_start", { prompt: "another" }, promptCtx)), {
+  message: { customType: "oboete", content: "next", display: false },
+});
+assert.equal(await prompted.emit("before_agent_start", { prompt: "again" }, promptCtx), undefined);
 
 const signal = new AbortController().signal;
 async function tool(name, params) {

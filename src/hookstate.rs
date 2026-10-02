@@ -64,6 +64,48 @@ pub fn take(home: &Path, agent: &str, session: &str, flag: &str) -> bool {
     std::fs::remove_file(dir.join(flag)).is_ok()
 }
 
+/// Replaces the session's value `name` with what `f` makes of it (`None` removes it), under the
+/// session's lock, so concurrent hooks of one session (parallel tool calls) lose no change. A value
+/// that cannot be read is none to `f`.
+// ponytail: each value is one small file rewritten whole per change; a session's shown set holds
+// at most the claims shown to it, and goes with the session after `KEEP`.
+pub fn update(
+    home: &Path,
+    agent: &str,
+    session: &str,
+    name: &str,
+    f: impl FnOnce(Option<String>) -> Option<String>,
+) -> std::io::Result<()> {
+    let dir = dir(home, agent, session);
+    std::fs::create_dir_all(&dir)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".lock"))?;
+    lock.lock()?;
+    let path = dir.join(name);
+    match f(std::fs::read_to_string(&path).ok()) {
+        Some(v) => {
+            // Renamed into place, so a reader without the lock sees the old value or the new.
+            let part = dir.join(format!(".{name}.part"));
+            std::fs::write(&part, v)?;
+            std::fs::rename(&part, &path)
+        }
+        None => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+    }
+}
+
+/// The session's value `name`: none when it has none or it cannot be read.
+// The prompt point (Task 8 Step 6) reads it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn value(home: &Path, agent: &str, session: &str, name: &str) -> Option<String> {
+    std::fs::read_to_string(dir(home, agent, session).join(name)).ok()
+}
+
 /// Removes the flags of sessions unchanged for `keep` (the worker, at its idle exit).
 pub fn prune(home: &Path, keep: Duration) {
     let Ok(agents) = std::fs::read_dir(root(home)) else {
@@ -129,6 +171,35 @@ mod tests {
                 .sum();
             assert_eq!(won, 1);
         }
+    }
+
+    /// Task 8 Step 5: concurrent updates of one session's value each see the others' changes.
+    #[test]
+    fn concurrent_updates_keep_every_change() {
+        let home = tempfile::tempdir().unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let (p, start) = (home.path().to_path_buf(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    update(&p, "claude", "s", "shown", |v| {
+                        Some(v.unwrap_or_default() + &format!("{i}\n"))
+                    })
+                    .unwrap();
+                })
+            })
+            .collect();
+        threads.into_iter().for_each(|t| t.join().unwrap());
+        let mut seen: Vec<String> = value(home.path(), "claude", "s", "shown")
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        seen.sort();
+        assert_eq!(seen, (0..8).map(|i| i.to_string()).collect::<Vec<_>>());
+        update(home.path(), "claude", "s", "shown", |_| None).unwrap();
+        assert_eq!(value(home.path(), "claude", "s", "shown"), None);
     }
 
     #[cfg(unix)] // setting a directory's time needs another open on Windows

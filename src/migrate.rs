@@ -1218,6 +1218,7 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         let settings = Settings::default();
         let shown =
             crate::hook::start_text(home.path(), &raw, "github.com/o/r", "", "s1", &settings)
+                .map(|s| s.text)
                 .unwrap_or_default();
         assert!(!shown.contains("We use tabs."), "{shown}");
     }
@@ -1243,7 +1244,7 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         let age = regex::Regex::new(r"/ \d+ min").unwrap();
         let manifest = |raw: &Raw| {
             crate::hook::start_text(home.path(), raw, "github.com/o/r", "", "L", &settings)
-                .map(|m| age.replace_all(&m, "/ _ min").into_owned())
+                .map(|m| age.replace_all(&m.text, "/ _ min").into_owned())
         };
         let before = manifest(&raw);
         assert!(

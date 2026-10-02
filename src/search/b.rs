@@ -2030,6 +2030,23 @@ pub(crate) mod fixture {
             uids
         }
 
+        /// The owner's correction of claim `uid` (`oboete correct`'s op); `run` applies it.
+        pub fn correct(&mut self, uid: &str, status: Option<&str>, body: Option<&str>) {
+            let k = crate::knowledge::open(self.home.path()).unwrap();
+            let c = crate::claims::active_one(&k, uid).unwrap().unwrap();
+            let op = crate::claims::CorrectionOp {
+                uid: uid.into(),
+                anchor: crate::claims::Anchor {
+                    device: c.device,
+                    seq: c.seq,
+                },
+                status: status.map(Into::into),
+                body: body.map(Into::into),
+            };
+            let op = serde_json::to_value(op).unwrap();
+            self.raw.append_ops(&[(OpKind::Correction, op)]).unwrap();
+        }
+
         pub fn exclude(&mut self, repo: &str) {
             let op = json!({"repo": repo, "undo": false});
             self.raw.append_ops(&[(OpKind::Exclusion, op)]).unwrap();

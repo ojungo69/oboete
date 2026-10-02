@@ -16,14 +16,22 @@ const started = new Set();
 let spawnMode = "ok";
 let active = 0;
 let maxActive = 0;
+// What a prompt's hook prints.
+let promptOutput = "";
 childProcess.spawn = (exe, args, options) => {
   assert.equal(exe, expectedExe);
   assert.deepEqual(args.slice(0, -1), [...homeArgs, "hook", "opencode"]);
-  assert.deepEqual(options.stdio, ["pipe", "ignore", "ignore"]);
+  // Only a prompt's output is read.
+  const read = args.at(-1) === "UserPromptSubmit";
+  assert.deepEqual(options.stdio, ["pipe", read ? "pipe" : "ignore", "ignore"]);
   assert.equal(options.shell, undefined);
   if (spawnMode === "throw") throw new Error("spawn failed");
   const child = new EventEmitter();
   child.stdin = new EventEmitter();
+  if (read) {
+    child.stdout = new EventEmitter();
+    child.stdout.setEncoding = () => child.stdout;
+  }
   child.unref = () => { child.unrefed = true; };
   child.stdin.end = (text) => {
     active += 1;
@@ -37,6 +45,7 @@ childProcess.spawn = (exe, args, options) => {
         child.emit("error", new Error("ENOENT"));
       }
       if (args.at(-1) === "SessionStart") started.add(JSON.parse(text).session_id);
+      if (read && spawnMode === "ok") child.stdout.emit("data", promptOutput);
       child.emit("close", 0);
     });
   };
@@ -179,6 +188,41 @@ await local.hooks.context(empty);
 await local.hooks.context(empty);
 assert.equal(injections.length, 3);
 assert.deepEqual(empty.system, []);
+await drain();
+
+// A prompt's output is pushed at each call of its turn, after the manifest, which is read again
+// when the prompt got something (it may name a change to the manifest). The turn's end drops it;
+// a compaction reads the manifest again too.
+injectResult = "remembered context";
+await local.emit("session.inbox.enqueued", user("turns", "nothing picked"), location);
+await drain();
+injections.length = 0;
+await local.hooks.context({ sessionID: "turns", system: [] });
+await local.emit("session.execution.succeeded", { sessionID: "turns" });
+promptOutput = JSON.stringify({ hookSpecificOutput: { additionalContext: "picked" } });
+await local.emit("session.inbox.enqueued", user("turns", "a prompt"), location);
+await drain();
+promptOutput = "";
+const turnCalls = Array.from({ length: 2 }, () => ({ sessionID: "turns", system: [] }));
+for (const call of turnCalls) await local.hooks.context(call);
+for (const call of turnCalls) {
+  assert.deepEqual(call.system, [{ type: "text", text: "remembered context" }, { type: "text", text: "picked" }]);
+}
+assert.equal(injections.length, 2);
+await local.emit("session.execution.succeeded", { sessionID: "turns" });
+const afterTurn = { sessionID: "turns", system: [] };
+await local.hooks.context(afterTurn);
+assert.deepEqual(afterTurn.system, [{ type: "text", text: "remembered context" }]);
+await local.emit("session.inbox.enqueued", user("turns", "nothing picked"), location);
+await drain();
+await local.hooks.context({ sessionID: "turns", system: [] });
+assert.equal(injections.length, 2);
+await local.emit("session.compaction.ended", { sessionID: "turns", text: "summary" });
+await drain();
+const afterCompaction = { sessionID: "turns", system: [] };
+await local.hooks.context(afterCompaction);
+assert.deepEqual(afterCompaction.system, [{ type: "text", text: "remembered context" }]);
+assert.equal(injections.length, 3);
 await drain();
 
 for (const mode of ["error", "throw"]) {
