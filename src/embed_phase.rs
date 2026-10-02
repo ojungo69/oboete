@@ -34,28 +34,43 @@ pub struct Doc {
 }
 
 /// A batch to send: its documents, their texts as sent (gated, then cut), and the exclusion list
-/// they were read under, which the sending thread holds the call to (D13).
+/// they were read under, with the rules and tombstones the sender holds the call to (D13).
 pub struct Batch {
     pub embedder: String,
     pub docs: Vec<Doc>,
     pub texts: Vec<String>,
     pub reading: Reading,
+    pub ruleset: String,
+    pub tombstones: i64,
 }
 
 /// What became of a batch.
 pub enum Sent {
     Vectors(Vec<Vec<f32>>),
     Failed(Failure),
-    /// Nothing left the machine: the exclusion list changed since the batch was read (D13), or a
-    /// local error such as raw.db not opening.
+    /// Nothing left the machine: the exclusions, rules or tombstones changed since the batch was
+    /// read, or a local error such as raw.db not opening.
     Unsent(anyhow::Error),
 }
 
-/// The thread's body: raw.db opened, the exclusion list checked against the batch's, raw.db
-/// closed, then the call. What it took, in ms, beside what became of it.
+/// The thread's body: rules loaded, raw.db opened, exclusions and tombstones checked against the
+/// batch's, raw.db closed, then the call. What it took, in ms, beside what became of it.
 pub fn send(home: &Path, batch: &Batch, embedder: &Embedder, timeout: Duration) -> (Sent, i64) {
     let started = Instant::now();
-    let still = crate::raw::open(home).and_then(|raw| batch.reading.still(&raw));
+    let still = crate::redact::Rules::load(home).and_then(|rules| {
+        anyhow::ensure!(
+            rules.version() == batch.ruleset,
+            "the redaction rules changed since the batch was composed"
+        );
+        crate::raw::open(home).and_then(|raw| {
+            batch.reading.still(&raw)?;
+            anyhow::ensure!(
+                raw.tombstones()? == batch.tombstones,
+                "the tombstones changed since the batch was composed"
+            );
+            Ok(())
+        })
+    });
     if let Err(e) = still {
         return (Sent::Unsent(e), 0);
     }
@@ -116,6 +131,7 @@ pub struct Phase {
     flight: Option<InFlight>,
     asked: Option<Asked>,
     answered: Option<Answer>,
+    unasked: Option<String>,
     db: Option<Connection>,
     /// A call's own timeout: `embed::BATCH_TIMEOUT`, shorter in tests.
     timeout: Duration,
@@ -153,6 +169,7 @@ impl Phase {
             flight: None,
             asked: None,
             answered: None,
+            unasked: None,
             db: None,
             timeout: crate::embed::BATCH_TIMEOUT,
             split: None,
@@ -198,8 +215,8 @@ impl Phase {
 
     /// Asks for `text`'s vector under `key` and returns at once (milestone 4 D9). The text, gated
     /// by the asker, is cut as a prompt is, counted in providers.db (role `query`) from the day's
-    /// whole allowance as a search's query is, and sent on a thread of its own once `reading` is
-    /// found to be the exclusion list still (`send`). False when nothing is asked: one is out,
+    /// whole allowance as a search's query is, and sent on a thread of its own once its exclusions,
+    /// rules and tombstones are found to be current still (`send`). False when nothing is asked: one is out,
     /// embedding is off or its settings do not load, the active vectors are another embedder's,
     /// the embedder rests, or a cap is spent.
     pub fn ask(
@@ -208,6 +225,8 @@ impl Phase {
         key: &str,
         text: &str,
         reading: &Reading,
+        rules: &crate::redact::Rules,
+        tombstones: i64,
     ) -> Result<bool> {
         use crate::providers_db as pdb;
         if self.asked.is_some() {
@@ -258,6 +277,8 @@ impl Phase {
             docs: Vec::new(),
             texts: vec![sent],
             reading: reading.clone(),
+            ruleset: rules.version().to_owned(),
+            tombstones,
         };
         let (home, timeout) = (self.home.clone(), self.timeout);
         self.asked = Some(Asked {
@@ -276,6 +297,11 @@ impl Phase {
         self.answered.take()
     }
 
+    /// A key whose query never left: the asker can drop its cooldown and compose it again.
+    pub fn unasked(&mut self) -> Option<String> {
+        self.unasked.take()
+    }
+
     /// A finished ask settled as `search::b::embedded` settles a query: counted, and never a
     /// rest; one not sent is no longer counted.
     fn settled(&mut self, a: Asked) -> Option<Answer> {
@@ -292,6 +318,7 @@ impl Phase {
                 if let Err(e) = self.providers().and_then(|db| pdb::unreserve(db, a.call)) {
                     eprintln!("oboete: a query embedding not sent stays counted: {e:#}");
                 }
+                self.unasked = Some(a.key);
                 return None;
             }
             Sent::Vectors(_) => ("ok", "1 query".to_owned(), true),
@@ -349,6 +376,13 @@ impl Phase {
                 return Ok(Step::Idle);
             }
         };
+        let rules = match crate::redact::Rules::load(&self.home) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("oboete: no embedding for now: {e:#}");
+                return Ok(Step::Idle);
+            }
+        };
         let reading = Reading::now(raw, Reads::Live)?;
         cleared(k, &embedder.id, &reading)?;
         let wait = match self.held_back(&cfg) {
@@ -360,7 +394,7 @@ impl Phase {
             }
         };
         let half = match wait {
-            None => self.next_half(raw, k, &embedder.id, &reading)?,
+            None => self.next_half(raw, k, &embedder.id, &reading, &rules)?,
             Some(_) => None,
         };
         let batch = match half {
@@ -368,7 +402,8 @@ impl Phase {
             // Cached vectors are mapped and documents passed over are marked whatever the rest
             // or the cap, each kind up to its first page with a text to send; only the call waits.
             None => {
-                let Some(b) = pending(raw, k, &embedder.id, &reading, wait.is_some())? else {
+                let Some(b) = pending(raw, k, &embedder.id, &reading, &rules, wait.is_some())?
+                else {
                     return Ok(Step::Idle);
                 };
                 if let Some(w) = wait {
@@ -420,13 +455,16 @@ impl Phase {
         k: &Connection,
         embedder: &str,
         reading: &Reading,
+        rules: &crate::redact::Rules,
     ) -> Result<Option<Batch>> {
         let Some(split) = &mut self.split else {
             return Ok(None);
         };
+        let tombstones = raw.tombstones()?;
         while let Some(half) = split.halves.pop() {
             let (mut docs, mut texts) = (Vec::new(), Vec::new());
             let tx = k.unchecked_transaction()?;
+            let held = crate::claims::Pending::read(raw, &tx)?;
             for doc in half.docs {
                 let Some(mut r) = current(&tx, doc.kind, &doc.key)? else {
                     continue;
@@ -434,12 +472,15 @@ impl Phase {
                 if r.doc.sha != doc.sha {
                     continue;
                 }
+                if claim_pending(&held, &tx, &r.doc)? {
+                    continue;
+                }
                 if let Some((device, seq)) = doc.key.rsplit_once(':')
                     && matches!(doc.kind, "r" | "rp")
                 {
                     r.labels = raw.event_labels(device, seq.parse()?)?;
                 }
-                if let Some((doc, text)) = sort_out(&tx, raw, reading, embedder, r)? {
+                if let Some((doc, text)) = sort_out(&tx, raw, reading, embedder, r, rules)? {
                     docs.push(doc);
                     texts.push(text);
                 }
@@ -451,6 +492,8 @@ impl Phase {
                     docs,
                     texts,
                     reading: reading.clone(),
+                    ruleset: rules.version().to_owned(),
+                    tombstones,
                 }));
             }
         }
@@ -547,6 +590,8 @@ impl Phase {
                             docs: docs.to_vec(),
                             texts: texts.to_vec(),
                             reading: batch.reading.clone(),
+                            ruleset: batch.ruleset.clone(),
+                            tombstones: batch.tombstones,
                         });
                     }
                 }
@@ -600,6 +645,8 @@ impl Phase {
                     docs: vec![doc],
                     texts: Vec::new(),
                     reading: batch.reading.clone(),
+                    ruleset: batch.ruleset.clone(),
+                    tombstones: batch.tombstones,
                 }));
             }
         }
@@ -909,8 +956,10 @@ fn pending(
     k: &Connection,
     embedder: &str,
     reading: &Reading,
+    rules: &crate::redact::Rules,
     waiting: bool,
 ) -> Result<Option<Batch>> {
+    let tombstones = raw.tombstones()?;
     crate::claims::schema(k)?;
     crate::consumer::imported::schema(k)?;
     crate::consumer::fts::schema(k)?;
@@ -923,12 +972,22 @@ fn pending(
                 break;
             }
             let mut todo = Vec::new();
+            let mut deferred = false;
             let tx = k.unchecked_transaction()?;
+            let held = crate::claims::Pending::read(raw, &tx)?;
             for r in page {
-                todo.extend(sort_out(&tx, raw, reading, embedder, r)?);
+                if claim_pending(&held, &tx, &r.doc)? {
+                    deferred = true;
+                    continue;
+                }
+                todo.extend(sort_out(&tx, raw, reading, embedder, r, rules)?);
             }
             tx.commit()?;
             if todo.is_empty() {
+                if deferred {
+                    // No skip mark: the next consumer pass may leave the same claim body live.
+                    break;
+                }
                 continue;
             }
             todo.sort_by_key(|(_, text)| text.chars().count());
@@ -944,6 +1003,8 @@ fn pending(
                 docs,
                 texts,
                 reading: reading.clone(),
+                ruleset: rules.version().to_owned(),
+                tombstones,
             };
             if !waiting {
                 return Ok(Some(batch));
@@ -967,12 +1028,13 @@ fn sort_out(
     reading: &Reading,
     embedder: &str,
     r: Read,
+    rules: &crate::redact::Rules,
 ) -> Result<Option<(Doc, String)>> {
     if let Some(why) = passed_over(raw, k, reading, &r)? {
         mark(k, embedder, &r.doc, why)?;
         return Ok(None);
     }
-    let sent = gated(&r);
+    let sent = gated(&r, rules);
     if sent.trim().is_empty() || sent.trim() == "[REDACTED]" {
         mark(k, embedder, &r.doc, "empty")?;
         return Ok(None);
@@ -1210,8 +1272,13 @@ pub(crate) fn composed_out(kind: &str, title: &str, body: &str) -> String {
     crate::redact::outbound_joined(&text, &parts)
 }
 
-fn sha(text: &str) -> String {
+pub(crate) fn sha(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+/// A claim a pending correction or tombstone touches: its text may change on the next pass.
+fn claim_pending(pending: &crate::claims::Pending, k: &Connection, doc: &Doc) -> Result<bool> {
+    Ok(doc.kind == "c" && pending.touches(k, &doc.key)?)
 }
 
 /// Why a document gets no vector without being sent: its repository or session is excluded
@@ -1230,19 +1297,28 @@ fn passed_over(
             Ok(excluded.then_some("excluded"))
         }
         "k" | "p" => Ok(import_excluded(&r.doc.repo, list).then_some("excluded")),
-        _ => Ok(match &r.labels {
-            // A record the index holds and raw no longer does: its rewind comes.
-            None => Some("empty"),
-            Some((session, source)) => {
-                if reading.excluded.contains(session) {
-                    Some("excluded")
-                } else if !crate::raw::is_live(source) {
-                    Some("source")
-                } else {
-                    None
-                }
+        _ => {
+            let Some((device, seq)) = r.doc.key.rsplit_once(':') else {
+                return Ok(Some("empty"));
+            };
+            let live = crate::consumer::manifest::event(raw, device, seq.parse()?)?;
+            if live.is_none_or(|e| crate::consumer::fts::text(&e.body) != r.text) {
+                return Ok(Some("empty"));
             }
-        }),
+            Ok(match &r.labels {
+                // A record the index holds and raw no longer does: its rewind comes.
+                None => Some("empty"),
+                Some((session, source)) => {
+                    if reading.excluded.contains(session) {
+                        Some("excluded")
+                    } else if !crate::raw::is_live(source) {
+                        Some("source")
+                    } else {
+                        None
+                    }
+                }
+            })
+        }
     }
 }
 
@@ -1263,14 +1339,17 @@ pub(crate) fn import_excluded(repo: &str, list: &[String]) -> bool {
 
 /// The text sent for `r`: gated first (an imported document's fields each alone, `composed_out`),
 /// then cut (12,000 characters; a prompt 1,000), so a secret across the cut is hidden whole (D8).
-fn gated(r: &Read) -> String {
+fn gated(r: &Read, rules: &crate::redact::Rules) -> String {
     let keep = match r.doc.kind {
         "p" | "rp" => crate::embed::PROMPT_CHARS,
         _ => crate::embed::MAX_CHARS,
     };
     match &r.title {
-        Some((kind, title)) => composed_out(kind, title, &r.text),
-        None => crate::redact::outbound_lines(&r.text),
+        Some((kind, title)) => {
+            let (text, parts) = composed_parts(kind, title, &r.text);
+            crate::redact::joined_with(&text, &parts, rules)
+        }
+        None => crate::redact::lines_with(&r.text, rules),
     }
     .chars()
     .take(keep)
@@ -1530,14 +1609,79 @@ pub(crate) mod fixture {
 
     /// A home whose `[embedding]` points at `stub`, with a key file.
     pub(crate) fn config(s: &Store, stub: &Stub) {
+        config_at(s, &stub.url);
+    }
+
+    pub(crate) fn config_at(s: &Store, url: &str) {
         let key = s.home.path().join("key.md");
         std::fs::write(&key, "workers ai\nk\n").unwrap();
         let text = format!(
             "[embedding]\nprovider = \"workers-ai\"\naccount_id = \"a\"\nkey_file = '{}'\nurl = \"{}\"\n",
             key.display(),
-            stub.url
+            url
         );
         std::fs::write(s.home.path().join("config.toml"), text).unwrap();
+    }
+
+    /// Deterministic embedder answers without a loopback listener.
+    pub(crate) fn vectors(s: &Store) {
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let reading = Reading::now(&s.raw, Reads::Live).unwrap();
+        let rules = crate::redact::Rules::load(s.home.path()).unwrap();
+        let id = crate::embed::EMBEDDER;
+        cleared(&k, id, &reading).unwrap();
+        while let Some(batch) = pending(&s.raw, &k, id, &reading, &rules, false).unwrap() {
+            let vectors: Vec<_> = batch
+                .texts
+                .iter()
+                .map(|t| crate::embed::stub::vector(id, t))
+                .collect();
+            write(&k, &batch, &vectors).unwrap();
+        }
+    }
+
+    pub(crate) fn answer(phase: &mut Phase, key: &str, text: &str) {
+        phase.answered = Some(Answer {
+            key: key.to_owned(),
+            text: text.to_owned(),
+            embedder: crate::embed::EMBEDDER.to_owned(),
+            vector: crate::embed::stub::vector(crate::embed::EMBEDDER, text),
+        });
+    }
+
+    pub(crate) fn hold_query(
+        phase: &mut Phase,
+        key: &str,
+        text: &str,
+        sent: Sent,
+    ) -> std::sync::mpsc::Sender<()> {
+        let call = reserve(
+            phase.providers().unwrap(),
+            "query",
+            "1 query",
+            text,
+            200,
+            1.0,
+        )
+        .unwrap()
+        .unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        phase.asked = Some(Asked {
+            key: key.to_owned(),
+            text: text.to_owned(),
+            embedder: crate::embed::EMBEDDER.to_owned(),
+            call,
+            thread: std::thread::spawn(move || {
+                wait.recv().unwrap();
+                (sent, 0)
+            }),
+            until: crate::db::now_ms() + 10_000,
+        });
+        release
+    }
+
+    pub(crate) fn query_text(phase: &Phase) -> Option<&str> {
+        phase.asked.as_ref().map(|a| a.text.as_str())
     }
 
     /// The phase polled until it has nothing left, each call waited for.
@@ -1715,7 +1859,8 @@ mod tests {
         let config = crate::config::load(home).unwrap();
         let embedder = Embedder::from_config(&config.embedding).unwrap().unwrap();
         let reading = Reading::now(&s.raw, Reads::Live).unwrap();
-        let batch = pending(&s.raw, &k, &embedder.id, &reading, false)
+        let rules = crate::redact::Rules::load(home).unwrap();
+        let batch = pending(&s.raw, &k, &embedder.id, &reading, &rules, false)
             .unwrap()
             .unwrap();
         let db = crate::providers_db::open(home).unwrap();
@@ -1737,6 +1882,155 @@ mod tests {
         assert_eq!(rows, 0);
         embed_all(&s);
         assert_eq!(stub.requests(), 1);
+    }
+
+    /// Spec 6.4: the sending thread checks the rules the batch was composed under.
+    #[test]
+    fn a_paused_send_rejects_changed_or_invalid_rules() {
+        for invalid in [false, true] {
+            let mut s = Store::new();
+            config_at(&s, "http://127.0.0.1:1/run/bge-m3");
+            s.said("s", R, 1_000, "opaque_canary");
+            s.run();
+            let home = s.home.path();
+            let k = crate::knowledge::open(home).unwrap();
+            let config = crate::config::load(home).unwrap();
+            let embedder = Embedder::from_config(&config.embedding).unwrap().unwrap();
+            let reading = Reading::now(&s.raw, Reads::Live).unwrap();
+            let rules = crate::redact::Rules::load(home).unwrap();
+            let batch = pending(&s.raw, &k, &embedder.id, &reading, &rules, false)
+                .unwrap()
+                .unwrap();
+            let gate = std::sync::Barrier::new(2);
+            let (sent, ms) = std::thread::scope(|scope| {
+                let sending = scope.spawn(|| {
+                    gate.wait();
+                    send(home, &batch, &embedder, Duration::from_millis(100))
+                });
+                let path = home.join("config.toml");
+                let regex = if invalid { "(" } else { "^opaque_canary$" };
+                let rules = format!(
+                    "[redaction]\nextra_rules = [{{ id = \"canary\", regex = '{regex}' }}]\n"
+                );
+                std::fs::write(&path, std::fs::read_to_string(&path).unwrap() + &rules).unwrap();
+                gate.wait();
+                sending.join().unwrap()
+            });
+            assert!(
+                matches!(sent, Sent::Unsent(_)),
+                "invalid={invalid}: a stale batch reached the embedder"
+            );
+            assert_eq!(ms, 0);
+        }
+    }
+
+    /// A tombstone written while the sender waits invalidates document and query text alike.
+    #[test]
+    fn a_paused_send_rejects_a_new_tombstone() {
+        for query in [false, true] {
+            let mut s = Store::new();
+            config_at(&s, "http://127.0.0.1:1/run/bge-m3");
+            let seq = s.said("s", R, 1_000, "opaque_canary");
+            s.run();
+            let home = s.home.path().to_owned();
+            let k = crate::knowledge::open(&home).unwrap();
+            let config = crate::config::load(&home).unwrap();
+            let embedder = Embedder::from_config(&config.embedding).unwrap().unwrap();
+            let reading = Reading::now(&s.raw, Reads::Live).unwrap();
+            let rules = crate::redact::Rules::load(&home).unwrap();
+            let mut batch = pending(&s.raw, &k, &embedder.id, &reading, &rules, false)
+                .unwrap()
+                .unwrap();
+            if query {
+                batch.docs.clear();
+            }
+            let gate = std::sync::Barrier::new(2);
+            let (sent, ms) = std::thread::scope(|scope| {
+                let sending = scope.spawn(|| {
+                    gate.wait();
+                    send(&home, &batch, &embedder, Duration::from_millis(100))
+                });
+                s.raw
+                    .append_tombstone(crate::raw::Target::Record {
+                        device: s.raw.device().to_owned(),
+                        seq,
+                    })
+                    .unwrap();
+                gate.wait();
+                sending.join().unwrap()
+            });
+            assert!(
+                matches!(sent, Sent::Unsent(_)),
+                "query={query}: tombstoned text reached the embedder"
+            );
+            assert_eq!(ms, 0);
+        }
+    }
+
+    /// A tombstone after consumer drain also keeps stale claim and raw indexes from egress.
+    #[test]
+    fn pending_tombstones_keep_raw_and_claim_text_out_of_batches() {
+        for whole in [true, false] {
+            let mut s = Store::new();
+            let text = "opaque_canary parser";
+            let seq = s.said("s", R, 1_000, text);
+            s.claim(seq, text, ("decision", "decided", "user"), &[]);
+            s.run();
+            let device = s.raw.device().to_owned();
+            let target = if whole {
+                crate::raw::Target::Record { device, seq }
+            } else {
+                let e = crate::consumer::manifest::event(&s.raw, &device, seq)
+                    .unwrap()
+                    .unwrap();
+                crate::raw::Target::Range {
+                    device,
+                    seq,
+                    offset: e.body.find("opaque_canary").unwrap() as i64,
+                    length: "opaque_canary".len() as i64,
+                }
+            };
+            s.raw.append_tombstone(target).unwrap();
+            let k = crate::knowledge::open(s.home.path()).unwrap();
+            let reading = Reading::now(&s.raw, Reads::Live).unwrap();
+            let rules = crate::redact::Rules::default();
+            let batch =
+                pending(&s.raw, &k, crate::embed::EMBEDDER, &reading, &rules, false).unwrap();
+            assert!(
+                batch
+                    .as_ref()
+                    .is_none_or(|b| b.texts.iter().all(|t| !t.contains("opaque_canary"))),
+                "whole={whole}: pending tombstoned text was composed"
+            );
+        }
+    }
+
+    /// A pending status change holds a claim only until the consumer applies it.
+    #[test]
+    fn a_pending_status_correction_does_not_permanently_skip_a_claim() {
+        let mut s = Store::new();
+        let text = "Parser errors go to stderr.";
+        let seq = s.said("s", R, 1_000, text);
+        let uid = s.claim(seq, text, ("decision", "decided", "user"), &[]);
+        s.run();
+        let correction = serde_json::json!({
+            "uid": uid, "anchor": {"device": s.raw.device(), "seq": seq}, "status": "done"
+        });
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Correction, correction)])
+            .unwrap();
+        vectors(&s);
+        s.run();
+        vectors(&s);
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let embedded: bool = k.query_row(
+            "SELECT EXISTS(SELECT 1 FROM vector_keys WHERE kind = 'c' AND key = ?1 AND skipped IS NULL)",
+            [&uid], |r| r.get(0),
+        ).unwrap();
+        assert!(
+            embedded,
+            "the applied status change left the claim permanently skipped"
+        );
     }
 
     /// D13: an exclusion undone queues its documents again: the marks made under the old list go.

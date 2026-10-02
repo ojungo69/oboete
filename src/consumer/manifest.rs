@@ -734,7 +734,7 @@ fn todos(input: &Value) -> Option<Vec<(String, String)>> {
 /// The files a call names: the file path fields agents use (not a bare `path`: Glob, Grep and
 /// LS take a directory there), and the file lines of Codex's `apply_patch` (its hook's
 /// `command`, its transcript's `input`). A path under the call's cwd is shown relative to it.
-fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
+pub(crate) fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = ["file_path", "notebook_path", "target_file"]
         .iter()
         .filter_map(|k| input.get(*k).and_then(Value::as_str))

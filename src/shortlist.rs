@@ -47,6 +47,12 @@ fn schema(k: &Connection) -> Result<()> {
            agent TEXT NOT NULL, session TEXT NOT NULL, at INTEGER NOT NULL,
            PRIMARY KEY (agent, session)
          );
+         -- The last query vector, kept with its gated text's identity and embedder.
+         CREATE TABLE IF NOT EXISTS shortlist_vectors(
+           agent TEXT NOT NULL, session TEXT NOT NULL, repo TEXT NOT NULL, branch TEXT NOT NULL,
+           sha TEXT NOT NULL, embedder TEXT NOT NULL, vec TEXT NOT NULL,
+           PRIMARY KEY (agent, session, repo, branch)
+         );
          CREATE TABLE IF NOT EXISTS shortlist(
            agent TEXT NOT NULL, session TEXT NOT NULL, repo TEXT NOT NULL, branch TEXT NOT NULL,
            rank INTEGER NOT NULL, uid TEXT NOT NULL,
@@ -118,10 +124,22 @@ impl Builder {
             }
         };
         schema(k)?;
+        if let Some(id) = embed
+            .as_deref_mut()
+            .and_then(crate::embed_phase::Phase::unasked)
+            && let Some((agent, rest)) = id.split_once('\0')
+            && let Some((session, _)) = rest.split_once('\0')
+        {
+            k.execute(
+                "DELETE FROM shortlist_asks WHERE agent = ?1 AND session = ?2",
+                params![agent, session],
+            )?;
+        }
         let device = raw.device();
         let live = keys(raw, k, now)?;
         // The exclusion list and the sessions it holds (every repository they touched), once.
         let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
+        let tombstones = raw.tombstones()?;
         let active: Option<String> = k
             .query_row(
                 "SELECT embedder FROM vec_generation WHERE state = 'active'",
@@ -130,6 +148,7 @@ impl Builder {
             )
             .optional()?;
         let mut built = Vec::new();
+        let mut asks = Vec::new();
         for key in &live {
             if built.len() == KEYS {
                 break;
@@ -137,11 +156,16 @@ impl Builder {
             let id = key.id();
             let answered = answer.as_ref().filter(|a| a.key == id);
             let is_due = due(k, device, key)?;
-            if answered.is_none() && !is_due {
+            let cooled =
+                embed.is_some() && active.is_some() && now - asked_at(k, key)? >= VECTOR_EVERY;
+            // A key last built without a vector for its text asks again once cooled, due or not.
+            let retry = cooled && !vectored(k, key, active.as_deref())?;
+            if answered.is_none() && !is_due && !retry {
                 continue;
             }
             let texts = parts(raw, k, key, &rules)?;
             let text = texts.join("\n");
+            let sha = crate::embed_phase::sha(&text);
             // The parts are read by session (the facts have no agent): a session of this id that
             // any agent ran in an excluded repository excludes the key.
             let excluded = reading
@@ -149,26 +173,45 @@ impl Builder {
                 .iter()
                 .any(|e| e.split_once('\0').is_some_and(|(_, s)| s == key.session));
             // A vector is used only for the text the key has now, from the active embedder.
-            let vector = answered
-                .filter(|a| a.text == text && !excluded && active.as_ref() == Some(&a.embedder))
-                .map(|a| a.vector.as_slice());
-            if vector.is_none() && !is_due {
+            let fresh = answered
+                .filter(|a| a.text == text && !excluded && active.as_ref() == Some(&a.embedder));
+            let cached: Option<String> = if excluded || fresh.is_some() {
+                None
+            } else {
+                k.query_row(
+                    "SELECT vec FROM shortlist_vectors
+                     WHERE agent = ?1 AND session = ?2 AND repo = ?3 AND branch = ?4
+                       AND sha = ?5 AND embedder = ?6",
+                    params![
+                        key.agent,
+                        key.session,
+                        key.repo,
+                        key.branch,
+                        sha,
+                        active.as_deref().unwrap_or("")
+                    ],
+                    |r| r.get(0),
+                )
+                .optional()?
+            };
+            let cached: Option<Vec<f32>> = cached.map(|v| serde_json::from_str(&v)).transpose()?;
+            let vector = fresh.map(|a| a.vector.as_slice()).or(cached.as_deref());
+            if let Some(e) = embed.as_deref_mut()
+                && vector.is_none()
+                && !excluded
+                && !text.is_empty()
+                && cooled
+                && e.ask(k, &id, &text, &reading, &rules, tombstones)?
+            {
+                asks.push(key);
+            }
+            if fresh.is_none() && !is_due {
                 continue;
             }
             let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
             let claims =
                 crate::search::b::delivered_ranked(raw, k, &refs, vector, &key.repo, SHORT)?;
-            let mut asked = false;
-            if let Some(e) = embed.as_deref_mut()
-                && vector.is_none()
-                && !excluded
-                && !text.is_empty()
-                && now - asked_at(k, key)? >= VECTOR_EVERY
-                && e.ask(k, &id, &text, &reading)?
-            {
-                asked = true;
-            }
-            built.push((key, claims, asked));
+            built.push((key, claims, fresh, sha));
         }
         // A half-rebuilt `manifest_facts` (after a rewind) looks as if every session ended.
         let rebuilding = k
@@ -195,7 +238,7 @@ impl Builder {
                     l.agent == agent && l.session == session && l.repo == repo && l.branch == branch
                 });
                 if gone {
-                    for table in ["shortlists", "shortlist"] {
+                    for table in ["shortlists", "shortlist", "shortlist_vectors"] {
                         tx.execute(
                             &format!(
                                 "DELETE FROM {table}
@@ -208,7 +251,13 @@ impl Builder {
                 }
             }
         }
-        for (key, claims, asked) in &built {
+        for key in &asks {
+            tx.execute(
+                "INSERT OR REPLACE INTO shortlist_asks(agent, session, at) VALUES(?1, ?2, ?3)",
+                params![key.agent, key.session, now],
+            )?;
+        }
+        for (key, claims, fresh, sha) in &built {
             let at = params![key.agent, key.session, key.repo, key.branch];
             tx.execute(
                 "DELETE FROM shortlist
@@ -236,15 +285,32 @@ impl Builder {
                    built_seq = excluded.built_seq",
                 params![key.agent, key.session, key.repo, key.branch, key.last],
             )?;
-            if *asked {
+            if let Some(a) = fresh {
                 tx.execute(
-                    "INSERT OR REPLACE INTO shortlist_asks(agent, session, at) VALUES(?1, ?2, ?3)",
-                    params![key.agent, key.session, now],
+                    "INSERT OR REPLACE INTO shortlist_vectors
+                     (agent, session, repo, branch, sha, embedder, vec)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        key.agent,
+                        key.session,
+                        key.repo,
+                        key.branch,
+                        sha,
+                        a.embedder,
+                        serde_json::to_string(&a.vector)?
+                    ],
+                )?;
+            } else {
+                // A vector kept for a text the key no longer has is of no more use.
+                tx.execute(
+                    "DELETE FROM shortlist_vectors
+                     WHERE agent = ?1 AND session = ?2 AND repo = ?3 AND branch = ?4 AND sha != ?5",
+                    params![key.agent, key.session, key.repo, key.branch, sha],
                 )?;
             }
         }
         tx.commit()?;
-        Ok(if built.is_empty() && dropped == 0 {
+        Ok(if built.is_empty() && asks.is_empty() && dropped == 0 {
             Phase::Idle
         } else {
             Phase::Covered
@@ -305,6 +371,19 @@ fn asked_at(k: &Connection, key: &Key) -> Result<i64> {
     )
     .optional()?
     .unwrap_or(0))
+}
+
+/// Whether `key` keeps a vector from `active`: one for the text of its last build, since a build
+/// drops one kept for another text.
+fn vectored(k: &Connection, key: &Key, active: Option<&str>) -> Result<bool> {
+    Ok(k.query_row(
+        "SELECT 1 FROM shortlist_vectors
+         WHERE agent = ?1 AND session = ?2 AND repo = ?3 AND branch = ?4 AND embedder = ?5",
+        params![key.agent, key.session, key.repo, key.branch, active],
+        |_| Ok(()),
+    )
+    .optional()?
+    .is_some())
 }
 
 /// Whether `key` is built now: it has no row; its session's records went back past its build (a
@@ -368,17 +447,28 @@ fn parts(
             prompts.push(field(&b, "prompt"));
         }
     }
-    let files: Vec<String> = k
+    let file_facts: Vec<(String, i64)> = k
         .prepare(
-            "SELECT label FROM manifest_facts
+            "SELECT label, MAX(seq) FROM manifest_facts
              WHERE device = ?1 AND repo = ?2 AND branch = ?3 AND fact = 'file' AND session = ?4
              GROUP BY label ORDER BY MAX(seq) DESC LIMIT ?5",
         )?
         .query_map(
             params![device, key.repo, key.branch, key.session, FILES],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?
         .collect::<rusqlite::Result<_>>()?;
+    let mut files = Vec::new();
+    for (label, seq) in file_facts {
+        let Some(e) = event(raw, device, seq)? else {
+            continue;
+        };
+        let b: Value = serde_json::from_str(&e.body).unwrap_or(Value::Null);
+        let input: Value = serde_json::from_str(&field(&b, "input")).unwrap_or(Value::Null);
+        if crate::consumer::manifest::paths(&input, e.cwd.as_deref()).contains(&label) {
+            files.push(label);
+        }
+    }
     // The last failure not followed by a success of the same call, as the manifest pairs them.
     let failing: Option<i64> = k
         .query_row(
@@ -387,14 +477,18 @@ fn parts(
                AND f.session = ?4
                AND NOT EXISTS (SELECT 1 FROM manifest_facts x
                  WHERE x.device = f.device AND x.repo = f.repo AND x.fact = 'fixed'
-                   AND x.branch = f.branch AND x.label = f.label AND x.seq > f.seq)
+                   AND x.branch = f.branch AND x.session = f.session
+                   AND x.label = f.label AND x.seq > f.seq)
              ORDER BY f.seq DESC LIMIT 1",
             at,
             |r| r.get(0),
         )
         .optional()?;
     let failed = match failing.map(body).transpose()?.flatten() {
-        Some(b) => vec![field(&b, "tool"), what_ran(&field(&b, "input"))],
+        Some(b) => vec![
+            field(&b, "tool"),
+            what_ran(&joined(&[field(&b, "input")], "", rules)),
+        ],
         None => Vec::new(),
     };
     Ok([(prompts, "\n"), (files, "\n"), (failed, " ")]
@@ -644,6 +738,42 @@ mod tests {
         assert!(uids.contains(&lesson) && uids.contains(&config), "{uids:?}");
     }
 
+    /// A success clears only its own session's failing command.
+    #[test]
+    fn another_sessions_success_does_not_hide_a_failure() {
+        let mut s = Store::new();
+        let lesson = s.decided(R, MIN, "Run cargo test with --features full.", &[]);
+        let input = "{\"command\":\"cargo test --features full\"}";
+        s.event(
+            "tool",
+            "failing",
+            (R, "main"),
+            NOW - 2 * MIN,
+            json!({"tool": "Bash", "input": input, "output": "error", "failed": true}),
+        );
+        s.event(
+            "tool",
+            "passing",
+            (R, "main"),
+            NOW - MIN,
+            json!({"tool": "Bash", "input": input, "output": "ok"}),
+        );
+        s.run();
+        per_prompt(&s, true);
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        Builder::new(s.home.path())
+            .run(&s.raw, &mut k, None, NOW)
+            .unwrap();
+        assert_eq!(
+            of(&k, ("claude", "failing", R, "main")).unwrap(),
+            Some(vec![lesson])
+        );
+        assert_eq!(
+            of(&k, ("claude", "passing", R, "main")).unwrap(),
+            Some(Vec::new())
+        );
+    }
+
     /// D8, D9: the search runs outside every transaction (it asserts so), and a write that fails
     /// part way keeps the rows the last build wrote, and its build, which the next call makes
     /// again.
@@ -726,7 +856,7 @@ mod tests {
 
     /// D9: a key built from full text asks for its query vector, never waiting for it, and is
     /// built again with it when it comes back for the text the key still has; a key asks at most
-    /// once every `VECTOR_EVERY`.
+    /// once every `VECTOR_EVERY`, and never for a text it keeps a vector for.
     #[test]
     fn one_query_vector_per_key_every_fifteen_minutes() {
         let stub = Stub::start();
@@ -767,7 +897,9 @@ mod tests {
         // A reply within 15 minutes: built again, nothing asked.
         s.event("reply", "live", main, NOW - MIN, json!({"assistant": "ok"}));
         assert_eq!(run(&s, &mut k, &mut phase, NOW + MIN), Phase::Covered);
+        assert!(shortlist(&k).contains(&near));
         assert_eq!(queries(&s), 1);
+        // 15 minutes on, the same text: the vector kept for it serves, nothing asked.
         s.event(
             "reply",
             "live",
@@ -776,7 +908,249 @@ mod tests {
             json!({"assistant": "ok"}),
         );
         assert_eq!(run(&s, &mut k, &mut phase, NOW + 16 * MIN), Phase::Covered);
+        assert!(shortlist(&k).contains(&near));
+        assert_eq!(queries(&s), 1);
+        // A new prompt changes the text the next reply builds: asked.
+        s.event(
+            "prompt",
+            "live",
+            main,
+            NOW + 16 * MIN,
+            json!({"prompt": "lexer db ok"}),
+        );
+        s.event(
+            "reply",
+            "live",
+            main,
+            NOW + 16 * MIN + 1,
+            json!({"assistant": "ok"}),
+        );
+        assert_eq!(run(&s, &mut k, &mut phase, NOW + 17 * MIN), Phase::Covered);
         assert_eq!(queries(&s), 2);
+    }
+
+    /// An unchanged query keeps its semantic candidates across replies and a worker restart.
+    #[test]
+    fn an_unchanged_query_keeps_its_vector_after_a_reply_and_restart() {
+        let mut s = Store::new();
+        let parser = s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        let near = s.decided(R, MIN, "Db ok.", &[]);
+        let main = (R, "main");
+        s.event(
+            "prompt",
+            "live",
+            main,
+            NOW - 2 * MIN,
+            json!({"prompt": "parser db ok"}),
+        );
+        s.run();
+        per_prompt(&s, true);
+        crate::embed_phase::fixture::vectors(&s);
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut b = Builder::new(s.home.path());
+        let mut phase = crate::embed_phase::Phase::new(s.home.path());
+        b.run(&s.raw, &mut k, None, NOW).unwrap();
+        let shortlist = |k: &Connection| of(k, ("claude", "live", R, "main")).unwrap().unwrap();
+        assert_eq!(shortlist(&k), [parser]);
+        k.execute(
+            "INSERT INTO shortlist_asks VALUES('claude', 'live', ?1)",
+            [NOW],
+        )
+        .unwrap();
+        crate::embed_phase::fixture::answer(
+            &mut phase,
+            "claude\0live\0github.com/x/r\0main",
+            "parser db ok",
+        );
+        b.run(&s.raw, &mut k, Some(&mut phase), NOW).unwrap();
+        assert!(shortlist(&k).contains(&near));
+        s.event("reply", "live", main, NOW - MIN, json!({"assistant": "ok"}));
+        s.run();
+        b.run(&s.raw, &mut k, Some(&mut phase), NOW + MIN).unwrap();
+        assert!(
+            shortlist(&k).contains(&near),
+            "the unchanged reply lost its semantic candidate"
+        );
+        drop((b, phase, k));
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut b = Builder::new(s.home.path());
+        let mut phase = crate::embed_phase::Phase::new(s.home.path());
+        s.event("reply", "live", main, NOW, json!({"assistant": "ok"}));
+        s.run();
+        b.run(&s.raw, &mut k, Some(&mut phase), NOW + 2 * MIN)
+            .unwrap();
+        assert!(
+            shortlist(&k).contains(&near),
+            "the restart lost its semantic candidate"
+        );
+        assert_eq!(
+            asked_at(&k, &keys(&s.raw, &k, NOW).unwrap()[0]).unwrap(),
+            NOW
+        );
+        k.execute(
+            "UPDATE vec_generation SET embedder = 'other' WHERE state = 'active'",
+            [],
+        )
+        .unwrap();
+        s.event("reply", "live", main, NOW + 1, json!({"assistant": "ok"}));
+        s.run();
+        b.run(&s.raw, &mut k, Some(&mut phase), NOW + 2 * MIN)
+            .unwrap();
+        assert!(!shortlist(&k).contains(&near));
+        k.execute(
+            "UPDATE vec_generation SET embedder = ?1 WHERE state = 'active'",
+            [crate::embed::EMBEDDER],
+        )
+        .unwrap();
+        s.event("reply", "live", main, NOW + 2, json!({"assistant": "ok"}));
+        s.run();
+        b.run(&s.raw, &mut k, Some(&mut phase), NOW + 2 * MIN)
+            .unwrap();
+        assert!(shortlist(&k).contains(&near));
+        // The same text from an excluded session cannot reuse the cached vector.
+        s.exclude("github.com/x/secret");
+        s.event(
+            "tool",
+            "live",
+            ("github.com/x/secret", "main"),
+            NOW + 3,
+            json!({}),
+        );
+        s.event("reply", "live", main, NOW + 4, json!({"assistant": "ok"}));
+        s.run();
+        b.run(&s.raw, &mut k, Some(&mut phase), NOW + 3 * MIN)
+            .unwrap();
+        assert!(!shortlist(&k).contains(&near));
+        s.raw.exclude("github.com/x/secret", true).unwrap();
+        s.event(
+            "prompt",
+            "live",
+            main,
+            NOW + 5,
+            json!({"prompt": "the lexer"}),
+        );
+        s.event("reply", "live", main, NOW + 6, json!({"assistant": "ok"}));
+        s.run();
+        b.run(&s.raw, &mut k, Some(&mut phase), NOW + 4 * MIN)
+            .unwrap();
+        assert!(!shortlist(&k).contains(&near));
+    }
+
+    /// A full-text build while another key's query waits does not consume query eligibility.
+    #[test]
+    fn a_second_session_asks_after_the_first_query_is_released() {
+        let mut s = Store::new();
+        s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        let near = s.decided(R, MIN, "Db ok.", &[]);
+        let main = (R, "main");
+        s.event(
+            "prompt",
+            "second",
+            main,
+            NOW - 2 * MIN,
+            json!({"prompt": "parser db ok"}),
+        );
+        s.event(
+            "prompt",
+            "first",
+            main,
+            NOW - MIN,
+            json!({"prompt": "parser db ok"}),
+        );
+        s.run();
+        crate::embed_phase::fixture::config_at(&s, "http://127.0.0.1:1/run/bge-m3");
+        let path = s.home.path().join("config.toml");
+        std::fs::write(
+            &path,
+            std::fs::read_to_string(&path).unwrap() + "[inject]\nper_prompt = true\n",
+        )
+        .unwrap();
+        crate::embed_phase::fixture::vectors(&s);
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = crate::embed_phase::Phase::new(s.home.path());
+        let mut b = Builder::new(s.home.path());
+        let sent = crate::embed_phase::Sent::Vectors(vec![crate::embed::stub::vector(
+            crate::embed::EMBEDDER,
+            "parser db ok",
+        )]);
+        let release = crate::embed_phase::fixture::hold_query(
+            &mut phase,
+            "claude\0first\0github.com/x/r\0main",
+            "parser db ok",
+            sent,
+        );
+        b.run(&s.raw, &mut k, Some(&mut phase), NOW).unwrap();
+        k.execute(
+            "INSERT INTO shortlist_asks VALUES('claude', 'first', ?1)",
+            [NOW],
+        )
+        .unwrap();
+        assert_eq!(
+            keys_built(&k),
+            [key("first", "main"), key("second", "main")]
+        );
+        assert_eq!(queries(&s), 1);
+        assert!(
+            !of(&k, ("claude", "second", R, "main"))
+                .unwrap()
+                .unwrap()
+                .contains(&near)
+        );
+        release.send(()).unwrap();
+        wait(|| phase.done());
+        phase.poll(&s.raw, &k).unwrap();
+        b.run(&s.raw, &mut k, Some(&mut phase), NOW).unwrap();
+        assert_eq!(queries(&s), 2, "the second key never retried its query");
+        assert_eq!(
+            asked_at(&k, &keys(&s.raw, &k, NOW).unwrap()[1]).unwrap(),
+            NOW
+        );
+    }
+
+    /// A send rejected before egress is retried under current rules without consuming cadence.
+    #[test]
+    fn an_unsent_query_is_recomposed_without_waiting_fifteen_minutes() {
+        let mut s = Store::new();
+        s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        s.event(
+            "prompt",
+            "live",
+            (R, "main"),
+            NOW - MIN,
+            json!({"prompt": "opaque_canary parser"}),
+        );
+        s.run();
+        crate::embed_phase::fixture::config_at(&s, "http://127.0.0.1:1/run/bge-m3");
+        let path = s.home.path().join("config.toml");
+        let config = std::fs::read_to_string(&path).unwrap() + "[inject]\nper_prompt = true\n";
+        std::fs::write(&path, &config).unwrap();
+        crate::embed_phase::fixture::vectors(&s);
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut b = Builder::new(s.home.path());
+        b.run(&s.raw, &mut k, None, NOW).unwrap();
+        let mut phase = crate::embed_phase::Phase::new(s.home.path());
+        let sent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("the redaction rules changed"));
+        let release = crate::embed_phase::fixture::hold_query(
+            &mut phase,
+            "claude\0live\0github.com/x/r\0main",
+            "opaque_canary parser",
+            sent,
+        );
+        k.execute(
+            "INSERT INTO shortlist_asks VALUES('claude', 'live', ?1)",
+            [NOW],
+        )
+        .unwrap();
+        let rule = "[redaction]\nextra_rules = [{ id = \"canary\", regex = 'opaque_canary' }]\n";
+        std::fs::write(&path, config + rule).unwrap();
+        release.send(()).unwrap();
+        wait(|| phase.done());
+        phase.poll(&s.raw, &k).unwrap();
+        b.run(&s.raw, &mut k, Some(&mut phase), NOW + 1).unwrap();
+        assert_eq!(queries(&s), 1, "the unsent query left its cooldown behind");
+        let text = crate::embed_phase::fixture::query_text(&phase).unwrap();
+        assert!(!text.contains("opaque_canary"), "{text}");
+        assert!(text.ends_with(" parser"), "{text}");
     }
 
     /// Rows 30-1 and 30-2, spec 5.5 (D9): a session with an event in an excluded repository asks
@@ -924,6 +1298,84 @@ mod tests {
             asked[0].ends_with(" --push") && !asked[0].contains("123456"),
             "{asked:?}"
         );
+    }
+
+    /// Spec 6.4: a rule on the stored input still holds after the command is extracted.
+    #[test]
+    fn the_stored_failing_input_is_gated_before_command_extraction() {
+        let mut s = Store::new();
+        s.event(
+            "tool",
+            "live",
+            (R, "main"),
+            NOW - MIN,
+            json!({"tool": "Bash", "input": "{\"command\":\"echo opaque_canary\"}",
+                "output": "error", "failed": true}),
+        );
+        s.run();
+        let path = s.home.path().join("config.toml");
+        let rule = "[redaction]\nextra_rules = [{ id = \"input\", \
+                    regex = '^\\{\"command\":\"echo (opaque_canary)\"\\}$', \
+                    secret_group = 1 }]\n";
+        std::fs::write(path, rule).unwrap();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let key = keys(&s.raw, &k, NOW).unwrap().pop().unwrap();
+        let rules = crate::redact::Rules::load(s.home.path()).unwrap();
+        let asked = parts(&s.raw, &k, &key, &rules).unwrap();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(!asked[0].contains("opaque_canary"), "{asked:?}");
+        assert!(asked[0].starts_with("Bash echo "), "{asked:?}");
+    }
+
+    /// A file fact is read through raw even before the consumer applies its tombstone.
+    #[test]
+    fn pending_file_tombstones_stay_out_of_the_query() {
+        for whole in [true, false] {
+            let mut s = Store::new();
+            let main = (R, "main");
+            s.event(
+                "tool",
+                "live",
+                main,
+                NOW - 3 * MIN,
+                json!({"tool": "Edit", "input": "{\"file_path\":\"src/public.rs\"}"}),
+            );
+            let seq = s.event(
+                "tool",
+                "live",
+                main,
+                NOW - 2 * MIN,
+                json!({"tool": "Edit", "input": "{\"file_path\":\"opaque_canary.rs\"}"}),
+            );
+            s.event(
+                "prompt",
+                "live",
+                main,
+                NOW - MIN,
+                json!({"prompt": "the parser"}),
+            );
+            s.run();
+            let device = s.raw.device().to_owned();
+            let target = if whole {
+                crate::raw::Target::Record { device, seq }
+            } else {
+                let e = event(&s.raw, &device, seq).unwrap().unwrap();
+                crate::raw::Target::Range {
+                    device,
+                    seq,
+                    offset: e.body.find("opaque_canary.rs").unwrap() as i64,
+                    length: "opaque_canary.rs".len() as i64,
+                }
+            };
+            s.raw.append_tombstone(target).unwrap();
+            let k = crate::knowledge::open(s.home.path()).unwrap();
+            let key = keys(&s.raw, &k, NOW).unwrap().pop().unwrap();
+            let text = parts(&s.raw, &k, &key, &crate::redact::Rules::default())
+                .unwrap()
+                .join("\n");
+            assert!(!text.contains("opaque_canary.rs"), "whole={whole}: {text}");
+            assert!(text.contains("src/public.rs"), "whole={whole}: {text}");
+        }
     }
 
     /// Redaction rules that do not load stop the phase as they stop capture: nothing is built and
