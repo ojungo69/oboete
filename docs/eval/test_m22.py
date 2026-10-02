@@ -299,3 +299,65 @@ def test_existing_replay_and_non_loopback_endpoint_are_refused_before_writing(tm
     with pytest.raises(ValueError, match='loopback'):
         m22.configure(tmp_path, SimpleNamespace(url='https://api.example.org'))
     assert not (tmp_path / 'config.toml').exists()
+
+
+def test_the_copied_profile_keeps_capture_redaction_exclusions_and_unicode_paths(tmp_path, monkeypatch):
+    import common, sqlite3, tomllib
+    monkeypatch.setattr(common, 'E', str(tmp_path / '評価😀'))
+    source = tmp_path / 'source'
+    source.mkdir()
+    profile = '''gemini = "before-subscriptions"
+[summary]
+curate = true
+shrink = true
+window_tokens = 1234
+language = "日本語"
+[capture]
+store_prompts = false
+tool_output = "head-tail"
+[redaction]
+allowlist = ["fixture-hash"]
+[[redaction.extra_rules]]
+id = "fixture"
+regex = '\\bfixture-[0-9]+\\b'
+[inject]
+per_prompt = false
+session_start_chars = 1234
+[backup]
+dir = "../../owner-backups"
+[[providers]]
+kind = "cli"
+name = "owner-cli"
+cli = "owner-cli"
+[embedding]
+provider = "workers-ai"
+account_id = "owner-account"
+key_file = "../owner-key.md"
+[chain]
+off = ["m22-stub"]
+'''
+    (source / 'config.toml').write_text(profile, encoding='utf-8')
+    with sqlite3.connect(source / 'raw.db') as db:
+        db.executescript('CREATE TABLE records(session TEXT); CREATE TABLE ops(type TEXT, body TEXT);')
+        db.execute('INSERT INTO ops VALUES(?, ?)', ('exclusion', '{"repo":"fixture-excluded","undo":false}'))
+    with sqlite3.connect(source / 'knowledge.db') as db:
+        db.executescript('CREATE TABLE active(uid TEXT);')
+    copied = m22.new_home()
+    m22.copy_dev(source, copied)
+    expected = tomllib.loads(profile)
+    with m22.loopback(0) as server:
+        m22.configure(copied, server)
+        parsed = tomllib.loads((copied / 'config.toml').read_text())
+        assert parsed['capture'] == expected['capture']
+        assert parsed['redaction'] == expected['redaction']
+        assert parsed['summary'] == expected['summary']
+        assert parsed['inject'] == dict(expected['inject'], per_prompt=True)
+        assert parsed['backup']['dir'] == 'backups'
+        assert [p['name'] for p in parsed['providers']] == ['m22-stub']
+        assert 'gemini' not in parsed and 'chain' not in parsed
+        assert parsed['embedding']['key_file'] == str(copied / 'm22-loopback.md')
+    with m22.database(copied, 'raw.db') as db:
+        assert db.execute('SELECT body FROM ops WHERE type = "exclusion"').fetchone()[0] == (
+            '{"repo":"fixture-excluded","undo":false}')
+    assert (source / 'config.toml').read_text() == profile
+    m22.cleanup(copied)

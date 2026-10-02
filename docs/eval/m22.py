@@ -9,7 +9,7 @@ source=real and samples_ms (at least 30 successful query embeddings). It must
 be measured separately. build leaves an owned home; run removes it even on failure.
 """
 import argparse, copy, hashlib, http.server, json, math, os, re, shutil, sqlite3, subprocess
-import tempfile, threading, time
+import tempfile, threading, time, tomllib
 from contextlib import contextmanager, closing
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -252,8 +252,28 @@ def environment():
     return env
 
 
+def toml_value(value):
+    if isinstance(value, dict):
+        return '{' + ', '.join(json.dumps(k, ensure_ascii=False) + ' = ' + toml_value(v)
+                              for k, v in value.items()) + '}'
+    if isinstance(value, list):
+        return '[' + ', '.join(toml_value(v) for v in value) + ']'
+    if type(value) in (str, bool, int, float):
+        return json.dumps(value, ensure_ascii=False, allow_nan=False)
+    raise ValueError('Unsupported copied configuration value')
+
+
 def configure(home, server=None):
-    providers = '[embedding]\nprovider = "none"\n'
+    path = Path(home) / 'config.toml'
+    config = tomllib.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+    # All recording/read settings survive; replace every provider route, including implicit Gemini.
+    for key in ('gemini', 'chain'):
+        config.pop(key, None)
+    config['providers'] = []
+    config['embedding'] = {'provider': 'none'}
+    config.setdefault('summary', {})['curate'] = server is not None
+    config.setdefault('inject', {})['per_prompt'] = True
+    config.setdefault('backup', {})['dir'] = 'backups'
     if server is not None:
         url = urlsplit(server.url)
         if (url.scheme != 'http' or url.hostname != '127.0.0.1' or not url.port or url.username or
@@ -263,12 +283,15 @@ def configure(home, server=None):
         key = Path(home) / 'm22-loopback.md'
         key.write_text('# evaluation sentinel\nm22-loopback-only\n', encoding='utf-8')
         os.chmod(key, 0o600)
-        providers = (f'[[providers]]\nkind = "openai"\nname = "m22-stub"\nmodel = "m22-stub"\n'
-                     f'base_url = {json.dumps(server.url + "/v1")}\ndaily_budget = 4294967295\n'
-                     f'[embedding]\nprovider = "workers-ai"\naccount_id = "m22-loopback"\n'
-                     f'url = {json.dumps(server.url + "/embed")}\nkey_file = {json.dumps(str(key))}\n'
-                     'daily_requests = 4294967295\nmonthly_usd = 1000000\n')
-    m3.config(str(home), providers + '[inject]\nper_prompt = true\n', server is not None)
+        config['providers'] = [dict(kind='openai', name='m22-stub', model='m22-stub',
+                                    base_url=server.url + '/v1', daily_budget=4294967295)]
+        config['embedding'] = dict(provider='workers-ai', account_id='m22-loopback', url=server.url + '/embed',
+                                   key_file=str(key), daily_requests=4294967295, monthly_usd=1000000)
+    text = '\n'.join(json.dumps(k, ensure_ascii=False) + ' = ' + toml_value(v) for k, v in config.items()) + '\n'
+    if tomllib.loads(text) != config:
+        raise ValueError('Copied configuration did not preserve its parsed values')
+    path.write_text(text, encoding='utf-8')
+    os.chmod(path, 0o600)
 
 
 def copy_dev(source, home):
@@ -282,6 +305,8 @@ def copy_dev(source, home):
         if (source / name).is_file():
             with database(source, name) as original, closing(sqlite3.connect(home / name)) as copied:
                 original.backup(copied)
+    if (source / 'config.toml').is_file():
+        shutil.copyfile(source / 'config.toml', home / 'config.toml')
     common.owner_only_tree(home)
     configure(home)
 
