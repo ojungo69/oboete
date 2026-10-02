@@ -677,7 +677,7 @@ mod tests {
         assert_eq!(run(&s), Phase::Covered);
         let k2 = crate::knowledge::open(s.home.path()).unwrap();
         let uids = of(&k2, ("claude", "live", R, "main")).unwrap().unwrap();
-        assert!(uids.contains(&lexer), "{uids:?}");
+        assert!(uids.contains(&lexer));
         let tool = json!({"tool": "Bash", "input": "{\"command\": \"ls\"}", "output": ""});
         for i in 0..EVERY_EVENTS - 1 {
             s.event("tool", "live", main, NOW - 8 * MIN + i, tool.clone());
@@ -757,7 +757,7 @@ mod tests {
         );
         let uids = of(&k, ("claude", "live", R, "main")).unwrap().unwrap();
         assert_eq!(uids.len(), SHORT);
-        assert!(uids.contains(&lesson) && uids.contains(&config), "{uids:?}");
+        assert!(uids.contains(&lesson) && uids.contains(&config));
     }
 
     /// A success clears only its own session's failing command.
@@ -844,7 +844,7 @@ mod tests {
         );
         assert_eq!(b.run(&s.raw, &mut k, None, NOW).unwrap(), Phase::Covered);
         let uids = of(&k, ("claude", "live", R, "main")).unwrap().unwrap();
-        assert_eq!(uids.len(), 2, "{uids:?}");
+        assert_eq!(uids.len(), 2);
     }
 
     /// `per_prompt` on, with `stub` as the embedder, and what is stored embedded.
@@ -907,7 +907,7 @@ mod tests {
         let sent = stub.requests();
         assert_eq!(run(&s, &mut k, &mut phase, NOW), Phase::Covered);
         let uids = shortlist(&k);
-        assert!(uids.contains(&parser) && !uids.contains(&near), "{uids:?}");
+        assert!(uids.contains(&parser) && !uids.contains(&near));
         assert_eq!(queries(&s), 1);
         wait(|| phase.done());
         assert_eq!(stub.texts()[sent..], [["parser db ok"]]);
@@ -915,7 +915,7 @@ mod tests {
         phase.poll(&s.raw, &k).unwrap();
         assert_eq!(run(&s, &mut k, &mut phase, NOW), Phase::Covered);
         let uids = shortlist(&k);
-        assert!(uids.contains(&parser) && uids.contains(&near), "{uids:?}");
+        assert!(uids.contains(&parser) && uids.contains(&near));
         // A reply within 15 minutes: built again, nothing asked.
         s.event("reply", "live", main, NOW - MIN, json!({"assistant": "ok"}));
         assert_eq!(run(&s, &mut k, &mut phase, NOW + MIN), Phase::Covered);
@@ -1697,7 +1697,7 @@ mod tests {
             wait(|| stub.requests() > sent && shortlist().is_some());
             wait(|| curated.load(Ordering::SeqCst) > 0);
             let uids = shortlist().unwrap();
-            assert!(uids.contains(&parser) && !uids.contains(&near), "{uids:?}");
+            assert!(uids.contains(&parser) && !uids.contains(&near));
             // Past the worker's idle wait: it stays up for the answer.
             std::thread::sleep(Duration::from_millis(1_000));
             assert!(!worker.is_finished(), "the worker left before the answer");
@@ -1705,7 +1705,7 @@ mod tests {
             worker.join().unwrap().unwrap();
         });
         let uids = shortlist().unwrap();
-        assert!(uids.contains(&parser) && uids.contains(&near), "{uids:?}");
+        assert!(uids.contains(&parser) && uids.contains(&near));
         assert_eq!(queries(&s), 1);
     }
 
@@ -1749,6 +1749,6 @@ mod tests {
             Phase::Idle
         );
         let uids = of(&k, ("claude", "live", R, "main")).unwrap().unwrap();
-        assert!(!uids.contains(&near), "{uids:?}");
+        assert!(!uids.contains(&near));
     }
 }
