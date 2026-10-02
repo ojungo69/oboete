@@ -5,6 +5,37 @@ import pytest
 import m22
 
 
+def _event_store(home, events, windows=()):
+    import sqlite3
+    with sqlite3.connect(home / 'raw.db') as db:
+        db.executescript('''CREATE TABLE records(device TEXT, seq INTEGER, type TEXT, session TEXT);
+                            CREATE TABLE ops(device TEXT, op_seq INTEGER, type TEXT, body TEXT);''')
+        db.executemany('INSERT INTO records VALUES(?, ?, ?, ?)', events)
+        db.executemany('INSERT INTO ops VALUES(?, ?, "window", ?)', [
+            (device, i, json.dumps(span)) for i, (device, span) in enumerate(windows, 1)])
+
+
+def _inflight_store(home, row=None):
+    import sqlite3
+    with sqlite3.connect(home / 'providers.db') as db:
+        db.execute('''CREATE TABLE IF NOT EXISTS curation_inflight(
+            device TEXT PRIMARY KEY, request_id TEXT, pid INTEGER, started_at INTEGER,
+            from_seq INTEGER, from_offset INTEGER, to_seq INTEGER, to_offset INTEGER,
+            prompt_sha256 TEXT)''')
+        db.execute('DELETE FROM curation_inflight')
+        if row:
+            db.execute('INSERT INTO curation_inflight VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)', row)
+
+
+def _inflight_row(pid, started_at, start, end):
+    return ('device-a', 'a' * 32, pid, started_at, *start, *end, 'b' * 64)
+
+
+def _worker(pid, exit_code=None):
+    from types import SimpleNamespace
+    return SimpleNamespace(pid=pid, poll=lambda: exit_code)
+
+
 def test_d16_uses_the_slowdown_ratio_and_the_two_upper_quantiles():
     idle = [{'ms': 100, 'embeds': 1}] * 40
     written = [{'ms': 120, 'embeds': 1}] * 40
@@ -54,36 +85,82 @@ def test_seeded_queries_and_warmup_are_identical_for_each_leg():
         m22.query_leg(Client(), selected, lambda: 0, clock=lambda: 1)
 
 
-def test_loopback_protocol_embeds_1024_coordinates_and_quotes_only_user_lines():
-    import urllib.request
+def test_loopback_protocol_embeds_1024_coordinates_and_quotes_only_user_lines(tmp_path):
+    import time, urllib.request
     def post(base, route, data):
         request = urllib.request.Request(base + route, json.dumps(data).encode(),
                                          {'Content-Type': 'application/json'})
         with urllib.request.urlopen(request, timeout=5) as response:
             return json.load(response)
-    with m22.loopback(0.5) as server:
+    home = tmp_path
+    _event_store(home, [('device-a', seq, 'event', str(seq)) for seq in (1, 4, 10, 20)],
+                 [('device-a', {'from_seq': 1, 'from_offset': None, 'to_seq': 10, 'to_offset': 3})])
+    started_at = int(time.time() * 1000)
+    worker = _worker(4242)
+    _inflight_store(home, _inflight_row(worker.pid, int(time.time() * 1000), (10, 3), (20, 9)))
+    with m22.loopback(1, home) as server:
+        server.worker, server.worker_started_at = worker, started_at
         body = post(server.url, '/embed', {'text': ['one', 'two'], 'truncate_inputs': True})
         assert len(body['result']['data']) == 2
         assert len(body['result']['data'][0]) == 1024
         assert sum(v * v for v in body['result']['data'][0]) == pytest.approx(1)
         prompt = ('=== RECORD abc ===\n## claude session x\nL1 [user] Keep the parser strict.\n'
-                  'L2 [assistant] invent a claim\n## Kept claims\nL3 [user] not a current record\n'
-                  '=== RECORD abc ===')
+                  'L2 [user] Another visible line\nL3 [user] Third visible line\n'
+                  '## Kept claims\nL4 [user] not a current record\n=== RECORD abc ===')
         answer = post(server.url, '/v1/chat/completions', {'messages': [{'role': 'user', 'content': prompt}],
                                                         'response_format': {'claims': []}})
         claims = json.loads(answer['choices'][0]['message']['content'])['claims']
         assert len(claims) == 1
         assert claims[0]['quote'] == 'Keep the parser strict.'
         assert claims[0]['line'] == 'L1' and claims[0]['speaker'] == 'user'
-        assert server.embeds == 1
+        assert server.embeds == 1 and server.claim_budget == 0
+        assert server.rate_complete is True
+
+
+def test_raw_event_denominator_deduplicates_split_windows_and_ignores_stale_inflight(tmp_path):
+    import time
+    _event_store(tmp_path, [('device-a', 1, 'event', 'a'), ('device-a', 5, 'event', 'b'),
+                            ('device-a', 10, 'event', 'c'), ('device-a', 20, 'event', 'd'),
+                            ('device-a', 30, 'event', 'e'),
+                            ('device-a', 21, 'tombstone', 'd')], [
+        ('device-a', {'from_seq': 1, 'from_offset': None, 'to_seq': 10, 'to_offset': 4}),
+        ('device-a', {'from_seq': 10, 'from_offset': 4, 'to_seq': 20, 'to_offset': None}),
+    ])
+    _inflight_store(tmp_path, _inflight_row(999999, 1, (30, 3), (30, 8)))
+    assert m22.raw_event_count(tmp_path) == {'count': 4, 'complete': True}
+    started_at = int(time.time() * 1000)
+    worker = _worker(4242)
+    _inflight_store(tmp_path, _inflight_row(worker.pid, int(time.time() * 1000), (30, 3), (30, 8)))
+    assert m22.raw_event_count(tmp_path, worker, started_at) == {'count': 5, 'complete': True}
+    assert m22.raw_event_count(tmp_path, _worker(worker.pid, 0), started_at) == {'count': 4, 'complete': True}
+
+
+def test_live_worker_without_inflight_metadata_cannot_set_the_raw_event_rate(tmp_path):
+    import time
+    _event_store(tmp_path, [('device-a', 1, 'event', 'a')],
+                 [('device-a', {'from_seq': 1, 'to_seq': 1})])
+    result = m22.raw_event_count(tmp_path, _worker(4242), int(time.time() * 1000))
+    assert result == {'count': None, 'complete': False}
+
+
+def test_missing_window_schema_does_not_create_a_claim_rate(tmp_path):
+    import sqlite3
+    with sqlite3.connect(tmp_path / 'raw.db') as db:
+        db.executescript('''CREATE TABLE records(device TEXT, seq INTEGER, type TEXT, session TEXT);
+                            INSERT INTO records VALUES('device-a', 1, 'event', 's1');''')
+    with sqlite3.connect(tmp_path / 'knowledge.db') as db:
+        db.executescript('CREATE TABLE active(uid TEXT); INSERT INTO active VALUES("claim");')
+    rate = m22.home_rates(tmp_path)
+    assert rate['rate_complete'] is False
+    assert rate['curated_records'] is None and rate['claims_per_record'] is None
 
 
 def test_build_cli_records_rates_first_and_refuses_year_without_disk_ok(tmp_path, monkeypatch):
     import sqlite3
     home = tmp_path / 'dev?#'
     home.mkdir()
-    with sqlite3.connect(home / 'raw.db') as db:
-        db.executescript("CREATE TABLE records(type TEXT, session TEXT); INSERT INTO records VALUES('event', 'already');")
+    _event_store(home, [('device-a', 1, 'event', 'already')],
+                 [('device-a', {'from_seq': 1, 'from_offset': None, 'to_seq': 1, 'to_offset': None})])
     with sqlite3.connect(home / 'knowledge.db') as db:
         db.executescript('CREATE TABLE active(uid TEXT); INSERT INTO active VALUES("claim");')
     called = []
@@ -178,8 +255,8 @@ def test_construct_uses_copied_recorded_transcripts_and_preserves_the_dev_home(t
     monkeypatch.setattr(m22, 'DOCUMENTS', 2)  # Tiny injected corpus; no real scale input is opened.
     home = tmp_path / 'dev?#'
     home.mkdir()
-    with sqlite3.connect(home / 'raw.db') as db:
-        db.executescript("CREATE TABLE records(type TEXT, session TEXT); INSERT INTO records VALUES('event', 'already');")
+    _event_store(home, [('device-a', 1, 'event', 'already')],
+                 [('device-a', {'from_seq': 1, 'from_offset': None, 'to_seq': 1, 'to_offset': None})])
     with sqlite3.connect(home / 'knowledge.db') as db:
         db.executescript('CREATE TABLE active(uid TEXT); INSERT INTO active VALUES("claim");')
     (home / 'config.toml').write_text('# owner config must remain unchanged\n')
@@ -205,12 +282,17 @@ def test_construct_uses_copied_recorded_transcripts_and_preserves_the_dev_home(t
         if argv[3] == 'replay':
             with sqlite3.connect(str(copied) + '/raw.db') as db:
                 for row in common.read_jsonl(argv[4]):
-                    db.execute('INSERT INTO records VALUES(?, ?)', ('event', row['session']))
+                    seq = db.execute('SELECT MAX(seq) FROM records').fetchone()[0] + 1
+                    db.execute('INSERT INTO records VALUES(?, ?, ?, ?)',
+                               ('device-a', seq, 'event', row['session']))
             return '{}'
         if argv[3] == 'import':
             assert argv[-1] == '--eval-store'
             return json.dumps({'observations': 2})
-        assert argv[3:] == ['worker', '--idle-ms', '0']
+        raise AssertionError('Unexpected external command')
+
+    def run_worker(_binary, copied, server):
+        assert server.rate_complete
         with open(str(copied) + '/config.toml', 'rb') as f:
             config = tomllib.load(f)
         assert config['embedding']['url'].startswith('http://127.0.0.1:')
@@ -219,8 +301,14 @@ def test_construct_uses_copied_recorded_transcripts_and_preserves_the_dev_home(t
             db.executescript('CREATE TABLE imported(uid TEXT); INSERT INTO imported VALUES("a"),("b");'
                              'CREATE TABLE vectors(uid TEXT); INSERT INTO vectors VALUES("v");'
                              'INSERT INTO active VALUES("new claim");')
-        return ''
+        with sqlite3.connect(str(copied) + '/raw.db') as db:
+            seq = db.execute('SELECT MAX(seq) FROM records').fetchone()[0]
+            op_seq = db.execute('SELECT MAX(op_seq) FROM ops').fetchone()[0] + 1
+            db.execute('INSERT INTO ops VALUES(?, ?, "window", ?)',
+                       ('device-a', op_seq, json.dumps({'from_seq': seq, 'from_offset': None,
+                                                        'to_seq': seq, 'to_offset': None})))
     monkeypatch.setattr(common, 'command', execute)
+    monkeypatch.setattr(m22, 'run_owned_worker', run_worker)
     result = m22.construct(str(binary), str(home), observed=m22.home_rates(home),
                            found=[('claude', 'dev', str(source))], now=now)
     assert result['actual']['records'] == 2 and result['replay']['events'] == 1

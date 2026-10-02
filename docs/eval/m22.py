@@ -143,12 +143,18 @@ class Stub(m3.Stub):
                     if not fence:
                         raise ValueError()
                     current = text[fence.end():].split(fence[1], 1)[0].split('## Kept claims', 1)[0]
-                    records = re.findall(r'^L\d+ ', current, re.M)
-                    # ponytail: HTTP exposes visible lines, not raw spans; report empty-record rate shortfalls.
                     users = re.findall(r'^(L\d+) \[user\] ([^\n]+)', current, re.M)
                     users = [(line, text[:200]) for line, text in users if text.strip() and '[REDACTED]' not in text]
                     with self.server.mutex:
-                        self.server.claim_budget += self.server.rate * len(records)
+                        if self.server.rate is None:
+                            self.server.rate_complete = False
+                        else:
+                            counted = inflight_event_count(
+                                self.server.home, self.server.worker, self.server.worker_started_at)
+                            if not counted['complete']:
+                                self.server.rate_complete = False
+                                raise ValueError()
+                            self.server.claim_budget += self.server.rate * counted['count']
                         count = min(int(self.server.claim_budget), len(users))
                         self.server.claim_budget -= count
                     content = {'summary': 'Scale fixture.', 'claims': [
@@ -170,13 +176,17 @@ class Stub(m3.Stub):
 
 
 @contextmanager
-def loopback(rate):
-    number(rate)
+def loopback(rate, home=None):
+    if rate is not None:
+        number(rate)
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Stub)
     server.url = f'http://127.0.0.1:{server.server_port}'
     server.rate, server.claim_budget, server.embeds, server.requests = rate, 0.0, 0, 0
     server.query_texts, server.query_embeds = set(), 0
     server.mutex = threading.Lock()
+    server.home, server.worker, server.worker_started_at = home, None, None
+    initial = raw_event_count(home) if home is not None else dict(count=None, complete=False)
+    server.rate_complete = rate is not None and initial['complete']
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -208,6 +218,134 @@ def database(home, name):
     return closing(sqlite3.connect((Path(home).resolve() / name).as_uri() + '?mode=ro', uri=True))
 
 
+def _columns(db, table):
+    return {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
+
+
+def _span(device, body):
+    row = json.loads(body)
+    if not isinstance(row, dict) or not isinstance(device, str) or not device:
+        raise ValueError('Invalid window metadata')
+    start, end = row.get('from_seq'), row.get('to_seq')
+    start_offset, end_offset = row.get('from_offset'), row.get('to_offset')
+    if (type(start) is not int or type(end) is not int or start < 1 or end < start or
+            any(value is not None and (type(value) is not int or value < 0)
+                for value in (start_offset, end_offset))):
+        raise ValueError('Invalid window bounds')
+    if start == end and (start_offset or 0) >= (math.inf if end_offset is None else end_offset):
+        raise ValueError('Empty window bounds')
+    return device, start, start_offset, end, end_offset
+
+
+def _current_inflight(home, worker, worker_started_at):
+    if worker is None or worker.poll() is not None:
+        return None
+    pid = worker.pid
+    if type(pid) is not int or pid <= 0 or type(worker_started_at) is not int:
+        raise ValueError('Invalid owned worker')
+    required = {'device', 'request_id', 'pid', 'started_at', 'from_seq', 'from_offset',
+                'to_seq', 'to_offset', 'prompt_sha256'}
+    with database(home, 'providers.db') as db:
+        if not required <= _columns(db, 'curation_inflight'):
+            raise ValueError('Inflight metadata is unavailable')
+        rows = db.execute(
+            '''SELECT device, request_id, pid, started_at, from_seq, from_offset, to_seq, to_offset,
+                      prompt_sha256 FROM curation_inflight WHERE pid = ?''', (pid,)).fetchall()
+    if len(rows) != 1:
+        raise ValueError('Owned worker has no unique inflight request')
+    device, request_id, row_pid, started, start, start_offset, end, end_offset, prompt_hash = rows[0]
+    if (row_pid != pid or type(started) is not int or started < worker_started_at or
+            not isinstance(request_id, str) or not re.fullmatch(r'[0-9a-f]{32}', request_id) or
+            not isinstance(prompt_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', prompt_hash)):
+        raise ValueError('Invalid inflight metadata')
+    span = _span(device, json.dumps({'from_seq': start, 'from_offset': start_offset,
+                                     'to_seq': end, 'to_offset': end_offset}))
+    if worker.poll() is not None:
+        raise ValueError('Owned worker exited during its inflight request')
+    return span
+
+
+def raw_event_count(home, worker=None, worker_started_at=None):
+    """Count unique event rows in completed windows and this live owned worker's window."""
+    try:
+        active = _current_inflight(home, worker, worker_started_at)
+        with database(home, 'raw.db') as db:
+            if not {'device', 'seq', 'type'} <= _columns(db, 'records'):
+                raise ValueError('Raw event metadata is unavailable')
+            if not {'device', 'op_seq', 'type', 'body'} <= _columns(db, 'ops'):
+                raise ValueError('Window metadata is unavailable')
+            for device, body in db.execute(
+                    "SELECT device, body FROM ops WHERE type = 'window' ORDER BY device, op_seq"):
+                _span(device, body)
+            parts = ["""SELECT device, json_extract(body, '$.from_seq'), json_extract(body, '$.to_seq')
+                      FROM ops WHERE type = 'window'"""]
+            params = []
+            if active:
+                device, start, _, end, _ = active
+                parts.append('SELECT ?, ?, ?')
+                params.extend((device, start, end))
+            value = db.execute(f'''
+                WITH spans(device, from_seq, to_seq) AS ({' UNION ALL '.join(parts)}),
+                ordered AS (
+                    SELECT device, from_seq, to_seq,
+                        MAX(to_seq) OVER (PARTITION BY device ORDER BY from_seq, to_seq
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS previous_end
+                    FROM spans
+                ), marked AS (
+                    SELECT device, from_seq, to_seq,
+                        SUM(CASE WHEN previous_end IS NULL OR from_seq > previous_end THEN 1 ELSE 0 END)
+                            OVER (PARTITION BY device ORDER BY from_seq, to_seq) AS group_id
+                    FROM ordered
+                ), merged AS (
+                    SELECT device, group_id, MIN(from_seq) AS from_seq, MAX(to_seq) AS to_seq
+                    FROM marked GROUP BY device, group_id
+                )
+                SELECT COUNT(*) FROM records r JOIN merged m
+                  ON m.device = r.device AND r.seq BETWEEN m.from_seq AND m.to_seq
+                WHERE r.type = 'event'
+            ''', params).fetchone()[0]
+        return dict(count=value, complete=True)
+    except (OSError, sqlite3.Error, TypeError, ValueError, KeyError):
+        return dict(count=None, complete=False)
+
+
+def inflight_event_count(home, worker, worker_started_at):
+    """Count event rows in the current request, once if it starts inside a completed split."""
+    try:
+        active = _current_inflight(home, worker, worker_started_at)
+        if active is None:
+            raise ValueError('No live owned request')
+        device, start, start_offset, end, _ = active
+        with database(home, 'raw.db') as db:
+            if not {'device', 'seq', 'type'} <= _columns(db, 'records') or not {
+                    'device', 'op_seq', 'type', 'body'} <= _columns(db, 'ops'):
+                raise ValueError('Raw window metadata is unavailable')
+            previous = db.execute(
+                "SELECT body FROM ops WHERE device = ? AND type = 'window' ORDER BY op_seq DESC LIMIT 1",
+                (device,)).fetchone()
+            split_seen = False
+            if previous:
+                _, _, _, previous_end, previous_offset = _span(device, previous[0])
+                if previous_offset is not None:
+                    if (start, start_offset) != (previous_end, previous_offset):
+                        raise ValueError('Inflight window does not follow the completed split')
+                    split_seen = True
+                elif start <= previous_end:
+                    raise ValueError('Inflight window overlaps completed records')
+            elif start_offset is not None:
+                raise ValueError('Inflight split has no completed predecessor')
+            count = db.execute(
+                "SELECT COUNT(*) FROM records WHERE device = ? AND type = 'event' AND seq BETWEEN ? AND ?",
+                (device, start, end)).fetchone()[0]
+            if split_seen and db.execute(
+                    "SELECT 1 FROM records WHERE device = ? AND seq = ? AND type = 'event'",
+                    (device, start)).fetchone():
+                count -= 1
+        return dict(count=count, complete=True)
+    except (OSError, sqlite3.Error, TypeError, ValueError, KeyError):
+        return dict(count=None, complete=False)
+
+
 def home_rates(home):
     with database(home, 'raw.db') as raw, database(home, 'knowledge.db') as knowledge:
         records = raw.execute("SELECT COUNT(*) FROM records WHERE type = 'event'").fetchone()[0]
@@ -215,7 +353,10 @@ def home_rates(home):
         sessions = sorted(s for (s,) in raw.execute('SELECT DISTINCT session FROM records') if s)
     if records < 1:
         raise ValueError('The dev home has no records to measure its claim rate')
-    return dict(records=records, claims=claims, claims_per_record=claims / records, sessions=sessions)
+    curated = raw_event_count(home)
+    rate = claims / curated['count'] if curated['complete'] and curated['count'] else None
+    return dict(records=records, claims=claims, curated_records=curated['count'],
+                rate_complete=curated['complete'], claims_per_record=rate, sessions=sessions)
 
 
 def new_home():
@@ -250,6 +391,30 @@ def environment():
         env.pop(key, None)
     env['OBOETE_NO_SPAWN'] = '1'
     return env
+
+
+def run_owned_worker(binary, home, server):
+    with server.mutex:
+        started_at = int(time.time() * 1000)
+        try:
+            worker = subprocess.Popen([binary, '--home', str(home), 'worker', '--idle-ms', '0'],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment())
+        except (OSError, subprocess.SubprocessError):
+            raise RuntimeError('Evaluation command failed') from None
+        server.worker, server.worker_started_at = worker, started_at
+    try:
+        if worker.wait() != 0:
+            raise RuntimeError('Evaluation command failed')
+    finally:
+        if worker.poll() is None:
+            worker.terminate()
+            try:
+                worker.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                worker.kill()
+                worker.wait()
+        with server.mutex:
+            server.worker, server.worker_started_at = None, None
 
 
 def toml_value(value):
@@ -464,23 +629,32 @@ def construct(binary, dev_home, days=90, disk_ok=False, *, observed, found=None,
                                                '--eval-store'], env=environment()))
         if not isinstance(imported, dict):
             raise ValueError('Invalid import result')
-        with loopback(observed['claims_per_record']) as server:
+        with loopback(observed['claims_per_record'], home) as server:
             configure(home, server)
-            common.command([binary, '--home', str(home), 'worker', '--idle-ms', '0'], env=environment())
+            run_owned_worker(binary, home, server)
         with database(home, 'knowledge.db') as k:
             documents = k.execute('SELECT COUNT(*) FROM imported').fetchone()[0]
             vectors = k.execute('SELECT COUNT(*) FROM vectors').fetchone()[0]
         if documents != DOCUMENTS or vectors < 1:
             raise ValueError('Imported corpus or embedded scale store is incomplete')
         actual = home_rates(home)
-        out.update(complete=True, N=actual['records'], actual=actual, imported_documents=documents,
+        rate_complete = bool(observed.get('rate_complete') and actual['rate_complete'] and
+                             server.rate_complete and observed.get('claims_per_record') is not None)
+        new_events = (actual['curated_records'] - observed['curated_records']
+                      if rate_complete else None)
+        if new_events is not None and new_events < 0:
+            rate_complete, new_events = False, None
+        claim_delta = actual['claims'] - observed['claims']
+        claim_target = (int(observed['claims_per_record'] * new_events)
+                        if rate_complete and new_events and new_events > 0 else None)
+        out.update(complete=rate_complete, claim_rate_complete=rate_complete,
+                   N=actual['records'], actual=actual, imported_documents=documents,
                    vectors=vectors, replay=replay, scale_target_reached=replay['events'] >= target,
+                   new_curated_events=new_events,
+                   new_claims_per_record=(claim_delta / new_events if new_events else None),
+                   new_claims_target=claim_target,
+                   claim_rate_target_reached=(claim_target is not None and claim_delta >= claim_target),
                    binary_sha256=common.sha256_file(binary), event_rate_per_day=counts['events'] / 90)
-        out['new_claims_per_record'] = ((actual['claims'] - observed['claims']) /
-                                      (actual['records'] - observed['records'])
-                                      if actual['records'] > observed['records'] else None)
-        out['new_claims_target'] = int(observed['claims_per_record'] * (actual['records'] - observed['records']))
-        out['claim_rate_target_reached'] = actual['claims'] - observed['claims'] >= out['new_claims_target']
         save(home / 'm22-build.json', out)
         shutil.rmtree(copies)
         spool.unlink()
