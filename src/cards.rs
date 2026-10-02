@@ -48,9 +48,15 @@ const ICONS: [&str; 9] = ["●", "◆", "↻", "✓", "○", "⚖", "⚠", "⚷"
 const NO_TYPE: &str = "📝";
 
 impl Card {
-    /// Its ID as session start shows it and `get` reads it (docs/cards.md S3).
-    pub fn id(&self) -> String {
-        format!("{}.{}", self.op_seq, self.n)
+    /// Its ID as session start shows it and `get` reads it (docs/cards.md S3): `<op seq>.<n>` on
+    /// `local`, the device that reads it, and `<device>.<op seq>.<n>` for another device's card
+    /// (a copied home keeps the ops of the device it was copied from; sync brings others').
+    pub fn id(&self, local: &str) -> String {
+        if self.device == local {
+            format!("{}.{}", self.op_seq, self.n)
+        } else {
+            format!("{}.{}.{}", self.device, self.op_seq, self.n)
+        }
     }
 }
 
@@ -135,20 +141,27 @@ fn gmt(seconds: i32) -> String {
 }
 
 /// claude-mem's recent-context block (docs/cards.md S2, S3) for `cards`, newest first as `recent`
-/// gives them, shown the oldest first by day, at `now` in `tz`. `name` is the repository's.
-pub fn block<Tz: chrono::TimeZone>(cards: &[Card], name: &str, now: i64, tz: &Tz) -> String
+/// gives them, shown the oldest first by day, at `now` in `tz`, read on device `local`. `name` is
+/// the repository's.
+pub fn block<Tz: chrono::TimeZone>(
+    cards: &[Card],
+    local: &str,
+    name: &str,
+    now: i64,
+    tz: &Tz,
+) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
     use chrono::Offset;
-    let local = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(tz));
+    let in_tz = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(tz));
     // `9:05am` as claude-mem's row shows it: `9:05a`.
     let clock = |t: &chrono::DateTime<Tz>| {
         let mut s = t.format("%-I:%M%P").to_string();
         s.pop();
         s
     };
-    let header = local(now).map_or_else(String::new, |t| {
+    let header = in_tz(now).map_or_else(String::new, |t| {
         let zone = gmt(t.offset().fix().local_minus_utc());
         format!(", {} {zone}", t.format("%Y-%m-%d %-I:%M%P"))
     });
@@ -167,7 +180,7 @@ where
     shown.sort_by(|a, b| (a.ts, &a.device, a.op_seq, a.n).cmp(&(b.ts, &b.device, b.op_seq, b.n)));
     let (mut day, mut minute) = (String::new(), String::new());
     for c in shown {
-        let Some(t) = local(c.ts) else {
+        let Some(t) = in_tz(c.ts) else {
             continue;
         };
         let d = t.format("%b %-d, %Y").to_string();
@@ -189,35 +202,12 @@ where
             .and_then(|k| TYPES.iter().position(|t| *t == k))
             .map_or(NO_TYPE, |i| ICONS[i]);
         let title = match c.title.trim() {
-            "" => "Untitled".to_owned(),
-            t => t.replace(['\n', '\r'], " "),
+            "" => "Untitled",
+            t => t,
         };
-        out.push_str(&format!("{} {time} {icon} {title}\n", c.id()));
+        out.push_str(&format!("{} {time} {icon} {title}\n", c.id(local)));
     }
     out
-}
-
-/// `block` within `room` characters, fitted as claude-mem fits its own (S5): the newest cards,
-/// their number halved until it fits, down to one. None when not even one does, or no card.
-pub fn fitted<Tz: chrono::TimeZone>(
-    cards: &[Card],
-    name: &str,
-    now: i64,
-    tz: &Tz,
-    room: usize,
-) -> Option<String>
-where
-    Tz::Offset: std::fmt::Display,
-{
-    let mut n = cards.len();
-    while n > 0 {
-        let b = block(&cards[..n], name, now, tz);
-        if b.chars().count() <= room {
-            return Some(b);
-        }
-        n /= 2;
-    }
-    None
 }
 
 /// What a reader reads of a card, in `read`'s order.
@@ -245,10 +235,16 @@ fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
         Ok(items.into_iter().map(gate).collect())
     };
     let narrative = gate(r.get(10)?);
-    // Gated before it is cut: a value the cut would split is whole when the rules read it.
+    // On the one line a row shows it on, gated as it was written and as that line: a rule may
+    // match only the flattened title (Codex on slice 3). A summary's is cut from the gated
+    // narrative: a value the cut would split is whole when the rules read it.
+    let line = |t: &str| {
+        crate::redact::flattened_with(t, rules, usize::MAX, crate::consumer::manifest::one_line)
+            .masked()
+    };
     let title = match r.get::<_, String>(8)? {
-        t if t.is_empty() => first_sentence(&narrative),
-        t => gate(t),
+        t if t.is_empty() => line(&first_sentence(&narrative)),
+        t => line(&t),
     };
     Ok(Some(Card {
         device,
@@ -294,30 +290,30 @@ pub fn recent(
     Ok(out)
 }
 
-/// The current card an ID names, `<op seq>.<n>` (S6), as `recent` would read it.
-// ponytail: the first device's card of that op seq; a device in the ID with sync (S3).
+/// The current card an ID names (S3, S6), as `recent` would read it: `<op seq>.<n>` of this
+/// device's, or `<device>.<op seq>.<n>`.
 pub fn get(k: &Connection, raw: &Raw, id: &str, rules: &Rules) -> Result<Option<Card>> {
-    let Some((Ok(op_seq), Ok(n))) = id
-        .trim()
-        .split_once('.')
-        .map(|(o, n)| (o.parse::<i64>(), n.parse::<i64>()))
-    else {
+    let parts: Vec<&str> = id.trim().split('.').collect();
+    let (device, op_seq, n) = match parts[..] {
+        [op_seq, n] => (raw.device(), op_seq, n),
+        [device, op_seq, n] => (device, op_seq, n),
+        _ => return Ok(None),
+    };
+    let (Ok(op_seq), Ok(n)) = (op_seq.parse::<i64>(), n.parse::<i64>()) else {
         return Ok(None);
     };
     if !crate::consumer::manifest::exists(k, "table", "cards")? {
         return Ok(None);
     }
     let mut st = k.prepare(&format!(
-        "SELECT {COLUMNS} FROM cards WHERE op_seq = ?1 AND n = ?2 AND replaced_by IS NULL
-         ORDER BY device"
+        "SELECT {COLUMNS} FROM cards
+         WHERE device = ?1 AND op_seq = ?2 AND n = ?3 AND replaced_by IS NULL"
     ))?;
-    let mut rows = st.query([op_seq, n])?;
-    while let Some(r) = rows.next()? {
-        if let Some(c) = read(r, raw, rules)? {
-            return Ok(Some(c));
-        }
+    let mut rows = st.query(rusqlite::params![device, op_seq, n])?;
+    match rows.next()? {
+        Some(r) => read(r, raw, rules),
+        None => Ok(None),
     }
-    Ok(None)
 }
 
 #[cfg(test)]
@@ -381,14 +377,18 @@ mod tests {
                 Some("discovery"),
                 "The worker leaves a lock it no longer holds",
             ),
-            card(400, 0, at(2, 9, 5, 0), None, "A summary card"),
+            Card {
+                device: "e".into(),
+                ..card(400, 0, at(2, 9, 5, 0), None, "A summary card")
+            },
         ]
     }
 
-    /// docs/cards.md S2, S3: claude-mem's recent context, in local time, the oldest first by day.
+    /// docs/cards.md S2, S3: claude-mem's recent context, in local time, the oldest first by day;
+    /// another device's card is named with its device.
     #[test]
     fn the_block_is_claude_mems_recent_context_in_local_time() {
-        let block = block(&four(), "oboete", at(3, 7, 37, 0), &jst());
+        let block = block(&four(), "d", "oboete", at(3, 7, 37, 0), &jst());
         assert_eq!(
             block,
             "# [oboete] recent context, 2026-10-03 7:37am GMT+9\n\
@@ -399,7 +399,7 @@ mod tests {
              Fetch details: get(ID) | Search: search(query)\n\
              \n\
              ### Oct 2, 2026\n\
-             400.0 9:05a 📝 A summary card\n\
+             e.400.0 9:05a 📝 A summary card\n\
              412.0 9:41p ○ The worker leaves a lock it no longer holds\n\
              413.0 \" ✓ The lock file is removed on exit\n\
              ### Oct 3, 2026\n\
@@ -414,24 +414,6 @@ mod tests {
     }
 
     fn block_of(tz: &FixedOffset) -> String {
-        block(&four(), "oboete", at(3, 7, 37, 0), tz)
-    }
-
-    /// S5: claude-mem's fit, the newest cards kept: their number halves until the block fits.
-    #[test]
-    fn a_block_halves_its_cards_until_it_fits_its_room() {
-        let now = at(3, 7, 37, 0);
-        let whole = block(&four(), "oboete", now, &jst());
-        let n = whole.chars().count();
-        assert_eq!(fitted(&four(), "oboete", now, &jst(), n), Some(whole));
-        let two = fitted(&four(), "oboete", now, &jst(), n - 1).unwrap();
-        assert!(two.contains("420.1 ") && two.contains("413.0 "), "{two}");
-        assert!(!two.contains("412.0 ") && !two.contains("400.0 "), "{two}");
-        assert_eq!(two, block(&four()[..2], "oboete", now, &jst()));
-        let one = block(&four()[..1], "oboete", now, &jst());
-        let room = one.chars().count();
-        assert_eq!(fitted(&four(), "oboete", now, &jst(), room), Some(one));
-        assert_eq!(fitted(&four(), "oboete", now, &jst(), room - 1), None);
-        assert_eq!(fitted(&[], "oboete", now, &jst(), usize::MAX), None);
+        block(&four(), "d", "oboete", at(3, 7, 37, 0), tz)
     }
 }

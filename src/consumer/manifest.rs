@@ -154,13 +154,40 @@ pub fn text(
         return Ok(None);
     }
     let k = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let manifest = stored(&k, raw, repo, branch, &stamp(rules.version()))?;
+    let manifest = stored(&k, raw, repo, branch, &stamp(rules.version()))?.unwrap_or_default();
     let live = live(&k, raw, repo, branch, session, rules, now)?;
-    let Some((packet, bodies)) = with_delivered(&k, raw, repo, manifest, &live, rules, (cap, now))?
-    else {
-        return Ok(None);
+    let parts = delivered(&k, raw, repo, &manifest, rules)?;
+    // The cards after the decisions (docs/cards.md S1): the most, halved each time, whose packet
+    // stays within `cap` as it leaves, gated and escaped inside the fence, in UTF-16 units, the
+    // measure Cursor cuts by (S5); the rest is never cut for them. Counted before the gate first,
+    // which is cheap. The fence's own text is outside `cap`, as it always was.
+    let cards = crate::cards::recent(&k, raw, repo, CARDS, rules)?;
+    let name = repo_name(repo, rules);
+    let rest = match parts.packet(&manifest, &live, "") {
+        Some((base, _)) => base.text.chars().count(),
+        None if cards.is_empty() => return Ok(None),
+        None => 0,
     };
-    let (gated, from) = packet.outbound(rules);
+    let mut n = cards.len();
+    let (bodies, gated, from) = loop {
+        let block = match n {
+            0 => String::new(),
+            n => crate::cards::block(&cards[..n], raw.device(), &name, now, &chrono::Local),
+        };
+        if n > 0 && rest + block.chars().count() > cap {
+            n /= 2;
+            continue;
+        }
+        let Some((packet, bodies)) = parts.packet(&manifest, &live, &block) else {
+            return Ok(None);
+        };
+        let (gated, from) = packet.outbound(rules);
+        let fence = manifest::fenced("").encode_utf16().count();
+        if n == 0 || manifest::fenced(gated.trim()).encode_utf16().count() - fence <= cap {
+            break (bodies, gated, from);
+        }
+        n /= 2;
+    };
     let text = manifest::cut(&gated, cap);
     // Match the surviving occurrence, not another claim with the same rendered line.
     let shown = bodies
@@ -365,36 +392,15 @@ type Body = (std::ops::Range<usize>, Shown);
 /// appends no record this consumer steps on, so a section built with the text would miss the last
 /// session's decisions; and what the worker has not applied yet (`claims::Pending`) is left out.
 /// Unchanged where curation never ran (no claims view).
-fn with_delivered(
+fn delivered(
     k: &Connection,
     raw: &Raw,
     repo: &str,
-    manifest: Option<String>,
-    live: &str,
+    manifest: &str,
     rules: &crate::redact::Rules,
-    (cap, now): (usize, i64),
-) -> Result<Option<(Mapped, Vec<Body>)>> {
+) -> Result<Delivered> {
     use crate::claims::{self, Claim};
-    let manifest = manifest.unwrap_or_default();
-    let at = AFTER_DECISIONS
-        .iter()
-        .filter_map(|h| {
-            let h = format!("## {h}\n");
-            manifest
-                .match_indices(&h)
-                .map(|(i, _)| i)
-                .find(|&i| i == 0 || manifest[..i].ends_with('\n'))
-        })
-        .min()
-        .unwrap_or(manifest.len());
-    let (mut first, mut middle, mut digest, mut last) = (
-        Mapped::default(),
-        Mapped::default(),
-        Mapped::default(),
-        Mapped::default(),
-    );
-    let (mut bodies, mut middle_bodies, mut last_bodies): (Vec<Body>, Vec<Body>, Vec<Body>) =
-        (Vec::new(), Vec::new(), Vec::new());
+    let mut d = Delivered::default();
     if exists(k, "view", "active")? {
         let pending = claims::Pending::read(raw, k)?;
         let hidden = |uid: &str| Ok(pending.touches(k, uid)? || claims::muted(k, uid)?);
@@ -404,7 +410,7 @@ fn with_delivered(
                 prefs.push(c);
             }
         }
-        let words = terms(&manifest);
+        let words = terms(manifest);
         let mut ranked = claims::decisions(k, repo, POOL)?;
         // Stable: among claims that share as many words, the newest first.
         ranked.sort_by_cached_key(|c| std::cmp::Reverse(shared(&c.body, &words)));
@@ -444,69 +450,97 @@ fn with_delivered(
             line
         };
         if !prefs.is_empty() {
-            first.push_str("## Global preferences\n");
+            d.first.push_str("## Global preferences\n");
             for c in &prefs {
-                full(&mut first, &mut bodies, c, &[]);
+                full(&mut d.first, &mut d.first_bodies, c, &[]);
             }
         }
         if !units.is_empty() {
-            middle.push_str("## Decisions and open items\n");
+            d.middle.push_str("## Decisions and open items\n");
             for unit in &units {
                 for c in unit {
-                    full(&mut middle, &mut middle_bodies, c, unit);
+                    full(&mut d.middle, &mut d.middle_bodies, c, unit);
                 }
             }
         }
         if let Some(lines) = crate::digest::fresh(k, repo, hidden)?
             && !lines.is_empty()
         {
-            digest.push_str("## Digest of the last session\n");
+            d.digest.push_str("## Digest of the last session\n");
             for line in &lines {
-                digest.push_str("- ");
-                digest.append(gate(line, CLIP));
-                digest.push_str("\n");
+                d.digest.push_str("- ");
+                d.digest.append(gate(line, CLIP));
+                d.digest.push_str("\n");
             }
         }
         if !(units.is_empty() && index.is_empty()) {
-            last.push_str(&format!("## More from memory\n{TOOLS}\n"));
+            d.last.push_str(&format!("## More from memory\n{TOOLS}\n"));
             for c in index.iter().flatten() {
-                shown(&mut last, &mut last_bodies, c, brief(c), false);
+                shown(&mut d.last, &mut d.last_bodies, c, brief(c), false);
             }
         }
     }
-    // Each section's lines move by where the section lands in the packet.
-    let at_offset = |bodies: Vec<Body>, offset: usize| {
-        bodies
-            .into_iter()
-            .map(move |(range, s)| (range.start + offset..range.end + offset, s))
-    };
-    // The cards after the decisions (docs/cards.md S1), in the room the rest leaves (S5).
-    let chars = |m: &Mapped| m.text.chars().count();
-    let rest = [&first, &middle, &digest, &last]
-        .map(chars)
-        .iter()
-        .sum::<usize>()
-        + manifest.chars().count()
-        + live.chars().count();
-    let name = crate::redact::outbound_with(repo, rules);
-    let name = name
+    Ok(d)
+}
+
+/// What `delivered` reads, each part with the lines in it that show a claim.
+#[derive(Default)]
+struct Delivered {
+    first: Mapped,
+    first_bodies: Vec<Body>,
+    middle: Mapped,
+    middle_bodies: Vec<Body>,
+    digest: Mapped,
+    last: Mapped,
+    last_bodies: Vec<Body>,
+}
+
+impl Delivered {
+    /// The packet around the checkout's `manifest`, with `block` (the cards) after the decisions
+    /// and `live` after the manifest, and each line in it that shows a claim; none when it is empty.
+    fn packet(&self, manifest: &str, live: &str, block: &str) -> Option<(Mapped, Vec<Body>)> {
+        let at = AFTER_DECISIONS
+            .iter()
+            .filter_map(|h| {
+                let h = format!("## {h}\n");
+                manifest
+                    .match_indices(&h)
+                    .map(|(i, _)| i)
+                    .find(|&i| i == 0 || manifest[..i].ends_with('\n'))
+            })
+            .min()
+            .unwrap_or(manifest.len());
+        // Each section's lines move by where the section lands in the packet.
+        let at_offset = |bodies: &[Body], offset: usize| {
+            bodies
+                .iter()
+                .map(move |(range, s)| (range.start + offset..range.end + offset, s.clone()))
+                .collect::<Vec<_>>()
+        };
+        let mut bodies = self.first_bodies.clone();
+        let mut text = self.first.clone();
+        text.push_str(&manifest[..at]);
+        bodies.extend(at_offset(&self.middle_bodies, text.text.len()));
+        text.append(self.middle.clone());
+        text.push_str(block);
+        text.append(self.digest.clone());
+        text.push_str(&manifest[at..]);
+        text.push_str(live);
+        bodies.extend(at_offset(&self.last_bodies, text.text.len()));
+        text.append(self.last.clone());
+        (!text.text.is_empty()).then_some((text, bodies))
+    }
+}
+
+/// The repository's name as the cards' header shows it: its last part, gated with the whole and
+/// again as shown, on one line.
+fn repo_name(repo: &str, rules: &crate::redact::Rules) -> String {
+    let gated = crate::redact::outbound_with(repo, rules);
+    let last = gated
         .rsplit(['/', '\\'])
         .find(|p| !p.is_empty())
-        .unwrap_or(&name)
-        .replace(['\n', '\r'], " ");
-    let cards = crate::cards::recent(k, raw, repo, CARDS, rules)?;
-    let block = crate::cards::fitted(&cards, &name, now, &chrono::Local, cap.saturating_sub(rest));
-    let mut text = first;
-    text.push_str(&manifest[..at]);
-    bodies.extend(at_offset(middle_bodies, text.text.len()));
-    text.append(middle);
-    text.push_str(block.as_deref().unwrap_or_default());
-    text.append(digest);
-    text.push_str(&manifest[at..]);
-    text.push_str(live);
-    bodies.extend(at_offset(last_bodies, text.text.len()));
-    text.append(last);
-    Ok((!text.text.is_empty()).then_some((text, bodies)))
+        .unwrap_or(&gated);
+    crate::redact::flattened_with(last, rules, usize::MAX, one_line).masked()
 }
 
 /// The words a claim may share with the checkout's manifest (D4): the names of the files touched,
@@ -872,7 +906,7 @@ pub(crate) fn body_line(
 /// (text in those languages has no spaces): a token is shown whole or not at all, so a rule added
 /// after the manifest was built still matches it at SessionStart's gate. A first token or clause
 /// longer than `n` is left out, not cut.
-fn one_line(s: &str, n: usize) -> String {
+pub(crate) fn one_line(s: &str, n: usize) -> String {
     let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
     match flat.char_indices().nth(n) {
         Some((at, c)) => {
@@ -2813,6 +2847,113 @@ extra_rules = [
         );
         assert!(text.contains(" ● Ours\n"), "{text}");
         assert!(!text.contains("Theirs"), "{text}");
+    }
+
+    /// Codex on slice 3: a card's title is gated as its row shows it, on one line, so a rule
+    /// anchored to the whole flattened title hides its value behind the row's ID and time.
+    #[test]
+    fn a_cards_title_is_gated_as_its_row_shows_it() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"otp\", regex = '^otp= ([0-9]{6})$', \
+             secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        store
+            .append_ops(&[cards_op(1, 7, &["otp=\n654321"])])
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let text = shown(home.path(), &store).unwrap();
+        assert!(text.contains("recent context"), "{text}");
+        assert!(!text.contains("654321"), "{text}");
+    }
+
+    /// Codex on slice 3: the gate can make the rest of the packet longer than it was read (a
+    /// short value becomes `[REDACTED]`), and the cards are fitted to the packet as it leaves,
+    /// so they still never cut the rest.
+    #[test]
+    fn the_cards_leave_room_for_what_the_gate_adds() {
+        let values: Vec<String> = (0..20).map(|i| format!("otp={}", i % 10)).collect();
+        let (home, _c, _) = start(
+            |store, cwd| {
+                let (decision, _) = claimed(
+                    store,
+                    said(cwd, DAY, &format!("Keep {}.", values.join(" "))),
+                    "decision",
+                    "decided",
+                    vec![],
+                );
+                let titles: Vec<String> = (0..8).map(|i| format!("Card number {i}")).collect();
+                let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
+                vec![decision, cards_op(1, 7, &titles)]
+            },
+            None,
+        );
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"otp\", regex = 'otp=([0-9])', \
+             secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let store = raw::open(home.path()).unwrap();
+        let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+        let at = |cap: usize| {
+            text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
+                .unwrap()
+                .unwrap()
+                .text
+        };
+        let whole = at(usize::MAX);
+        assert!(
+            whole.contains("[REDACTED]") && !whole.contains("otp=3"),
+            "{whole}"
+        );
+        let start = whole.find("# [r] recent context, ").expect(&whole);
+        let end = start + whole[start..].find("\n## ").unwrap() + 1;
+        let fitted = at(whole.chars().count() - 1);
+        assert!(fitted.contains("recent context"), "{fitted}");
+        assert!(fitted.ends_with(&whole[end..]), "{fitted}");
+    }
+
+    /// Codex on slice 3: the cards are fitted in UTF-16 units inside the fence, the measure the
+    /// agents cut by (Cursor), with each closing tag a title holds escaped as the fence escapes it.
+    #[test]
+    fn the_cards_are_fitted_inside_the_fence_in_utf16_units() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let titles: Vec<String> = (0..8)
+            .map(|i| format!("{i} {} </oboete-memory>", "🚀".repeat(50)))
+            .collect();
+        let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
+        store.append_ops(&[cards_op(1, 7, &titles)]).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+        let at = |cap: usize| {
+            text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
+                .unwrap()
+                .unwrap()
+                .text
+        };
+        // The packet's text as the fence holds it, in UTF-16 units, without the fence's own.
+        let units = |t: &str| {
+            manifest::fenced(t.trim()).encode_utf16().count()
+                - manifest::fenced("").encode_utf16().count()
+        };
+        let whole = at(usize::MAX);
+        let start = whole.find("# [r] recent context, ").expect(&whole);
+        let end = start + whole[start..].find("\n## ").unwrap() + 1;
+        let cap = units(&whole) - 1;
+        assert!(whole.chars().count() <= cap);
+        let fitted = at(cap);
+        assert!(units(&fitted) <= cap, "{} > {cap}", units(&fitted));
+        assert!(fitted.contains("recent context"), "{fitted}");
+        assert!(fitted.ends_with(&whole[end..]), "{fitted}");
     }
 
     /// S5: the stored manifest keeps its own 6,000 characters under the packet's 9,000, so the

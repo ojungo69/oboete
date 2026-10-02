@@ -1371,7 +1371,7 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
     // A card by the ID session start shows it under (docs/cards.md S6): `<op seq>.<n>`, a dot
     // that no uid, record key or imported uid has.
     if let Some(c) = crate::cards::get(&k, &raw, id, &redact::Rules::load(home)?)? {
-        return Ok(Some(card_text(&c)));
+        return Ok(Some(card_text(&c, raw.device())));
     }
     Ok(match named(&raw, &k, id)? {
         None => None,
@@ -1399,10 +1399,10 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
 
 /// A card in full, as its reader gave it (gated, K6): its ID, time, type and repository, then
 /// claude-mem's fields, each part only when it has something.
-fn card_text(c: &crate::cards::Card) -> String {
+fn card_text(c: &crate::cards::Card, local: &str) -> String {
     let mut out = format!(
         "{} {} {} {}",
-        c.id(),
+        c.id(local),
         crate::db::utc(c.ts),
         c.kind.as_deref().unwrap_or("summary"),
         c.repo.as_deref().unwrap_or("no repository")

@@ -233,10 +233,13 @@ Fetch details: get(ID) | Search: search(query)
 
 S3. **Rows.** `<ID> <TIME> <ICON> <title>`, claude-mem's compact row, the oldest first. The icon
 is the type's (the legend's); a card without a type (a window's summary, K1) has `📝`, claude-mem's
-icon for an unknown type. The ID is the card's window op and place, `<op seq>.<n>`: a dot, so it
-is never read as a claim's uid, whose prefix is hexadecimal, nor as a record's `device:seq`.
-`ponytail:` op seqs are one device's; a device in the ID when sync brings another device's cards
-(milestone 6).
+icon for an unknown type. The ID is the card's window op and place, `<op seq>.<n>`, for a card of
+the device that reads it, and `<device>.<op seq>.<n>` for another device's: a copied home keeps
+the ops of the device it was copied from, whose op seqs start again on the copy (Codex on slice 3),
+and sync brings others'. A dot, so it is never read as a claim's uid, whose prefix is hexadecimal,
+nor as a record's `device:seq`. The title is gated as it was written and again on the one line
+its row shows it on: a rule may match only the flattened title, and the row's ID and time in
+front of it would keep an anchored rule from matching at the packet's gate (Codex on slice 3).
 
 S4. **Which cards.** The repository's newest current cards, at most 50 (claude-mem's default),
 read through `cards::recent` (K3, K4, K6), of every agent: claude-mem shows only the calling
@@ -246,6 +249,9 @@ S5. **Size.** The packet's cap rises from 6,000 to 9,000 characters: claude-mem'
 may take 10,000, and Cursor drops a context over 10,000 (oboete keeps it under its 9,500 units).
 The block gets the room the rest of the packet leaves and is fitted as claude-mem fits its own:
 the number of cards halves until it fits, down to one; with no room for one there is no block.
+It is measured as the packet leaves: gated (a mask can make the rest longer than it was read),
+with each closing tag escaped as the fence escapes it, in UTF-16 units, the measure Cursor cuts by
+(Codex on slice 3). The fence's own text is outside the cap, as it always was.
 The rest of the packet is never cut for it, and the stored manifest keeps its own 6,000, so its
 state lines never take all of the block's room.
 
@@ -303,6 +309,11 @@ says so.
    not another repository's.
 4. The cards take only the room the rest of the packet leaves, and the rest is not cut for them;
    the stored manifest keeps its own 6,000 characters under the packet's 9,000.
-5. A card is read by its ID through the reader's rules (K4); an ID of no current card gives none.
+5. A card is read by its ID through the reader's rules (K4); an ID of no current card gives none;
+   another device's card is named and read with its device.
 6. `get` shows a card in full: its ID, time, type and repository, title, subtitle, narrative,
    facts, concepts and files.
+7. A title is gated as its row shows it, on one line, so a rule anchored to the flattened title
+   hides its value.
+8. The cards leave room for what the gate adds to the rest, and are fitted in UTF-16 units inside
+   the fence, a closing tag in a title escaped: the rest is not cut for them.
