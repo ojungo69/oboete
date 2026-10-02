@@ -294,6 +294,9 @@ enum Cmd {
         /// shows, before and after the consumers are drained (milestone 4 Task 0)
         #[arg(long, default_value_t = 0)]
         read_sample: usize,
+        /// Spawns of each read hook run and left out before the N timed ones (milestone 4 D15)
+        #[arg(long, default_value_t = 0)]
+        read_warmup: usize,
     },
 }
 
@@ -680,14 +683,20 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             sizes,
             agent,
             read_sample,
-        } => replay::run(
-            &home,
-            &fixture,
-            repo_root,
-            spawn_sample,
-            &sizes,
-            &agent,
-            read_sample,
-        ),
+            read_warmup,
+        } => {
+            let report = replay::run(
+                &home,
+                &fixture,
+                repo_root,
+                spawn_sample,
+                &sizes,
+                &agent,
+                read_sample,
+                read_warmup,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
     }
 }

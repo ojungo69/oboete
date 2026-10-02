@@ -23,6 +23,9 @@ Every command takes the binary by path: `oboete` on PATH is the owner's v1.
 import collections, glob, http.server, json, os, re, sqlite3, subprocess, sys, threading, time, tomllib
 from datetime import datetime
 
+from contextlib import closing
+from pathlib import Path
+
 import common
 from common import E, clean_env, owner_only, read_jsonl, sha256_file
 
@@ -162,7 +165,7 @@ def replay_events(binary, h, events, session_count):
 def guard_home(h, decide=None, pool='dev'):
     common.guard(decide=decide, pool=pool)
     if os.path.exists(f'{h}/raw.db'):
-        with sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True) as raw:
+        with closing(sqlite3.connect(Path(h, 'raw.db').as_uri() + '?mode=ro', uri=True)) as raw:
             sessions = [s for (s,) in raw.execute("SELECT DISTINCT session FROM records WHERE session IS NOT NULL")]
         common.guard(session_ids=sessions, decide=decide, pool=pool)
 
