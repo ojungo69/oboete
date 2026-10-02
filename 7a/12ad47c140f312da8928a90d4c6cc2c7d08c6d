@@ -1,0 +1,22 @@
+src/mcp.rs
+  s_17c3dc80287a78::t_ef909983a24954 16,138,168,172-178
+  s_17c3dc80287a78::t_bdb1e5641e6068 385-386,395-403,415,455,467-468,471
+  s_17c3dc80287a78::t_250a79821a05e8 383-384,387-394,404-414,416-454,456-466
+  s_17c3dc80287a78::t_2ae1952ca59046 469-470,472-475
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7a12ad47c140f312da8928a90d4c6cc2c7d08c6d",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
