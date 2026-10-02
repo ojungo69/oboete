@@ -4847,10 +4847,7 @@ mod tests {
                 .unwrap();
             assert_eq!((p.hold.as_str(), p.attempts), ("time", attempts));
             assert!((before..=crate::db::now_ms()).contains(&p.next_attempt_at));
-            assert!(
-                matches!(phase, Phase::Waiting { up: true, .. }),
-                "{phase:?}"
-            );
+            assert!(matches!(phase, Phase::Waiting { up: true, .. }));
         }
         for _ in 0..2 {
             let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut chain).unwrap();
