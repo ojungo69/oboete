@@ -1,0 +1,26 @@
+src/opencode.js
+  s_17c3dc80287a78::t_9a348f766c627a 48-54,58,60,126,139,163,165-166
+  s_17c3dc80287a78::t_1b7ed8a858f026 118,122-124,128,130-138
+  s_17c3dc80287a78::t_71a8b6d2955060 84,112,127,129,189
+src/testdata/opencode/test.mjs
+  s_17c3dc80287a78::t_1b7ed8a858f026 82,87
+  s_17c3dc80287a78::t_826108416cb684 17-19,25-29,46-49,54-55,63,74,365-378,461,463
+  s_17c3dc80287a78::t_e56981e4f6d267 83-84,94-99,464-481
+  s_17c3dc80287a78::t_41a5b42432677b 303-306,323-325,334-336,350,379-460,462
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "57b174e25fce168f7d8f13a03455cc9f7a9311ae",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
