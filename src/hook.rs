@@ -2138,6 +2138,199 @@ mod tests {
         }
     }
 
+    /// #320: only the owner's requested or accepted open items are delivered. In particular,
+    /// pastWordsSourceShadow can be a user-authored paste while still being proposed.
+    #[test]
+    fn only_owner_approved_open_items_are_delivered_and_ranked_first() {
+        use crate::search::b::{self, Query, RawArm};
+        let mut p = Prompts::new(true);
+        let cases = [
+            (
+                "Parser work requested by the owner.",
+                "decided",
+                "user",
+                "prompt",
+            ),
+            (
+                "Parser work accepted from the assistant.",
+                "decided",
+                "assistant proposal",
+                "reply",
+            ),
+            (
+                "Parser work suggested by a tool.",
+                "proposed",
+                "tool result",
+                "tool",
+            ),
+            (
+                "Parser work suggested by the assistant.",
+                "proposed",
+                "assistant proposal",
+                "reply",
+            ),
+            (
+                "Parser work pastWordsSourceShadow pasted by the user.",
+                "proposed",
+                "user",
+                "prompt",
+            ),
+            ("Parser work not verified.", "unverified", "user", "prompt"),
+            (
+                "Parser work withdrawn by the owner.",
+                "retracted",
+                "user",
+                "prompt",
+            ),
+            ("Parser work already completed.", "done", "user", "prompt"),
+        ];
+        let mut ids = Vec::new();
+        for (i, &(body, status, speaker, event)) in cases.iter().enumerate() {
+            let content = match event {
+                "tool" => json!({"tool": "Bash", "input": "", "output": body}),
+                "reply" => json!({"assistant": body}),
+                _ => json!({"prompt": body}),
+            };
+            let seq = p.s.event(
+                event,
+                "open-policy",
+                (&p.repo, "main"),
+                i as i64 * 86_400_000,
+                content,
+            );
+            ids.push(p.s.claim(seq, body, ("open item", status, speaker), &[]));
+            if status == "decided" && speaker == "assistant proposal" {
+                p.s.event(
+                    "prompt",
+                    "open-policy",
+                    (&p.repo, "main"),
+                    i as i64 * 86_400_000 + 1,
+                    json!({"prompt": "Yes, go ahead with that work."}),
+                );
+            }
+        }
+        p.s.run();
+        let start = p.hook("SessionStart", "start-policy", json!({"source": "startup"}));
+        let section = start
+            .split("## Decisions and open items\n")
+            .nth(1)
+            .unwrap()
+            .split("\n## ")
+            .next()
+            .unwrap();
+        for (i, &(body, status, _, _)) in cases.iter().enumerate() {
+            let home = p.s.home.path();
+            let view = b::claim(home, &ids[i]).unwrap().unwrap();
+            assert_eq!(
+                view.status, status,
+                "the policy must never promote a model status"
+            );
+            assert_eq!(view.delivered, status == "decided");
+            assert_eq!(section.contains(body), status == "decided");
+            let cold = p.prompt(&format!("cold-policy-{i}"), body);
+            assert_eq!(cold.contains(body), status == "decided");
+            let warm_session = format!("warm-policy-{i}");
+            p.s.event(
+                "prompt",
+                &warm_session,
+                (&p.repo, "main"),
+                crate::db::now_ms(),
+                json!({"prompt": body}),
+            );
+            p.s.run();
+            p.shortlists();
+            let k = crate::knowledge::open(p.s.home.path()).unwrap();
+            assert!(
+                crate::shortlist::of(&k, ("claude", &warm_session, &p.repo, "main"))
+                    .unwrap()
+                    .is_some()
+            );
+            drop(k);
+            let warm = p.prompt(&warm_session, body);
+            assert_eq!(warm.contains(body), status == "decided", "{body}: {warm}");
+        }
+        let found = p.s.query(&Query {
+            text: "Parser work".into(),
+            caller: Some(p.repo.clone()),
+            raw: RawArm::Off,
+            limit: 20,
+            ..Default::default()
+        });
+        assert_eq!(
+            found.hits.len(),
+            cases.len(),
+            "unapproved items remain searchable"
+        );
+        assert!(
+            found.hits[..2]
+                .iter()
+                .all(|hit| ids[..2].contains(&hit.key)),
+            "{found:?}"
+        );
+        for (i, &(_, status, _, _)) in cases.iter().enumerate() {
+            let hit = found.hits.iter().find(|hit| hit.key == ids[i]).unwrap();
+            assert_eq!(hit.status, status);
+        }
+        let history = p.s.query(&Query {
+            text: "Parser work".into(),
+            caller: Some(p.repo.clone()),
+            history: true,
+            raw: RawArm::Off,
+            limit: 20,
+            ..Default::default()
+        });
+        assert_eq!(history.hits.len(), cases.len());
+        for (i, &(_, status, _, _)) in cases.iter().enumerate() {
+            assert_eq!(
+                history
+                    .hits
+                    .iter()
+                    .find(|hit| hit.key == ids[i])
+                    .unwrap()
+                    .status,
+                status
+            );
+        }
+        // Explicit owner corrections can approve even a tool proposal or a user paste; the
+        // original proposed derivation stays in history. Before the worker applies them, hide.
+        for i in [2, 4] {
+            p.s.correct(&ids[i], Some("decided"), None);
+            assert!(
+                !p.prompt(&format!("pending-approval-{i}"), cases[i].0)
+                    .contains(cases[i].0)
+            );
+            p.s.run();
+            let view = b::claim(p.s.home.path(), &ids[i]).unwrap().unwrap();
+            assert!(view.delivered && view.status == "decided");
+            assert!(
+                view.history
+                    .iter()
+                    .any(|change| change.status.as_deref() == Some("proposed"))
+            );
+            assert!(
+                p.prompt(&format!("approved-{i}"), cases[i].0)
+                    .contains(cases[i].0)
+            );
+        }
+        p.s.correct(&ids[0], Some("proposed"), None);
+        p.s.correct(&ids[1], Some("done"), None);
+        p.s.run();
+        assert!(
+            !b::claim(p.s.home.path(), &ids[0])
+                .unwrap()
+                .unwrap()
+                .delivered
+        );
+        assert!(
+            !b::claim(p.s.home.path(), &ids[1])
+                .unwrap()
+                .unwrap()
+                .delivered
+        );
+        let notice = p.prompt("cold-policy-1", "Any update?");
+        assert!(notice.contains("is done"), "{notice}");
+    }
+
     /// Spec 4.2, 4.6, row 30-18 (D9): a prompt gets the shortlisted claims whose body holds the
     /// threshold's share of its words, dated and fenced, never the prompt's own text; with
     /// `per_prompt` off it gets nothing, yet `oboete inject --prompt` names the claim.
@@ -2840,7 +3033,7 @@ mod tests {
         let delta = p.s.claim(
             seq,
             "Delta configs live in yaml.",
-            ("open item", "open", "user"),
+            ("open item", "decided", "user"),
             &[],
         );
         p.s.run();
@@ -2885,14 +3078,14 @@ mod tests {
             &mut p,
             4,
             "Delta configs live in yaml.",
-            ("open item", "open"),
+            ("open item", "decided"),
             &[],
         );
         let echo = item(
             &mut p,
             5,
             "Echo builds need the beta toolchain.",
-            ("open item", "open"),
+            ("open item", "decided"),
             &[],
         );
         p.s.run();
