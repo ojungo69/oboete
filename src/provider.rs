@@ -3540,6 +3540,7 @@ mod tests {
             aside: None,
             lines: Vec::new(),
             reading: Default::default(),
+            at: 0,
         };
         let check = |v: &Value| crate::curate::check(&w, v);
         let claim = json!({"id": "c1", "kind": "decision", "status": "decided", "speaker": "user",

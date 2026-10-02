@@ -6,6 +6,7 @@
 mod backup;
 mod budget;
 mod capture;
+mod cards;
 mod claims;
 mod codex_probe;
 mod config;

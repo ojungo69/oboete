@@ -107,6 +107,17 @@ pub struct Record {
     pub item: Item,
 }
 
+/// What a span of a device's events agree on (`Raw::labels_in`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpanLabels {
+    /// Their agent and session, when they are of one session.
+    pub session: Option<(String, String)>,
+    /// Their repository, when they are of one.
+    pub repo: Option<String>,
+    /// The time of the last of them, unix ms; none when the span holds no event.
+    pub ts: Option<i64>,
+}
+
 /// What an op records (milestone 3 D1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpKind {
@@ -577,6 +588,19 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Whether a tombstone targets one of `device`'s records `from` to `to` and was appended
+    /// after its seq `at`, or by another device, whose seqs say nothing of when (docs/cards.md
+    /// K4).
+    pub fn tombstoned_since(&self, device: &str, from: i64, to: i64, at: i64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM records
+               WHERE type = 'tombstone' AND target_device = ?1 AND target_seq BETWEEN ?2 AND ?3
+                 AND (device != ?1 OR seq > ?4))",
+            params![device, from, to, at],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Every device with records in this file: this one, and one a copied home left under its
     /// old id (`ensure_device`). A skip-scan over the primary key, one step per device.
     pub fn devices(&self) -> Result<Vec<String>> {
@@ -653,6 +677,42 @@ impl Raw {
             )
             .optional()?;
         Ok(labels.map(|(a, s)| format!("{}\u{0}{}", a.unwrap_or_default(), s.unwrap_or_default())))
+    }
+
+    /// What the labels of `device`'s events `from` to `to` agree on, from the rows alone (no body
+    /// is read): their agent and session when they are of one session, their repository when
+    /// they are of one, and the time of the last of them (docs/cards.md K2).
+    pub fn labels_in(&self, device: &str, from: i64, to: i64) -> Result<SpanLabels> {
+        type Row = (
+            i64,
+            Option<String>,
+            Option<String>,
+            i64,
+            Option<String>,
+            Option<i64>,
+        );
+        let (sessions, agent, session, repos, repo, ts): Row = self.conn.query_row(
+            "SELECT COUNT(DISTINCT COALESCE(agent, '') || char(0) || COALESCE(session, '')),
+                    MIN(agent), MIN(session), COUNT(DISTINCT COALESCE(repo, char(0))), MIN(repo),
+                    MAX(ts)
+             FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'",
+            params![device, from, to],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )?;
+        Ok(SpanLabels {
+            session: agent.zip(session).filter(|_| sessions == 1),
+            repo: repo.filter(|_| repos == 1),
+            ts,
+        })
     }
 
     /// `device`'s event `seq`: its session as `session_key` spells it, and its source, from the
