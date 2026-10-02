@@ -11,33 +11,6 @@ pub struct Cards;
 
 /// Ops per step, one knowledge.db transaction each.
 const BATCH: usize = 500;
-/// A title made of a summary's first sentence, at most (K1).
-const TITLE: usize = 120;
-
-/// A summary's first sentence, within `TITLE` characters and ending in `…` when it was cut: a
-/// line's end, a Japanese full stop, or a `.`, `!` or `?` that ends a word ("v1.2" has none).
-fn first_sentence(text: &str) -> String {
-    let end = text
-        .char_indices()
-        .find(|&(i, c)| match c {
-            '。' | '！' | '？' | '\n' => true,
-            '.' | '!' | '?' => text[i + 1..].chars().next().is_none_or(char::is_whitespace),
-            _ => false,
-        })
-        .map_or(
-            text.len(),
-            |(i, c)| {
-                if c == '\n' { i } else { i + c.len_utf8() }
-            },
-        );
-    let sentence = &text[..end];
-    if sentence.chars().count() <= TITLE {
-        return sentence.to_owned();
-    }
-    let cut: String = sentence.chars().take(TITLE - 1).collect();
-    format!("{}…", cut.trim_end())
-}
-
 impl Consumer for Cards {
     fn name(&self) -> &'static str {
         "cards"
@@ -66,10 +39,15 @@ impl Consumer for Cards {
             }
             let labels = raw.labels_in(device, span.from, span.to)?;
             let (agent, session) = labels.session.unzip();
+            // An op that lists none: every removal from its records hides the card (K4).
+            let removed = match &op.body["removed"] {
+                list @ serde_json::Value::Array(_) => list.to_string(),
+                _ => "[]".to_owned(),
+            };
             k.execute(
                 "INSERT INTO cards(device, op_seq, n, from_seq, from_offset, to_seq, to_offset,
-                   at, ts, agent, session, repo, title, narrative)
-                 VALUES(?1, ?2, 0, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                   removed, ts, agent, session, repo, narrative)
+                 VALUES(?1, ?2, 0, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     device,
                     op.op_seq,
@@ -77,12 +55,11 @@ impl Consumer for Cards {
                     span.from_offset,
                     span.to,
                     span.to_offset,
-                    op.body["at"].as_i64().unwrap_or(span.to),
+                    removed,
                     labels.ts.unwrap_or(op.ts),
                     agent,
                     session,
                     labels.repo,
-                    first_sentence(summary),
                     summary
                 ],
             )?;
@@ -152,7 +129,7 @@ mod tests {
     /// K1: a title is a summary's first sentence, in either language, and says when it was cut.
     #[test]
     fn a_title_is_the_first_sentence_and_shows_a_cut() {
-        use super::first_sentence;
+        use crate::cards::first_sentence;
         assert_eq!(first_sentence("v1.2 is out. Next."), "v1.2 is out.");
         assert_eq!(first_sentence("Is it done? Yes."), "Is it done?");
         assert_eq!(
@@ -219,12 +196,12 @@ mod tests {
         assert_eq!(c.kind, None);
     }
 
-    /// Every card kept, whoever it is of: (title, agent, session, repo), in op order.
+    /// Every card kept, whoever it is of: (narrative, agent, session, repo), in op order.
     type Kept = (String, Option<String>, Option<String>, Option<String>);
     fn kept(home: &Path) -> Vec<Kept> {
         let k = crate::knowledge::open(home).unwrap();
         let mut st = k
-            .prepare("SELECT title, agent, session, repo FROM cards ORDER BY device, op_seq, n")
+            .prepare("SELECT narrative, agent, session, repo FROM cards ORDER BY device, op_seq, n")
             .unwrap();
         st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .unwrap()
@@ -320,41 +297,60 @@ mod tests {
         assert_eq!(titles(home.path()), ["Again.", "Kept back."]);
     }
 
-    /// K4: a card whose window lost a record after it was cut is not shown, since its text may
-    /// say what was removed; a record removed before the cut was never read. A window op says
-    /// where the records stood when it was cut (`at`), and one without it counts its last record.
+    /// K4: a card is hidden by a removal its window op does not list: the curator read what was
+    /// removed, and the card may say it. What the op lists was gone before the window was cut,
+    /// and the same removal made again (a restore brought the text back) is still that one.
     #[test]
-    fn a_record_removed_after_the_window_was_cut_hides_its_card() {
+    fn a_removal_the_window_op_does_not_list_hides_its_card() {
         let home = tempfile::tempdir().unwrap();
         let mut raw = raw::open(home.path()).unwrap();
         let device = raw.device().to_owned();
-        let remove = |raw: &mut Raw, seq: i64| {
-            let device = device.clone();
-            raw.append_tombstone(raw::Target::Record { device, seq })
-                .unwrap()
+        for ts in 1..=6 {
+            raw.append(&event("s1", "r", ts * 1_000)).unwrap();
+        }
+        let whole = |seq: i64| raw::Target::Record {
+            device: device.clone(),
+            seq,
         };
-        // Records 1 and 2, and record 1 removed (3) before the window over them is cut.
-        two_records(&mut raw);
-        assert_eq!(remove(&mut raw, 1), 3);
-        // Records 4 and 5, cut, then record 4 removed (6).
-        raw.append(&event("s1", "r", 4_000)).unwrap();
-        raw.append(&event("s1", "r", 5_000)).unwrap();
-        assert_eq!(remove(&mut raw, 4), 6);
-        // Records 7 and 8, and record 7 removed (9) before a window over 7 and 8 alone is cut.
-        raw.append(&event("s1", "r", 7_000)).unwrap();
-        raw.append(&event("s1", "r", 8_000)).unwrap();
-        assert_eq!(remove(&mut raw, 7), 9);
-        let (kind, mut third) = window(7, 8, "curated", "Third.");
-        third["at"] = 9.into();
+        let part = |seq: i64, offset: i64| raw::Target::Range {
+            device: device.clone(),
+            seq,
+            offset,
+            length: 1,
+        };
+        // Gone before the windows are cut: record 1, and a part of record 3.
+        raw.append_tombstone(whole(1)).unwrap();
+        raw.append_tombstone(part(3, 0)).unwrap();
+        let listing = |from: i64, to: i64, summary: &str, removed: Value| {
+            let (kind, mut op) = window(from, to, "curated", summary);
+            op["removed"] = removed;
+            (kind, op)
+        };
         raw.append_ops(&[
-            window(1, 3, "curated", "First."),
-            window(4, 5, "curated", "Second."),
-            (kind, third),
+            listing(1, 2, "First.", json!([[1, null, null]])),
+            listing(3, 4, "Second.", json!([[3, 0, 1]])),
+            window(5, 6, "curated", "Third."),
         ])
         .unwrap();
-        drop(raw);
         crate::worker::run_once(home.path()).unwrap();
-        assert_eq!(titles(home.path()), ["Third.", "First."]);
+        assert_eq!(titles(home.path()), ["Third.", "Second.", "First."]);
+        // The same part of record 3 again hides nothing.
+        raw.append_tombstone(part(3, 0)).unwrap();
+        assert_eq!(titles(home.path()), ["Third.", "Second.", "First."]);
+        // Another part of it does, and so does a record of a window that lists none.
+        raw.append_tombstone(part(3, 1)).unwrap();
+        raw.append_tombstone(whole(5)).unwrap();
+        assert_eq!(titles(home.path()), ["First."]);
+    }
+
+    /// The owner's rules, as `config.toml` gives them.
+    fn rules(home: &Path, extra: &str) -> Rules {
+        std::fs::write(
+            home.join("config.toml"),
+            format!("[redaction]\nextra_rules = [{extra}]\n"),
+        )
+        .unwrap();
+        Rules::load(home).unwrap()
     }
 
     /// K6: a card is gated with the rules as they are when it is read, so a rule the owner adds
@@ -368,12 +364,10 @@ mod tests {
         raw.append_ops(&[window(1, 2, "curated", summary)]).unwrap();
         crate::worker::run_once(home.path()).unwrap();
         assert!(recent(home.path(), "r")[0].title.contains("AAAA1111"));
-        std::fs::write(
-            home.path().join("config.toml"),
-            "[redaction]\nextra_rules = [{ id = \"otp\", regex = 'otp=([A-Za-z0-9]+)', secret_group = 1 }]\n",
-        )
-        .unwrap();
-        let rules = Rules::load(home.path()).unwrap();
+        let rules = rules(
+            home.path(),
+            r#"{ id = "otp", regex = 'otp=([A-Za-z0-9]+)', secret_group = 1 }"#,
+        );
         let k = crate::knowledge::open(home.path()).unwrap();
         let cards = cards::recent(&k, &raw, "r", 10, &rules).unwrap();
         let c = &cards[0];
@@ -382,6 +376,61 @@ mod tests {
             assert!(!text.contains("AAAA1111"), "{text}");
         }
         assert!(c.narrative.ends_with("Its tests pass."), "{}", c.narrative);
+    }
+
+    /// K6: a title is cut from the narrative as the gate leaves it, so a value the rules hide by
+    /// what follows its sentence, or one the title's cut would split, is not in the title either.
+    #[test]
+    fn a_title_is_cut_from_the_gated_narrative() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        for ts in 1..=4 {
+            raw.append(&event("s1", "r", ts * 1_000)).unwrap();
+        }
+        let by_what_follows = "The value is AAAA1111. That otp went to the vendor.";
+        // The title's cut falls inside the value.
+        let split = format!("{}otp=AAAA1111BBBB2222 went out.", "word ".repeat(22));
+        raw.append_ops(&[
+            window(1, 2, "curated", by_what_follows),
+            window(3, 4, "curated", &split),
+        ])
+        .unwrap();
+        crate::worker::run_once(home.path()).unwrap();
+        let rules = rules(
+            home.path(),
+            r#"{ id = "before", regex = '([A-Z0-9]{8})\. That otp', secret_group = 1 },
+               { id = "otp", regex = 'otp=([A-Z0-9]{16})', secret_group = 1 }"#,
+        );
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let cards = cards::recent(&k, &raw, "r", 10, &rules).unwrap();
+        assert_eq!(cards[1].title, "The value is [REDACTED].");
+        assert!(
+            cards[0].title.ends_with("word otp=[REDA…"),
+            "{}",
+            cards[0].title
+        );
+        assert_eq!(cards[0].title.chars().count(), 120);
+    }
+
+    /// K6: the session and the repository a card is shown under are gated as its text is.
+    #[test]
+    fn a_rule_added_after_a_card_was_written_masks_its_labels() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let repo = "host/otp=BBBB2222";
+        raw.append(&event("otp=AAAA1111", repo, 1_000)).unwrap();
+        raw.append_ops(&[window(1, 1, "curated", "Done.")]).unwrap();
+        crate::worker::run_once(home.path()).unwrap();
+        let rules = rules(
+            home.path(),
+            r#"{ id = "otp", regex = 'otp=([A-Z0-9]+)', secret_group = 1 }"#,
+        );
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let cards = cards::recent(&k, &raw, repo, 10, &rules).unwrap();
+        let c = &cards[0];
+        assert_eq!(c.agent.as_deref(), Some("claude"));
+        assert_eq!(c.session.as_deref(), Some("otp=[REDACTED]"));
+        assert_eq!(c.repo.as_deref(), Some("host/otp=[REDACTED]"));
     }
 
     /// K5: the table is derived from the op log, so a rebuild gives the same cards, replaced ones

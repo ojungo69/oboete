@@ -92,9 +92,9 @@ pub struct Window {
     /// The exclusion list and the records it was cut under: the egress gate holds each call to
     /// them (spec 5.5).
     pub reading: Reading,
-    /// The device's last record when it was cut: a tombstone after it came after what the
-    /// curator read (docs/cards.md K4).
-    pub at: i64,
+    /// What was removed from its records before it was cut, which the curator did not read
+    /// (docs/cards.md K4).
+    pub removed: Vec<crate::raw::Removal>,
 }
 
 impl Window {
@@ -390,8 +390,8 @@ pub(crate) fn window_at(
     rules: &Rules,
     reading: &Reading,
 ) -> Result<Option<Window>> {
-    // Before the first read: a record that lands during the cut counts as after it.
-    let at = raw.max_seq_of(device)?;
+    // Before the first read: a removal that lands during the cut counts as after it.
+    let top = raw.max_seq_of(device)?;
     let mut after = if offset.is_some() { seq - 1 } else { seq };
     let (mut pieces, mut used, mut elided, mut full) = (Vec::<Piece>::new(), 0, Vec::new(), false);
     let mut excluded = Vec::new();
@@ -525,7 +525,7 @@ pub(crate) fn window_at(
             reads,
             ..reading.clone()
         },
-        at,
+        removed: raw.removed_in(device, first.seq, last.seq, Some(top))?,
     }))
 }
 
@@ -2357,7 +2357,7 @@ pub fn recurate_window(
     op["from_offset"] = w.from_offset.into();
     op["to_seq"] = w.to_seq.into();
     op["to_offset"] = w.to_offset.into();
-    op["at"] = w.at.into();
+    removed_before(&mut op, w);
     op["elided"] = w.elided.clone().into();
     if !w.shortened.is_empty() {
         op["shortened"] = w.shortened.clone().into();
@@ -2601,6 +2601,17 @@ fn waiting(p: &Pending, now: i64) -> Phase {
     }
 }
 
+/// Removals a window op lists, at most: an op that lists none has no card shown once any of
+/// its records lost a part (docs/cards.md K4).
+const MAX_REMOVED: usize = 500;
+
+/// `op` with what was removed from `w`'s records before it was cut (docs/cards.md K4).
+fn removed_before(op: &mut Value, w: &Window) {
+    if !w.removed.is_empty() && w.removed.len() <= MAX_REMOVED {
+        op["removed"] = json!(w.removed);
+    }
+}
+
 /// The window op, with the claims it yields, in one transaction: the curation checkpoint moves
 /// with the window's knowledge (D2, spec 3.1). The op is cut to the op cap with its range in it.
 fn cover(
@@ -2614,7 +2625,7 @@ fn cover(
     op["from_offset"] = w.from_offset.into();
     op["to_seq"] = w.to_seq.into();
     op["to_offset"] = w.to_offset.into();
-    op["at"] = w.at.into();
+    removed_before(&mut op, w);
     op["elided"] = w.elided.clone().into();
     if !w.shortened.is_empty() {
         op["shortened"] = w.shortened.clone().into();
@@ -4862,26 +4873,37 @@ mod tests {
         assert_eq!(calls.get(), 2);
     }
 
-    /// docs/cards.md K4: a window op says where the device's records stood when the window was
-    /// cut, not when its answer came: a record removed during the call was read by the curator.
+    /// docs/cards.md K4: a window op lists what was removed from its records before the window
+    /// was cut, and nothing removed while its answer was awaited: the curator read that.
     #[test]
-    fn a_window_op_says_where_the_records_stood_when_it_was_cut() {
+    fn a_window_op_lists_what_was_removed_from_its_records_before_it_was_cut() {
         let home = tempfile::tempdir().unwrap();
         let (mut raw, db) = open(home.path());
         for word in ["alpha ", "beta "] {
             raw.append(&prompt(&word.repeat(20))).unwrap();
         }
+        let device = raw.device().to_owned();
+        // A word of the first prompt, inside its JSON body.
+        let part = |offset: i64| crate::raw::Target::Range {
+            device: device.clone(),
+            seq: 1,
+            offset,
+            length: 5,
+        };
+        raw.append_tombstone(part(11)).unwrap();
         let mut curator = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
-            // A record that lands while the curator is asked.
-            let mut hook = crate::raw::open(home.path()).unwrap();
-            hook.append(&prompt("during the call")).unwrap();
+            let mut other = crate::raw::open(home.path()).unwrap();
+            other.append_tombstone(part(17)).unwrap();
             Ok(answered("fake"))
         };
         let (rules, summary) = (Rules::default(), curating(30));
         let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
         assert_eq!(phase, Phase::Covered);
         let ws = windows(&raw);
-        assert_eq!((&ws[0]["to_seq"], &ws[0]["at"]), (&json!(1), &json!(2)));
+        assert_eq!(
+            (&ws[0]["to_seq"], &ws[0]["removed"]),
+            (&json!(1), &json!([[1, 11, 5]]))
+        );
     }
 
     /// D9: the wait of a window at the last record reads hook records only: a tombstone and a
@@ -8273,7 +8295,7 @@ mod tests {
             aside: None,
             lines: Vec::new(),
             reading: Default::default(),
-            at: 0,
+            removed: Vec::new(),
         };
         assert_eq!(
             cover(&mut raw, &db, &w, op, Vec::new()).unwrap(),

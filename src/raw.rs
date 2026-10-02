@@ -118,6 +118,10 @@ pub struct SpanLabels {
     pub ts: Option<i64>,
 }
 
+/// What a tombstone removes: its target's seq and, for a part of that record, the part's
+/// offset and length. A window op lists these as `[seq, offset, length]` (docs/cards.md K4).
+pub type Removal = (i64, Option<i64>, Option<i64>);
+
 /// What an op records (milestone 3 D1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpKind {
@@ -588,17 +592,26 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Whether a tombstone targets one of `device`'s records `from` to `to` and was appended
-    /// after its seq `at`, or by another device, whose seqs say nothing of when (docs/cards.md
-    /// K4).
-    pub fn tombstoned_since(&self, device: &str, from: i64, to: i64, at: i64) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM records
-               WHERE type = 'tombstone' AND target_device = ?1 AND target_seq BETWEEN ?2 AND ?3
-                 AND (device != ?1 OR seq > ?4))",
-            params![device, from, to, at],
-            |r| r.get(0),
-        )?)
+    /// What tombstones remove from `device`'s records `from` to `to`, each once, in order. With
+    /// `through`, only what `device`'s own tombstones up to that seq remove: what was gone before
+    /// a read that started when its last record was `through` (docs/cards.md K4).
+    pub fn removed_in(
+        &self,
+        device: &str,
+        from: i64,
+        to: i64,
+        through: Option<i64>,
+    ) -> Result<Vec<Removal>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT DISTINCT target_seq, target_offset, target_length FROM records
+             WHERE type = 'tombstone' AND target_device = ?1 AND target_seq BETWEEN ?2 AND ?3
+               AND (?4 IS NULL OR device = ?1 AND seq <= ?4)
+             ORDER BY 1, 2, 3",
+        )?;
+        let rows = st.query_map(params![device, from, to, through], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Every device with records in this file: this one, and one a copied home left under its
@@ -2017,6 +2030,51 @@ pub fn test_event(body: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/cards.md K4: what tombstones remove from a span, each once; with `through`, only
+    /// what this device's own tombstones up to it remove, as another device's seqs say nothing of
+    /// when.
+    #[test]
+    fn removals_of_a_span_are_listed_once_and_through_a_seq() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        for _ in 0..3 {
+            raw.append(&test_event("{}")).unwrap();
+        }
+        let part = |seq: i64, offset: i64| Target::Range {
+            device: device.clone(),
+            seq,
+            offset,
+            length: 1,
+        };
+        let whole = Target::Record {
+            device: device.clone(),
+            seq: 1,
+        };
+        raw.append_tombstone(part(2, 0)).unwrap(); // 4
+        raw.append_tombstone(part(2, 0)).unwrap(); // 5: the same part again
+        raw.append_tombstone(whole).unwrap(); // 6
+        raw.append_tombstone(part(3, 0)).unwrap(); // 7: outside the span asked for
+        raw.conn
+            .execute(
+                "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq,
+                   target_offset, target_length)
+                 VALUES('other', 1, 'tombstone', 0, 'rescan', ?1, 2, 1, 1)",
+                [&device],
+            )
+            .unwrap();
+        let first = (2, Some(0), Some(1));
+        assert_eq!(
+            raw.removed_in(&device, 1, 2, None).unwrap(),
+            [(1, None, None), first, (2, Some(1), Some(1))]
+        );
+        assert_eq!(raw.removed_in(&device, 1, 2, Some(5)).unwrap(), [first]);
+        assert_eq!(
+            raw.removed_in(&device, 1, 2, Some(6)).unwrap(),
+            [(1, None, None), first]
+        );
+    }
 
     #[test]
     fn a_range_is_masked_by_whole_characters_and_masking_again_changes_nothing() {
