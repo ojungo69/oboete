@@ -66,6 +66,9 @@ pub enum Skip {
     Owner,
     /// It was tried and gave no valid answer, and its failure set no cooldown.
     Failed,
+    /// It answered, and nothing in the answer anchored to the request (`unanchored`): the
+    /// answer's fault, not the provider's, and another answer to the same request may anchor.
+    Refused,
     /// It can never take this request: over its ceiling. Nothing was sent.
     TooBig,
 }
@@ -435,7 +438,20 @@ impl<'a> Chain<'a> {
                     // A forced failure is a test of the fallback, not of the provider.
                     let mut skip = Skip::Failed;
                     if !forced {
-                        let next = next_state(state, &e);
+                        // An answer whose quotes did not anchor leaves the provider as an answer
+                        // does: no breaker count, only a rest the answer carried (#330).
+                        // ponytail: a model that never anchors costs ATTEMPTS calls a window
+                        // then; its budget's caps bound a paid one.
+                        let unanchored = refused == Some("unanchored");
+                        let next = if unanchored {
+                            skip = Skip::Refused;
+                            providers_db::State {
+                                down_until: e.cool_until.unwrap_or(0),
+                                ..Default::default()
+                            }
+                        } else {
+                            next_state(state, &e)
+                        };
                         // A failure that set a cooldown passes by itself (D11).
                         if next.down_until == providers_db::OWNER_HOLD {
                             skip = Skip::Owner;
@@ -3571,7 +3587,9 @@ mod tests {
                 assert!(detail.contains("expected value"), "{detail}");
                 assert!(!detail.contains("Sure"), "{detail}");
             }
-            // Alone, it is a provider that failed (D11 counts it).
+            // Alone, it is a provider that failed (D11 counts it); one whose answer only did not
+            // anchor answered, and is not counted toward its breaker (#330).
+            let before = crate::providers_db::state(&conn, "stub").unwrap().fails;
             let (url, _) = serve_once(content(answer).into_bytes(), "");
             let Err(err) = Chain::new(&[stub(url)], &conn).check(&check).run(
                 "curator",
@@ -3582,7 +3600,16 @@ mod tests {
                 panic!("{outcome}: refused answer accepted");
             };
             let ChainFailed(fallbacks) = err.downcast::<ChainFailed>().unwrap();
-            assert_eq!(fallbacks[0].skip, Skip::Failed, "{outcome}");
+            let fails = crate::providers_db::state(&conn, "stub").unwrap().fails;
+            if outcome == "unanchored" {
+                assert_eq!((&fallbacks[0].skip, fails), (&Skip::Refused, 0));
+            } else {
+                assert_eq!(
+                    (&fallbacks[0].skip, fails),
+                    (&Skip::Failed, before + 1),
+                    "{outcome}"
+                );
+            }
             // Each was a request sent: the daily budget counts it.
             let (sent, _) = crate::providers_db::calls_in_a_day(&conn, "stub").unwrap();
             assert_eq!(sent, 2, "{outcome}");

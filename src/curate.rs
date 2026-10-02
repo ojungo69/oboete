@@ -2532,7 +2532,9 @@ fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims:
 /// What a window every provider went past waits for, when it is tried again, and whether the
 /// attempt counts toward D11's three: only when no provider waits on time or a budget, and at
 /// least one was tried (or can never take it). One that waits only on the owner does not count,
-/// nor does a chain with no entry at all (an owner hold too: the owner configures one).
+/// nor does a chain with no entry at all (an owner hold too: the owner configures one). A window
+/// whose answers only failed to anchor is tried again at once: another answer may anchor, and
+/// waiting holds every later window of a chain with one entry (#330).
 pub(crate) fn hold(failed: &[Fallback], now: i64) -> (&'static str, i64, bool) {
     let timed = |budget: bool| {
         failed
@@ -2556,6 +2558,7 @@ pub(crate) fn hold(failed: &[Fallback], now: i64) -> (&'static str, i64, bool) {
         {
             ("time", now + RETRY_MS, true)
         }
+        (None, None) if failed.iter().any(|f| f.skip == Skip::Refused) => ("time", now, true),
         (None, None) => ("owner", now + OWNER_RETRY_MS, false),
     }
 }
@@ -4815,6 +4818,50 @@ mod tests {
         assert!(ws[0]["reason"].as_str().unwrap().contains("groq: HTTP 400"));
         assert_eq!(ws[1]["outcome"], "curated");
         assert_eq!(ws[1]["from_seq"], 2);
+    }
+
+    /// #330: a window whose answers only failed to anchor is tried again at once, as another
+    /// answer may anchor, each try counted: after three it is skipped and the next window goes on.
+    #[test]
+    fn an_unanchored_window_is_tried_again_at_once_and_skipped_after_three() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&prompt(&"a".repeat(40))).unwrap();
+        raw.append(&prompt(&"b".repeat(40))).unwrap();
+        let step = Cell::new(0);
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+            let i = step.get();
+            step.set(i + 1);
+            if i < 3 {
+                Err(went_past(&[("claude", "unanchored", Skip::Refused)]))
+            } else {
+                Ok(answered("claude"))
+            }
+        };
+        let (rules, summary) = (Rules::default(), curating(30));
+        for attempts in 1..3 {
+            let before = crate::db::now_ms();
+            let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut chain).unwrap();
+            let p = providers_db::pending_of(&db, raw.device())
+                .unwrap()
+                .unwrap();
+            assert_eq!((p.hold.as_str(), p.attempts), ("time", attempts));
+            assert!((before..=crate::db::now_ms()).contains(&p.next_attempt_at));
+            assert!(
+                matches!(phase, Phase::Waiting { up: true, .. }),
+                "{phase:?}"
+            );
+        }
+        for _ in 0..2 {
+            let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut chain).unwrap();
+            assert_eq!(phase, Phase::Covered);
+        }
+        let ws = windows(&raw);
+        assert_eq!(
+            (&ws[0]["outcome"], &ws[1]["outcome"]),
+            (&json!("skipped"), &json!("curated"))
+        );
+        assert_eq!(step.get(), 4);
     }
 
     /// Task 5: a pending row counts only while raw's next window still starts where it does. A
