@@ -1,0 +1,26 @@
+src/consumer/manifest.rs
+  s_17c3dc80287a78::t_8a10230f76d4fe 1573-1611
+  s_17c3dc80287a78::t_77b366db400d09 1612
+src/redact.rs
+  s_17c3dc80287a78::t_ce126e4bf2336d 493-494,499,523-524,528,530-532,535-536,557,1175-1176
+  s_17c3dc80287a78::t_8a10230f76d4fe 2114-2130,2132-2134,2136-2143
+  s_17c3dc80287a78::t_eaf67ac9f46a7f 2131,2135
+  s_17c3dc80287a78::t_dfd0f6e1fdedcf 520-522,1177-1185
+  s_17c3dc80287a78::t_6b49f5c581c270 525-527,529,533-534,537-556,558
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "699242e92dcbd38e760c0747f8b0c5224410563e",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
