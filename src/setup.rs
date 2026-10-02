@@ -170,10 +170,10 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         ));
     };
     let cmd = HookCommand::current(home)?;
-    let failed = wire_each(&agents, |a| wire(a, &cmd, remove));
-    if !remove {
+    let (wired, failed) = wire_each(&agents, |a| wire(a, &cmd, remove));
+    if !remove && !wired.is_empty() {
         println!("Hook files are read when an agent starts: restart running sessions.");
-        for a in agents.iter().filter(|a| !failed.contains(a)) {
+        for a in wired {
             println!("{}", status_line(a));
         }
     }
@@ -187,27 +187,35 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
 }
 
 /// Each agent in turn, whatever another's failure: one unreadable settings file must not leave
-/// the other agents unwired. Returns the agents that failed, each named with its error.
-fn wire_each<'a>(agents: &[&'a str], mut wire: impl FnMut(&str) -> Result<()>) -> Vec<&'a str> {
+/// the other agents unwired. Returns successful and failed agents; skipped agents have no status line.
+fn wire_each<'a>(
+    agents: &[&'a str],
+    mut wire: impl FnMut(&str) -> Result<bool>,
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let mut wired = Vec::new();
     let mut failed = Vec::new();
     for &a in agents {
-        if let Err(e) = wire(a) {
-            println!("{a}: failed: {e:#}");
-            failed.push(a);
+        match wire(a) {
+            Ok(true) => wired.push(a),
+            Ok(false) => {}
+            Err(e) => {
+                println!("{a}: failed: {e:#}");
+                failed.push(a);
+            }
         }
     }
-    failed
+    (wired, failed)
 }
 
 /// One agent: its hooks (plugin, extension) and MCP entry, with a line on what changed.
-fn wire(a: &str, cmd: &HookCommand, remove: bool) -> Result<()> {
+fn wire(a: &str, cmd: &HookCommand, remove: bool) -> Result<bool> {
     let files = match a {
         "claude" => claude(cmd, remove)?,
         "codex" => codex(cmd, remove)?,
         "grok" => grok(cmd, remove)?,
         "agy" if !agy_available(&agy_dir(), on_path("agy")) => {
             println!("agy: skipped (`~/.gemini` and `agy` on PATH are absent)");
-            return Ok(());
+            return Ok(false);
         }
         "agy" => agy_files(&agy_dir(), cmd, remove, cfg!(windows))?,
         "opencode" => {
@@ -215,23 +223,23 @@ fn wire(a: &str, cmd: &HookCommand, remove: bool) -> Result<()> {
             // npm installs a .cmd launcher on Windows before a config directory exists.
             if !dir.is_dir() && !on_path("opencode") {
                 println!("opencode: skipped (config directory and `opencode` on PATH are absent)");
-                return Ok(());
+                return Ok(false);
             }
             let (plugin, mcp) = opencode_files(&dir, cmd, remove)?;
             println!("opencode: plugin {plugin}");
             println!("opencode: mcp server {mcp}");
-            return Ok(());
+            return Ok(true);
         }
         "pi" if !pi_dir().is_dir() && !on_path("pi") => {
             println!("pi: skipped (agent directory and `pi` on PATH are absent)");
-            return Ok(());
+            return Ok(false);
         }
         "pi" => pi_files(&pi_dir(), cmd, remove)?,
         "cursor" if !cursor_available(&cursor_dir(), on_path("cursor-agent"), on_path("agent")) => {
             println!(
                 "cursor: skipped (config directory and cursor-agent/agent on PATH are absent)"
             );
-            return Ok(());
+            return Ok(false);
         }
         "cursor" => cursor_files(&cursor_dir(), cmd, remove, cfg!(windows))?,
         _ => unreachable!(),
@@ -258,7 +266,7 @@ fn wire(a: &str, cmd: &HookCommand, remove: bool) -> Result<()> {
             "written with hooks above"
         })
         .to_string(),
-        "pi" => return Ok(()), // Pi uses the extension's native CLI tools, not MCP.
+        "pi" => return Ok(true), // Pi uses the extension's native CLI tools, not MCP.
         "cursor" => "handled with hooks above".to_string(),
         _ => unreachable!(),
     };
@@ -268,7 +276,7 @@ fn wire(a: &str, cmd: &HookCommand, remove: bool) -> Result<()> {
             "cursor: approve MCP once per project with `agent mcp enable oboete`, or use `--approve-mcps` with `-p`"
         );
     }
-    Ok(())
+    Ok(true)
 }
 
 /// The command line every hook entry runs: this binary's absolute path plus `hook <agent> <event>`;
@@ -2170,15 +2178,19 @@ mod tests {
     #[test]
     fn one_agent_that_fails_leaves_the_others_wired() {
         let mut wired = Vec::new();
-        let failed = wire_each(&["claude", "codex", "grok"], |a| {
+        let (reported, failed) = wire_each(&["claude", "codex", "grok", "pi"], |a| {
             if a == "claude" {
                 return Err(anyhow!("settings.json is not JSON"));
             }
+            if a == "pi" {
+                return Ok(false);
+            }
             wired.push(a.to_owned());
-            Ok(())
+            Ok(true)
         });
         assert_eq!(failed, ["claude"]);
         assert_eq!(wired, ["codex", "grok"]);
+        assert_eq!(reported, ["codex", "grok"]);
     }
 
     #[test]

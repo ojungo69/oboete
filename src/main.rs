@@ -141,7 +141,7 @@ enum Cmd {
         prompt: bool,
         #[arg(long, requires = "prompt")]
         repo: Option<String>,
-        /// The share a claim's body must hold (default 0.5)
+        /// The share a claim's body must hold (default 0.53)
         #[arg(long, requires = "prompt")]
         threshold: Option<f64>,
     },
