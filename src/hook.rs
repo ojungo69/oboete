@@ -959,6 +959,13 @@ struct Named {
     entry: Option<Option<Value>>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A worker commit between a correction's mute and delivery checks.
+    static BETWEEN_CORRECTION_READS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Spec 4.8 and A102: each claim the session was shown that changed since, once: by id, date,
 /// kind and first words (gated), and what changed: retracted, done, ended by a later claim (named
 /// first), no longer delivered, or its body corrected. One an owner's change the worker has not
@@ -976,6 +983,8 @@ fn corrections(
     if !crate::consumer::manifest::exists(k, "view", "active")? {
         return Ok(Vec::new());
     }
+    // A mute and the text it hides must come from the same snapshot.
+    let _snapshot = k.unchecked_transaction()?;
     let pending = claims::Pending::read(raw, k)?;
     let decided = format!(
         "SELECT 1 FROM active a WHERE a.uid = ?1 AND {}",
@@ -1007,6 +1016,23 @@ fn corrections(
                         "- {}: withdrawn by an owner's change not applied yet",
                         id(uid)
                     ))],
+                    entry: Some(Some(entry)),
+                });
+            }
+            continue;
+        }
+        let muted = claims::muted(k, uid)?;
+        #[cfg(test)]
+        if let Some(between) = BETWEEN_CORRECTION_READS.take() {
+            between();
+        }
+        if muted {
+            if !withdrawn {
+                let mut entry = entry.clone();
+                entry["withdrawn"] = json!(true);
+                named.push(Named {
+                    uid: uid.clone(),
+                    lines: vec![plain(&format!("- {}: muted by the owner", id(uid)))],
                     entry: Some(Some(entry)),
                 });
             }
@@ -1070,7 +1096,7 @@ fn corrections(
             {
                 // A later claim an owner's change the worker has not applied touches is named by
                 // id alone, as a withdrawn one is (D3).
-                Some(l) if pending.touches(k, &l.uid)? => {
+                Some(l) if pending.touches(k, &l.uid)? || claims::muted(k, &l.uid)? => {
                     gone(vec![line(&c, &format!("was ended by {}", id(&l.uid)))])
                 }
                 Some(l) => gone(vec![
@@ -2136,6 +2162,95 @@ mod tests {
                 .run(&raw, &mut k, None, crate::db::now_ms())
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn muted_claims_are_absent_from_session_start_and_plain_injection() {
+        let mut p = Prompts::new(false);
+        let uid = p.decided(1, "Parser noise goes to stderr.", &[]);
+        p.s.run();
+        let pref = crate::claims::pref_add(p.s.home.path(), "Global silence holds.").unwrap();
+        let initial = inject_text(p.s.home.path(), Path::new(&p.c), None);
+        assert!(initial.contains("Parser noise goes to stderr."));
+        assert!(initial.contains("Global silence holds."));
+        for (muted, injected) in [(true, false), (false, true)] {
+            crate::claims::mute(p.s.home.path(), &uid, muted).unwrap();
+            crate::claims::mute(p.s.home.path(), &pref, muted).unwrap();
+            let start = p.hook(
+                "SessionStart",
+                if muted { "muted" } else { "unmuted" },
+                json!({}),
+            );
+            let plain = inject_text(p.s.home.path(), Path::new(&p.c), None);
+            let packet = inject_json(p.s.home.path(), Path::new(&p.c), Some("opencode-mute"));
+            for text in [start, plain, packet.to_string()] {
+                assert_eq!(
+                    text.contains("Parser noise goes to stderr."),
+                    injected,
+                    "{text}"
+                );
+                assert_eq!(text.contains("Global silence holds."), injected, "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn prompt_corrections_never_quote_muted_claims_and_unmute_delivers_again() {
+        let mut p = Prompts::new(true);
+        let uid = p.decided(1, "Noisy parser.", &[]);
+        p.s.run();
+        assert!(
+            p.hook("SessionStart", "live", json!({}))
+                .contains("Noisy parser.")
+        );
+        p.s.run();
+        p.shortlists();
+        crate::claims::mute(p.s.home.path(), &uid, true).unwrap();
+        crate::claims::correct(p.s.home.path(), &uid, None, Some("Noisy lexer.")).unwrap();
+        let muted = p.prompt("live", "Work on parsing.");
+        assert!(!muted.contains("Noisy parser."), "{muted}");
+        assert!(!muted.contains("Noisy lexer."), "{muted}");
+        assert!(muted.contains(&format!("- {}: muted by the owner", &uid[..12])));
+        let again = p.prompt("live", "Continue parsing.");
+        assert!(!again.contains("Noisy lexer."));
+        crate::claims::mute(p.s.home.path(), &uid, false).unwrap();
+        let unmuted = p.prompt("live", "Continue parsing.");
+        assert!(unmuted.contains("Noisy lexer."), "{unmuted}");
+        assert!(unmuted.contains("is delivered again"));
+        let seq = p.s.said("s", &p.repo, 2 * 86_400_000, "A quieter parser.");
+        let later = p.s.claim(
+            seq,
+            "A quieter parser.",
+            ("decision", "proposed", "assistant proposal"),
+            &[&uid],
+        );
+        p.s.run();
+        crate::claims::mute(p.s.home.path(), &later, true).unwrap();
+        let ended = p.prompt("live", "Continue parsing.");
+        assert!(!ended.contains("A quieter parser."), "{ended}");
+        assert!(ended.contains(&format!("was ended by {}", &later[..12])));
+    }
+
+    #[test]
+    fn a_mute_committed_between_correction_reads_never_quotes_the_muted_body() {
+        let mut p = Prompts::new(false);
+        let uid = p.decided(1, "Noisy parser.", &[]);
+        p.s.run();
+        assert!(
+            p.hook("SessionStart", "live", json!({}))
+                .contains("Noisy parser.")
+        );
+        let home = p.s.home.path().to_owned();
+        let muted_uid = uid.clone();
+        BETWEEN_CORRECTION_READS.set(Some(Box::new(move || {
+            crate::claims::mute(&home, &muted_uid, true).unwrap();
+        })));
+        let text = p.prompt("live", "Continue parsing.");
+        assert!(BETWEEN_CORRECTION_READS.take().is_none());
+        assert_eq!(text, "");
+        let next = p.prompt("live", "Continue parsing.");
+        assert!(!next.contains("Noisy parser."), "{next}");
+        assert!(next.contains(&format!("- {}: muted by the owner", &uid[..12])));
     }
 
     /// #320: only the owner's requested or accepted open items are delivered. In particular,

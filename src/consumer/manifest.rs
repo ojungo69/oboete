@@ -386,7 +386,7 @@ fn with_delivered(
         (Vec::new(), Vec::new(), Vec::new());
     if exists(k, "view", "active")? {
         let pending = claims::Pending::read(raw, k)?;
-        let hidden = |uid: &str| pending.touches(k, uid);
+        let hidden = |uid: &str| Ok(pending.touches(k, uid)? || claims::muted(k, uid)?);
         let mut prefs = Vec::new();
         for c in claims::global(k)? {
             if !hidden(&c.uid)? {
@@ -2078,6 +2078,7 @@ extra_rules = [
             },
             status: None,
             body: Some("Spaces, four of them.".into()),
+            muted: None,
         };
         let correction = serde_json::to_value(correction).unwrap();
         store

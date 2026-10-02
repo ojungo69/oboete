@@ -36,6 +36,7 @@ impl Consumer for Claims {
 
     fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64> {
         schema(k)?;
+        retry(raw, k)?;
         let ops = whole_batches(raw, device, after)?;
         let Some(last) = ops.last().map(|o| o.op_seq) else {
             return Ok(after);
@@ -186,10 +187,25 @@ fn correction(k: &Connection, op: &Op) -> Result<Option<String>> {
         Ok(c) => match c.fault() {
             None => {
                 k.execute(
-                    "INSERT INTO corrections(op_device, op_seq, ts, uid, status, body)
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![op.device, op.op_seq, op.ts, c.uid, c.status, c.body],
+                    "INSERT INTO corrections(op_device, op_seq, ts, uid, status, body, muted)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        op.device, op.op_seq, op.ts, c.uid, c.status, c.body, c.muted
+                    ],
                 )?;
+                // Unmute is visible even when a shortlist was built while the claim was muted.
+                if c.muted.is_some() && crate::consumer::manifest::exists(k, "table", "shortlists")?
+                {
+                    for table in ["shortlist", "shortlists"] {
+                        k.execute(
+                            &format!(
+                                "DELETE FROM {table} WHERE repo IN
+                               (SELECT repo FROM active WHERE uid = ?1)"
+                            ),
+                            [&c.uid],
+                        )?;
+                    }
+                }
                 return Ok(Some(c.uid));
             }
             Some(why) => why,
@@ -201,6 +217,39 @@ fn correction(k: &Connection, op: &Op) -> Result<Option<String>> {
         params![op.device, op.op_seq, fault],
     )?;
     Ok(None)
+}
+
+/// The corrections a consumer passed without keeping them, read again at each step (one query
+/// when there is none). A worker of an older oboete passes one it does not understand (a mute,
+/// to a consumer that knew none) and moves its checkpoint beyond it: the first step of a consumer
+/// that understands it keeps it, with no rewind. One that corrects nothing is only read.
+fn retry(raw: &Raw, k: &Connection) -> Result<()> {
+    let passed: Vec<(String, i64)> = k
+        .prepare(
+            "SELECT op_device, op_seq FROM claim_skips
+             WHERE reason IN ('corrects nothing', 'not a correction')",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (device, seq) in passed {
+        let op = raw.ops_after(&device, seq - 1, 1)?.into_iter().next();
+        let Some(op) = op.filter(|o| o.op_seq == seq && o.kind == OpKind::Correction) else {
+            continue;
+        };
+        let kept = serde_json::from_value::<CorrectionOp>(op.body.clone())
+            .is_ok_and(|c| c.fault().is_none());
+        if !kept {
+            continue;
+        }
+        if let Some(uid) = correction(k, &op)? {
+            k.execute(
+                "DELETE FROM claim_skips WHERE op_device = ?1 AND op_seq = ?2",
+                params![device, seq],
+            )?;
+            activate(k, &uid)?;
+        }
+    }
+    Ok(())
 }
 
 fn is_uid(s: &str) -> bool {
@@ -916,6 +965,253 @@ mod tests {
         assert!(!home.path().join("providers.db").exists());
     }
 
+    #[test]
+    fn the_newest_mute_wins_by_time_device_and_sequence() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let text = "Ship on Fridays.";
+        let seq = raw.append(&event(text, 5)).unwrap();
+        let dev = raw.device().to_owned();
+        let ship = claim("c", "decision", text, vec![quote(&dev, seq, text, text, 0)]);
+        let uid = crate::claims::uid("decision", &ship.evidence[0]);
+        raw.append_ops(&[op(&ship)]).unwrap();
+        let mute = |muted| {
+            (
+                OpKind::Correction,
+                json!({
+                    "uid": uid, "anchor": {"device": dev, "seq": seq}, "muted": muted
+                }),
+            )
+        };
+        let mut z = as_device(home.path(), "dev-z");
+        z.append_ops(&[mute(true)]).unwrap();
+        let mut a = as_device(home.path(), "dev-a");
+        a.append_ops(&[mute(false), mute(false), mute(false)])
+            .unwrap();
+        let clock = Connection::open(home.path().join("raw.db")).unwrap();
+        clock
+            .execute("UPDATE ops SET ts = 20 WHERE type = 'correction'", [])
+            .unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        let state = |k: &Connection| {
+            k.query_row(
+                "SELECT muted, status, body FROM active WHERE uid = ?1",
+                [&uid],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(state(&k), (1, "decided".into(), "Ship on Fridays.".into()));
+        z.append_ops(&[mute(false)]).unwrap();
+        clock
+            .execute("UPDATE ops SET ts = 20 WHERE type = 'correction'", [])
+            .unwrap();
+        run(&raw, &mut k);
+        assert_eq!(state(&k), (0, "decided".into(), "Ship on Fridays.".into()));
+        z.append_ops(&[mute(true)]).unwrap();
+        clock
+            .execute(
+                "UPDATE ops SET ts = 19 WHERE device = 'dev-z' AND op_seq = 3",
+                [],
+            )
+            .unwrap();
+        run(&raw, &mut k);
+        assert_eq!(state(&k), (0, "decided".into(), "Ship on Fridays.".into()));
+    }
+
+    /// A worker of an older oboete can still hold the lock while a newer command mutes: it knows
+    /// no `muted`, passes the op as one that corrects nothing and moves its checkpoint beyond it.
+    /// The next run of this consumer keeps it, with no rewind (Codex on #358).
+    #[test]
+    fn a_correction_an_older_consumer_passed_is_kept_by_the_next_run() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let text = "Ship on Fridays.";
+        let seq = raw.append(&event(text, 5)).unwrap();
+        let dev = raw.device().to_owned();
+        let ship = claim("c", "decision", text, vec![quote(&dev, seq, text, text, 0)]);
+        let uid = crate::claims::uid("decision", &ship.evidence[0]);
+        raw.append_ops(&[op(&ship)]).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        // What the older consumer left of a mute, and of an op that does correct nothing.
+        let correction = |body: serde_json::Value| (OpKind::Correction, body);
+        let anchor = json!({"device": dev, "seq": seq});
+        let passed = raw
+            .append_ops(&[
+                correction(json!({"uid": uid, "anchor": anchor, "muted": true})),
+                correction(json!({"uid": uid, "anchor": anchor})),
+            ])
+            .unwrap();
+        for at in &passed {
+            k.execute(
+                "INSERT INTO claim_skips(op_device, op_seq, reason)
+                 VALUES(?1, ?2, 'corrects nothing')",
+                params![dev, at],
+            )
+            .unwrap();
+        }
+        use crate::knowledge::checkpoint;
+        checkpoint::set_in(&k, checkpoint::OPS, "claims", &dev, passed[1]).unwrap();
+        run(&raw, &mut k);
+        let muted: bool = k
+            .query_row("SELECT muted FROM active WHERE uid = ?1", [&uid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(muted, "the mute an older consumer passed was not kept");
+        let skipped: Vec<i64> = k
+            .prepare("SELECT op_seq FROM claim_skips ORDER BY op_seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            skipped,
+            [passed[1]],
+            "only the empty correction stays skipped"
+        );
+    }
+
+    #[test]
+    fn an_old_corrections_table_and_active_view_are_upgraded() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("r", 5, "Ship on Fridays.", &[]);
+        s.run();
+        s.correct(&uid, Some("done"), Some("Ship only on Fridays."));
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        k.execute_batch(
+            "DROP VIEW active;
+             ALTER TABLE corrections RENAME TO corrections_new;
+             CREATE TABLE corrections(
+               op_device TEXT NOT NULL, op_seq INTEGER NOT NULL, ts INTEGER NOT NULL,
+               uid TEXT NOT NULL, status TEXT, body TEXT, PRIMARY KEY (op_device, op_seq));
+             INSERT INTO corrections SELECT op_device, op_seq, ts, uid, status, body
+               FROM corrections_new;
+             DROP TABLE corrections_new;
+             CREATE VIEW active AS
+               SELECT c.uid, d.kind, d.speaker, d.scope, d.repo, d.valid_from,
+                 d.anchor_device, d.anchor_seq,
+                 COALESCE((SELECT x.status FROM corrections x WHERE x.uid = c.uid
+                           AND x.status IS NOT NULL
+                           ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1),
+                          d.status) AS status,
+                 COALESCE((SELECT x.body FROM corrections x WHERE x.uid = c.uid
+                           AND x.body IS NOT NULL
+                           ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1),
+                          d.body) AS body
+               FROM claims c JOIN derivations d
+                 ON d.op_device = c.op_device AND d.op_seq = c.op_seq;",
+        )
+        .unwrap();
+        crate::claims::correct(s.home.path(), &uid, None, Some("Ship every Friday.")).unwrap();
+        let state = k
+            .query_row(
+                "SELECT muted, status, body FROM active WHERE uid = ?1",
+                [&uid],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(state, (0, "done".into(), "Ship every Friday.".into()));
+        s.raw
+            .append_ops(&[(
+                OpKind::Correction,
+                json!({
+                    "uid": uid, "anchor": {"device": s.raw.device(), "seq": 1}, "muted": true
+                }),
+            )])
+            .unwrap();
+        s.run();
+        assert_eq!(
+            k.query_row("SELECT muted FROM active WHERE uid = ?1", [&uid], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn mute_survives_recuration_rebuild_and_other_owner_corrections() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let text = "Ship on Fridays.";
+        let seq = raw.append(&event(text, 5)).unwrap();
+        let dev = raw.device().to_owned();
+        let ship = claim("c", "decision", text, vec![quote(&dev, seq, text, text, 0)]);
+        raw.append_ops(&[op(&ship)]).unwrap();
+        crate::worker::run_once(home.path()).unwrap();
+        let uid = crate::claims::uid("decision", &ship.evidence[0]);
+        let state = || {
+            let k = crate::knowledge::open(home.path()).unwrap();
+            k.query_row(
+                "SELECT muted, status, body FROM active WHERE uid = ?1",
+                [&uid],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+        };
+        for _ in 0..2 {
+            crate::claims::mute(home.path(), &uid, true).unwrap();
+            assert_eq!(state(), (1, "decided".into(), "Ship on Fridays.".into()));
+        }
+        let before = raw.max_op_seq().unwrap();
+        let err = crate::claims::mute(home.path(), &"0".repeat(64), true).unwrap_err();
+        assert!(err.to_string().starts_with("no claim has the uid "));
+        assert_eq!(raw.max_op_seq().unwrap(), before);
+        let again = claim(
+            "c",
+            "decision",
+            "Ship every Friday.",
+            vec![quote(&dev, seq, text, "on Fridays", 0)],
+        );
+        raw.append_ops(&[
+            (
+                OpKind::Window,
+                json!({
+                    "from_seq": seq, "to_seq": seq, "recurate": true, "outcome": "curated"
+                }),
+            ),
+            op(&again),
+        ])
+        .unwrap();
+        crate::worker::run_once(home.path()).unwrap();
+        assert_eq!(state(), (1, "decided".into(), "Ship every Friday.".into()));
+        crate::claims::correct(home.path(), &uid, Some("proposed"), None).unwrap();
+        crate::claims::correct(home.path(), &uid, None, Some("Ship when ready.")).unwrap();
+        assert_eq!(state(), (1, "proposed".into(), "Ship when ready.".into()));
+        drop(raw);
+        crate::worker::rebuild(home.path()).unwrap();
+        assert_eq!(state(), (1, "proposed".into(), "Ship when ready.".into()));
+        for _ in 0..2 {
+            crate::claims::mute(home.path(), &uid, false).unwrap();
+            assert_eq!(state(), (0, "proposed".into(), "Ship when ready.".into()));
+        }
+        crate::worker::rebuild(home.path()).unwrap();
+        assert_eq!(state(), (0, "proposed".into(), "Ship when ready.".into()));
+        assert!(!home.path().join("providers.db").exists());
+    }
+
     /// A correction's body is stored as a typed prompt is: a private block never reaches raw.db.
     #[test]
     fn a_private_block_in_a_correction_is_never_stored() {
@@ -963,6 +1259,7 @@ mod tests {
                 },
                 status: status.map(str::to_owned),
                 body: None,
+                muted: None,
             };
             (OpKind::Correction, serde_json::to_value(op).unwrap())
         };

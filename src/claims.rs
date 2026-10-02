@@ -105,6 +105,20 @@ const RECURATE: &str = "CREATE TABLE IF NOT EXISTS recurate(
   PRIMARY KEY (op_device, op_seq, from_seq)
 )";
 
+/// Each field uses the newest correction that sets it, over the active derivation.
+const ACTIVE: &str = "CREATE VIEW active AS
+  SELECT c.uid, d.kind, d.speaker, d.scope, d.repo, d.valid_from, d.anchor_device, d.anchor_seq,
+    COALESCE((SELECT x.status FROM corrections x WHERE x.uid = c.uid
+              AND x.status IS NOT NULL
+              ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1), d.status) AS status,
+    COALESCE((SELECT x.body FROM corrections x WHERE x.uid = c.uid
+              AND x.body IS NOT NULL
+              ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1), d.body) AS body,
+    COALESCE((SELECT x.muted FROM corrections x WHERE x.uid = c.uid
+              AND x.muted IS NOT NULL
+              ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1), 0) AS muted
+  FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq";
+
 /// Runs `change` when `needed` says so, asked again under the write lock: a worker and a command
 /// can open the same older knowledge.db at once, and the second to change it would fail or
 /// change it twice (#213). The read first keeps a current file free of the lock; a step's
@@ -184,23 +198,10 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
          -- re-derivation and rebuild. One for a uid with no claim yet waits for it.
          CREATE TABLE IF NOT EXISTS corrections(
            op_device TEXT NOT NULL, op_seq INTEGER NOT NULL, ts INTEGER NOT NULL,
-           uid TEXT NOT NULL, status TEXT, body TEXT,
+           uid TEXT NOT NULL, status TEXT, body TEXT, muted INTEGER,
            PRIMARY KEY (op_device, op_seq)
          );
          CREATE INDEX IF NOT EXISTS corrections_uid ON corrections(uid, ts);
-         -- Each claim as it is now: its active derivation with the owner's corrections over it.
-         CREATE VIEW IF NOT EXISTS active AS
-           SELECT c.uid, d.kind, d.speaker, d.scope, d.repo, d.valid_from, d.anchor_device,
-             d.anchor_seq,
-             COALESCE((SELECT x.status FROM corrections x WHERE x.uid = c.uid
-                       AND x.status IS NOT NULL
-                       ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1),
-                      d.status) AS status,
-             COALESCE((SELECT x.body FROM corrections x WHERE x.uid = c.uid
-                       AND x.body IS NOT NULL
-                       ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1),
-                      d.body) AS body
-           FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq;
          -- Claim ops that gave no claim, and why: doctor counts them.
          CREATE TABLE IF NOT EXISTS claim_skips(
            op_device TEXT NOT NULL, op_seq INTEGER NOT NULL, reason TEXT NOT NULL,
@@ -212,11 +213,22 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
         k,
         "SELECT count(*) = 0 FROM pragma_table_info('evidence') WHERE name = 'claim_at'",
         "ALTER TABLE evidence ADD COLUMN claim_at INTEGER",
+    )?;
+    migrate(
+        k,
+        "SELECT count(*) = 0 FROM pragma_table_info('corrections') WHERE name = 'muted'",
+        "ALTER TABLE corrections ADD COLUMN muted INTEGER",
+    )?;
+    // CREATE VIEW IF NOT EXISTS would leave an older view in place.
+    migrate(
+        k,
+        "SELECT count(*) = 0 FROM pragma_table_info('active') WHERE name = 'muted'",
+        &format!("DROP VIEW IF EXISTS active; {ACTIVE}"),
     )
 }
 
 /// The body of a correction op, which `oboete correct` writes (spec 3.4, MUST-M21): the owner's
-/// status or body for a claim, by uid and by the raw record the claim anchors on.
+/// status, body or mute for a claim, by uid and by the raw record the claim anchors on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CorrectionOp {
     pub uid: String,
@@ -225,6 +237,8 @@ pub struct CorrectionOp {
     pub status: Option<String>,
     #[serde(default)]
     pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<bool>,
 }
 
 /// A raw record: a claim's first quote's event.
@@ -244,7 +258,7 @@ impl CorrectionOp {
         if !uid {
             return Some("not a claim uid");
         }
-        if self.status.is_none() && self.body.is_none() {
+        if self.status.is_none() && self.body.is_none() && self.muted.is_none() {
             return Some("corrects nothing");
         }
         if self
@@ -270,6 +284,21 @@ pub fn correct(
     uid: &str,
     status: Option<&str>,
     body: Option<&str>,
+) -> Result<()> {
+    correction(home, uid, status, body, None)
+}
+
+/// Mute or unmute a claim without changing its status or body (spec 6.1).
+pub fn mute(home: &std::path::Path, uid: &str, muted: bool) -> Result<()> {
+    correction(home, uid, None, None, Some(muted))
+}
+
+fn correction(
+    home: &std::path::Path,
+    uid: &str,
+    status: Option<&str>,
+    body: Option<&str>,
+    muted: Option<bool>,
 ) -> Result<()> {
     use rusqlite::OptionalExtension;
     let rules = crate::capture::Settings::load(home)?.rules;
@@ -297,6 +326,7 @@ pub fn correct(
         // As a typed prompt is stored: private blocks out (an unclosed one hides the rest), then
         // the scanners.
         body: body.map(|b| crate::redact::scan(&crate::hook::strip_blocks(b, true), &rules).0),
+        muted,
     };
     if let Some(why) = op.fault() {
         anyhow::bail!("the correction is refused: {why}");
@@ -305,7 +335,20 @@ pub fn correct(
     let device = raw.device().to_owned();
     drop(raw);
     // A search or a SessionStart right after never shows the old claim.
-    applied(home, &k, &device, &seqs, "correction")
+    applied(home, &k, &device, &seqs, "correction")?;
+    // A worker of an older oboete that still held the lock passes a correction it does not
+    // understand; the next worker of this one keeps it (`consumer::claims::retry`).
+    let kept: bool = k.query_row(
+        "SELECT EXISTS(SELECT 1 FROM corrections WHERE op_device = ?1 AND op_seq = ?2)",
+        rusqlite::params![device, seqs.last()],
+        |r| r.get(0),
+    )?;
+    anyhow::ensure!(
+        kept,
+        "the correction is recorded; the worker running now is an older oboete and did not \
+         apply it: the next worker does"
+    );
+    Ok(())
 }
 
 /// The owner's ops `seqs`, applied before the command returns: by this process or by the worker
@@ -648,6 +691,15 @@ pub fn active_one(k: &Connection, uid: &str) -> Result<Option<Claim>> {
     .pop())
 }
 
+/// Whether the owner's newest mute correction hides this claim from injection.
+pub fn muted(k: &Connection, uid: &str) -> Result<bool> {
+    use rusqlite::OptionalExtension;
+    Ok(k.prepare_cached("SELECT muted FROM active WHERE uid = ?1")?
+        .query_row([uid], |r| r.get(0))
+        .optional()?
+        .unwrap_or(false))
+}
+
 /// The active claims `l` whose derivation links claim `a` (a row of the `active` view).
 const LINKERS: &str = "FROM edges e
            JOIN claims x ON x.op_device = e.op_device AND x.op_seq = e.op_seq
@@ -832,7 +884,7 @@ pub fn anchored_through(
     tips(
         k,
         &format!(
-            "{TIPS} AND a.status NOT IN ('proposed', 'unverified') AND {}
+            "{TIPS} AND a.muted = 0 AND a.status NOT IN ('proposed', 'unverified') AND {}
              AND a.anchor_device = ?2 AND a.anchor_seq <= ?3
              ORDER BY a.valid_from DESC, a.anchor_device DESC, a.anchor_seq DESC, a.uid DESC
              LIMIT ?4",
@@ -847,7 +899,7 @@ pub fn anchored_through(
 macro_rules! decided_where {
     () => {
         "a.kind IN ('decision', 'preference', 'open item', 'lesson')
-     AND a.status = 'decided'"
+     AND a.status = 'decided' AND a.muted = 0"
     };
 }
 
@@ -896,4 +948,30 @@ fn tips(k: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<Vec<
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn old_corrections_keep_their_shape_and_mute_alone_is_a_correction() {
+        let old = json!({
+            "uid": "a".repeat(64), "anchor": {"device": "d", "seq": 1},
+            "status": "decided", "body": null
+        });
+        let op: CorrectionOp = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(op.fault(), None);
+        assert_eq!(serde_json::to_value(op).unwrap(), old);
+        for muted in [true, false] {
+            let value = json!({
+                "uid": "a".repeat(64), "anchor": {"device": "d", "seq": 1},
+                "status": null, "body": null, "muted": muted
+            });
+            let op: CorrectionOp = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(op.fault(), None);
+            assert_eq!(serde_json::to_value(op).unwrap(), value);
+        }
+    }
 }

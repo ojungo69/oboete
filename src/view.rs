@@ -1062,6 +1062,25 @@ mod tests {
         s.run();
     }
 
+    #[test]
+    fn viewer_json_labels_muted_claims_in_search_and_details() {
+        let (s, v, x) = seeded();
+        for muted in [true, false] {
+            crate::claims::mute(s.home.path(), &x.current, muted).unwrap();
+            let claim = get(&v, &format!("/api/claim?id={}", x.current));
+            assert_eq!(claim["muted"], muted);
+            assert_eq!(claim["status"], "decided");
+            let found = get(&v, "/api/search?q=parser&raw=off");
+            let hit = found["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|h| h["key"] == x.current)
+                .unwrap();
+            assert_eq!(hit["muted"], muted);
+        }
+    }
+
     /// The stores alone, the fixture's own raw.db closed: a restore or a rebuild can swap them.
     fn closed(s: Store) -> tempfile::TempDir {
         let Store { home, raw } = s;

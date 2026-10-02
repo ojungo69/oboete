@@ -599,7 +599,7 @@ pub fn placed(
         return Ok(Vec::new());
     }
     let pending = claims::Pending::read(raw, k)?;
-    let hidden = |uid: &str| pending.touches(k, uid);
+    let hidden = |uid: &str| Ok(pending.touches(k, uid)? || claims::muted(k, uid)?);
     let decided = format!(
         "SELECT 1 FROM active a WHERE a.uid = ?1 AND {}",
         claims::DECIDED_WHERE
@@ -736,6 +736,89 @@ mod tests {
 
     fn key(session: &str, branch: &str) -> (String, String, String, String) {
         ("claude".into(), session.into(), R.into(), branch.into())
+    }
+
+    #[test]
+    fn a_cached_shortlist_filters_mute_and_restores_unmute() {
+        let mut s = Store::new();
+        let uid = s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        s.event(
+            "prompt",
+            "live",
+            (R, "main"),
+            NOW - MIN,
+            json!({"prompt": "Parser errors go to stderr."}),
+        );
+        s.run();
+        per_prompt(&s, true);
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        Builder::new(s.home.path())
+            .run(&s.raw, &mut k, None, NOW)
+            .unwrap();
+        let cached = of(&k, ("claude", "live", R, "main")).unwrap().unwrap();
+        assert_eq!(cached, std::slice::from_ref(&uid));
+        for (muted, bodies) in [(true, vec![]), (false, vec!["Parser errors go to stderr."])] {
+            crate::claims::mute(s.home.path(), &uid, muted).unwrap();
+            let picked = pick(
+                &s.raw,
+                &k,
+                &cached,
+                &["Parser errors go to stderr."],
+                THRESHOLD,
+            )
+            .unwrap();
+            let actual: Vec<&str> = picked.iter().flatten().map(|c| c.body.as_str()).collect();
+            assert_eq!(actual, bodies);
+            let printed = report(
+                s.home.path(),
+                R,
+                None,
+                "Parser errors go to stderr.",
+                THRESHOLD,
+            )
+            .unwrap();
+            assert_eq!(
+                printed,
+                if muted {
+                    String::new()
+                } else {
+                    format!("{uid} 1.000\n")
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn the_builder_leaves_muted_claims_out_and_unmute_refreshes_its_cache() {
+        let mut s = Store::new();
+        let uid = s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        s.event(
+            "prompt",
+            "live",
+            (R, "main"),
+            NOW - MIN,
+            json!({"prompt": "Parser errors go to stderr."}),
+        );
+        s.run();
+        per_prompt(&s, true);
+        crate::claims::mute(s.home.path(), &uid, true).unwrap();
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut builder = Builder::new(s.home.path());
+        assert_eq!(
+            builder.run(&s.raw, &mut k, None, NOW).unwrap(),
+            Phase::Covered
+        );
+        assert_eq!(of(&k, ("claude", "live", R, "main")).unwrap(), Some(vec![]));
+        crate::claims::mute(s.home.path(), &uid, false).unwrap();
+        assert_eq!(of(&k, ("claude", "live", R, "main")).unwrap(), None);
+        assert_eq!(
+            builder.run(&s.raw, &mut k, None, NOW).unwrap(),
+            Phase::Covered
+        );
+        assert_eq!(
+            of(&k, ("claude", "live", R, "main")).unwrap(),
+            Some(vec![uid])
+        );
     }
 
     /// D9, A100: only this device's sessions with an event in the 30 minutes before now and no
