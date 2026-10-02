@@ -1,0 +1,24 @@
+src/curate.rs
+  s_17c3dc80287a78::t_dcaf99ccfda6e3 1438-1440,1460
+  s_17c3dc80287a78::t_e8772104793f2c 4920-4966,4970
+  s_17c3dc80287a78::t_4182dd76284c29 4967-4969,4971-4982
+src/digest.rs
+  s_17c3dc80287a78::t_7fbc7c97b0c9da 888-913,916-922,933-943
+  s_17c3dc80287a78::t_aee44914a2b441 257-259,276,914-915,923-932
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "15dd14897d1b861393ebc1516fcab4a1f74cacea",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
