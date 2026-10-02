@@ -80,7 +80,7 @@ export default {
       sessions.set(id, state);
       if (!state.started) {
         state.started = true;
-        send("SessionStart", { session_id: id, cwd: state.dir, source: "startup" });
+        void send("SessionStart", { session_id: id, cwd: state.dir, source: "startup" });
       }
       return state;
     }
@@ -90,7 +90,7 @@ export default {
     ctx.tool.hook("execute.after", (e) => {
       const state = session(e.sessionID, ctx.location);
       if (!state || !["completed", "error"].includes(e.status)) return;
-      send(e.status === "error" ? "PostToolUseFailure" : "PostToolUse", {
+      void send(e.status === "error" ? "PostToolUseFailure" : "PostToolUse", {
         session_id: e.sessionID,
         cwd: state.dir,
         tool_name: e.tool,
@@ -149,13 +149,13 @@ export default {
           case "session.execution.succeeded":
           case "session.execution.failed":
           case "session.execution.interrupted":
-            send("Stop", { ...payload, last_assistant_message: state.parts.filter(Boolean).join("\n") });
+            void send("Stop", { ...payload, last_assistant_message: state.parts.filter(Boolean).join("\n") });
             state.message = null;
             state.parts = [];
             state.turn = null;
             break;
           case "session.compaction.ended":
-            send("PostCompact", { ...payload, compact_summary: data.text });
+            void send("PostCompact", { ...payload, compact_summary: data.text });
             // The summary replaced what the manifest put in: the next call reads it again.
             state.context = undefined;
             break;

@@ -1963,7 +1963,7 @@ mod tests {
         )
         .unwrap();
         let parser = format!("{parser} ");
-        assert!(named.lines().any(|l| l.starts_with(&parser)), "{named}");
+        assert!(named.lines().any(|l| l.starts_with(&parser)));
     }
 
     /// Spec 6.4: a field mask must not remove the context of a rule on the formatted prompt line

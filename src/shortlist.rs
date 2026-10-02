@@ -1926,14 +1926,10 @@ mod tests {
                 .collect()
         };
         let picked = uids(pick(&s.raw, &k, &all, &prompt, THRESHOLD).unwrap());
-        assert_eq!(picked, [vec![stderr.clone(), stdout.clone()]], "{picked:?}");
+        assert!(picked == [vec![stderr.clone(), stdout.clone()]]);
         // At 0 every delivered one passes: the pair and one more fill the 3 places.
         let picked = uids(pick(&s.raw, &k, &all, &prompt, 0.0).unwrap());
-        assert_eq!(
-            picked,
-            [vec![lexer.clone()], vec![stderr.clone(), stdout.clone()]],
-            "{picked:?}"
-        );
+        assert!(picked == [vec![lexer.clone()], vec![stderr.clone(), stdout.clone()]]);
         assert!(
             pick(&s.raw, &k, &all, &["zzz qqq"], THRESHOLD)
                 .unwrap()
@@ -1941,7 +1937,7 @@ mod tests {
         );
         // A short text counts as `MIN_GRAMS` trigrams: three held tell no topic.
         let short = pick(&s.raw, &k, &all, &["Lexer"], THRESHOLD).unwrap();
-        assert!(short.is_empty(), "{:?}", uids(short));
+        assert!(short.is_empty());
         let whole = pick(&s.raw, &k, &all, &["Lexer tokens are cached"], THRESHOLD).unwrap();
         assert_eq!(uids(whole), [vec![lexer.clone()]]);
         // The CLI prints each one's share, from every delivered claim of the repository.
@@ -1954,7 +1950,7 @@ mod tests {
         )
         .unwrap();
         let lines: Vec<&str> = printed.lines().collect();
-        assert_eq!(lines.len(), 2, "{printed}");
-        assert!(lines[1].starts_with(&format!("{stdout} 0.")), "{printed}");
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].starts_with(&format!("{stdout} 0.")));
     }
 }
