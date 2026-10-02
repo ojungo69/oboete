@@ -1,7 +1,7 @@
 //! Milestone 5's first vertical: durable refusal to return or import a forgotten raw record.
 //! Every store, transcript and child configuration lives in a synthetic temporary home.
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -165,6 +165,72 @@ fn losing_the_control_files_never_looks_like_an_empty_history() {
     let get = run(home, &["get", &id], "");
     assert!(!get.status.success());
     assert!(!String::from_utf8_lossy(&get.stdout).contains(CANARY));
+    let raw = std::fs::read(home.join("raw.db")).unwrap();
+    let knowledge = std::fs::read(home.join("knowledge.db")).unwrap();
+    let restored = run(home, &["restore"], "");
+    assert!(
+        !restored.status.success(),
+        "restore discarded the existing raw store's deletion authority: {}",
+        String::from_utf8_lossy(&restored.stdout)
+    );
+    assert_eq!(std::fs::read(home.join("raw.db")).unwrap(), raw);
+    assert_eq!(std::fs::read(home.join("knowledge.db")).unwrap(), knowledge);
+    assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
+}
+
+#[test]
+fn a_restored_seq_reused_for_another_record_invalidates_the_preview() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let first = record(home, "backup-seed-agate-423");
+    let id = format!("{}:2", first.split_once(':').unwrap().0);
+    let source = home.join("native-source.db");
+    let db = rusqlite::Connection::open(&source).unwrap();
+    db.execute(
+        "INSERT INTO events VALUES(2,'native-session','UserPromptSubmit',102,?1)",
+        [serde_json::json!({"prompt":CANARY}).to_string()],
+    )
+    .unwrap();
+    drop(db);
+    let migrate = ["migrate", "--from", source.to_str().unwrap()];
+    ok(run(home, &migrate, "")); // no worker: only the first record is backed up
+    assert!(ok(run(home, &["get", &id], "")).contains(CANARY));
+    let mut waiting = command(home, &["forget", "--record", &id]).spawn().unwrap();
+    let mut stdout = BufReader::new(waiting.stdout.take().unwrap());
+    let mut preview = String::new();
+    loop {
+        let mut line = String::new();
+        assert!(
+            stdout.read_line(&mut line).unwrap() > 0,
+            "no confirmation prompt: {preview}"
+        );
+        preview.push_str(&line);
+        if line.contains("Type yes:") {
+            break;
+        }
+    }
+    assert!(preview.contains(CANARY));
+    ok(run(home, &["restore"], ""));
+    let replacement = "unrelated-jasper-82461";
+    let db = rusqlite::Connection::open(&source).unwrap();
+    db.execute(
+        "UPDATE events SET payload=?1 WHERE id=2",
+        [serde_json::json!({"prompt":replacement}).to_string()],
+    )
+    .unwrap();
+    drop(db);
+    ok(run(home, &migrate, ""));
+    assert!(ok(run(home, &["get", &id], "")).contains(replacement));
+    waiting.stdin.take().unwrap().write_all(b"yes\n").unwrap();
+    let output = waiting.wait_with_output().unwrap();
+    assert!(
+        !output.status.success(),
+        "accepted a preview of a different record"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("stale"));
+    assert!(ok(run(home, &["get", &id], "")).contains(replacement));
+    assert!(!home.join("privacy.db").exists());
 }
 
 fn copy_backup(from: &Path, to: &Path) {

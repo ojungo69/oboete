@@ -359,6 +359,7 @@ pub fn restore(home: &Path) -> Result<String> {
     // No store is open while the file is read, rebuilt and swapped; a hook waits (or fails with
     // MUST-M16's marker) instead of writing into the file that is moved aside.
     let _swap = raw::lock_for_swap(home)?;
+    crate::forget::before_restore(home)?;
     let dir = dir(home)?;
     let all = segments(&dir, Kind::Records)?;
     let device = device_of(home, &all)?;

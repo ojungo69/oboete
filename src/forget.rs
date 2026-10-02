@@ -16,6 +16,7 @@ thread_local! {
     // Only the process-crash test pauses between the two durable stores.
     pub(crate) static REGISTERED: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
     static INITIALIZING: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+    static JOURNAL_WRITING: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
     static FULL_JOURNAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -321,7 +322,9 @@ impl Journal {
                 "privacy journal is not a regular file"
             ),
         }
-        let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        // No CREATE: missing controls remain an error. Read-write permits SQLite to roll back
+        // a hot journal after a registrar died before commit, before we validate its authority.
+        let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
             .context("open privacy journal")?;
         conn.busy_timeout(std::time::Duration::from_secs(2))?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -478,6 +481,10 @@ pub(crate) fn register(home: &Path, p: &Preview) -> Result<()> {
         let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
         conn.pragma_update(None, "max_page_count", pages)?;
     }
+    #[cfg(test)]
+    if JOURNAL_WRITING.get().is_some() {
+        conn.pragma_update(None, "cache_size", 1)?;
+    }
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let seq = journal
         .head
@@ -505,6 +512,10 @@ pub(crate) fn register(home: &Path, p: &Preview) -> Result<()> {
             ],
         )?;
     }
+    #[cfg(test)]
+    if let Some(writing) = JOURNAL_WRITING.get() {
+        writing();
+    }
     tx.commit()?;
     write_head(
         home,
@@ -517,30 +528,12 @@ pub(crate) fn register(home: &Path, p: &Preview) -> Result<()> {
 
 /// Replay into raw's transaction, including a newly restored store before its file is swapped.
 pub(crate) fn apply(conn: &Connection, home: &Path, device: &str) -> Result<()> {
-    let applied: Option<String> = conn
-        .query_row("SELECT value FROM meta WHERE key='privacy_head'", [], |r| {
-            r.get(0)
-        })
-        .optional()?;
-    let applied = applied
-        .map(|s| serde_json::from_str::<Head>(&s))
-        .transpose()?;
+    let applied = applied_head(conn)?;
     let journal = Journal::read(home)?;
+    check_applied(applied.as_ref(), journal.as_ref().map(|j| &j.head))?;
     let Some(journal) = journal else {
-        anyhow::ensure!(
-            applied.is_none(),
-            "privacy journal is missing; refusing an empty deny-list"
-        );
         return Ok(());
     };
-    if let Some(applied) = &applied {
-        anyhow::ensure!(
-            applied.version == 1
-                && applied.identity == journal.head.identity
-                && applied.through <= journal.head.through,
-            "privacy journal was rolled back"
-        );
-    }
     for c in journal.controls(applied.as_ref().map_or(0, |h| h.through))? {
         let status = c.status(&journal.head.identity)?;
         for r in c.records {
@@ -568,19 +561,58 @@ pub(crate) fn apply(conn: &Connection, home: &Path, device: &str) -> Result<()> 
 }
 
 pub(crate) fn needs_apply(conn: &Connection, home: &Path) -> Result<bool> {
-    let got: Option<String> = conn
+    let got = applied_head(conn)?;
+    let expected = version(home)?;
+    check_applied(got.as_ref(), expected.as_ref())?;
+    Ok(got != expected)
+}
+
+fn applied_head(conn: &Connection) -> Result<Option<Head>> {
+    let head: Option<String> = conn
         .query_row("SELECT value FROM meta WHERE key='privacy_head'", [], |r| {
             r.get(0)
         })
         .optional()?;
-    let expected = version(home)?
-        .map(|h| serde_json::to_string(&h))
-        .transpose()?;
+    Ok(head.map(|s| serde_json::from_str(&s)).transpose()?)
+}
+
+fn check_applied(applied: Option<&Head>, current: Option<&Head>) -> Result<()> {
+    let Some(applied) = applied else {
+        return Ok(());
+    };
+    let current = current.context("privacy journal is missing; refusing an empty deny-list")?;
     anyhow::ensure!(
-        got.is_none() || expected.is_some(),
-        "privacy journal is missing; refusing an empty deny-list"
+        applied.version == 1
+            && applied.identity == current.identity
+            && applied.through <= current.through,
+        "privacy journal was rolled back"
     );
-    Ok(got != expected)
+    Ok(())
+}
+
+/// Before a restore discards the current raw store, preserve its independent evidence that
+/// controls existed. A fresh Rebuild cannot check that: its meta table has no privacy head yet.
+/// Called under raw.lock exclusively, before any file is moved or a staged restore is removed.
+pub(crate) fn before_restore(home: &Path) -> Result<()> {
+    let current = version(home)?;
+    if !crate::raw::exists(home) {
+        return Ok(());
+    }
+    let read = || -> Result<Option<Head>> {
+        let conn = Connection::open_with_flags(
+            crate::raw::path(home),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(2))?;
+        applied_head(&conn)
+    };
+    match read() {
+        Ok(applied) => check_applied(applied.as_ref(), current.as_ref()),
+        // A corrupt source cannot supply its meta table; the independently checked journal is
+        // still applied to the rebuilt file. This also retains pre-forget corruption recovery.
+        Err(e) if crate::backup::corrupt(&e) => Ok(()),
+        Err(e) => Err(e).context("check current raw deletion authority before restore"),
+    }
 }
 
 fn write_head(home: &Path, head: &Head) -> Result<()> {
@@ -777,7 +809,18 @@ mod tests {
             return;
         };
         let home = Path::new(&home);
-        let (mut raw, target) = record(home);
+        let (mut raw, mut target) = record(home);
+        let phase = std::env::var("OBOETE_TEST_CRASH_PHASE").unwrap_or_default();
+        if phase == "journal" {
+            for n in 2..=MAX_RECORDS {
+                native(&mut raw, n, "{\"prompt\":\"synthetic\"}");
+            }
+            target = Target::Span {
+                device: raw.device().into(),
+                from: 1,
+                to: MAX_RECORDS as i64,
+            };
+        }
         let p = raw.forget_preview(target).unwrap();
         let stopped = || {
             let home = std::env::var_os("OBOETE_TEST_CRASH_HOME").unwrap();
@@ -786,8 +829,10 @@ mod tests {
                 std::thread::park();
             }
         };
-        if std::env::var("OBOETE_TEST_CRASH_PHASE").as_deref() == Ok("initialize") {
+        if phase == "initialize" {
             INITIALIZING.set(Some(stopped));
+        } else if phase == "journal" {
+            JOURNAL_WRITING.set(Some(stopped));
         } else {
             REGISTERED.set(Some(stopped));
         }
@@ -807,6 +852,33 @@ mod tests {
             Item::Removed
         ));
         assert_eq!(resume(home.path()).unwrap()[0].job, jobs[0].job);
+    }
+
+    #[test]
+    fn a_killed_journal_writer_rolls_back_and_can_resume() {
+        let home = tempfile::tempdir().unwrap();
+        kill_at(home.path(), "journal");
+        assert!(
+            std::fs::metadata(home.path().join("privacy.db-journal"))
+                .unwrap()
+                .len()
+                > 0
+        );
+        assert!(
+            resume(home.path()).unwrap().is_empty(),
+            "an uncommitted request survived"
+        );
+        let raw = raw::open(home.path()).unwrap();
+        let records = raw.after(raw.device(), 0, MAX_RECORDS + 1).unwrap();
+        assert_eq!(records.len(), MAX_RECORDS);
+        assert!(records.iter().all(|r| matches!(r.item, Item::Event(_))));
+        let p = raw
+            .forget_preview(Target::Record {
+                device: raw.device().into(),
+                seq: 1,
+            })
+            .unwrap();
+        assert!(start(home.path(), &p).is_ok());
     }
 
     fn kill_at(home: &Path, phase: &str) {

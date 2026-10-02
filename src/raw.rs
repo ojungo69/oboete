@@ -520,8 +520,14 @@ impl Raw {
         &self,
         target: crate::forget::Target,
     ) -> Result<crate::forget::Preview> {
-        use rusqlite::OptionalExtension;
         self.sync_privacy()?;
+        self.resolve_forget(target)
+    }
+
+    /// Reads only: start calls this inside its writer transaction, so a restore/reimport cannot
+    /// replace the preview's records between resolving their identities and registering them.
+    fn resolve_forget(&self, target: crate::forget::Target) -> Result<crate::forget::Preview> {
+        use rusqlite::OptionalExtension;
         let (device, from, to) = target.bounds()?;
         anyhow::ensure!(
             device == self.device,
@@ -535,7 +541,7 @@ impl Raw {
             let take = usize::try_from(to - at)
                 .unwrap_or(usize::MAX)
                 .min(crate::forget::MAX_RECORDS + 1);
-            let batch = self.after_within(device, at, take, MAX_BATCH_BYTES)?;
+            let batch = self.read_after_within(device, at, take, MAX_BATCH_BYTES)?;
             let Some(last) = batch.last() else { break };
             let last = last.seq;
             for r in batch.into_iter().filter(|r| r.seq <= to) {
@@ -587,9 +593,14 @@ impl Raw {
         preview: &crate::forget::Preview,
     ) -> Result<crate::forget::Status> {
         preview.validate()?;
-        let tx = begin_batch(&mut self.conn)?;
+        let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
         anyhow::ensure!(
             preview.version == privacy_version(&tx, &self.home, &self.device)?,
+            "forget preview is stale; preview again"
+        );
+        let resolved = self.resolve_forget(preview.target.clone())?;
+        anyhow::ensure!(
+            resolved.token()? == preview.token()?,
             "forget preview is stale; preview again"
         );
         crate::forget::register(&self.home, preview)?;
@@ -685,7 +696,7 @@ impl Raw {
             anyhow::bail!("an import cannot record a {} record", c.event.source);
         }
         // No hook imports: the batch waits for another writer as a non-hook open does (#362).
-        let tx = begin_batch(&mut self.conn, crate::db::OPEN_WRITE_WAIT)?;
+        let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
         crate::forget::apply(&tx, &self.home, &self.device)?;
         if origins.is_empty() && batch.iter().any(|c| c.event.kind != "touch") {
             let has_denials: bool =
@@ -1246,6 +1257,16 @@ impl Raw {
         max_bytes: usize,
     ) -> Result<Vec<Record>> {
         self.sync_privacy()?;
+        self.read_after_within(device, seq, limit, max_bytes)
+    }
+
+    fn read_after_within(
+        &self,
+        device: &str,
+        seq: i64,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<Record>> {
         let mut st = self.conn.prepare(
             "SELECT device, seq, type, ts, kind, agent, session, repo, branch, head, gitdir, cwd,
                     source, body, original_bytes,
@@ -1378,7 +1399,7 @@ impl Raw {
     /// it yields commit together, and with them the curation checkpoint (D2).
     pub fn append_ops(&mut self, ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<i64>> {
         let bodies = within_batch_cap(ops)?;
-        let tx = begin_batch(&mut self.conn, Duration::ZERO)?;
+        let tx = begin_batch(&self.conn, Duration::ZERO)?;
         crate::forget::apply(&tx, &self.home, &self.device)?;
         for (kind, body) in ops {
             anyhow::ensure!(
@@ -2312,10 +2333,7 @@ fn masked(body: &str, offset: i64, length: i64) -> String {
 /// batch's BEGIN at 1 ms, within the connection's existing timeout or `wait` when that is longer,
 /// then restore that timeout before its statements and commit. Nothing in an acquired
 /// transaction is retried.
-fn begin_batch(
-    conn: &mut Connection,
-    wait: Duration,
-) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+fn begin_batch(conn: &Connection, wait: Duration) -> rusqlite::Result<rusqlite::Transaction<'_>> {
     let timeout: u32 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
     let timeout = Duration::from_millis(timeout.into());
     let deadline = Instant::now() + timeout.max(wait);
