@@ -2356,7 +2356,7 @@ mod tests {
             std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(f))
                 .unwrap()
         };
-        let tests = src("hook.rs") + &src("setup.rs");
+        let tests = (src("hook.rs") + &src("setup.rs")).replace("\r\n", "\n");
         assert_eq!(AGENT_STATUS.map(|(a, _)| a), AGENTS);
         for (agent, cells) in AGENT_STATUS {
             for (point, names) in POINTS.iter().zip(cells) {
