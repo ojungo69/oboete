@@ -1,0 +1,21 @@
+src/worker.rs
+  s_17c3dc80287a78::t_abf2a0cf4f5301 581
+src/import.rs
+  s_17c3dc80287a78::t_abf2a0cf4f5301 48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "166f2b8c7d44c35bdd3770c44aec047fd94dde9c",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
