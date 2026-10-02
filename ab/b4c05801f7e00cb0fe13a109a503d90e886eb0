@@ -1,0 +1,22 @@
+docs/eval/test_m22.py
+  s_17c3dc80287a78::t_3250b69cb0370e 146-162
+docs/eval/m22.py
+  s_17c3dc80287a78::t_268fdb56de5223 11,158-160,281-287,305,584,592-594,596,599,602,610
+  s_17c3dc80287a78::t_32edc4a40d8180 148,157
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "abb4c05801f7e00cb0fe13a109a503d90e886eb0",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
