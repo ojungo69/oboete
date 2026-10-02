@@ -134,6 +134,9 @@ enum Cmd {
         /// The session it is for, so it is not listed among the other active sessions
         #[arg(long)]
         session: Option<String>,
+        /// OpenCode's context packet, acknowledged only after SDK insertion
+        #[arg(long, hide = true, requires = "session", conflicts_with = "prompt")]
+        json: bool,
         /// Print instead the claims a prompt read from stdin would get in --repo, each with the
         /// share of the prompt's trigrams its body holds: from --session's shortlists, or from
         /// every delivered claim; ignores [inject] and keeps no hook state
@@ -364,6 +367,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             prompt: true,
             repo,
             threshold,
+            ..
         } => {
             let mut text = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
@@ -373,9 +377,13 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             print!("{shown}");
             Ok(())
         }
-        Cmd::Inject { session, .. } => {
+        Cmd::Inject { session, json, .. } => {
             let cwd = std::env::current_dir()?;
-            print!("{}", hook::inject_text(&home, &cwd, session.as_deref()));
+            if json {
+                print!("{}", hook::inject_json(&home, &cwd, session.as_deref()));
+            } else {
+                print!("{}", hook::inject_text(&home, &cwd, session.as_deref()));
+            }
             Ok(())
         }
         Cmd::Mcp => mcp::run(&home),
