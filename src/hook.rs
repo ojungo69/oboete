@@ -1211,9 +1211,9 @@ mod tests {
                 sent.send(result).unwrap();
             });
             ready.recv().unwrap();
-            // The shortest timeout setup registers (SessionEnd's 3 s): measured 2.27 s on an M1 iMac,
-            // and GitHub's macOS runners stretch timers past 2.5 s.
-            let result = received.recv_timeout(std::time::Duration::from_secs(3));
+            // The timeout setup registers for this event (UserPromptSubmit, 5 s): measured 2.27 s on an
+            // M1 iMac; GitHub's macOS runners stretch timers past 3 s.
+            let result = received.recv_timeout(std::time::Duration::from_secs(5));
             writer.execute_batch("ROLLBACK").unwrap();
             assert!(
                 result
