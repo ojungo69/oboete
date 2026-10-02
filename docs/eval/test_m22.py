@@ -143,6 +143,23 @@ def test_live_worker_without_inflight_metadata_cannot_set_the_raw_event_rate(tmp
     assert result == {'count': None, 'complete': False}
 
 
+def test_stub_returns_no_claims_when_inflight_metadata_is_missing(tmp_path):
+    import time, urllib.request
+    _event_store(tmp_path, [('device-a', 1, 'event', 'a')],
+                 [('device-a', {'from_seq': 1, 'to_seq': 1})])
+    prompt = '=== RECORD abc ===\nL1 [user] Keep the parser strict.\n=== RECORD abc ==='
+    with m22.loopback(1, tmp_path) as server:
+        server.worker, server.worker_started_at = _worker(4242), int(time.time() * 1000)
+        request = urllib.request.Request(server.url + '/v1/chat/completions', json.dumps({
+            'messages': [{'role': 'user', 'content': prompt}], 'response_format': {'claims': []}
+        }).encode(), {'Content-Type': 'application/json'})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            body = json.load(response)
+        claims = json.loads(body['choices'][0]['message']['content'])['claims']
+        assert claims == []
+        assert server.claim_budget == 0 and server.rate_complete is False
+
+
 def test_missing_window_schema_does_not_create_a_claim_rate(tmp_path):
     import sqlite3
     with sqlite3.connect(tmp_path / 'raw.db') as db:

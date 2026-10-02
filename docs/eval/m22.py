@@ -8,7 +8,7 @@ The external latency JSON has provider=workers-ai, model=@cf/baai/bge-m3,
 source=real and samples_ms (at least 30 successful query embeddings). It must
 be measured separately. build leaves an owned home; run removes it even on failure.
 """
-import argparse, copy, hashlib, http.server, json, math, os, re, shutil, sqlite3, subprocess
+import argparse, copy, http.server, json, math, os, re, shutil, sqlite3, subprocess
 import tempfile, threading, time, tomllib
 from contextlib import contextmanager, closing
 from datetime import datetime, timezone, timedelta
@@ -145,6 +145,7 @@ class Stub(m3.Stub):
                     current = text[fence.end():].split(fence[1], 1)[0].split('## Kept claims', 1)[0]
                     users = re.findall(r'^(L\d+) \[user\] ([^\n]+)', current, re.M)
                     users = [(line, text[:200]) for line, text in users if text.strip() and '[REDACTED]' not in text]
+                    count = 0
                     with self.server.mutex:
                         if self.server.rate is None:
                             self.server.rate_complete = False
@@ -153,10 +154,10 @@ class Stub(m3.Stub):
                                 self.server.home, self.server.worker, self.server.worker_started_at)
                             if not counted['complete']:
                                 self.server.rate_complete = False
-                                raise ValueError()
-                            self.server.claim_budget += self.server.rate * counted['count']
-                        count = min(int(self.server.claim_budget), len(users))
-                        self.server.claim_budget -= count
+                            if self.server.rate_complete:
+                                self.server.claim_budget += self.server.rate * counted['count']
+                                count = min(int(self.server.claim_budget), len(users))
+                                self.server.claim_budget -= count
                     content = {'summary': 'Scale fixture.', 'claims': [
                         dict(id=f'c{i + 1}', kind='decision', status='decided', speaker='user', scope='repo',
                              body=quote, quote=quote, line=line, supersedes=[], why='')
@@ -277,15 +278,13 @@ def raw_event_count(home, worker=None, worker_started_at=None):
             for device, body in db.execute(
                     "SELECT device, body FROM ops WHERE type = 'window' ORDER BY device, op_seq"):
                 _span(device, body)
-            parts = ["""SELECT device, json_extract(body, '$.from_seq'), json_extract(body, '$.to_seq')
-                      FROM ops WHERE type = 'window'"""]
-            params = []
-            if active:
-                device, start, _, end, _ = active
-                parts.append('SELECT ?, ?, ?')
-                params.extend((device, start, end))
-            value = db.execute(f'''
-                WITH spans(device, from_seq, to_seq) AS ({' UNION ALL '.join(parts)}),
+            device, start, _, end, _ = active if active else (None, None, None, None, None)
+            value = db.execute('''
+                WITH spans(device, from_seq, to_seq) AS (
+                    SELECT device, json_extract(body, '$.from_seq'), json_extract(body, '$.to_seq')
+                    FROM ops WHERE type = 'window'
+                    UNION ALL SELECT ?, ?, ?
+                ),
                 ordered AS (
                     SELECT device, from_seq, to_seq,
                         MAX(to_seq) OVER (PARTITION BY device ORDER BY from_seq, to_seq
@@ -303,7 +302,7 @@ def raw_event_count(home, worker=None, worker_started_at=None):
                 SELECT COUNT(*) FROM records r JOIN merged m
                   ON m.device = r.device AND r.seq BETWEEN m.from_seq AND m.to_seq
                 WHERE r.type = 'event'
-            ''', params).fetchone()[0]
+            ''', (device, start, end)).fetchone()[0]
         return dict(count=value, complete=True)
     except (OSError, sqlite3.Error, TypeError, ValueError, KeyError):
         return dict(count=None, complete=False)
@@ -582,7 +581,7 @@ def construct(binary, dev_home, days=90, disk_ok=False, *, observed, found=None,
                         raise ValueError('Recorded transcript copy changed before replay')
                 text = common.command([binary, '--home', str(home), 'transcript', str(path), '--agent', s['agent']],
                                       env=environment())
-                events = []
+                transcript_events = []
                 for line in text.split('\n'):
                     if line.strip():
                         event = json.loads(line)
@@ -590,17 +589,17 @@ def construct(binary, dev_home, days=90, disk_ok=False, *, observed, found=None,
                         if since <= stamp <= now:
                             if event.get('session') != s['session']:
                                 raise ValueError('Transcript conversion changed the recorded session')
-                            events.append(event)
-                events.sort(key=lambda e: e['ts'])
-                for e in events:
+                            transcript_events.append(event)
+                transcript_events.sort(key=lambda e: e['ts'])
+                for e in transcript_events:
                     output.write(json.dumps(e, ensure_ascii=False) + '\n')
-                total += len(events)
+                total += len(transcript_events)
         if total == 0:
             raise ValueError('No events in the measured 90-day window')
-        def events():
+        def iter_spool_events():
             with spool.open(encoding='utf-8') as f:
                 yield from (json.loads(line) for line in f)
-        replay = replay_parts(binary, home, events())
+        replay = replay_parts(binary, home, iter_spool_events())
         if days == 365:
             # Real copied events, shifted in time and session identity, never synthesized claims/rows.
             remaining, cycle = max(0, target - total), 1
@@ -608,7 +607,7 @@ def construct(binary, dev_home, days=90, disk_ok=False, *, observed, found=None,
             while remaining:
                 take = min(remaining, total)
                 def shifted():
-                    for i, e in enumerate(events()):
+                    for i, e in enumerate(iter_spool_events()):
                         if i >= take:
                             break
                         e = copy.deepcopy(e)
