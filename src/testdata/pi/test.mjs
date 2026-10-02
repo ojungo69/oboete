@@ -28,6 +28,7 @@ async function load(env = {}, manualTimers = false) {
   const timeouts = [];
   const timers = new Map();
   let nextTimerId = 0;
+  let now = 0;
   let failNextHook = false;
   let stallNextHook = false;
   let nextHookOutput;
@@ -64,6 +65,7 @@ async function load(env = {}, manualTimers = false) {
   const Type = Object.fromEntries(["Object", "String", "Boolean", "Integer", "Number", "Optional"].map(name => [name, (...args) => ({ kind: name, args })]));
   const vmContext = createContext({
     process: { env },
+    Date: class extends Date { static now() { return manualTimers ? now : Date.now(); } },
     setTimeout: (fn, ms) => {
       timeouts.push(ms);
       if (!manualTimers) return setTimeout(fn, ms);
@@ -99,6 +101,7 @@ async function load(env = {}, manualTimers = false) {
     set stallNextHook(value) { stallNextHook = value; },
     set nextHookOutput(value) { nextHookOutput = value; },
     set nextExec(value) { nextExec = value; },
+    advance(ms) { now += ms; },
     fireLastTimer() {
       const [id, fn] = [...timers].at(-1);
       timers.delete(id);
@@ -238,19 +241,21 @@ assert.deepEqual(recovering.hooks.map(h => h.payload.session_id), ["old-session"
 assert.deepEqual(recovering.hooks.map(h => h.payload.prompt), ["first", "second", undefined]);
 
 for (const [eventName, event, expected] of [
-  ["session_start", { reason: "startup" }, ["UserPromptSubmit", "SessionStart"]],
-  ["session_compact", { reason: "manual", compactionEntry: { summary: "summary" } }, ["UserPromptSubmit", "PostCompact", "SessionStart"]],
+  ["session_start", { reason: "startup" }, ["UserPromptSubmit"]],
+  ["session_compact", { reason: "manual", compactionEntry: { summary: "summary" } }, ["UserPromptSubmit", "PostCompact"]],
   ["session_shutdown", { reason: "quit" }, ["UserPromptSubmit", "SessionEnd"]],
 ]) {
   const bounded = await load({}, true);
   bounded.stallNextHook = true;
   const typing = bounded.emit("input", { source: "interactive", text: "stalled" }, ctx);
   await Promise.resolve();
+  bounded.advance(2000);
   bounded.fireFirstTimer(); // the prompt's wait, while its spawn is stuck
   await typing;
   assert.equal(bounded.hooks.length, 1);
   const waiting = bounded.emit(eventName, event, ctx);
   await Promise.resolve();
+  bounded.advance(2000);
   bounded.fireLastTimer(); // total-queue wait, while the first spawn is still stuck
   await waiting;
   assert.deepEqual(bounded.hooks.map(h => h.payload.hook_event_name), ["UserPromptSubmit"]);
@@ -264,6 +269,44 @@ for (const [eventName, event, expected] of [
     assert.equal(await bounded.emit("before_agent_start", { prompt: "after drain" }, ctx), undefined);
   }
 }
+
+// A prompt that expires behind queued capture work must never run its mutating hook later.
+const expired = await load({}, true);
+expired.stallNextHook = true;
+expired.handlers.get("tool_result")(toolEvent, ctx);
+await Promise.resolve();
+const expiredInput = expired.emit("input", { source: "interactive", text: "expired prompt" }, ctx);
+await Promise.resolve();
+expired.advance(2000);
+expired.fireLastTimer();
+await expiredInput;
+assert.deepEqual(expired.hooks.map(h => h.payload.hook_event_name), ["PostToolUse"]);
+expired.fireFirstTimer();
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual(expired.hooks.map(h => h.payload.hook_event_name), ["PostToolUse"]);
+expired.nextHookOutput = JSON.stringify({ hookSpecificOutput: { additionalContext: "later prompt" } });
+await expired.emit("input", { source: "interactive", text: "fresh prompt" }, ctx);
+assert.deepEqual(plain(await expired.emit("before_agent_start", { prompt: "fresh prompt" }, ctx)), {
+  message: { customType: "oboete", content: "later prompt", display: false },
+});
+
+// Starting before expiry gets only the time left after the preceding capture work.
+const remaining = await load({}, true);
+remaining.stallNextHook = true;
+remaining.handlers.get("tool_result")(toolEvent, ctx);
+await Promise.resolve();
+const limitedInput = remaining.emit("input", { source: "interactive", text: "limited prompt" }, ctx);
+await Promise.resolve();
+remaining.advance(1500);
+remaining.stallNextHook = true;
+remaining.fireFirstTimer();
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual(remaining.hooks.map(h => h.payload.hook_event_name), ["PostToolUse", "UserPromptSubmit"]);
+assert.equal(remaining.timeouts.at(-1), 500);
+remaining.advance(500);
+remaining.fireLastTimer();
+await limitedInput;
+assert.equal(await remaining.emit("before_agent_start", { prompt: "after timeout" }, ctx), undefined);
 
 // What a prompt gets joins the stash its run starts with, after SessionStart's, once.
 const prompted = await load();
