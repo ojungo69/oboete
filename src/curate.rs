@@ -1435,7 +1435,9 @@ pub fn run_phase(
         Err(e) => return Err(e),
     };
     let reason = ChainFailed(failed.clone()).to_string();
-    let (hold, next, counted) = hold(&failed, now);
+    // A slow call may set its reset after the phase started: judge the remaining wait now.
+    let after = crate::db::now_ms();
+    let (hold, next, counted) = hold(&failed, after);
     let attempts = pending.as_ref().map_or(0, |p| p.attempts) + i64::from(counted);
     if attempts >= ATTEMPTS {
         let op = json!({"outcome": "skipped", "reason": reason});
@@ -1455,7 +1457,7 @@ pub fn run_phase(
         prompt: sent,
     };
     providers_db::set_pending(db, &p)?;
-    Ok(waiting(&p, now))
+    Ok(waiting(&p, after))
 }
 
 /// What a window's request is made of: its prompt, and the candidates and carried claims it
@@ -4913,6 +4915,69 @@ mod tests {
         let phase =
             run_phase(&mut raw, &kn(), &db, &rules, &curating(3), "", &mut curator).unwrap();
         assert_eq!((phase, calls.get()), (Phase::Covered, 1));
+    }
+
+    /// D10: a provider's reset is timed from its answer, even after a slow call. The hold's
+    /// kind and deadline stay intact, and `since` still records when this window first waited.
+    #[test]
+    fn a_wait_is_judged_from_when_the_curator_returns() {
+        for (kind, delay, up) in [
+            ("time", 30 * 60_000, true),
+            ("time", 31 * 60_000, false),
+            ("budget", 30 * 60_000, false),
+            ("owner", 60 * 60_000, false),
+            ("failed", 10 * 60_000, true),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let (mut raw, db) = open(home.path());
+            raw.append(&prompt("Use tabs.")).unwrap();
+            let began = Cell::new(0);
+            let returned = Cell::new(0);
+            let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| {
+                began.set(crate::db::now_ms());
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                returned.set(crate::db::now_ms());
+                let skip = match kind {
+                    "time" => Skip::Wait(returned.get() + delay),
+                    "budget" => Skip::Budget(returned.get() + delay),
+                    "owner" => Skip::Owner,
+                    _ => Skip::Failed,
+                };
+                Err(went_past(&[("fake", "returned wait", skip)]))
+            };
+            let started = crate::db::now_ms();
+            let phase = run_phase(
+                &mut raw,
+                &kn(),
+                &db,
+                &Rules::default(),
+                &curating(WINDOW_TOKENS),
+                "",
+                &mut chain,
+            )
+            .unwrap();
+            let finished = crate::db::now_ms();
+            let p = providers_db::pending_of(&db, raw.device())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                phase,
+                Phase::Waiting {
+                    until: p.next_attempt_at,
+                    up
+                },
+                "{kind}: {delay}"
+            );
+            assert_eq!(p.hold, if kind == "failed" { "time" } else { kind });
+            assert_eq!(p.attempts, i64::from(kind == "failed"));
+            assert!((started..=began.get()).contains(&p.since));
+            if matches!(kind, "time" | "budget") {
+                assert_eq!(p.next_attempt_at, returned.get() + delay);
+            } else {
+                assert!((returned.get() + delay..=finished + delay).contains(&p.next_attempt_at));
+            }
+            assert!(windows(&raw).is_empty());
+        }
     }
 
     /// D11: an attempt counts only when no provider waits on time or a budget and one was tried

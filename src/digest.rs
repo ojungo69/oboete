@@ -254,7 +254,9 @@ pub fn phase(
                     Err(e) => return Err(e),
                 },
             };
-            let (hold, next, counted) = crate::curate::hold(&failed, now);
+            // A slow call may set its reset after the phase started: judge the remaining wait now.
+            let after = crate::db::now_ms();
+            let (hold, next, counted) = crate::curate::hold(&failed, after);
             let p = crate::providers_db::DigestPending {
                 device: device.clone(),
                 agent: s.agent.clone(),
@@ -271,7 +273,7 @@ pub fn phase(
             if p.attempts >= crate::curate::ATTEMPTS {
                 return Ok(Phase::Covered);
             }
-            return Ok(sooner(out, held(hold, next, now)));
+            return Ok(sooner(out, held(hold, next, after)));
         }
     }
     Ok(out)
@@ -881,6 +883,62 @@ mod tests {
             up: false,
         };
         assert_eq!(run(home.path(), sooner, &answer).0, sooner);
+    }
+
+    /// D10 applies after the callback: a reset 30 minutes from its answer keeps the worker up,
+    /// while a longer wait, a budget reset or an owner hold does not.
+    #[test]
+    fn a_wait_is_judged_from_when_the_digester_returns() {
+        for (kind, delay, up) in [
+            ("time", 30 * 60_000, true),
+            ("time", 31 * 60_000, false),
+            ("budget", 30 * 60_000, false),
+            ("owner", 60 * 60_000, false),
+            ("failed", 10 * 60_000, true),
+        ] {
+            let (home, _) = home(&["Use tabs."], 1_000, true);
+            let returned = std::cell::Cell::new(0);
+            let answer = || -> Result<ChainResult> {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                returned.set(crate::db::now_ms());
+                let skip = match kind {
+                    "time" => Skip::Wait(returned.get() + delay),
+                    "budget" => Skip::Budget(returned.get() + delay),
+                    "owner" => Skip::Owner,
+                    _ => Skip::Failed,
+                };
+                Err(ChainFailed(vec![Fallback {
+                    provider: "fake".into(),
+                    reason: "returned wait".into(),
+                    skip,
+                }])
+                .into())
+            };
+            let (phase, sent) = run(home.path(), Phase::Idle, &answer);
+            let finished = crate::db::now_ms();
+            assert_eq!(sent.len(), 1);
+            let db = crate::providers_db::open(home.path()).unwrap();
+            let raw = crate::raw::open(home.path()).unwrap();
+            let p = crate::providers_db::digest_pending_of(&db, raw.device(), "claude", "s1", "r")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                phase,
+                Phase::Waiting {
+                    until: p.next_attempt_at,
+                    up
+                },
+                "{kind}: {delay}"
+            );
+            assert_eq!(p.hold, if kind == "failed" { "time" } else { kind });
+            assert_eq!(p.attempts, i64::from(kind == "failed"));
+            if matches!(kind, "time" | "budget") {
+                assert_eq!(p.next_attempt_at, returned.get() + delay);
+            } else {
+                assert!((returned.get() + delay..=finished + delay).contains(&p.next_attempt_at));
+            }
+            assert!(digest_ops(home.path()).is_empty());
+        }
     }
 
     #[test]
