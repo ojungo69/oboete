@@ -152,6 +152,7 @@ pub struct Hit {
     pub kind: String,
     /// A claim's status; empty for the rest.
     pub status: String,
+    pub muted: bool,
     pub label: Label,
     /// Through the egress gate, as the snippet is.
     pub title: String,
@@ -349,6 +350,7 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                     when: h.ts,
                     kind: h.kind,
                     status: String::new(),
+                    muted: false,
                     label: Label::Citable,
                     title: String::new(),
                     snippet: h.snippet,
@@ -1039,6 +1041,7 @@ fn claim_hit(raw: &Raw, k: &Connection, c: &Claim, class: Class, terms: &[String
         when: c.valid_from,
         kind: c.kind.clone(),
         status: c.status.clone(),
+        muted: claims::muted(k, &c.uid)?,
         label,
         title: String::new(),
         snippet: super::snippet(&redact::outbound(&c.body), terms, WIDTH),
@@ -1177,6 +1180,7 @@ fn imported_hit(k: &Connection, uid: &str, terms: &[String]) -> Result<Option<Hi
             when: r.get(2)?,
             kind: r.get(0)?,
             status: String::new(),
+            muted: false,
             label: Label::Imported,
             title: redact::outbound(&title),
             snippet: super::snippet(&redact::outbound(&body), terms, WIDTH),
@@ -1214,6 +1218,7 @@ pub fn line(h: &Hit, all: bool) -> String {
     if !h.status.is_empty() {
         standing.push_str(&format!(" {}", h.status));
     }
+    standing.push_str(muted_label(h.muted));
     // As SessionStart's index names it (D2), whether the claim is delivered or not.
     if let Class::Superseded { by: Some(by) } | Class::Delivered { later: by } = &h.class {
         standing.push_str(&format!(", superseded by {}", id(by)));
@@ -1340,10 +1345,11 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
             for uid in uids {
                 if let Some(c) = claims::active_one(&k, &uid)? {
                     out.push_str(&format!(
-                        "{uid} {} {} {}: {}\n",
+                        "{uid} {} {} {}{}: {}\n",
                         &crate::db::utc(c.valid_from)[..10],
                         c.kind,
                         c.status,
+                        muted_label(claims::muted(&k, &uid)?),
                         one_line(&redact::outbound(&c.body), 80)
                     ));
                 }
@@ -1353,6 +1359,11 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
         Some(Named::Imported(uid)) => imported_text(&k, &uid)?,
         Some(Named::Record(id, e)) => Some(record_text(&id, &e)),
     })
+}
+
+/// After a claim's status, where one is printed: said only of a muted claim (spec 6.1).
+fn muted_label(muted: bool) -> &'static str {
+    if muted { " muted" } else { "" }
 }
 
 /// The stores, raw.db first: its shared hold on raw.lock keeps a restore from swapping them while
@@ -1375,6 +1386,7 @@ pub struct ClaimView {
     pub uid: String,
     pub kind: String,
     pub status: String,
+    pub muted: bool,
     pub speaker: String,
     pub scope: String,
     pub repo: Option<String>,
@@ -1412,6 +1424,7 @@ pub struct Change {
     pub recipe: Option<String>,
     pub status: Option<String>,
     pub body: Option<String>,
+    pub muted: Option<bool>,
 }
 
 #[cfg(test)]
@@ -1471,10 +1484,12 @@ fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView
         })
         .collect::<Result<_>>()?;
     let mut st = k.prepare(
-        "SELECT ts, tier, recipe, status, body, op_device, op_seq FROM (
-           SELECT ts, tier, recipe, status, body, op_device, op_seq FROM derivations WHERE uid = ?1
+        "SELECT ts, tier, recipe, status, body, op_device, op_seq, muted FROM (
+           SELECT ts, tier, recipe, status, body, op_device, op_seq, NULL AS muted
+             FROM derivations WHERE uid = ?1
            UNION ALL
-           SELECT ts, NULL, NULL, status, body, op_device, op_seq FROM corrections WHERE uid = ?1)
+           SELECT ts, NULL, NULL, status, body, op_device, op_seq, muted
+             FROM corrections WHERE uid = ?1)
          ORDER BY ts, op_device, op_seq",
     )?;
     let rows = st
@@ -1486,6 +1501,7 @@ fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView
                     recipe: r.get(2)?,
                     status: r.get(3)?,
                     body: r.get::<_, Option<String>>(4)?.map(|b| redact::outbound(&b)),
+                    muted: r.get(7)?,
                 },
                 r.get::<_, String>(5)?,
                 r.get::<_, i64>(6)?,
@@ -1512,6 +1528,7 @@ fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView
         .optional()?
         .flatten();
     Ok(Some(ClaimView {
+        muted: claims::muted(k, &uid)?,
         delivered: claims::delivered_one(k, &uid)?.is_some()
             && (c.kind != "open item" || c.status == "decided"),
         label: if on_this_device(raw, &c.device, c.seq)? {
@@ -1545,10 +1562,11 @@ fn claim_text(raw: &Raw, k: &Connection, uid: &str) -> Result<Option<String>> {
         _ => String::new(),
     };
     let mut out = format!(
-        "{uid} {} {} {} {} ({})\n{ended}speaker: {}, scope: {}\n\n{}\n",
+        "{uid} {} {} {}{} {} ({})\n{ended}speaker: {}, scope: {}\n\n{}\n",
         crate::db::utc(v.when),
         v.kind,
         v.status,
+        muted_label(v.muted),
         v.repo.as_deref().unwrap_or("no repository"),
         v.label,
         v.speaker,
@@ -2045,6 +2063,7 @@ pub(crate) mod fixture {
                 },
                 status: status.map(Into::into),
                 body: body.map(Into::into),
+                muted: None,
             };
             let op = serde_json::to_value(op).unwrap();
             self.raw.append_ops(&[(OpKind::Correction, op)]).unwrap();
@@ -2088,6 +2107,59 @@ mod tests {
 
     fn keys(a: &Answer) -> Vec<&str> {
         a.hits.iter().map(|h| h.key.as_str()).collect()
+    }
+
+    #[test]
+    fn a_muted_claim_keeps_its_search_rank_and_is_labelled() {
+        let mut s = Store::new();
+        let old = s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        let new = s.decided(R, 2_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        let query = Query {
+            raw: RawArm::Off,
+            ..q("Parser errors")
+        };
+        assert_eq!(keys(&s.query(&query)), [&new, &old]);
+        for muted in [true, false] {
+            crate::claims::mute(s.home.path(), &new, muted).unwrap();
+            let answer = s.query(&query);
+            assert_eq!(keys(&answer), [&new, &old]);
+            let hit = serde_json::to_value(&answer.hits[0]).unwrap();
+            assert_eq!(hit["muted"], muted);
+            assert_eq!(line(&answer.hits[0], false).contains("muted"), muted);
+            let view = serde_json::to_value(claim(s.home.path(), &new).unwrap().unwrap()).unwrap();
+            assert_eq!(view["muted"], muted);
+            assert_eq!(view["status"], "decided");
+            assert_eq!(view["text"], "Parser errors go to stderr.");
+            assert_eq!(view["history"][1]["muted"], true);
+            let full = get(s.home.path(), &new).unwrap().unwrap();
+            let first = full.lines().next().unwrap();
+            assert_eq!(first.contains(" decided muted "), muted, "{first}");
+        }
+    }
+
+    #[test]
+    fn an_ambiguous_get_prefix_labels_each_claims_mute() {
+        let mut s = Store::new();
+        let uid = s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        k.execute(
+            "INSERT INTO claims(uid, op_device, op_seq)
+            SELECT substr(uid, 1, 12) || 'f00d', op_device, op_seq FROM claims WHERE uid = ?1",
+            [&uid],
+        )
+        .unwrap();
+        for (muted, label) in [(true, " muted"), (false, "")] {
+            crate::claims::mute(s.home.path(), &uid, muted).unwrap();
+            let text = get(s.home.path(), &uid[..12]).unwrap().unwrap();
+            assert!(text.starts_with("2 claims start with "));
+            let line = text.lines().find(|l| l.starts_with(&uid)).unwrap();
+            assert_eq!(
+                line,
+                format!("{uid} 1970-01-01 decision decided{label}: Parser errors go to stderr.")
+            );
+        }
     }
 
     /// MUST-M11: a decision a later claim ended (here a proposal, which the owner does not back,

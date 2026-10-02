@@ -113,6 +113,10 @@ enum Cmd {
         #[arg(long)]
         body: Option<String>,
     },
+    /// Keep a claim searchable without injecting it into an agent's context
+    Mute { uid: String },
+    /// Inject a muted claim again
+    Unmute { uid: String },
     /// List the current claims of the repository in the current directory, each with the uid
     /// `oboete correct` takes
     Claims,
@@ -662,6 +666,16 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             println!("corrected {uid}");
             Ok(())
         }
+        Cmd::Mute { uid } => {
+            claims::mute(&home, &uid, true)?;
+            println!("muted {uid}");
+            Ok(())
+        }
+        Cmd::Unmute { uid } => {
+            claims::mute(&home, &uid, false)?;
+            println!("unmuted {uid}");
+            Ok(())
+        }
         Cmd::Restore => {
             // The worker's lock, so no worker reads raw.db while it is replaced.
             let held = worker::lock(&home)?.ok_or_else(|| {
@@ -698,5 +712,39 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mute_and_unmute_commands_wait_for_the_claims_consumer() {
+        let mut s = search::b::fixture::Store::new();
+        let uid = s.decided("r", 5, "Ship on Fridays.", &[]);
+        s.run();
+        for (name, muted) in [("mute", true), ("unmute", false)] {
+            let cli = Cli::try_parse_from(["oboete", name, &uid]).unwrap();
+            run(cli.cmd, s.home.path().to_owned()).unwrap();
+            let k = knowledge::open(s.home.path()).unwrap();
+            assert_eq!(
+                k.query_row("SELECT muted FROM active WHERE uid = ?1", [&uid], |r| r
+                    .get::<_, bool>(0))
+                    .unwrap(),
+                muted
+            );
+        }
+        let ops = s.raw.ops_after(s.raw.device(), 0, 10).unwrap();
+        assert_eq!(ops.len(), 3);
+        assert_eq!(ops[1].kind, raw::OpKind::Correction);
+        assert_eq!(ops[1].body["muted"], true);
+        assert_eq!(ops[2].body["muted"], false);
+        let k = knowledge::open(s.home.path()).unwrap();
+        assert_eq!(
+            knowledge::checkpoint::get_in(&k, knowledge::checkpoint::OPS, "claims", s.raw.device())
+                .unwrap(),
+            3
+        );
     }
 }

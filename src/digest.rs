@@ -466,7 +466,7 @@ pub fn fresh(
     let lines: Vec<Line> = serde_json::from_str(&lines)?;
     // One indexed lookup per cited uid: a chain tip of `repo` that is not retracted, and that
     // still says what it said when the digest was written (#161).
-    let sql = format!("{} AND a.uid = ?2", crate::claims::TIPS);
+    let sql = format!("{} AND a.uid = ?2 AND a.muted = 0", crate::claims::TIPS);
     let mut tip = k.prepare(&sql)?;
     for l in &lines {
         for (i, uid) in l.uids.iter().enumerate() {
@@ -608,6 +608,43 @@ mod tests {
             .filter(|o| o.kind == OpKind::Digest)
             .map(|o| serde_json::from_value(o.body).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn a_saved_digest_is_hidden_while_a_cited_claim_is_muted() {
+        let (home, uids) = home(&["Use tabs."], 1_000, true);
+        let answer = || lines(json!([{"text": "Use tabs for indentation.", "uids": uids}]));
+        assert_eq!(run(home.path(), Phase::Idle, &answer).0, Phase::Covered);
+        crate::worker::run_once(home.path()).unwrap();
+        let k = crate::knowledge::open(home.path()).unwrap();
+        assert_eq!(
+            fresh(&k, "r", |_| Ok(false)).unwrap(),
+            Some(vec!["Use tabs for indentation.".into()])
+        );
+        crate::claims::mute(home.path(), &uids[0], true).unwrap();
+        assert_eq!(fresh(&k, "r", |_| Ok(false)).unwrap(), None);
+        crate::claims::mute(home.path(), &uids[0], false).unwrap();
+        assert_eq!(
+            fresh(&k, "r", |_| Ok(false)).unwrap(),
+            Some(vec!["Use tabs for indentation.".into()])
+        );
+    }
+
+    #[test]
+    fn digest_input_leaves_muted_claims_out_and_unmute_restores_them() {
+        for (muted, included) in [(true, false), (false, true)] {
+            let (home, uids) = home(&["Use tabs.", "Ship on Fridays."], 1_000, true);
+            crate::claims::mute(home.path(), &uids[0], true).unwrap();
+            if !muted {
+                crate::claims::mute(home.path(), &uids[0], false).unwrap();
+            }
+            let answer = || lines(json!([{"text": "Release on Fridays.", "uids": [uids[1]]}]));
+            let (phase, sent) = run(home.path(), Phase::Idle, &answer);
+            assert_eq!(phase, Phase::Covered);
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].contains("Use tabs."), included);
+            assert!(sent[0].contains("Ship on Fridays."));
+        }
     }
 
     #[test]

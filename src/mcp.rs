@@ -278,6 +278,27 @@ mod tests {
         (s, server, uid)
     }
 
+    /// Spec 6.1: a muted claim stays in search and `get`, and both say that it is muted.
+    #[test]
+    fn search_and_get_say_when_a_claim_is_muted() {
+        let (s, server, uid) = seeded("Parser errors go to stderr.");
+        for muted in [true, false] {
+            crate::claims::mute(s.home.path(), &uid, muted).unwrap();
+            let found = server
+                .search(Parameters(args("Parser errors", None, None)))
+                .unwrap();
+            assert_eq!(body(found).contains("decided muted"), muted);
+            let got = server
+                .get(Parameters(GetArgs {
+                    id: uid[..12].into(),
+                }))
+                .unwrap();
+            let got = body(got);
+            assert_eq!(got.contains(" decided muted "), muted, "{got}");
+            assert!(got.contains("Parser errors go to stderr."));
+        }
+    }
+
     fn args(query: &str, all: Option<bool>, repo: Option<&str>) -> SearchArgs {
         SearchArgs {
             query: query.into(),
