@@ -1,0 +1,20 @@
+src/migrate.rs
+  s_f40d9cf05cef1b::t_c835250e791f93 15-22,416-419,1279-1297,1300-1324,1330-1331,1348-1355,1362-1363,1367,1369-1372,1374-1379
+  s_f40d9cf05cef1b::t_ada3e32c40f72b 1298-1299
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7a3b303513c3ae894ae0c42adcb4529d55eb3db6",
+  "prompts": {},
+  "sessions": {
+    "s_f40d9cf05cef1b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fe7b-bd5d-7211-ad85-4c71fcf06810",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
