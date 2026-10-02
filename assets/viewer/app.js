@@ -429,6 +429,10 @@ const TEXT = {
     'The key file is on a drive where this page cannot keep it private (a Windows drive seen from WSL, a network share, or a FUSE mount such as sshfs), so it was not written.',
     'キーのファイルが、ほかのユーザーから読めないことをこの画面では保証できないドライブ(WSL から見た Windows のドライブ、ネットワーク共有、sshfs などの FUSE)にあるため、書き込みませんでした。',
   ],
+  shared_folder: [
+    'The folder for the key file, or a folder above it, can be changed by another user of this computer (the group or everyone may write to it, or its owner is neither you nor root), so the key was not written. Please remove that write permission from the folder (chmod go-w), or use a folder only you can write to.',
+    'キーのファイルを置くフォルダ、またはその上のフォルダを、このコンピューターのほかのユーザーが変更できる状態(グループまたは全員が書き込める、あるいは所有者があなたでも root でもない)のため、書き込みませんでした。そのフォルダから書き込み権限を外す(chmod go-w)か、あなただけが書き込めるフォルダをお使いください。',
+  ],
   changed: [
     'The key file changed while the key was being saved, so it was not overwritten. Please try again.',
     'キーの保存中にキーのファイルが変更されたため、上書きしませんでした。もう一度お試しください。',

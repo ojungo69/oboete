@@ -23,6 +23,8 @@ pub(crate) enum Refused {
     TooBig,
     NotUtf8,
     NotPrivate,
+    /// Another local user could replace a folder on the key file's path (#285).
+    SharedDir,
     Changed,
     // Made off Linux only (#281).
     #[cfg_attr(target_os = "linux", allow(dead_code))]
@@ -42,6 +44,7 @@ impl Refused {
             Refused::TooBig => "too_big",
             Refused::NotUtf8 => "not_utf8",
             Refused::NotPrivate => "not_private",
+            Refused::SharedDir => "shared_folder",
             Refused::Changed => "changed",
             Refused::Unsupported => "unsupported",
             Refused::Failed => "failed",
@@ -210,27 +213,42 @@ mod linux {
     /// parent protects the next check. A trusted sticky ancestor (e.g. /tmp) protects a trusted
     /// child, but the key folder itself must not let other users create/replace key-file names.
     pub(super) fn check_dirs(path: &Path) -> Result<(), Refused> {
+        walk(path, true, &mut 0)
+    }
+
+    /// `key_dir`: `path` ends at the key folder, not at a folder above it. `links` counts the
+    /// links followed so far, so a chain that never ends is refused where the kernel refuses it.
+    fn walk(path: &Path, key_dir: bool, links: &mut u8) -> Result<(), Refused> {
         // SAFETY: geteuid has no arguments and cannot fail.
         let uid = unsafe { libc::geteuid() };
         let ancestors: Vec<_> = path.ancestors().collect();
         for ancestor in ancestors.into_iter().rev() {
             let entry = std::fs::symlink_metadata(ancestor).map_err(|_| Refused::NoDir)?;
-            if ![0, uid].contains(&entry.uid()) {
-                return Err(Refused::NotPrivate);
-            }
             // In a sticky parent a link's owner matters as well as its target's owner.
-            let dir = if entry.file_type().is_symlink() {
-                std::fs::metadata(ancestor).map_err(|_| Refused::NoDir)?
-            } else {
-                entry
-            };
-            if !dir.is_dir() {
+            if ![0, uid].contains(&entry.uid()) {
+                return Err(Refused::SharedDir);
+            }
+            let key_dir = key_dir && ancestor == path;
+            if entry.file_type().is_symlink() {
+                // The folders a link's target passes through are on the path too, each link of a
+                // chain included: where the chain ends says nothing about the folders between.
+                *links += 1;
+                if *links > 40 {
+                    return Err(Refused::NoDir);
+                }
+                let target = std::fs::read_link(ancestor).map_err(|_| Refused::NoDir)?;
+                walk(
+                    &ancestor.parent().unwrap_or(ancestor).join(target),
+                    key_dir,
+                    links,
+                )?;
+                continue;
+            }
+            if !entry.is_dir() {
                 return Err(Refused::NoDir);
             }
-            if ![0, uid].contains(&dir.uid())
-                || (dir.mode() & 0o022 != 0 && (ancestor == path || dir.mode() & 0o1000 == 0))
-            {
-                return Err(Refused::NotPrivate);
+            if entry.mode() & 0o022 != 0 && (key_dir || entry.mode() & 0o1000 == 0) {
+                return Err(Refused::SharedDir);
             }
         }
         Ok(())
@@ -413,7 +431,16 @@ mod tests {
             let home = root.path().join("home");
             std::fs::create_dir_all(&keys).unwrap();
             std::fs::create_dir_all(&home).unwrap();
+            for dir in [root.path(), &keys, &home] {
+                private(dir);
+            }
             (root, keys, home)
+        }
+
+        /// Owner-only whatever the umask: under 0002 a new folder is group-writable, which the
+        /// check refuses on the key file's path.
+        fn private(dir: &Path) {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
 
         fn mode(p: &Path) -> u32 {
@@ -475,6 +502,7 @@ mod tests {
             let keys = shared.join("keys");
             let moved = root.path().join("moved");
             std::fs::create_dir_all(&keys).unwrap();
+            private(&keys);
             std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
             let path = keys.join("GROQ_KEY.md");
             let before = "Groq\nold-key-123\n";
@@ -490,7 +518,7 @@ mod tests {
             // approved the old key folder, and the save writes the key into that home.
             let result = write(&path, KEY, &home);
             let swap = BEFORE_WRITE.with(|b| b.borrow_mut().take());
-            assert_eq!(result, Err(Refused::NotPrivate));
+            assert_eq!(result, Err(Refused::SharedDir));
             assert!(swap.is_some(), "must refuse before the read/stage/write");
             swap.unwrap()();
             assert_eq!(
@@ -510,6 +538,7 @@ mod tests {
             let nested = shared.join("nested");
             let alias = root.path().join("alias");
             std::fs::create_dir_all(&nested).unwrap();
+            private(&nested);
             std::os::unix::fs::symlink(&nested, &alias).unwrap();
             for mode in [0o775, 0o757, 0o777] {
                 std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(mode)).unwrap();
@@ -518,10 +547,45 @@ mod tests {
                     shared.join("..").join("keys").join("GROQ_KEY.md"),
                     alias.join("GROQ_KEY.md"),
                 ] {
-                    assert_eq!(write(&path, KEY, &home), Err(Refused::NotPrivate));
+                    assert_eq!(write(&path, KEY, &home), Err(Refused::SharedDir));
                 }
             }
             assert!(holding(&[&keys, &nested, &home], KEY).is_empty());
+        }
+
+        /// A link whose target is reached through another link: the folder that holds the second
+        /// link is on the path too, and a user who can write there can point it anywhere.
+        #[test]
+        fn a_folder_a_second_link_passes_through_is_checked() {
+            let (root, keys, home) = setup();
+            let shared = root.path().join("shared");
+            std::fs::create_dir_all(&shared).unwrap();
+            let hop = shared.join("hop");
+            std::os::unix::fs::symlink(&keys, &hop).unwrap();
+            let alias = root.path().join("alias");
+            std::os::unix::fs::symlink(&hop, &alias).unwrap();
+            let path = alias.join("GROQ_KEY.md");
+            // Both links in folders only the owner writes: the chain is as safe as its target.
+            private(&shared);
+            assert_eq!(write(&path, KEY, &home), Ok(Written { durable: true }));
+            // The second link's folder open to others: `hop` can be replaced under the first link.
+            for mode in [0o775, 0o757, 0o777] {
+                std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(mode)).unwrap();
+                assert_eq!(
+                    write(&path, "canary-second-hop", &home),
+                    Err(Refused::SharedDir),
+                    "{mode:o}"
+                );
+            }
+            assert!(holding(&[&keys, &home], "canary-second-hop").is_empty());
+            // A chain that never ends is no folder.
+            let (a, b) = (root.path().join("a"), root.path().join("b"));
+            std::os::unix::fs::symlink(&b, &a).unwrap();
+            std::os::unix::fs::symlink(&a, &b).unwrap();
+            assert_eq!(
+                write(&a.join("GROQ_KEY.md"), KEY, &home),
+                Err(Refused::NoDir)
+            );
         }
 
         #[test]
@@ -536,7 +600,7 @@ mod tests {
             // The key folder cannot itself be shared: a new key's name has no owner yet.
             std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o1777)).unwrap();
             let new = keys.join("NEW_KEY.md");
-            assert_eq!(write(&new, KEY, &home), Err(Refused::NotPrivate));
+            assert_eq!(write(&new, KEY, &home), Err(Refused::SharedDir));
             assert!(!new.exists());
         }
 
