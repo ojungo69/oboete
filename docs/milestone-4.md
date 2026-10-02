@@ -182,6 +182,13 @@ A script given a held-out session or pool exits unless `--decide <id>` equals `c
 - **M5's sessions without a checkout.** Each tier's text is `oboete inject` run in the session's checkout. A session whose checkout is no longer on this machine (its repository moved or was removed) cannot be measured so, and a checkout made up for it would guess the repository's identity. Such a session is counted apart (`no_checkout`) and left out of the scoring: `n` is the sessions scored, `metadata.N` the sessions cut. 7 of the first 20 sessions were such.
 - **M5's homes.** A home whose replay stopped part way (raw.db without `replay.json`) is removed, with its none tier, and replayed again.
 
+### Changed on 2026-10-02, before continuing with the merged runtime
+
+- **Curation retry.** The runtime includes #339: a window whose only retryable answer failure is `unanchored` is retried immediately, without opening the provider breaker, and skipped after three counted attempts. Rate limits, budgets and the answer's cooldown still apply (milestone 3 plan, D11). This changes retry scheduling, not the frozen questions, keys, labels or prompts.
+- **The binary for this continuation.** Main at `62efd7d68eba1e60f1df661ee6326ab1fb429e99`, including #333, #334, #335 and #339, built with `cargo build --release --locked` on WSL; SHA-256 `4343eb89b8d7df3f87d7b52ce3e0cbae53d867ec9f19aa73366cbaf1a9fcd2e1`. It is retained at `~/.oboete/eval/bin/oboete-main-62efd7d-4343eb89b8d7`. The owner's installed v1 binary and hooks are not replaced.
+- **The continuing dev home.** Resume the same dev-m4 home from its checkpoint; keep its earlier ceda2d3 and 4adeadc windows and record the first window made by this runtime. Do not curate those windows again or remap the frozen keys. The default curator remains subscription Haiku, with no embedder.
+- **M5 restart.** Keep the stopped ceda2d3 rows and homes aside. Reuse the frozen 26 cuts, start with the fixed harness and this binary's own hash directory, exclude sessions without a checkout, and score only after the eligible sessions finish. No held-out or deciding run is opened.
+
 ### Prompts
 
 The harnesses' prompts are these texts, as Python format strings (`{{` is a brace), byte for byte; `test_m6.py`, `test_m5.py` and `test_m3.py` compare them with this file. Every text filled in has passed `oboete gate`.
