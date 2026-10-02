@@ -74,11 +74,12 @@ enum Cmd {
         /// Hook event name (e.g. SessionStart, PreInvocation, UserPromptSubmit, PostToolUse, Stop, PreCompact, SessionEnd)
         event: String,
     },
-    /// Run Design B's consumers over raw.db until idle (hooks start it; one per home)
+    /// Run Design B's consumers over raw.db (hooks start it; one per home). It exits when idle,
+    /// or stays where config.toml says `[worker] resident = true`
     Worker {
-        /// Exit after this long without a new record
-        #[arg(long, default_value_t = 60_000)]
-        idle_ms: u64,
+        /// Exit after this long without a new record, whatever config.toml says
+        #[arg(long)]
+        idle_ms: Option<u64>,
     },
     /// Rebuild knowledge.db (claims, digests, indexes, manifests) from raw.db and its op log,
     /// with no AI call
@@ -368,7 +369,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Worker { idle_ms } => worker::run(&home, idle_ms),
+        Cmd::Worker { idle_ms: Some(ms) } => worker::run(&home, ms),
+        Cmd::Worker { idle_ms: None } => worker::run_default(&home),
         Cmd::Inject {
             session,
             prompt: true,
@@ -678,9 +680,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         }
         Cmd::Restore => {
             // The worker's lock, so no worker reads raw.db while it is replaced.
-            let held = worker::lock(&home)?.ok_or_else(|| {
-                anyhow::anyhow!("a worker is running; try again when it has exited")
-            })?;
+            let held = worker::lock_asking(&home)?;
             let said = backup::restore(&home)?;
             // Derived data was moved aside: it is rebuilt before this returns, so a search right
             // after finds the restored records.

@@ -1909,6 +1909,7 @@ mod tests {
                     embed: Some(&mut embed),
                     shortlist: Some(&mut builder),
                     curation: Some(&mut curation),
+                    ..crate::worker::Phases::default()
                 };
                 let consumers = crate::worker::consumers(&home);
                 crate::worker::run_holding(&home, 200, consumers, || {}, None, phases)

@@ -100,9 +100,44 @@ fn pass(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> R
     Ok(advanced)
 }
 
+/// The home this run locked was removed, or removed and made again (docs/resident.md R3).
+#[derive(Debug)]
+pub struct Gone;
+
+impl std::fmt::Display for Gone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "the home was removed or replaced while this ran: nothing more is written to it",
+        )
+    }
+}
+
+impl std::error::Error for Gone {}
+
 /// The per-home worker lock, `<home>/state/worker.lock`; released when dropped. Each taking of it
 /// has the next number of `state/worker-gen`, so a run's outcome is ordered against a later run's.
 pub struct Lock(#[allow(dead_code)] std::fs::File, u64);
+
+impl Lock {
+    /// Whether `home`'s lock file is still the file this lock holds. A home removed, or removed
+    /// and made again, is not the home of this run (docs/resident.md R3).
+    fn names(&self, home: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let at = std::fs::metadata(home.join("state").join("worker.lock"));
+            matches!(
+                (self.0.metadata(), at),
+                (Ok(held), Ok(at)) if (held.dev(), held.ino()) == (at.dev(), at.ino())
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = home;
+            true
+        }
+    }
+}
 
 /// The lock, or `None` when another process holds it. Hooks try it too, and start a worker only
 /// when they get it (dropping it at once).
@@ -136,12 +171,72 @@ pub fn lock(home: &Path) -> Result<Option<Lock>> {
     }
 }
 
+/// Where a command that needs the worker lock asks the worker that holds it to step aside
+/// (docs/resident.md R12).
+fn yield_request(home: &Path) -> std::path::PathBuf {
+    home.join("state").join("worker-yield")
+}
+
+/// Whether a command asked within the last minute. An older request was left by a command that
+/// died. One dated after now (the clock went back) is not obeyed either: a worker that works on
+/// is the smaller harm than one that never works.
+fn asked_aside(home: &Path) -> bool {
+    std::fs::metadata(yield_request(home))
+        .and_then(|m| m.modified())
+        .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < Duration::from_secs(60)))
+}
+
+/// R12, the worker's side: when a command asked, what is new is backed up (a restore reads the
+/// backups) and the loop ends. Whether it does. The lock goes once the loop's stores are closed
+/// (`run_holding`): the command that takes it may swap them at once.
+fn steps_aside(home: &Path, raw: &Raw, holding: &Holding) -> bool {
+    if !asked_aside(home) || gone(home, holding) {
+        return false;
+    }
+    crate::backup::run(home, raw);
+    true
+}
+
+/// How long a command waits for a worker to step aside.
+const ASK: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 30 });
+
+/// R12, the command's side: the lock for a command that cannot run beside a worker (`oboete
+/// restore`, `rebuild`, `recurate --yes`). A worker that holds it is asked to step aside, which
+/// it does between rounds and while it waits, not during a call to a provider.
+pub fn lock_asking(home: &Path) -> Result<Lock> {
+    if let Some(held) = lock(home)? {
+        return Ok(held);
+    }
+    let ask = yield_request(home);
+    std::fs::write(&ask, "")?;
+    let until = Instant::now() + ASK;
+    let held = loop {
+        match lock(home) {
+            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(50)),
+            tried => break tried,
+        }
+    };
+    let _ = std::fs::remove_file(&ask);
+    held?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "the worker is busy and did not step aside within {} s (a call to a provider can \
+             take minutes); try again later",
+            ASK.as_secs()
+        )
+    })
+}
+
 /// The lock for a command that plans from knowledge.db and then appends to raw (`oboete
 /// recurate`), with the consumers drained under it first as a worker drains them: the plan reads
 /// what raw holds, and no worker or other command moves it until the lock is dropped. `None` when
-/// another process holds it.
-pub fn drained(home: &Path) -> Result<Option<Lock>> {
-    let Some(held) = lock(home)? else {
+/// another process holds it and the command did not `ask` for it.
+pub fn drained(home: &Path, ask: bool) -> Result<Option<Lock>> {
+    let held = if ask {
+        Some(lock_asking(home)?)
+    } else {
+        lock(home)?
+    };
+    let Some(held) = held else {
         return Ok(None);
     };
     let raw = crate::backup::open_raw(home)?;
@@ -214,6 +309,11 @@ pub struct Phases<'a, 'f> {
     pub embed: Option<&'a mut crate::embed_phase::Phase>,
     pub shortlist: Option<&'a mut crate::shortlist::Builder>,
     pub curation: Option<&'a mut CurationPhase<'f>>,
+    /// `oboete worker` itself, not a command that borrows its loop: it steps aside for a command
+    /// that asks for the lock (docs/resident.md R12).
+    pub yields: bool,
+    /// It stays when it is idle (R2, R3). Only `run_default` sets it, from `[worker] resident`.
+    pub resident: bool,
 }
 
 pub(crate) fn run_holding(
@@ -236,13 +336,27 @@ pub(crate) fn run_holding(
         &mut holding,
         &mut phases,
     );
+    // No outcome goes into a home that is not this run's (R3).
+    let ours = !gone(home, &holding);
     // Released first: a hook that finds the lock free starts a worker for what it appended.
     holding.lock = None;
     // A run that never took the lock did no work: another worker's outcome stands.
-    if holding.last > 0 {
+    if holding.last > 0 && ours {
         record(home, holding.last, &result);
     }
     result
+}
+
+/// config.toml as a resident worker last saw it (R3): its time and size, `None` with no file.
+fn config_stamp(home: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let file = std::fs::metadata(home.join("config.toml")).ok()?;
+    Some((file.modified().ok()?, file.len()))
+}
+
+/// R3: whether the home is no longer the one this run locked. It is asked before every write the
+/// loop makes by path (a backup, the prune, an outcome), which would go into another home.
+fn gone(home: &Path, holding: &Holding) -> bool {
+    holding.lock.as_ref().is_some_and(|l| !l.names(home))
 }
 
 /// Every lock this run takes is noted as a run that has not ended, until `record` replaces the
@@ -315,6 +429,10 @@ fn serve(
             None => return Ok(false),
         }
     }
+    // The stores are opened by path too: after a restore, in a home that may be another by now.
+    if gone(home, holding) {
+        return Err(Gone.into());
+    }
     // Taken before the open, so a request a hook makes while it runs is still seen below; put
     // back when the open fails (no segment, a reader holding raw.lock), for the next worker,
     // which the next hook starts.
@@ -328,29 +446,46 @@ fn serve(
     let mut k = crate::backup::open_knowledge(home)?;
     checkpoint::rewind(&raw, &k, consumers)?;
     crate::backup::check(home, &raw);
-    let mut due = |raw: &Raw| {
-        if Instant::now() >= *next_backup {
+    let mut due = |raw: &Raw, holding: &Holding| {
+        if Instant::now() >= *next_backup && !gone(home, holding) {
             crate::backup::run(home, raw);
             *next_backup = Instant::now() + crate::backup::EVERY;
         }
     };
+    let (resident, yields) = (phases.resident, phases.yields);
+    let mut config = config_stamp(home);
+    // Whether a round ran since a resident worker's last idle step (R3).
+    let mut ran;
+    // R10: a resident worker is killed at every shutdown of the PC. While it waits its outcome
+    // says all is well, so doctor reports a kill during a round and none during a wait.
+    let mut waited = false;
     loop {
+        if gone(home, holding) {
+            return Err(Gone.into());
+        }
+        if yields && steps_aside(home, &raw, holding) {
+            return Ok(false);
+        }
+        ran = true;
+        if std::mem::take(&mut waited) {
+            note(home, holding.last, STOPPED);
+        }
         // What the pass below reads up to, new records or new ops of this device (an owner's
         // correction appends only an op): one that lands after it, even before the wait, wakes it.
         let seen = (raw.max_seq()?, raw.max_op_seq_of(raw.device())?);
         while pass(&raw, &mut k, consumers)? {
-            due(&raw);
+            due(&raw, holding);
         }
-        due(&raw);
+        due(&raw, holding);
         // D3 and milestone 4's D8 and D9: once the consumers have drained, the embedding phase, the
         // shortlists, then one window. A call in flight, or a window that waits only on time
         // within D10's 30 minutes, keeps the worker up until then; a phase's progress starts the
-        // next round.
+        // next round. A resident worker is up for every wait (R3): no hook starts it again.
         let (mut stay, mut again) = (None, false);
         if let Some(embed) = phases.embed.as_mut() {
             match embed.poll(&raw, &k)? {
                 Phase::Covered => again = true,
-                Phase::Waiting { until, up: true } => stay = Some(until),
+                Phase::Waiting { until, up } if up || resident => stay = Some(until),
                 Phase::Waiting { .. } | Phase::Idle => {}
             }
         }
@@ -368,7 +503,7 @@ fn serve(
             match phase(&mut raw, &k)? {
                 Phase::Covered if crate::backup::restore_requested(home) => return Ok(true),
                 Phase::Covered => again = true,
-                Phase::Waiting { until, up: true } => {
+                Phase::Waiting { until, up } if up || resident => {
                     stay = Some(stay.map_or(until, |s: i64| s.min(until)));
                 }
                 Phase::Waiting { .. } | Phase::Idle => {}
@@ -377,28 +512,70 @@ fn serve(
         if again {
             continue;
         }
-        // A window's time replaces the idle wait: the phase runs again then, and the idle wait
-        // starts once it has nothing left to wait for.
-        let wait = stay.map_or(idle_ms, |until| {
-            u64::try_from(until - crate::db::now_ms()).unwrap_or(0)
-        });
-        let deadline = Instant::now() + Duration::from_millis(wait);
-        let mut more = false;
-        while Instant::now() < deadline {
-            std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
-            if crate::backup::restore_requested(home) {
-                return Ok(true);
+        if resident {
+            if gone(home, holding) {
+                return Err(Gone.into());
             }
-            // A call that came back is written at once.
-            if (raw.max_seq()?, raw.max_op_seq_of(raw.device())?) != seen
-                || phases.embed.as_ref().is_some_and(|e| e.done())
-            {
-                more = true;
-                break;
-            }
-            due(&raw);
+            note(home, holding.last, "");
+            waited = true;
         }
-        if more || stay.is_some() {
+        // A window's time replaces the idle wait: the phase runs again then, and the idle wait
+        // starts once it has nothing left to wait for. A resident worker (R3) waits again after
+        // each idle time that passes with nothing new, also within a longer wait for a phase.
+        let leaving = loop {
+            let phase = stay.map(|until| u64::try_from(until - crate::db::now_ms()).unwrap_or(0));
+            let wait = match phase {
+                Some(phase) if resident => phase.min(idle_ms),
+                Some(phase) => phase,
+                None => idle_ms,
+            };
+            let deadline = Instant::now() + Duration::from_millis(wait);
+            let mut more = false;
+            while Instant::now() < deadline {
+                std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
+                if crate::backup::restore_requested(home) {
+                    return Ok(true);
+                }
+                if yields && steps_aside(home, &raw, holding) {
+                    return Ok(false);
+                }
+                // A call that came back is written at once.
+                if (raw.max_seq()?, raw.max_op_seq_of(raw.device())?) != seen
+                    || phases.embed.as_ref().is_some_and(|e| e.done())
+                {
+                    more = true;
+                    break;
+                }
+                due(&raw, holding);
+            }
+            if more || phase == Some(wait) {
+                break false;
+            }
+            // The idle time passed with nothing new: a backup and a prune follow, here or below.
+            if gone(home, holding) {
+                return Err(Gone.into());
+            }
+            if !resident {
+                break true;
+            }
+            // Its idle step: what an exit does, once for the rounds since the last one.
+            if std::mem::take(&mut ran) {
+                crate::backup::run(home, &raw);
+                crate::hookstate::prune(home, crate::hookstate::KEEP);
+            }
+            // Only a config.toml that loads and does not say `resident = true` ends it: one the
+            // owner is still editing leaves it as it is.
+            if crate::config::worker(home).is_ok_and(|w| !w.resident) {
+                break true;
+            }
+            // A setting the owner changed is followed without a new record.
+            let now = config_stamp(home);
+            if now != config {
+                config = now;
+                break false;
+            }
+        };
+        if !leaving {
             continue;
         }
         // Under the lock: a worker started after the release cannot export the same seqs.
@@ -422,7 +599,28 @@ fn serve(
     }
 }
 
+/// `oboete worker --idle-ms N`: it exits after that long with no new record, whatever
+/// config.toml says (docs/resident.md R2).
 pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
+    run_as(home, idle_ms, false)
+}
+
+/// The idle time of a worker started with none.
+const IDLE_MS: u64 = 60_000;
+
+/// `oboete worker`, as a hook starts it: in a home whose config.toml says `[worker] resident =
+/// true` it stays when idle (R2).
+pub fn run_default(home: &Path) -> Result<()> {
+    run_as(home, IDLE_MS, true)
+}
+
+/// `follow`: whether `[worker] resident` is read. Only here, never in the loop: `run_once`,
+/// `rebuild` and the other commands that borrow it exit at idle in every home. A file that does
+/// not load makes no resident worker, as before; Linux only until the other systems' unit.
+fn run_as(home: &Path, idle_ms: u64, follow: bool) -> Result<()> {
+    let resident = follow
+        && cfg!(target_os = "linux")
+        && crate::config::worker(home).is_ok_and(|w| w.resident);
     // Another worker holds the lock: its run, not this one, says how the work went.
     let Some(held) = lock(home)? else {
         return Ok(());
@@ -434,6 +632,8 @@ pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
         embed: Some(&mut embed),
         shortlist: Some(&mut shortlist),
         curation: Some(&mut *curation),
+        yields: true,
+        resident,
     };
     run_holding(home, idle_ms, consumers(home), || {}, Some(held), phases)
 }
@@ -647,8 +847,7 @@ pub(crate) fn contending() -> impl Drop {
 /// named in the error.
 pub fn rebuild(home: &Path) -> Result<()> {
     use anyhow::Context;
-    let held = lock(home)?
-        .ok_or_else(|| anyhow::anyhow!("a worker is running; try again when it has exited"))?;
+    let held = lock_asking(home)?;
     let name = format!("knowledge.db.rebuilding-{}", crate::db::now_ms());
     set_aside(home, &name)?;
     let kept = home.join(&name);
@@ -1596,6 +1795,379 @@ mod tests {
         let k = knowledge::open(&p).unwrap();
         assert_eq!(checkpoint::get(&k, "seen", &device).unwrap(), 2);
         assert_eq!(seen(&k), vec![1, 2]);
+    }
+
+    // docs/resident.md: a worker that stays (R2, R3, R10, R12).
+
+    /// A resident worker over `Seen` in a thread, with a short idle time: what `oboete worker`
+    /// runs in a home whose config.toml says `resident = true`.
+    #[cfg(target_os = "linux")]
+    fn resident(p: &Path, idle_ms: u64) -> std::thread::JoinHandle<Result<()>> {
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+        let p = p.to_path_buf();
+        std::thread::spawn(move || {
+            let held = lock(&p)?;
+            let phases = Phases {
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            run_holding(&p, idle_ms, vec![Box::new(Seen)], || {}, held, phases)
+        })
+    }
+
+    /// Waits up to 10 s for `done`.
+    #[cfg(target_os = "linux")]
+    fn until(what: &str, mut done: impl FnMut() -> bool) {
+        let t = Instant::now();
+        while !done() {
+            assert!(t.elapsed() < Duration::from_secs(10), "never: {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A session's flags last changed longer ago than a prune keeps them.
+    #[cfg(target_os = "linux")]
+    fn stale_flags(p: &Path) -> std::path::PathBuf {
+        let old = p.join("state").join("hooks").join("claude").join("old");
+        std::fs::create_dir_all(&old).unwrap();
+        let long_ago =
+            std::time::SystemTime::now() - crate::hookstate::KEEP - Duration::from_secs(60);
+        let dir = std::fs::File::open(&old).unwrap();
+        dir.set_modified(long_ago).unwrap();
+        old
+    }
+
+    /// R3: at its idle time a resident worker backs up and prunes as a worker does before it
+    /// exits, keeps the lock and waits. It does so again only after a round, and it exits at the
+    /// idle time that finds `resident` turned off.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_worker_stays_when_idle_until_its_config_says_otherwise() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("first")).unwrap();
+        let old = stale_flags(p);
+        let worker = resident(p, 100);
+        let segments = || std::fs::read_dir(p.join("backups")).map_or(0, |d| d.count());
+        // Its first idle step: the backup, then the prune.
+        until("the first idle step", || !old.exists());
+        let exported = segments();
+        assert!(exported > 0, "no backup at the idle time");
+        // Idle times pass with no round: it stays, and does that work only once.
+        let old = stale_flags(p);
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(running(p) && !worker.is_finished(), "it left when idle");
+        assert!(old.exists(), "pruned again with no round since");
+        // A round, then its idle step.
+        raw.append(&raw::test_event("second")).unwrap();
+        until("the idle step after a round", || !old.exists());
+        assert!(segments() > exported);
+        // Turned off: it exits at its next idle time.
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+        worker.join().unwrap().unwrap();
+        assert!(!running(p));
+    }
+
+    /// R2: only `oboete worker` started with no `--idle-ms` follows `[worker] resident`. With one
+    /// it exits when idle whatever the file says, and the commands that borrow its loop return.
+    /// R3: a config.toml that does not load leaves a resident worker as it is, and makes none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_a_worker_started_with_no_idle_time_follows_the_resident_switch() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let config = |text: &str| std::fs::write(p.join("config.toml"), text).unwrap();
+        let hooks = |p: &Path| {
+            let p = p.to_path_buf();
+            std::thread::spawn(move || run_as(&p, 100, true))
+        };
+        config("[worker]\nresident = true\n");
+        run(p, 50).unwrap();
+        run_once(p).unwrap();
+        rebuild(p).unwrap();
+        let worker = hooks(p);
+        until("it holds the lock", || running(p));
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!worker.is_finished(), "it left a resident home when idle");
+        config("[worker\n");
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!worker.is_finished(), "a file that does not load ended it");
+        config("[worker]\nresident = false\n");
+        worker.join().unwrap().unwrap();
+        // Started while the file does not load: not resident.
+        config("[worker\n");
+        let worker = hooks(p);
+        until("a worker with no readable switch exits", || {
+            worker.is_finished()
+        });
+        worker.join().unwrap().unwrap();
+    }
+
+    /// R3: no hook starts a resident worker again, so it is up for every wait of a phase, not
+    /// only D10's short ones. The phase runs again at the time it named, not at each idle time,
+    /// and the idle step is taken while it waits.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_worker_runs_a_phase_again_at_the_time_it_waits_for() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("first")).unwrap();
+        let polls = std::sync::Arc::new(AtomicUsize::new(0));
+        let started = Instant::now();
+        let worker = {
+            let (p, polls) = (p.to_path_buf(), polls.clone());
+            std::thread::spawn(move || {
+                let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+                    // First a wait of three idle times, then a long one; neither keeps a worker
+                    // up that is not resident.
+                    let wait = match polls.fetch_add(1, Ordering::SeqCst) {
+                        0 => 300,
+                        _ => 600_000,
+                    };
+                    Ok(Phase::Waiting {
+                        until: crate::db::now_ms() + wait,
+                        up: false,
+                    })
+                };
+                let phases = Phases {
+                    curation: Some(&mut phase),
+                    yields: true,
+                    resident: true,
+                    ..Phases::default()
+                };
+                run_holding(&p, 100, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+            })
+        };
+        until("the phase ran again", || polls.load(Ordering::SeqCst) > 1);
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "the phase ran again before its time"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(polls.load(Ordering::SeqCst), 2, "a round at each idle time");
+        assert!(
+            std::fs::read_dir(p.join("backups")).is_ok_and(|d| d.count() > 0),
+            "no idle step while a phase waits"
+        );
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+        worker.join().unwrap().unwrap();
+    }
+
+    /// R10: a resident worker is killed at every shutdown of the PC. While it waits its outcome
+    /// says all is well, so that kill is no alarm; during a round it says "stopped", as before.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_workers_outcome_is_clean_while_it_waits_and_not_during_a_round() {
+        use std::sync::mpsc::channel;
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("first")).unwrap();
+        let (entered, in_round) = channel();
+        let (go_on, gate) = channel::<()>();
+        let worker = {
+            let p = p.to_path_buf();
+            std::thread::spawn(move || {
+                let mut rounds = 0;
+                // The second round stops in its phase until the test lets it go on.
+                let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+                    rounds += 1;
+                    if rounds == 2 {
+                        entered.send(()).ok();
+                        gate.recv().ok();
+                    }
+                    Ok(Phase::Idle)
+                };
+                let phases = Phases {
+                    curation: Some(&mut phase),
+                    yields: true,
+                    resident: true,
+                    ..Phases::default()
+                };
+                run_holding(&p, 100, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+            })
+        };
+        let waits = || outcome(p).is_some_and(|(_, why)| why.is_empty()) && running(p);
+        until("a clean outcome while it waits", waits);
+        raw.append(&raw::test_event("second")).unwrap();
+        in_round
+            .recv_timeout(Duration::from_secs(10))
+            .expect("no second round");
+        assert_eq!(
+            outcome(p).unwrap().1,
+            STOPPED,
+            "a round under a clean outcome"
+        );
+        go_on.send(()).unwrap();
+        until("a clean outcome after the round", waits);
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+        worker.join().unwrap().unwrap();
+    }
+
+    /// R3: a home removed and made again is not the home this worker locked. It stops at its next
+    /// write by path and leaves the new home as it found it: no backup, no outcome, and its
+    /// stores with their `-wal` and `-shm` files (SQLite removes those by name when a store's
+    /// last connection closes, but not once the store's file is no longer at its path).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_worker_whose_home_was_replaced_leaves_the_new_one_alone() {
+        let _contending = contending();
+        let parent = tempfile::tempdir().unwrap();
+        let p = parent.path().join("home");
+        std::fs::create_dir(&p).unwrap();
+        {
+            let mut raw = raw::open(&p).unwrap();
+            raw.append(&raw::test_event("first")).unwrap();
+        }
+        let worker = resident(&p, 300);
+        // It waits, its idle step still before it.
+        until("it waits", || {
+            outcome(&p).is_some_and(|(_, why)| why.is_empty())
+        });
+        std::fs::remove_dir_all(&p).unwrap();
+        // The new home has a lock file of its own: the same path, another file.
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        std::fs::write(p.join("state").join("worker.lock"), "").unwrap();
+        let mut made = vec!["config.toml".to_owned(), "state".to_owned()];
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+        for store in ["raw.db", "knowledge.db"] {
+            for ext in ["", "-wal", "-shm"] {
+                std::fs::write(p.join(format!("{store}{ext}")), "the new home's").unwrap();
+                made.push(format!("{store}{ext}"));
+            }
+        }
+        until("the old worker stops", || worker.is_finished());
+        let why = worker.join().unwrap().unwrap_err();
+        assert!(why.is::<Gone>(), "{why:#}");
+        let mut left: Vec<String> = std::fs::read_dir(&p)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        made.sort();
+        assert_eq!(left, made, "the old worker changed the new home");
+        let state = std::fs::read_dir(p.join("state")).unwrap().count();
+        assert_eq!(
+            state, 1,
+            "the old worker wrote its outcome into the new home"
+        );
+    }
+
+    /// R12: a command that needs the worker lock asks the worker that holds it to step aside.
+    /// The worker backs up (a restore reads the backups), lets go and exits; the command runs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_worker_steps_aside_for_a_command_that_needs_the_lock() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        // An idle time it never reaches: the backup below is the one it makes as it lets go.
+        let worker = resident(p, 600_000);
+        until("it waits", || {
+            outcome(p).is_some_and(|(_, why)| why.is_empty())
+        });
+        assert!(!p.join("backups").exists());
+        let held = lock_asking(p).unwrap();
+        worker.join().unwrap().unwrap();
+        assert!(
+            std::fs::read_dir(p.join("backups")).is_ok_and(|d| d.count() > 0),
+            "it let go without a backup"
+        );
+        assert!(!p.join("state").join("worker-yield").exists());
+        assert!(last_failure(p).is_none());
+        drop(held);
+        // `oboete rebuild` is such a command: it swaps knowledge.db as soon as it has the lock,
+        // so the worker's stores are closed by then.
+        // The next worker's own taking of the lock, not one a forked child still holds open.
+        let last = outcome(p).unwrap().0;
+        let worker = resident(p, 600_000);
+        until("the next worker waits", || {
+            outcome(p).is_some_and(|(taken, why)| taken > last && why.is_empty())
+        });
+        rebuild(p).unwrap();
+        worker.join().unwrap().unwrap();
+    }
+
+    /// R12: a request left by a command that died is not obeyed for ever: after a minute it is
+    /// ignored. A new one is obeyed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_request_to_step_aside_older_than_a_minute_is_ignored() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let ask = p.join("state").join("worker-yield");
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        std::fs::write(&ask, "").unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(61);
+        let file = std::fs::File::options().write(true).open(&ask).unwrap();
+        file.set_modified(old).unwrap();
+        let worker = resident(p, 100);
+        until("it holds the lock", || running(p));
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!worker.is_finished(), "it obeyed a request a minute old");
+        std::fs::write(&ask, "").unwrap();
+        until("it obeys a new request", || worker.is_finished());
+        worker.join().unwrap().unwrap();
+    }
+
+    /// R3: a setting the owner changes is followed without a new record. At its idle time a
+    /// resident worker that finds config.toml changed starts a round; otherwise it starts none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_worker_starts_a_round_when_config_toml_changed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+        let rounds = std::sync::Arc::new(AtomicUsize::new(0));
+        let worker = {
+            let (p, rounds) = (p.to_path_buf(), rounds.clone());
+            std::thread::spawn(move || {
+                let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+                    rounds.fetch_add(1, Ordering::SeqCst);
+                    Ok(Phase::Idle)
+                };
+                let phases = Phases {
+                    curation: Some(&mut phase),
+                    yields: true,
+                    resident: true,
+                    ..Phases::default()
+                };
+                run_holding(&p, 100, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+            })
+        };
+        until("its first round", || rounds.load(Ordering::SeqCst) > 0);
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(rounds.load(Ordering::SeqCst), 1, "a round with nothing new");
+        let changed = "[worker]\nresident = true\n[summary]\ncurate = false\n";
+        std::fs::write(p.join("config.toml"), changed).unwrap();
+        until("a round after the change", || {
+            rounds.load(Ordering::SeqCst) > 1
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            rounds.load(Ordering::SeqCst),
+            2,
+            "a round at each idle time since"
+        );
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+        worker.join().unwrap().unwrap();
     }
 
     // M2 (spec 8.2): a crash at 20 points gives the rows of a run with none.

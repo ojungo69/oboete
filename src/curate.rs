@@ -1772,10 +1772,7 @@ pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<Str
     // queue between the plan and its sending. Sending needs it: no curation phase sends at the
     // same time (the month's cap is read before each call and written after it), and no consumer
     // changes the claims a window retracts from. A list is made without it while a worker runs.
-    let held = crate::worker::drained(home)?;
-    if send && held.is_none() {
-        anyhow::bail!("a worker is running; try again when it has exited");
-    }
+    let held = crate::worker::drained(home, send)?;
     let out = planned(home, source, send);
     // Released as a worker releases it: a hook that appended while it was held started no
     // worker, so the consumers run once more, sent or not.
@@ -6513,9 +6510,10 @@ mod tests {
         let again = Again::Span(device, Span::records(1, 3));
         let refused = recurate(home.path(), again, true).unwrap_err();
         assert!(
-            refused.to_string().contains("a worker is running"),
+            refused.to_string().contains("the worker is busy"),
             "{refused}"
         );
+        assert!(!home.path().join("state").join("worker-yield").exists());
     }
 
     /// A recuration of the middle of a queued or skipped span leaves the parts on both sides,
