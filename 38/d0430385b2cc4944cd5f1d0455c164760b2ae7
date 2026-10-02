@@ -1,0 +1,23 @@
+docs/eval/test_m3.py
+  s_17c3dc80287a78::t_ac04a7e7dc241d 235
+docs/eval/test_m6.py
+  s_17c3dc80287a78::t_ac04a7e7dc241d 202,395
+docs/eval/m5.py
+  s_17c3dc80287a78::t_ac04a7e7dc241d 10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "38d0430385b2cc4944cd5f1d0455c164760b2ae7",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
