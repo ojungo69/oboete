@@ -2630,6 +2630,29 @@ const CARD_FACTS: usize = 10;
 const CARD_FILES: usize = 20;
 const CARD_ITEM: usize = 500;
 
+/// Whether `text` shows `path` whole (C3), not as a part of a longer one: `/etc/passwd` is not
+/// shown by `/tmp/etc/passwd`, nor `src/auth.rs` by `src/auth.rs.bak`. A relative path may end a
+/// longer one (the same file under a directory), and a full stop may follow it.
+fn shows_path(text: &str, path: &str) -> bool {
+    let part = |c: char| c.is_alphanumeric() || "/\\._-~".contains(c);
+    let relative = !path.starts_with(['/', '\\', '~']) && path.get(1..2) != Some(":");
+    !path.is_empty()
+        && text.match_indices(path).any(|(at, _)| {
+            let starts = match text[..at].chars().next_back() {
+                Some('/' | '\\') => relative,
+                Some(c) => !part(c),
+                None => true,
+            };
+            let mut after = text[at + path.len()..].chars();
+            let ends = match after.next() {
+                Some('.') => after.next().is_none_or(|c| !part(c)),
+                Some(c) => !part(c),
+                None => true,
+            };
+            starts && ends
+        })
+}
+
 /// The answer's cards as the window op keeps them (docs/cards.md slice 2), and how many it
 /// gave that are not kept; none when the answer has no list of them. Each is checked alone and
 /// none fails its window: claude-mem's one rule for keeping an observation is a title. A type
@@ -2658,7 +2681,7 @@ fn cards_of(w: &Window, answer: &Value) -> Option<(Vec<Value>, u64)> {
         }
         out
     };
-    let named = |path: &str| w.text.contains(path);
+    let named = |path: &str| shows_path(&w.text, path);
     let mut kept = Vec::new();
     for c in given {
         let card = (|| {
@@ -8557,6 +8580,29 @@ mod tests {
                 "files_read": ["src/a.rs"], "files_modified": []}])
         );
         assert!(op.get("cards_dropped").is_none());
+    }
+
+    /// Codex on slice 2: a file is kept when the lines show it whole, not as a part of a longer
+    /// path (`/etc/passwd` in `/tmp/etc/passwd`, `src/auth.rs` in `src/auth.rs.bak`); a relative
+    /// path may end a longer one, and a full stop may follow it.
+    #[test]
+    fn a_cards_file_is_kept_only_as_a_whole_path_its_lines_show() {
+        let given = json!([{"type": "change", "title": "Paths",
+            "files_read": ["/etc/passwd", "src/auth.rs", "src/main.rs", "notes.md",
+                "/home/u/repo/src/main.rs"],
+            "files_modified": ["/tmp/etc/passwd", "src/auth.rs.bak"]}]);
+        let said = "edited /tmp/etc/passwd and src/auth.rs.bak, then read \
+                    /home/u/repo/src/main.rs and notes.md.";
+        let op = observing(said, given);
+        let card = &op["observations"][0];
+        assert_eq!(
+            card["files_read"],
+            json!(["src/main.rs", "notes.md", "/home/u/repo/src/main.rs"])
+        );
+        assert_eq!(
+            card["files_modified"],
+            json!(["/tmp/etc/passwd", "src/auth.rs.bak"])
+        );
     }
 
     /// Cards within their own caps can still pass the op cap together: the last goes first, and

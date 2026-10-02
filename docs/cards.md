@@ -156,8 +156,9 @@ and the op says how many were (`cards_dropped`).
 - A type outside the nine is no type. claude-mem keeps an unknown type as written and takes a
   missing one for `bugfix`; a wrong label on the timeline is worse than none.
 - Concepts outside the seven go. A list holds text only, each item once.
-- A file is kept when the window's lines name it. A card is found by its files (the note on a
-  file), so it names none the curator was not shown.
+- A file is kept when the window's lines name it whole, not as a part of a longer path
+  (`/etc/passwd` is not named by `/tmp/etc/passwd`); a relative path may end a longer one. A card
+  is found by its files (the note on a file), so it names none the curator was not shown.
 - A title over 300 characters, a subtitle over 500 or a narrative over 4,000 drops the card:
   nothing is cut before the gate (K6). A fact or a file over 500 characters is dropped, as is one
   past the tenth fact or the twentieth file of a list.
@@ -218,7 +219,7 @@ window carries in, within its existing budget.
 3. A card without a title, one that is no object, one with a text over its cap and those past
    the fifth are dropped and counted; the window is covered.
 4. A type outside the nine becomes none, concepts outside the seven go, a list holds text only,
-   and a file the window does not name goes.
+   and a file the window does not name whole goes.
 5. Three cards within their own caps that pass the op cap together: the last goes first.
 6. The answer's shape names every field of a card as required, and the prompt asks for cards.
 7. A window op's observations are its cards in the table, in their order, and its summary is
