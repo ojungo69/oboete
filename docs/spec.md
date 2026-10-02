@@ -114,7 +114,7 @@ The other checked items in RD/constraints-synthesis.md (the "2. Inherited constr
 
 - Agent hooks redact each event and append it to `raw.db`.
 - `raw.db` holds the raw records. It is the source of truth and is kept forever by default; the retention period is a user setting (1.5).
-- A worker per device reads `raw.db` in order by per-device sequence number and runs the consumers: full-text index, handoff manifest, embeddings, curation (AI), digest, sync. Hooks start the worker; it exits when idle.
+- A worker per device reads `raw.db` in order by per-device sequence number and runs the consumers: full-text index, handoff manifest, embeddings, curation (AI), digest, sync. Hooks start the worker; it stays up by default and can be set to exit when idle (1.8).
   - A wake-up is never lost: work that arrives while a worker runs, including between its last check for pending work and its exit, is processed without another hook, by that worker or by a run it hands over to, with embeddings on or off. Processes and threads waiting on the worker lock, and immediate retries, are bounded (issue #55).
   - Consumers progress independently: a slow or failing embedder or a large embedding backlog never delays full-text indexing, the manifest or curation of new records, and this is achieved without unbounded threads, connections or provider calls (issue #55).
   - Issue #55 is met by this worker. Today's code gets a stopgap only for issue #54 (owner decision 24) (Claude; overrulable).
@@ -229,7 +229,7 @@ The user settings in 1.5 change what is recorded: capture exclusion per repo or 
 ### 2.6 Backups
 
 - Backups are sealed, compressed segments with checksums.
-- They run on a `next_attempt_at` deadline, checked at idle exit and periodically while the worker runs (RD/constraints-synthesis.md S2-21).
+- They run on a `next_attempt_at` deadline, checked when the worker goes idle and periodically while it runs (RD/constraints-synthesis.md S2-21).
 - Warn if the backup is inside OneDrive/iCloud/Dropbox.
 - On corruption: quarantine and restore.
 - forget rewrites backups.
@@ -811,7 +811,7 @@ These limits are disclosed in MUST-M23's forget-limits doc and printed by forget
 
 ### 6.6 Local surfaces
 
-- The worker opens one port: the viewer's, on 127.0.0.1, while it is resident (owner decision 36). Hooks do not use it: they wake the worker by starting it or through a lock file. A worker set to exit when idle opens none. The local HTTP API for other clients follows [spec-client-runtime.md](spec-client-runtime.md), §7: loopback, authenticated and privilege-scoped, coordinated through the existing worker lock and SQLite. It is planned, not installed or started.
+- The worker opens no network port, resident or not. Hooks wake it by starting it or through a lock file. In a resident home the viewer is a resident process of its own with one port, on 127.0.0.1 (owner decision 36, the Viewer item below); hooks do not use it. The local HTTP API for other clients follows [spec-client-runtime.md](spec-client-runtime.md), §7: loopback, authenticated and privilege-scoped, coordinated through the existing worker lock and SQLite. It is planned, not installed or started.
 - Local MCP remains stdio. The separately planned versioned local HTTP API (§7 of the client/runtime draft) does not claim HTTP MCP compatibility or replace milestone 6 remote MCP/OAuth.
 - Viewer: 127.0.0.1 only, a token in the URL fragment, and a Host check against DNS rebinding (src/view.rs:205-213): kept. In a resident home (1.8) the viewer is a resident process of its own: its address is fixed and its token outlives a restart, kept in a file only the owner can read, so that a bookmark opens the page; `oboete view` prints or opens that address, and a new token can be made at any time, which ends the old bookmark (Claude; overrulable, A112). Every route still checks the token, including the ones that only read.
   - The new write actions (forget, mute, capture exclusion, corrections, "apply to all repos") are POST only.
@@ -1018,15 +1018,16 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
      - Today's hooks call `/home/jura/.cargo/bin/oboete` by absolute path (~/.claude/settings.json; src/setup.rs:162-172). A new binary installed there would switch every agent before the checks below.
      - Until step 4, the old binary keeps that path, and the new one is called by its full path.
   2. Run the migration (7.4). Answer yes to the transcript import, so the sessions the old `DELETE` trimmed get their heads back (7.4). On the owner's yes to curation, set `[summary] curate`, before the hook switch in step 4, since the migration leaves curation off (7.4; Claude; overrulable, A106). Run doctor.
-  3. (Deferred by owner decision 34 to the one evaluation: at the switch, B's full-text results for the frozen dev questions are compared with the frozen `e0-trigram` run, and known v1 uids are fetched by `search` and `get`, with no model call (Claude; overrulable, A114). The graded check below runs in the one evaluation.) Compare search on the test questions, run on the evaluation store that the judgments grade (the claude-mem evaluation copy, imported once by the old code and once by the new code; milestone 4 builds the new import), not on the owner's migrated store, whose documents the judgments do not cover (Appendix C item 11). The check is milestone 4's line for B's hybrid (8.2 M1, A95). Pass (Claude; overrulable, A110):
-     - no line-carrying slice's recall@10 drops by more than 0.02 (M1's no-regression line, RD/options-draft.md:325);
-     - overall nDCG@10 over the test questions drops by no more than the floor the owner settles in milestone 4's plan (docs/milestone-4-plan.md, "What needs the owner" item 9): drafted 0.03, and 0.02 until the owner answers.
-     The test questions are graded once (8.1), so this check reuses milestone 4's graded run when search has not changed since; a search changed after milestone 4 is compared on the dev questions with the same lines.
+  3. Check search with no model call (owner decision 34): B's full-text results for the frozen dev questions are compared with the frozen `e0-trigram` run, and known v1 uids are fetched by `search` and `get` (Claude; overrulable, A114). The graded comparison is not a step of the switch: it runs in the one evaluation afterwards (below).
   4. Switch the hooks: setup rewrites the entries to the new path.
      - From then on, `oboete` on PATH resolves to the new binary. The old one is kept under another name for rollback.
      - Then run `oboete migrate` again. It imports only what the old binary wrote since step 2 (7.4 import keys).
   5. Run `oboete migrate --finish` after a period the owner chooses. It runs one more import pass first.
      - Agents may keep the hook commands they loaded at session start. So the old binary can still write to oboete.db until every running session restarts, and that is why `--finish` imports once more.
+- **The graded search comparison** runs once, in the one evaluation after the switch (owner decision 34), not at step 3: search on the test questions, run on the evaluation store that the judgments grade (the claude-mem evaluation copy, imported once by the old code and once by the new code; milestone 4 builds the new import), not on the owner's migrated store, whose documents the judgments do not cover (Appendix C item 11). The check is milestone 4's line for B's hybrid (8.2 M1, A95). Pass (Claude; overrulable, A110):
+  - no line-carrying slice's recall@10 drops by more than 0.02 (M1's no-regression line, RD/options-draft.md:325);
+  - overall nDCG@10 over the test questions drops by no more than the floor the owner settles in milestone 4's plan (docs/milestone-4-plan.md, "What needs the owner" item 9): drafted 0.03, and 0.02 until the owner answers.
+  The test questions are graded once (8.1), so this check reuses milestone 4's graded run when search has not changed since; a search changed after milestone 4 is compared on the dev questions with the same lines.
 - **Hub last**: the owner's hub is connected only after every device has passed step 4. (Claude; overrulable)
   - Until then no device pushes anything. So rolling one device back never leaves its ops on the hub or on other devices.
   - Today's code has no hub sync, so nothing is lost while the hub waits.
@@ -1037,7 +1038,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
 
 ### 7.6 Running
 
-- **Worker lifecycle**: the worker is hook-started and exits when idle. This is the default until M5 decides (RD/options-draft.md:340) (set by measurement M5 at milestones 4 (one device) and 6 (devices, the deciding run)).
+- **Worker lifecycle**: the worker is hook-started and resident by default, and exiting when idle is a setting (owner decision 36, 1.8). Measurement M5 no longer decides the default: it reports both modes (RD/options-draft.md:340) (measured at milestones 4 (one device) and 6 (devices)).
   - Periodic jobs run when the worker starts, if they are overdue: the backup deadline (§2.6, RD/sections-1-4.md:27) and S5's daily canary (RD/improvements-synthesis.md:456). So a device that was idle for days catches up at its next session.
   - If M5 makes an OS service the default:
     - setup registers the service, and `setup --remove` unregisters it;
@@ -1470,7 +1471,7 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A111 | Resident is the default that setup and the first-run wizard write; a home whose config does not say so keeps the worker that exits when idle, which also stays as a setting | 1.8 | Whether a machine short of memory may still run the worker on demand, and whether an evaluation or test home leaves a process behind |
 | A112 | In a resident home the viewer is a resident process of its own beside the worker, which still opens no port; its address is fixed and its token outlives a restart, kept in a file only the owner can read; `oboete view` prints or opens the address, and a new token ends the old bookmark | 6.6 | How a bookmark can open a viewer that checks a token |
 | A113 | Where 8.4 says a run or a default waits for a line, the build and the owner's switch do not wait: the run is part of owner decision 34's one evaluation | 8.4 | Whether any build step or the switch still waits for a measured line |
-| A114 | The switch's search check is call-free: B's full-text results for the frozen dev questions against the frozen `e0-trigram` run, and known v1 uids fetched by `search` and `get`; 7.5 step 3's graded check runs in the one evaluation | 7.5 | What replaces the graded search comparison at the switch |
+| A114 | The switch's search check is call-free: B's full-text results for the frozen dev questions against the frozen `e0-trigram` run, and known v1 uids fetched by `search` and `get`; 7.5's graded search comparison runs in the one evaluation | 7.5 | What replaces the graded search comparison at the switch |
 | A115 | The records moved in at the switch are embedded by the local runner when it is built by then, else on Workers AI after an exact estimate on the owner's data | 0.1 (35) | Which embedder embeds the old records |
 
 ## Appendix B. Acceptance tests carried from issues
