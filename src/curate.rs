@@ -92,9 +92,9 @@ pub struct Window {
     /// The exclusion list and the records it was cut under: the egress gate holds each call to
     /// them (spec 5.5).
     pub reading: Reading,
-    /// What was removed from its records before it was cut, which the curator did not read
-    /// (docs/cards.md K4).
-    pub removed: Vec<crate::raw::Removal>,
+    /// The device's last record before its first read: what this device's tombstones up to it
+    /// remove was gone before the curator read anything (docs/cards.md K4).
+    pub top: i64,
 }
 
 impl Window {
@@ -525,7 +525,7 @@ pub(crate) fn window_at(
             reads,
             ..reading.clone()
         },
-        removed: raw.removed_in(device, first.seq, last.seq, Some(top))?,
+        top,
     }))
 }
 
@@ -1341,7 +1341,7 @@ const RETRY_MS: i64 = 10 * 60 * 1000;
 /// isolation gate refused) is tried again this often, and never keeps the worker up.
 const OWNER_RETRY_MS: i64 = 60 * 60 * 1000;
 /// A window summary's length (spec 6.5's digest cap).
-const MAX_SUMMARY_CHARS: usize = 2_000;
+pub(crate) const MAX_SUMMARY_CHARS: usize = 2_000;
 pub const KINDS: [&str; 6] = [
     "decision",
     "bugfix",
@@ -1474,6 +1474,8 @@ struct Request {
     carried_uids: Carried,
     /// The sessions shown a reply's options, with their labels (`Offered`).
     offered: Vec<(String, Vec<String>)>,
+    /// The records outside the window whose text it shows as a session's goal.
+    goals: Vec<i64>,
 }
 
 /// The request for window `w`: its text, the candidates of each of its repositories (found by
@@ -1524,7 +1526,8 @@ fn request(
         }
         shown.push(block);
     }
-    let (carried_text, mut carried_uids, offered) = carried(raw, k, rules, w)?;
+    let (carried_text, mut carried_uids, offered, mut goals) = carried(raw, k, rules, w)?;
+    goals.retain(|g| !(w.from_seq..=w.to_seq).contains(g));
     // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing,
     // and options cut from it are picked by nothing.
     let (carried_text, shown) = fit(&carried_text, &shown, summary.window_tokens / 5);
@@ -1540,6 +1543,7 @@ fn request(
         shown_in,
         carried_uids,
         offered,
+        goals,
     })
 }
 
@@ -1645,8 +1649,10 @@ fn answered(
                 // The candidates the prompt showed, in its order: what this window could
                 // supersede, kept for an audit of the gates and for measurement (#222).
                 let shown: Vec<&str> = req.shown_in.iter().map(|(_, c)| c.uid.as_str()).collect();
-                let op = json!({"outcome": "curated", "provider": r.provider, "summary": summary,
-                    "dropped": dropped, "lowered": gated.lowered, "candidates": shown});
+                let mut op = json!({"outcome": "curated", "provider": r.provider,
+                    "summary": summary, "dropped": dropped, "lowered": gated.lowered,
+                    "candidates": shown});
+                shown_records(raw, &mut op, w, &req.goals)?;
                 Ok((op, claims))
             }
             // Counted like a provider that failed: no answer this window can use.
@@ -2357,7 +2363,6 @@ pub fn recurate_window(
     op["from_offset"] = w.from_offset.into();
     op["to_seq"] = w.to_seq.into();
     op["to_offset"] = w.to_offset.into();
-    removed_before(&mut op, w);
     op["elided"] = w.elided.clone().into();
     if !w.shortened.is_empty() {
         op["shortened"] = w.shortened.clone().into();
@@ -2605,11 +2610,21 @@ fn waiting(p: &Pending, now: i64) -> Phase {
 /// its records lost a part (docs/cards.md K4).
 const MAX_REMOVED: usize = 500;
 
-/// `op` with what was removed from `w`'s records before it was cut (docs/cards.md K4).
-fn removed_before(op: &mut Value, w: &Window) {
-    if !w.removed.is_empty() && w.removed.len() <= MAX_REMOVED {
-        op["removed"] = json!(w.removed);
+/// `op` with the records its curator was shown besides the window's own (`goals`: the first
+/// prompt of each session, when it lies outside the window) and with what was already removed
+/// from all of them when the window was cut (docs/cards.md K4).
+fn shown_records(raw: &Raw, op: &mut Value, w: &Window, goals: &[i64]) -> Result<()> {
+    let mut removed = raw.removed_in(&w.device, w.from_seq, w.to_seq, Some(w.top))?;
+    for &goal in goals {
+        removed.extend(raw.removed_in(&w.device, goal, goal, Some(w.top))?);
     }
+    if !goals.is_empty() {
+        op["goals"] = json!(goals);
+    }
+    if !removed.is_empty() && removed.len() <= MAX_REMOVED {
+        op["removed"] = json!(removed);
+    }
+    Ok(())
 }
 
 /// The window op, with the claims it yields, in one transaction: the curation checkpoint moves
@@ -2625,7 +2640,6 @@ fn cover(
     op["from_offset"] = w.from_offset.into();
     op["to_seq"] = w.to_seq.into();
     op["to_offset"] = w.to_offset.into();
-    removed_before(&mut op, w);
     op["elided"] = w.elided.clone().into();
     if !w.shortened.is_empty() {
         op["shortened"] = w.shortened.clone().into();
@@ -3196,7 +3210,7 @@ fn carried(
     k: &Connection,
     rules: &Rules,
     w: &Window,
-) -> Result<(String, Carried, Offered)> {
+) -> Result<(String, Carried, Offered, Vec<i64>)> {
     // On one line: `fit` keeps or cuts a line whole, and no text can start a line `carries` reads.
     let gate = |t: &str| crate::redact::outbound_with(t, rules).replace(['\n', '\r'], " ");
     // Each session with every repository its lines are in: an agent may change checkout.
@@ -3268,16 +3282,19 @@ fn carried(
     let (mut out, mut settled, mut open) = (String::new(), String::new(), String::new());
     let mut uids: Carried = Vec::new();
     let mut offered: Offered = Vec::new();
+    // The records the goals are read from (docs/cards.md K4).
+    let mut goals = Vec::new();
     for (key, repos) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
         let previous =
             raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset), |s| w.reads(s))?;
         let mut lines = Vec::new();
-        if let Some(e) = raw.first_prompt(agent, session, |s| w.reads(s))?
+        if let Some((seq, e)) = raw.first_prompt(agent, session, |s| w.reads(s))?
             && let Some(goal) = long_text(&e)
         {
             let goal: String = gate(&goal).chars().take(200).collect();
             lines.push(format!("goal: {goal}"));
+            goals.push(seq);
         }
         // Proposals first: they are what an acceptance in this window answers. The assistant's
         // own before the rest (inferred, a tool's), since `fit` cuts from the end (#244).
@@ -3394,7 +3411,7 @@ fn carried(
     }
     out.push_str(&settled);
     out.push_str(&open);
-    Ok((out, uids, offered))
+    Ok((out, uids, offered, goals))
 }
 
 /// The curator's prompt: what to extract and how, then everything taken from the record (the
@@ -4904,6 +4921,23 @@ mod tests {
             (&ws[0]["to_seq"], &ws[0]["removed"]),
             (&json!(1), &json!([[1, 11, 5]]))
         );
+        // Its session's goal is the first prompt, inside its span: no record besides its own.
+        assert!(ws[0].get("goals").is_none(), "{}", ws[0]);
+        // A window over the second prompt carries the first in as its goal: its op names that
+        // record and lists what was removed from it before this window was cut, which is now
+        // the part removed during the first call too.
+        let mut curator = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+            Ok(answered("fake"))
+        };
+        while run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap()
+            == Phase::Covered
+        {}
+        let ws = windows(&raw);
+        let next = ws.iter().find(|w| w["from_seq"] == 2).unwrap();
+        assert_eq!(
+            (&next["goals"], &next["removed"]),
+            (&json!([1]), &json!([[1, 11, 5], [1, 17, 5]]))
+        );
     }
 
     /// D9: the wait of a window at the last record reads hook records only: a tombstone and a
@@ -5826,7 +5860,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(w.from_seq, before + 1);
-        let (text, uids, _) = carried(&raw, &k, &rules, &w).unwrap();
+        let (text, uids, ..) = carried(&raw, &k, &rules, &w).unwrap();
         let decided: Vec<&str> = text
             .lines()
             .filter(|l| l.starts_with("decided before "))
@@ -8295,7 +8329,7 @@ mod tests {
             aside: None,
             lines: Vec::new(),
             reading: Default::default(),
-            removed: Vec::new(),
+            top: 0,
         };
         assert_eq!(
             cover(&mut raw, &db, &w, op, Vec::new()).unwrap(),

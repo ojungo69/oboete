@@ -645,14 +645,14 @@ impl Raw {
     }
 
     /// The first prompt this device recorded in one agent's session from a source `read` takes,
-    /// as `after` returns it: the session's goal for the curator (milestone 3 Task 7), from a
-    /// record its window may send (Codex on #304). A scan by label, as `turns`.
+    /// with its seq, as `after` returns it: the session's goal for the curator (milestone 3
+    /// Task 7), from a record its window may send (Codex on #304). A scan by label, as `turns`.
     pub fn first_prompt(
         &self,
         agent: &str,
         session: &str,
         read: impl Fn(&str) -> bool,
-    ) -> Result<Option<Event>> {
+    ) -> Result<Option<(i64, Event)>> {
         let mut st = self.conn.prepare(
             "SELECT seq, source FROM records WHERE device = ?1 AND type = 'event' AND agent = ?2
                AND session = ?3 AND kind = 'prompt' ORDER BY seq",
@@ -671,7 +671,7 @@ impl Raw {
             .into_iter()
             .find(|r| r.seq == seq)
             .and_then(|r| match r.item {
-                Item::Event(e) => Some(*e),
+                Item::Event(e) => Some((seq, *e)),
                 _ => None,
             }))
     }

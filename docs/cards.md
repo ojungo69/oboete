@@ -50,7 +50,9 @@ K1. **Where cards come from.** A window op with outcome `curated`. Its `observat
 are its cards, in their order. An op without that field gives one card from its `summary`, when it
 is not empty: the summary is the narrative, and the type is null. Such a card is kept without a
 title: its title is the narrative's first sentence as the card is read (K6), at most 120
-characters, ending in `…` when it was cut. Every window op curated before slice 2 is of this kind.
+characters, ending in `…` when it was cut. A summary as long as the op keeps one (2,000
+characters) may have been cut there, before any gate read it, and gives no card. Every window op
+curated before slice 2 is of this kind.
 
 K2. **Whose it is.** `agent`, `session` and `repo` are set only when the event records of that
 device from `from_seq` to `to_seq` have one agent, one session and one repository between them.
@@ -64,19 +66,24 @@ it kept back. They get its op_seq as `replaced_by` and no reader shows them. Not
 recuration covers only in part goes too; the part outside has no card until it is curated again.
 The curation phase itself never reads a record twice, so only a recuration replaces.
 
-K4. **Removed records.** A card is not shown when a tombstone removes from a record of its span
-something its window op does not list: the curator read it, and the card's text may say it. The op
-lists what was already removed from its records when the window was cut (`removed`: each a record
-and, for a part of one, its offset and length), by this device's own tombstones up to the record
-that was its last before the window's first read; a removal that lands during the cut, or comes
-from another device, is not listed and hides the card. A removal is known by what it removes, not
-by when: the same one made again is still listed, and a restore that lost records and uses their
-seqs again changes nothing. An op that lists none (every op before this slice, and one with more
-than 500 removals) has no card shown once anything is removed from its records. A recuration
-gives the span new cards (K3), with the removals it found.
+K4. **Removed records.** A card is not shown when a tombstone removes, from a record its curator
+was shown, something its window op does not list: the curator read it, and the card's text may
+say it. Those records are the window's own and each session's goal, its first prompt, which a
+window carries in (`goals` names the ones outside the window). The op lists what was already
+removed from them when the window was cut (`removed`: each a record and, for a part of one, its
+offset and length), by this device's own tombstones up to the record that was its last before the
+window's first read; a removal that lands during the cut, or comes from another device, is not
+listed and hides the card. A removal is known by what it removes, not by when: the same one made
+again is still listed, and a restore that lost records and uses their seqs again changes nothing.
+An op that lists none (every op before this slice, and one with more than 500 removals) has no
+card shown once anything is removed from its records. A recuration gives the span new cards
+(K3), with the removals it found.
+Not covered, and left to the forget unit's fence for derived text (#366): what a card restates
+of a claim its curator was shown, and a removal whose tombstone a restore lost with a damaged
+segment.
 `ponytail:` a new redaction rule tombstones old records, so the cards over them are hidden until
 `oboete recurate` reads them again, though K6 would have masked the value; a narrower rule comes
-with the forget unit's fence for derived text.
+with the forget unit.
 
 K5. **Rebuild and rewind.** The table is derived: `oboete rebuild` makes it again from the op log,
 and a rewind of a device's op log removes that device's cards above the point and clears the
@@ -129,10 +136,12 @@ So MUST-M4 holds as written.
    rewind below the recuration brings them back; a card over records the recuration kept back
    stays.
 5. A removal the window op does not list hides the card; one it lists does not, nor the same
-   one made again; after a restore that lost records, a removal at a seq they had hides it too.
+   one made again; after a restore that lost records, a removal at a seq they had hides it too;
+   a removal from the goal a window carried in hides it as one from its own records does.
 6. A redaction rule added after the card was written masks its value when it is read: in its
    text, in a title whose sentence the rule knows only by what follows it or whose cut would split
    the value, and in the session and repository it is shown under.
 7. `oboete rebuild` gives the same cards.
 8. The curation phase's window op lists what was removed from its records before the window was
-   cut, by this device up to the cut.
+   cut, by this device up to the cut, and names the goal it carried in from outside its span.
+9. A summary as long as the op keeps one is no card.

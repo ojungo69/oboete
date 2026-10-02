@@ -34,20 +34,24 @@ impl Consumer for Cards {
                 replace(k, device, op.op_seq, &op.body)?;
             }
             let summary = op.body["summary"].as_str().unwrap_or("").trim();
-            if op.body["outcome"] != "curated" || summary.is_empty() {
+            // A summary as long as the op keeps one may have been cut there, ungated (K6).
+            if op.body["outcome"] != "curated"
+                || summary.is_empty()
+                || summary.chars().count() >= crate::curate::MAX_SUMMARY_CHARS
+            {
                 continue;
             }
             let labels = raw.labels_in(device, span.from, span.to)?;
             let (agent, session) = labels.session.unzip();
             // An op that lists none: every removal from its records hides the card (K4).
-            let removed = match &op.body["removed"] {
+            let list = |field: &str| match &op.body[field] {
                 list @ serde_json::Value::Array(_) => list.to_string(),
                 _ => "[]".to_owned(),
             };
             k.execute(
                 "INSERT INTO cards(device, op_seq, n, from_seq, from_offset, to_seq, to_offset,
-                   removed, ts, agent, session, repo, narrative)
-                 VALUES(?1, ?2, 0, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                   goals, removed, ts, agent, session, repo, narrative)
+                 VALUES(?1, ?2, 0, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     device,
                     op.op_seq,
@@ -55,7 +59,8 @@ impl Consumer for Cards {
                     span.from_offset,
                     span.to,
                     span.to_offset,
-                    removed,
+                    list("goals"),
+                    list("removed"),
                     labels.ts.unwrap_or(op.ts),
                     agent,
                     session,
@@ -341,6 +346,56 @@ mod tests {
         raw.append_tombstone(part(3, 1)).unwrap();
         raw.append_tombstone(whole(5)).unwrap();
         assert_eq!(titles(home.path()), ["First."]);
+    }
+
+    /// K4: a card's records are its window's and the goal the window carried in (its session's
+    /// first prompt, shown to the curator beside the window): a removal from the goal's record
+    /// that the op does not list hides the card too.
+    #[test]
+    fn a_removal_from_the_goal_a_window_carried_in_hides_its_card() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        for ts in 1..=4 {
+            raw.append(&event("s1", "r", ts * 1_000)).unwrap();
+        }
+        let (kind, mut first) = window(2, 2, "curated", "First.");
+        first["goals"] = json!([1]);
+        // Cut after a part of the goal's record was removed, which it lists.
+        let (_, mut second) = window(3, 4, "curated", "Second.");
+        second["goals"] = json!([1]);
+        second["removed"] = json!([[1, 0, 1]]);
+        raw.append_ops(&[(kind, first), (kind, second)]).unwrap();
+        crate::worker::run_once(home.path()).unwrap();
+        assert_eq!(titles(home.path()), ["Second.", "First."]);
+        let part = raw::Target::Range {
+            device,
+            seq: 1,
+            offset: 0,
+            length: 1,
+        };
+        raw.append_tombstone(part).unwrap();
+        assert_eq!(titles(home.path()), ["Second."]);
+    }
+
+    /// K6: a summary as long as the op keeps one may have been cut there, before any gate read
+    /// it: it is no card.
+    #[test]
+    fn a_summary_at_the_ops_cap_is_no_card() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        two_records(&mut raw);
+        let cap = crate::curate::MAX_SUMMARY_CHARS;
+        raw.append_ops(&[
+            window(1, 1, "curated", &"x".repeat(cap)),
+            window(2, 2, "curated", &"y".repeat(cap - 1)),
+        ])
+        .unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        let kept = kept(home.path());
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert!(kept[0].0.starts_with('y'));
     }
 
     /// The owner's rules, as `config.toml` gives them.

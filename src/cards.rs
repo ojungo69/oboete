@@ -38,8 +38,10 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            device TEXT NOT NULL, op_seq INTEGER NOT NULL, n INTEGER NOT NULL,
            from_seq INTEGER NOT NULL, from_offset INTEGER,
            to_seq INTEGER NOT NULL, to_offset INTEGER,
-           -- What was removed from its records before the window was cut, as its op lists it
-           -- (K4): a JSON array of [seq, offset, length].
+           -- The records its curator was shown besides the window's own (K4): a JSON array of
+           -- seqs. And what was removed from all of them before the window was cut, as its op
+           -- lists it: a JSON array of [seq, offset, length].
+           goals TEXT NOT NULL DEFAULT '[]',
            removed TEXT NOT NULL DEFAULT '[]',
            ts INTEGER NOT NULL,
            agent TEXT, session TEXT, repo TEXT,
@@ -98,7 +100,7 @@ pub fn recent(
     }
     let mut st = k.prepare(
         "SELECT device, op_seq, n, ts, agent, session, repo, type, title, subtitle, narrative,
-                facts, concepts, files_read, files_modified, from_seq, to_seq, removed
+                facts, concepts, files_read, files_modified, from_seq, to_seq, removed, goals
          FROM cards WHERE repo = ?1 AND replaced_by IS NULL
          ORDER BY ts DESC, device DESC, op_seq DESC, n",
     )?;
@@ -114,10 +116,15 @@ pub fn recent(
         && let Some(r) = rows.next()?
     {
         let device: String = r.get(0)?;
-        // K4: its text may say what a removal its op does not list took from the record.
+        // K4: its text may say what a removal its op does not list took from a record its
+        // curator was shown.
         let listed: Vec<Removal> =
             serde_json::from_str(&r.get::<_, String>(17)?).unwrap_or_default();
-        let removed = raw.removed_in(&device, r.get(15)?, r.get(16)?, None)?;
+        let goals: Vec<i64> = serde_json::from_str(&r.get::<_, String>(18)?).unwrap_or_default();
+        let mut removed = raw.removed_in(&device, r.get(15)?, r.get(16)?, None)?;
+        for goal in goals {
+            removed.extend(raw.removed_in(&device, goal, goal, None)?);
+        }
         if removed.iter().any(|x| !listed.contains(x)) {
             continue;
         }
