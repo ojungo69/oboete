@@ -1,0 +1,23 @@
+CLAUDE.md
+  s_821f8fcda60ea0::t_ff9ba71a75a8f3 5
+docs/spec-client-runtime.md
+  s_821f8fcda60ea0::t_3dd437cc99e09a 124,126,158,165
+docs/spec.md
+  s_821f8fcda60ea0::t_947e2198f8d1f1 60,375,1235
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "47cbe2cad2d713765074efd7dcb08c19365e7271",
+  "prompts": {},
+  "sessions": {
+    "s_821f8fcda60ea0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3c3ad270-2ec6-4f00-abc6-a7903bd32508",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
