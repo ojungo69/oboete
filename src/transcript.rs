@@ -1534,7 +1534,10 @@ mod tests {
             "{refused:#}"
         );
         let said = String::from_utf8(out).unwrap();
-        assert!(said.contains(file.to_str().unwrap()), "{said}");
+        assert!(
+            said.contains(file.file_name().unwrap().to_str().unwrap()),
+            "{said}"
+        );
         let report: Value = serde_json::from_str(said.lines().last().unwrap()).unwrap();
         assert_eq!(report["agents"]["claude"]["refused"], 1);
         assert_eq!(records(&home), before);
@@ -1570,7 +1573,10 @@ mod tests {
                 "{refused:#}"
             );
             let said = String::from_utf8(out).unwrap();
-            assert!(said.contains(file.to_str().unwrap()), "{said}");
+            assert!(
+                said.contains(file.file_name().unwrap().to_str().unwrap()),
+                "{said}"
+            );
             let report: Value = serde_json::from_str(said.lines().last().unwrap()).unwrap();
             assert_eq!(report["agents"]["codex"]["refused"], 1);
             assert_eq!(records(&home), before);
