@@ -369,3 +369,74 @@ Answer with JSON only: {{"borne_out": true or false, "kind_right": true or false
 ```
 
 KIND's `{meaning}` per kind: decision, "a choice the developer made"; preference, "how the developer wants work done, beyond one task"; lesson, "what to do or avoid, learned from a failure"; fix, "how a problem was fixed: its symptom, cause and fix"; open item, "work still to do"; repo fact, "a fact about the repository or its tools"; change, "what was changed".
+
+## Task 12b: the lines' rules (D15-D18)
+
+Fixed on 2026-10-01 in this commit, before any run of the read-hook line, M22, the worker's one-device half, Inject or truncation (plan Task 12b Step 2). A later change is a dated subsection below, written before the run it applies to. No line here is 300 ms (spec 8.1); each number below is set from its first measurement and then kept for every later run.
+
+### The read-hook line (D15)
+
+- **One number per read hook**, SessionStart and the prompt hook: the p95 of the whole spawned `oboete hook claude <event>` as the agent waits for it (process start to exit: the write, its fsync, the read and the lock attempt), on the warm path.
+- **The command**: `oboete --home <copy> replay ~/.oboete/eval/replay/events-1000.jsonl --repo-root <a checkout with delivered claims> --read-sample 300 --read-warmup 10 --spawn-sample 300 --sizes 1`, with `[inject] per_prompt = true` in the copy's config. The numbers are `read.warm.session_start_ms.p95` and `read.warm.prompt_ms.p95`; the 10 warm-ups per hook are run and left out.
+- **The home**: a fresh copy of Task 12a's dev home for each run. The checkout is a clone, on the machine that runs, of the dev home's repository with the most delivered claims: a repository's key is its origin, the same on every machine (`repo::key`), so the prompt both arms send is that repository's newest delivered decision (`replay::sample_prompt`).
+- **A run counts** only when `read.per_prompt` is true and the warm arm printed something at every timed spawn: `read.warm.session_start_printed_bytes` and `read.warm.prompt_printed_bytes` (the fewest bytes a timed spawn printed) above 0. A run that does not count sets no line and is reported with why.
+- **Three runs per machine**, each on a fresh copy; the machine's number is its worst run's p95. **Machines**: WSL (ext4), Windows native (the MSVC build if `local-embed.yml`'s artifact exists before the run, else GNU, named in the record), and the M1 iMac. The line is the slowest machine's number for that hook, not rounded.
+- **Beside it**, per run: the read share (the hook's p95 minus the same run's `hook_spawn_ms.1KB.p95`, a PostToolUse of 1 KB), the in-process read (`read.warm.read_in_process_us`), the cold arm's numbers, and the drain between the arms (`read.drain`, its time and backlog).
+- **Serves**: SessionStart's number M5's worker rule, MUST-M9 and S2; the prompt hook's S4; both M22.
+
+### M22 (D16)
+
+- **Corpus**: a copy of Task 12a's dev home; `oboete import claude-mem --eval-store` of the 2026-09-24 copy (178,370 documents); the owner's 90-day transcripts (362,379 events, `corpus-count.json`) replayed, less the sessions the home already holds; then, after the owner's disk answer (What needs the owner, item 16), time-shifted copies with new session ids up to a year (1,469,648 events). Claims come from `m22.py`'s subclass of m3.py's `Stub`, which quotes user lines of each window at the dev home's claims per record, recorded before the build; vectors from a loopback stub through `[embedding] url` (D8) under the evaluation cap override (D10).
+- **MCP p95**: 100 of `queries.jsonl`'s 312 dev questions, the first 100 in the order of `h(f'm22-queries:{SEED}:{qid}')`, over stdio (`common.Mcp`) with `all=true`; 10 warm-ups left out, the first call reported apart. The number is the p97.5 of the store's share (with the stub embedder) plus the p97.5 of the query embedding timed on real Workers AI (about 120 queries, inside the free 10,000 neurons a day), which bounds the p95 of the sum. The line: 1.5 s.
+- **Slowdown**: the p95 with a writer over the idle p95, minus one (the p50 ratio beside it), the same queries in the same order; the writer spawns `oboete hook claude PostToolUse` at 2 and at 20 events a second; the worker is stopped and `backup::run` done before each idle leg.
+- **Injection hooks at scale**: warm, the read-hook command above on the scale home; cold, the prompt hook with no shortlist row (`search::b::delivered_ranked` with no vector), and SessionStart after a 2,000-event dev fixture replayed with no drain.
+- **Past the line**: WSL's p95 at scale, times the slowest machine's dev p95 over WSL's dev p95, against the hook's line; the iMac at the size its disk holds. A miss is attributed by the read share and the in-process read against dev before Task 13 picks a remedy (D16). The scale homes are deleted after the run.
+
+### The worker's one-device half (D17)
+
+- Hooks and MCP run with `OBOETE_NO_SPAWN` on the arm without a worker. SessionStart's time without one is the cold spawned SessionStart p95 plus the p95 of 20 runs of `worker::drained` over a 20-record backlog (D9's N), with 1, 200 and 2,000 records reported for the slope; curation and embedding are left out.
+- MCP with local embeddings: a fresh `oboete mcp` that loads the model (D14), the 100 queries above, the first call included and reported apart, on the slowest machine.
+- Both arms run on a home embedded beforehand; only a concurrent worker embedding a backlog differs between them.
+- The worker is kept if either misses: SessionStart's read-hook number, or MCP's 1.5 s. The SessionStart half runs after Task 8, the MCP half after Task 10's build.
+
+### Inject (D18)
+
+- **Pools**: a dev pool of 50 no-answer questions (nothing the dev home holds answers them) and 50 false-premise questions (they presume something the dev home holds otherwise), drafted by Claude from the dev transcripts, with Task 12a's 40 M6 questions beside them; the deciding pool (100 and 100) is drafted from held-out transcripts after A88 and sealed (Task 12a's guard).
+- **Run** (`inject.py run`): `oboete inject --prompt --session <a fresh id> --threshold <t>` on a warm copy of the dev home, for each question at each threshold swept from 0.30 to 0.90 by 0.05; each injected (question, claim) pair is labelled once by Task 12a's three graders, their majority deciding (INJECT), and reused at every threshold.
+- **Counted per question**: a question is irrelevant-injected when the hook injects any claim the graders' majority marks irrelevant; any injection on a no-answer question is irrelevant. Pass: a one-sided 95% Wilson upper bound of the irrelevant share of at most 10% (13 of 200 passes, 14 fails). On dev, the threshold is the lowest that passes; beside it, the share of the 40 M6 questions that get a claim whose evidence lies in the key's records.
+
+INJECT:
+
+```text
+A developer typed this prompt to a coding agent:
+<<<
+{prompt}
+>>>
+
+Before the agent saw it, a memory system added this note from earlier sessions:
+<<<
+{claim}
+>>>
+
+Does the note bear on the prompt: does it help answer it or carry it out, or does it correct a wrong belief in it?
+Answer with JSON only: {{"relevant": true}} or {{"relevant": false}}.
+```
+
+### Truncation (D18)
+
+- Per agent, the injected text at 3,000, 6,000 and 12,000 characters, ending with a canary line `OBOETE-CANARY-<12 hex digits>` new for each run; 4 runs per size, and a control per size with the canary first. The agent is asked: `Reply with the line of your context that starts with OBOETE-CANARY, exactly, and nothing else.` Only an exact echo counts. Lengths are recorded in characters and in UTF-16 units.
+- A scratch script prints each agent's injection shape; for OpenCode and Pi it runs `OBOETE_BIN` in a copy of the plugin template. It runs only as `oboete-dogfood`, never with `oboete setup`. Cursor stays unverified with its 9,500 UTF-16 cut (`hook::cursor_injection`), carried to MUST-M10's live checks.
+
+### Integration on current main, 2026-10-02
+
+The Task 12b rules above are preserved from `d1e3a5e`, before any real run. The replay arms and the hooks/Inject harnesses are ported onto main `6225150`; the Task 8 adapters, redaction, shown-state accounting and the fixed Task 12a evaluation runtime are kept. This is build and offline verification evidence, not a result for a measurement line.
+
+Each cold and warm read spawn now uses a fresh session id. The warm prompt samples get copies of the one shortlist built from the last cold prompt, before its records are forgotten; the copies and payload preparation are outside the measured hook time. No session's shown set is cleared by replay, and a warm prompt is not timed through the cold fallback. The copied shortlist header and candidates are written in one transaction. The report discards its warm-ups, keeps the fewest printed bytes among timed samples, and names the drain's time and backlog.
+
+Failing-first checks observed the absent `--read-warmup`, the old arm's one session for 20 spawned hooks, and an arm that printed context through the cold fallback but had none of the three required prepared shortlist rows. The final focused checks pass: 7 replay CLI tests, 10 replay unit tests and 56 offline Python hooks/Inject tests. Format, all-target clippy with warnings denied and diff checks pass. The Python harnesses retain their pool seals, Wilson rule, private copied homes, secret-free subprocess environments and fake-only tests. `hooks.py drain` explicitly records the worker CLI's wall time, including startup, maintenance and backup, as a proxy rather than `worker::drained` alone.
+
+Full offline verification on 2026-10-02 for the initial integration (`bb9d1c9`): `cargo test --locked --offline` passed 865 unit and 36 integration tests (3 existing ignored); `cd docs/eval && uv run --offline --with pytest --with scipy --with ranx pytest -q -p no:cacheprovider` passed 207 tests. `graphify update . --no-cluster` rechecked the AST and found no code-graph change. These are harness checks; no read-hook line, M22, worker half, Inject deciding pool or truncation line has been measured here.
+
+Review fixes after `bb9d1c9` keep copied backups under the evaluation copy, check the frozen source before copying, preserve unrelated TOML settings, require exactly three counted runs for a D15 line, and retain microsecond precision in the read-hook report. Their failing-first regressions then passed: 7 replay CLI tests, 11 replay unit tests, and 60 offline Python hooks/Inject tests; format, all-target clippy with warnings denied and diff checks passed. The full offline rerun on the same executable source passed 866 unit and 36 integration Rust tests (3 existing ignored), and 211 Python tests.
+
+No owner store, held-out transcript, real model, agent configuration or live agent was used for this integration. M22 and truncation are separate harness work; the D17 local-MCP half waits for Task 10's build. Actual three-machine hook numbers, scale results, Inject dev tuning and the deciding runs remain to be recorded under the rules above and A88.

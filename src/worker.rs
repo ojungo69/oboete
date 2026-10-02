@@ -155,6 +155,21 @@ pub fn drained(home: &Path) -> Result<Option<Lock>> {
 /// How often a worker looks for new records while it waits.
 const POLL: Duration = Duration::from_millis(200);
 
+/// The most records a consumer has yet to read on one device: what a drain has before it
+/// (milestone 4 D17).
+pub fn backlog(home: &Path) -> Result<i64> {
+    let raw = crate::backup::open_raw(home)?;
+    let k = crate::backup::open_knowledge(home)?;
+    let mut most = 0;
+    for c in consumers(home) {
+        for device in c.devices(&raw)? {
+            let read = checkpoint::get_in(&k, c.checkpoints(), c.name(), &device)?;
+            most = most.max(c.top(&raw, &device)? - read);
+        }
+    }
+    Ok(most)
+}
+
 /// Whether any consumer's checkpoint for this device is below raw's highest seq.
 fn behind(raw: &Raw, k: &Connection, consumers: &[Box<dyn Consumer>]) -> Result<bool> {
     for c in consumers {
@@ -1782,7 +1797,7 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/testdata/fixtures/overturn-cross.jsonl");
-        crate::replay::run(base.path(), &fixture, None, 0, &[1], "claude", 0).unwrap();
+        crate::replay::run(base.path(), &fixture, None, 0, &[1], "claude", 0, 0).unwrap();
         let clean = tempfile::tempdir().unwrap();
         copy_home(base.path(), clean.path());
         crate::crash::off();
