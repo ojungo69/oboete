@@ -1,0 +1,35 @@
+src/transcript.rs
+  s_24c0cb9ce0dbb8::t_f9ee7c5552dc5e 706-707,798-806,862-867,1530-1531,1536-1539,1565-1567,1572-1575
+  s_24c0cb9ce0dbb8::t_cdea650d0c64ef 786-789
+src/raw.rs
+  s_24c0cb9ce0dbb8::t_29828ecf143c6d 193-195,296-306,310,321-322
+docs/milestone-4.md
+  s_24c0cb9ce0dbb8::t_29828ecf143c6d 93
+src/migrate.rs
+  s_24c0cb9ce0dbb8::t_d6f965a3658dff 988-990,994
+  s_24c0cb9ce0dbb8::t_6a6ec0059a9b31 490-492,495
+  s_24c0cb9ce0dbb8::t_29828ecf143c6d 17,120,1460
+tests/migrate_cli.rs
+  s_24c0cb9ce0dbb8::t_480bdb6689c636 125-151
+tests/transcript_cli.rs
+  s_24c0cb9ce0dbb8::t_2fc7617fa9831e 161-164,204-207
+  s_24c0cb9ce0dbb8::t_450492c47bd7f3 149-160,165-186,193-196
+  s_24c0cb9ce0dbb8::t_83974d2a00591b 187-192
+  s_24c0cb9ce0dbb8::t_eeef74835f16e5 197-203,208-225
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4e67d7ba4f7757523503dfc62ca8b3e1c912d30c",
+  "prompts": {},
+  "sessions": {
+    "s_24c0cb9ce0dbb8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f961-7acd-7583-90e9-5edc43a57041",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
