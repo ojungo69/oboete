@@ -131,18 +131,17 @@ export default {
         const payload = { session_id: data.sessionID, cwd: state.dir };
         switch (ev.type) {
           case "session.inbox.enqueued":
-            if (data.item?.type === "user") {
+            if (data.item?.type === "user" && typeof data.inboxID === "string") {
               // Queue admission is not delivery. Steers may pass queued input, so retain the
-              // capture by the public inboxID until OpenCode actually uses that prompt.
-              const turn = send("UserPromptSubmit", { ...payload, prompt: data.item.payload?.text })
-                .then(contextOf);
-              if (typeof data.inboxID === "string") state.inbox.set(data.inboxID, turn);
+              // payload until OpenCode uses it: UserPromptSubmit also consumes corrections.
+              state.inbox.set(data.inboxID, { ...payload, prompt: data.item.payload?.text });
             }
             break;
           case "session.inbox.delivered": {
-            const captured = state.inbox.get(data.inboxID);
+            const prompt = state.inbox.get(data.inboxID);
             state.inbox.delete(data.inboxID);
-            if (captured) {
+            if (prompt) {
+              const captured = send("UserPromptSubmit", prompt).then(contextOf);
               // A boundary may deliver several steers in this execution. Its terminal clears
               // only these delivered contexts; prompts still queued belong to later execution.
               const turn = Promise.all([state.turn, captured]).then((texts) => texts.filter(Boolean).join("\n"));
