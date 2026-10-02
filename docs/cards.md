@@ -246,7 +246,8 @@ S5. **Size.** The packet's cap rises from 6,000 to 9,000 characters: claude-mem'
 may take 10,000, and Cursor drops a context over 10,000 (oboete keeps it under its 9,500 units).
 The block gets the room the rest of the packet leaves and is fitted as claude-mem fits its own:
 the number of cards halves until it fits, down to one; with no room for one there is no block.
-The rest of the packet is never cut for it.
+The rest of the packet is never cut for it, and the stored manifest keeps its own 6,000, so its
+state lines never take all of the block's room.
 
 S6. **`get` shows a card.** The fetch line names `get`, so `get <op seq>.<n>` (CLI and MCP)
 prints the card in full: its type, title, subtitle, narrative, facts, concepts, files read and
@@ -300,7 +301,8 @@ says so.
    no card, there is none.
 3. Session start shows the repository's cards after the decisions and before the state lines, and
    not another repository's.
-4. The cards take only the room the rest of the packet leaves, and the rest is not cut for them.
+4. The cards take only the room the rest of the packet leaves, and the rest is not cut for them;
+   the stored manifest keeps its own 6,000 characters under the packet's 9,000.
 5. A card is read by its ID through the reader's rules (K4); an ID of no current card gives none.
 6. `get` shows a card in full: its ID, time, type and repository, title, subtitle, narrative,
    facts, concepts and files.

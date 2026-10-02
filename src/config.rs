@@ -881,7 +881,7 @@ pub struct Inject {
     /// The short user-visible status at session start; it never contains stored text.
     pub session_start_note: bool,
     /// The packet's size in characters (`SESSION_START_CHARS`); the manifest in it is stored rendered
-    /// at `manifest::CAP`.
+    /// at 6,000, so the cards have room (docs/cards.md S5).
     pub session_start_chars: usize,
     /// Delivered claims picked for each prompt (D9): off until the Inject harness has measured it.
     pub per_prompt: bool,

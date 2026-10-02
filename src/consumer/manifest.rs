@@ -50,6 +50,8 @@ const BRIEF: usize = 80;
 /// The index's first line: where the rest is (spec 4.4).
 const TOOLS: &str = "`search` finds more of what is remembered here, `get` shows one in full by \
                      its id, and `timeline` lists the earlier sessions.";
+/// The stored manifest's own size: the state lines leave the cards their room (docs/cards.md S5).
+const MANIFEST: usize = 6_000;
 /// The newest cards session start shows, at most: claude-mem's default (docs/cards.md S4).
 const CARDS: usize = 50;
 const TODOS: usize = 20;
@@ -1081,7 +1083,7 @@ fn build(
         .query_map(params![device, repo, branch, FILES as i64], |r| r.get(0))?
         .map(|f| f.map(|f: String| gate(&f)))
         .collect::<rusqlite::Result<_>>()?;
-    Ok(Some(manifest::render(&p, CAP)))
+    Ok(Some(manifest::render(&p, MANIFEST)))
 }
 
 /// D9's risky git state of the checkout at `cwd`, while it is still on `branch` (or detached, as
@@ -2811,6 +2813,51 @@ extra_rules = [
         );
         assert!(text.contains(" ● Ours\n"), "{text}");
         assert!(!text.contains("Theirs"), "{text}");
+    }
+
+    /// S5: the stored manifest keeps its own 6,000 characters under the packet's 9,000, so the
+    /// state lines never take all of the cards' room.
+    #[test]
+    fn the_stored_manifest_keeps_its_own_size_under_the_packets() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let todos: Vec<Value> = (0..TODOS)
+            .map(|i| {
+                serde_json::json!({"content": format!("{i} {}", "a long step ".repeat(40)),
+                "status": "pending"})
+            })
+            .collect();
+        let seq = store
+            .append(&tool(
+                cwd.path(),
+                60_000,
+                "TodoWrite",
+                serde_json::json!({ "todos": todos }),
+                "",
+                false,
+            ))
+            .unwrap();
+        store
+            .append_ops(&[cards_op(seq, seq, &["The todo list was written"])])
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let (stored, _) = manifest(home.path());
+        assert!(
+            stored.chars().count() <= MANIFEST,
+            "{}",
+            stored.chars().count()
+        );
+        const { assert!(MANIFEST < CAP) };
+        let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+        let packet = text(home.path(), &store, "r", "main", "none", &rules, CAP, NOW)
+            .unwrap()
+            .unwrap()
+            .text;
+        assert!(
+            packet.contains(" ● The todo list was written\n"),
+            "{packet}"
+        );
     }
 
     /// S5: the cards take only the room the rest of the packet leaves, halved until they fit, and
