@@ -95,9 +95,14 @@ oboeteにも **captureとrecall deliveryを別々のadapter能力** として設
 
 実装PRの受け入れ：分割行、UTF-8境界、重複event、commit後crash、rotation/copy/truncation、revision逆順、過大行、watcher停止・再開で欠落/重複を数える。二scope・二instanceを同じラベルで動かし、他scopeの内容とgenerated contextを再取込みしない。並行reader/writerとforget中のrefreshを競合させ、半file・旧内容復活を0にする。実hostで「test入力 → durable記録 → curation → scoped search → host context取得 → 次のtaskで利用 → correction → 再利用 → forget後に返らない」を確認し、read可能・配送済み・回答での実利用を別々に記録する。実利用が観測できなければ未確認として残し、harnessだけをlive-verifiedにしない。
 
-## 7. 任意の常駐LOCAL HTTPサービス
+## 7. 常駐するworkerと、任意のlocal HTTP API
 
-ownerが希望した常時利用の選択肢として追加する。既定のon-demand workerとstdio MCPは維持し、常駐モードの設定を明示的に選ぶ。§1.8/§6.6/M5の従来の「常駐は測定結果でのみ採用」は、**任意のlocal HTTPモードを提供すること**に限り置き換える。default workerの選択と既存M5性能lineは変えない。
+この節は二つを分けて扱う。
+
+- **常駐するworkerとviewer**（owner決定36、2026-10-03）：workerは起動後に動き続け、viewerは固定のlocal addressでいつでも開ける。ownerのPCの切り替え時点から既定。spec.md §1.8/§6.6が正本で、この節の表のうち所有権・engine/DB・background・lifecycle・資源の行をそのまま適用する。hookはworkerを経由せず自分で記録と読み取りを行う。
+- **他のclient向けのlocal HTTP API**（owner決定33）：bot hostや外部clientが使う、grant別の検索・受付の入口。明示的なopt-inで、ownerのPCの切り替えの後に作る。以下の表のAPI・書込み・transport認証の行はこのAPIの契約である。
+
+stdio MCPは維持する。§1.8/§6.6/M5の従来の「常駐は測定結果でのみ採用」はowner決定36が置き換えた。既存M5性能lineは変えず、常駐時と非常駐時の両方で計測する。
 
 | 境界 | 将来サービスの契約 |
 | --- | --- |
@@ -157,7 +162,7 @@ previewは対象・件数・推定size・含む個人情報と削除状態を示
 | --- | --- |
 | [#343](https://github.com/ojungo69/oboete/issues/343) | MCP searchのAnswer.vector/fallback理由。既存§4.10/A93の不足。PR #348で実装済み（2026-10-02） |
 | [#344](https://github.com/ojungo69/oboete/issues/344) | live captureとscoped host recall adapter。M5後に検証 |
-| [#345](https://github.com/ojungo69/oboete/issues/345) | 任意persistent LOCAL HTTP lifecycleとgrant別API。M5後に検証 |
+| [#345](https://github.com/ojungo69/oboete/issues/345) | 他のclient向けの任意local HTTP API（grant別）とそのlifecycle。ownerのPCの切り替え後。常駐するworkerとviewerはowner決定36で別に切り替え前に作る |
 | [#346](https://github.com/ojungo69/oboete/issues/346) | 選択的portable export。低優先planned |
 
 - 既存：identity #321、false task/provenance #320/#167、accepted decision #255/#244、correction #157/#162、総resource #317、HTTP境界 #53、WebUI #94/#338、M5 forget、M6 remote read/sync。scopeを広げるissue本文変更や重複issueを作らない。
