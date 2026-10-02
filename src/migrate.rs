@@ -12,6 +12,14 @@ use crate::raw::{Checkpoint, IMPORT_BATCH, ImportDoc, MAX_BATCH_BYTES, Raw, V1Ro
 /// The source of what v1's store holds, as records and documents in Design B (D6).
 const SOURCE: &str = "oboete-v1";
 
+#[cfg(test)]
+thread_local! {
+    /// A hook gets a known commit gap without depending on the thread scheduler.
+    static BETWEEN_BATCHES: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 /// Refuse a source that a writable raw open would reuse, including a stopped restore's file.
 pub fn check_source(home: &Path, from: &Path) -> Result<()> {
     let destination = crate::raw::path(home);
@@ -405,6 +413,10 @@ fn events(
             || batch.bytes + bytes > MAX_BATCH_BYTES
         {
             stats.records += batch.append(raw, &key, ruleset)?;
+            #[cfg(test)]
+            if let Some(between) = BETWEEN_BATCHES.with(|seam| seam.borrow_mut().take()) {
+                between();
+            }
         }
         batch.bytes += bytes;
         batch.records.extend(captured);
@@ -1264,13 +1276,59 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         assert_eq!(manifest(&raw), before);
     }
 
-    /// MUST-M16: hooks keep appending while a pass runs, every append succeeds, and some land
-    /// between migrated batches.
+    /// MUST-M16: a known commit gap proves interleaving without relying on SQLite's busy
+    /// handler or the scheduler to give a waiting hook that gap.
+    #[test]
+    fn a_hook_appends_between_migrated_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let v1 = V1::new(dir.path());
+        v1.session("s1", "r", 100);
+        for i in 0..1_200 {
+            v1.prompt("s1", 1_000 + i, &format!("old {i}"));
+        }
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let live = std::rc::Rc::new(std::cell::Cell::new(None));
+        let appended = live.clone();
+        let hook_home = home.path().to_owned();
+        BETWEEN_BATCHES.with(|seam| {
+            *seam.borrow_mut() = Some(Box::new(move || {
+                let mut hook = raw::open(&hook_home).unwrap();
+                appended.set(Some(
+                    hook.append(&raw::test_event("live between batches"))
+                        .unwrap(),
+                ));
+            }));
+        });
+        let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
+        assert_eq!((stats.events, stats.records), (1_200, 1_200));
+        let migrated: Vec<i64> = raw
+            .after(raw.device(), 0, 2_000)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r.item {
+                Item::Event(e) if e.source == SOURCE && e.kind == "prompt" => Some(r.seq),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(migrated.len(), 1_200);
+        let live = live.get().expect("the between-batch seam did not run");
+        assert!(migrated[0] < live && live < migrated[1_199], "{live}");
+        assert_eq!(
+            raw.migration_checkpoints("oboete-v1:").unwrap()["oboete-v1:d1e5"].through,
+            1_200
+        );
+    }
+
+    /// MUST-M16: real contention must not lose hook appends or stop a pass. Scheduling cannot
+    /// promise interleaving; `a_hook_appends_between_migrated_batches` covers it deterministically.
     #[test]
     fn migrate_and_a_hook_append_together() {
         migrate_with_hooks(std::time::Duration::from_millis(1));
     }
 
+    /// Without a pause, contention must still preserve every append and finish the pass.
+    /// `a_hook_appends_between_migrated_batches` owns interleaving, which scheduling cannot promise.
     #[test]
     fn migrate_progresses_while_hooks_append_without_a_pause() {
         migrate_with_hooks(std::time::Duration::ZERO);
@@ -1287,34 +1345,38 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         let home = tempfile::tempdir().unwrap();
         let mut raw = raw::open(home.path()).unwrap();
         let done = std::sync::atomic::AtomicBool::new(false);
-        let live: Vec<i64> = std::thread::scope(|s| {
-            let hook = s.spawn(|| {
-                let mut store = raw::open(home.path()).unwrap();
-                let mut seqs = Vec::new();
+        let (live, stats) = std::thread::scope(|s| {
+            let (ready, started) = std::sync::mpsc::channel();
+            let done = &done;
+            let hook_home = home.path();
+            let hook = s.spawn(move || {
+                let mut store = raw::open(hook_home).unwrap();
+                let mut seqs = vec![store.append(&raw::test_event("live")).unwrap()];
+                ready.send(()).unwrap();
                 while !done.load(std::sync::atomic::Ordering::SeqCst) {
                     seqs.push(store.append(&raw::test_event("live")).unwrap());
                     std::thread::sleep(pause);
                 }
                 seqs
             });
+            // A delayed hook thread must not make the append-count check vacuous.
+            started.recv().unwrap();
             let passed = pass(home.path(), &mut raw, &v1.path);
             done.store(true, std::sync::atomic::Ordering::SeqCst);
             let live = hook.join().unwrap();
-            passed.unwrap();
-            live
+            (live, passed.unwrap())
         });
+        assert_eq!(
+            (stats.events, stats.records, stats.documents),
+            (1_200, 1_200, 1)
+        );
         let all = records(&raw);
-        let migrated: Vec<i64> = raw
-            .after(raw.device(), 0, 100_000)
-            .unwrap()
-            .iter()
-            .zip(&all)
-            .filter(|(_, e)| e.source == "oboete-v1" && e.kind == "prompt")
-            .map(|(r, _)| r.seq)
-            .collect();
-        assert_eq!(migrated.len(), 1_200);
-        let (first, last) = (migrated[0], migrated[1_199]);
-        assert!(live.iter().any(|s| (first..last).contains(s)), "{live:?}");
+        assert_eq!(
+            all.iter()
+                .filter(|e| e.source == SOURCE && e.kind == "prompt")
+                .count(),
+            1_200
+        );
         assert_eq!(
             all.iter().filter(|e| e.source == "hook").count(),
             live.len()
