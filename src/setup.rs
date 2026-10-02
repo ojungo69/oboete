@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{config, db};
+use crate::config;
 
 pub const AGENTS: [&str; 7] = ["claude", "codex", "grok", "agy", "opencode", "pi", "cursor"];
 const BACKUP_SUFFIX: &str = ".oboete.bak";
@@ -529,7 +529,7 @@ fn merge_groups(root: &mut Value, wanted: Vec<(String, Value)>) {
 }
 
 /// Claude Code's config directory: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
-fn claude_dir() -> PathBuf {
+pub(crate) fn claude_dir() -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| config::home_dir().join(".claude"))
@@ -770,7 +770,7 @@ fn claude(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     Ok(vec![file.display().to_string()])
 }
 
-fn codex_home() -> PathBuf {
+pub(crate) fn codex_home() -> PathBuf {
     std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| config::home_dir().join(".codex"))
@@ -1724,7 +1724,8 @@ pub fn doctor(home: &Path) -> Result<()> {
             &mut unhealthy,
             "oboete.db",
             (|| -> Result<()> {
-                let conn = db::open(home)?;
+                // Read only: v1's open writes its schema and a new device id into a copy.
+                let conn = crate::migrate::open_v1(&db_path)?;
                 // A table that cannot be read makes the section unhealthy, not a count of 0; the
                 // readable counts and the calls below are still shown.
                 let counts = ["sessions", "events", "observations", "summaries"].map(|t| {
@@ -1764,6 +1765,16 @@ pub fn doctor(home: &Path) -> Result<()> {
             })(),
         );
     }
+    // Milestone 4 Task 9: what the cut-over (spec 7.4) leaves to do.
+    section(
+        &mut unhealthy,
+        "oboete.db",
+        crate::migrate::doctor(home).map(|lines| {
+            for l in lines {
+                println!("  {l}");
+            }
+        }),
+    );
     if home.join("providers.db").exists() {
         section(
             &mut unhealthy,

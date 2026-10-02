@@ -60,7 +60,8 @@ impl Consumer for Gaps {
         let mut settings = None;
         for r in &recs {
             let Item::Event(e) = &r.item else { continue };
-            if e.kind != "end" {
+            // An imported end (v1's, a transcript's): raw holds only what was imported of it.
+            if e.kind != "end" || !crate::raw::is_live(&e.source) {
                 continue;
             }
             let body: Value = serde_json::from_str(&e.body).unwrap_or(Value::Null);
@@ -319,6 +320,33 @@ mod tests {
                 "claude: 1 of 1 ended session(s) short of their transcript (1 turn(s) not recorded)"
             ]
         );
+    }
+
+    /// Milestone 4 D6: an imported `end` record (v1's, a transcript's) parses no transcript and
+    /// writes no row: raw holds only what was imported of that session.
+    #[test]
+    fn an_imported_end_record_parses_no_transcript() {
+        let home = tempfile::tempdir().unwrap();
+        let file = home.path().join("s1.jsonl");
+        transcript(&file, &["one"]);
+        let mut store = raw::open(home.path()).unwrap();
+        for (session, source) in [("s1", "oboete-v1"), ("s2", "transcript"), ("s3", "hook")] {
+            let e = raw::Event {
+                source: source.into(),
+                ..end("claude", session, Some(&file))
+            };
+            store.append(&e).unwrap();
+        }
+        worker::run_once(home.path()).unwrap();
+        let k = knowledge::open(home.path()).unwrap();
+        let checked: Vec<String> = k
+            .prepare("SELECT session FROM gaps")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(checked, ["s3"]);
     }
 
     #[test]

@@ -1058,7 +1058,7 @@ pub fn parse_capture(text: Option<&str>) -> Result<CaptureConfig> {
 /// `oboete mcp`. Only its line: the error's own text can quote the value on that line (a serde
 /// message quotes a value of the wrong type, the display quotes the line), and `[redaction]`
 /// holds values the user means to hide.
-fn toml_error(text: &str, e: &toml::de::Error) -> anyhow::Error {
+pub(crate) fn toml_error(text: &str, e: &toml::de::Error) -> anyhow::Error {
     let line = e
         .span()
         .and_then(|s| text.get(..s.start))

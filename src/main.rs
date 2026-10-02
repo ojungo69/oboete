@@ -27,6 +27,7 @@ mod keyfile;
 mod knowledge;
 mod manifest;
 mod mcp;
+mod migrate;
 mod provider;
 mod providers_db;
 // Design B's store: the hook writes to it; its readers come with the worker (milestone 2 Task 5).
@@ -44,7 +45,7 @@ mod worker;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -203,15 +204,33 @@ enum Cmd {
         #[arg(long)]
         open: bool,
     },
-    /// Copy another memory tool's store into this one (claude-mem's SQLite database)
+    /// Import claude-mem's SQLite database or Claude Code and Codex transcripts
     Import {
-        /// Source tool: claude-mem
+        /// Source: claude-mem or transcripts
         source: String,
         /// Its database file (read-only; e.g. ~/.claude-mem/claude-mem.db)
-        db: PathBuf,
+        #[arg(required_if_eq("source", "claude-mem"))]
+        db: Option<PathBuf>,
         /// The --home store is for evaluation, not the one the hooks write (required until PR-H)
         #[arg(long)]
         eval_store: bool,
+        /// Import only this agent's transcripts (default: both)
+        #[arg(long, value_parser = ["claude", "codex"])]
+        agent: Option<String>,
+        /// Import transcripts; without this flag, print a preview and write nothing
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Move v1's store (oboete.db) into Design B (spec 7.4): its events as records, its documents
+    /// as imported documents, its settings into a home that has none. v1's store is never written;
+    /// run it again to import what v1 wrote since
+    Migrate {
+        /// v1's store (default: <home>/oboete.db)
+        #[arg(long, conflicts_with = "finish")]
+        from: Option<PathBuf>,
+        /// Import once more, then list v1's old files and delete them if you answer yes
+        #[arg(long)]
+        finish: bool,
     },
     /// Evaluation: pass stdin through the outbound gate (what may leave the machine) to stdout
     #[command(hide = true)]
@@ -301,8 +320,9 @@ fn emit(text: &str) -> Result<()> {
 }
 
 fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
-    // Hooks create storage after the skip guards, inside their fail-open boundary.
-    if !matches!(&cmd, Cmd::Hook { .. }) {
+    // Hooks create storage after the skip guards; transcript preview creates nothing.
+    let preview = matches!(&cmd, Cmd::Import { source, yes: false, .. } if source == "transcripts");
+    if !matches!(&cmd, Cmd::Hook { .. }) && !preview {
         std::fs::create_dir_all(&home)?;
     }
     // The egress gate (`redact::outbound`) applies the user's rules as they are now (spec 6.4).
@@ -391,10 +411,28 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             source,
             db,
             eval_store,
+            agent,
+            yes,
         } => {
-            if source != "claude-mem" {
-                anyhow::bail!("unknown source {source}: use claude-mem");
+            if source == "transcripts" {
+                anyhow::ensure!(db.is_none(), "import transcripts takes no database path");
+                anyhow::ensure!(!eval_store, "--eval-store is only for import claude-mem");
+                let claude = setup::claude_dir().join("projects");
+                let codex = setup::codex_home().join("sessions");
+                let roots: Vec<(&str, &std::path::Path)> =
+                    [("claude", claude.as_path()), ("codex", codex.as_path())]
+                        .into_iter()
+                        .filter(|(name, _)| agent.as_deref().is_none_or(|a| a == *name))
+                        .collect();
+                transcript::import(&home, &roots, yes, &mut std::io::stdout().lock())?;
+                return Ok(());
             }
+            if source != "claude-mem" {
+                anyhow::bail!("unknown source {source}: use claude-mem or transcripts");
+            }
+            let db = db.context("import claude-mem requires a database path")?;
+            anyhow::ensure!(!yes, "--yes is only for import transcripts");
+            anyhow::ensure!(agent.is_none(), "--agent is only for import transcripts");
             // Until repositories map onto claude-mem's project names (PR-H), the rows would
             // reach no repository's injection; keep them out of the store the hooks write.
             // The hooks may write a custom home (OBOETE_HOME), so the caller has to say the store
@@ -410,6 +448,21 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let _lock = import::lock(&home)?;
             let mut raw = raw::open(&home)?;
             let stats = import::claude_mem(&mut raw, &db)?;
+            println!("{}", serde_json::to_string(&stats)?);
+            Ok(())
+        }
+        Cmd::Migrate { from, finish } => {
+            let from = from.unwrap_or_else(|| home.join("oboete.db"));
+            migrate::check_source(&home, &from)?;
+            let _lock = import::lock(&home)?;
+            if finish {
+                let mut out = std::io::stdout().lock();
+                return migrate::finish(&home, std::io::stdin().lock(), &mut out);
+            }
+            for line in migrate::settings(&home, &from)? {
+                println!("{line}");
+            }
+            let stats = migrate::pass(&home, &mut raw::open(&home)?, &from)?;
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())
         }

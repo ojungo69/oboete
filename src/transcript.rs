@@ -1,14 +1,19 @@
 //! Agent transcripts as replay fixtures (docs/milestone-1-plan.md Task 4; spec 7.4, 8.4 item 1).
 //! `oboete transcript <path> --agent claude|codex` prints one `{seq, agent, event, session, ts,
 //! payload}` line per hook event the transcript implies: the format `oboete replay` reads, so a
-//! transcript replays through today's hooks and, later, feeds the transcript import. Nothing is
-//! redacted or stripped here: the hook path does that, and it is part of what a replay measures.
+//! transcript replays through today's hooks and feeds the transcript import (spec 7.4, A60).
+//! Conversion leaves text whole for replay; import uses capture's settings and redaction gate.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+use crate::capture::{self, Captured, Settings};
+use crate::raw::{self, Checkpoint, IMPORT_BATCH, MAX_BATCH_BYTES};
 
 /// Claude Code records that only the transcript has: no prompt hook ever saw them.
 const TRANSCRIPT_ONLY: [&str; 5] = [
@@ -70,8 +75,21 @@ type Pending = (
     Option<String>,
 );
 
-struct Emitter<W: Write> {
-    out: W,
+#[derive(serde::Serialize)]
+// The fields in the order `convert` printed them before this struct (`json!` keeps its keys'
+// order here: serde_json's `preserve_order`), so a fixture converted again keeps its bytes.
+struct Line {
+    seq: u64,
+    agent: &'static str,
+    event: String,
+    session: String,
+    ts: String,
+    payload: Value,
+    #[serde(skip)]
+    synthetic: bool,
+}
+
+struct Emitter {
     agent: &'static str,
     session: String,
     path: String,
@@ -93,10 +111,10 @@ struct Emitter<W: Write> {
     last_ts: String,
     /// Lines without their `seq`, keyed by time: subagent files are read after the main file,
     /// and `oboete replay` takes the lines in order, so they are sorted before they are written.
-    lines: Vec<(String, String)>,
+    lines: Vec<(String, Line)>,
 }
 
-impl<W: Write> Emitter<W> {
+impl Emitter {
     fn ignore(&mut self, kind: String) {
         *self.stats.ignored.entry(kind).or_default() += 1;
     }
@@ -112,31 +130,44 @@ impl<W: Write> Emitter<W> {
             ("", Some((prev, _))) => prev.clone(),
             _ => ts.to_string(),
         };
-        let line = json!({"agent": self.agent, "event": event, "session": self.session,
-                          "ts": ts, "payload": payload});
+        let line = Line {
+            seq: 0,
+            agent: self.agent,
+            event: event.to_owned(),
+            session: self.session.clone(),
+            ts: ts.clone(),
+            payload,
+            synthetic: false,
+        };
         // SessionStart sorts first whatever its time.
         let key = if event == "SessionStart" {
             String::new()
         } else {
             ts
         };
-        self.lines.push((key, line.to_string()));
+        self.lines.push((key, line));
         Ok(())
     }
 
     /// Every line in time order (a stable sort: equal times keep the order they were read in),
     /// numbered, then SessionEnd.
-    fn flush(mut self) -> Result<Stats> {
+    fn flush(mut self) -> Result<(Vec<Line>, Stats)> {
         if self.started {
             let ts = self.last_ts.clone();
             self.write("SessionEnd", &ts, json!({"reason": "transcript_end"}))?;
         }
         let end = self.lines.len().saturating_sub(1);
         self.lines[..end].sort_by(|a, b| a.0.cmp(&b.0));
-        for (i, (_, line)) in self.lines.iter().enumerate() {
-            writeln!(self.out, "{{\"seq\":{},{}", i + 1, &line[1..])?;
-        }
-        Ok(self.stats)
+        let lines = self
+            .lines
+            .into_iter()
+            .enumerate()
+            .map(|(i, (_, mut line))| {
+                line.seq = i as u64 + 1;
+                line
+            })
+            .collect();
+        Ok((lines, self.stats))
     }
 
     fn emit(&mut self, event: &str, ts: &str, payload: Value) -> Result<()> {
@@ -240,9 +271,14 @@ impl<W: Write> Emitter<W> {
 
     /// End of one file: calls that never got a result, then the turn's last text.
     fn finish(&mut self) -> Result<()> {
+        let first = self.lines.len();
         self.interrupt(false)?;
         let ts = self.last_ts.clone();
-        self.stop(&ts)
+        self.stop(&ts)?;
+        for (_, line) in &mut self.lines[first..] {
+            line.synthetic = true;
+        }
+        Ok(())
     }
 }
 
@@ -273,7 +309,7 @@ fn command_text(s: &str) -> Option<String> {
     })
 }
 
-fn claude_line<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) -> Result<()> {
+fn claude_line(e: &mut Emitter, v: &Value, agent_id: Option<&str>) -> Result<()> {
     // Older Claude Code wrote subagent turns inline, marked isSidechain; newer writes them to
     // <session>/subagents/, read with their file's agent id.
     let agent_id = if v["isSidechain"] == true {
@@ -303,7 +339,7 @@ fn claude_line<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) 
     result
 }
 
-fn claude_record<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) -> Result<()> {
+fn claude_record(e: &mut Emitter, v: &Value, agent_id: Option<&str>) -> Result<()> {
     let ts = v["timestamp"].as_str().unwrap_or_default().to_string();
     let content = &v["message"]["content"];
     match v["type"].as_str() {
@@ -437,7 +473,7 @@ pub(crate) fn codex_agent_sent(meta: &Value) -> bool {
         )
 }
 
-fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
+fn codex_line(e: &mut Emitter, v: &Value) -> Result<()> {
     let ts = v["timestamp"].as_str().unwrap_or_default().to_string();
     let p = &v["payload"];
     let call_id = p["call_id"].as_str().unwrap_or_default();
@@ -549,7 +585,7 @@ fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
     }
 }
 
-fn read_file<W: Write>(e: &mut Emitter<W>, path: &Path, agent_id: Option<&str>) -> Result<()> {
+fn read_file(e: &mut Emitter, path: &Path, agent_id: Option<&str>) -> Result<()> {
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     // Split on bytes: one line of broken UTF-8 must not end the file.
     for line in BufReader::new(file).split(b'\n') {
@@ -577,14 +613,15 @@ fn read_file<W: Write>(e: &mut Emitter<W>, path: &Path, agent_id: Option<&str>) 
     e.finish()
 }
 
-fn jsonl_under(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+fn jsonl_under(dir: &Path, prefix: &str, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
-        let p = entry?.path();
-        if p.is_dir() {
-            jsonl_under(&p, out)?;
+        let entry = entry?;
+        let p = entry.path();
+        if entry.file_type()?.is_dir() {
+            jsonl_under(&p, prefix, out)?;
         } else if p.extension().is_some_and(|x| x == "jsonl")
-            // A workflow's journal.jsonl sits beside its agents; it is no transcript.
-            && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("agent-"))
+            && p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(prefix))
         {
             out.push(p);
         }
@@ -592,7 +629,18 @@ fn jsonl_under(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
     Ok(())
 }
 
-pub fn convert(path: &Path, agent: &str, out: impl Write) -> Result<Stats> {
+fn subagent_files(path: &Path, agent: &str) -> Result<Vec<PathBuf>> {
+    let dir = path.with_extension("").join("subagents");
+    let mut files = Vec::new();
+    if agent == "claude" && dir.is_dir() {
+        // A workflow's journal.jsonl sits beside its agents; it is no transcript.
+        jsonl_under(&dir, "agent-", &mut files)?;
+        files.sort();
+    }
+    Ok(files)
+}
+
+fn parse(path: &Path, agent: &str, subagents: &[PathBuf]) -> Result<(Vec<Line>, Stats)> {
     let agent: &'static str = match agent {
         "claude" => "claude",
         "codex" => "codex",
@@ -603,7 +651,6 @@ pub fn convert(path: &Path, agent: &str, out: impl Write) -> Result<Stats> {
         .and_then(|s| s.to_str())
         .unwrap_or("session");
     let mut e = Emitter {
-        out,
         agent,
         session: stem.to_string(),
         path: path.display().to_string(),
@@ -620,24 +667,1090 @@ pub fn convert(path: &Path, agent: &str, out: impl Write) -> Result<Stats> {
         lines: Vec::new(),
     };
     read_file(&mut e, path, None)?;
-    let subagents = path.with_extension("").join("subagents");
-    if agent == "claude" && subagents.is_dir() {
-        // Workflow agents sit deeper: subagents/workflows/wf_*/agent-*.jsonl.
-        let mut files = Vec::new();
-        jsonl_under(&subagents, &mut files)?;
-        files.sort();
-        for f in files {
-            let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-            let id = stem.strip_prefix("agent-").unwrap_or(stem).to_string();
-            read_file(&mut e, &f, Some(&id))?;
-        }
+    for f in subagents {
+        let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let id = stem.strip_prefix("agent-").unwrap_or(stem).to_string();
+        read_file(&mut e, f, Some(&id))?;
     }
     e.flush()
+}
+
+pub fn convert(path: &Path, agent: &str, mut out: impl Write) -> Result<Stats> {
+    let (lines, stats) = parse(path, agent, &subagent_files(path, agent)?)?;
+    for line in lines {
+        serde_json::to_writer(&mut out, &line)?;
+        writeln!(out)?;
+    }
+    Ok(stats)
+}
+
+/// What each agent's transcripts contributed, or would contribute in a preview (spec 7.4).
+#[derive(Debug, Default, serde::Serialize)]
+pub struct ImportStats {
+    pub agents: BTreeMap<String, AgentStats>,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+pub struct AgentStats {
+    pub files: u64,
+    pub sessions: u64,
+    /// Records appended, after `append_imported` leaves denied records out; preview counts the
+    /// records capture would produce without opening a destination store.
+    pub events: u64,
+    pub cut: u64,
+    pub seen: u64,
+    pub housekeeping: u64,
+    /// Sessions whose identifier the redaction gate masks or clips: never imported.
+    pub masked: u64,
+    pub waiting: u64,
+    /// Files whose stored import prefix no longer matches or cannot be verified.
+    pub refused: u64,
+    /// Bytes of captured bodies selected for import, before the store's deny-list check.
+    pub bytes: u64,
+}
+
+/// Import stable transcripts locally, with the time cut and transactional checkpoints of A60
+/// and D6. Preview reads only the transcripts, settings and v1 store, and creates nothing.
+pub fn import(
+    home: &Path,
+    roots: &[(&str, &Path)],
+    yes: bool,
+    out: &mut impl Write,
+) -> Result<ImportStats> {
+    let _lock = yes.then(|| crate::import::lock(home)).transpose()?;
+    let v1 = home.join("oboete.db");
+    if yes {
+        crate::migrate::check_source(home, &v1)?;
+    }
+    let mut raw = yes.then(|| raw::open(home)).transpose()?;
+    if let Some(raw) = raw.as_mut()
+        && v1.exists()
+    {
+        for line in crate::migrate::settings(home, &v1)? {
+            writeln!(out, "{line}")?;
+        }
+        let migrated = crate::migrate::pass(home, raw, &v1)?;
+        writeln!(out, "v1 migration: {}", serde_json::to_string(&migrated)?)?;
+    }
+    let cut = match raw.as_ref() {
+        Some(raw) => raw.earliest_by_session()?,
+        None => preview_cut(&v1)?,
+    };
+    let mut checkpoints = match raw.as_ref() {
+        Some(raw) => raw.migration_checkpoints("transcript:")?,
+        None => HashMap::new(),
+    };
+    let settings = Settings {
+        source: "transcript",
+        ..Settings::load(home)?
+    };
+    let clock = rusqlite::Connection::open_in_memory()?;
+    let mut stats = ImportStats::default();
+    let mut sessions = HashSet::new();
+    for (agent, root) in roots {
+        let stats = stats.agents.entry((*agent).to_owned()).or_default();
+        for path in transcript_files(root, agent)? {
+            stats.files += 1;
+            let Some(mut lines) = stable_lines(&path, agent)? else {
+                stats.waiting += 1;
+                continue;
+            };
+            // EOF's interrupted calls, Stop and SessionEnd may be replaced when the file grows.
+            // Number only settled events, so none of those synthetic lines moves the checkpoint.
+            lines.retain(|line| !line.synthetic && line.event != "SessionEnd");
+            for (i, line) in lines.iter_mut().enumerate() {
+                line.seq = i as u64 + 1;
+            }
+            let Some(first) = lines.first() else {
+                continue;
+            };
+            let session = &first.session;
+            let new_session = sessions.insert(((*agent).to_owned(), session.clone()));
+            stats.sessions += u64::from(new_session);
+            if lines
+                .iter()
+                .any(|line| crate::hook::is_agent_internal(agent, &line.payload))
+            {
+                stats.housekeeping += u64::from(new_session);
+                continue;
+            }
+            // Masked or clipped identifiers cannot serve as checkpoints without collisions,
+            // and keeping the original would bypass both the redaction gate and the time cut:
+            // such a session is left out, counted. A touch always gives one record to look at.
+            let labelled =
+                capture::imported(agent, "Touch", &first.payload, 0, "", None, &settings);
+            if labelled.first().map(|c| c.event.session.as_str()) != Some(session.as_str()) {
+                stats.masked += u64::from(new_session);
+                continue;
+            }
+            if !new_session {
+                stats.seen += lines.len() as u64;
+                continue;
+            }
+            let key = format!("transcript:{agent}:{session}");
+            let seen = checkpoints.get(&key).map_or(0, |c| c.through);
+            let mut prefix = Sha256::new();
+            if let Some(previous) = checkpoints.get(&key) {
+                for line in lines.iter().take_while(|line| line.seq <= seen as u64) {
+                    hash_line(&mut prefix, line)?;
+                }
+                let fingerprint = format!("{:x}", prefix.clone().finalize());
+                if previous.prefix.as_deref() != Some(fingerprint.as_str()) {
+                    stats.refused += 1;
+                    writeln!(
+                        out,
+                        "refused {}: its imported prefix changed or cannot be verified",
+                        crate::redact::outbound_with(&path.display().to_string(), &settings.rules)
+                    )?;
+                    continue;
+                }
+            }
+            let earliest = cut.get(&((*agent).to_owned(), session.clone()));
+            let mut checkpoint = Checkpoint {
+                key: key.clone(),
+                through: seen,
+                row: None,
+                prefix: checkpoints.get(&key).and_then(|c| c.prefix.clone()),
+            };
+            let mut batch = Vec::<Captured>::new();
+            let mut bytes = 0;
+            for line in lines {
+                let through = i64::try_from(line.seq)?;
+                if through <= seen {
+                    stats.seen += 1;
+                    continue;
+                }
+                hash_line(&mut prefix, &line)?;
+                let fingerprint = Some(format!("{:x}", prefix.clone().finalize()));
+                let ts = crate::replay::fixture_ms(&clock, &json!(line.ts))
+                    .context("a transcript event has no valid timestamp")?;
+                if earliest.is_some_and(|cut| ts >= *cut) {
+                    stats.cut += 1;
+                    checkpoint.through = through;
+                    checkpoint.prefix = fingerprint;
+                    continue;
+                }
+                // The parser writes "." where the transcript named no directory: that is this
+                // process's, not the session's, so such a line gets no repository.
+                let cwd = line.payload["cwd"].as_str().filter(|c| *c != ".");
+                let repo = cwd.map_or_else(String::new, |c| crate::repo::key(Path::new(c)));
+                let captured =
+                    capture::imported(agent, &line.event, &line.payload, ts, &repo, cwd, &settings);
+                let size: usize = captured.iter().map(|c| c.event.body.len()).sum();
+                if batch.len() + captured.len() > IMPORT_BATCH || bytes + size > MAX_BATCH_BYTES {
+                    append_batch(&mut raw, &mut batch, &checkpoint, &settings, stats)?;
+                    bytes = 0;
+                }
+                batch.extend(captured);
+                bytes += size;
+                checkpoint.through = through;
+                checkpoint.prefix = fingerprint;
+            }
+            if checkpoint.through > seen {
+                append_batch(&mut raw, &mut batch, &checkpoint, &settings, stats)?;
+                checkpoints.insert(key, checkpoint);
+            }
+        }
+    }
+    if !yes {
+        writeln!(
+            out,
+            "Run oboete import transcripts --yes with the same --home and --agent to import."
+        )?;
+    }
+    writeln!(out, "{}", serde_json::to_string(&stats)?)?;
+    let refused: u64 = stats.agents.values().map(|agent| agent.refused).sum();
+    anyhow::ensure!(
+        refused == 0,
+        "{refused} transcript file(s) refused: imported prefixes changed or cannot be verified; \
+         use a fresh --home to reimport them"
+    );
+    Ok(stats)
+}
+
+fn hash_line(prefix: &mut Sha256, line: &Line) -> Result<()> {
+    // A copied transcript keeps its event contents; its file path is not its identity.
+    let mut payload = line.payload.clone();
+    if let Some(fields) = payload.as_object_mut() {
+        fields.remove("transcript_path");
+    }
+    prefix.update(serde_json::to_vec(&(
+        line.agent,
+        &line.event,
+        &line.session,
+        &line.ts,
+        payload,
+    ))?);
+    prefix.update(b"\n");
+    Ok(())
+}
+
+fn append_batch(
+    raw: &mut Option<raw::Raw>,
+    batch: &mut Vec<Captured>,
+    checkpoint: &Checkpoint,
+    settings: &Settings,
+    stats: &mut AgentStats,
+) -> Result<()> {
+    stats.events += match raw.as_mut() {
+        Some(raw) => raw
+            .append_imported(batch, settings.rules.version(), Some(checkpoint))?
+            .len() as u64,
+        None => batch.len() as u64,
+    };
+    stats.bytes += batch.iter().map(|c| c.event.body.len() as u64).sum::<u64>();
+    batch.clear();
+    Ok(())
+}
+
+fn preview_cut(v1: &Path) -> Result<HashMap<(String, String), i64>> {
+    if !v1.exists() {
+        return Ok(HashMap::new());
+    }
+    // Even a read-only SQLite open can create WAL sidecars. Read a stable private copy so
+    // preview changes nothing in the home; its WAL is copied too, never opened as immutable.
+    let home = v1
+        .parent()
+        .context("v1 store has no parent directory")?
+        .canonicalize()?;
+    anyhow::ensure!(
+        !std::env::temp_dir().canonicalize()?.starts_with(home),
+        "preview needs a temporary directory outside the oboete home"
+    );
+    let scratch = crate::provider::scratch_dir()
+        .map_err(|_| anyhow::anyhow!("cannot create a private v1 preview directory"))?;
+    let result = (|| {
+        // SQLite resolves a database symlink before locating its WAL.
+        let source = v1.canonicalize()?;
+        let mut wal = source.as_os_str().to_owned();
+        wal.push("-wal");
+        let wal = PathBuf::from(wal);
+        let logs = || -> Result<Vec<PathBuf>> {
+            Ok(if wal.try_exists()? {
+                vec![wal.clone()]
+            } else {
+                Vec::new()
+            })
+        };
+        let before = stamps(&source, &logs()?)?;
+        for (i, (path, _, _)) in before.iter().enumerate() {
+            std::fs::copy(
+                path,
+                scratch
+                    .0
+                    .join(if i == 0 { "oboete.db" } else { "oboete.db-wal" }),
+            )
+            .context("copy v1 for preview")?;
+        }
+        anyhow::ensure!(
+            before == stamps(&source, &logs()?)? && v1.canonicalize()? == source,
+            "v1 changed during preview; run it again when the writes stop"
+        );
+        let conn = crate::migrate::open_v1(&scratch.0.join("oboete.db"))?;
+        let mut st = conn.prepare(
+            "SELECT s.agent, e.session_id, MIN(e.ts) FROM events e
+             JOIN sessions s ON s.id = e.session_id GROUP BY s.agent, e.session_id",
+        )?;
+        let rows = st.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    })();
+    // Close SQLite before removal, including on an error, so Windows releases its handles.
+    std::fs::remove_dir_all(&scratch.0).context("remove the private v1 preview copy")?;
+    result
+}
+
+fn transcript_files(root: &Path, agent: &str) -> Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).context("read transcript root"),
+    };
+    let mut files = Vec::new();
+    if agent == "codex" {
+        jsonl_under(root, "rollout-", &mut files)?;
+    } else {
+        for project in entries {
+            let project = project?;
+            if project.file_type()?.is_dir() {
+                for entry in std::fs::read_dir(project.path())? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if entry.file_type()?.is_file()
+                        && path.extension().is_some_and(|e| e == "jsonl")
+                    {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn stamps(
+    path: &Path,
+    subagents: &[PathBuf],
+) -> Result<Vec<(PathBuf, u64, std::time::SystemTime)>> {
+    std::iter::once(path)
+        .chain(subagents.iter().map(PathBuf::as_path))
+        .map(|path| {
+            let m = std::fs::metadata(path)?;
+            Ok((path.to_owned(), m.len(), m.modified()?))
+        })
+        .collect()
+}
+
+fn stable_lines(path: &Path, agent: &str) -> Result<Option<Vec<Line>>> {
+    let subagents = subagent_files(path, agent)?;
+    let before = stamps(path, &subagents)?;
+    let parsed = parse(path, agent, &subagents);
+    #[cfg(test)]
+    AFTER_PARSE.with_borrow_mut(|hook| {
+        if let Some(hook) = hook.take() {
+            hook();
+        }
+    });
+    // Check the file set too: a new or removed subagent changes the session's event order.
+    let after = subagent_files(path, agent).and_then(|files| stamps(path, &files));
+    if after.as_ref().ok() != Some(&before) {
+        return Ok(None);
+    }
+    Ok(Some(parsed?.0))
+}
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_PARSE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::{self, Settings};
+    use crate::raw::{self, Event, Item};
+    use rusqlite::{Connection, params};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    const CODEX: &str = "src/testdata/transcripts/codex-basic.jsonl";
+    const CODEX_SESSION: &str = "22222222-2222-4222-8222-222222222222";
+    const CLAUDE_MS: i64 = 1_788_220_800_000;
+    const CODEX_MS: i64 = 1_788_307_200_000;
+
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let path = entry.unwrap().path();
+            let target = to.join(path.file_name().unwrap());
+            if path.is_dir() {
+                copy_tree(&path, &target);
+            } else {
+                std::fs::copy(path, target).unwrap();
+            }
+        }
+    }
+
+    fn fixtures(dir: &Path) -> (PathBuf, PathBuf) {
+        let claude = dir.join("claude/projects");
+        let project = claude.join("-work-app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::copy(CLAUDE, project.join("claude-basic.jsonl")).unwrap();
+        copy_tree(
+            Path::new("src/testdata/transcripts/claude-basic"),
+            &project.join("claude-basic"),
+        );
+        let codex = dir.join("codex/sessions");
+        let day = codex.join("2026/09/02");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::copy(CODEX, day.join("rollout-basic.jsonl")).unwrap();
+        // Neither a workflow journal nor an unrelated JSONL file is a rollout.
+        std::fs::write(codex.join("journal.jsonl"), b"not a transcript\n").unwrap();
+        (claude, codex)
+    }
+
+    fn records(home: &Path) -> Vec<Event> {
+        let raw = raw::open(home).unwrap();
+        let mut out = Vec::new();
+        let mut after = 0;
+        loop {
+            let page = raw.after(raw.device(), after, 1_000).unwrap();
+            let Some(last) = page.last() else {
+                return out;
+            };
+            after = last.seq;
+            out.extend(page.into_iter().filter_map(|r| match r.item {
+                Item::Event(e) => Some(*e),
+                _ => None,
+            }));
+        }
+    }
+
+    fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        fn read(base: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let bytes = if path.is_dir() {
+                    read(base, &path, out);
+                    None
+                } else {
+                    Some(std::fs::read(&path).unwrap())
+                };
+                out.insert(path.strip_prefix(base).unwrap().to_owned(), bytes);
+            }
+        }
+        let mut out = BTreeMap::new();
+        read(dir, dir, &mut out);
+        out
+    }
+
+    #[test]
+    fn only_lines_before_the_sessions_first_raw_record_are_imported() {
+        for (agent, session, cut, total) in [
+            ("claude", "claude-basic", CLAUDE_MS + 4_000, 18),
+            ("codex", CODEX_SESSION, CODEX_MS + 8_000, 8),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (claude, codex) = fixtures(dir.path());
+            let home = dir.path().join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            let mut raw = raw::open(&home).unwrap();
+            let live = capture::events(
+                agent,
+                "UserPromptSubmit",
+                &json!({"session_id": session, "cwd": "/work", "prompt": "Already captured"}),
+                cut,
+                &Settings::default(),
+            );
+            raw.append_with_ledger(&live[0].event, &live[0].ledger, "test")
+                .unwrap();
+            drop(raw);
+            let roots = [("claude", claude.as_path()), ("codex", codex.as_path())];
+            let first = import(&home, &roots, true, &mut Vec::new()).unwrap();
+            assert_eq!(first.agents[agent].events, 4);
+            assert_eq!(first.agents[agent].cut, total - 4);
+            let other = if agent == "claude" { "codex" } else { "claude" };
+            assert_eq!(
+                first.agents[other].events,
+                if other == "claude" { 18 } else { 8 }
+            );
+            let got = records(&home);
+            let imported: Vec<_> = got.iter().filter(|e| e.source == "transcript").collect();
+            assert!(
+                imported
+                    .iter()
+                    .filter(|e| e.agent == agent)
+                    .all(|e| e.ts < cut)
+            );
+            assert_eq!(got.iter().filter(|e| e.source == "hook").count(), 1);
+            assert!(
+                imported
+                    .iter()
+                    .all(|e| e.branch.is_none() && e.head.is_none())
+            );
+            let again = import(&home, &roots, true, &mut Vec::new()).unwrap();
+            assert!(again.agents.values().all(|s| s.events == 0));
+            assert_eq!(again.agents[agent].seen, total);
+            assert_eq!(records(&home), got);
+            let raw = raw::open(&home).unwrap();
+            let checkpoints = raw.migration_checkpoints("transcript:").unwrap();
+            assert_eq!(
+                checkpoints[&format!("transcript:{agent}:{session}")].through,
+                total as i64
+            );
+        }
+    }
+
+    #[test]
+    fn a_trimmed_v1_head_comes_back() {
+        for (agent, fixture, session, first_prompt, boundary_prompt) in [
+            (
+                "claude",
+                CLAUDE,
+                "claude-basic",
+                "キャッシュの方針を決めたい",
+                "どちらが良い？",
+            ),
+            (
+                "codex",
+                CODEX,
+                CODEX_SESSION,
+                "Add a 50ms timeout to fetchJson",
+                "Try again with 100ms",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (claude, codex) = fixtures(dir.path());
+            let home = dir.path().join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            let path = home.join("oboete.db");
+            let v1 = Connection::open(&path).unwrap();
+            v1.pragma_update(None, "journal_mode", "WAL").unwrap();
+            v1.execute_batch(
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE sessions(id TEXT PRIMARY KEY, agent TEXT NOT NULL, repo TEXT NOT NULL,
+                   cwd TEXT, started_at INTEGER NOT NULL, last_event_at INTEGER NOT NULL);
+                 CREATE TABLE session_repos(session_id TEXT NOT NULL, repo TEXT NOT NULL,
+                   PRIMARY KEY(session_id, repo)) WITHOUT ROWID;
+                 CREATE TABLE events(id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
+                   event TEXT NOT NULL, ts INTEGER NOT NULL, payload TEXT NOT NULL);
+                 CREATE TABLE observations(id INTEGER PRIMARY KEY, session_id TEXT, repo TEXT,
+                   ts INTEGER, kind TEXT, title TEXT, body TEXT, uid TEXT);
+                 CREATE TABLE summaries(id INTEGER PRIMARY KEY, session_id TEXT, repo TEXT,
+                   ts INTEGER, body TEXT, uid TEXT);
+                 CREATE TABLE prompts(id INTEGER PRIMARY KEY, session_id TEXT, repo TEXT,
+                   ts INTEGER, body TEXT, uid TEXT);
+                 INSERT INTO meta VALUES('device_id', 'd1e5');",
+            )
+            .unwrap();
+            v1.execute(
+                "INSERT INTO sessions VALUES(?1, ?2, '/work', '/work', 0, 0)",
+                params![session, agent],
+            )
+            .unwrap();
+            v1.execute("INSERT INTO session_repos VALUES(?1, '/work')", [session])
+                .unwrap();
+            let (lines, _) = events(fixture, agent);
+            let mid = lines
+                .iter()
+                .position(|e| e["payload"]["prompt"] == boundary_prompt)
+                .unwrap();
+            let clock = Connection::open_in_memory().unwrap();
+            let mut first_ts = 0;
+            for (i, line) in lines[mid..].iter().enumerate() {
+                let ts: i64 = clock
+                    .query_row(
+                        "SELECT CAST(round(unixepoch(?1, 'subsec') * 1000) AS INTEGER)",
+                        [line["ts"].as_str().unwrap()],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                if i == 0 {
+                    first_ts = ts + 1;
+                }
+                let captured = capture::imported(
+                    agent,
+                    line["event"].as_str().unwrap(),
+                    &line["payload"],
+                    ts,
+                    "/work",
+                    Some("/work"),
+                    &Settings::default(),
+                );
+                let body = &captured[0].event.body;
+                // The hook stamps a turn later than its transcript entry does (spec 7.4).
+                v1.execute(
+                    "INSERT INTO events(session_id, event, ts, payload) VALUES(?1, ?2, ?3, ?4)",
+                    params![session, line["event"].as_str().unwrap(), ts + 1, body],
+                )
+                .unwrap();
+            }
+            drop(v1);
+            let before = std::fs::read(&path).unwrap();
+            let root = if agent == "claude" { &claude } else { &codex };
+            let before_preview = snapshot(&home);
+            let preview = import(&home, &[(agent, root)], false, &mut Vec::new()).unwrap();
+            assert_eq!(
+                preview.agents[agent].events,
+                if agent == "claude" { 6 } else { 8 }
+            );
+            assert!(
+                snapshot(&home) == before_preview,
+                "preview changed v1's files"
+            );
+            let mut out = Vec::new();
+            let stats = import(&home, &[(agent, root)], true, &mut out).unwrap();
+            assert!(stats.agents[agent].events > 2);
+            assert!(
+                String::from_utf8(out)
+                    .unwrap()
+                    .contains("[summary] curate is not set")
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            let got = records(&home);
+            assert!(
+                got.iter()
+                    .any(|e| e.source == "oboete-v1" && e.kind == "prompt")
+            );
+            assert!(
+                got.iter()
+                    .filter(|e| e.source == "transcript")
+                    .all(|e| e.ts < first_ts)
+            );
+            let mut prompts = BTreeMap::<String, Vec<String>>::new();
+            for e in got.iter().filter(|e| e.kind == "prompt") {
+                let body: Value = serde_json::from_str(&e.body).unwrap();
+                prompts
+                    .entry(body["prompt"].as_str().unwrap().to_owned())
+                    .or_default()
+                    .push(e.source.clone());
+            }
+            assert_eq!(prompts[first_prompt], ["transcript"]);
+            let doubled: Vec<_> = prompts
+                .iter()
+                .filter(|(_, sources)| sources.len() > 1)
+                .collect();
+            assert_eq!(doubled.len(), 1);
+            assert_eq!(doubled[0].0, boundary_prompt);
+            assert_eq!(doubled[0].1, &["oboete-v1", "transcript"]);
+        }
+    }
+
+    #[test]
+    fn nothing_is_written_without_yes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (claude, codex) = fixtures(dir.path());
+        let home = dir.path().join("missing");
+        let roots = [("claude", claude.as_path()), ("codex", codex.as_path())];
+        for existing in [false, true] {
+            if existing {
+                std::fs::create_dir_all(&home).unwrap();
+                drop(raw::open(&home).unwrap());
+            }
+            let before = existing.then(|| snapshot(&home));
+            let mut out = Vec::new();
+            let stats = import(&home, &roots, false, &mut out).unwrap();
+            assert_eq!(
+                (
+                    stats.agents["claude"].files,
+                    stats.agents["claude"].sessions,
+                    stats.agents["claude"].events
+                ),
+                (1, 1, 18)
+            );
+            assert_eq!(
+                (
+                    stats.agents["codex"].files,
+                    stats.agents["codex"].sessions,
+                    stats.agents["codex"].events
+                ),
+                (1, 1, 8)
+            );
+            assert!(stats.agents.values().all(|s| s.bytes > 0));
+            let said = String::from_utf8(out).unwrap();
+            assert!(said.contains("--yes"));
+            let printed: Value = serde_json::from_str(said.lines().last().unwrap()).unwrap();
+            assert_eq!(printed, serde_json::to_value(stats).unwrap());
+            if let Some(before) = before {
+                assert_eq!(snapshot(&home), before);
+            } else {
+                assert!(!home.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn a_changed_file_waits() {
+        for which in ["codex", "claude", "subagent"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (claude, codex) = fixtures(dir.path());
+            let agent = if which == "codex" { "codex" } else { "claude" };
+            let root = if agent == "codex" { &codex } else { &claude };
+            let changed = match which {
+                "codex" => codex.join("2026/09/02/rollout-basic.jsonl"),
+                "claude" => claude.join("-work-app/claude-basic.jsonl"),
+                _ => claude.join("-work-app/claude-basic/subagents/workflows/wf_1/agent-w1.jsonl"),
+            };
+            AFTER_PARSE.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(changed)
+                        .unwrap()
+                        .write_all(b"\n")
+                        .unwrap();
+                }))
+            });
+            let home = dir.path().join("home");
+            let first = import(&home, &[(agent, root)], true, &mut Vec::new()).unwrap();
+            assert_eq!(
+                (first.agents[agent].events, first.agents[agent].waiting),
+                (0, 1)
+            );
+            assert!(records(&home).is_empty());
+            assert!(
+                raw::open(&home)
+                    .unwrap()
+                    .migration_checkpoints("transcript:")
+                    .unwrap()
+                    .is_empty()
+            );
+            let again = import(&home, &[(agent, root)], true, &mut Vec::new()).unwrap();
+            assert_eq!(
+                again.agents[agent].events,
+                if agent == "claude" { 18 } else { 8 }
+            );
+            assert_eq!(again.agents[agent].waiting, 0);
+        }
+    }
+
+    /// A line whose transcript named no directory gets no repository: "." is the importing
+    /// process's directory, never the session's.
+    #[test]
+    fn a_line_with_no_directory_gets_no_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("claude/projects/-work-app");
+        std::fs::create_dir_all(&project).unwrap();
+        let line = json!({"type": "user", "timestamp": "2026-09-01T00:00:01Z",
+                          "sessionId": "no-dir", "message": {"role": "user",
+                          "content": "Keep the parser errors on stderr."}});
+        std::fs::write(project.join("no-dir.jsonl"), format!("{line}\n")).unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let claude = dir.path().join("claude/projects");
+        import(&home, &[("claude", &claude)], true, &mut Vec::new()).unwrap();
+        let got = records(&home);
+        assert!(got.iter().any(|e| e.kind == "prompt"), "{got:?}");
+        let here = crate::repo::key(&std::env::current_dir().unwrap());
+        for e in got {
+            assert_ne!(e.repo.as_deref(), Some(here.as_str()), "{e:?}");
+        }
+    }
+
+    /// The parser's own SessionEnd is not imported: a session resumed after an import gets its
+    /// next events in by a rerun.
+    #[test]
+    fn a_resumed_session_imports_its_next_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("claude/projects/-work-app");
+        std::fs::create_dir_all(&project).unwrap();
+        let prompt = |ts: &str, text: &str| {
+            let line = json!({"type": "user", "timestamp": ts, "sessionId": "resumed",
+                              "cwd": "/work/app", "message": {"role": "user", "content": text}});
+            format!("{line}\n")
+        };
+        let file = project.join("resumed.jsonl");
+        std::fs::write(&file, prompt("2026-09-01T00:00:01Z", "first")).unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let claude = dir.path().join("claude/projects");
+        import(&home, &[("claude", &claude)], true, &mut Vec::new()).unwrap();
+        let mut resumed = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap();
+        std::io::Write::write_all(
+            &mut resumed,
+            prompt("2026-09-02T00:00:01Z", "second").as_bytes(),
+        )
+        .unwrap();
+        import(&home, &[("claude", &claude)], true, &mut Vec::new()).unwrap();
+        let got = records(&home);
+        let prompts: Vec<&str> = got
+            .iter()
+            .filter(|e| e.kind == "prompt")
+            .map(|e| e.body.as_str())
+            .collect();
+        assert_eq!(prompts.len(), 2, "{prompts:?}");
+        assert!(prompts[0].contains("first") && prompts[1].contains("second"));
+        assert!(got.iter().all(|e| e.kind != "end"), "{got:?}");
+    }
+
+    #[test]
+    fn housekeeping_sessions_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, codex) = fixtures(dir.path());
+        let path = codex.join("2026/09/02/rollout-basic.jsonl");
+        let cwd = crate::config::home_dir().join(".codex/memories/consolidate");
+        let text: String = std::fs::read(&path)
+            .unwrap()
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let mut line: Value = serde_json::from_slice(line).unwrap();
+                if line["payload"].get("cwd").is_some() {
+                    line["payload"]["cwd"] = json!(cwd);
+                }
+                format!("{line}\n")
+            })
+            .collect();
+        std::fs::write(path, text).unwrap();
+        let home = dir.path().join("home");
+        let stats = import(&home, &[("codex", &codex)], true, &mut Vec::new()).unwrap();
+        assert_eq!(
+            (
+                stats.agents["codex"].sessions,
+                stats.agents["codex"].housekeeping,
+                stats.agents["codex"].events
+            ),
+            (1, 1, 0)
+        );
+        assert!(records(&home).is_empty());
+    }
+
+    #[test]
+    fn appended_tool_results_are_imported_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sessions");
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("rollout-resumed.jsonl");
+        let fixture = std::fs::read_to_string(CODEX).unwrap();
+        let unfinished = fixture.lines().take(5).collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::write(&file, &unfinished).unwrap();
+        let home = dir.path().join("home");
+        let roots = [("codex", root.as_path())];
+        let first = import(&home, &roots, true, &mut Vec::new()).unwrap();
+        assert_eq!(first.agents["codex"].events, 2);
+        std::fs::write(&file, unfinished + fixture.lines().nth(5).unwrap() + "\n").unwrap();
+        import(&home, &roots, true, &mut Vec::new()).unwrap();
+        let got = records(&home);
+        let tools: Vec<_> = got.iter().filter(|e| e.kind == "tool").collect();
+        assert_eq!(tools.len(), 1, "{tools:?}");
+        let body: Value = serde_json::from_str(&tools[0].body).unwrap();
+        assert_eq!(body["output"], "src/http.ts:3");
+        assert!(body.get("interrupted").is_none());
+        assert_eq!(
+            import(&home, &roots, true, &mut Vec::new()).unwrap().agents["codex"].events,
+            0
+        );
+        assert_eq!(records(&home), got);
+    }
+
+    #[test]
+    fn late_subagent_events_refuse_a_changed_imported_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects/p");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("claude-basic.jsonl");
+        std::fs::copy(CLAUDE, &file).unwrap();
+        let home = dir.path().join("home");
+        let roots = [("claude", root.parent().unwrap())];
+        let first = import(&home, &roots, true, &mut Vec::new()).unwrap();
+        assert!(first.agents["claude"].events > 0);
+        let before = records(&home);
+        let subagents = file.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::copy(
+            "src/testdata/transcripts/claude-basic/subagents/agent-a1.jsonl",
+            subagents.join("agent-a1.jsonl"),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let refused = import(&home, &roots, true, &mut out).unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("imported prefix"),
+            "{refused:#}"
+        );
+        let said = String::from_utf8(out).unwrap();
+        assert!(
+            said.contains(file.file_name().unwrap().to_str().unwrap()),
+            "{said}"
+        );
+        let report: Value = serde_json::from_str(said.lines().last().unwrap()).unwrap();
+        assert_eq!(report["agents"]["claude"]["refused"], 1);
+        assert_eq!(records(&home), before);
+    }
+
+    #[test]
+    fn rewritten_or_truncated_imported_prefixes_are_refused() {
+        for truncate in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (_, root) = fixtures(dir.path());
+            let file = root.join("2026/09/02/rollout-basic.jsonl");
+            let home = dir.path().join("home");
+            let roots = [("codex", root.as_path())];
+            assert_eq!(
+                import(&home, &roots, true, &mut Vec::new()).unwrap().agents["codex"].events,
+                8
+            );
+            let before = records(&home);
+            let fixture = std::fs::read_to_string(&file).unwrap();
+            let changed = if truncate {
+                fixture.lines().take(5).collect::<Vec<_>>().join("\n") + "\n"
+            } else {
+                fixture.replace(
+                    "Add a 50ms timeout to fetchJson",
+                    "Rewrite the earlier prompt",
+                )
+            };
+            std::fs::write(&file, changed).unwrap();
+            let mut out = Vec::new();
+            let refused = import(&home, &roots, true, &mut out).unwrap_err();
+            assert!(
+                format!("{refused:#}").contains("imported prefix"),
+                "{refused:#}"
+            );
+            let said = String::from_utf8(out).unwrap();
+            assert!(
+                said.contains(file.file_name().unwrap().to_str().unwrap()),
+                "{said}"
+            );
+            let report: Value = serde_json::from_str(said.lines().last().unwrap()).unwrap();
+            assert_eq!(report["agents"]["codex"]["refused"], 1);
+            assert_eq!(records(&home), before);
+        }
+    }
+
+    #[test]
+    fn a_killed_import_resumes_without_duplicates_or_gaps() {
+        for (count, bytes) in [(100, 60_000), (600, 10)] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("sessions/2026/09/02");
+            std::fs::create_dir_all(&root).unwrap();
+            let mut file = std::fs::File::create(root.join("rollout-big.jsonl")).unwrap();
+            let at = |ms: i64| format!("2026-09-02T00:00:{:02}.{:03}Z", ms / 1000, ms % 1000);
+            writeln!(file, "{}", json!({"timestamp": at(0), "type": "session_meta", "payload": {"id": "big", "cwd": "/gone/repo"}})).unwrap();
+            writeln!(file, "{}", json!({"timestamp": at(0), "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"text": "Import the tool history."}]}})).unwrap();
+            for i in 0..count {
+                writeln!(file, "{}", json!({"timestamp": at(i * 2 + 1), "type": "response_item", "payload": {"type": "function_call", "call_id": format!("t{i}"), "name": "Read", "arguments": json!({"file": format!("file {i}")}).to_string()}})).unwrap();
+                writeln!(file, "{}", json!({"timestamp": at(i * 2 + 2), "type": "response_item", "payload": {"type": "function_call_output", "call_id": format!("t{i}"), "output": "x".repeat(bytes)}})).unwrap();
+            }
+            drop(file);
+            let home = dir.path().join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            drop(raw::open(&home).unwrap());
+            // Arm after parsing so SQLite setup is outside the two batch commits.
+            AFTER_PARSE.with_borrow_mut(|hook| *hook = Some(Box::new(|| crate::crash::at(2))));
+            let killed = import(&home, &[("codex", &root)], true, &mut Vec::new());
+            crate::crash::off();
+            assert!(killed.is_err());
+            let landed = records(&home).len();
+            assert!(
+                landed > 0 && landed < count as usize + 2,
+                "{landed} landed: {killed:?}"
+            );
+            import(&home, &[("codex", &root)], true, &mut Vec::new()).unwrap();
+            let got = records(&home);
+            assert_eq!(got.len(), count as usize + 2);
+            assert!(
+                got.iter()
+                    .all(|e| e.source == "transcript" && e.repo.as_deref() == Some("/gone/repo"))
+            );
+            let inputs: Vec<Value> = got
+                .iter()
+                .filter(|e| e.kind == "tool")
+                .map(|e| {
+                    let body: Value = serde_json::from_str(&e.body).unwrap();
+                    serde_json::from_str(body["input"].as_str().unwrap()).unwrap()
+                })
+                .collect();
+            let want: Vec<Value> = (0..count)
+                .map(|i| json!({"file": format!("file {i}")}))
+                .collect();
+            assert_eq!(inputs, want);
+            assert!(got.windows(2).all(|w| w[0].ts <= w[1].ts));
+            let again = import(&home, &[("codex", &root)], true, &mut Vec::new()).unwrap();
+            assert_eq!(
+                (again.agents["codex"].events, again.agents["codex"].seen),
+                (0, count as u64 + 2)
+            );
+        }
+    }
+
+    #[test]
+    fn a_denied_line_is_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, codex) = fixtures(dir.path());
+        let path = codex.join("2026/09/02/rollout-basic.jsonl");
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("Add a 50ms timeout to fetchJson", raw::DENIED_IN_TESTS)
+            .replace("Try again with 100ms", "Try again\u{2028}with 100ms");
+        std::fs::write(path, text).unwrap();
+        let home = dir.path().join("home");
+        let first = import(&home, &[("codex", &codex)], true, &mut Vec::new()).unwrap();
+        assert_eq!(first.agents["codex"].events, 7);
+        let got = records(&home);
+        assert_eq!(got.len(), 7);
+        assert!(got.iter().all(|e| !e.body.contains(raw::DENIED_IN_TESTS)));
+        assert!(
+            got.iter()
+                .any(|e| e.body.contains("Try again\u{2028}with 100ms"))
+        );
+        let again = import(&home, &[("codex", &codex)], true, &mut Vec::new()).unwrap();
+        assert_eq!(
+            (again.agents["codex"].events, again.agents["codex"].seen),
+            (0, 8)
+        );
+    }
+
+    #[test]
+    fn a_masked_session_cannot_bypass_the_cut_or_leak_through_its_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let (claude, _) = fixtures(dir.path());
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{id = 'session', regex = 'claude-basic'}]\n",
+        )
+        .unwrap();
+        let settings = Settings::load(&home).unwrap();
+        let live = capture::events(
+            "claude",
+            "UserPromptSubmit",
+            &json!({"session_id": "claude-basic", "prompt": "Live"}),
+            CLAUDE_MS + 4_000,
+            &settings,
+        );
+        assert_ne!(live[0].event.session, "claude-basic");
+        let mut raw = raw::open(&home).unwrap();
+        raw.append_with_ledger(&live[0].event, &live[0].ledger, settings.rules.version())
+            .unwrap();
+        drop(raw);
+        let mut out = Vec::new();
+        let stats = import(&home, &[("claude", &claude)], true, &mut out).unwrap();
+        assert_eq!(stats.agents["claude"].masked, 1);
+        assert!(!String::from_utf8(out).unwrap().contains("claude-basic"));
+        assert_eq!(records(&home).len(), 1);
+        assert!(
+            raw::open(&home)
+                .unwrap()
+                .migration_checkpoints("transcript:")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn preview_reads_wal_events_without_changing_the_home_or_a_symlink_target() {
+        #[cfg(unix)]
+        let variants = [false, true];
+        #[cfg(not(unix))]
+        let variants = [false];
+        for link in variants {
+            let dir = tempfile::tempdir().unwrap();
+            let (_, codex) = fixtures(dir.path());
+            let home = dir.path().join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            let path = if link {
+                dir.path().join("store.db")
+            } else {
+                home.join("oboete.db")
+            };
+            let v1 = Connection::open(&path).unwrap();
+            v1.pragma_update(None, "journal_mode", "WAL").unwrap();
+            v1.execute_batch(
+                "CREATE TABLE sessions(id TEXT PRIMARY KEY, agent TEXT NOT NULL);
+                 CREATE TABLE events(session_id TEXT NOT NULL, ts INTEGER NOT NULL);
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+            v1.execute("INSERT INTO sessions VALUES(?1, 'codex')", [CODEX_SESSION])
+                .unwrap();
+            v1.execute(
+                "INSERT INTO events VALUES(?1, ?2)",
+                params![CODEX_SESSION, CODEX_MS + 8_000],
+            )
+            .unwrap();
+            #[cfg(unix)]
+            if link {
+                std::os::unix::fs::symlink(&path, home.join("oboete.db")).unwrap();
+            }
+            let before = snapshot(dir.path());
+            let stats = import(&home, &[("codex", &codex)], false, &mut Vec::new()).unwrap();
+            assert_eq!(
+                (stats.agents["codex"].events, stats.agents["codex"].cut),
+                (4, 4)
+            );
+            assert!(
+                snapshot(dir.path()) == before,
+                "preview changed a source or destination file"
+            );
+        }
+    }
 
     fn events(path: &str, agent: &str) -> (Vec<Value>, Stats) {
         let mut buf = Vec::new();

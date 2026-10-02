@@ -1147,6 +1147,57 @@ mod tests {
         assert!(export(p).unwrap().is_none()); // nothing new
     }
 
+    /// D6: a restore that lost an imported batch's records, the newest or one with later
+    /// segments restored, drops its checkpoint and every later op, so the next pass imports the
+    /// batch again; restored again, the checkpoint stays dropped.
+    #[test]
+    fn a_restore_that_lost_a_batch_drops_its_checkpoint() {
+        // The segment lost, its seqs, the highest seq restored and the checkpoint left.
+        for (lost, seqs, max, through) in [(3, (11, 12), 10, 5), (2, (9, 10), 12, 3)] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            segmented(p, 5, 5); // records 1-5
+            let batch = |n: usize| -> Vec<crate::capture::Captured> {
+                (0..n)
+                    .map(|i| crate::capture::Captured {
+                        event: raw::Event {
+                            source: "oboete-v1".into(),
+                            ..raw::test_event(&format!("v1 zq{i:03}x"))
+                        },
+                        ledger: Vec::new(),
+                    })
+                    .collect()
+            };
+            let checkpoint = |through| raw::Checkpoint {
+                key: "oboete-v1:d1".into(),
+                through,
+                row: None,
+                prefix: None,
+            };
+            // Records 6-8, 9-10 and 11-12, a segment each.
+            for (n, through) in [(3, 3), (2, 5), (2, 7)] {
+                let mut raw = raw::open(p).unwrap();
+                raw.append_imported(&batch(n), "v", Some(&checkpoint(through)))
+                    .unwrap();
+                drop(raw);
+                export(p).unwrap();
+            }
+            let lost = segments(&p.join("backups"), Kind::Records)
+                .unwrap()
+                .remove(lost);
+            assert_eq!((lost.first, lost.last), seqs);
+            std::fs::remove_file(&lost.path).unwrap();
+            for _ in 0..2 {
+                damage_raw(p);
+                crate::worker::run_once(p).unwrap();
+                let restored = raw::open(p).unwrap();
+                assert_eq!(restored.max_seq().unwrap(), max);
+                let checkpoints = restored.migration_checkpoints("oboete-v1:").unwrap();
+                assert_eq!(checkpoints["oboete-v1:d1"].through, through);
+            }
+        }
+    }
+
     #[test]
     fn a_window_op_past_the_restored_records_goes_with_every_op_after_it() {
         let home = tempfile::tempdir().unwrap();

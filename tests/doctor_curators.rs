@@ -57,12 +57,24 @@ fn doctor_reports_past_a_store_it_cannot_read() {
     assert!(!out.status.success());
 }
 
-/// The legacy oboete.db section counts each of its tables, and a readable store is healthy.
+/// The legacy oboete.db section counts each of its tables, and a readable store is healthy and
+/// left as it was (doctor opens it read only, spec 7.4).
 #[test]
 fn doctor_counts_the_tables_of_a_legacy_store() {
     let home = tempfile::tempdir().unwrap();
-    // An empty file is an empty SQLite database; doctor's open gives it the schema.
-    std::fs::write(home.path().join("oboete.db"), "").unwrap();
+    let db = home.path().join("oboete.db");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO meta VALUES('device_id', 'd1');
+             CREATE TABLE sessions(id TEXT); CREATE TABLE events(id INTEGER);
+             CREATE TABLE observations(id INTEGER); CREATE TABLE summaries(id INTEGER);
+             CREATE TABLE provider_calls(id INTEGER PRIMARY KEY, ts INTEGER, provider TEXT,
+               outcome TEXT, ms INTEGER, detail TEXT);",
+        )
+        .unwrap();
+    let bytes = std::fs::read(&db).unwrap();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_oboete"))
         .args(["--home", &home.path().to_string_lossy(), "doctor"])
         .env("OBOETE_NO_SPAWN", "1")
@@ -74,6 +86,8 @@ fn doctor_counts_the_tables_of_a_legacy_store() {
         "{text}"
     );
     assert!(!text.contains("cannot read oboete.db"), "{text}");
+    assert!(text.contains("v1 events not migrated yet: 0"), "{text}");
+    assert_eq!(std::fs::read(&db).unwrap(), bytes);
 }
 
 /// #94: doctor prints `[inject]` as it applies, an entry `[chain]` turns off, and `[chain]`'s

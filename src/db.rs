@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
+#[cfg(test)] // a fixture for v1's readers' tests: doctor and migrate read oboete.db only (Task 9)
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS sessions(
   id TEXT PRIMARY KEY,
@@ -183,6 +184,7 @@ pub(crate) fn retry_busy<T>(
     result
 }
 
+#[cfg(test)] // a fixture for v1's readers' tests: doctor and migrate read oboete.db only (Task 9)
 pub fn open(home: &Path) -> Result<Connection> {
     let path = home.join("oboete.db");
     private(home, 0o700);
@@ -220,6 +222,7 @@ pub fn open(home: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+#[cfg(test)] // a fixture for v1's readers' tests: doctor and migrate read oboete.db only (Task 9)
 /// Every document's `uid`, unique across devices (proposal §4.2 3): `<device id>:<doc>` for what
 /// this device recorded (a trigger fills it on insert, so every insert path gets one), and
 /// `<source>:<source row>` for an import, so two devices importing one claude-mem database agree.
@@ -398,6 +401,7 @@ pub fn touch_repo(conn: &Connection, session_id: &str, repo: &str) -> Result<()>
     Ok(())
 }
 
+#[cfg(test)] // a fixture for v1's readers' tests: doctor and migrate read oboete.db only (Task 9)
 /// Repository keys moved from paths to the origin URL (`repo::key`, PR-C): rows filed under paths
 /// get their key once when the store is opened. `user_version` 1 marks it done. Two first opens
 /// may both run it; the second finds nothing left to move.
@@ -411,6 +415,7 @@ fn ensure_repo_keys(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)] // a fixture for v1's readers' tests: doctor and migrate read oboete.db only (Task 9)
 /// Rows filed under a path that is still a directory on this machine and now has another key
 /// (a repository that got an origin after it was used) move to that key; a path that is gone, or
 /// a key that is no path (`claude-mem:<project>`), stays. Run at open for older stores and by
@@ -453,6 +458,7 @@ pub fn rekey_paths(conn: &mut Connection) -> Result<usize> {
     Ok(moves.len())
 }
 
+#[cfg(test)] // a fixture for v1's readers' tests: doctor and migrate read oboete.db only (Task 9)
 /// Document ids (`o<id>`, `s<id>`, `p<id>`) are handed to agents and pages, so a deleted id must
 /// never come back for another row (`prompts` had AUTOINCREMENT from the start). A table from a
 /// build before delete existed lacks AUTOINCREMENT,
@@ -499,6 +505,7 @@ fn ensure_autoincrement(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)] // a fixture for v1's readers' tests: doctor and migrate read oboete.db only (Task 9)
 fn autoincrements(conn: &Connection, table: &str) -> Result<bool> {
     let sql: Option<String> = conn
         .query_row(
@@ -510,6 +517,7 @@ fn autoincrements(conn: &Connection, table: &str) -> Result<bool> {
     Ok(sql.is_some_and(|s| s.contains("AUTOINCREMENT")))
 }
 
+#[cfg(test)] // a fixture for v1's readers' tests: doctor and migrate read oboete.db only (Task 9)
 /// The search index (FTS5 trigram: substring matching, CJK by character), built from what is
 /// already stored. The read check keeps the hook path free of write locks; the write
 /// transaction re-checks, so concurrent first opens build it once and a killed one leaves
@@ -557,6 +565,7 @@ pub(crate) fn register_sqlite_vec() {
     });
 }
 
+#[cfg(test)] // a fixture for v1's readers' tests: doctor and migrate read oboete.db only (Task 9)
 fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     Ok(conn
         .query_row(
