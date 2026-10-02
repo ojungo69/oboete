@@ -232,6 +232,10 @@ def run(binary, pool='dev', decide=None):
         if not row.get('complete'):
             events = fixture_rows(session, pool, decide, cut['line'])
             if not os.path.exists(f'{h}/replay.json'):
+                # A replay stopped part way leaves raw.db without replay.json: made again whole.
+                for home in (h, none):
+                    if os.path.exists(home):
+                        shutil.rmtree(home)
                 m3.replay_events(binary, h, [(m3.when(e['ts']), session, line - 1, raw)
                                             for line, e, raw in events], 1)
             if not os.path.exists(none):

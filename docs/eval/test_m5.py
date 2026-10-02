@@ -107,7 +107,7 @@ def harness(monkeypatch, tmp_path):
     path.write_text(json.dumps(events[0]) + '\n\n' + ''.join(json.dumps(e) + '\n' for e in events[1:]))
     state = {'repo': str(repo), 'calls': [], 'processes': [], 'replayed': [], 'fail_grade': False,
              'first_turn': '[9]', 'session': 's1', 'bad_labels': 0, 'partial_worker': False,
-             'no_models': False}
+             'no_models': False, 'stop_replay': False}
 
     def process(argv, **kw):
         state['processes'].append((argv, kw))
@@ -127,6 +127,9 @@ def harness(monkeypatch, tmp_path):
                                [(i + 1, i, 'event', state['session'], state['repo']) for i in range(len(prefix))])
                 db.execute('CREATE TABLE ops(op_seq INTEGER, type TEXT, body TEXT)')
             os.chmod(home / 'raw.db', 0o666)
+            if state['stop_replay']:
+                state['stop_replay'] = False
+                raise KeyboardInterrupt
             return subprocess.CompletedProcess(argv, 0, '{"events": 1}', '')
         if 'worker' in argv:
             assert argv[-2:] == ['--idle-ms', '0']
@@ -260,6 +263,18 @@ def test_a_partial_curator_pass_waits_for_the_remaining_windows(harness):
     resumed = m5.run(binary)[0]
     assert resumed['complete'] and not resumed['pending_curation']
     assert len(state['replayed']) == 1 and resumed['curation']['coverage'] == '100%'
+
+
+def test_a_replay_stopped_part_way_is_made_again_whole(harness):
+    m5, binary, state, *_ = harness
+    m5.cuts(binary)
+    state['stop_replay'] = True
+    with pytest.raises(KeyboardInterrupt):
+        m5.run(binary)
+    row = m5.run(binary)[0]
+    assert row['complete'] and len(state['replayed']) == 2
+    with sqlite3.connect(Path(row['homes']['curated']) / 'raw.db') as db:
+        assert db.execute('SELECT COUNT(*) FROM records').fetchone()[0] == len(state['replayed'][1])
 
 
 def test_a_requested_curator_alias_cannot_replace_missing_reported_models(harness):
