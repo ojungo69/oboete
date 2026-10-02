@@ -1,0 +1,22 @@
+docs/eval/m22.py
+  s_17c3dc80287a78::t_e0c700bcc9cd5e 12,255-265,267-276,286-294,308-309
+docs/eval/test_m22.py
+  s_17c3dc80287a78::t_e0c700bcc9cd5e 306
+  s_17c3dc80287a78::t_00b679c9ad0b8f 302-305,307-363
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4cb94ebd5089a9d891df256b77b969487eb3b963",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
