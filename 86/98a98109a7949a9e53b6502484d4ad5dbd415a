@@ -1,0 +1,24 @@
+docs/milestone-4.md
+  s_17c3dc80287a78::t_8309abd488b1bd 5-10
+src/keyfile.rs
+  s_17c3dc80287a78::t_237469b4f41846 505,526
+  s_17c3dc80287a78::t_2c85187403779a 472-504,506-525,527-541
+  s_17c3dc80287a78::t_e2d52f005bcdab 123-129,132-133,190-191,207-237,241-244
+  s_17c3dc80287a78::t_11fb38a270dae6 471,542
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8698a98109a7949a9e53b6502484d4ad5dbd415a",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
