@@ -10,8 +10,8 @@ The owner, 2026-10-03, after comparing what both tools show on the same sessions
 「もうここまできたらほぼ丸パクリぐらい寄せて理想に近付けた方がいいんじゃない？」, confirmed as: claude-mem's
 behaviour, look and prompts are the specification; its code is not ported; oboete's engine and its
 merits stay (no vector server, a chain of summarizers, masking, forget, several agents, the owner's
-decisions first). Both projects are Apache-2.0: a `NOTICE` entry comes with the first text taken
-(slice 2); this slice takes only the shape of an observation.
+decisions first). Both projects are Apache-2.0: `NOTICE` names the text taken (slice 2); the table
+takes only the shape of an observation.
 
 claude-mem's unit of memory is the observation: a type, a title, a subtitle, facts, a narrative,
 concepts, files read and files modified. Its session start, its page, its search tools and its
@@ -114,14 +114,78 @@ page, a file) can colour it.
 
 So MUST-M4 holds as written.
 
+## The curator's cards (slice 2)
+
+The curator's one call per window returns `observations` beside `claims` and `summary`: the cards
+of what the stretch built, fixed, changed, decided or found out, usually 1 to 3 and at most 5.
+
+C1. **What it is asked.** claude-mem's guidance for an observation (`plugin/modes/code.json` at
+039c6160): the nine types and what each means, the seven concepts, what a title, a subtitle, a
+narrative and a fact are, what to record ("what the system now does", not "what was looked at")
+and what to skip (routine steps, a result only confirmed again). Cut down to about 390 tokens
+beside the claims' 840, by `budget::estimate`. Cards are written in the answer's language; a type
+and a concept stay as the keywords. `NOTICE` names what was taken. Not taken: the observer's
+framing (it watches a live session and must not contact it; the curator is one stateless call
+over a record fenced as data), its XML (the chain's JSON schema asks for the fields) and its skip
+sentinel (an empty list).
+
+C1a. **The window's own lines only.** claude-mem's observer is shown only the work it records.
+The curator is also shown what the window carries in (each session's goal, its proposals,
+decisions and open items) and the kept claims the lines may change, under headings that start
+`Already known:`. In probes on the evaluation home, free models wrote carried open items as the
+window's cards and as claims quoting them with a uid for a line, and turned a command whose output
+the window elided into its result. The prompt now says that the summary, the cards and the claims
+are about the numbered lines, that what is already known is never a card's subject or a new claim,
+that a claim's line is an `L` id and its quote never comes from the claims below, and that a
+command whose output is not shown says nothing about its result: about 120 tokens more. On the
+window those probes failed on, four runs after the change wrote none of it.
+
+C2. **One call, as before.** A second call per window would double the calls, which is what
+oboete does not copy. The request grows by those 390 tokens and the answer by its cards. On the
+2,691 curated windows of the evaluation home above, 99.6% were within the one hard ceiling among
+the default entries (Groq free: 8,000 tokens a request, 1,250 of them kept for the answer); with
+the cards' instructions and C1a's rule about 64% are. `window_tokens` stays at 5,000: a window over an entry's
+ceiling goes to the next entry without a call, and a Groq entry is bound first by its 40,000
+tokens a day, which is about six windows.
+
+C3. **Each card is checked alone and never fails its window** (`curate::cards_of`). A claim that
+does not parse fails the answer, and a provider with it; a card that cannot be kept is dropped,
+and the op says how many were (`cards_dropped`).
+
+- It is kept when its title is not empty: claude-mem's one rule for storing an observation.
+- A type outside the nine is no type. claude-mem keeps an unknown type as written and takes a
+  missing one for `bugfix`; a wrong label on the timeline is worse than none.
+- Concepts outside the seven go. A list holds text only, each item once.
+- A file is kept when the window's lines name it. A card is found by its files (the note on a
+  file), so it names none the curator was not shown.
+- A title over 300 characters, a subtitle over 500 or a narrative over 4,000 drops the card:
+  nothing is cut before the gate (K6). A fact or a file over 500 characters is dropped, as is one
+  past the tenth fact or the twentieth file of a list.
+- The first five cards are kept. Over the op cap, the last card goes first.
+
+C4. **An answer without the list is an answer.** A provider that does not hold to the schema
+may leave `observations` out: the op then has none and its summary is the card (K1). An empty
+list says there was nothing worth a card, and the window has none.
+
+C5. **A refused answer gives no cards.** An answer whose claims are all unanchored is still a
+provider's failure (D11), its cards with it, and the window goes to the next entry. Before C1a,
+the answers so refused in the probes were the ones that had written carried items as cards. A rule
+that kept their cards and dropped their claims would also take the window as curated without the
+claims the next entry may anchor. With Codex's small model as the only entry, 2 of the 14 windows
+of a span were refused so after C1a, each over one claim that quoted a tool's input or an output
+JSON-escaped twice (issue #368); a window every entry refuses has cards after
+`oboete recurate --skipped`.
+
+`ponytail:` the curator sees one window, not the cards it wrote before, so a result confirmed
+again two windows later can get a second card; claude-mem's observer sees its own earlier
+answers. If the timeline shows such repeats, the session's last card titles go into what the
+window carries in, within its existing budget.
+
 ## Slices (test first, one at a time)
 
 1. **The table** (this note's K1 to K7 for ops as they are today): the consumer, the reader,
    `removed` in the window op.
-2. **The curator writes cards**: `observations` in its answer (0 to 3 a window, claude-mem's
-   fields and its guidance on what to record and what to skip, cut down to fit beside the claims
-   within a provider's request ceiling), checked like the rest of the answer; file paths are kept
-   only when the window's records name them.
+2. **The curator writes cards**: `observations` in its answer (C1 to C4).
 3. **Session summaries** (claude-mem's request, investigated, learned, completed, next steps),
    then **session start** in claude-mem's order after the owner's decisions, the **page**, the
    **tools** and the **note on a file**, each its own unit.
@@ -146,3 +210,19 @@ So MUST-M4 holds as written.
 8. The curation phase's window op lists what was removed from its records before the window was
    cut, by this device up to the cut, and names the goal it carried in from outside its span.
 9. A summary as long as the op keeps one is no card.
+
+## Tests of slice 2 (through `curate::run_phase` with a stub curator, and `cards::recent`)
+
+1. An answer's cards are kept in its window op, in their order; an empty list is kept as one.
+2. An answer without the list, or with something else in its place, gives an op without it.
+3. A card without a title, one that is no object, one with a text over its cap and those past
+   the fifth are dropped and counted; the window is covered.
+4. A type outside the nine becomes none, concepts outside the seven go, a list holds text only,
+   and a file the window does not name goes.
+5. Three cards within their own caps that pass the op cap together: the last goes first.
+6. The answer's shape names every field of a card as required, and the prompt asks for cards.
+7. A window op's observations are its cards in the table, in their order, and its summary is
+   then no card; an op with an empty list has none.
+8. Every field of a curator's card is gated when it is read.
+9. The prompt keeps the summary, the cards and the claims to the numbered lines (C1a).
+

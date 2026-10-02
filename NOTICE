@@ -1,0 +1,18 @@
+oboete
+Copyright 2026 ojungo69
+
+Licensed under the Apache License, Version 2.0.
+
+This product includes text adapted from Claude-Mem (https://github.com/thedotmack/claude-mem),
+licensed under the Apache License, Version 2.0:
+
+    Claude-Mem
+    Copyright 2026 Alex Newman
+
+    This product includes software developed for the Claude-Mem project.
+
+What was taken, from plugin/modes/code.json at commit 039c6160: the names and meanings of the
+observation types and concepts, and the guidance on a title, a subtitle, a narrative and a fact
+and on what to record and what to skip. It is cut down and reworded in the curator's prompt
+(src/curate.rs, `prompt`) and named in src/cards.rs (`TYPES`, `CONCEPTS`). No code of Claude-Mem
+is included.
