@@ -118,24 +118,20 @@ impl std::error::Error for Gone {}
 /// has the next number of `state/worker-gen`, so a run's outcome is ordered against a later run's.
 pub struct Lock(#[allow(dead_code)] std::fs::File, u64);
 
-impl Lock {
-    /// Whether `home`'s lock file is still the file this lock holds. A home removed, or removed
-    /// and made again, is not the home of this run (docs/resident.md R3).
-    fn names(&self, home: &Path) -> bool {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let at = std::fs::metadata(home.join("state").join("worker.lock"));
-            matches!(
-                (self.0.metadata(), at),
-                (Ok(held), Ok(at)) if (held.dev(), held.ino()) == (at.dev(), at.ino())
-            )
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = home;
-            true
-        }
+/// Which file a lock file is: its device and inode. `None` where the system has none to give, and
+/// for a file that cannot be read.
+type FileId = Option<(u64, u64)>;
+
+fn file_id(file: std::io::Result<std::fs::Metadata>) -> FileId {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        file.ok().map(|m| (m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        None
     }
 }
 
@@ -212,7 +208,13 @@ pub fn lock_asking(home: &Path) -> Result<Lock> {
     let until = Instant::now() + ASK;
     let held = loop {
         match lock(home) {
-            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) if Instant::now() < until => {
+                // Another command that gave up took the request away with its own.
+                if !ask.exists() {
+                    let _ = std::fs::write(&ask, "");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
             tried => break tried,
         }
     };
@@ -336,12 +338,11 @@ pub(crate) fn run_holding(
         &mut holding,
         &mut phases,
     );
-    // No outcome goes into a home that is not this run's (R3).
-    let ours = !gone(home, &holding);
     // Released first: a hook that finds the lock free starts a worker for what it appended.
     holding.lock = None;
-    // A run that never took the lock did no work: another worker's outcome stands.
-    if holding.last > 0 && ours {
+    // A run that never took the lock did no work: another worker's outcome stands. And no
+    // outcome goes into a home that is not this run's (R3).
+    if holding.last > 0 && !gone(home, &holding) {
         record(home, holding.last, &result);
     }
     result
@@ -353,25 +354,34 @@ fn config_stamp(home: &Path) -> Option<(std::time::SystemTime, u64)> {
     Some((file.modified().ok()?, file.len()))
 }
 
-/// R3: whether the home is no longer the one this run locked. It is asked before every write the
-/// loop makes by path (a backup, the prune, an outcome), which would go into another home.
+/// R3: whether the home is no longer the one this run locked: its lock file is missing, or is
+/// another file than the one this run took first. It is asked before every write the loop makes
+/// by path (a backup, the prune, an outcome, the lock taken again), which would go into another
+/// home, and it holds after the lock is released too.
 fn gone(home: &Path, holding: &Holding) -> bool {
-    holding.lock.as_ref().is_some_and(|l| !l.names(home))
+    holding.home.is_some()
+        && file_id(std::fs::metadata(home.join("state").join("worker.lock"))) != holding.home
 }
 
 /// Every lock this run takes is noted as a run that has not ended, until `record` replaces the
 /// note: a worker killed or crashed while it holds any of them is reported (doctor).
 fn take(home: &Path, l: Lock, holding: &mut Holding) {
+    // The first lock this run takes says which home is its own.
+    if holding.home.is_none() {
+        holding.home = file_id(l.0.metadata());
+    }
     holding.last = l.1;
     note(home, l.1, STOPPED);
     holding.lock = Some(l);
 }
 
-/// The worker lock while this run holds it, and the number of its last taking.
+/// The worker lock while this run holds it, the number of its last taking, and the lock file of
+/// its first one.
 #[derive(Default)]
 struct Holding {
     lock: Option<Lock>,
     last: u64,
+    home: FileId,
 }
 
 fn serve_until_done(
@@ -463,7 +473,10 @@ fn serve(
         if gone(home, holding) {
             return Err(Gone.into());
         }
-        if yields && steps_aside(home, &raw, holding) {
+        // An embedding call that is out is work in flight: its answer is settled before the
+        // worker steps aside (R12) and before its outcome says all is well (R10).
+        let calling = |phases: &Phases| phases.embed.as_ref().is_some_and(|e| e.busy());
+        if yields && !calling(phases) && steps_aside(home, &raw, holding) {
             return Ok(false);
         }
         ran = true;
@@ -474,6 +487,10 @@ fn serve(
         // correction appends only an op): one that lands after it, even before the wait, wakes it.
         let seen = (raw.max_seq()?, raw.max_op_seq_of(raw.device())?);
         while pass(&raw, &mut k, consumers)? {
+            // Between two batches too: a consumer opens the home's files by path (the rescan).
+            if gone(home, holding) {
+                return Err(Gone.into());
+            }
             due(&raw, holding);
         }
         due(&raw, holding);
@@ -512,7 +529,7 @@ fn serve(
         if again {
             continue;
         }
-        if resident {
+        if resident && !calling(phases) {
             if gone(home, holding) {
                 return Err(Gone.into());
             }
@@ -536,7 +553,7 @@ fn serve(
                 if crate::backup::restore_requested(home) {
                     return Ok(true);
                 }
-                if yields && steps_aside(home, &raw, holding) {
+                if yields && !calling(phases) && steps_aside(home, &raw, holding) {
                     return Ok(false);
                 }
                 // A call that came back is written at once.
@@ -583,6 +600,10 @@ fn serve(
         crate::hookstate::prune(home, crate::hookstate::KEEP);
         holding.lock = None;
         before_exit();
+        // Before the lock is taken again, which writes its number by path.
+        if gone(home, holding) {
+            return Err(Gone.into());
+        }
         // A hook that asked before the release saw the lock held and started nothing.
         let wanted = crate::backup::restore_requested(home);
         if !wanted && !behind(&raw, &k, consumers)? {
@@ -2168,6 +2189,168 @@ mod tests {
         );
         std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
         worker.join().unwrap().unwrap();
+    }
+
+    /// `p` removed and made again, with a lock file of its own.
+    #[cfg(target_os = "linux")]
+    fn replace_home(p: &Path) {
+        std::fs::remove_dir_all(p).unwrap();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        std::fs::write(p.join("state").join("worker.lock"), "").unwrap();
+    }
+
+    /// R3 after the lock is released: a home replaced while a worker makes its last check gets
+    /// no outcome and no lock number from it (Codex on #359).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn no_outcome_goes_into_a_home_replaced_as_the_worker_exits() {
+        let parent = tempfile::tempdir().unwrap();
+        let p = parent.path().join("home");
+        std::fs::create_dir(&p).unwrap();
+        raw::open(&p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        let mut once = true;
+        let why = run_with(&p, 0, vec![Box::new(Seen)], || {
+            if std::mem::take(&mut once) {
+                replace_home(&p);
+            }
+        })
+        .unwrap_err();
+        assert!(why.is::<Gone>(), "{why:#}");
+        let state: Vec<_> = std::fs::read_dir(p.join("state"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(state, ["worker.lock"], "written into the new home");
+    }
+
+    /// A consumer that replaces the home in its first step and reports progress each time.
+    #[cfg(target_os = "linux")]
+    struct Replaces(
+        std::path::PathBuf,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    );
+    #[cfg(target_os = "linux")]
+    impl Consumer for Replaces {
+        fn name(&self) -> &'static str {
+            "replaces"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, _device: &str, after: i64) -> Result<i64> {
+            if self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                replace_home(&self.0);
+            }
+            Ok((after + 1).min(raw.max_seq()?))
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// R3 within a drain: the rescan opens raw.db by its path in each step, so a home replaced
+    /// during a long drain is noticed between two batches, not only at the next round (Codex on
+    /// #359).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_drain_stops_between_batches_when_its_home_was_replaced() {
+        let parent = tempfile::tempdir().unwrap();
+        let p = parent.path().join("home");
+        std::fs::create_dir(&p).unwrap();
+        {
+            let mut raw = raw::open(&p).unwrap();
+            for text in ["a", "b", "c"] {
+                raw.append(&raw::test_event(text)).unwrap();
+            }
+        }
+        let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Replaces(p.clone(), steps.clone()))];
+        let why = run_consumers(&p, 0, consumers).unwrap_err();
+        assert!(why.is::<Gone>(), "{why:#}");
+        assert_eq!(steps.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// R10 and R12 with an embedding call out: the worker is not waiting. Its outcome keeps
+    /// saying stopped, and it steps aside only once the call's answer is settled, which the call
+    /// was paid for (Codex on #359).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_embedding_call_that_is_out_is_work_in_flight() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        let mut embed = crate::embed_phase::Phase::new(p);
+        let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+        let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+        let worker = {
+            let p = p.to_path_buf();
+            std::thread::spawn(move || {
+                let phases = Phases {
+                    embed: Some(&mut embed),
+                    yields: true,
+                    resident: true,
+                    ..Phases::default()
+                };
+                run_holding(&p, 600_000, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+            })
+        };
+        let device = raw::open(p).unwrap().device().to_owned();
+        until("the first round", || {
+            knowledge::open(p)
+                .and_then(|k| checkpoint::get(&k, "seen", &device))
+                .is_ok_and(|at| at == 1)
+        });
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(outcome(p).unwrap().1, STOPPED, "clean with a call out");
+        std::fs::write(yield_request(p), "").unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(!worker.is_finished(), "it left a call unsettled");
+        release.send(()).unwrap();
+        until("it steps aside once the call is settled", || {
+            worker.is_finished()
+        });
+        worker.join().unwrap().unwrap();
+        assert!(last_failure(p).is_none());
+    }
+
+    /// R12 with two commands: one that gives up takes the request file away, and the other puts
+    /// its request back (Codex on #359).
+    #[test]
+    fn a_waiting_command_puts_its_request_back_when_another_took_it_away() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path().to_path_buf();
+        let _held = lock(&p).unwrap().unwrap();
+        let ask = yield_request(&p);
+        let waiter = {
+            let p = p.clone();
+            std::thread::spawn(move || {
+                let _contending = contending();
+                lock_asking(&p).map(drop)
+            })
+        };
+        let t = Instant::now();
+        while !ask.exists() {
+            assert!(t.elapsed() < Duration::from_secs(10), "it never asked");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::remove_file(&ask).unwrap();
+        let t = Instant::now();
+        while !ask.exists() {
+            assert!(
+                t.elapsed() < Duration::from_secs(2),
+                "its request stayed away"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let why = waiter.join().unwrap().unwrap_err().to_string();
+        assert!(why.contains("the worker is busy"), "{why}");
+        assert!(!ask.exists());
     }
 
     // M2 (spec 8.2): a crash at 20 points gives the rows of a run with none.

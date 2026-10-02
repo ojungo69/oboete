@@ -64,10 +64,12 @@ config.toml and checks its home:
 - a config.toml that changed since the worker last looked (its time or its size) starts a round,
   so a setting the owner changed is followed without a new record;
 - "the home is gone" means the path `state/worker.lock` is missing or no longer names the file this
-  process holds (device and inode of the held descriptor against the path). The worker checks it
-  before every write it makes by path (the idle backup, the 30-minute backup, prune, the outcome),
-  at the start of each round and before it opens the stores again, and stops with an error without
-  them. A home deleted and made again never gets the old home's backup. Its stores' `-wal` and
+  run locked first (its device and inode, kept from that first lock, against the path: so the
+  answer holds after the lock is released too). The worker checks it before every write it makes
+  by path (the idle backup, the 30-minute backup, prune, the outcome it records after the release,
+  the lock it takes again), at the start of each round, between two batches of a round (a consumer
+  opens the home's files by path) and before it opens the stores again, and stops with an error
+  without them. A home deleted and made again never gets the old home's backup. Its stores' `-wal` and
   `-shm` files are safe too: SQLite removes them by name when a store's last connection closes,
   but not once the store's file is no longer at its path. The commands that borrow the worker's
   loop (`rebuild`, `restore`, `recurate`) fail with the same error.
@@ -135,8 +137,9 @@ share the stores short.
 R10. **A kill while it waits is not an alarm.** A resident worker is killed at every shutdown of
 the PC or of WSL (this PC: about every two to five days, by the journal's boot list). The worker
 records its outcome (empty: all well) each time it finishes a round and starts waiting, and puts
-the "stopped before it finished" note back when it starts a round. So doctor reports a kill during
-work, as today, and says nothing about a kill while waiting.
+the "stopped before it finished" note back when it starts a round. An embedding call that is out is
+work in flight: the outcome stays "stopped before it finished" until its answer is written. So
+doctor reports a kill during work, as today, and says nothing about a kill while waiting.
 
 R11. **What is measured before the PR is ready** (spec 1.8), on WSL with the owner's hardware.
 - The same resident worker after each of 5 cycles of 1,000 new records and one idle time, and the
@@ -156,9 +159,12 @@ R11. **What is measured before the PR is ready** (spec 1.8), on WSL with the own
 R12. **Stepping aside for a command.** `oboete restore`, `oboete rebuild` and
 `oboete recurate --yes` that find the worker lock held write `state/worker-yield` and wait up to
 30 s for the lock, removing the file when they hold it or give up (the message then says the worker
-is busy, not "try again when it has exited"). The worker looks for the file at its start, between
-rounds and on the 200 ms tick beside the restore request: it backs up (a restore reads the
-backups), closes its stores, releases the lock, records a clean outcome and exits. The lock goes
+is busy, not "try again when it has exited"). Two commands may wait at once: one that still waits
+writes the file again when the other took it away. The worker looks for the file at its start,
+between rounds and on the 200 ms tick beside the restore request: it backs up (a restore reads the
+backups), closes its stores, releases the lock, records a clean outcome and exits. It does not
+step aside while an embedding call is out: the call is paid for and counted, so its answer is
+written first, and a command whose 30 s pass meanwhile says the worker is busy. The lock goes
 only after the stores are closed: the command that takes it may swap them at once. Only `oboete
 worker` steps aside, resident or not; a command that borrows the worker's loop runs to its end.
 The worker ignores a file older than a minute, and one dated after now (a clock that went back):
@@ -295,3 +301,17 @@ left as a setting to add before a public release.
   needs the same in slice 2.
 - A command that takes the lock from a worker stepping aside found raw.db still open: the lock is
   now released after the loop's stores are closed (R12).
+
+## What the review of slice 1 changed
+
+Codex's adversarial review of the first build (PR #359), each with a test that failed first:
+
+- The home was checked only where a round starts, and a long drain opens the home's files by path
+  at every batch: it is checked between batches too (R3).
+- The check compared the held lock's file with the path, so it said nothing once the lock was
+  released, and the exit wrote its outcome and took the lock again in a home made meanwhile: the
+  identity is kept from the run's first lock and asked after the release too (R3).
+- A worker stepped aside, and called itself waiting, with an embedding call out: neither happens
+  until the answer is written (R10, R12).
+- A command that gave up removed the request of another command still waiting: the one that waits
+  writes it again (R12).

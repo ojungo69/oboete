@@ -185,6 +185,12 @@ impl Phase {
             || self.asked.as_ref().is_some_and(|a| a.thread.is_finished())
     }
 
+    /// Whether a call is out or its answer not yet settled: the worker neither steps aside nor
+    /// calls itself waiting until then (docs/resident.md R10, R12).
+    pub fn busy(&self) -> bool {
+        self.flight.is_some() || self.asked.is_some()
+    }
+
     /// One step: a finished call's vectors written, or the next batch sent, or what it waits on.
     /// An asked query vector that came back is settled first and kept for `answer`; while one is
     /// out, the phase is not idle, so the worker stays up for it.
