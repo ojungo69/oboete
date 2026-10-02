@@ -2,6 +2,7 @@
 //! `sessions.observed_event_id` marks how far observe has read each session.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -85,7 +86,6 @@ CREATE TABLE IF NOT EXISTS imports(
 );
 ";
 
-/// WAL with a 2 s busy timeout and the given `synchronous` level.
 /// `PRAGMA quick_check`: Ok when SQLite answers "ok", else the first problem it names.
 pub(crate) fn quick_check(conn: &Connection, name: &str) -> Result<()> {
     let first: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
@@ -102,7 +102,8 @@ pub(crate) fn quick_check(conn: &Connection, name: &str) -> Result<()> {
 pub(crate) fn quick_check_without_vtabs(path: &Path, name: &str) -> Result<()> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open {}", path.display()))?;
-    // The stores' connections wait 2 s (`wal`); rusqlite's own default is 5 s.
+    // This read-only check waits 2 s, matching the stores' SQLite busy timeout. Initialization
+    // retries share 10 s on the normal raw path, or 2 s on hooks; rusqlite's default is 5 s.
     conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
     // SAFETY: the handle is this live connection's, and a null list keeps no module, FTS5's
     // included, which is what leaves the search indexes out. It must come before any statement
@@ -112,23 +113,74 @@ pub(crate) fn quick_check_without_vtabs(path: &Path, name: &str) -> Result<()> {
     quick_check(&conn, name)
 }
 
+pub(crate) const OPEN_WRITE_WAIT: Duration = Duration::from_secs(10);
+
+/// WAL with a 2 s SQLite busy timeout and the given `synchronous` level. This path retries up
+/// to 10 s; raw hooks call `wal_until` with their shared 2 s initialization deadline instead.
 pub(crate) fn wal(conn: &Connection, synchronous: &str) -> Result<()> {
+    wal_until(conn, synchronous, Instant::now() + OPEN_WRITE_WAIT)
+}
+
+pub(crate) fn wal_until(conn: &Connection, synchronous: &str, deadline: Instant) -> Result<()> {
+    // Normal operations keep the 2 s timeout; initialization retries clamp it to the deadline.
     conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
     // Switching a file to WAL takes an exclusive lock that the busy handler does not cover:
     // openers racing on a fresh or pre-WAL file wait for each other here instead.
-    let mut tries = 0;
-    loop {
-        match conn.execute_batch(&format!(
+    retry_busy(conn, deadline, || {
+        conn.execute_batch(&format!(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous={synchronous};"
-        )) {
-            Ok(()) => return Ok(()),
-            Err(e) if tries < 50 && e.to_string().contains("locked") => {
-                tries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(20));
+        ))?;
+        Ok(())
+    })
+    .context("journal mode")
+}
+
+#[cfg(test)]
+thread_local! {
+    // A test opener observes its first real retry, without replacing SQLite's busy handler.
+    pub(crate) static BUSY_RETRY_NOTICE: std::cell::Cell<Option<std::sync::mpsc::Sender<()>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Retry an open-time write until the shared deadline, including SQLite's busy-handler waits.
+/// The connection keeps its busy timeout afterwards; non-lock errors return immediately.
+pub(crate) fn retry_busy<T>(
+    conn: &Connection,
+    deadline: Instant,
+    mut run: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let timeout: u32 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
+    let timeout = Duration::from_millis(timeout.into());
+    let result = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        conn.busy_timeout(timeout.min(remaining))?;
+        match run() {
+            Err(e)
+                if e.downcast_ref::<rusqlite::Error>().is_some_and(|e| {
+                    matches!(
+                        e.sqlite_error_code(),
+                        Some(
+                            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                        )
+                    )
+                }) && Instant::now() < deadline =>
+            {
+                #[cfg(test)]
+                BUSY_RETRY_NOTICE.with(|notice| {
+                    if let Some(retried) = notice.take() {
+                        let _ = retried.send(());
+                    }
+                });
+                std::thread::sleep(
+                    Duration::from_millis(20)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
             }
-            Err(e) => return Err(e).context("journal mode"),
+            result => break result,
         }
-    }
+    };
+    conn.busy_timeout(timeout)?;
+    result
 }
 
 pub fn open(home: &Path) -> Result<Connection> {
@@ -280,6 +332,10 @@ fn legacy_store_file(_: &Path) -> Option<String> {
 /// turns up as another file (a `~/.oboete` copied to another machine), so two devices never share
 /// one. It prefixes ids that must be unique across devices.
 pub(crate) fn ensure_device(conn: &Connection, path: &Path) -> Result<()> {
+    ensure_device_until(conn, path, Instant::now() + OPEN_WRITE_WAIT)
+}
+
+pub(crate) fn ensure_device_until(conn: &Connection, path: &Path, deadline: Instant) -> Result<()> {
     let here = store_file(path);
     let known: Option<String> = conn
         .query_row("SELECT value FROM meta WHERE key='store_file'", [], |r| {
@@ -292,32 +348,36 @@ pub(crate) fn ensure_device(conn: &Connection, path: &Path) -> Result<()> {
     // A store from before #122 on Windows holds its creation time: the same file, so it keeps its
     // device id and takes the new identity (its records stay under their device, Codex on #122).
     if known.is_some() && known == legacy_store_file(path) {
-        conn.execute(
-            "UPDATE meta SET value=?1 WHERE key='store_file'",
-            params![here],
-        )?;
-        return Ok(());
+        return retry_busy(conn, deadline, || {
+            conn.execute(
+                "UPDATE meta SET value=?1 WHERE key='store_file'",
+                params![here],
+            )?;
+            Ok(())
+        });
     }
     let mut raw = [0u8; 4];
     getrandom::fill(&mut raw).map_err(|e| anyhow::anyhow!("random device id: {e}"))?;
     let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();
     // Two first opens may race: the one whose update finds the old identity still in place wins,
     // the other keeps what it reads back.
-    let tx = conn.unchecked_transaction()?;
-    let changed = tx.execute(
-        "INSERT INTO meta(key, value) VALUES('store_file', ?1)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value IS NOT excluded.value",
-        params![here],
-    )?;
-    if changed > 0 {
-        tx.execute(
-            "INSERT INTO meta(key, value) VALUES('device_id', ?1)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![id],
+    retry_busy(conn, deadline, || {
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "INSERT INTO meta(key, value) VALUES('store_file', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value IS NOT excluded.value",
+            params![here],
         )?;
-    }
-    tx.commit()?;
-    Ok(())
+        if changed > 0 {
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES('device_id', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
 }
 
 pub fn device_id(conn: &Connection) -> Result<String> {
@@ -516,15 +576,28 @@ pub(crate) fn ensure_column(
     column: &str,
     decl: &str,
 ) -> Result<()> {
+    ensure_column_until(conn, table, column, decl, Instant::now() + OPEN_WRITE_WAIT)
+}
+
+pub(crate) fn ensure_column_until(
+    conn: &mut Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+    deadline: Instant,
+) -> Result<()> {
     if has_column(conn, table, column)? {
         return Ok(());
     }
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    if !has_column(&tx, table, column)? {
-        tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
-    }
-    tx.commit()?;
-    Ok(())
+    retry_busy(conn, deadline, || {
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        if !has_column(&tx, table, column)? {
+            tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
@@ -754,6 +827,57 @@ pub fn apply_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_writes_share_a_deadline_and_keep_the_busy_timeout_after_an_error() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("locked.db");
+        let writer = Connection::open(&path).unwrap();
+        wal(&writer, "FULL").unwrap();
+        writer
+            .execute_batch("CREATE TABLE sample(id INTEGER); BEGIN IMMEDIATE;")
+            .unwrap();
+        let mut opener = Connection::open(&path).unwrap();
+        wal(&opener, "FULL").unwrap();
+        let deadline = Instant::now() + Duration::from_millis(100);
+        // The second write gets the same, now expired deadline, rather than a fresh wait.
+        for column in ["first", "second"] {
+            let error =
+                ensure_column_until(&mut opener, "sample", column, "TEXT", deadline).unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<rusqlite::Error>()
+                    .unwrap()
+                    .sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+            assert!(Instant::now() >= deadline);
+            assert!(deadline.elapsed() < Duration::from_secs(1));
+            let timeout: i64 = opener
+                .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(timeout, 2_000);
+        }
+        writer.execute_batch("ROLLBACK").unwrap();
+        ensure_column(&mut opener, "sample", "first", "TEXT").unwrap();
+        assert_eq!(
+            opener
+                .execute("INSERT INTO sample(first) VALUES ('unlocked')", [])
+                .unwrap(),
+            1
+        );
+        let started = Instant::now();
+        let error = ensure_column_until(
+            &mut opener,
+            "missing",
+            "column",
+            "TEXT",
+            started + OPEN_WRITE_WAIT,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no such table"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     #[test]
     fn documents_get_uids_unique_across_devices_and_imports_agree() {
