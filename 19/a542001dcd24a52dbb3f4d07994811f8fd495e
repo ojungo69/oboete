@@ -1,0 +1,46 @@
+tests/replay_source.rs
+  s_17c3dc80287a78::t_7cdefdea1aeadc 353-365
+  s_17c3dc80287a78::t_0f866342e8dcd6 4-10,80-352,366-430
+  s_17c3dc80287a78::t_de24836cb0d384 431-434
+src/replay.rs
+  s_17c3dc80287a78::t_0f866342e8dcd6 130-133,243,482,732
+  s_17c3dc80287a78::t_ee6ed6d918c4a3 374-398
+  s_17c3dc80287a78::t_ac54c97bde2cd6 16,25-26,118-129,134-138,161,186-189,246-255,266-270,272-373,399-406,412-417,419-427,429-434,437,439,449,459,489-500,504-506,510,512-516,522,542-546,549,578,600,637,663,700,715
+  s_17c3dc80287a78::t_445de5339905e2 428
+  s_17c3dc80287a78::t_49953497e4a4d1 190,733-734,737
+docs/milestone-4.md
+  s_17c3dc80287a78::t_3db68227def130 423-431,434
+  s_17c3dc80287a78::t_38e7c7db782cfa 432-433
+docs/eval/hooks.py
+  s_17c3dc80287a78::t_47485b0d0e3f5b 1-277
+docs/eval/inject.py
+  s_17c3dc80287a78::t_31e8c968e939b3 1-341
+docs/eval/m3.py
+  s_17c3dc80287a78::t_152061a803ff8b 26-28,168
+docs/eval/test_hooks.py
+  s_17c3dc80287a78::t_0de1624bafe38a 1-431
+docs/eval/test_inject.py
+  s_17c3dc80287a78::t_948b639093798e 1-439
+src/curate.rs
+  s_17c3dc80287a78::t_057602152471ae 5207
+src/main.rs
+  s_17c3dc80287a78::t_b80e677d3c53e3 297-299,686-700
+src/worker.rs
+  s_17c3dc80287a78::t_4aa6c6bbb4b81b 158-172,1800
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "19a542001dcd24a52dbb3f4d07994811f8fd495e",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}

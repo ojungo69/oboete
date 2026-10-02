@@ -1,0 +1,40 @@
+docs/eval/test_inject.py
+  s_17c3dc80287a78::t_551985ca6ae934 254
+  s_17c3dc80287a78::t_64e4cf85ed198b 239-253,255-267
+docs/eval/inject.py
+  s_17c3dc80287a78::t_1a43733d15a44e 127
+  s_17c3dc80287a78::t_6a3739f96dfe23 126,131-133
+docs/eval/test_hooks.py
+  s_17c3dc80287a78::t_72c9c2822b7110 338,353-354
+  s_17c3dc80287a78::t_eea69d2a8240aa 225-257
+  s_17c3dc80287a78::t_32e8763ab96f7a 316-317,319-320,323-331
+  s_17c3dc80287a78::t_94b40e26468b2b 315,318,321-322
+  s_17c3dc80287a78::t_e78b8dd53be9dc 270,275-276
+docs/eval/hooks.py
+  s_17c3dc80287a78::t_0ec5ebe0bdeec8 16,58,62-63
+  s_17c3dc80287a78::t_6a3739f96dfe23 65
+  s_17c3dc80287a78::t_72c9c2822b7110 91,100-101
+src/replay.rs
+  s_17c3dc80287a78::t_12fdcc32b1c302 197-204,444,446
+  s_17c3dc80287a78::t_41e001f996ebd4 573-578
+  s_17c3dc80287a78::t_c36161e2d050ff 572
+docs/milestone-4.md
+  s_17c3dc80287a78::t_1a7fd63d57bcfc 432-433
+  s_17c3dc80287a78::t_e0eceb9001974a 434
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7826a0bddfe44dc1b830a74dc2fbc69625a9b73f",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
