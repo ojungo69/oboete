@@ -121,9 +121,9 @@ milestone 6のremote MCPはhub OAuth/read grants/cloud syncの別境界。local 
 
 ### MCPのlexical fallback理由
 
-現行main `74c40c075b024e125d976175346bd5df31308688` の `src/mcp.rs:165–171` は `Answer.hits` の行だけ返し、`Answer.vector` を落とす。§4.10/A93の「full-text fallbackと理由を返す」をMCPでも満たす必要がある。これは新しい検索engineではなく既存契約の不足。最新main `6225150661472d2be9c54aa62802bcaab648f772` でも同じコードを再確認した。
+2026-10-02、[PR #348](https://github.com/ojungo69/oboete/pull/348)（main `b8d3e19`）で実装済み（[#343](https://github.com/ojungo69/oboete/issues/343)）。それまでの `src/mcp.rs` は `Answer.hits` の行だけ返し、`Answer.vector` を落としていた。§4.10/A93の「full-text fallbackと理由を返す」をMCPでも満たすための修正で、新しい検索engineではない。
 
-受け入れ：Vector::Usedと全VectorSkip（off / excluded / no-vectors / building / waiting / timeout / error）をMCPの実tool出力に通し、検索方式とsafeな理由が **no hitsの場合にも**callerに分かる。metadataの表現は既存clientとの互換を保つ形で決め、本文・認証情報・providerの生errorを理由として返さない。hits/順位/ID/根拠・scopeを変えず、failure時もlexical検索が継続し、excludedでqueryが送信されないことを確認する。CLI/viewer/HTTPも同じ状態を表現する。
+実装された形：searchのtool結果の `structuredContent` に `vector`（`used`、または off / excluded / no-vectors / building / waiting / timeout / error のいずれか）と `why`（viewerと同じ安全な説明文、usedでは `null`）を入れ、**no hitsの場合にも**返す。既存の本文（fenceとredactionを通した行、順位、ID、scope）は変えない。query、hit本文、認証情報、providerの生errorは入れない。excludedではqueryを送信しない。CLIはfull textだけになった理由をstderrへ出し（embeddingがoffの場合を除く）、viewerは同じ状態を表示する。任意local HTTP（§7）を作る時は同じ状態を返すことを受け入れ条件に含める。
 
 ### 選択的portable export（低優先のplanned要件）
 
@@ -155,12 +155,13 @@ previewは対象・件数・推定size・含む個人情報と削除状態を示
 
 | 追跡 | 範囲 |
 | --- | --- |
-| [#343](https://github.com/ojungo69/oboete/issues/343) | MCP searchのAnswer.vector/fallback理由。既存§4.10/A93の不足 |
+| [#343](https://github.com/ojungo69/oboete/issues/343) | MCP searchのAnswer.vector/fallback理由。既存§4.10/A93の不足。PR #348で実装済み（2026-10-02） |
 | [#344](https://github.com/ojungo69/oboete/issues/344) | live captureとscoped host recall adapter。M5後に検証 |
 | [#345](https://github.com/ojungo69/oboete/issues/345) | 任意persistent LOCAL HTTP lifecycleとgrant別API。M5後に検証 |
 | [#346](https://github.com/ojungo69/oboete/issues/346) | 選択的portable export。低優先planned |
 
 - 既存：identity #321、false task/provenance #320/#167、accepted decision #255/#244、correction #157/#162、総resource #317、HTTP境界 #53、WebUI #94/#338、M5 forget、M6 remote read/sync。scopeを広げるissue本文変更や重複issueを作らない。
 - 順序：既存M3/M4の品質・注入を進め、M5のforget/securityを満たしてからlive bot/local serviceを隔離dogfoodで実装・検証する。M6 remote/syncは既存順序。local serviceはremote必須依存ではなく、remote書込を前倒ししない。MCP fallbackは既存§4.10のfollow-up、exportは低優先。#340は作業中にmain `6225150661472d2be9c54aa62802bcaab648f772` へmergeされたが、どれもその既存範囲や後続作業の追加blockerにしない。既存adapterのtested/live-unverified区別を維持する。
+- ownerの順序（2026-10-03）：「ボット連携(noteMan など)と常時動く HTTP サーバーは、いつ作りますか？」に「PC切り替えの後 (Recommended)」。live bot adapter（#344）と任意local HTTP（#345）は、ownerのPCが新しいoboeteへ切り替わった後（spec.md §7.5）、milestone 6より前に作る（owner決定33）。切り替え時点でつなぐagentはClaude Code・Codex・Grok CLIの3つで、bot hostは含めない。
 - 残る判断：noteManの正確なruntime/API/version/path/権限と話者保証、stable revision/cursor、host配送確認点、API schema/token保管、viewerとのlistener統合、OS service方式、計測budgetとexport format。未確認製品に能力を付与しない。#320のowner判断は別途必要。
 - 共有：ownerの依頼に従い、作業中Codex向けの中央handoffをPR342へ投稿する。直接のsupported message channel/target sessionを確認できない限りterminalへ入力・割込みをしない。GitHubへの「投稿済み」と相手の「確認済み」を別々に報告する。
