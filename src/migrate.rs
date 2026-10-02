@@ -1239,8 +1239,11 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         raw.append(&live("Live prompt.", 1_000)).unwrap();
         crate::worker::run_once(home.path()).unwrap();
         let settings = Settings::default();
+        // The backlog's age in minutes moves with the clock between the two reads.
+        let age = regex::Regex::new(r"/ \d+ min").unwrap();
         let manifest = |raw: &Raw| {
             crate::hook::start_text(home.path(), raw, "github.com/o/r", "", "L", &settings)
+                .map(|m| age.replace_all(&m, "/ _ min").into_owned())
         };
         let before = manifest(&raw);
         assert!(
