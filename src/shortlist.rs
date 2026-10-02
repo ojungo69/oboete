@@ -15,6 +15,7 @@ use crate::raw::Raw;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// The claims a key keeps (D9).
@@ -31,6 +32,17 @@ const FILES: i64 = 10;
 // ponytail: up to `KEYS` keys asking 4 an hour each can spend a day's `daily_requests` on a busy
 // day; one hourly budget across keys if that shows.
 pub const VECTOR_EVERY: i64 = 15 * 60_000;
+
+/// The claims one prompt's injection takes at most, a pair counting two (D2).
+pub const PLACES: usize = 3;
+/// The share of one text's trigrams a claim's body holds to be injected with it (D9): set by Task 8
+/// Step 11 on milestone 3's dev prompts (docs/milestone-4.md), tuned by Task 12b.
+pub const THRESHOLD: f64 = 0.53;
+/// A text's trigrams count as at least this many: a short prompt (`進めて`) tells no topic, and
+/// its one or two trigrams would match any claim holding them (Step 11).
+pub const MIN_GRAMS: usize = 10;
+/// The trigrams read of each text (D9): `search::trigrams`' 64 would leave a long prompt's end out.
+const GRAMS: usize = 256;
 
 /// Made when `per_prompt` is first on: a home that never asks for it gets no table.
 fn schema(k: &Connection) -> Result<()> {
@@ -534,6 +546,130 @@ fn joined(fields: &[String], sep: &str, rules: &crate::redact::Rules) -> String 
         })
         .collect();
     crate::redact::joined_with(&fields.join(sep), &parts, rules)
+}
+
+/// Each run's trigrams of `text`, case folded as the index folds them, at most `cap`.
+fn grams(text: &str, cap: usize) -> HashSet<String> {
+    crate::search::trigrams_upto(text, cap)
+        .into_iter()
+        .map(|g| g.to_ascii_lowercase())
+        .collect()
+}
+
+/// The share of `of` (one text's trigrams, at least `MIN_GRAMS`) that `body` holds.
+fn share(of: &HashSet<String>, body: &str) -> f64 {
+    let held = grams(body, usize::MAX);
+    of.iter().filter(|g| held.contains(*g)).count() as f64 / of.len().max(MIN_GRAMS) as f64
+}
+
+/// Spec 4.2 and D9: of `candidates` (uids, the best first), the units (`placed`) of the claims
+/// whose body holds at least `threshold` of one text's trigrams. Read-only.
+pub fn pick(
+    raw: &Raw,
+    k: &Connection,
+    candidates: &[String],
+    texts: &[&str],
+    threshold: f64,
+) -> Result<Vec<Vec<crate::claims::Claim>>> {
+    let of: Vec<HashSet<String>> = texts
+        .iter()
+        .map(|t| grams(t, GRAMS))
+        .filter(|g| !g.is_empty())
+        .collect();
+    if of.is_empty() {
+        return Ok(Vec::new());
+    }
+    placed(raw, k, candidates, |c| {
+        of.iter().any(|g| share(g, &c.body) >= threshold)
+    })
+}
+
+/// The units (D2) of the claims of `candidates` (uids, the best first) that `keep` keeps, each
+/// still delivered under `claims::DECIDED`, a unit left out whole when an owner's change the
+/// worker has not applied touches one of its claims (D3), in `PLACES` places, newest first.
+/// Read-only.
+pub fn placed(
+    raw: &Raw,
+    k: &Connection,
+    candidates: &[String],
+    keep: impl Fn(&crate::claims::Claim) -> bool,
+) -> Result<Vec<Vec<crate::claims::Claim>>> {
+    use crate::claims;
+    if !exists(k, "view", "active")? {
+        return Ok(Vec::new());
+    }
+    let pending = claims::Pending::read(raw, k)?;
+    let hidden = |uid: &str| pending.touches(k, uid);
+    let decided = format!(
+        "SELECT 1 FROM active a WHERE a.uid = ?1 AND {}",
+        claims::DECIDED_WHERE
+    );
+    let mut ranked = Vec::new();
+    for uid in candidates {
+        let Some(c) = claims::delivered_one(k, uid)? else {
+            continue;
+        };
+        let still = k
+            .query_row(&decided, [uid], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if still && keep(&c) {
+            ranked.push(c);
+        }
+    }
+    let (mut fit, _) = claims::place(claims::units(k, &ranked, hidden)?, PLACES);
+    claims::newest_first(&mut fit);
+    Ok(fit)
+}
+
+/// `oboete inject --prompt` (Task 8 Step 11): each claim `prompt` would get in `repo`, with the
+/// share of the prompt's trigrams its body holds, from `session`'s shortlists there, or, with none,
+/// from every delivered claim of the repository. Ignores `[inject]` and keeps no hook state.
+pub fn report(
+    home: &Path,
+    repo: &str,
+    session: Option<&str>,
+    prompt: &str,
+    threshold: f64,
+) -> Result<String> {
+    let path = home.join("knowledge.db");
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    let raw = crate::raw::open(home)?;
+    let k = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    if !exists(&k, "view", "active")? {
+        return Ok(String::new());
+    }
+    let uids = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> Result<Vec<String>> {
+        Ok(k.prepare(sql)?
+            .query_map(args, |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    };
+    let mut candidates = match session {
+        Some(s) if exists(&k, "table", "shortlist")? => uids(
+            "SELECT uid FROM shortlist WHERE session = ?1 AND repo = ?2
+             GROUP BY uid ORDER BY MIN(rank)",
+            &[&s, &repo],
+        )?,
+        _ => Vec::new(),
+    };
+    if candidates.is_empty() {
+        let every = format!(
+            "SELECT a.uid FROM active a WHERE a.repo = ?1 AND {}
+             ORDER BY a.valid_from DESC, a.uid",
+            crate::claims::DECIDED_WHERE
+        );
+        candidates = uids(&every, &[&repo])?;
+    }
+    let text = crate::hook::strip_blocks(prompt, true);
+    let of = grams(&text, GRAMS);
+    let units = pick(&raw, &k, &candidates, &[&text], threshold)?;
+    Ok(units
+        .iter()
+        .flatten()
+        .map(|c| format!("{} {:.3}\n", c.uid, share(&of, &c.body)))
+        .collect())
 }
 
 /// The shortlist the worker keeps for `key`'s session on a checkout, the best first: none when
@@ -1750,5 +1886,71 @@ mod tests {
         );
         let uids = of(&k, ("claude", "live", R, "main")).unwrap().unwrap();
         assert!(!uids.contains(&near));
+    }
+
+    /// Spec 4.2 and D9: a prompt gets the shortlisted claims whose body holds the threshold's share
+    /// of its trigrams, in 3 places, newest first: an earlier decision only after the later one
+    /// that ended it (D2, #295 row 2), and none an owner's change hides, applied or not (D3).
+    #[test]
+    fn pick_takes_whole_units_over_the_threshold_in_three_places() {
+        let mut s = Store::new();
+        let stdout = s.decided(R, MIN, "Parser errors go to stdout.", &[]);
+        let stderr = s.decided(
+            R,
+            2 * MIN,
+            "Parser errors go to stderr, not stdout.",
+            &[&stdout],
+        );
+        let lexer = s.decided(R, 3 * MIN, "Lexer tokens are cached.", &[]);
+        let warnings = s.decided(R, 4 * MIN, "Parser warnings go to the log.", &[]);
+        let retracted = s.decided(R, 5 * MIN, "Parser errors are fatal.", &[]);
+        let pending = s.decided(R, 6 * MIN, "Parser errors carry their line.", &[]);
+        // Delivered, but not decided: no injection (D9).
+        let text = "Parser errors may go to a file.";
+        let seq = s.said("s", R, 7 * MIN, text);
+        let proposal = s.claim(seq, text, ("decision", "proposed", "user"), &[]);
+        s.run();
+        s.correct(&retracted, Some("retracted"), None);
+        s.run();
+        // Appended, not applied yet.
+        s.correct(&pending, Some("retracted"), None);
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let prompt = ["where do the parser errors go"];
+        let all = [&proposal, &stdout, &lexer, &warnings, &retracted, &pending]
+            .map(|u| u.to_string())
+            .to_vec();
+        let uids = |units: Vec<Vec<crate::claims::Claim>>| -> Vec<Vec<String>> {
+            units
+                .into_iter()
+                .map(|u| u.into_iter().map(|c| c.uid).collect())
+                .collect()
+        };
+        let picked = uids(pick(&s.raw, &k, &all, &prompt, THRESHOLD).unwrap());
+        assert!(picked == [vec![stderr.clone(), stdout.clone()]]);
+        // At 0 every delivered one passes: the pair and one more fill the 3 places.
+        let picked = uids(pick(&s.raw, &k, &all, &prompt, 0.0).unwrap());
+        assert!(picked == [vec![lexer.clone()], vec![stderr.clone(), stdout.clone()]]);
+        assert!(
+            pick(&s.raw, &k, &all, &["zzz qqq"], THRESHOLD)
+                .unwrap()
+                .is_empty()
+        );
+        // A short text counts as `MIN_GRAMS` trigrams: three held tell no topic.
+        let short = pick(&s.raw, &k, &all, &["Lexer"], THRESHOLD).unwrap();
+        assert!(short.is_empty());
+        let whole = pick(&s.raw, &k, &all, &["Lexer tokens are cached"], THRESHOLD).unwrap();
+        assert_eq!(uids(whole), [vec![lexer.clone()]]);
+        // The CLI prints each one's share, from every delivered claim of the repository.
+        let printed = report(
+            s.home.path(),
+            R,
+            None,
+            "where do the parser errors go",
+            THRESHOLD,
+        )
+        .unwrap();
+        let lines: Vec<&str> = printed.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].starts_with(&format!("{stdout} 0.")));
     }
 }

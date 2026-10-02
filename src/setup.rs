@@ -59,6 +59,116 @@ const CURSOR_EVENTS: [(&str, &str); 7] = [
     ("sessionEnd", "SessionEnd"),
 ];
 
+/// MUST-M10 (spec 4.7): each agent's injection points (`POINTS`), each with the tests that drive
+/// it through `run_io`, `inject_text` or a Node harness. None is live-verified yet: Task 8 Step
+/// 10's live checks mark the ones seen working in a live session of the agent.
+const POINTS: [&str; 6] = [
+    "start",
+    "resume",
+    "compaction",
+    "prompt",
+    "correction",
+    "failure line",
+];
+const AGENT_STATUS: [(&str, [&[&str]; 6]); 7] = {
+    const START: &[&str] = &["session_start_injects_at_a_start_and_a_compaction_not_a_resume"];
+    const PROMPT: &[&str] = &["each_agent_takes_the_prompt_injection_in_its_shape"];
+    const CORRECTION: &[&str] = &["each_agent_gets_a_correction_at_its_next_prompt"];
+    const FAILURE: &[&str] = &["each_injection_point_warns_when_its_own_write_fails"];
+    const GROK: &[&str] = &["grok_delivers_at_each_turns_first_tool_use"];
+    const AGY: &[&str] = &["agy_injects_context_once_at_preinvocation_in_its_own_json_shape"];
+    const CURSOR: &[&str] = &["cursor_injects_once_per_conversation_within_its_cap"];
+    const OPENCODE: &[&str] = &["opencode_plugin_escapes_paths_and_runs_on_node"];
+    const PI: &[&str] = &[
+        "session_start_injects_at_a_start_and_a_compaction_not_a_resume",
+        "pi_generated_extension_matches_event_and_tool_contract",
+    ];
+    [
+        ("claude", [START, START, START, PROMPT, CORRECTION, FAILURE]),
+        ("codex", [START, START, START, PROMPT, CORRECTION, FAILURE]),
+        ("grok", [GROK, GROK, GROK, GROK, GROK, FAILURE]),
+        (
+            "agy",
+            [
+                AGY,
+                AGY,
+                &["agy_reinjects_after_a_later_checkpoint"],
+                PROMPT,
+                CORRECTION,
+                FAILURE,
+            ],
+        ),
+        (
+            "opencode",
+            [
+                &[
+                    "pi_and_opencode_record_to_raw_and_get_the_manifest_at_session_start",
+                    "opencode_plugin_escapes_paths_and_runs_on_node",
+                ],
+                OPENCODE,
+                OPENCODE,
+                &[
+                    "each_agent_takes_the_prompt_injection_in_its_shape",
+                    "opencode_plugin_escapes_paths_and_runs_on_node",
+                ],
+                &[
+                    "each_agent_gets_a_correction_at_its_next_prompt",
+                    "opencode_plugin_escapes_paths_and_runs_on_node",
+                ],
+                &["inject_shows_the_failure_line_when_raw_cannot_be_opened"],
+            ],
+        ),
+        (
+            "pi",
+            [
+                PI,
+                PI,
+                PI,
+                &[
+                    "each_agent_takes_the_prompt_injection_in_its_shape",
+                    "pi_generated_extension_matches_event_and_tool_contract",
+                ],
+                CORRECTION,
+                FAILURE,
+            ],
+        ),
+        (
+            "cursor",
+            [
+                &["cursor_session_start_uses_workspace_and_prints_flat_context"],
+                CURSOR,
+                &["cursor_compaction_reinjects_once_after_cleanup_even_with_concurrent_prompts"],
+                PROMPT,
+                CORRECTION,
+                FAILURE,
+            ],
+        ),
+    ]
+};
+
+/// MUST-M10: what setup says of `agent`'s row of `AGENT_STATUS`.
+fn status_line(agent: &str) -> String {
+    let tested = AGENT_STATUS
+        .iter()
+        .find(|(a, _)| *a == agent)
+        .map(|(_, cells)| POINTS.iter().zip(cells).filter(|(_, t)| !t.is_empty()));
+    let points: Vec<&str> = tested
+        .into_iter()
+        .flatten()
+        .map(|(p, _)| {
+            if *p == "resume" && matches!(agent, "claude" | "codex" | "pi") {
+                "resume (existing context reused)"
+            } else {
+                *p
+            }
+        })
+        .collect();
+    format!(
+        "{agent}: injection handling at {} is implemented and tested, not yet checked in a live session",
+        points.join(", ")
+    )
+}
+
 pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
     let agents: Vec<&str> = if agent == "all" {
         AGENTS.to_vec()
@@ -70,9 +180,12 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         ));
     };
     let cmd = HookCommand::current(home)?;
-    let failed = wire_each(&agents, |a| wire(a, &cmd, remove));
-    if !remove {
+    let (wired, failed) = wire_each(&agents, |a| wire(a, &cmd, remove));
+    if !remove && !wired.is_empty() {
         println!("Hook files are read when an agent starts: restart running sessions.");
+        for a in wired {
+            println!("{}", status_line(a));
+        }
     }
     anyhow::ensure!(
         failed.is_empty(),
@@ -84,27 +197,35 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
 }
 
 /// Each agent in turn, whatever another's failure: one unreadable settings file must not leave
-/// the other agents unwired. Returns the agents that failed, each named with its error.
-fn wire_each<'a>(agents: &[&'a str], mut wire: impl FnMut(&str) -> Result<()>) -> Vec<&'a str> {
+/// the other agents unwired. Returns successful and failed agents; skipped agents have no status line.
+fn wire_each<'a>(
+    agents: &[&'a str],
+    mut wire: impl FnMut(&str) -> Result<bool>,
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let mut wired = Vec::new();
     let mut failed = Vec::new();
     for &a in agents {
-        if let Err(e) = wire(a) {
-            println!("{a}: failed: {e:#}");
-            failed.push(a);
+        match wire(a) {
+            Ok(true) => wired.push(a),
+            Ok(false) => {}
+            Err(e) => {
+                println!("{a}: failed: {e:#}");
+                failed.push(a);
+            }
         }
     }
-    failed
+    (wired, failed)
 }
 
 /// One agent: its hooks (plugin, extension) and MCP entry, with a line on what changed.
-fn wire(a: &str, cmd: &HookCommand, remove: bool) -> Result<()> {
+fn wire(a: &str, cmd: &HookCommand, remove: bool) -> Result<bool> {
     let files = match a {
         "claude" => claude(cmd, remove)?,
         "codex" => codex(cmd, remove)?,
         "grok" => grok(cmd, remove)?,
         "agy" if !agy_available(&agy_dir(), on_path("agy")) => {
             println!("agy: skipped (`~/.gemini` and `agy` on PATH are absent)");
-            return Ok(());
+            return Ok(false);
         }
         "agy" => agy_files(&agy_dir(), cmd, remove, cfg!(windows))?,
         "opencode" => {
@@ -112,23 +233,23 @@ fn wire(a: &str, cmd: &HookCommand, remove: bool) -> Result<()> {
             // npm installs a .cmd launcher on Windows before a config directory exists.
             if !dir.is_dir() && !on_path("opencode") {
                 println!("opencode: skipped (config directory and `opencode` on PATH are absent)");
-                return Ok(());
+                return Ok(false);
             }
             let (plugin, mcp) = opencode_files(&dir, cmd, remove)?;
             println!("opencode: plugin {plugin}");
             println!("opencode: mcp server {mcp}");
-            return Ok(());
+            return Ok(true);
         }
         "pi" if !pi_dir().is_dir() && !on_path("pi") => {
             println!("pi: skipped (agent directory and `pi` on PATH are absent)");
-            return Ok(());
+            return Ok(false);
         }
         "pi" => pi_files(&pi_dir(), cmd, remove)?,
         "cursor" if !cursor_available(&cursor_dir(), on_path("cursor-agent"), on_path("agent")) => {
             println!(
                 "cursor: skipped (config directory and cursor-agent/agent on PATH are absent)"
             );
-            return Ok(());
+            return Ok(false);
         }
         "cursor" => cursor_files(&cursor_dir(), cmd, remove, cfg!(windows))?,
         _ => unreachable!(),
@@ -155,7 +276,7 @@ fn wire(a: &str, cmd: &HookCommand, remove: bool) -> Result<()> {
             "written with hooks above"
         })
         .to_string(),
-        "pi" => return Ok(()), // Pi uses the extension's native CLI tools, not MCP.
+        "pi" => return Ok(true), // Pi uses the extension's native CLI tools, not MCP.
         "cursor" => "handled with hooks above".to_string(),
         _ => unreachable!(),
     };
@@ -165,7 +286,7 @@ fn wire(a: &str, cmd: &HookCommand, remove: bool) -> Result<()> {
             "cursor: approve MCP once per project with `agent mcp enable oboete`, or use `--approve-mcps` with `-p`"
         );
     }
-    Ok(())
+    Ok(true)
 }
 
 /// The command line every hook entry runs: this binary's absolute path plus `hook <agent> <event>`;
@@ -2067,15 +2188,19 @@ mod tests {
     #[test]
     fn one_agent_that_fails_leaves_the_others_wired() {
         let mut wired = Vec::new();
-        let failed = wire_each(&["claude", "codex", "grok"], |a| {
+        let (reported, failed) = wire_each(&["claude", "codex", "grok", "pi"], |a| {
             if a == "claude" {
                 return Err(anyhow!("settings.json is not JSON"));
             }
+            if a == "pi" {
+                return Ok(false);
+            }
             wired.push(a.to_owned());
-            Ok(())
+            Ok(true)
         });
         assert_eq!(failed, ["claude"]);
         assert_eq!(wired, ["codex", "grok"]);
+        assert_eq!(reported, ["codex", "grok"]);
     }
 
     #[test]
@@ -2244,6 +2369,31 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// MUST-M10: every cell of the status table names tests that exist.
+    #[test]
+    fn every_claimed_cell_has_its_test() {
+        let src = |f: &str| {
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(f))
+                .unwrap()
+        };
+        let tests = (src("hook.rs") + &src("setup.rs")).replace("\r\n", "\n");
+        assert_eq!(AGENT_STATUS.map(|(a, _)| a), AGENTS);
+        for (agent, cells) in AGENT_STATUS {
+            for (point, names) in POINTS.iter().zip(cells) {
+                assert!(!names.is_empty(), "{agent} {point}");
+                for name in names {
+                    let declared = format!("#[test]\n    fn {name}() {{");
+                    assert!(tests.contains(&declared), "{agent} {point}: {name}");
+                }
+            }
+        }
+        assert_eq!(
+            status_line("pi"),
+            "pi: injection handling at start, resume (existing context reused), compaction, prompt, correction, failure line is \
+             implemented and tested, not yet checked in a live session"
+        );
     }
 
     #[test]

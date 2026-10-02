@@ -95,12 +95,35 @@ fn schema(k: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// What SessionStart shows (`text`), and the claims shown with their bodies, which a later
-/// injection need not repeat (spec 4.7).
+/// What SessionStart shows (`text`), and the claims it shows (spec 4.7, 4.8).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Start {
     pub text: String,
-    pub shown: Vec<String>,
+    pub shown: Vec<Shown>,
+}
+
+/// A claim shown to a session: a later injection need not repeat its body, and a correction names
+/// it if it changes (Task 8, D9).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shown {
+    pub uid: String,
+    /// `fingerprint` of its body when it was shown.
+    pub fp: String,
+    /// Its body, or only its index line.
+    pub body: bool,
+    /// The line that shows it: a later cut that drops the line leaves it unshown.
+    pub line: String,
+    /// This occurrence's byte range in `Start::text`, after its gate and cut.
+    pub range: std::ops::Range<usize>,
+}
+
+/// A body's fingerprint: whether a claim's body changed since it was shown.
+pub fn fingerprint(body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(body.as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// What SessionStart shows for this checkout (spec 4.4, D3 and D4 of milestone 4's plan): the
@@ -136,20 +159,32 @@ pub fn text(
     // Match the surviving occurrence, not another claim with the same rendered line.
     let shown = bodies
         .into_iter()
-        .filter_map(|(range, line, uid)| {
-            let at = from.iter().position(|&(s, _)| s == range.start)?;
-            let end = at + line.len();
-            (text.get(at..end) == Some(line.as_str())
-                && (at == 0 || text.as_bytes()[at - 1] == b'\n')
-                && text.as_bytes().get(end).is_none_or(|&b| b == b'\n')
-                && from.get(end - 1).is_some_and(|&(_, e)| e == range.end)
-                && from[at..end]
-                    .iter()
-                    .all(|&(s, e)| s >= range.start && e <= range.end))
-            .then_some(uid)
+        .filter_map(|(range, mut shown)| {
+            shown.range = surviving_line(&text, &from, range, &shown.line)?;
+            Some(shown)
         })
         .collect();
     Ok(Some(Start { text, shown }))
+}
+
+/// The same source occurrence survived the packet's gate and cut as a whole line, not an
+/// identical line from another claim. Prompt blocks use the same accounting as SessionStart.
+pub(crate) fn surviving_line(
+    text: &str,
+    from: &[(usize, usize)],
+    range: std::ops::Range<usize>,
+    line: &str,
+) -> Option<std::ops::Range<usize>> {
+    let at = from.iter().position(|&(s, _)| s == range.start)?;
+    let end = at + line.len();
+    (text.get(at..end) == Some(line)
+        && (at == 0 || text.as_bytes()[at - 1] == b'\n')
+        && text.as_bytes().get(end).is_none_or(|&b| b == b'\n')
+        && from.get(end - 1).is_some_and(|&(_, e)| e == range.end)
+        && from[at..end]
+            .iter()
+            .all(|&(s, e)| s >= range.start && e <= range.end))
+    .then_some(at..end)
 }
 
 /// The stored ruleset of a row built under rules of `version` in this format.
@@ -306,8 +341,9 @@ fn stored(
     Ok(text.filter(|(_, built)| built == ruleset).map(|(t, _)| t))
 }
 
-/// A body line's source range, its field-gated text, and the claim's uid.
-type Body = (std::ops::Range<usize>, String, String);
+/// A line that shows a claim, its body's or its index line: its range in the packet, and the
+/// claim as `Shown` names it.
+type Body = (std::ops::Range<usize>, Shown);
 
 /// Spec 4.4's SessionStart around the checkout's `manifest`: the global preferences first; the
 /// manifest, with `repo`'s delivered decisions, preferences, open items and lessons (spec 3.4) in
@@ -318,7 +354,7 @@ type Body = (std::ops::Range<usize>, String, String);
 /// earlier claim with the later claim that ended it (`claims::units`), and listed newest first. A
 /// checkout with no manifest to show (a new branch, a dirty manifest, a tombstone not yet applied)
 /// still gets them (D4). Each body and digest line is gated with `rules` before it is flattened
-/// and clipped. The text, with each line that shows a claim's body and its uid.
+/// and clipped. The text, with each line that shows a claim, its body's or its index line.
 /// Read when the text is (D3): claims come from curation, which runs while the owner is idle and
 /// appends no record this consumer steps on, so a section built with the text would miss the last
 /// session's decisions; and what the worker has not applied yet (`claims::Pending`) is left out.
@@ -346,7 +382,8 @@ fn with_delivered(
         .unwrap_or(manifest.len());
     let (mut first, mut middle, mut last) =
         (Mapped::default(), Mapped::default(), Mapped::default());
-    let (mut bodies, mut middle_bodies): (Vec<Body>, Vec<Body>) = (Vec::new(), Vec::new());
+    let (mut bodies, mut middle_bodies, mut last_bodies): (Vec<Body>, Vec<Body>, Vec<Body>) =
+        (Vec::new(), Vec::new(), Vec::new());
     if exists(k, "view", "active")? {
         let pending = claims::Pending::read(raw, k)?;
         let hidden = |uid: &str| pending.touches(k, uid);
@@ -366,21 +403,22 @@ fn with_delivered(
         claims::newest_first(&mut index);
         let gate = |s: &str, n: usize| crate::redact::flattened_with(s, rules, n, one_line);
         let date = |c: &Claim| crate::db::utc(c.valid_from)[..10].to_owned();
-        // An earlier claim names the claim above it that ended it.
-        let full = |out: &mut Mapped, bodies: &mut Vec<Body>, c: &Claim, unit: &[Claim]| {
-            let ended = c
-                .later
-                .as_ref()
-                .and_then(|l| unit.iter().find(|u| u.uid == *l))
-                .map(|l| format!(", superseded by the {} {} above", date(l), l.kind))
-                .unwrap_or_default();
-            let mut line = Mapped::default();
-            line.push_str(&format!("- {} {}{ended}: ", date(c), c.kind));
-            line.append(gate(&c.body, CLIP));
+        // Each line that shows a claim joins `bodies` with its range in `out`.
+        let shown = |out: &mut Mapped, bodies: &mut Vec<Body>, c: &Claim, line: Mapped, body| {
             let at = out.text.len();
-            bodies.push((at..at + line.text.len(), line.masked(), c.uid.clone()));
+            let shown = Shown {
+                uid: c.uid.clone(),
+                fp: fingerprint(&c.body),
+                body,
+                line: line.masked(),
+                range: at..at + line.text.len(),
+            };
+            bodies.push((at..at + line.text.len(), shown));
             out.append(line);
             out.push_str("\n");
+        };
+        let full = |out: &mut Mapped, bodies: &mut Vec<Body>, c: &Claim, unit: &[Claim]| {
+            shown(out, bodies, c, body_line(c, unit, rules), true);
         };
         let id = |uid: &str| uid.chars().take(12).collect::<String>();
         let brief = |c: &Claim| {
@@ -392,7 +430,6 @@ fn with_delivered(
             let mut line = Mapped::default();
             line.push_str(&format!("- {} {} {}{ended}: ", id(&c.uid), date(c), c.kind));
             line.append(gate(&c.body, BRIEF));
-            line.push_str("\n");
             line
         };
         if !prefs.is_empty() {
@@ -422,21 +459,23 @@ fn with_delivered(
         if !(units.is_empty() && index.is_empty()) {
             last.push_str(&format!("## More from memory\n{TOOLS}\n"));
             for c in index.iter().flatten() {
-                last.append(brief(c));
+                shown(&mut last, &mut last_bodies, c, brief(c), false);
             }
         }
     }
+    // Each section's lines move by where the section lands in the packet.
+    let at_offset = |bodies: Vec<Body>, offset: usize| {
+        bodies
+            .into_iter()
+            .map(move |(range, s)| (range.start + offset..range.end + offset, s))
+    };
     let mut text = first;
     text.push_str(&manifest[..at]);
-    let offset = text.text.len();
-    bodies.extend(
-        middle_bodies
-            .into_iter()
-            .map(|(range, line, uid)| (range.start + offset..range.end + offset, line, uid)),
-    );
+    bodies.extend(at_offset(middle_bodies, text.text.len()));
     text.append(middle);
     text.push_str(&manifest[at..]);
     text.push_str(live);
+    bodies.extend(at_offset(last_bodies, text.text.len()));
     text.append(last);
     Ok((!text.text.is_empty()).then_some((text, bodies)))
 }
@@ -770,6 +809,34 @@ pub(crate) fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// A claim's first words, with field findings kept until its formatted line is gated.
+pub(crate) fn first_words(body: &str, rules: &crate::redact::Rules) -> Mapped {
+    crate::redact::flattened_with(body, rules, BRIEF, one_line)
+}
+
+/// A claim's line with its body, at SessionStart and at a prompt: its date and kind, the later
+/// claim of `unit` that ended it (shown above it), and its body gated with `rules` before it is
+/// flattened and clipped. The original context and field findings survive until the packet's gate.
+pub(crate) fn body_line(
+    c: &crate::claims::Claim,
+    unit: &[crate::claims::Claim],
+    rules: &crate::redact::Rules,
+) -> Mapped {
+    let date = |c: &crate::claims::Claim| crate::db::utc(c.valid_from)[..10].to_owned();
+    let ended = c
+        .later
+        .as_ref()
+        .and_then(|l| unit.iter().find(|u| u.uid == *l))
+        .map(|l| format!(", superseded by the {} {} above", date(l), l.kind))
+        .unwrap_or_default();
+    let mut line = Mapped::default();
+    line.push_str(&format!("- {} {}{ended}: ", date(c), c.kind));
+    line.append(crate::redact::flattened_with(
+        &c.body, rules, CLIP, one_line,
+    ));
+    line
 }
 
 /// `s` on one line, cut to `n` characters at a space, or after a Japanese or Chinese clause mark
@@ -1614,10 +1681,10 @@ mod tests {
         assert!(!after.contains("hidden"), "{after}");
     }
 
-    /// Spec 4.7: `Start::shown` names the claims shown with their bodies, never an index line's,
-    /// nor one the cut dropped.
+    /// Spec 4.7, 4.8: `Start::shown` names each claim shown, with its body or only its index line,
+    /// and its body's fingerprint, never one the cut dropped.
     #[test]
-    fn start_names_the_claims_shown_with_their_bodies() {
+    fn start_names_the_claims_it_shows_and_how() {
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         session(home.path(), cwd.path());
@@ -1639,18 +1706,33 @@ mod tests {
                 .unwrap()
         };
         let all = start(usize::MAX);
-        let mut shown = all.shown.clone();
-        shown.sort();
+        let shown = |start: &Start, body: bool| {
+            let mut uids: Vec<String> = start
+                .shown
+                .iter()
+                .filter(|s| s.body == body)
+                .map(|s| s.uid.clone())
+                .collect();
+            uids.sort();
+            uids
+        };
         let mut newest: Vec<String> = uids[2..].to_vec();
         newest.sort();
-        assert_eq!(shown, newest); // the 2 oldest are index lines
-        // A cap that ends inside the bodies: the claims past it are not shown.
+        assert_eq!(shown(&all, true), newest);
+        // The 2 oldest are index lines.
+        let mut oldest = uids[..2].to_vec();
+        oldest.sort();
+        assert_eq!(shown(&all, false), oldest);
+        for (i, uid) in uids.iter().enumerate() {
+            let s = all.shown.iter().find(|s| s.uid == *uid).unwrap();
+            assert_eq!(s.fp, fingerprint(&format!("Rule {:02}.", i + 1)));
+        }
+        // A cap that ends inside the bodies: the claims past it, and the index, are not shown.
         let at = all.text.find("- 1970-01-09 decision").unwrap();
         let cut = start(all.text[..at].chars().count());
-        assert_eq!(
-            cut.shown,
-            uids[8..].iter().rev().cloned().collect::<Vec<_>>()
-        );
+        let mut kept = uids[8..].to_vec();
+        kept.sort();
+        assert_eq!((shown(&cut, true), shown(&cut, false)), (kept, Vec::new()));
     }
 
     #[test]
@@ -1688,7 +1770,8 @@ mod tests {
         assert_eq!(lines[0], lines[1]);
         let end = all.text.find(&lines[0]).unwrap() + lines[0].len() + 1;
         let cut = start(all.text[..end].chars().count());
-        assert_eq!(cut.shown, vec![uid], "{}", cut.text);
+        let shown: Vec<_> = cut.shown.iter().map(|s| s.uid.as_str()).collect();
+        assert_eq!(shown, [uid.as_str()], "{}", cut.text);
     }
 
     /// Task 8: a row built before the read-time lines carries the ruleset without the format tag:

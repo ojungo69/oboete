@@ -16,13 +16,15 @@ export default function (pi) {
   const textParts = (parts) => (Array.isArray(parts) ? parts : [])
     .filter((p) => p?.type === "text").map((p) => p.text).join("\n");
 
-  const call = (event, cwd, payload) => new Promise((resolve) => {
+  const call = (event, cwd, payload, deadline) => new Promise((resolve) => {
+    const remaining = deadline === undefined ? 2000 : Math.min(2000, deadline - Date.now());
+    if (remaining <= 0) { resolve(""); return; }
     const child = spawn(OBOETE_BIN, [...OBOETE_ARGS, "hook", "pi", event], {
       cwd, stdio: ["pipe", "pipe", "ignore"],
     });
     let out = "";
     const finish = (text) => { clearTimeout(timer); resolve(text); };
-    const timer = setTimeout(() => { child.kill("SIGKILL"); finish(""); }, 2000);
+    const timer = setTimeout(() => { child.kill("SIGKILL"); finish(""); }, remaining);
     child.on("error", () => finish(""));
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (data) => { out += data; });
@@ -31,7 +33,7 @@ export default function (pi) {
     child.stdin.end(payload);
   });
 
-  const send = (event, ctx, extra) => {
+  const send = (event, ctx, extra, deadline) => {
     try {
       // Capture now: Pi may switch sessions before this queued process starts.
       const cwd = ctx.cwd;
@@ -40,7 +42,7 @@ export default function (pi) {
         transcript_path: ctx.sessionManager.getSessionFile() ?? null,
         hook_event_name: event, ...extra,
       });
-      chain = chain.then(() => call(event, cwd, payload)).catch(() => "");
+      chain = chain.then(() => call(event, cwd, payload, deadline)).catch(() => "");
     } catch {
       // A missing executable, closed pipe, or bad payload must never break the agent.
       return Promise.resolve("");
@@ -70,7 +72,8 @@ export default function (pi) {
     if (event.reason === "reload") return;
     pending = "";
     const resumed = ctx.sessionManager.getEntries().some((entry) => entry.type === "message");
-    pending = contextOf(await wait(send("SessionStart", ctx, { source: resumed ? "resume" : "startup" })));
+    const deadline = Date.now() + 2000;
+    pending = contextOf(await wait(send("SessionStart", ctx, { source: resumed ? "resume" : "startup" }, deadline)));
   });
   pi.on("before_agent_start", () => {
     if (!pending) return undefined;
@@ -78,26 +81,33 @@ export default function (pi) {
     pending = "";
     return { message: { customType: "oboete", content, display: false } };
   });
-  pi.on("input", (event, ctx) => {
-    if (event.source !== "extension") send("UserPromptSubmit", ctx, { prompt: event.text });
+  // Pi awaits this before the run starts: what the prompt gets joins the stash.
+  pi.on("input", async (event, ctx) => {
+    if (event.source === "extension") return;
+    // Queue time counts too: an expired prompt must not update shown state after Pi moves on.
+    const deadline = Date.now() + 2000;
+    const text = contextOf(await wait(send("UserPromptSubmit", ctx, { prompt: event.text }, deadline)));
+    if (text) pending = pending ? `${pending}\n${text}` : text;
   });
   pi.on("tool_result", (event, ctx) => {
-    send(event.isError ? "PostToolUseFailure" : "PostToolUse", ctx, {
+    // Capture calls stay queued; send handles rejection and later context calls await the queue.
+    void send(event.isError ? "PostToolUseFailure" : "PostToolUse", ctx, {
       tool_name: event.toolName, tool_input: event.input, tool_response: textParts(event.content),
     });
   });
   pi.on("agent_end", (event, ctx) => {
     const last = [...(event.messages ?? [])].reverse().find((message) => message?.role === "assistant");
-    send("Stop", ctx, { last_assistant_message: last ? textParts(last.content) : "" });
+    void send("Stop", ctx, { last_assistant_message: last ? textParts(last.content) : "" });
   });
   pi.on("session_compact", async (event, ctx) => {
     pending = "";
-    send("PostCompact", ctx, { compact_summary: event.compactionEntry?.summary, trigger: event.reason });
-    pending = contextOf(await wait(send("SessionStart", ctx, { source: "compact" })));
+    const deadline = Date.now() + 2000;
+    void send("PostCompact", ctx, { compact_summary: event.compactionEntry?.summary, trigger: event.reason });
+    pending = contextOf(await wait(send("SessionStart", ctx, { source: "compact" }, deadline)));
   });
   pi.on("session_shutdown", async (event, ctx) => {
     if (event.reason === "reload") return;
-    send("SessionEnd", ctx, { reason: event.reason });
+    void send("SessionEnd", ctx, { reason: event.reason });
     await wait(chain);
   });
 
