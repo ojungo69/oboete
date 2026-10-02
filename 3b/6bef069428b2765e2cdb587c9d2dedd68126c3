@@ -1,0 +1,31 @@
+tests/forget_cli.rs
+  s_17c3dc80287a78::t_7e42aa518741d1 4,179-219,226-227,229
+  s_17c3dc80287a78::t_5f2e3f543fa066 168-178
+  s_17c3dc80287a78::t_590eefbe6833fb 220-225,228,230-233
+src/raw.rs
+  s_17c3dc80287a78::t_bb29228fcd8640 477-483,497,549,554-558,651,980-983
+  s_17c3dc80287a78::t_45669385d0f7c4 984-989,1122,2055
+src/backup.rs
+  s_17c3dc80287a78::t_0f2dd16beac5a7 362
+src/forget.rs
+  s_17c3dc80287a78::t_5eef07b7468e93 19,484-487,515,580-582,585-587,598-600,602-605,812-823,832,834-835,857-862,880,883
+  s_17c3dc80287a78::t_8c0aab75d615b2 325-327
+  s_17c3dc80287a78::t_0f2dd16beac5a7 531,533,564-571,576-579,583,588,590-597,601,606-615
+  s_17c3dc80287a78::t_7db88134081785 516-518,863-879,881-882
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3b6bef069428b2765e2cdb587c9d2dedd68126c3",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
