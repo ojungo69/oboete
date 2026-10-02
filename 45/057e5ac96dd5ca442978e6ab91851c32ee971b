@@ -1,0 +1,21 @@
+docs/milestone-3.md
+  s_59cfa7617c8511::t_be792c43ef24b6 409
+docs/milestone-4.md
+  s_59cfa7617c8511::t_e83da0cc227f10 80,96-331
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "45057e5ac96dd5ca442978e6ab91851c32ee971b",
+  "prompts": {},
+  "sessions": {
+    "s_59cfa7617c8511": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eefe95b4-6610-46b9-a595-cca754873b8e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
