@@ -185,8 +185,8 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
-    /// Print one in full by its id from `search`: a claim's uid (or its first characters), an
-    /// imported document's uid, or a record's `device:seq`
+    /// Print one in full by its id from `search` or the session's start: a claim's uid (or its
+    /// first characters), a card's `op.n`, an imported document's uid, or a record's `device:seq`
     Get { id: String },
     /// Claims, imported history and session starts, newest first (this repository unless --all)
     Timeline {

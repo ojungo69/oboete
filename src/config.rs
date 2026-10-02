@@ -880,7 +880,8 @@ pub struct Inject {
     pub session_start: bool,
     /// The short user-visible status at session start; it never contains stored text.
     pub session_start_note: bool,
-    /// The manifest's size in characters (`SESSION_START_CHARS`): it is stored rendered at 6,000.
+    /// The packet's size in characters (`SESSION_START_CHARS`); the manifest in it is stored rendered
+    /// at `manifest::CAP`.
     pub session_start_chars: usize,
     /// Delivered claims picked for each prompt (D9): off until the Inject harness has measured it.
     pub per_prompt: bool,
@@ -1628,7 +1629,7 @@ model = { gone = "m" }
             Inject::default(),
             Inject {
                 session_start: true,
-                session_start_chars: 6_000,
+                session_start_chars: 9_000,
                 ..Inject::default()
             }
         );
@@ -1651,7 +1652,7 @@ model = { gone = "m" }
         // the defaults, which would inject for a user who turned it off.
         for bad in [
             "[inject]\nsession_start = false\nsession_start_chars = 999\n",
-            "[inject]\nsession_start = false\nsession_start_chars = 6001\n",
+            "[inject]\nsession_start = false\nsession_start_chars = 9001\n",
             "[inject]\nsession_start = \"false\"\n",
             "[inject]\nsesion_start = false\n",
             "[inject]\nsession_start = false\n[inject\n",
@@ -1678,7 +1679,7 @@ model = { gone = "m" }
             (false, 1_500, true, 800)
         );
         for (key, low, high) in [
-            ("session_start_chars", 1_000, 6_000),
+            ("session_start_chars", 1_000, 9_000),
             ("per_prompt_chars", 500, 6_000),
             ("correction_chars", 300, 3_000),
         ] {

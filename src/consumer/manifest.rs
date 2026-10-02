@@ -30,8 +30,9 @@ impl Manifest {
 /// Records per step, as the FTS consumer.
 const BATCH: usize = 500;
 /// ponytail: one size for every agent until spec 1.5's per-agent injection sizes; under Cursor's
-/// 9,500-unit cut with room for the recording-failure line.
-pub const CAP: usize = 6_000;
+/// 9,500-unit cut with room for the recording-failure line, and near claude-mem's 10,000 for its
+/// block alone (docs/cards.md S5).
+pub const CAP: usize = 9_000;
 /// How much of one prompt, reply, command or output a manifest shows.
 const CLIP: usize = 400;
 const FILES: usize = 10;
@@ -49,6 +50,8 @@ const BRIEF: usize = 80;
 /// The index's first line: where the rest is (spec 4.4).
 const TOOLS: &str = "`search` finds more of what is remembered here, `get` shows one in full by \
                      its id, and `timeline` lists the earlier sessions.";
+/// The newest cards session start shows, at most: claude-mem's default (docs/cards.md S4).
+const CARDS: usize = 50;
 const TODOS: usize = 20;
 const SESSIONS: usize = 5;
 /// ponytail: the owner lines a build reads (a negation older than these no longer matters); a
@@ -151,7 +154,8 @@ pub fn text(
     let k = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let manifest = stored(&k, raw, repo, branch, &stamp(rules.version()))?;
     let live = live(&k, raw, repo, branch, session, rules, now)?;
-    let Some((packet, bodies)) = with_delivered(&k, raw, repo, manifest, &live, rules)? else {
+    let Some((packet, bodies)) = with_delivered(&k, raw, repo, manifest, &live, rules, (cap, now))?
+    else {
         return Ok(None);
     };
     let (gated, from) = packet.outbound(rules);
@@ -366,6 +370,7 @@ fn with_delivered(
     manifest: Option<String>,
     live: &str,
     rules: &crate::redact::Rules,
+    (cap, now): (usize, i64),
 ) -> Result<Option<(Mapped, Vec<Body>)>> {
     use crate::claims::{self, Claim};
     let manifest = manifest.unwrap_or_default();
@@ -380,8 +385,12 @@ fn with_delivered(
         })
         .min()
         .unwrap_or(manifest.len());
-    let (mut first, mut middle, mut last) =
-        (Mapped::default(), Mapped::default(), Mapped::default());
+    let (mut first, mut middle, mut digest, mut last) = (
+        Mapped::default(),
+        Mapped::default(),
+        Mapped::default(),
+        Mapped::default(),
+    );
     let (mut bodies, mut middle_bodies, mut last_bodies): (Vec<Body>, Vec<Body>, Vec<Body>) =
         (Vec::new(), Vec::new(), Vec::new());
     if exists(k, "view", "active")? {
@@ -446,14 +455,14 @@ fn with_delivered(
                 }
             }
         }
-        if let Some(digest) = crate::digest::fresh(k, repo, hidden)?
-            && !digest.is_empty()
+        if let Some(lines) = crate::digest::fresh(k, repo, hidden)?
+            && !lines.is_empty()
         {
-            middle.push_str("## Digest of the last session\n");
-            for line in &digest {
-                middle.push_str("- ");
-                middle.append(gate(line, CLIP));
-                middle.push_str("\n");
+            digest.push_str("## Digest of the last session\n");
+            for line in &lines {
+                digest.push_str("- ");
+                digest.append(gate(line, CLIP));
+                digest.push_str("\n");
             }
         }
         if !(units.is_empty() && index.is_empty()) {
@@ -469,10 +478,28 @@ fn with_delivered(
             .into_iter()
             .map(move |(range, s)| (range.start + offset..range.end + offset, s))
     };
+    // The cards after the decisions (docs/cards.md S1), in the room the rest leaves (S5).
+    let chars = |m: &Mapped| m.text.chars().count();
+    let rest = [&first, &middle, &digest, &last]
+        .map(chars)
+        .iter()
+        .sum::<usize>()
+        + manifest.chars().count()
+        + live.chars().count();
+    let name = crate::redact::outbound_with(repo, rules);
+    let name = name
+        .rsplit(['/', '\\'])
+        .find(|p| !p.is_empty())
+        .unwrap_or(&name)
+        .replace(['\n', '\r'], " ");
+    let cards = crate::cards::recent(k, raw, repo, CARDS, rules)?;
+    let block = crate::cards::fitted(&cards, &name, now, &chrono::Local, cap.saturating_sub(rest));
     let mut text = first;
     text.push_str(&manifest[..at]);
     bodies.extend(at_offset(middle_bodies, text.text.len()));
     text.append(middle);
+    text.push_str(block.as_deref().unwrap_or_default());
+    text.append(digest);
     text.push_str(&manifest[at..]);
     text.push_str(live);
     bodies.extend(at_offset(last_bodies, text.text.len()));
@@ -2730,6 +2757,98 @@ extra_rules = [
         worker::run_once(home.path()).unwrap();
         let text = shown(home.path(), &store).unwrap();
         (home, cwd, text)
+    }
+
+    /// A curated window op over records `from` to `to` with a card for each of `titles`.
+    fn cards_op(from: i64, to: i64, titles: &[&str]) -> (crate::raw::OpKind, Value) {
+        let cards: Vec<Value> = titles
+            .iter()
+            .map(|t| {
+                serde_json::json!({"type": "bugfix", "title": t, "subtitle": "", "narrative": "",
+                    "facts": [], "concepts": [], "files_read": [], "files_modified": []})
+            })
+            .collect();
+        let op = serde_json::json!({"outcome": "curated", "summary": "", "from_seq": from,
+            "from_offset": null, "to_seq": to, "to_offset": null, "elided": [],
+            "observations": cards});
+        (crate::raw::OpKind::Window, op)
+    }
+
+    /// docs/cards.md S1, S4: the repository's cards, as claude-mem's block, after the owner's
+    /// decisions and before the checkout's state lines; another repository's are not shown.
+    #[test]
+    fn session_start_shows_the_repositorys_cards_after_the_decisions() {
+        let (_h, _c, text) = start(
+            |store, cwd| {
+                let (decision, _) = claimed(
+                    store,
+                    said(cwd, DAY, "Use tabs."),
+                    "decision",
+                    "decided",
+                    vec![],
+                );
+                let elsewhere = Event {
+                    repo: Some("other".into()),
+                    ..ev("tool", "s9", DAY, cwd, serde_json::json!({}))
+                };
+                let other = store.append(&elsewhere).unwrap();
+                vec![
+                    decision,
+                    cards_op(1, 7, &["Ours"]),
+                    cards_op(other, other, &["Theirs"]),
+                ]
+            },
+            None,
+        );
+        let block = text.find("# [r] recent context, ").expect(&text);
+        assert!(
+            text.find("## Decisions and open items").unwrap() < block,
+            "{text}"
+        );
+        assert!(
+            block < text.find("## Owner's directives").unwrap(),
+            "{text}"
+        );
+        assert!(text.contains(" ● Ours\n"), "{text}");
+        assert!(!text.contains("Theirs"), "{text}");
+    }
+
+    /// S5: the cards take only the room the rest of the packet leaves, halved until they fit, and
+    /// the rest is not cut for them.
+    #[test]
+    fn the_cards_take_only_the_room_the_packet_leaves() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let titles: Vec<String> = (0..8).map(|i| format!("Card number {i}")).collect();
+        let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
+        store.append_ops(&[cards_op(1, 7, &titles)]).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+        let at = |cap: usize| {
+            text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
+                .unwrap()
+                .unwrap()
+                .text
+        };
+        let whole = at(usize::MAX);
+        let start = whole.find("# [r] recent context, ").expect(&whole);
+        let end = start + whole[start..].find("\n## ").unwrap() + 1;
+        let block = &whole[start..end];
+        assert!(block.contains(".7 ") && block.contains(".0 "), "{block}");
+        let rest = whole.chars().count() - block.chars().count();
+        let fitted = at(rest + block.chars().count() - 1);
+        assert!(
+            fitted.contains(".3 ") && !fitted.contains(".4 "),
+            "{fitted}"
+        );
+        assert!(fitted.ends_with(&whole[end..]), "{fitted}");
+        assert!(fitted.chars().count() < rest + block.chars().count());
+        // No room for one card: no block, and the rest as it was.
+        let none = at(rest);
+        assert!(!none.contains("recent context"), "{none}");
+        assert_eq!(none, format!("{}{}", &whole[..start], &whole[end..]));
     }
 
     /// Spec 3.4, owner decision 31 (#295 row 1): an earlier decision that a curator link from a

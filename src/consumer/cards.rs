@@ -373,6 +373,41 @@ mod tests {
         assert_eq!(titles(home.path()), ["Again.", "Kept back."]);
     }
 
+    /// docs/cards.md S6: a card is read by its ID, `<op seq>.<n>`, through the reader's rules;
+    /// an ID of no current card, or of none at all, gives none.
+    #[test]
+    fn a_card_is_read_by_its_id_as_any_reader_reads_it() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        two_records(&mut raw);
+        let (kind, mut op) = window(1, 1, "curated", "The summary.");
+        op["observations"] = json!([
+            {"type": "bugfix", "title": "First", "subtitle": "", "narrative": "",
+             "facts": [], "concepts": [], "files_read": [], "files_modified": []},
+            {"type": "change", "title": "Second", "subtitle": "", "narrative": "",
+             "facts": [], "concepts": [], "files_read": [], "files_modified": []}
+        ]);
+        raw.append_ops(&[(kind, op), window(2, 2, "curated", "Third.")])
+            .unwrap();
+        crate::worker::run_once(home.path()).unwrap();
+        let get = |raw: &Raw, id: &str| {
+            let k = crate::knowledge::open(home.path()).unwrap();
+            cards::get(&k, raw, id, &Rules::default())
+                .unwrap()
+                .map(|c| c.title)
+        };
+        assert_eq!(get(&raw, "1.1").as_deref(), Some("Second"));
+        assert_eq!(get(&raw, " 2.0 ").as_deref(), Some("Third."));
+        for none in ["1.2", "3.0", "1", "1.x", "abc", ""] {
+            assert_eq!(get(&raw, none), None, "{none}");
+        }
+        let device = raw.device().to_owned();
+        raw.append_tombstone(raw::Target::Record { device, seq: 1 })
+            .unwrap();
+        assert_eq!(get(&raw, "1.1"), None);
+        assert_eq!(get(&raw, "2.0").as_deref(), Some("Third."));
+    }
+
     /// K4: a card is hidden by a removal its window op does not list: the curator read what was
     /// removed, and the card may say it. What the op lists was gone before the window was cut,
     /// and the same removal made again (a restore brought the text back) is still that one.

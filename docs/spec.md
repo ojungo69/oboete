@@ -329,7 +329,8 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
   - explicit global preferences;
   - the checkout's manifest;
   - delivered decisions (3.4), owner-requested or accepted open items with status `decided`, and lessons: about 10 with bodies, chosen by relation to the manifest and recency and listed newest first, so a later decision is read before an earlier one it may overturn (3.4, owner decision 31); the rest as a one-line index with get/search/timeline guidance;
-  - the digest, only if fresh.
+  - the digest, only if fresh;
+  - after the decisions, claude-mem's recent-context block of the repository's cards: a row per card by day, in local time, within the room the rest leaves (owner direction 2026-10-03: claude-mem's behaviour, look and prompts on oboete's engine; docs/cards.md S1-S6).
 - The injection is fenced as data and attributed.
 - **Open-item approval (#320, owner-delegated decision, 2026-10-02).** Delivery requires `status = decided`, which the existing curator and evidence gates establish from the owner's request or acceptance. `speaker = user` alone is insufficient: pasted suggestions and questions can remain proposed. Proposed, unverified, done and retracted open items retain their real status in search, get, timeline and history, and are lowered below the current search rank unless history is requested. They are not delivered as unfinished owner work. This same approval condition applies to the shortlist, prompt injection, compaction reinjection and the manifest. An explicit owner correction to `decided` approves the item; status downgrades and closure still produce the existing correction notices. No model status is promoted merely to make it eligible, and decisions, preferences, lessons and their delivery-link rules are unchanged.
 

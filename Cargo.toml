@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 aho-corasick = "1"
 anyhow = "1.0.104"
+# Local time for session start's timeline (claude-mem shows local time); already in the tree.
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 getrandom = "0.4"
 httparse = "1"

@@ -1368,6 +1368,11 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
     let Some((raw, k)) = stores(home)? else {
         return Ok(None);
     };
+    // A card by the ID session start shows it under (docs/cards.md S6): `<op seq>.<n>`, a dot
+    // that no uid, record key or imported uid has.
+    if let Some(c) = crate::cards::get(&k, &raw, id, &redact::Rules::load(home)?)? {
+        return Ok(Some(card_text(&c)));
+    }
     Ok(match named(&raw, &k, id)? {
         None => None,
         Some(Named::Claim(uid)) => claim_text(&raw, &k, &uid)?,
@@ -1390,6 +1395,44 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
         Some(Named::Imported(uid)) => imported_text(&k, &uid)?,
         Some(Named::Record(id, e)) => Some(record_text(&id, &e)),
     })
+}
+
+/// A card in full, as its reader gave it (gated, K6): its ID, time, type and repository, then
+/// claude-mem's fields, each part only when it has something.
+fn card_text(c: &crate::cards::Card) -> String {
+    let mut out = format!(
+        "{} {} {} {}",
+        c.id(),
+        crate::db::utc(c.ts),
+        c.kind.as_deref().unwrap_or("summary"),
+        c.repo.as_deref().unwrap_or("no repository")
+    );
+    if let (Some(agent), Some(session)) = (&c.agent, &c.session) {
+        out.push_str(&format!(" ({agent} session {session})"));
+    }
+    out.push_str(&format!("\n{}\n", c.title));
+    if !c.subtitle.is_empty() {
+        out.push_str(&format!("{}\n", c.subtitle));
+    }
+    if !c.narrative.is_empty() {
+        out.push_str(&format!("\n{}\n", c.narrative));
+    }
+    if !c.facts.is_empty() {
+        out.push_str("\nfacts:\n");
+        for f in &c.facts {
+            out.push_str(&format!("- {f}\n"));
+        }
+    }
+    for (name, list) in [
+        ("concepts", &c.concepts),
+        ("files read", &c.files_read),
+        ("files modified", &c.files_modified),
+    ] {
+        if !list.is_empty() {
+            out.push_str(&format!("{name}: {}\n", list.join(", ")));
+        }
+    }
+    out
 }
 
 /// After a claim's status, where one is printed: said only of a muted claim (spec 6.1).
@@ -2730,6 +2773,46 @@ mod tests {
             "{anchor:#}"
         );
         assert_eq!(get(home, &claim).unwrap().unwrap(), full);
+    }
+
+    /// docs/cards.md S6: `get` shows a card in full by the ID session start shows it under.
+    #[test]
+    fn get_shows_a_card_in_full_by_its_id() {
+        let mut s = Store::new();
+        let seq = s.said("s1", R, 1_000, "Fix the parser.");
+        let op = serde_json::json!({"outcome": "curated", "summary": "", "from_seq": seq,
+            "from_offset": null, "to_seq": seq, "to_offset": null, "elided": [],
+            "observations": [{"type": "bugfix",
+                "title": "The parser no longer drops the last line",
+                "subtitle": "A missing newline lost it.",
+                "narrative": "It read up to a newline, and the last line has none.",
+                "facts": ["read_line returned at EOF.", "The fix reads to the end."],
+                "concepts": ["problem-solution", "gotcha"],
+                "files_read": ["src/a.rs"], "files_modified": ["src/b.rs"]}]});
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Window, op)])
+            .unwrap();
+        s.run();
+        let home = s.home.path();
+        let op_seq: i64 = crate::knowledge::open(home)
+            .unwrap()
+            .query_row("SELECT op_seq FROM cards", [], |r| r.get(0))
+            .unwrap();
+        let id = format!("{op_seq}.0");
+        let shown = get(home, &id).unwrap().unwrap();
+        let first = shown.lines().next().unwrap();
+        assert!(first.starts_with(&format!("{id} ")), "{shown}");
+        assert!(first.contains(" bugfix ") && first.contains(R), "{shown}");
+        for part in [
+            "The parser no longer drops the last line\nA missing newline lost it.\n\n\
+             It read up to a newline, and the last line has none.\n",
+            "\nfacts:\n- read_line returned at EOF.\n- The fix reads to the end.\n",
+            "\nconcepts: problem-solution, gotcha\n",
+            "\nfiles read: src/a.rs\nfiles modified: src/b.rs\n",
+        ] {
+            assert!(shown.contains(part), "{part:?} in {shown}");
+        }
+        assert_eq!(get(home, &format!("{op_seq}.1")).unwrap(), None);
     }
 
     /// The timeline: claims, imported documents and session starts, newest first, or around an

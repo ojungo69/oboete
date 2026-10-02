@@ -191,10 +191,67 @@ window carries in, within its existing budget.
 
 1. **The table** (this note's K1 to K7 for ops as they are today): the consumer, the reader,
    `removed` in the window op.
-2. **The curator writes cards**: `observations` in its answer (C1 to C4).
-3. **Session summaries** (claude-mem's request, investigated, learned, completed, next steps),
-   then **session start** in claude-mem's order after the owner's decisions, the **page**, the
-   **tools** and the **note on a file**, each its own unit.
+2. **The curator writes cards**: `observations` in its answer (C1 to C5).
+3. **Session start shows the cards** (S1 to S6 below), then **session summaries** (claude-mem's
+   request, investigated, learned, completed, next steps, with their rows and fields in the same
+   block), the **page**, the **tools** and the **note on a file**, each its own unit.
+
+## Session start shows the cards (slice 3)
+
+claude-mem's session start is one block: a header, a legend, a format line, a line on how to
+fetch more, then the recent observations and session summaries by day (its
+`src/services/context/` at 039c6160). oboete's packet keeps its own sections and gains that
+block.
+
+S1. **Where.** After the owner's decisions and open items (oboete's packet puts them first), before
+the digest of the last session, which the latest summary's fields replace in the next unit, and
+before the checkout's state lines (todo list, last exchange, files touched) and the live lines.
+
+S2. **What.** claude-mem's model text, as its format gives it, without what oboete has no data
+for yet:
+
+```text
+# [<repository name>] recent context, 2026-10-03 7:37am GMT+9
+
+Legend: ●bugfix ◆feature ↻refactor ✓change ○discovery ⚖decision ⚠security_alert ⚷security_note ⊘sensitive
+Format: ID TIME TYPE TITLE
+Fetch details: get(ID) | Search: search(query)
+
+### Oct 2, 2026
+412.0 9:41p ○ The worker leaves a lock it no longer holds
+413.0 " ✓ The lock file is removed on exit
+### Oct 3, 2026
+420.1 6:05a ● Two workers no longer race for one lock
+```
+
+- No `Mode:` line: oboete has one set of types. No `🎯session` in the legend and no session rows
+  until session summaries exist (next unit). No `Stats:` line and no footer: claude-mem counts
+  the tokens each observation's work took, and oboete does not count a window's.
+- The times are local, as claude-mem's are: the header's date and `h:mmam` with the offset as
+  `GMT+9`, each day `Mon D, YYYY`, each row `H:MMa` or `H:MMp`, and `"` for a row in the same
+  minute as the row before it that day.
+
+S3. **Rows.** `<ID> <TIME> <ICON> <title>`, claude-mem's compact row, the oldest first. The icon
+is the type's (the legend's); a card without a type (a window's summary, K1) has `📝`, claude-mem's
+icon for an unknown type. The ID is the card's window op and place, `<op seq>.<n>`: a dot, so it
+is never read as a claim's uid, whose prefix is hexadecimal, nor as a record's `device:seq`.
+`ponytail:` op seqs are one device's; a device in the ID when sync brings another device's cards
+(milestone 6).
+
+S4. **Which cards.** The repository's newest current cards, at most 50 (claude-mem's default),
+read through `cards::recent` (K3, K4, K6), of every agent: claude-mem shows only the calling
+agent's by default, and one memory across agents is what oboete is for.
+
+S5. **Size.** The packet's cap rises from 6,000 to 9,000 characters: claude-mem's block alone
+may take 10,000, and Cursor drops a context over 10,000 (oboete keeps it under its 9,500 units).
+The block gets the room the rest of the packet leaves and is fitted as claude-mem fits its own:
+the number of cards halves until it fits, down to one; with no room for one there is no block.
+The rest of the packet is never cut for it.
+
+S6. **`get` shows a card.** The fetch line names `get`, so `get <op seq>.<n>` (CLI and MCP)
+prints the card in full: its type, title, subtitle, narrative, facts, concepts, files read and
+modified, date, agent and session, through the same reader (K4, K6). An ID of no current card
+says so.
 
 ## Tests of slice 1 (through `worker::run_once` and `cards::recent`)
 
@@ -232,3 +289,18 @@ window carries in, within its existing budget.
 8. Every field of a curator's card is gated when it is read.
 9. The prompt keeps the summary, the cards and the claims to the numbered lines (C1a).
 
+
+## Tests of slice 3 (through `cards::block`, `consumer::manifest::text` and `search::b::get`)
+
+1. The block is claude-mem's recent context: its header with the repository's name and the local
+   time and offset, the legend, the format and fetch lines, the days oldest first, a row per card
+   with its ID, local time (`"` in the minute of the row before it), icon and title, and `📝` for a
+   card without a type.
+2. The block halves its cards, the newest kept, until it fits its room; with no room for one, or
+   no card, there is none.
+3. Session start shows the repository's cards after the decisions and before the state lines, and
+   not another repository's.
+4. The cards take only the room the rest of the packet leaves, and the rest is not cut for them.
+5. A card is read by its ID through the reader's rules (K4); an ID of no current card gives none.
+6. `get` shows a card in full: its ID, time, type and repository, title, subtitle, narrative,
+   facts, concepts and files.
