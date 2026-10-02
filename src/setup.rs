@@ -152,9 +152,19 @@ fn status_line(agent: &str) -> String {
         .iter()
         .find(|(a, _)| *a == agent)
         .map(|(_, cells)| POINTS.iter().zip(cells).filter(|(_, t)| !t.is_empty()));
-    let points: Vec<&str> = tested.into_iter().flatten().map(|(p, _)| *p).collect();
+    let points: Vec<&str> = tested
+        .into_iter()
+        .flatten()
+        .map(|(p, _)| {
+            if *p == "resume" && matches!(agent, "claude" | "codex" | "pi") {
+                "resume (existing context reused)"
+            } else {
+                *p
+            }
+        })
+        .collect();
     format!(
-        "{agent}: injection at {} is implemented and tested, not yet checked in a live session",
+        "{agent}: injection handling at {} is implemented and tested, not yet checked in a live session",
         points.join(", ")
     )
 }
@@ -2381,7 +2391,7 @@ mod tests {
         }
         assert_eq!(
             status_line("pi"),
-            "pi: injection at start, resume, compaction, prompt, correction, failure line is \
+            "pi: injection handling at start, resume (existing context reused), compaction, prompt, correction, failure line is \
              implemented and tested, not yet checked in a live session"
         );
     }
