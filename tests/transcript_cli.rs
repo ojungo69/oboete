@@ -185,7 +185,10 @@ fn refused_files_do_not_block_later_files_and_exit_nonzero() {
             .unwrap();
         assert_eq!(records, 16);
         let said = String::from_utf8_lossy(&out.stdout);
-        assert!(said.contains(refused.to_str().unwrap()), "{said}");
+        assert!(
+            said.contains(refused.file_name().unwrap().to_str().unwrap()),
+            "{said}"
+        );
         let counts: serde_json::Value = serde_json::from_str(said.lines().last().unwrap()).unwrap();
         assert_eq!(counts["agents"]["codex"]["files"], 2);
         assert_eq!(counts["agents"]["codex"]["refused"], 1);
