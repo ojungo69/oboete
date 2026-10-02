@@ -579,7 +579,7 @@ impl Viewer {
                     "next": next,
                 })
             }
-            // Its text is SessionStart's, which `hook::start_text` gated itself.
+            // Its text is SessionStart's, which `hook::start_text_read` gated itself.
             "context" => return Ok(Response::json(&self.context(arg("repo"))?)),
             "repos" => {
                 let (current, branch) = self.checkout()?;

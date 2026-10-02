@@ -1217,7 +1217,8 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         let raw = raw::open(home.path()).unwrap();
         let settings = Settings::default();
         let shown =
-            crate::hook::start_text(home.path(), &raw, "github.com/o/r", "", "s1", &settings)
+            crate::hook::start_text_read(home.path(), &raw, "github.com/o/r", "", "s1", &settings)
+                .unwrap()
                 .map(|s| s.text)
                 .unwrap_or_default();
         assert!(!shown.contains("We use tabs."), "{shown}");
@@ -1243,7 +1244,8 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         // The backlog's age in minutes moves with the clock between the two reads.
         let age = regex::Regex::new(r"/ \d+ min").unwrap();
         let manifest = |raw: &Raw| {
-            crate::hook::start_text(home.path(), raw, "github.com/o/r", "", "L", &settings)
+            crate::hook::start_text_read(home.path(), raw, "github.com/o/r", "", "L", &settings)
+                .unwrap()
                 .map(|m| age.replace_all(&m.text, "/ _ min").into_owned())
         };
         let before = manifest(&raw);

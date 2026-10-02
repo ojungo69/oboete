@@ -16,6 +16,8 @@ fn hook_output(
         .arg("--home")
         .arg(home)
         .args(["hook", agent, event])
+        // No worker is wanted for a hook's output.
+        .env("OBOETE_NO_SPAWN", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -106,6 +108,27 @@ fn inject_settings_that_do_not_load_give_no_note() {
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("nothing injected"),
         "{out:?}"
+    );
+}
+
+/// A store that cannot be read is not an empty one: the line says so instead of "no memory yet"
+/// (Codex on #361). Recording still works, so no failure line stands in for it.
+#[test]
+fn session_start_note_says_when_memory_could_not_be_read() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir(home.path().join("knowledge.db")).unwrap();
+    let out = hook_output(
+        home.path(),
+        "claude",
+        "SessionStart",
+        r#"{"session_id":"s","source":"startup"}"#,
+    );
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("manifest not read"), "{stderr}");
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"\"},\"systemMessage\":\"oboete: 記録は有効です。記憶を読み出せませんでした。oboete doctor で状態を確認できます。\"}\n"
     );
 }
 

@@ -71,6 +71,8 @@ fn run_io(
     // Task 9: the manifest this call injects for the checkout its payload names, and whether it
     // is an injection point at all (Task 2b: each agent has its own, see `injects`).
     let mut manifest = None;
+    // Whether that manifest could not be read, which is not a checkout with none.
+    let mut unread = false;
     let mut injecting = false;
     // Task 8 Step 6: what this call's prompt gets (spec 4.2, 4.6), and the session the shown set
     // is kept under.
@@ -173,7 +175,11 @@ fn run_io(
         }
         // A manifest that cannot be read is no recording failure: the row is written.
         if injecting {
-            manifest = checkout_manifest(home, &store, &labels, &settings);
+            manifest = checkout_manifest(home, &store, &labels, &settings).unwrap_or_else(|e| {
+                eprintln!("oboete: manifest not read: {e:#}");
+                unread = true;
+                None
+            });
         }
         // The prompt point (Step 6), after the record, as SessionStart's manifest: nothing read
         // there fails the hook. Grok's UserPromptSubmit keeps its picks for its next tool call.
@@ -265,11 +271,14 @@ fn run_io(
         .flatten()
         .filter(|(inject, _)| inject.session_start_note)
         .map(|(inject, japanese)| {
-            let shown = manifest
-                .as_ref()
-                .filter(|m| !m.text.is_empty())
-                .map(|m| m.shown.len());
-            session_start_note(japanese, inject.session_start, shown)
+            let packet = manifest.as_ref().filter(|m| !m.text.is_empty());
+            let handed = match packet {
+                _ if !inject.session_start => Handed::Off,
+                _ if unread => Handed::Unread,
+                Some(m) => Handed::Claims(m.shown.len()),
+                None => Handed::Nothing,
+            };
+            session_start_note(japanese, handed)
         });
         let (text, kept) = assembled(agent, line, &blocks);
         // The shown set follows what the agent gets: a line a cut dropped or the fence changed is
@@ -377,25 +386,42 @@ fn injection(agent: &str, event: &str, text: &str) -> Value {
     }
 }
 
-/// The line a person sees at a session's start: whether memory was handed over (`shown`: how many
-/// claim lines, `None` for an empty packet) or is switched off (`enabled`). It never holds stored
-/// text, a token or an address.
-fn session_start_note(japanese: bool, enabled: bool, shown: Option<usize>) -> String {
-    match (japanese, enabled, shown) {
-        (true, false, _) => {
+/// What a session's start handed over, for the line a person sees.
+enum Handed {
+    /// `[inject] session_start = false`.
+    Off,
+    /// The memory could not be read: not the same as none.
+    Unread,
+    /// An empty packet.
+    Nothing,
+    /// This many claim lines.
+    Claims(usize),
+}
+
+/// The line a person sees at a session's start. It never holds stored text, a token or an
+/// address.
+fn session_start_note(japanese: bool, handed: Handed) -> String {
+    match (japanese, handed) {
+        (true, Handed::Off) => {
             "oboete: 記録は有効です。セッション開始時の記憶の受け渡しはオフになっています。".into()
         }
-        (true, true, Some(n)) => format!(
+        (true, Handed::Unread) => {
+            "oboete: 記録は有効です。記憶を読み出せませんでした。oboete doctor で状態を確認できます。".into()
+        }
+        (true, Handed::Claims(n)) => format!(
             "oboete: 記憶は有効です。このリポジトリの記憶 {n} 件を渡しました。画面を開くには oboete view --open"
         ),
-        (true, true, None) => "oboete: 記録は有効です。このリポジトリには、まだ渡せる記憶がありません。画面を開くには oboete view --open".into(),
-        (false, false, _) => {
+        (true, Handed::Nothing) => "oboete: 記録は有効です。このリポジトリには、まだ渡せる記憶がありません。画面を開くには oboete view --open".into(),
+        (false, Handed::Off) => {
             "oboete: recording is on. Handing memory over at session start is switched off.".into()
         }
-        (false, true, Some(n)) => format!(
+        (false, Handed::Unread) => {
+            "oboete: recording is on. Memory could not be read. Check with: oboete doctor".into()
+        }
+        (false, Handed::Claims(n)) => format!(
             "oboete: memory is on. {n} remembered items for this repository were handed over. Open the page with: oboete view --open"
         ),
-        (false, true, None) => "oboete: recording is on. This repository has no memory to hand over yet. Open the page with: oboete view --open".into(),
+        (false, Handed::Nothing) => "oboete: recording is on. This repository has no memory to hand over yet. Open the page with: oboete view --open".into(),
     }
 }
 
@@ -472,16 +498,17 @@ pub fn record(
 /// model provider: its manifest with the delivered claims (`consumer::manifest::text`), which a
 /// checkout with no manifest to show gets too; gated with the rules as they are now, so a rule
 /// added after the text was built already hides its value (spec 6.4), and cut to its cap from the
-/// end, where the index is. Text that cannot be read is none, never a failed hook.
+/// end, where the index is. Text that cannot be read is an error its caller logs, never a failed
+/// hook.
 fn checkout_manifest(
     home: &Path,
     store: &crate::raw::Raw,
     labels: &Value,
     settings: &crate::capture::Settings,
-) -> Option<Start> {
+) -> Result<Option<Start>> {
     let (session, repo, branch) = crate::capture::checkout(labels, settings);
     let session = own_session(session, store);
-    start_text(
+    start_text_read(
         home,
         store,
         &repo,
@@ -493,24 +520,9 @@ fn checkout_manifest(
 
 /// SessionStart's manifest for the checkout (`repo`, `branch`) shown to `session`, the labels as
 /// `checkout_manifest` reads them from a hook's fields: gated with the rules as they are now and
-/// cut to `[inject]`'s size. It writes nothing (milestone 4 D11: the viewer's Context page shows it
-/// for any checkout).
-pub fn start_text(
-    home: &Path,
-    store: &crate::raw::Raw,
-    repo: &str,
-    branch: &str,
-    session: &str,
-    settings: &crate::capture::Settings,
-) -> Option<Start> {
-    start_text_read(home, store, repo, branch, session, settings).unwrap_or_else(|e| {
-        eprintln!("oboete: manifest not read: {e:#}");
-        None
-    })
-}
-
-/// `start_text` with the manifest's read error returned, which a hook only logs: the viewer's
-/// Context page answers it (D11: 503 for a store a restore or a rebuild holds).
+/// cut to `[inject]`'s size. It writes nothing. A read error is returned: a hook logs it and says
+/// so in its line for the person, and the viewer's Context page, which shows this for any
+/// checkout, answers it (milestone 4 D11: 503 for a store a restore or a rebuild holds).
 pub fn start_text_read(
     home: &Path,
     store: &crate::raw::Raw,
@@ -1176,7 +1188,7 @@ fn injection_packet(home: &Path, cwd: &Path, session: Option<&str>) -> (String, 
         let settings = crate::capture::Settings::load(home)?;
         let store = crate::raw::open_within(home, Duration::from_secs(2))?;
         let labels = json!({"session_id": session.unwrap_or("unknown"), "cwd": cwd});
-        Ok(checkout_manifest(home, &store, &labels, &settings))
+        checkout_manifest(home, &store, &labels, &settings)
     })()
     .unwrap_or_else(|e| {
         eprintln!("oboete: manifest not read: {e:#}");
