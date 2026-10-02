@@ -490,7 +490,8 @@ impl Raw {
         if let Some(c) = batch.iter().find(|c| is_live(&c.event.source)) {
             anyhow::bail!("an import cannot record a {} record", c.event.source);
         }
-        let tx = begin_batch(&mut self.conn)?;
+        // No hook imports: the batch waits for another writer as a non-hook open does (#362).
+        let tx = begin_batch(&mut self.conn, crate::db::OPEN_WRITE_WAIT)?;
         let from_seq = next_seq(&tx, &self.device)?;
         let mut seqs = Vec::with_capacity(batch.len());
         for c in batch {
@@ -919,7 +920,7 @@ impl Raw {
     /// it yields commit together, and with them the curation checkpoint (D2).
     pub fn append_ops(&mut self, ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<i64>> {
         let bodies = within_batch_cap(ops)?;
-        let tx = begin_batch(&mut self.conn)?;
+        let tx = begin_batch(&mut self.conn, Duration::ZERO)?;
         let seqs = insert_ops(&tx, &self.device, &bodies)?;
         tx.commit()?;
         Ok(seqs)
@@ -1762,12 +1763,16 @@ fn masked(body: &str, offset: i64, length: i64) -> String {
 }
 
 /// SQLite's increasing busy sleeps miss the short gaps between hooks' writes. Poll only the
-/// batch's BEGIN at 1 ms, within the connection's existing timeout, then restore that timeout
-/// before its statements and commit. Nothing in an acquired transaction is retried.
-fn begin_batch(conn: &mut Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+/// batch's BEGIN at 1 ms, within the connection's existing timeout or `wait` when that is longer,
+/// then restore that timeout before its statements and commit. Nothing in an acquired
+/// transaction is retried.
+fn begin_batch(
+    conn: &mut Connection,
+    wait: Duration,
+) -> rusqlite::Result<rusqlite::Transaction<'_>> {
     let timeout: u32 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
     let timeout = Duration::from_millis(timeout.into());
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now() + timeout.max(wait);
     conn.busy_timeout(Duration::ZERO)?;
     let result = loop {
         match rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate) {
@@ -1965,6 +1970,12 @@ mod tests {
         assert_eq!(once.len(), "aé日b".len());
     }
 
+    /// Whether `e` is SQLite's "database is locked".
+    fn busy(e: &anyhow::Error) -> bool {
+        e.downcast_ref::<rusqlite::Error>()
+            .is_some_and(|e| e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy))
+    }
+
     #[test]
     fn two_writers_get_consecutive_seqs_and_both_land() {
         let home = tempfile::tempdir().unwrap();
@@ -1975,8 +1986,18 @@ mod tests {
                 .map(|i| {
                     s.spawn(move || {
                         let mut r = open(p).unwrap();
+                        // A writer in a tight loop can keep the other out past the busy timeout
+                        // on a slow disk (#362): this is about the seqs, so it asks again.
                         (0..50)
-                            .map(|n| r.append(&test_event(&format!("{i}-{n}"))).unwrap())
+                            .map(|n| {
+                                loop {
+                                    match r.append(&test_event(&format!("{i}-{n}"))) {
+                                        Ok(seq) => break seq,
+                                        Err(e) if busy(&e) => continue,
+                                        Err(e) => panic!("{e:#}"),
+                                    }
+                                }
+                            })
                             .collect::<Vec<_>>()
                     })
                 })
@@ -2449,23 +2470,27 @@ mod tests {
                     .unwrap()
             };
             assert_eq!(timeout(&raw), 2_000);
-            raw.conn.busy_timeout(Duration::from_millis(100)).unwrap();
-            let writer = Connection::open(home.path().join("raw.db")).unwrap();
-            writer.execute_batch("BEGIN IMMEDIATE").unwrap();
-            let started = Instant::now();
-            let error = append(&mut raw).unwrap_err();
-            assert_eq!(
-                error
-                    .downcast_ref::<rusqlite::Error>()
-                    .unwrap()
-                    .sqlite_error_code(),
-                Some(rusqlite::ErrorCode::DatabaseBusy)
-            );
-            assert!(started.elapsed() >= Duration::from_millis(100));
-            assert!(started.elapsed() < Duration::from_secs(1));
-            assert_eq!(timeout(&raw), 100);
-            assert_eq!((raw.max_seq().unwrap(), raw.max_op_seq().unwrap()), (0, 0));
-            writer.execute_batch("ROLLBACK").unwrap();
+            // An op's batch gives up at the connection's timeout; an import waits longer
+            // (`an_imported_batch_waits_past_the_busy_timeout_for_a_writer`).
+            if !records {
+                raw.conn.busy_timeout(Duration::from_millis(100)).unwrap();
+                let writer = Connection::open(home.path().join("raw.db")).unwrap();
+                writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+                let started = Instant::now();
+                let error = append(&mut raw).unwrap_err();
+                assert_eq!(
+                    error
+                        .downcast_ref::<rusqlite::Error>()
+                        .unwrap()
+                        .sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy)
+                );
+                assert!(started.elapsed() >= Duration::from_millis(100));
+                assert!(started.elapsed() < Duration::from_secs(1));
+                assert_eq!(timeout(&raw), 100);
+                assert_eq!((raw.max_seq().unwrap(), raw.max_op_seq().unwrap()), (0, 0));
+                writer.execute_batch("ROLLBACK").unwrap();
+            }
 
             // A non-lock error returns promptly and restores the original timeout too.
             raw.conn.busy_timeout(Duration::from_secs(2)).unwrap();
@@ -2508,6 +2533,32 @@ mod tests {
     /// D6: a batch of imported records, their ledger rows and the checkpoint op commit together;
     /// the op says through which seq the batch went, and each key's furthest checkpoint reads
     /// back by its prefix.
+    /// #362: an import is no hook, so its batch waits for another writer as a non-hook open does
+    /// (`db::OPEN_WRITE_WAIT`), not for the connection's short busy timeout: a pass beside a busy
+    /// agent stopped with "database is locked".
+    #[test]
+    fn an_imported_batch_waits_past_the_busy_timeout_for_a_writer() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        raw.conn.busy_timeout(Duration::from_millis(50)).unwrap();
+        let writer = open(home.path()).unwrap();
+        writer.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let seqs = std::thread::scope(|s| {
+            let import = s.spawn(|| raw.append_imported(&[imported("a")], "v9", None));
+            std::thread::sleep(Duration::from_millis(400));
+            assert!(!import.is_finished(), "it gave up at the busy timeout");
+            writer.conn.execute_batch("ROLLBACK").unwrap();
+            import.join().unwrap().unwrap()
+        });
+        assert_eq!(seqs, [1]);
+        // Its own timeout is back for what follows.
+        let timeout: u32 = raw
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 50);
+    }
+
     #[test]
     fn an_imported_batch_lands_with_its_ledger_and_checkpoint() {
         let home = tempfile::tempdir().unwrap();
