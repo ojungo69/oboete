@@ -236,6 +236,35 @@ else:
     return str(binary), str(source), commands
 
 
+@pytest.mark.parametrize('location', ['absolute', 'parent'])
+def test_run_keeps_worker_backups_inside_its_copy(harness, tmp_path, location):
+    import inject
+    binary, source, commands = harness
+    outside = (tmp_path / 'outside' if location == 'absolute'
+               else Path(common.E, 'inject', 'outside'))
+    outside.mkdir(parents=True)
+    sentinel = outside / 'sentinel'
+    sentinel.write_text('kept')
+    configured = str(outside) if location == 'absolute' else '../outside'
+    config = Path(source, 'config.toml')
+    config.write_text(config.read_text() + f'\n[backup]\ndir = {json.dumps(configured)}\n')
+    script = Path(binary)
+    script.write_text(script.read_text().replace('command = args[2]\n', '''command = args[2]
+if command == 'worker':
+    backup = pathlib.Path(config.get('backup', {}).get('dir', 'backups'))
+    backup = backup if backup.is_absolute() else home / backup
+    backup.mkdir(parents=True, exist_ok=True)
+    (backup / 'worker-created').write_text('new backup')
+    sys.exit(1)
+'''))
+    with pytest.raises(SystemExit, match='private text is not printed'):
+        inject.main(['run', '--binary', binary, '--dev-home', source])
+    assert any(argv[3] == 'worker' for argv, _ in commands)
+    assert sentinel.read_text() == 'kept'
+    assert not (outside / 'worker-created').exists()
+    assert not list(Path(common.E, 'inject').glob('home-*'))
+
+
 def test_run_sweeps_a_drained_copy_and_uses_each_repo_stdin_and_fresh_session(harness, capsys):
     import inject
     binary, source, commands = harness

@@ -13,6 +13,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 
 import common
+import inject
 import m3
 
 
@@ -54,13 +55,14 @@ def environment(no_spawn=False):
 
 @contextmanager
 def copied_home(home, prefix, per_prompt):
+    source_files = inject.frozen_home(home, 'dev', None)
     with tempfile.TemporaryDirectory(prefix=prefix + '-', dir=directory()) as copied:
         shutil.copytree(home, copied, dirs_exist_ok=True)
         common.owner_only_tree(copied)
-        # As in m3.replay: no providers, no curation or shrinking, and no embedding provider.
-        m3.config(copied, '[embedding]\nprovider = "none"\n\n[inject]\n'
-                  f'per_prompt = {str(per_prompt).lower()}\n', False)
+        if inject.frozen_home(home, 'dev', None) != source_files:
+            raise ValueError('Source home changed while copying')
         m3.guard_home(copied)
+        inject.drain_config(copied, per_prompt=per_prompt)
         yield copied
 
 
@@ -86,7 +88,7 @@ def measurements(report):
 
 def summary(rows, expected):
     counted = [r for r in rows if r['counted']]
-    complete = expected > 0 and len(rows) == len(counted) == expected
+    complete = expected == 3 and len(rows) == len(counted) == expected
     return dict(counted_runs=len(counted),
                 line_ms={hook: max(r['report']['read']['warm'][hook + '_ms']['p95']
                                    for r in counted) if complete else None for hook in HOOKS},
@@ -95,8 +97,8 @@ def summary(rows, expected):
 
 
 def line(binary, dev_home, checkout, machine=None, runs=3):
-    if runs < 1:
-        raise ValueError('Runs must be positive')
+    if runs != 3:
+        raise ValueError('D15 requires three runs per machine')
     binary = os.path.abspath(os.path.expanduser(binary))
     home, checkout = source_home(dev_home), os.path.realpath(os.path.expanduser(checkout))
     if not os.path.isdir(checkout):

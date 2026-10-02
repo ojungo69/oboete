@@ -123,13 +123,14 @@ def frozen_home(home, pool, decide):
             if Path(home, name).exists()}
 
 
-def drain_config(home):
-    """Disable model work in the copy, preserving every other TOML value, including redaction."""
+def drain_config(home, per_prompt=False):
+    """Disable model work and confine backups in the copy; preserve other TOML values."""
     config = Path(home, 'config.toml')
     text = config.read_text(encoding='utf-8') if config.exists() else ''
     expected = copy.deepcopy(tomllib.loads(text))
-    for section, key, value in (('summary', 'curate', False), ('embedding', 'provider', 'none'),
-                                ('inject', 'per_prompt', False)):
+    for section, key, value in (('summary', 'curate', False), ('summary', 'shrink', False),
+                                ('embedding', 'provider', 'none'), ('inject', 'per_prompt', per_prompt),
+                                ('backup', 'dir', 'backups')):
         expected.setdefault(section, {})[key] = value
         assignment = f'{key} = {json.dumps(value)}\n'
         pattern = rf'(?ms)^\[{section}\][ \t]*(?:#[^\n]*)?\n(?P<body>.*?)(?=^\[|\Z)'

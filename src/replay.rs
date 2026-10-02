@@ -194,6 +194,14 @@ fn stats_ms(sorted_us: &[u128]) -> Value {
            "p99": ms(pct(sorted_us, 99)), "max": ms(sorted_us.last().copied().unwrap_or(0))})
 }
 
+/// D15's read-hook line keeps the timer's microsecond precision.
+fn read_stats_ms(sorted_us: &[u128]) -> Value {
+    let exact = |us: u128| us as f64 / 1_000.0;
+    json!({"n": sorted_us.len(), "p50": exact(pct(sorted_us, 50)),
+           "p95": exact(pct(sorted_us, 95)), "p99": exact(pct(sorted_us, 99)),
+           "max": exact(sorted_us.last().copied().unwrap_or(0))})
+}
+
 /// Tool-output-like text of `bytes` bytes: paths, code and Japanese, every 20th line with words
 /// that wake redaction rules (api, key, token, password) but no secret, as Spike 1's payload
 /// (docs/spike/hook-m14.md).
@@ -433,9 +441,9 @@ fn read_arm(home: &Path, held: &crate::worker::Lock, arms: &Arms, arm: &str) -> 
     })?;
     let (reads, chars) = read_in_process(home, Path::new(arms.root), arms.n);
     Ok(json!({
-        "session_start_ms": stats_ms(&starts),
+        "session_start_ms": read_stats_ms(&starts),
         "session_start_printed_bytes": start_bytes,
-        "prompt_ms": stats_ms(&prompts),
+        "prompt_ms": read_stats_ms(&prompts),
         "prompt_printed_bytes": prompt_bytes,
         "read_in_process_us": {"p50": pct(&reads, 50), "p95": pct(&reads, 95),
                                "max": reads.last().copied().unwrap_or(0)},
@@ -560,6 +568,13 @@ fn pct(sorted: &[u128], p: usize) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_hook_line_keeps_the_measured_microseconds() {
+        let samples = [19_125];
+        assert_eq!(read_stats_ms(&samples)["p95"], json!(19.125));
+        assert_eq!(stats_ms(&samples)["p95"], json!(19.1));
+    }
 
     #[test]
     fn a_ported_replay_keeps_fixture_times_and_reports_no_v1_summary() {

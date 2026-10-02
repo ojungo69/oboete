@@ -222,6 +222,39 @@ def test_line_cli_uses_exact_command_private_copies_and_metadata(fixture_home, c
     assert json.loads(path.read_text()) == out
 
 
+def test_line_keeps_unrelated_source_settings_in_each_worker_copy(fixture_home):
+    import hooks
+    binary, home, checkout = fixture_home
+    (home / 'config.toml').write_text('''[summary]
+curate = true
+shrink = true
+language = "ja"
+window_tokens = 1717
+[embedding]
+provider = "workers-ai"
+[inject]
+per_prompt = false
+session_start_chars = 1234
+per_prompt_chars = 777
+correction_chars = 555
+[redaction]
+allowlist = ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+[capture]
+store_prompts = false
+''')
+    script = binary.read_text()
+    binary.write_text(script.replace("config = tomllib.loads((home / 'config.toml').read_text())\n",
+        "config = tomllib.loads((home / 'config.toml').read_text())\n"
+        "assert config['summary']['language'] == 'ja' and config['summary']['window_tokens'] == 1717\n"
+        "assert config['inject']['session_start_chars'] == 1234\n"
+        "assert config['inject']['per_prompt_chars'] == 777 and config['inject']['correction_chars'] == 555\n"
+        "assert config['redaction']['allowlist'] == ['a' * 64]\n"
+        "assert config['capture']['store_prompts'] is False\n"))
+    out = hooks.line(binary, home, checkout)
+    assert out['counted_runs'] == 3
+    assert out['line_ms'] == dict(session_start=10.0, prompt=20.0)
+
+
 def test_failed_replay_is_recorded_and_copies_are_deleted(fixture_home, capsys):
     import common, hooks
     binary, home, checkout = fixture_home
@@ -234,11 +267,13 @@ def test_failed_replay_is_recorded_and_copies_are_deleted(fixture_home, capsys):
     assert not list(Path(common.E, 'hooks').glob('line-*/'))
 
 
-def test_a_sealed_home_is_refused_and_its_copy_is_removed(fixture_home):
+def test_a_sealed_home_is_refused_before_any_copy(fixture_home, monkeypatch):
     import common, hooks
     binary, home, checkout = fixture_home
     with sqlite3.connect(home / 'raw.db') as db:
         db.execute("UPDATE records SET session='sealed'")
+    monkeypatch.setattr(hooks.shutil, 'copytree',
+                        lambda *args, **kwargs: pytest.fail('held-out source was copied'))
     with pytest.raises(SystemExit, match='Held-out'):
         hooks.line(binary, home, checkout)
     assert not Path(common.E, 'hooks', 'commands.jsonl').exists()
@@ -277,13 +312,30 @@ def test_combine_uses_each_hooks_slowest_machine_and_refuses_a_partial_line(tmp_
     assert hooks.combine(paths)['line_ms'] == dict(session_start=None, prompt=None)
 
 
+def test_one_run_cannot_publish_a_d15_line(fixture_home, tmp_path, capsys):
+    import common, hooks
+    binary, home, checkout = fixture_home
+    with pytest.raises(SystemExit) as error:
+        hooks.main(['line', '--binary', str(binary), '--dev-home', str(home),
+                    '--checkout', str(checkout), '--runs', '1'])
+    assert error.value.code == 1
+    assert 'Hook evaluation failed' in capsys.readouterr().err
+    assert not Path(common.E, 'hooks', 'line-test-host.json').exists()
+    path = tmp_path / 'line-one.json'
+    common.keep_json(path, dict(machine='test-host', machine_label='test-host',
+                                requested_runs=1, runs=[hooks.measurements(replay_report())]))
+    combined = hooks.combine([path])
+    assert combined['complete'] is False
+    assert combined['line_ms'] == dict(session_start=None, prompt=None)
+
+
 def test_paths_and_run_count_are_checked_before_writes(fixture_home):
     import common, hooks
     binary, home, checkout = fixture_home
     for name in ('../outside', 'a/b', '', '..'):
         with pytest.raises(ValueError):
             hooks.line(binary, home, checkout, machine=name)
-    for runs in (0, -1):
+    for runs in (0, -1, 1, 2, 4):
         with pytest.raises(ValueError):
             hooks.line(binary, home, checkout, runs=runs)
     with pytest.raises(ValueError, match='outside'):
@@ -298,8 +350,8 @@ def test_relative_eval_paths_and_sqlite_uri_characters_work(fixture_home, monkey
     Path(common.E).rename(moved)
     monkeypatch.chdir(moved.parent)
     monkeypatch.setattr(common, 'E', moved.name)
-    out = hooks.line(binary, home, checkout, runs=1)
-    assert out['counted_runs'] == 1 and out['line_ms'] == dict(session_start=10.0, prompt=20.0)
+    out = hooks.line(binary, home, checkout)
+    assert out['counted_runs'] == 3 and out['line_ms'] == dict(session_start=10.0, prompt=20.0)
     assert Path(out['fixture']).is_absolute()
     assert Path(out['runs'][0]['home']).is_absolute()
     with sqlite3.connect(home / 'raw.db') as db:
