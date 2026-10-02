@@ -45,7 +45,7 @@ pub fn lock(home: &Path) -> Result<std::fs::File> {
         .truncate(false)
         .write(true)
         .open(state.join("import.lock"))?;
-    match f.try_lock() {
+    match crate::worker::try_lock(&f) {
         Ok(()) => Ok(f),
         Err(std::fs::TryLockError::WouldBlock) => {
             anyhow::bail!(
