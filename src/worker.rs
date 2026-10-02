@@ -562,9 +562,12 @@ fn serve(
                 if yields && !calling(phases) && steps_aside(home, &raw, holding) {
                     return Ok(false);
                 }
-                // A call that came back is written at once.
+                // A call that came back is written at once. And a request that went away (its
+                // command gave up) starts a round, which lets the embedding go on: a resident
+                // worker starts none at its idle time.
                 if (raw.max_seq()?, raw.max_op_seq_of(raw.device())?) != seen
                     || phases.embed.as_ref().is_some_and(|e| e.done())
+                    || (asked && !asked_aside(home))
                 {
                     more = true;
                     break;
@@ -2417,6 +2420,73 @@ mod tests {
         });
         worker.join().unwrap().unwrap();
         assert_eq!(stub.requests(), 0);
+    }
+
+    /// A consumer that takes the request to step aside away in its first step, as a command that
+    /// gave up does.
+    #[cfg(target_os = "linux")]
+    struct Withdraws(std::path::PathBuf, bool);
+    #[cfg(target_os = "linux")]
+    impl Consumer for Withdraws {
+        fn name(&self) -> &'static str {
+            "withdraws"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, _device: &str, _after: i64) -> Result<i64> {
+            if !std::mem::replace(&mut self.1, true) {
+                let _ = std::fs::remove_file(yield_request(&self.0));
+            }
+            raw.max_seq()
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// R12: a request that went away lets the embedding go on. A resident worker starts no round
+    /// at its idle time, so it looks for that while it waits (Codex on #359, third round).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_withdrawn_request_lets_a_resident_worker_embed_again() {
+        let _contending = contending();
+        let mut s = crate::search::b::fixture::Store::new();
+        s.decided(
+            "github.com/o/r",
+            1_000,
+            "The parser reads one line at a time.",
+            &[],
+        );
+        s.run();
+        let stub = crate::embed::stub::Stub::start();
+        crate::embed_phase::fixture::config(&s, &stub);
+        let p = s.home.path().to_path_buf();
+        // A record for the consumer to step on, after what `run` covered.
+        s.raw.append(&raw::test_event("later")).unwrap();
+        let mut embed = crate::embed_phase::Phase::new(&p);
+        let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+        // A query that came back and is not settled yet: the worker does not step aside for the
+        // request it finds, and holds the phase.
+        let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+        release.send(()).unwrap();
+        until("the query's thread ends", || embed.done());
+        std::fs::write(yield_request(&p), "").unwrap();
+        let worker = {
+            let p = p.clone();
+            std::thread::spawn(move || {
+                let phases = Phases {
+                    embed: Some(&mut embed),
+                    yields: true,
+                    resident: true,
+                    ..Phases::default()
+                };
+                let withdraws = Box::new(Withdraws(p.clone(), false));
+                run_holding(&p, 600_000, vec![withdraws], || {}, lock(&p)?, phases)
+            })
+        };
+        until("the embedding goes on", || stub.requests() >= 1);
+        assert!(!worker.is_finished());
+        std::fs::write(yield_request(&p), "").unwrap();
+        until("it steps aside for a new request", || worker.is_finished());
+        worker.join().unwrap().unwrap();
     }
 
     /// R12 with two commands: one that gives up takes the request file away, and the other puts

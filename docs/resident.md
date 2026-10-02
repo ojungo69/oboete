@@ -167,7 +167,8 @@ backups), closes its stores, releases the lock, records a clean outcome and exit
 step aside while an embedding call is out: the call is paid for and counted, so its answer is
 written first, and a command whose 30 s pass meanwhile says the worker is busy. Once a command
 has asked, the worker sends no other batch or query, so a backlog cannot keep the command waiting
-for longer than the call that was out. The lock goes
+for longer than the call that was out; a request that goes away (its command gave up) starts a
+round, and the embedding goes on. The lock goes
 only after the stores are closed: the command that takes it may swap them at once. Only `oboete
 worker` steps aside, resident or not; a command that borrows the worker's loop runs to its end.
 The worker ignores a file older than a minute, and one dated after now (a clock that went back):
@@ -336,3 +337,6 @@ Codex's second round, on the fixes:
   long as the backlog lasted. Once asked, the worker now sends nothing new (R12).
 - The check before a write by path leaves the moment between the two. Not closed in this slice: it
   is written under Limits with the way to close it.
+
+Its third round, on those: a request withdrawn while the phase was held left a resident worker's
+embedding stopped until the next record. The wait now sees the request go and starts a round (R12).
