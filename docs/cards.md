@@ -243,7 +243,10 @@ front of it would keep an anchored rule from matching at the packet's gate (Code
 
 S4. **Which cards.** The repository's newest current cards, at most 50 (claude-mem's default),
 read through `cards::recent` (K3, K4, K6), of every agent: claude-mem shows only the calling
-agent's by default, and one memory across agents is what oboete is for.
+agent's by default, and one memory across agents is what oboete is for. Measured on the evaluation
+home's copy (26,444 records, release build): reading 50 cards takes about 8 ms in a fresh process
+and 4 ms after, and the whole packet about 15 ms where it took 11 without them; the first run
+after a build, with nothing of the stores in the page cache, took 107 ms.
 
 S5. **Size.** The packet's cap rises from 6,000 to 9,000 characters: claude-mem's block alone
 may take 10,000, and Cursor drops a context over 10,000 (oboete keeps it under its 9,500 units).
