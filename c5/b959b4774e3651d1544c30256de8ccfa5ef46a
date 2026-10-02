@@ -1,0 +1,36 @@
+tests/resident.rs
+  s_821f8fcda60ea0::t_b54b75ad31c0d4 1-92
+  s_821f8fcda60ea0::t_650707448e4e9d 93-94
+src/config.rs
+  s_821f8fcda60ea0::t_519d16f489a061 1708-1732
+  s_821f8fcda60ea0::t_a4956c62ef68b3 952-977,1063
+  s_821f8fcda60ea0::t_aea0a7e36a0ead 1064,1166-1167
+docs/resident.md
+  s_821f8fcda60ea0::t_192debafc6ff4d 1-297
+src/curate.rs
+  s_821f8fcda60ea0::t_d1c7c2a67a5fc6 1775,6513,6516
+src/main.rs
+  s_821f8fcda60ea0::t_f4c24f49ee7f86 77-78,80-82,368-369,669
+src/replay.rs
+  s_821f8fcda60ea0::t_33e0f38ccbc674 269,683
+src/shortlist.rs
+  s_821f8fcda60ea0::t_e5e4ccb45137ba 1829
+src/worker.rs
+  s_821f8fcda60ea0::t_08536238d69042 103-116,121-141,174-228,232-239,312-316,339-340,344,350-361,432-435,449-450,455-461,463-472,477,479,483,488,506,515-521,523-549,551-552,554-578,602-603,605-623,635-636,850,1800-2172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c5b959b4774e3651d1544c30256de8ccfa5ef46a",
+  "prompts": {},
+  "sessions": {
+    "s_821f8fcda60ea0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3c3ad270-2ec6-4f00-abc6-a7903bd32508",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
