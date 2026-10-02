@@ -188,6 +188,9 @@ thread_local! {
     static FAIL: std::cell::Cell<Option<Step>> = const { std::cell::Cell::new(None) };
     /// The filesystem magic `private` sees instead of the real one.
     static FS: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    /// A folder on the way to the key folder, and the filesystem magic the walk sees for it.
+    static FS_AT: std::cell::RefCell<Option<(PathBuf, u32)>> =
+        const { std::cell::RefCell::new(None) };
     static BEFORE_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
     static BEFORE_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
@@ -219,11 +222,32 @@ mod linux {
         let uid = unsafe { libc::geteuid() };
         let mut at = PathBuf::new();
         walk(path, &mut at, &mut 0, uid)?;
-        let dir = std::fs::symlink_metadata(&at).map_err(|_| Refused::NoDir)?;
-        if dir.mode() & 0o022 != 0 {
+        if entry(&at)?.mode() & 0o022 != 0 {
             return Err(Refused::SharedDir);
         }
         Ok(())
+    }
+
+    /// What `path` itself is (a link is not followed), read from the entry while it is held open
+    /// and only on a filesystem in `PRIVATE_FS`: one that enforces no Unix mode, or whose answers
+    /// a program makes up (a FUSE mount another user made), can show a folder as this user's,
+    /// 0700, and then turn it into a link.
+    fn entry(path: &Path) -> Result<std::fs::Metadata, Refused> {
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|_| Refused::NoDir)?;
+        let fs = magic(&held);
+        #[cfg(test)]
+        let fs = FS_AT.with(|f| match &*f.borrow() {
+            Some((at, fake)) if at == path => Some(*fake),
+            _ => fs,
+        });
+        if !fs.is_some_and(|m| PRIVATE_FS.contains(&m)) {
+            return Err(Refused::NotPrivate);
+        }
+        held.metadata().map_err(|_| Refused::NoDir)
     }
 
     /// Follows `path` from `at`, the folder resolved so far (no link is left in it), and leaves
@@ -244,7 +268,7 @@ mod linux {
                 Component::RootDir => PathBuf::from("/"),
                 Component::Normal(name) => at.join(name),
             };
-            let entry = std::fs::symlink_metadata(&next).map_err(|_| Refused::NoDir)?;
+            let entry = entry(&next)?;
             // In a sticky parent a link's owner matters as well as its target's owner.
             if ![0, uid].contains(&entry.uid()) {
                 return Err(Refused::SharedDir);
@@ -334,18 +358,23 @@ mod linux {
 
     /// Whether `file` is on a filesystem in `PRIVATE_FS`; not when that cannot be told.
     fn private(file: &std::fs::File) -> bool {
+        let magic = magic(file);
+        #[cfg(test)]
+        let magic = FS.with(|f| f.get()).or(magic);
+        magic.is_some_and(|m| PRIVATE_FS.contains(&m))
+    }
+
+    /// The magic number of the filesystem `file` is on, when the kernel tells it.
+    fn magic(file: &std::fs::File) -> Option<u32> {
         use std::os::fd::AsRawFd;
         let mut fs = std::mem::MaybeUninit::<libc::statfs>::uninit();
         // SAFETY: `fstatfs` gets an open descriptor and a buffer of its type, which it fills when
         // it returns 0; only then is the buffer read.
         if unsafe { libc::fstatfs(file.as_raw_fd(), fs.as_mut_ptr()) } != 0 {
-            return false;
+            return None;
         }
         // SAFETY: filled above. The magic is 32 bits, whatever the width of `f_type`.
-        let magic = unsafe { fs.assume_init() }.f_type as u32;
-        #[cfg(test)]
-        let magic = FS.with(|f| f.get()).unwrap_or(magic);
-        PRIVATE_FS.contains(&magic)
+        Some(unsafe { fs.assume_init() }.f_type as u32)
     }
 
     /// The key file as it is now, none when there is none: opened without following a link and
@@ -764,6 +793,35 @@ mod tests {
                 assert_eq!(names, ["GROQ_KEY.md"], "{at:?}");
             }
             assert!(holding(&[&keys, &home], KEY).is_empty());
+        }
+
+        /// A folder's owner and mode are believed only on a filesystem known to enforce them: a
+        /// FUSE mount another user made can show its folders as this user's, 0700, and then turn
+        /// one into a link (Codex's second review of #355). Such a folder on the way, or as the
+        /// key folder, is refused before any read or stage.
+        #[test]
+        fn a_folder_on_the_way_must_be_on_a_filesystem_known_to_keep_a_mode() {
+            let (root, _keys, home) = setup();
+            let mount = root.path().join("m");
+            let keys = mount.join("keys");
+            std::fs::create_dir_all(&keys).unwrap();
+            private(&mount);
+            private(&keys);
+            let path = keys.join("GROQ_KEY.md");
+            assert_eq!(write(&path, KEY, &home), Ok(Written { durable: true }));
+            for at in [&mount, &keys] {
+                FS_AT.with(|f| *f.borrow_mut() = Some((at.clone(), 0x6573_5546)));
+                let result = write(&path, "canary-fuse-on-the-way", &home);
+                FS_AT.with(|f| *f.borrow_mut() = None);
+                assert_eq!(result, Err(Refused::NotPrivate), "{}", at.display());
+            }
+            assert!(holding(&[&keys, &home], "canary-fuse-on-the-way").is_empty());
+            let names: Vec<_> = std::fs::read_dir(&keys)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name())
+                .collect();
+            assert_eq!(names, ["GROQ_KEY.md"]);
         }
 
         /// The staged file's own filesystem decides, before the key is written: 9p (a Windows
