@@ -151,7 +151,7 @@ previewは対象・件数・推定size・含む個人情報と削除状態を示
 
 ## 10. 決定・追跡・実装順序
 
-新規追跡は既存課題が覆わない次の4契約だけ。このPRを中心に実装前レビューを行う。
+新規追跡は既存課題が覆わない次の4契約だけ。
 
 | 追跡 | 範囲 |
 | --- | --- |
@@ -164,4 +164,3 @@ previewは対象・件数・推定size・含む個人情報と削除状態を示
 - 順序：既存M3/M4の品質・注入を進め、M5のforget/securityを満たしてからlive bot/local serviceを隔離dogfoodで実装・検証する。M6 remote/syncは既存順序。local serviceはremote必須依存ではなく、remote書込を前倒ししない。MCP fallbackは既存§4.10のfollow-up、exportは低優先。#340は作業中にmain `6225150661472d2be9c54aa62802bcaab648f772` へmergeされたが、どれもその既存範囲や後続作業の追加blockerにしない。既存adapterのtested/live-unverified区別を維持する。
 - ownerの順序（2026-10-03）：「ボット連携(noteMan など)と常時動く HTTP サーバーは、いつ作りますか？」に「PC切り替えの後 (Recommended)」。live bot adapter（#344）と任意local HTTP（#345）は、ownerのPCが新しいoboeteへ切り替わった後（spec.md §7.5）、milestone 6より前に作る（owner決定33）。切り替え時点でつなぐagentはClaude Code・Codex・Grok CLIの3つで、bot hostは含めない。
 - 残る判断：noteManの正確なruntime/API/version/path/権限と話者保証、stable revision/cursor、host配送確認点、API schema/token保管、viewerとのlistener統合、OS service方式、計測budgetとexport format。未確認製品に能力を付与しない。#320のowner判断は別途必要。
-- 共有：ownerの依頼に従い、作業中Codex向けの中央handoffをPR342へ投稿する。直接のsupported message channel/target sessionを確認できない限りterminalへ入力・割込みをしない。GitHubへの「投稿済み」と相手の「確認済み」を別々に報告する。
