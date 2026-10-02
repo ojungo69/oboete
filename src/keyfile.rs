@@ -209,47 +209,62 @@ mod linux {
     use std::io::{Read, Write};
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
-    /// No other user may replace a path component (#285). Check from the root down so each
-    /// parent protects the next check. A trusted sticky ancestor (e.g. /tmp) protects a trusted
-    /// child, but the key folder itself must not let other users create/replace key-file names.
+    /// No other user may replace a part of the path to the key folder (#285). The path is
+    /// resolved as the kernel resolves it, one name at a time from the root, and each folder and
+    /// each link is checked where it is found, so a parent that passed protects the check of what
+    /// it holds. A trusted sticky folder on the way (e.g. /tmp) protects a trusted entry, but the
+    /// key folder itself must not let other users create or replace key-file names.
     pub(super) fn check_dirs(path: &Path) -> Result<(), Refused> {
-        walk(path, true, &mut 0)
-    }
-
-    /// `key_dir`: `path` ends at the key folder, not at a folder above it. `links` counts the
-    /// links followed so far, so a chain that never ends is refused where the kernel refuses it.
-    fn walk(path: &Path, key_dir: bool, links: &mut u8) -> Result<(), Refused> {
         // SAFETY: geteuid has no arguments and cannot fail.
         let uid = unsafe { libc::geteuid() };
-        let ancestors: Vec<_> = path.ancestors().collect();
-        for ancestor in ancestors.into_iter().rev() {
-            let entry = std::fs::symlink_metadata(ancestor).map_err(|_| Refused::NoDir)?;
+        let mut at = PathBuf::new();
+        walk(path, &mut at, &mut 0, uid)?;
+        let dir = std::fs::symlink_metadata(&at).map_err(|_| Refused::NoDir)?;
+        if dir.mode() & 0o022 != 0 {
+            return Err(Refused::SharedDir);
+        }
+        Ok(())
+    }
+
+    /// Follows `path` from `at`, the folder resolved so far (no link is left in it), and leaves
+    /// `at` where `path` ends. A link's target is followed from the folder the link is in, name
+    /// by name like the path itself: asking the kernel about `hop/` would follow `hop` without
+    /// showing the folders behind it. `links` counts each link once, up to the kernel's 40.
+    fn walk(path: &Path, at: &mut PathBuf, links: &mut u8, uid: u32) -> Result<(), Refused> {
+        use std::path::Component;
+        for part in path.components() {
+            let next = match part {
+                Component::Prefix(_) => return Err(Refused::NoDir),
+                Component::CurDir => continue,
+                Component::ParentDir => {
+                    // `at` holds no link, so its parent is the folder `..` names.
+                    at.pop();
+                    continue;
+                }
+                Component::RootDir => PathBuf::from("/"),
+                Component::Normal(name) => at.join(name),
+            };
+            let entry = std::fs::symlink_metadata(&next).map_err(|_| Refused::NoDir)?;
             // In a sticky parent a link's owner matters as well as its target's owner.
             if ![0, uid].contains(&entry.uid()) {
                 return Err(Refused::SharedDir);
             }
-            let key_dir = key_dir && ancestor == path;
             if entry.file_type().is_symlink() {
-                // The folders a link's target passes through are on the path too, each link of a
-                // chain included: where the chain ends says nothing about the folders between.
                 *links += 1;
                 if *links > 40 {
                     return Err(Refused::NoDir);
                 }
-                let target = std::fs::read_link(ancestor).map_err(|_| Refused::NoDir)?;
-                walk(
-                    &ancestor.parent().unwrap_or(ancestor).join(target),
-                    key_dir,
-                    links,
-                )?;
+                let target = std::fs::read_link(&next).map_err(|_| Refused::NoDir)?;
+                walk(&target, at, links, uid)?;
                 continue;
             }
             if !entry.is_dir() {
                 return Err(Refused::NoDir);
             }
-            if entry.mode() & 0o022 != 0 && (key_dir || entry.mode() & 0o1000 == 0) {
+            if entry.mode() & 0o022 != 0 && entry.mode() & 0o1000 == 0 {
                 return Err(Refused::SharedDir);
             }
+            *at = next;
         }
         Ok(())
     }
@@ -584,6 +599,80 @@ mod tests {
             std::os::unix::fs::symlink(&a, &b).unwrap();
             assert_eq!(
                 write(&a.join("GROQ_KEY.md"), KEY, &home),
+                Err(Refused::NoDir)
+            );
+        }
+
+        /// A link target that ends in `/` or `/.` is still a link: the kernel follows it when it
+        /// is asked about `hop/`, so the folders behind it must be walked, not skipped (Codex's
+        /// review of #355).
+        #[test]
+        fn a_link_target_with_a_trailing_slash_does_not_hide_its_hops() {
+            for suffix in ["/", "/."] {
+                let (root, keys, home) = setup();
+                let shared = root.path().join("shared");
+                std::fs::create_dir_all(&shared).unwrap();
+                std::os::unix::fs::symlink(&keys, shared.join("bridge")).unwrap();
+                std::os::unix::fs::symlink(shared.join("bridge"), root.path().join("hop")).unwrap();
+                let alias = root.path().join("alias");
+                std::os::unix::fs::symlink(format!("hop{suffix}"), &alias).unwrap();
+                let path = alias.join("GROQ_KEY.md");
+                private(&shared);
+                assert_eq!(
+                    write(&path, KEY, &home),
+                    Ok(Written { durable: true }),
+                    "{suffix}"
+                );
+                std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+                assert_eq!(
+                    write(&path, "canary-trailing-slash", &home),
+                    Err(Refused::SharedDir),
+                    "{suffix}"
+                );
+                assert!(holding(&[&keys, &home], "canary-trailing-slash").is_empty());
+            }
+        }
+
+        /// Each link is followed once, as the kernel counts them: a path through several links is
+        /// not refused for its length, and the kernel's limit of 40 is the limit.
+        #[test]
+        fn links_are_counted_once_each_up_to_the_kernels_forty() {
+            let (root, keys, home) = setup();
+            // l1 -> d1, d1/l2 -> d2, ... d5/l6 -> the key folder: six links in one path, each
+            // target relative to the folder its link is in.
+            let mut at = root.path().to_path_buf();
+            let mut path = root.path().to_path_buf();
+            for n in 1..=6 {
+                let target = if n == 6 {
+                    "../../../../../keys".to_string()
+                } else {
+                    format!("d{n}")
+                };
+                std::os::unix::fs::symlink(target, at.join(format!("l{n}"))).unwrap();
+                path.push(format!("l{n}"));
+                if n < 6 {
+                    at.push(format!("d{n}"));
+                    std::fs::create_dir(&at).unwrap();
+                    private(&at);
+                }
+            }
+            assert_eq!(
+                write(&path.join("GROQ_KEY.md"), KEY, &home),
+                Ok(Written { durable: true })
+            );
+            // A chain: c40 -> c39 -> ... -> c1 -> the key folder is 40 links; one more is refused.
+            let mut target = keys.clone();
+            for n in 1..=41 {
+                let link = root.path().join(format!("c{n}"));
+                std::os::unix::fs::symlink(&target, &link).unwrap();
+                target = link;
+            }
+            assert_eq!(
+                write(&root.path().join("c40").join("GROQ_KEY.md"), KEY, &home),
+                Ok(Written { durable: true })
+            );
+            assert_eq!(
+                write(&root.path().join("c41").join("GROQ_KEY.md"), KEY, &home),
                 Err(Refused::NoDir)
             );
         }
