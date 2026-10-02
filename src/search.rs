@@ -24,13 +24,9 @@ pub(crate) fn trigrams(query: &str) -> Vec<String> {
 
 /// `trigrams` up to `cap` of them.
 pub(crate) fn trigrams_upto(query: &str, cap: usize) -> Vec<String> {
-    const SEPARATORS: &str = "、。，．,.!?！？「」『』()（）[]{}:;：；\"'`<>";
-    let hiragana = |c: &char| ('\u{3040}'..='\u{309f}').contains(c);
     let mut out: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    // A control character too: FTS5 reads a query as a C string and stops at a NUL.
-    for run in query.split(|c: char| c.is_whitespace() || c.is_control() || SEPARATORS.contains(c))
-    {
+    for run in runs(query) {
         let chars: Vec<char> = run.chars().collect();
         for w in chars.windows(3) {
             // The index folds case, so `HTTP` and `http` are one piece (else bm25 counts it twice).
@@ -43,6 +39,34 @@ pub(crate) fn trigrams_upto(query: &str, cap: usize) -> Vec<String> {
         }
     }
     out
+}
+
+/// A query's runs: what lies between whitespace and punctuation. A control character ends one
+/// too: FTS5 reads a query as a C string and stops at a NUL.
+fn runs(query: &str) -> impl Iterator<Item = &str> {
+    const SEPARATORS: &str = "、。，．,.!?！？「」『』()（）[]{}:;：；\"'`<>";
+    query.split(|c: char| c.is_whitespace() || c.is_control() || SEPARATORS.contains(c))
+}
+
+fn hiragana(c: &char) -> bool {
+    ('\u{3040}'..='\u{309f}').contains(c)
+}
+
+/// The short words a mixed query's order counts, at most this many: SQLite refuses an expression
+/// 1,000 deep, and a pasted page is still one quick query.
+const SHORT_WORDS: usize = 8;
+
+/// A mixed query's short words: its runs of two characters, each once (ASCII case folded, as
+/// `LIKE` folds it), the first `SHORT_WORDS`. Not one of ASCII letters only or of hiragana only:
+/// as a substring it says nothing ("is" in "this", こと).
+fn short_words(query: &str) -> Vec<&str> {
+    let mut seen = std::collections::HashSet::new();
+    runs(query)
+        .filter(|t| t.chars().count() == 2)
+        .filter(|t| !t.chars().all(|c| c.is_ascii_alphabetic()) && !t.chars().all(|c| hiragana(&c)))
+        .filter(|t| seen.insert(t.to_ascii_lowercase()))
+        .take(SHORT_WORDS)
+        .collect()
 }
 
 /// One char's case fold for dedup and the snippet: ASCII only, which SQLite's tokenizer folds too.
@@ -63,15 +87,25 @@ pub fn terms(query: &str) -> Vec<String> {
     }
 }
 
+type QueryClauses = (Vec<String>, Vec<Value>, String, Vec<Value>);
+
+/// How many of a mixed query's hits its short words reorder: the best by bm25. A `LIKE` reads a
+/// hit's text, and a trigram query matches widely: over every hit it took 24 s where the rank
+/// alone took 0.2 s (325,000 records, 151,000 of them matched). A hit ranked below these keeps
+/// its place.
+pub(crate) const POOL: usize = 500;
+
 /// What a query matches on: its trigrams ORed against the FTS5 table `fts`, or, for a query too
-/// short for a trigram, each word as a `LIKE` on any of the `like` columns. The clauses, their
-/// arguments, and whether bm25 ranks them (there are trigrams); `None` when nothing is left.
-fn query_clauses(query: &str, fts: &str, like: &[&str]) -> Option<(Vec<String>, Vec<Value>, bool)> {
+/// short for a trigram, each word as a `LIKE` on any of the `like` columns. Short words in a
+/// mixed query (同期, M5) boost only MATCH hits: the hits that hold more of them come first. The
+/// WHERE clauses and arguments, then the ORDER BY prefix and its arguments; `None` when nothing is
+/// left.
+fn query_clauses(query: &str, fts: &str, like: &[&str]) -> Option<QueryClauses> {
     let grams = trigrams(query);
     let short: Vec<&str> = if grams.is_empty() {
         query.split_whitespace().collect()
     } else {
-        Vec::new()
+        short_words(query)
     };
     if grams.is_empty() && short.is_empty() {
         return None;
@@ -88,6 +122,8 @@ fn query_clauses(query: &str, fts: &str, like: &[&str]) -> Option<(Vec<String>, 
         clauses.push(format!("{fts} MATCH ?"));
         args.push(Value::Text(q));
     }
+    let mut short_clauses = Vec::new();
+    let mut short_args = Vec::new();
     for t in &short {
         let pattern = format!(
             "%{}%",
@@ -99,10 +135,22 @@ fn query_clauses(query: &str, fts: &str, like: &[&str]) -> Option<(Vec<String>, 
             .iter()
             .map(|c| format!("{c} LIKE ? ESCAPE '\\'"))
             .collect();
-        clauses.push(format!("({})", any.join(" OR ")));
-        args.extend(like.iter().map(|_| Value::Text(pattern.clone())));
+        short_clauses.push(format!("({})", any.join(" OR ")));
+        short_args.extend(like.iter().map(|_| Value::Text(pattern.clone())));
     }
-    Some((clauses, args, !grams.is_empty()))
+    let (order, order_args) = if grams.is_empty() {
+        clauses.extend(short_clauses);
+        args.extend(short_args);
+        (String::new(), Vec::new())
+    } else if short_clauses.is_empty() {
+        ("rank, ".into(), Vec::new())
+    } else {
+        (
+            format!("{} DESC, rank, ", short_clauses.join(" + ")),
+            short_args,
+        )
+    };
+    Some((clauses, args, order, order_args))
 }
 
 /// `as i64` would wrap a huge `--limit` negative, which SQLite reads as "no limit".
@@ -178,7 +226,9 @@ pub(crate) fn raw_order(
     limit: usize,
 ) -> Result<Vec<String>> {
     crate::consumer::fts::schema(k)?;
-    let Some((mut clauses, mut args, ranked)) = query_clauses(query, "raw_fts", &["f.text"]) else {
+    let Some((mut clauses, mut args, order, order_args)) =
+        query_clauses(query, "raw_fts", &["f.text"])
+    else {
         return Ok(Vec::new());
     };
     if let Some(r) = repo {
@@ -192,18 +242,28 @@ pub(crate) fn raw_order(
     }
     let raw_db = fts_seen(raw, k)?;
     let before = hidden(&raw_db)?.len();
-    let order = if ranked {
-        "rank, d.ts DESC"
-    } else {
-        "d.ts DESC"
-    };
-    let sql = format!(
-        "SELECT d.device, d.seq FROM raw_fts f JOIN raw_docs d ON d.rowid = f.rowid
-         WHERE {} ORDER BY {order} LIMIT ?",
-        clauses.join(" AND ")
-    );
     // Enough rows that the hidden ones cannot take the place of visible ones.
-    args.push(Value::Integer(sql_limit(limit.saturating_add(before))));
+    let rows = limit.saturating_add(before);
+    let sql = if order_args.is_empty() {
+        format!(
+            "SELECT d.device, d.seq FROM raw_fts f JOIN raw_docs d ON d.rowid = f.rowid
+             WHERE {} ORDER BY {order}d.ts DESC LIMIT ?",
+            clauses.join(" AND ")
+        )
+    } else {
+        // The short words reorder the best `POOL` rows; `f` names them for `order`.
+        args.push(Value::Integer(sql_limit(rows.max(POOL))));
+        args.extend(order_args);
+        format!(
+            "SELECT device, seq FROM (
+               SELECT d.device, d.seq, d.ts, f.text, f.rank
+               FROM raw_fts f JOIN raw_docs d ON d.rowid = f.rowid
+               WHERE {} ORDER BY rank, d.ts DESC LIMIT ?
+             ) f ORDER BY {order}ts DESC LIMIT ?",
+            clauses.join(" AND ")
+        )
+    };
+    args.push(Value::Integer(sql_limit(rows)));
     let rows: Vec<(String, i64)> = k
         .prepare(&sql)?
         .query_map(params_from_iter(args), |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -465,6 +525,123 @@ mod tests {
             .map(Result::unwrap)
             .collect();
         assert_eq!(repos, ["github.com/o/a", "github.com/o/b"]);
+    }
+
+    #[test]
+    fn a_short_japanese_word_boosts_raw_hits_beside_a_long_word() {
+        for (both_at, long_at) in [(1_000, 2_000), (2_000, 1_000)] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            let mut store = crate::raw::open(p).unwrap();
+            for (ts, body) in [
+                (both_at, "設計 worker"),
+                (long_at, "worker"),
+                (3_000, "設計"),
+            ] {
+                store
+                    .append(&crate::raw::Event {
+                        ts,
+                        repo: Some("github.com/o/r".into()),
+                        ..crate::raw::test_event(body)
+                    })
+                    .unwrap();
+            }
+            crate::worker::run_once(p).unwrap();
+            let seqs = |text| -> Vec<i64> {
+                raw_search(p, text, Some("github.com/o/r"))
+                    .iter()
+                    .map(|h| h.seq)
+                    .collect()
+            };
+            assert_eq!(seqs("worker"), [2, 1]);
+            assert_eq!(seqs("worker absent"), [2, 1]);
+            assert_eq!(seqs("設 worker"), [2, 1]);
+            assert_eq!(seqs("設計"), [3, 1]);
+            assert_eq!(seqs("設計 worker"), [1, 2]);
+        }
+    }
+
+    /// A short word of ASCII letters only says nothing as a substring ("is" in "this"): it
+    /// reorders nothing, as before short words counted.
+    #[test]
+    fn a_short_word_of_ascii_letters_reorders_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut store = crate::raw::open(p).unwrap();
+        for (ts, body) in [(1_000, "this worker"), (2_000, "worker")] {
+            store
+                .append(&crate::raw::Event {
+                    ts,
+                    repo: Some("github.com/o/r".into()),
+                    ..crate::raw::test_event(body)
+                })
+                .unwrap();
+        }
+        crate::worker::run_once(p).unwrap();
+        for text in ["worker", "is worker", "IS worker"] {
+            let seqs: Vec<i64> = raw_search(p, text, Some("github.com/o/r"))
+                .iter()
+                .map(|h| h.seq)
+                .collect();
+            assert_eq!(seqs, [2, 1], "{text}");
+        }
+    }
+
+    /// Records with `bodies` in one repository, indexed: the seqs a query finds, the best first.
+    fn found(bodies: &[&str], query: &str) -> Vec<i64> {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut store = crate::raw::open(p).unwrap();
+        for (n, body) in bodies.iter().enumerate() {
+            store
+                .append(&crate::raw::Event {
+                    ts: 1_000 * (n as i64 + 1),
+                    repo: Some("github.com/o/r".into()),
+                    ..crate::raw::test_event(body)
+                })
+                .unwrap();
+        }
+        crate::worker::run_once(p).unwrap();
+        raw(p, query, Some("github.com/o/r"), 10)
+            .unwrap()
+            .iter()
+            .map(|h| h.seq)
+            .collect()
+    }
+
+    /// A word of hiragana only has no trigram at any length (particles and endings), and says as
+    /// little as a substring: it reorders nothing (Codex on #360).
+    #[test]
+    fn a_hiragana_word_reorders_nothing() {
+        for (body, query) in [
+            ("worker ください", "worker ください"),
+            ("worker こと", "worker こと"),
+            ("worker について", "について worker"),
+        ] {
+            assert_eq!(found(&[body, "worker"], query), [2, 1], "{query}");
+        }
+    }
+
+    /// A short word is a run between whitespace and punctuation, as a trigram's is.
+    #[test]
+    fn a_short_word_ends_at_punctuation() {
+        assert_eq!(found(&["設計 worker", "worker"], "worker"), [2, 1]);
+        assert_eq!(found(&["設計 worker", "worker"], "worker、設計。"), [1, 2]);
+    }
+
+    /// The short words that count are few and counted once: a pasted page is still one query
+    /// that SQLite can prepare (Codex on #360: 1,000 of them made an expression too deep).
+    #[test]
+    fn a_query_of_a_thousand_short_words_still_runs() {
+        let repeated = format!("worker {}", "M5 ".repeat(1_000));
+        assert_eq!(found(&["M5 worker", "worker"], &repeated), [1, 2]);
+        let distinct: String = (0..1_100)
+            .map(|i| format!("{}1 ", char::from_u32(0x4e00 + i).unwrap()))
+            .collect();
+        assert_eq!(
+            found(&["M5 worker", "worker"], &format!("worker M5 {distinct}")),
+            [1, 2]
+        );
     }
 
     #[test]
