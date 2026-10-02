@@ -55,7 +55,7 @@ pub fn run_stdin(home: &Path, agent: &str, event: &str) -> Result<()> {
 
 fn run_io(
     home: &Path,
-    agent: &str,
+    mut agent: &str,
     event: &str,
     mut input: impl Read,
     mut output: impl Write,
@@ -96,9 +96,10 @@ fn run_io(
         if let Some(fields) = payload.as_object_mut() {
             fields.remove(crate::capture::AGENT_SENT);
         }
-        let Some(agent) = resolve_agent(agent, &payload, &grok_hooks_file()) else {
+        let Some(resolved) = resolve_agent(agent, &payload, &grok_hooks_file()) else {
             return Ok(());
         };
+        agent = resolved;
         if !crate::setup::AGENTS.contains(&agent)
             || (matches!(agent, "agy" | "cursor") && agent_workspace(agent, &payload).is_none())
             || is_agent_internal(agent, &payload)
@@ -245,7 +246,7 @@ fn run_io(
         if let Some(p) = &prompted {
             blocks.extend(p.blocks.iter().map(|(what, text)| (*what, text.as_str())));
         }
-        let text = assembled(agent, line, &blocks);
+        let (text, kept) = assembled(agent, line, &blocks);
         // The shown set follows what the agent gets: a line a cut dropped or the fence changed is
         // not found, so its claim may be shown again, never counted as shown unseen (as
         // `consumer::manifest::text` does after its gate).
@@ -255,14 +256,21 @@ fn run_io(
                 home,
                 agent,
                 &session,
-                m.shown.iter().filter(|s| came(&s.line)),
+                m.shown
+                    .iter()
+                    .filter(|s| s.range.end <= kept[0] && came(&s.line)),
             );
         }
         if let Some(p) = prompted {
             let named = p
                 .named
                 .into_iter()
-                .filter(|n| n.lines.iter().all(|l| came(l)));
+                .filter(|(block, end, n)| {
+                    let block = block + usize::from(manifest.is_some());
+                    *end <= kept.get(block).copied().unwrap_or(0)
+                        && n.lines.iter().all(|l| came(&l.masked()))
+                })
+                .map(|(_, _, n)| n);
             changed(home, agent, &session, named);
         }
         // Cursor gets its field even when empty: a reinjection is consumed either way.
@@ -471,17 +479,20 @@ pub fn start_text_read(
 /// The failure line, then each block inside the memory fence after what it holds. Cursor drops a
 /// field over 10,000 UTF-16 units (`cursor_injection`): there each block is cut at its last line
 /// that fits 9,500 with what comes before it, so no fence is cut (D9), and one cut to its heading
-/// is left out.
-fn assembled(agent: &str, line: Option<String>, blocks: &[(&str, &str)]) -> String {
+/// is left out. Also returns how many source bytes of each block survived that cut.
+fn assembled(agent: &str, line: Option<String>, blocks: &[(&str, &str)]) -> (String, Vec<usize>) {
     use crate::manifest::fence;
     let units = |s: &str| s.encode_utf16().count() + 1; // with the newline that joins it
     let mut parts: Vec<String> = line.into_iter().collect();
     let cap = if agent == "cursor" { 9_500 } else { usize::MAX };
     let mut left = cap.saturating_sub(parts.iter().map(|p| units(p)).sum());
+    let mut kept = Vec::with_capacity(blocks.len());
     for (what, text) in blocks {
         let mut fenced = Some(fence(what, text));
+        let mut end = text.len();
         if fenced.as_deref().is_some_and(|f| units(f) > left) {
             fenced = None;
+            end = 0;
             let mut fit = String::new();
             for (n, l) in text.split_inclusive('\n').enumerate() {
                 fit.push_str(l);
@@ -490,14 +501,18 @@ fn assembled(agent: &str, line: Option<String>, blocks: &[(&str, &str)]) -> Stri
                     break;
                 }
                 fenced = (n > 0).then_some(f);
+                if fenced.is_some() {
+                    end = fit.len();
+                }
             }
         }
+        kept.push(end);
         if let Some(f) = fenced {
             left -= units(&f);
             parts.push(f);
         }
     }
-    parts.join("\n")
+    (parts.join("\n"), kept)
 }
 
 /// Task 8 Step 5 (spec 4.7, 4.8): what an injection showed replaces the session's shown set, so a
@@ -548,7 +563,8 @@ enum Ask<'a> {
 /// they name.
 struct Prompted {
     blocks: Vec<(&'static str, String)>,
-    named: Vec<Named>,
+    /// Each change's block index and last byte after the block's gate and cut.
+    named: Vec<(usize, usize, Named)>,
 }
 
 /// Task 8 Step 6 (spec 4.2, 4.6, 4.8, D9): what a typed prompt gets, each block gated and cut at a
@@ -605,17 +621,46 @@ fn prompt_point(
         named: Vec::new(),
     };
     let mut block = |title: &str, named: Vec<Named>, cap: usize, what: &'static str| {
+        let at_block = out.blocks.len();
         if named.iter().any(|n| !n.lines.is_empty()) {
-            let lines: String = named
-                .iter()
-                .flat_map(|n| &n.lines)
-                .map(|l| format!("{l}\n"))
+            let mut packet = redact::Mapped::default();
+            packet.push_str(&format!("## {title}\n"));
+            let ranged: Vec<_> = named
+                .into_iter()
+                .map(|n| {
+                    let ranges: Vec<_> = n
+                        .lines
+                        .iter()
+                        .map(|line| {
+                            let at = packet.text.len();
+                            packet.append(line.clone());
+                            let range = at..packet.text.len();
+                            packet.push_str("\n");
+                            range
+                        })
+                        .collect();
+                    (n, ranges)
+                })
                 .collect();
-            let text = format!("## {title}\n{lines}");
-            let text = crate::manifest::cut(&redact::outbound_with(&text, rules), cap);
+            let (text, from) = packet.outbound(rules);
+            let text = crate::manifest::cut(&text, cap);
+            for (n, ranges) in ranged {
+                let end = ranges
+                    .into_iter()
+                    .zip(&n.lines)
+                    .try_fold(0, |end, (range, l)| {
+                        crate::consumer::manifest::surviving_line(&text, &from, range, &l.masked())
+                            .map(|range| end.max(range.end))
+                    });
+                if let Some(end) = end {
+                    out.named.push((at_block, end, n));
+                }
+            }
             out.blocks.push((what, text));
+        } else {
+            out.named
+                .extend(named.into_iter().map(|n| (at_block, 0, n)));
         }
-        out.named.extend(named);
     };
     if correcting {
         block(
@@ -725,7 +770,7 @@ fn failed_call(
 /// leaves the set as it is, `Some(None)` takes the claim out of it).
 struct Named {
     uid: String,
-    lines: Vec<String>,
+    lines: Vec<redact::Mapped>,
     entry: Option<Option<Value>>,
 }
 
@@ -752,14 +797,17 @@ fn corrections(
         claims::DECIDED_WHERE
     );
     let id = |uid: &str| uid.chars().take(12).collect::<String>();
+    let plain = |text: &str| {
+        let mut line = redact::Mapped::default();
+        line.push_str(text);
+        line
+    };
     let line = |c: &Claim, change: &str| {
         let date = &crate::db::utc(c.valid_from)[..10];
-        format!(
-            "- {} {date} {}: \"{}\" {change}",
-            id(&c.uid),
-            c.kind,
-            first_words(&c.body, rules)
-        )
+        let mut line = plain(&format!("- {} {date} {}: \"", id(&c.uid), c.kind));
+        line.append(first_words(&c.body, rules));
+        line.push_str(&format!("\" {change}"));
+        line
     };
     let mut named = Vec::new();
     for (uid, entry) in shown {
@@ -770,10 +818,10 @@ fn corrections(
                 entry["withdrawn"] = json!(true);
                 named.push(Named {
                     uid: uid.clone(),
-                    lines: vec![format!(
+                    lines: vec![plain(&format!(
                         "- {}: withdrawn by an owner's change not applied yet",
                         id(uid)
-                    )],
+                    ))],
                     entry: Some(Some(entry)),
                 });
             }
@@ -814,13 +862,16 @@ fn corrections(
             }
             continue;
         }
-        let gone = |lines: Vec<String>| Named {
+        let gone = |lines: Vec<redact::Mapped>| Named {
             uid: uid.clone(),
             lines,
             entry: Some(None),
         };
         named.push(match claims::active_one(k, uid)? {
-            None => gone(vec![format!("- {}: is no longer delivered", id(uid))]),
+            None => gone(vec![plain(&format!(
+                "- {}: is no longer delivered",
+                id(uid)
+            ))]),
             Some(c) if c.status == "retracted" => gone(vec![line(&c, "was retracted")]),
             Some(c) if c.kind == "open item" && c.status == "done" => {
                 gone(vec![line(&c, "is done")])
@@ -873,10 +924,19 @@ pub fn inject_text(home: &Path, cwd: &Path, session: Option<&str>) -> String {
         None
     });
     // OpenCode's plugin is what reads it (D9).
+    let text = joined(home, manifest.as_ref().map(|m| m.text.as_str()));
     if let (Some(start), Some(session)) = (&manifest, session) {
-        remember(home, "opencode", session, start.shown.iter());
+        remember(
+            home,
+            "opencode",
+            session,
+            start
+                .shown
+                .iter()
+                .filter(|s| text.lines().any(|l| l == s.line)),
+        );
     }
-    joined(home, manifest.as_ref().map(|m| m.text.as_str()))
+    text
 }
 
 /// The recording-failure line, then `manifest` in its fence: what SessionStart shows, as `oboete
@@ -1906,6 +1966,47 @@ mod tests {
         assert!(named.lines().any(|l| l.starts_with(&parser)), "{named}");
     }
 
+    /// Spec 6.4: a field mask must not remove the context of a rule on the formatted prompt line
+    /// (#327's manifest regression, through the prompt hook).
+    #[test]
+    fn interacting_field_and_formatted_rules_hide_prompt_claims() {
+        let mut p = Prompts::new(true);
+        p.decided(1, "Header\nalpha code 654321", &[]);
+        p.s.run();
+        std::fs::write(
+            p.s.home.path().join("config.toml"),
+            "[inject]\nper_prompt = true\n[redaction]\nextra_rules = [\
+             { id = 'field', regex = '^Header\\n(alpha) code [0-9]{6}$', secret_group = 1 }, \
+             { id = 'line', regex = '(?m)^- 1970-01-02 decision: Header alpha code ([0-9]{6})$', secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let text = p.prompt("a", "Header alpha code 654321");
+        assert!(text.contains("Header [REDACTED] code [REDACTED]"), "{text}");
+        assert!(!text.contains("654321"), "{text}");
+    }
+
+    /// Spec 6.4 and 4.8: the same original context is kept for a correction's quoted first words.
+    #[test]
+    fn interacting_field_and_formatted_rules_hide_correction_claims() {
+        let mut p = Prompts::new(false);
+        let uid = p.decided(1, "Header\nalpha code 654321", &[]);
+        p.s.run();
+        let start = p.hook("SessionStart", "a", json!({"source": "startup"}));
+        assert!(start.contains("Header alpha code 654321"), "{start}");
+        p.s.correct(&uid, Some("retracted"), None);
+        p.s.run();
+        std::fs::write(
+            p.s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [\
+             { id = 'field', regex = '^Header\\n(alpha) code [0-9]{6}$', secret_group = 1 }, \
+             { id = 'line', regex = '(?m)^- [^ ]+ 1970-01-02 decision: \"Header alpha code ([0-9]{6})\" was retracted$', secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let text = p.prompt("a", "anything new");
+        assert!(text.contains("Header [REDACTED] code [REDACTED]"), "{text}");
+        assert!(!text.contains("654321"), "{text}");
+    }
+
     /// D3: a shortlisted claim retracted since the build, by a change the worker applied or one
     /// it has not applied yet, is not injected.
     #[test]
@@ -2005,6 +2106,32 @@ mod tests {
         // A compaction shows the manifest again, which shows it only as an index line.
         p.hook("SessionStart", "a", json!({"source": "compact"}));
         assert!(p.prompt("a", asked).contains(asked), "{asked}");
+    }
+
+    /// D9: identical display lines do not make a different uid past the prompt's cap count as
+    /// shown; the cut claim can still get its body at the next prompt.
+    #[test]
+    fn identical_prompt_lines_count_only_the_occurrence_before_the_cut() {
+        let mut p = Prompts::new(true);
+        let common = "Shared words ".repeat(40);
+        let older =
+            p.s.decided(&p.repo, 86_400_001, &format!("{common}older tail"), &[]);
+        let newer =
+            p.s.decided(&p.repo, 86_400_002, &format!("{common}newer tail"), &[]);
+        p.s.run();
+        std::fs::write(
+            p.s.home.path().join("config.toml"),
+            "[inject]\nper_prompt = true\nper_prompt_chars = 500\n",
+        )
+        .unwrap();
+        let text = p.prompt("a", "Shared words Shared words");
+        assert_eq!(text.lines().filter(|l| l.starts_with("- ")).count(), 1);
+        let shown = shown_set(p.s.home.path(), "claude", "a");
+        assert_eq!(shown.keys().collect::<Vec<_>>(), [&newer]);
+        let text = p.prompt("a", "Shared words Shared words");
+        assert_eq!(text.lines().filter(|l| l.starts_with("- ")).count(), 1);
+        let shown = shown_set(p.s.home.path(), "claude", "a");
+        assert!(shown.contains_key(&older) && shown.contains_key(&newer));
     }
 
     /// Spec 4.8, 6.5 and A102: a claim the session was shown that changed since is named once, at
@@ -2434,6 +2561,53 @@ mod tests {
         assert_eq!(tool(), "");
     }
 
+    /// Grok's Claude-compatible hooks keep shown claims and corrections under the resolved
+    /// agent, as its dedicated hooks do. The child keeps GROK_HOME out of the owner's config.
+    #[test]
+    fn grok_compat_hooks_keep_shown_claims_and_corrections() {
+        const CHILD: &str = "OBOETE_GROK_COMPAT_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "hook::tests::grok_compat_hooks_keep_shown_claims_and_corrections",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("GROK_HOME", home.path())
+                .env("OBOETE_NO_SPAWN", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let mut p = Prompts::new(false);
+        let uid = p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let cwd = p.c.clone();
+        let call = |event: &str| {
+            let payload = json!({"sessionId": "g", "workspaceRoot": cwd,
+                                 "hookEventName": event, "prompt": "anything new"});
+            injected("grok", &hook(&home, "claude", event, &payload))
+        };
+        call("UserPromptSubmit");
+        assert!(call("PreToolUse").contains("Parser errors go to stderr."));
+        assert!(shown_set(p.s.home.path(), "grok", "g").contains_key(&uid));
+        assert!(shown_set(p.s.home.path(), "claude", "g").is_empty());
+        p.s.correct(&uid, None, Some("Parser errors go to the log."));
+        p.s.run();
+        call("UserPromptSubmit");
+        assert!(call("PreToolUse").contains("was corrected and now reads so"));
+        call("UserPromptSubmit");
+        assert_eq!(call("PreToolUse"), "");
+    }
+
     /// Spec 4.7: agy has no compaction hook; a CHECKPOINT step in its transcript past the first
     /// reply is one, and the next PreInvocation shows the manifest again. The `CHECKPOINT 0` most
     /// sessions get before their first reply is none.
@@ -2510,7 +2684,7 @@ mod tests {
         // Every line whole, the others' text uncut.
         let blocks = [("what", "## A\n- one\n- two\n")];
         assert_eq!(
-            assembled("cursor", None, &blocks),
+            assembled("cursor", None, &blocks).0,
             crate::manifest::fence("what", blocks[0].1)
         );
         let long = format!("## A\n{}", "- 🚀🚀🚀🚀\n".repeat(2_000));
@@ -2518,7 +2692,8 @@ mod tests {
             "cursor",
             Some("failed".into()),
             &[("what", &long), ("b", "## B\n- x\n")],
-        );
+        )
+        .0;
         assert!(text.encode_utf16().count() <= 9_500);
         assert!(text.starts_with("failed\n<oboete-memory>\nwhat\n\n## A\n"));
         assert!(
@@ -2527,13 +2702,40 @@ mod tests {
             &text[text.len() - 80..]
         );
         assert_eq!(text.matches("<oboete-memory>").count(), 1);
-        let full = assembled("claude", None, &[("what", &long)]);
+        let full = assembled("claude", None, &[("what", &long)]).0;
         assert_eq!(full, crate::manifest::fence("what", &long));
         // A block with room for its heading only is left out.
         let wide = format!("## B\n- {}\n", "x".repeat(9_480));
         assert_eq!(
-            assembled("cursor", None, &[("what", "## A\n- a\n"), ("b", &wide)]),
+            assembled("cursor", None, &[("what", "## A\n- a\n"), ("b", &wide)]).0,
             crate::manifest::fence("what", "## A\n- a\n")
+        );
+    }
+
+    /// D9: Cursor's additional UTF-16 cut retains only the source occurrences that came through,
+    /// even when different global preferences have the same clipped display line.
+    #[test]
+    fn identical_cursor_lines_count_only_the_occurrences_before_its_cut() {
+        let p = Prompts::new(false);
+        let common = "🚀🚀🚀🚀🚀🚀🚀 ".repeat(60);
+        for i in 0..16 {
+            crate::claims::pref_add(p.s.home.path(), &format!("{common}tail {i}")).unwrap();
+        }
+        p.s.run();
+        let payload = json!({"conversation_id": "cs", "workspace_roots": [p.c]});
+        let text = injected(
+            "cursor",
+            &hook(p.s.home.path(), "cursor", "SessionStart", &payload),
+        );
+        let lines: Vec<_> = text
+            .lines()
+            .filter(|l| l.contains(" preference: "))
+            .collect();
+        assert!((1..16).contains(&lines.len()));
+        assert!(lines.iter().all(|l| *l == lines[0]));
+        assert_eq!(
+            shown_set(p.s.home.path(), "cursor", "cs").len(),
+            lines.len()
         );
     }
 

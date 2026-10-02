@@ -1073,6 +1073,7 @@ pub(crate) fn lines_with(text: &str, rules: &Rules) -> String {
 }
 
 /// Selected, untouched display text, with field findings kept until the composed packet's gate.
+#[derive(Clone)]
 pub(crate) struct Mapped {
     pub text: String,
     hidden: Option<Vec<(usize, usize)>>,

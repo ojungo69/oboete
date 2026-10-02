@@ -113,6 +113,8 @@ pub struct Shown {
     pub body: bool,
     /// The line that shows it: a later cut that drops the line leaves it unshown.
     pub line: String,
+    /// This occurrence's byte range in `Start::text`, after its gate and cut.
+    pub range: std::ops::Range<usize>,
 }
 
 /// A body's fingerprint: whether a claim's body changed since it was shown.
@@ -157,21 +159,32 @@ pub fn text(
     // Match the surviving occurrence, not another claim with the same rendered line.
     let shown = bodies
         .into_iter()
-        .filter_map(|(range, shown)| {
-            let line = shown.line.as_str();
-            let at = from.iter().position(|&(s, _)| s == range.start)?;
-            let end = at + line.len();
-            (text.get(at..end) == Some(line)
-                && (at == 0 || text.as_bytes()[at - 1] == b'\n')
-                && text.as_bytes().get(end).is_none_or(|&b| b == b'\n')
-                && from.get(end - 1).is_some_and(|&(_, e)| e == range.end)
-                && from[at..end]
-                    .iter()
-                    .all(|&(s, e)| s >= range.start && e <= range.end))
-            .then_some(shown)
+        .filter_map(|(range, mut shown)| {
+            shown.range = surviving_line(&text, &from, range, &shown.line)?;
+            Some(shown)
         })
         .collect();
     Ok(Some(Start { text, shown }))
+}
+
+/// The same source occurrence survived the packet's gate and cut as a whole line, not an
+/// identical line from another claim. Prompt blocks use the same accounting as SessionStart.
+pub(crate) fn surviving_line(
+    text: &str,
+    from: &[(usize, usize)],
+    range: std::ops::Range<usize>,
+    line: &str,
+) -> Option<std::ops::Range<usize>> {
+    let at = from.iter().position(|&(s, _)| s == range.start)?;
+    let end = at + line.len();
+    (text.get(at..end) == Some(line)
+        && (at == 0 || text.as_bytes()[at - 1] == b'\n')
+        && text.as_bytes().get(end).is_none_or(|&b| b == b'\n')
+        && from.get(end - 1).is_some_and(|&(_, e)| e == range.end)
+        && from[at..end]
+            .iter()
+            .all(|&(s, e)| s >= range.start && e <= range.end))
+    .then_some(at..end)
 }
 
 /// The stored ruleset of a row built under rules of `version` in this format.
@@ -398,13 +411,14 @@ fn with_delivered(
                 fp: fingerprint(&c.body),
                 body,
                 line: line.masked(),
+                range: at..at + line.text.len(),
             };
             bodies.push((at..at + line.text.len(), shown));
             out.append(line);
             out.push_str("\n");
         };
         let full = |out: &mut Mapped, bodies: &mut Vec<Body>, c: &Claim, unit: &[Claim]| {
-            shown(out, bodies, c, body_mapped(c, unit, rules), true);
+            shown(out, bodies, c, body_line(c, unit, rules), true);
         };
         let id = |uid: &str| uid.chars().take(12).collect::<String>();
         let brief = |c: &Claim| {
@@ -797,24 +811,15 @@ pub(crate) fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
     out
 }
 
-/// A claim's first words as an index line shows them: gated with `rules`, flattened, clipped.
-pub(crate) fn first_words(body: &str, rules: &crate::redact::Rules) -> String {
-    crate::redact::flattened_with(body, rules, BRIEF, one_line).masked()
+/// A claim's first words, with field findings kept until its formatted line is gated.
+pub(crate) fn first_words(body: &str, rules: &crate::redact::Rules) -> Mapped {
+    crate::redact::flattened_with(body, rules, BRIEF, one_line)
 }
 
 /// A claim's line with its body, at SessionStart and at a prompt: its date and kind, the later
 /// claim of `unit` that ended it (shown above it), and its body gated with `rules` before it is
-/// flattened and clipped. As the line reads, its masks included.
+/// flattened and clipped. The original context and field findings survive until the packet's gate.
 pub(crate) fn body_line(
-    c: &crate::claims::Claim,
-    unit: &[crate::claims::Claim],
-    rules: &crate::redact::Rules,
-) -> String {
-    body_mapped(c, unit, rules).masked()
-}
-
-/// `body_line`, with the origin of each byte, as the packet is built from.
-fn body_mapped(
     c: &crate::claims::Claim,
     unit: &[crate::claims::Claim],
     rules: &crate::redact::Rules,
@@ -828,7 +833,9 @@ fn body_mapped(
         .unwrap_or_default();
     let mut line = Mapped::default();
     line.push_str(&format!("- {} {}{ended}: ", date(c), c.kind));
-    line.append(crate::redact::flattened_with(&c.body, rules, CLIP, one_line));
+    line.append(crate::redact::flattened_with(
+        &c.body, rules, CLIP, one_line,
+    ));
     line
 }
 
