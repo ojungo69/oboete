@@ -1422,7 +1422,7 @@ pub fn run_phase(
     }
     // Built only for a window that is sent now: a held one would search its candidates each pass.
     let req = request(raw, k, rules, summary, &w)?;
-    let failed = match answered(raw, k, rules, &w, &req, curator) {
+    let failed = match answered(raw, k, db, rules, &w, &req, curator) {
         Ok(Ok((op, claims))) => return cover(raw, db, &w, op, claims),
         Ok(Err(failed)) => failed,
         // Nothing more went out, and no attempt is counted: the next pass cuts it again.
@@ -1572,15 +1572,24 @@ pub(crate) fn quotes_excluded(
 fn answered(
     raw: &Raw,
     k: &Connection,
+    db: &Connection,
     rules: &Rules,
     w: &Window,
     req: &Request,
     curator: &mut Curator,
 ) -> Result<std::result::Result<(Value, Vec<Value>), Vec<Fallback>>> {
     let span = format!("{}-{}", w.from_seq, w.to_seq);
+    let in_flight = providers_db::start_curation(
+        db,
+        &w.device,
+        (w.from_seq, w.from_offset),
+        (w.to_seq, w.to_offset),
+        &sha256_hex(&req.prompt),
+    )?;
     let answer = curator(&span, &req.prompt, &|v| check(w, v), &|| {
         w.reading.still(raw)
     });
+    drop(in_flight);
     Ok(match answer {
         Ok(r) => match located(w, &r.output) {
             Ok((summary, mut found, lost)) => {
@@ -1926,6 +1935,7 @@ fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> 
     let sent = send_plan(
         &mut raw,
         &mut k,
+        &db,
         &mut consumers,
         &rules,
         &cfg.summary,
@@ -2006,9 +2016,11 @@ pub struct Sent {
 /// would spend it again; the next run starts there. The consumers run after each window, as the
 /// worker runs them between its windows: the next window reads the claims this one derived, the
 /// proposals it carries among them, as they stand now (review on #243).
+#[allow(clippy::too_many_arguments)]
 pub fn send_plan(
     raw: &mut Raw,
     k: &mut Connection,
+    db: &Connection,
     consumers: &mut [Box<dyn crate::worker::Consumer>],
     rules: &Rules,
     summary: &Summary,
@@ -2061,7 +2073,7 @@ pub fn send_plan(
                 to,
                 to_offset,
             };
-            match recurate_window(raw, k, rules, summary, curator, w, Some(&through)) {
+            match recurate_window(raw, k, db, rules, summary, curator, w, Some(&through)) {
                 Err(e) if e.is::<ListChanged>() => {
                     changed(&mut sent, e);
                     return Ok(sent);
@@ -2250,9 +2262,11 @@ pub(crate) fn curated_parts(op: &Value, range: &Value) -> Vec<Span> {
 /// through this window, from the span's start: that part is off the queue and no longer skipped,
 /// whatever windows it took, and a later run sends only the rest.
 /// How many claims and retractions it wrote, or why every provider went past.
+#[allow(clippy::too_many_arguments)]
 pub fn recurate_window(
     raw: &mut Raw,
     k: &Connection,
+    db: &Connection,
     rules: &Rules,
     summary: &Summary,
     curator: &mut Curator,
@@ -2276,7 +2290,7 @@ pub fn recurate_window(
         (json!({"outcome": "covered"}), Vec::new())
     } else {
         let req = request(raw, k, rules, summary, w)?;
-        match answered(raw, k, rules, w, &req, curator)? {
+        match answered(raw, k, db, rules, w, &req, curator)? {
             Ok(answer) => answer,
             Err(failed) => return Ok(Err(ChainFailed(failed).to_string())),
         }
@@ -4623,6 +4637,184 @@ mod tests {
         (raw, providers_db::open(home).unwrap())
     }
 
+    #[test]
+    fn a_curators_window_is_visible_before_the_call_and_cleared_on_every_return() {
+        for outcome in ["ok", "failed", "gate", "panic"] {
+            let home = tempfile::tempdir().unwrap();
+            let (mut raw, db) = open(home.path());
+            raw.append(&prompt("request-only canary: blue cedar"))
+                .unwrap();
+            raw.append(&prompt("two")).unwrap();
+            let device = raw.device().to_owned();
+            let reader = Connection::open_with_flags(
+                home.path().join("providers.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let mut curator = |_: &str, text: &str, _: &AnswerCheck, gate: &Gate| {
+                gate()?;
+                let row: (String, i64, Option<i64>, i64, Option<i64>, String) = reader
+                    .query_row(
+                        "SELECT device, from_seq, from_offset, to_seq, to_offset, prompt_sha256
+                         FROM curation_inflight",
+                        [],
+                        |r| {
+                            Ok((
+                                r.get(0)?,
+                                r.get(1)?,
+                                r.get(2)?,
+                                r.get(3)?,
+                                r.get(4)?,
+                                r.get(5)?,
+                            ))
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(row, (device.clone(), 1, None, 2, None, sha256_hex(text)));
+                match outcome {
+                    "failed" => Err(went_past(&[("fake", "HTTP 400", Skip::Failed)])),
+                    "gate" => Err(ListChanged.into()),
+                    "panic" => panic!("curator stopped"),
+                    _ => Ok(answered("fake")),
+                }
+            };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_phase(
+                    &mut raw,
+                    &kn(),
+                    &db,
+                    &Rules::default(),
+                    &curating(WINDOW_TOKENS),
+                    "",
+                    &mut curator,
+                )
+            }));
+            match outcome {
+                "ok" => assert_eq!(result.unwrap().unwrap(), Phase::Covered),
+                "failed" => {
+                    assert!(matches!(result.unwrap().unwrap(), Phase::Waiting { .. }));
+                    assert_eq!(
+                        providers_db::pending_of(&db, &device)
+                            .unwrap()
+                            .unwrap()
+                            .attempts,
+                        1
+                    );
+                }
+                "gate" => assert!(matches!(result.unwrap().unwrap(), Phase::Waiting { .. })),
+                "panic" => assert!(result.is_err()),
+                _ => unreachable!(),
+            }
+            let left: i64 = reader
+                .query_row("SELECT count(*) FROM curation_inflight", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(left, 0, "{outcome}");
+            assert!(providers_db::last_calls(&db, 10).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn metadata_failure_blocks_a_new_request_but_keeps_an_answer_already_received() {
+        for blocked in ["INSERT", "DELETE"] {
+            let home = tempfile::tempdir().unwrap();
+            let (mut raw, db) = open(home.path());
+            raw.append(&prompt("We use tabs")).unwrap();
+            db.execute_batch(&format!(
+                "CREATE TRIGGER hold_metadata BEFORE {blocked} ON curation_inflight
+                 BEGIN SELECT RAISE(ABORT, 'metadata unavailable'); END;"
+            ))
+            .unwrap();
+            let calls = Cell::new(0);
+            let mut curator = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| {
+                calls.set(calls.get() + 1);
+                Ok(claimed("L1", "We use tabs"))
+            };
+            let mut phase = |raw: &mut Raw| {
+                run_phase(
+                    raw,
+                    &kn(),
+                    &db,
+                    &Rules::default(),
+                    &curating(WINDOW_TOKENS),
+                    "",
+                    &mut curator,
+                )
+            };
+            let result = phase(&mut raw);
+            if blocked == "INSERT" {
+                assert!(result.is_err());
+                assert_eq!(calls.get(), 0);
+                assert!(windows(&raw).is_empty());
+            } else {
+                assert_eq!(result.unwrap(), Phase::Covered);
+                assert_eq!(phase(&mut raw).unwrap(), Phase::Idle);
+                assert_eq!(calls.get(), 1);
+                assert_eq!(raw.ops_after(raw.device(), 0, 10).unwrap().len(), 2);
+                let stale: i64 = db
+                    .query_row("SELECT count(*) FROM curation_inflight", [], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(stale, 1);
+            }
+            assert!(providers_db::pending(&db).unwrap().is_empty());
+            assert!(providers_db::last_calls(&db, 10).unwrap().is_empty());
+            // When metadata is writable again, the next attempt replaces any stale generation.
+            db.execute_batch("DROP TRIGGER hold_metadata").unwrap();
+            raw.append(&prompt("We use tabs")).unwrap();
+            assert_eq!(phase(&mut raw).unwrap(), Phase::Covered);
+            assert_eq!(calls.get(), if blocked == "INSERT" { 1 } else { 2 });
+            let left: i64 = db
+                .query_row("SELECT count(*) FROM curation_inflight", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(left, 0);
+        }
+    }
+
+    #[test]
+    fn recuration_exposes_the_exact_device_and_split_offsets_while_answering() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&prompt("alpha bravo charlie delta echo"))
+            .unwrap();
+        let span = Span {
+            from: 1,
+            from_offset: Some(6),
+            to: 1,
+            to_offset: Some(19),
+        };
+        let rules = Rules::default();
+        let pieces = span_windows(&raw, &span, WINDOW_TOKENS, &rules, &Reading::default()).unwrap();
+        assert_eq!(pieces.len(), 1);
+        let device = raw.device().to_owned();
+        let reader = Connection::open_with_flags(
+            home.path().join("providers.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut curator = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| {
+            let row: (String, i64, i64, i64, i64) = reader.query_row(
+                "SELECT device, from_seq, from_offset, to_seq, to_offset FROM curation_inflight", [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            ).unwrap();
+            assert_eq!(row, (device.clone(), 1, 6, 1, 19));
+            Ok(answered("fake"))
+        };
+        let result = recurate_window(
+            &mut raw,
+            &kn(),
+            &db,
+            &rules,
+            &curating(WINDOW_TOKENS),
+            &mut curator,
+            &pieces[0],
+            None,
+        );
+        assert_eq!(result.unwrap(), Ok((0, 0)));
+        let left: i64 = reader
+            .query_row("SELECT count(*) FROM curation_inflight", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
     /// Review Focus 4: a worker stopped between the answer and the append moves neither the
     /// window op nor the checkpoint, and the same window is curated again, once.
     #[test]
@@ -5794,7 +5986,7 @@ mod tests {
             let from = first.len() as i64 + 1;
             let span = Span::records(from, from + second.len() as i64 - 1);
             let w = span_windows(&raw, &span, WINDOW_TOKENS, &rules, &Reading::default()).unwrap();
-            recurate_window(&mut raw, &k, &rules, &summary, &mut chain, &w[0], None)
+            recurate_window(&mut raw, &k, &db, &rules, &summary, &mut chain, &w[0], None)
                 .unwrap()
                 .unwrap();
             consume(&raw, &mut k);
@@ -6021,6 +6213,7 @@ mod tests {
         let done = recurate_window(
             &mut raw,
             &k,
+            &db,
             &rules,
             &summary,
             &mut chain,
@@ -6051,7 +6244,7 @@ mod tests {
     #[test]
     fn a_skipped_window_is_curated_by_recurate_skipped() {
         let home = tempfile::tempdir().unwrap();
-        let (mut raw, _) = open(home.path());
+        let (mut raw, db) = open(home.path());
         let k = crate::knowledge::open(home.path()).unwrap();
         for text in ["We use tabs.", "two"] {
             raw.append(&prompt(text)).unwrap();
@@ -6079,6 +6272,7 @@ mod tests {
         let done = recurate_window(
             &mut raw,
             &k,
+            &db,
             &rules,
             &summary,
             &mut chain,
@@ -6184,7 +6378,9 @@ mod tests {
         let again = span_windows(&raw, &last, 80, &rules, &Reading::default()).unwrap();
         assert_eq!(again.len(), 1);
         let mut none = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| Ok(answered("fake"));
-        let done = recurate_window(&mut raw, &k, &rules, &summary, &mut none, &again[0], None);
+        let done = recurate_window(
+            &mut raw, &k, &db, &rules, &summary, &mut none, &again[0], None,
+        );
         assert_eq!(done.unwrap(), Ok((0, 1)));
         consume(&raw, &mut k);
         // The first part's claim stays: it is quoted from the other part.
@@ -6201,9 +6397,11 @@ mod tests {
         };
         raw.append_ops(&[skip(&parts[0]), skip(&last)]).unwrap();
         let first = span_windows(&raw, &parts[0], 80, &rules, &Reading::default()).unwrap();
-        recurate_window(&mut raw, &k, &rules, &summary, &mut none, &first[0], None)
-            .unwrap()
-            .unwrap();
+        recurate_window(
+            &mut raw, &k, &db, &rules, &summary, &mut none, &first[0], None,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(skipped_spans(&raw).unwrap(), [last]);
     }
 
@@ -6212,7 +6410,7 @@ mod tests {
     #[test]
     fn a_queued_span_of_several_windows_leaves_the_queue_with_its_last() {
         let home = tempfile::tempdir().unwrap();
-        let (mut raw, _) = open(home.path());
+        let (mut raw, db) = open(home.path());
         let mut k = crate::knowledge::open(home.path()).unwrap();
         for text in ["one two three", "four five six", "seven eight nine"] {
             raw.append(&prompt(text)).unwrap();
@@ -6238,7 +6436,7 @@ mod tests {
         };
         for (i, w) in windows.iter().enumerate() {
             let last = (i + 1 == windows.len()).then_some(&span);
-            recurate_window(&mut raw, &k, &rules, &summary, &mut none, w, last)
+            recurate_window(&mut raw, &k, &db, &rules, &summary, &mut none, w, last)
                 .unwrap()
                 .unwrap();
             consume(&raw, &mut k);
@@ -6260,7 +6458,7 @@ mod tests {
     #[test]
     fn a_recuration_of_a_spans_middle_leaves_both_sides() {
         let home = tempfile::tempdir().unwrap();
-        let (mut raw, _) = open(home.path());
+        let (mut raw, db) = open(home.path());
         let mut k = crate::knowledge::open(home.path()).unwrap();
         for text in ["one two three", "four five six", "seven eight nine"] {
             raw.append(&prompt(text)).unwrap();
@@ -6288,7 +6486,7 @@ mod tests {
         let mut again = |raw: &mut Raw, k: &mut Connection, span: Span| {
             let w = span_windows(raw, &span, WINDOW_TOKENS, &rules, &Reading::default()).unwrap();
             assert_eq!(w.len(), 1);
-            recurate_window(raw, k, &rules, &summary, &mut none, &w[0], Some(&span))
+            recurate_window(raw, k, &db, &rules, &summary, &mut none, &w[0], Some(&span))
                 .unwrap()
                 .unwrap();
             consume(raw, k);
@@ -6324,7 +6522,7 @@ mod tests {
     #[test]
     fn a_recuration_the_consumers_have_not_read_is_not_sent_again() {
         let home = tempfile::tempdir().unwrap();
-        let (mut raw, _) = open(home.path());
+        let (mut raw, db) = open(home.path());
         let mut k = crate::knowledge::open(home.path()).unwrap();
         raw.append(&prompt("We use tabs.")).unwrap();
         let op = json!({"from_seq": 1, "from_offset": null, "to_seq": 1, "to_offset": null,
@@ -6344,6 +6542,7 @@ mod tests {
         recurate_window(
             &mut raw,
             &k,
+            &db,
             &rules,
             &summary,
             &mut none,
@@ -6362,7 +6561,7 @@ mod tests {
     #[test]
     fn a_record_curated_in_part_stays_queued() {
         let home = tempfile::tempdir().unwrap();
-        let (mut raw, _) = open(home.path());
+        let (mut raw, db) = open(home.path());
         let mut k = crate::knowledge::open(home.path()).unwrap();
         raw.append(&prompt(&"Some filler here.\n".repeat(30)))
             .unwrap();
@@ -6393,6 +6592,7 @@ mod tests {
         let sent = send_plan(
             &mut raw,
             &mut k,
+            &db,
             &mut claims_consumer(),
             &rules,
             &summary,
@@ -6414,6 +6614,7 @@ mod tests {
         let sent = send_plan(
             &mut raw,
             &mut k,
+            &db,
             &mut claims_consumer(),
             &rules,
             &summary,
@@ -6434,7 +6635,7 @@ mod tests {
     #[test]
     fn a_quote_a_new_split_cuts_in_two_is_not_retracted() {
         let home = tempfile::tempdir().unwrap();
-        let (mut raw, _) = open(home.path());
+        let (mut raw, db) = open(home.path());
         let mut k = crate::knowledge::open(home.path()).unwrap();
         let text = "Some filler here.\n".repeat(30);
         let (_, mut op) = kept(&mut raw, "s", "r", &text);
@@ -6456,7 +6657,7 @@ mod tests {
         let summary = curating(80);
         let mut none = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| Ok(answered("fake"));
         for part in &parts {
-            let done = recurate_window(&mut raw, &k, &rules, &summary, &mut none, part, None);
+            let done = recurate_window(&mut raw, &k, &db, &rules, &summary, &mut none, part, None);
             assert_eq!(done.unwrap(), Ok((0, 0)));
         }
         consume(&raw, &mut k);
@@ -6468,7 +6669,7 @@ mod tests {
     #[test]
     fn retractions_past_the_batch_cap_are_left_out() {
         let home = tempfile::tempdir().unwrap();
-        let (mut raw, _) = open(home.path());
+        let (mut raw, db) = open(home.path());
         let mut k = crate::knowledge::open(home.path()).unwrap();
         let mut claims = Vec::new();
         for i in 0..1_100 {
@@ -6495,7 +6696,16 @@ mod tests {
         assert_eq!(windows.len(), 1);
         let summary = curating(1_000_000);
         let mut none = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| Ok(answered("fake"));
-        let done = recurate_window(&mut raw, &k, &rules, &summary, &mut none, &windows[0], None);
+        let done = recurate_window(
+            &mut raw,
+            &k,
+            &db,
+            &rules,
+            &summary,
+            &mut none,
+            &windows[0],
+            None,
+        );
         let room = crate::raw::MAX_BATCH_OPS - 1;
         assert_eq!(done.unwrap(), Ok((0, room)));
         consume(&raw, &mut k);
@@ -6509,7 +6719,7 @@ mod tests {
     #[test]
     fn a_failed_window_leaves_only_the_rest_of_its_span() {
         let home = tempfile::tempdir().unwrap();
-        let (mut raw, _) = open(home.path());
+        let (mut raw, db) = open(home.path());
         let mut k = crate::knowledge::open(home.path()).unwrap();
         for text in ["one two three", "four five six", "seven eight nine"] {
             raw.append(&prompt(text)).unwrap();
@@ -6541,6 +6751,7 @@ mod tests {
         let sent = send_plan(
             &mut raw,
             &mut k,
+            &db,
             &mut claims_consumer(),
             &rules,
             &summary,
@@ -6575,6 +6786,7 @@ mod tests {
         let sent = send_plan(
             &mut raw,
             &mut k,
+            &db,
             &mut claims_consumer(),
             &rules,
             &summary,
@@ -6593,7 +6805,7 @@ mod tests {
     #[test]
     fn a_skipped_span_of_several_windows_and_a_window_with_no_text() {
         let home = tempfile::tempdir().unwrap();
-        let (mut raw, _) = open(home.path());
+        let (mut raw, db) = open(home.path());
         let k = crate::knowledge::open(home.path()).unwrap();
         for text in ["one two three", "four five six", "seven eight nine"] {
             raw.append(&prompt(text)).unwrap();
@@ -6620,7 +6832,7 @@ mod tests {
             let still = skipped_spans(&raw).unwrap();
             assert_eq!(still, [rest], "window {i}");
             let last = (i + 1 == windows.len()).then_some(&span);
-            recurate_window(&mut raw, &k, &rules, &summary, &mut none, w, last)
+            recurate_window(&mut raw, &k, &db, &rules, &summary, &mut none, w, last)
                 .unwrap()
                 .unwrap();
         }
@@ -6631,7 +6843,9 @@ mod tests {
         let mut never = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
             panic!("a window with no text is not sent")
         };
-        let done = recurate_window(&mut raw, &k, &rules, &summary, &mut never, &start[0], None);
+        let done = recurate_window(
+            &mut raw, &k, &db, &rules, &summary, &mut never, &start[0], None,
+        );
         assert_eq!(done.unwrap(), Ok((0, 0)));
     }
 
@@ -6675,7 +6889,7 @@ mod tests {
         let span = Span::records(1, 1);
         while !answers.borrow().is_empty() {
             let w = span_windows(&raw, &span, WINDOW_TOKENS, &rules, &Reading::default()).unwrap();
-            recurate_window(&mut raw, &k, &rules, &summary, &mut chain, &w[0], None)
+            recurate_window(&mut raw, &k, &db, &rules, &summary, &mut chain, &w[0], None)
                 .unwrap()
                 .unwrap();
             consume(&raw, &mut k);
@@ -7359,6 +7573,7 @@ mod tests {
         let done = recurate_window(
             &mut raw,
             &k,
+            &db,
             &rules,
             &summary,
             &mut chain,
@@ -8214,6 +8429,7 @@ mod tests {
         let done = recurate_window(
             &mut raw,
             &k,
+            &db,
             &rules,
             &summary,
             &mut chain,
@@ -8302,6 +8518,7 @@ mod tests {
         let done = send_plan(
             &mut raw,
             &mut k,
+            &db,
             &mut consumers,
             &rules,
             &summary,
@@ -8892,6 +9109,7 @@ mod tests {
             send_plan(
                 raw,
                 &mut k,
+                &db,
                 &mut consumers,
                 &rules,
                 &summary,
@@ -8957,7 +9175,7 @@ mod tests {
     #[test]
     fn a_recuration_keeps_a_claim_that_quotes_an_excluded_session_elsewhere() {
         let home = tempfile::tempdir().unwrap();
-        let (mut raw, _) = open(home.path());
+        let (mut raw, db) = open(home.path());
         let mut k = crate::knowledge::open(home.path()).unwrap();
         let (_, other) = kept(&mut raw, "b", "secret", "Parse the secret feed.");
         let (_, own) = kept(&mut raw, "a", "open", "Cache the parsed files.");
@@ -8977,7 +9195,7 @@ mod tests {
         let reading = Reading::now(&raw, Reads::Live).unwrap();
         let w = span_windows(&raw, &Span::records(2, 2), WINDOW_TOKENS, &rules, &reading).unwrap();
         let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| Ok(answered("fake"));
-        let done = recurate_window(&mut raw, &k, &rules, &summary, &mut chain, &w[0], None)
+        let done = recurate_window(&mut raw, &k, &db, &rules, &summary, &mut chain, &w[0], None)
             .unwrap()
             .unwrap();
         consume(&raw, &mut k);
@@ -9040,6 +9258,7 @@ mod tests {
             let done = send_plan(
                 raw,
                 &mut k,
+                &db,
                 &mut consumers,
                 &rules,
                 &summary,
@@ -9106,6 +9325,7 @@ mod tests {
         let sent = send_plan(
             &mut raw,
             &mut k,
+            &db,
             &mut consumers,
             &rules,
             &summary,
@@ -9380,6 +9600,7 @@ mod tests {
         let sent = send_plan(
             &mut raw,
             &mut k,
+            &db,
             &mut consumers,
             &rules,
             &summary,
@@ -9421,6 +9642,7 @@ mod tests {
         let stopped = send_plan(
             &mut raw,
             &mut k,
+            &db,
             &mut consumers,
             &rules,
             &summary,
@@ -9439,6 +9661,7 @@ mod tests {
         let done = send_plan(
             &mut raw,
             &mut k,
+            &db,
             &mut consumers,
             &rules,
             &summary,

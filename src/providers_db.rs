@@ -66,6 +66,19 @@ CREATE TABLE IF NOT EXISTS pending(
   since INTEGER NOT NULL,                 -- when the window first waited
   prompt TEXT NOT NULL                    -- the SHA-256 of the request the attempts were on, with who was asked
 );
+-- A curator request currently being answered: metadata only, one generation per device. A
+-- crashed process may leave a row; pid/start identify its owner, and the next request replaces it.
+CREATE TABLE IF NOT EXISTS curation_inflight(
+  device TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL,
+  pid INTEGER NOT NULL,
+  started_at INTEGER NOT NULL,            -- unix ms
+  from_seq INTEGER NOT NULL,
+  from_offset INTEGER,
+  to_seq INTEGER NOT NULL,
+  to_offset INTEGER,
+  prompt_sha256 TEXT NOT NULL
+);
 -- What an entry's own key may request a day, where its budget is a fifth of that (#238): the
 -- `:free` model requests OpenRouter's GET /api/v1/key gives. NULL when the read failed or its
 -- answer had no limit.
@@ -550,6 +563,73 @@ pub fn clear_pending(conn: &Connection, device: &str) -> Result<()> {
     Ok(())
 }
 
+/// The current request's lifetime, including an unwinding curator. Completion is conditional
+/// on its generation, so a late answer cannot clear another request's metadata.
+#[must_use]
+pub struct CurationRequest<'a> {
+    conn: &'a Connection,
+    device: &'a str,
+    request_id: String,
+}
+
+impl Drop for CurationRequest<'_> {
+    fn drop(&mut self) {
+        if self
+            .conn
+            .execute(
+                "DELETE FROM curation_inflight WHERE device=?1 AND request_id=?2",
+                params![self.device, self.request_id],
+            )
+            .is_err()
+        {
+            // The call already happened: metadata failure must not discard its answer or cause
+            // it to be charged again. No payload or database error text enters the diagnostic.
+            eprintln!("oboete: curation request metadata could not be cleared; it may be stale");
+        }
+    }
+}
+
+/// Publish before calling the curator, without changing the call ledger or pending attempts.
+/// Readers may SELECT `curation_inflight` through a read-only connection. Seq bounds are
+/// inclusive, offsets are bytes within the first/last record; count raw records by device and
+/// bounds, never by subtracting seqs. Only a SHA-256 is kept, never the request text. A row left
+/// after a crash is not proof that its process still runs; the next request replaces it.
+pub fn start_curation<'a>(
+    conn: &'a Connection,
+    device: &'a str,
+    from: (i64, Option<i64>),
+    to: (i64, Option<i64>),
+    prompt_sha256: &str,
+) -> Result<CurationRequest<'a>> {
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).map_err(|e| anyhow::anyhow!("random request id: {e}"))?;
+    let request_id: String = random.iter().map(|b| format!("{b:02x}")).collect();
+    conn.execute(
+        "INSERT INTO curation_inflight(device, request_id, pid, started_at, from_seq,
+           from_offset, to_seq, to_offset, prompt_sha256) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+         ON CONFLICT(device) DO UPDATE SET request_id=excluded.request_id, pid=excluded.pid,
+           started_at=excluded.started_at, from_seq=excluded.from_seq,
+           from_offset=excluded.from_offset, to_seq=excluded.to_seq,
+           to_offset=excluded.to_offset, prompt_sha256=excluded.prompt_sha256",
+        params![
+            device,
+            request_id,
+            std::process::id(),
+            now_ms(),
+            from.0,
+            from.1,
+            to.0,
+            to.1,
+            prompt_sha256
+        ],
+    )?;
+    Ok(CurationRequest {
+        conn,
+        device,
+        request_id,
+    })
+}
+
 /// A session's digest waiting after every provider failed (`digest_pending`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DigestPending {
@@ -633,6 +713,101 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_inflight_curation_keeps_only_metadata_and_its_current_generation() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let reader = Connection::open_with_flags(
+            home.path().join("providers.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let hash = "a".repeat(64);
+        let started = now_ms();
+        let old = start_curation(&db, "device-a", (7, Some(12)), (9, Some(34)), &hash).unwrap();
+        let row: (String, i64, i64, i64, i64, i64, i64, String) = reader
+            .query_row(
+                "SELECT request_id, pid, started_at, from_seq, from_offset, to_seq, to_offset,
+                   prompt_sha256 FROM curation_inflight WHERE device='device-a'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row.0.len(), 32);
+        assert!(row.0.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(row.1, i64::from(std::process::id()));
+        assert!((started..=now_ms()).contains(&row.2));
+        assert_eq!((row.3, row.4, row.5, row.6), (7, 12, 9, 34));
+        assert_eq!(row.7, hash);
+        let columns: Vec<String> = reader
+            .prepare("PRAGMA table_info(curation_inflight)")
+            .unwrap()
+            .query_map([], |r| r.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            columns,
+            [
+                "device",
+                "request_id",
+                "pid",
+                "started_at",
+                "from_seq",
+                "from_offset",
+                "to_seq",
+                "to_offset",
+                "prompt_sha256"
+            ]
+        );
+        let another_writer = open(home.path()).unwrap();
+        let newer = start_curation(
+            &another_writer,
+            "device-a",
+            (9, Some(34)),
+            (11, None),
+            &hash,
+        )
+        .unwrap();
+        let other = start_curation(&db, "device-b", (7, None), (9, None), &hash).unwrap();
+        drop(old);
+        let kept: (String, i64, Option<i64>) = reader
+            .query_row(
+                "SELECT request_id, from_seq, to_offset FROM curation_inflight WHERE device='device-a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_ne!(kept.0, row.0);
+        assert_eq!((kept.1, kept.2), (9, None));
+        drop(newer);
+        let devices: Vec<String> = reader
+            .prepare("SELECT device FROM curation_inflight")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(devices, ["device-b"]);
+        drop(other);
+        let left: i64 = reader
+            .query_row("SELECT count(*) FROM curation_inflight", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+        assert!(last_calls(&db, 10).unwrap().is_empty());
+    }
+
+    #[test]
     fn schema_upgrade_is_atomic_and_keeps_the_cooldown_and_call_ledger() {
         let home = tempfile::tempdir().unwrap();
         let writer = open(home.path()).unwrap();
@@ -662,7 +837,8 @@ mod tests {
             },
         )
         .unwrap();
-        let missing = "DROP TABLE key_limits; DROP INDEX provider_calls_day;";
+        let missing =
+            "DROP TABLE key_limits; DROP INDEX provider_calls_day; DROP TABLE curation_inflight;";
         writer.execute_batch(missing).unwrap();
         crate::crash::off();
         let reopened = open(home.path()).unwrap();
@@ -673,7 +849,7 @@ mod tests {
         crate::crash::off();
         assert!(failed.is_err());
         let remaining: i64 = writer.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE name IN ('key_limits', 'provider_calls_day')",
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('key_limits', 'provider_calls_day', 'curation_inflight')",
             [], |r| r.get(0)
         ).unwrap();
         assert_eq!(remaining, 0);
