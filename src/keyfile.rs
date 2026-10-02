@@ -704,6 +704,12 @@ mod tests {
                 write(&root.path().join("c41").join("GROQ_KEY.md"), KEY, &home),
                 Err(Refused::NoDir)
             );
+            // Asked of the walk itself: in `write` the kernel refuses a 41st link after it, which
+            // would hide a walk that no longer counts (and then never ends on a loop of links).
+            assert_eq!(
+                crate::keyfile::linux::check_dirs(&root.path().join("c41")),
+                Err(Refused::NoDir)
+            );
         }
 
         #[test]
