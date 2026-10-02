@@ -2225,14 +2225,10 @@ mod tests {
                 view.status, status,
                 "the policy must never promote a model status"
             );
-            assert_eq!(view.delivered, status == "decided", "{body}: {view:?}");
-            assert_eq!(
-                section.contains(body),
-                status == "decided",
-                "{body}: {section}"
-            );
+            assert_eq!(view.delivered, status == "decided");
+            assert_eq!(section.contains(body), status == "decided");
             let cold = p.prompt(&format!("cold-policy-{i}"), body);
-            assert_eq!(cold.contains(body), status == "decided", "{body}: {cold}");
+            assert_eq!(cold.contains(body), status == "decided");
             let warm_session = format!("warm-policy-{i}");
             p.s.event(
                 "prompt",
