@@ -490,12 +490,13 @@ fn hull(from: &[(usize, usize)]) -> (usize, usize) {
 /// removes, and as masks what its scan hides and what its line pass hides in each line, both of
 /// what the gate scans (before any mask, so a mask from a rule that spans two lines takes no
 /// context a rule anchored to the next line needs: #315) and of what it shows (as the line pass saw
-/// it before #315, so nothing it hid then is shown now).
+/// it before #315, so nothing it hid then is shown now). Findings of the final whole and line
+/// rescans also keep their original ranges, so a cut quote or field cannot reveal them (#329).
 fn hidden_lines(text: &str, rules: &Rules) -> Option<(Runs, Runs)> {
     let Gated {
         plain,
         shown,
-        blocks,
+        mut blocks,
         mut masks,
     } = gated(text, rules)?;
     // Where the whole pass masked nothing, what it shows is what it scans: one sweep.
@@ -516,7 +517,45 @@ fn hidden_lines(text: &str, rules: &Rules) -> Option<(Runs, Runs)> {
             at += line.len() + 1;
         }
     }
-    Some((blocks, masks))
+    if masks.is_empty() {
+        return Some((blocks, masks));
+    }
+    // The final passes of `lines_with`, with origins retained even after earlier masks grew or
+    // joined lines. Project before taking a quote: its cut can remove a cascade's mask context.
+    let mut runs = merged_runs(masks.clone());
+    for _ in 0..MAX_PASSES {
+        let (masked, masked_from) = mask_map(text, &runs);
+        let Gated {
+            shown: (view, mut from),
+            blocks: more_blocks,
+            masks: more_masks,
+            ..
+        } = gated(&masked, rules)?;
+        let source = |(s, e)| origin(&masked_from[s..e]);
+        blocks.extend(more_blocks.into_iter().map(source).filter(|&(s, e)| s < e));
+        masks.extend(more_masks.into_iter().map(source).filter(|&(s, e)| s < e));
+        for run in &mut from {
+            *run = origin(&masked_from[run.0..run.1]);
+        }
+        let mut at = 0;
+        for line in view.split('\n') {
+            let Gated {
+                blocks: more_blocks,
+                masks: more_masks,
+                ..
+            } = gated(line, rules)?;
+            let source = |(s, e)| origin(&from[at + s..at + e]);
+            blocks.extend(more_blocks.into_iter().map(source).filter(|&(s, e)| s < e));
+            masks.extend(more_masks.into_iter().map(source).filter(|&(s, e)| s < e));
+            at += line.len() + 1;
+        }
+        masks = merged_runs(masks);
+        if masks == runs {
+            return Some((blocks, masks));
+        }
+        runs = masks.clone();
+    }
+    None // Alternating whole/line cascades past the scan bound mask the view whole.
 }
 
 /// v1's import into oboete.db (`hook::clip`): the bundled rules only. Hooks go through
@@ -1133,6 +1172,17 @@ impl Mapped {
     pub fn outbound(&self, rules: &Rules) -> (String, Vec<(usize, usize)>) {
         let mapped = || {
             let mut runs = self.hidden.clone()?;
+            // Keep the field-only packet's findings independently: a packet mask can remove the
+            // context a cascade written against a field's mask needs (#329).
+            if !runs.is_empty() {
+                let (field, field_from) = mask_map(&self.text, &runs);
+                runs.extend(
+                    hidden(&field, rules)?
+                        .into_iter()
+                        .map(|(s, e)| origin(&field_from[s..e]))
+                        .filter(|&(s, e)| s < e),
+                );
+            }
             let Gated {
                 plain: (clean, from),
                 masks,
@@ -2059,6 +2109,36 @@ mod tests {
         let at = record.find("otp=").unwrap();
         let quote = quote_with(record, at..at + 10, &around);
         assert_eq!(quote, format!("otp={MASK}"));
+    }
+
+    /// #329: quotes and joined fields retain findings from the record's final rescans, even
+    /// when the rule needs a mask made by the initial line pass.
+    #[test]
+    fn final_line_rescans_hide_a_quote_and_joined_body() {
+        let rules = user(
+            r#"[redaction]
+extra_rules = [
+  { id = "name", regex = '^ACME$' },
+  { id = "otp", regex = '^\[REDACTED\]\notp=([0-9]{6})$', secret_group = 1 },
+]
+"#,
+        )
+        .unwrap();
+        let text = "ACME\notp=654321";
+        assert_eq!(lines_with(text, &rules), "[REDACTED]\notp=[REDACTED]");
+        let prefix = "observation: title\n";
+        let joined = format!("{prefix}{text}");
+        let body = prefix.len()..joined.len();
+        assert_eq!(
+            (
+                quote_with(text, 9..15, &rules),
+                joined_with(&joined, std::slice::from_ref(&body), &rules),
+            ),
+            (
+                MASK.to_owned(),
+                "observation: title\n[REDACTED]\notp=[REDACTED]".to_owned(),
+            )
+        );
     }
 
     /// #315 (Codex's security review of Task 7, on 3d9c958): each pass of `outbound_lines` finds

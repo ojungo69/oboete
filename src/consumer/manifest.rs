@@ -1570,6 +1570,46 @@ mod tests {
         }
     }
 
+    /// #329: the field-only masked packet remains an independent view. A packet rule masking
+    /// `code` must not take away the context of a cascade that sees the field's masked `alpha`.
+    #[test]
+    fn the_field_masked_packets_cascade_keeps_its_findings() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let (claim, _) = claimed(
+            &mut store,
+            said(cwd.path(), DAY, "Header\nalpha code 654321"),
+            "decision",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[claim]).unwrap();
+        worker::run_once(home.path()).unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            r#"[redaction]
+extra_rules = [
+  { id = "field", regex = '^Header\n(alpha) code [0-9]{6}$', secret_group = 1 },
+  { id = "packet", regex = '(?m)^- 1970-01-02 decision: Header alpha (code) [0-9]{6}$', secret_group = 1 },
+  { id = "cascade", regex = '(?m)^- 1970-01-02 decision: Header \[REDACTED\] code ([0-9]{6})$', secret_group = 1 },
+]
+"#,
+        )
+        .unwrap();
+        let after = shown_at(home.path(), &store, "none", NOW).unwrap();
+        assert!(
+            after
+                .text
+                .contains("Header [REDACTED] [REDACTED] [REDACTED]"),
+            "{}",
+            after.text
+        );
+        assert!(!after.text.contains("654321"), "{}", after.text);
+        assert!(after.shown.is_empty());
+    }
+
     #[test]
     fn a_packet_rule_keeps_the_original_clipped_view() {
         let home = tempfile::tempdir().unwrap();
