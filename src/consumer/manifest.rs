@@ -55,7 +55,7 @@ const SESSIONS: usize = 5;
 /// claims table replaces the scan in milestone 3.
 const OWNER_LINES: i64 = 500;
 /// Spec 4.9, MUST-M8: sessions with a record this close to the time SessionStart reads are active.
-const ACTIVE_MS: i64 = 30 * 60 * 1000;
+pub(crate) const ACTIVE_MS: i64 = 30 * 60 * 1000;
 /// MUST-M9: the backlog is shown once its oldest record has waited this long.
 const LAG_MS: i64 = 2 * 60 * 1000;
 /// The stored ruleset's format: a row built before the read-time lines (Task 8) holds the other
@@ -678,7 +678,7 @@ fn call_key(body: &Value) -> String {
         .collect()
 }
 
-fn what_ran(input: &str) -> String {
+pub(crate) fn what_ran(input: &str) -> String {
     match serde_json::from_str::<Value>(input) {
         Ok(v) => match v.get("command").or_else(|| v.get("cmd")) {
             Some(Value::String(c)) => c.clone(),
@@ -734,7 +734,7 @@ fn todos(input: &Value) -> Option<Vec<(String, String)>> {
 /// The files a call names: the file path fields agents use (not a bare `path`: Glob, Grep and
 /// LS take a directory there), and the file lines of Codex's `apply_patch` (its hook's
 /// `command`, its transcript's `input`). A path under the call's cwd is shown relative to it.
-fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
+pub(crate) fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = ["file_path", "notebook_path", "target_file"]
         .iter()
         .filter_map(|k| input.get(*k).and_then(Value::as_str))
@@ -832,7 +832,7 @@ fn rebuild(raw: &Raw, k: &Connection, device: &str, rules: &crate::redact::Rules
 }
 
 /// One record's event, read back through raw (`None` once a tombstone removed it).
-fn event(raw: &Raw, device: &str, seq: i64) -> Result<Option<Event>> {
+pub(crate) fn event(raw: &Raw, device: &str, seq: i64) -> Result<Option<Event>> {
     Ok(raw
         .after(device, seq - 1, 1)?
         .into_iter()

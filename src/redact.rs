@@ -1374,7 +1374,7 @@ pub fn outbound_joined(text: &str, parts: &[std::ops::Range<usize>]) -> String {
     }
 }
 
-fn joined_with(text: &str, parts: &[std::ops::Range<usize>], rules: &Rules) -> String {
+pub(crate) fn joined_with(text: &str, parts: &[std::ops::Range<usize>], rules: &Rules) -> String {
     let views = std::iter::once(0..text.len()).chain(parts.iter().cloned());
     let Some(runs) = hidden_views(text, views, rules) else {
         return MASK.to_string();

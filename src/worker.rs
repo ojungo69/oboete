@@ -192,11 +192,12 @@ pub fn run_with(
 /// The curation phase a worker runs after its consumers have drained (milestone 3 D3).
 pub type CurationPhase<'a> = dyn FnMut(&mut Raw, &Connection) -> Result<Phase> + 'a;
 
-/// The phases a worker runs after its consumers have drained, in this order (milestone 4 D8):
-/// embedding, then curation. `rebuild`, `run_once` and `drained` run neither.
+/// The phases a worker runs after its consumers have drained, in this order (milestone 4 D8,
+/// D9): embedding, the shortlists, then curation. `rebuild`, `run_once` and `drained` run none.
 #[derive(Default)]
 pub struct Phases<'a, 'f> {
     pub embed: Option<&'a mut crate::embed_phase::Phase>,
+    pub shortlist: Option<&'a mut crate::shortlist::Builder>,
     pub curation: Option<&'a mut CurationPhase<'f>>,
 }
 
@@ -326,9 +327,10 @@ fn serve(
             due(&raw);
         }
         due(&raw);
-        // D3 and milestone 4's D8: once the consumers have drained, the embedding phase, then one
-        // window. A call in flight, or a window that waits only on time within D10's 30 minutes,
-        // keeps the worker up until then; either phase's progress starts the next round.
+        // D3 and milestone 4's D8 and D9: once the consumers have drained, the embedding phase, the
+        // shortlists, then one window. A call in flight, or a window that waits only on time
+        // within D10's 30 minutes, keeps the worker up until then; a phase's progress starts the
+        // next round.
         let (mut stay, mut again) = (None, false);
         if let Some(embed) = phases.embed.as_mut() {
             match embed.poll(&raw, &k)? {
@@ -336,6 +338,16 @@ fn serve(
                 Phase::Waiting { until, up: true } => stay = Some(until),
                 Phase::Waiting { .. } | Phase::Idle => {}
             }
+        }
+        if let Some(shortlist) = phases.shortlist.as_mut()
+            && shortlist.run(
+                &raw,
+                &mut k,
+                phases.embed.as_deref_mut(),
+                crate::db::now_ms(),
+            )? == Phase::Covered
+        {
+            again = true;
         }
         if let Some(phase) = phases.curation.as_mut() {
             match phase(&mut raw, &k)? {
@@ -402,8 +414,10 @@ pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
     };
     let mut curation = curation(home);
     let mut embed = crate::embed_phase::Phase::new(home);
+    let mut shortlist = crate::shortlist::Builder::new(home);
     let phases = Phases {
         embed: Some(&mut embed),
+        shortlist: Some(&mut shortlist),
         curation: Some(&mut *curation),
     };
     run_holding(home, idle_ms, consumers(home), || {}, Some(held), phases)
