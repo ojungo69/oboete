@@ -1,0 +1,27 @@
+src/raw.rs
+  s_17c3dc80287a78::t_ea1595770effb5 2476-2499,2504-2517,2522-2549
+  s_17c3dc80287a78::t_d9b5b5318439ba 2500-2503,2518-2521
+  s_17c3dc80287a78::t_ddf091f835b75a 8,535,964,1806-1833
+docs/milestone-4.md
+  s_17c3dc80287a78::t_9a563ef5249ea5 96-101
+src/migrate.rs
+  s_17c3dc80287a78::t_ddf091f835b75a 1285,1323-1324
+  s_17c3dc80287a78::t_dac563cf9806fb 1270-1278,1295,1317-1322,1325
+  s_17c3dc80287a78::t_2f6ad5faacb9f1 1326-1327
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a1156a9f9407f9132f5795877fa49538f3ce5ef0",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
