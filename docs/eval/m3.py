@@ -1,10 +1,11 @@
 """Milestone 3, Task 13: M3 (decisions) and M2's coverage on the dev transcripts, curated by Design B
-(docs/milestone-3-plan.md Task 13, docs/spike/m3-dev.md). Dev only: held-out transcripts are never
-read here. Every command takes the binary by path: `oboete` on PATH is the owner's v1.
+(docs/milestone-3-plan.md Task 13, docs/spike/m3-dev.md). Task 12a's held-out pools require --decide.
+Every command takes the binary by path: `oboete` on PATH is the owner's v1.
 
   m3.py fixtures <bin>          each transcript the dev labels or the replay set's dev side need ->
                                 a fixture, by <bin>'s own `transcript`
-  m3.py replay <bin> <name>     every fixture, merged in time order, into one home; curation off
+  m3.py replay <bin> <name> [--dev-only] [--decide ID]
+                                every selected fixture in time order, into one home; curation off
   m3.py map <bin> <name>        each labeled decision -> the records its quote is in (before stub:
                                 the worker compresses the bodies it reads)
   m3.py stub <bin> <name> [--shrink] [--tokens=N]
@@ -16,14 +17,37 @@ read here. Every command takes the binary by path: `oboete` on PATH is the owner
                                 the accepted proposals (both ends), of the owner's typed
                                 decisions and owner-no records, or of both ends of the pairs the
                                 lines score, when asked
-  m3.py score <bin> <name>      M3's counts on the labeled items"""
-import collections, glob, http.server, json, os, re, sqlite3, subprocess, sys, threading, time
+  m3.py score <bin> <name>      M3's counts on the labeled items
+  m3.py kinds|overturned <home> --binary <bin> [--pool dev|test] [--decide ID]
+                                Task 12a: per-kind precision / MUST-M11; test labels are labels/test-*"""
+import collections, glob, http.server, json, os, re, sqlite3, subprocess, sys, threading, time, tomllib
 from datetime import datetime
 
+import common
 from common import E, clean_env, owner_only, read_jsonl, sha256_file
 
 M = f'{E}/m3'
 PART = 20_000  # events per replayed part: `oboete replay` reads a fixture whole
+
+# Task 12a's fixed prompt and kind meanings (docs/milestone-4.md).
+KIND = """A memory system wrote this from a developer's coding session, as a {kind} ({meaning}):
+<<<
+{text}
+>>>
+
+The quotes from the session it rests on:
+{quotes}
+
+Do the quotes bear it out, and is it a {kind}?
+Answer with JSON only: {{"borne_out": true or false, "kind_right": true or false}}.
+"""
+MEANINGS = {'decision': 'a choice the developer made',
+            'preference': 'how the developer wants work done, beyond one task',
+            'lesson': 'what to do or avoid, learned from a failure',
+            'fix': 'how a problem was fixed: its symptom, cause and fix',
+            'open item': 'work still to do',
+            'repo fact': 'a fact about the repository or its tools',
+            'change': 'what was changed'}
 
 
 def home(binary, name):
@@ -41,23 +65,32 @@ def transcripts():
     return out
 
 
-def labels():
+def labels(pool='dev'):
     """(decision keys with the owner's value, pair keys with the owner's value, drafts by id)."""
     value = lambda f: {r['id']: r['value'] for r in read_jsonl(f'{E}/labels/{f}')}
-    dv, pv = value('dev-decisions.jsonl'), value('dev-pairs.jsonl')
-    decisions = [dict(d, value=dv.get(d['id'])) for d in read_jsonl(f'{E}/labels/dev-decisions.key.jsonl')]
-    pairs = [dict(p, value=pv.get(p['id'])) for p in read_jsonl(f'{E}/labels/dev-pairs.key.jsonl')]
+    dv, pv = value(f'{pool}-decisions.jsonl'), value(f'{pool}-pairs.jsonl')
+    decisions = [dict(d, value=dv.get(d['id'])) for d in read_jsonl(f'{E}/labels/{pool}-decisions.key.jsonl')]
+    pairs = [dict(p, value=pv.get(p['id'])) for p in read_jsonl(f'{E}/labels/{pool}-pairs.key.jsonl')]
     drafts = {d['id']: d for d in read_jsonl(f'{E}/labels/drafts/decisions.jsonl')}
     return decisions, pairs, drafts
 
 
-def sessions():
+def pool_sessions(pool='dev', decide=None):
+    """The replay manifest's sessions of one pool; the held-out side only under the guard."""
+    common.guard(pool=pool, decide=decide)
+    with open(f'{common.E}/replay/manifest.json', encoding='utf-8') as f:
+        side = 'held-out' if pool == 'test' else pool
+        return sorted(s['session'] for s in json.load(f)['sessions'] if s['side'] == side)
+
+
+def sessions(dev_only=False, decide=None):
     """The sessions to replay: the replay set's dev side, and every session a dev label is in."""
-    with open(f'{E}/replay/manifest.json') as f:
-        wanted = {s['session'] for s in json.load(f)['sessions'] if s['side'] == 'dev'}
-    decisions, pairs, drafts = labels()
-    wanted |= {d['session'] for d in decisions}
-    wanted |= {drafts[p[k]]['session'] for p in pairs for k in ('earlier', 'later')}
+    wanted = set(pool_sessions())
+    if not dev_only:
+        decisions, pairs, drafts = labels()
+        wanted |= {d['session'] for d in decisions}
+        wanted |= {drafts[p[k]]['session'] for p in pairs for k in ('earlier', 'later')}
+    common.guard(session_ids=wanted, decide=decide)
     return sorted(wanted)
 
 
@@ -86,20 +119,30 @@ def config(h, providers, curate, shrink=False, tokens=None):
                 + providers)
 
 
-def replay(binary, name):
+def fixture_events(session):
+    """(line index, event, raw line) of a fixture's non-blank lines; U+2028 is JSON text, not a break."""
+    with open(f'{M}/fixtures/{session}.jsonl', encoding='utf-8') as f:
+        return [(i, json.loads(line), line) for i, line in enumerate(f) if line.strip()]
+
+
+def replay(binary, name, dev_only=False, decide=None):
     """One home for every session, so a later session's claim can supersede an earlier one's; the
     events of all sessions in time order, as the hooks would have received them."""
-    h = home(binary, name)
+    selected = sessions(dev_only, decide)
+    common.guard(session_ids=selected, decide=decide)
+    events = [(when(e['ts']), s, i, raw) for s in selected for i, e, raw in fixture_events(s)]
+    return replay_events(binary, home(binary, name), events, len(selected))
+
+
+def replay_events(binary, h, events, session_count):
+    """Replay fixture tuples (timestamp, session, original line index, JSONL line) into a fresh
+    home, with curation off. M5 passes one session's prefix, including its cut event."""
     if os.path.exists(f'{h}/raw.db'):
         sys.exit(f'{h} is replayed already: a second replay would insert every event twice')
-    os.makedirs(h)
+    common.owner_only()
+    os.makedirs(h, mode=0o700)
     config(h, '', False)
-    events = []
-    for s in sessions():
-        for i, line in enumerate(open(f'{M}/fixtures/{s}.jsonl', encoding='utf-8')):
-            if line.strip():
-                events.append((when(json.loads(line)['ts']), s, i, line))
-    events.sort(key=lambda e: e[:3])
+    events = sorted(events, key=lambda e: e[:3])
     reports = []
     for n in range(0, len(events), PART):
         part = f'{h}/part.jsonl'
@@ -110,9 +153,193 @@ def replay(binary, name):
         reports.append(json.loads(r.stdout))
         os.remove(part)
     with open(f'{h}/replay.json', 'w') as f:
-        json.dump({'binary': sha256_file(binary)[:12], 'sessions': len(sessions()), 'events': len(events),
+        json.dump({'binary': sha256_file(binary)[:12], 'sessions': session_count, 'events': len(events),
                    'parts': reports}, f, indent=1)
-    print(f'{len(events)} events of {len(sessions())} sessions into {h}')
+    print(f'{len(events)} events of {session_count} sessions into {h}')
+    return h
+
+
+def guard_home(h, decide=None, pool='dev'):
+    common.guard(decide=decide, pool=pool)
+    if os.path.exists(f'{h}/raw.db'):
+        with sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True) as raw:
+            sessions = [s for (s,) in raw.execute("SELECT DISTINCT session FROM records WHERE session IS NOT NULL")]
+        common.guard(session_ids=sessions, decide=decide, pool=pool)
+
+
+def kinds(binary, h, decide=None, pool='dev'):
+    """Seeded samples of the active derivations, graded only when all three judges answer."""
+    binary, h = os.path.abspath(os.path.expanduser(binary)), os.path.abspath(os.path.expanduser(h))
+    guard_home(h, decide, pool)
+    common.owner_only()
+    rows = {}
+    with sqlite3.connect(f'file:{h}/knowledge.db?mode=ro', uri=True) as k:
+        for uid, kind, text, quote in k.execute(
+                "SELECT a.uid, a.kind, a.body, e.quote FROM active a JOIN claims c ON c.uid = a.uid "
+                "LEFT JOIN evidence e ON e.op_device = c.op_device AND e.op_seq = c.op_seq "
+                "ORDER BY a.uid, e.idx"):
+            row = rows.setdefault(uid, {'uid': uid, 'kind': kind, 'text': text, 'quotes': []})
+            if quote is not None:
+                row['quotes'].append(quote)
+    drawn = [r for kind in MEANINGS for r in sorted(
+        (r for r in rows.values() if r['kind'] == kind),
+        key=lambda r: common.h(f'kinds:{common.SEED}:{r["uid"]}'))[:15]]
+    path = f'{h}/kinds-{pool}.labels.jsonl'
+    common.write_jsonl(path, drawn)
+    calls, votes = common.Calls(), {}
+    for row in drawn:
+        fields = {'kind': row['kind'], 'meaning': MEANINGS[row['kind']], 'text': row['text'],
+                  'quotes': '\n'.join(row['quotes'])}
+        prompt = KIND.format(**{key: common.gate(value, binary) for key, value in fields.items()})
+        votes[row['uid']] = calls.votes(prompt, ('borne_out', 'kind_right'))
+    out = dict(common.record(binary, h, len(drawn), 'off', calls.models()),
+               labels=path, pool=pool)
+    pending = sum(common.voted(v, 'borne_out') is None or common.voted(v, 'kind_right') is None
+                  for v in votes.values())
+    if pending:
+        out.update(complete=False, pending=pending)
+    else:
+        each = {}
+        for kind in MEANINGS:
+            members = [votes[r['uid']] for r in drawn if r['kind'] == kind]
+            correct = sum(common.voted(v, 'borne_out') and common.voted(v, 'kind_right') for v in members)
+            each[kind] = {'n': len(members), 'correct': correct,
+                          'precision': correct / len(members) if members else None}
+        out.update(complete=True, per_kind=each,
+                   agreement={f: common.agreement(list(votes.values()), f) for f in ('borne_out', 'kind_right')})
+    common.keep_json(f'{h}/kinds-{pool}.json', out)
+    print(json.dumps(out, indent=1))
+    return out
+
+
+def vector_side(h):
+    """Task 12a's homes have no embedder, so every run is full text ('off')."""
+    if os.path.exists(f'{h}/config.toml'):
+        with open(f'{h}/config.toml', 'rb') as f:
+            if tomllib.load(f).get('embedding', {}).get('provider', 'none') != 'none':
+                sys.exit('Task 12a requires a full text home with no embedder')
+    return 'off'
+
+
+def overturned(binary, h, decide=None, pool='dev'):
+    """A108: linked pairs alone set the current-rank line; every earlier claim sets history N."""
+    binary, h = os.path.abspath(os.path.expanduser(binary)), os.path.abspath(os.path.expanduser(h))
+    guard_home(h, decide, pool)
+    vector_side(h)
+    common.owner_only()
+    decisions, pairs, drafted = labels(pool)
+    quote_of = {i: d['quote'] for i, d in drafted.items()} | {d['id']: d['quote'] for d in decisions}
+    where = json.load(open(f'{h}/map.json'))
+    on = collections.defaultdict(list)
+    for item, w in where.items():
+        if w['seq'] is not None:
+            on[w['seq']].append(item)
+    claims, links = {}, set()
+    with sqlite3.connect(f'file:{h}/knowledge.db?mode=ro', uri=True) as k:
+        for uid, status, seq, quote in k.execute(
+                "SELECT a.uid, a.status, e.seq, e.quote FROM active a JOIN claims c ON c.uid = a.uid "
+                "LEFT JOIN evidence e ON e.op_device = c.op_device AND e.op_seq = c.op_seq ORDER BY e.idx"):
+            claim = claims.setdefault(uid, [status, {}])
+            if seq is not None:
+                claim[1].setdefault(seq, []).append(quote)
+        links = set(k.execute("SELECT c.uid, e.to_uid FROM edges e JOIN claims c "
+                              "ON c.op_device = e.op_device AND c.op_seq = e.op_seq "
+                              "WHERE e.type = 'supersedes'"))
+    raw = sqlite3.connect(f'file:{h}/raw.db?mode=ro', uri=True)
+    def mine(item):
+        if item not in where or where[item]['seq'] is None:
+            return set()
+        records = item_records(raw, where, item)
+        return {u for u, (_, quotes) in claims.items()
+                if any(seq in records and its(item, qs, on[seq], quote_of) for seq, qs in quotes.items())}
+
+    # `get` names delivered earlier decisions separately from lowered ones; the search line's
+    # "superseded by" is identical for the two and cannot decide their rank class.
+    delivered = {}
+    def current(uid):
+        if uid not in claims:
+            return True                         # imported and raw hits precede lowered claims
+        if uid not in delivered:
+            text = common.command([binary, '--home', h, 'get', uid])
+            metadata = text.split('\n')[:2]
+            if not metadata or not metadata[0].startswith(uid):
+                raise ValueError('get did not return the active claim')
+            delivered[uid] = claims[uid][0] not in ('retracted', 'done') and not any(
+                line.startswith('superseded by ') for line in metadata[1:])
+        return delivered[uid]
+
+    def hits(text):
+        # Only real hit lines: MCP's data fences and a U+2028 inside a snippet are not rows.
+        rows = []
+        for line in text.split('\n'):
+            if re.match(r'^\S+ \d{4}-\d\d-\d\d \d\d:\d\d UTC ', line):
+                key = line.split(' ', 1)[0]
+                uid = next((u for u in claims if u.startswith(key)), key)
+                rows.append(uid)
+        return rows[:10]
+
+    def bad_rank(rank, earlier, later):
+        for i, uid in enumerate(rank):
+            if uid not in earlier:
+                continue
+            if current(uid):
+                if i == 0 or rank[i - 1] not in later:
+                    return True
+            elif any(current(hit) for hit in rank[i + 1:]):
+                return True
+        return False
+
+    counts = {s: {'bad': 0, 'recalled': 0} for s in ('cli', 'mcp')}
+    miss, linked, historical, n = collections.Counter(), 0, 0, 0
+    results = []
+    with common.Mcp(binary, h, h) as mcp:
+        for p in pairs:
+            if p['value'] != 'overturns':
+                continue
+            n += 1
+            earlier, later = mine(p['earlier']), mine(p['later'])
+            linked_pair = any((b, a) in links for a in earlier for b in later)
+            if not earlier:
+                miss['missing_earlier'] += 1
+                continue
+            historical += 1
+            if linked_pair:
+                linked += 1
+            else:
+                miss['missing_later' if not later else 'unlinked'] += 1
+            item = drafted.get(p['earlier']) or next(d for d in decisions if d['id'] == p['earlier'])
+            common.guard(session_ids=[item['session']], decide=decide, pool=pool)
+            query = item['quote']
+            row = {'pair': p['id'], 'linked': linked_pair, 'surfaces': {}}
+            for history in (False, True):
+                argv = [binary, '--home', h, 'search', '--all', '--limit', '10']
+                if history:
+                    argv.append('--history')
+                reply = mcp.call('search', {'query': query, 'all': True, 'limit': 10, 'history': history})
+                texts = {'cli': common.command(argv + ['--', query]),
+                         'mcp': '\n'.join(c['text'] for c in reply.get('content', []) if c.get('type') == 'text')}
+                for surface, text in texts.items():
+                    rank = hits(text)
+                    row['surfaces'].setdefault(surface, {})['history' if history else 'current'] = text
+                    if history:
+                        counts[surface]['recalled'] += bool(earlier.intersection(rank))
+                    elif linked_pair:
+                        counts[surface]['bad'] += bad_rank(rank, earlier, later)
+            results.append(row)
+    raw.close()
+    out = dict(common.record(binary, h, n, 'off', {}), pool=pool, linked=linked,
+               curation_miss={key: miss[key] for key in ('missing_earlier', 'missing_later', 'unlinked')})
+    for surface, c in counts.items():
+        out[surface] = {'ranked_current': {'bad': c['bad'], 'n': linked,
+                                         'rate': c['bad'] / linked if linked else None,
+                                         'pass': bool(linked and c['bad'] == 0)},
+                        'history': {'recalled': c['recalled'], 'n': historical,
+                                    'recall': c['recalled'] / historical if historical else None,
+                                    'pass': bool(historical and c['recalled'] * 5 >= historical * 4)}}
+    common.write_jsonl(f'{h}/overturned-{pool}.searches.jsonl', results)
+    common.keep_json(f'{h}/overturned-{pool}.json', out)
+    print(json.dumps(out, indent=1))
+    return out
 
 
 class Stub(http.server.BaseHTTPRequestHandler):
@@ -597,7 +824,7 @@ def drafts(binary, name):
             lowered[i].append(why)
         if not about:
             tally[f'{kind}: not drafted'] += 1
-            print(d['id'], kind, 'NOT DRAFTED', repr(d['quote'][:60]))
+            print(d['id'], kind, 'NOT DRAFTED')
             continue
         for c in about:
             if c['id'] in dropped:
@@ -606,18 +833,36 @@ def drafts(binary, name):
                 k = b['claims'].get(c['id'], {})
                 out = f"{k.get('status')} ({k.get('speaker')})" + (f" lowered: {'; '.join(lowered[c['id']])}" if lowered[c['id']] else '')
             tally[f"{kind}: drafted {c['status']} ({c['speaker']}) -> {out}"] += 1
-            print(d['id'], kind, c['status'], c['speaker'], '->', out, '|', repr(c.get('quote', '')[:60]), '| label', repr(d['quote'][:40]))
+            print(d['id'], kind, c['status'], c['speaker'], '->', out)
     for k, v in tally.most_common():
         print(v, k)
 
 
-if __name__ == '__main__':
+def main(argv=None):
+    import argparse
     owner_only()
-    cmd, args = sys.argv[1], sys.argv[2:]
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        sys.exit(__doc__)
+    cmd, args = argv[0], argv[1:]
+    if cmd in ('kinds', 'overturned'):
+        p = argparse.ArgumentParser(description=f'Task 12a: {cmd}; --binary must be a Design B binary.')
+        p.add_argument('home')
+        p.add_argument('--binary', required=True)
+        p.add_argument('--decide')
+        p.add_argument('--pool', choices=('dev', 'test'), default='dev')
+        a = p.parse_args(args)
+        return (kinds if cmd == 'kinds' else overturned)(a.binary, a.home, a.decide, a.pool)
     if cmd == 'fixtures':
         fixtures(args[0])
     elif cmd == 'replay':
-        replay(args[0], args[1])
+        p = argparse.ArgumentParser(description='Replay the dev set and labelled sessions; curation off.')
+        p.add_argument('binary')
+        p.add_argument('name')
+        p.add_argument('--dev-only', action='store_true')
+        p.add_argument('--decide')
+        a = p.parse_args(args)
+        return replay(a.binary, a.name, dev_only=a.dev_only, decide=a.decide)
     elif cmd == 'stub':
         tokens = next((a.split('=')[1] for a in args if a.startswith('--tokens=')), None)
         stub(args[0], args[1], '--shrink' in args, tokens)
@@ -633,3 +878,7 @@ if __name__ == '__main__':
         drafts(args[0], args[1])
     else:
         sys.exit(__doc__)
+
+
+if __name__ == '__main__':
+    main()

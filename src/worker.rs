@@ -592,7 +592,7 @@ pub fn running(home: &Path) -> bool {
 /// dropped can still be held for a moment (about one CI run in twelve failed on it). A thread that
 /// contends for the lock on purpose (`contending`) gets its answer at once. No oboete process
 /// forks from another thread while it takes or releases the lock, so outside tests nothing waits.
-fn try_lock(f: &std::fs::File) -> Result<(), std::fs::TryLockError> {
+pub(crate) fn try_lock(f: &std::fs::File) -> Result<(), std::fs::TryLockError> {
     #[cfg(test)]
     if !CONTENDING.get() {
         for _ in 0..20 {

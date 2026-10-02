@@ -1559,6 +1559,42 @@ fn claim_text(raw: &Raw, k: &Connection, uid: &str) -> Result<Option<String>> {
     Ok(Some(out))
 }
 
+/// D12: each of `uids` with its label and its evidence rows, each with whether it still reads
+/// in its record (`claims::live`) and its quote through the gate with its record's words, as the
+/// viewer shows it: what M6's harness checks a cited span against. A uid that names no active
+/// claim gives `{uid, error: "not a claim"}`.
+pub fn cite(home: &Path, uids: &[String]) -> Result<Vec<serde_json::Value>> {
+    let not_a_claim = |uid: &str| serde_json::json!({"uid": uid, "error": "not a claim"});
+    let Some((raw, k)) = stores(home)? else {
+        return Ok(uids.iter().map(|u| not_a_claim(u)).collect());
+    };
+    // One snapshot of knowledge.db, as `claim` reads it.
+    let _snapshot = k.unchecked_transaction()?;
+    uids.iter()
+        .map(|uid| {
+            let Some(c) = claims::active_one(&k, uid)? else {
+                return Ok(not_a_claim(uid));
+            };
+            let label = if on_this_device(&raw, &c.device, c.seq)? {
+                "citable"
+            } else {
+                "quote-only"
+            };
+            let evidence = active_quotes(&k, uid)?
+                .iter()
+                .map(|e| {
+                    Ok(serde_json::json!({
+                        "device": e.device, "seq": e.seq, "offset": e.offset,
+                        "length": e.length, "quote": quote_text(&raw, e)?,
+                        "live": crate::consumer::claims::live(&raw, e)?.is_some(),
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(serde_json::json!({"uid": uid, "label": label, "evidence": evidence}))
+        })
+        .collect()
+}
+
 /// The quotes of `uid`'s active derivation, in order.
 fn active_quotes(k: &Connection, uid: &str) -> Result<Vec<claims::Evidence>> {
     let mut st = k.prepare(
@@ -3468,6 +3504,91 @@ mod tests {
     /// it, so a rule added after the claim that needs them (a code after a name) hides it in the
     /// viewer's claim and in `get` as in the record, before the rescan masks the record. The read
     /// runs in a child process: egress reads the rules of the home `redact::set_home` names.
+    /// D12: `cite` gives each evidence row of a cited claim, whether it still reads in its record,
+    /// and its quote through the gate: a row whose record a tombstone hid after the pass is not
+    /// live, and after the next pass the claim is gone.
+    #[test]
+    fn a_cited_claim_reports_each_evidence_row_and_whether_it_still_reads() {
+        use crate::claims::{ClaimOp, Evidence};
+        use crate::raw::{OpKind, Target};
+        use serde_json::json;
+        // What the gate hides and the worker's rescan does not: an opted-out part a hook would
+        // have removed (a secret in raw is masked there, and its quote no longer reads).
+        let private = "<private>the vault code 4417</private>";
+        let mut s = Store::new();
+        let texts = [
+            format!("We keep tabs. {private}"),
+            "Tabs in every file.".to_owned(),
+        ];
+        let seqs = texts.clone().map(|t| s.said("s", R, 1_000, &t));
+        let device = s.raw.device().to_owned();
+        let evidence: Vec<Evidence> = seqs
+            .iter()
+            .zip(&texts)
+            .map(|(&seq, text)| Evidence {
+                device: device.clone(),
+                seq,
+                offset: 0,
+                length: text.len() as i64,
+                sentence: 0,
+                quote: text.clone(),
+                claim_at: None,
+            })
+            .collect();
+        let uid = crate::claims::uid("decision", &evidence[0]);
+        let op = ClaimOp {
+            id: "c1".into(),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: "Tabs everywhere.".into(),
+            evidence,
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier: 1,
+            why: String::new(),
+            tainted: false,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        s.raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
+        s.run();
+        let asked = [uid.clone(), "nothing".to_owned()];
+        let cited = cite(s.home.path(), &asked).unwrap();
+        assert_eq!(cited[1], json!({"uid": "nothing", "error": "not a claim"}));
+        assert_eq!(cited[0]["label"], "citable");
+        let rows = cited[0]["evidence"].as_array().unwrap();
+        let read: Vec<(i64, bool)> = rows
+            .iter()
+            .map(|r| (r["seq"].as_i64().unwrap(), r["live"] == true))
+            .collect();
+        assert_eq!(read, [(seqs[0], true), (seqs[1], true)]);
+        let quote = rows[0]["quote"].as_str().unwrap();
+        assert!(
+            quote.starts_with("We keep tabs.") && !quote.contains("4417"),
+            "{quote}"
+        );
+        assert_eq!(rows[1]["offset"], 0);
+        assert_eq!(rows[1]["length"], texts[1].len());
+        // The second record hidden after the pass: its row is not live.
+        let gone = Target::Record {
+            device,
+            seq: seqs[1],
+        };
+        s.raw.append_tombstone(gone).unwrap();
+        let cited = cite(s.home.path(), &asked).unwrap();
+        let live: Vec<bool> = cited[0]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["live"] == true)
+            .collect();
+        assert_eq!(live, [true, false]);
+        s.run();
+        let cited = cite(s.home.path(), &asked).unwrap();
+        assert_eq!(cited[0], json!({"uid": uid, "error": "not a claim"}));
+    }
+
     #[test]
     fn a_quote_is_gated_with_its_records_words() {
         use crate::claims::{ClaimOp, Evidence};

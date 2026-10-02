@@ -16,10 +16,17 @@ N, PASS_KAPPA = 50, 0.4
 # the grade of memory `d` and is the one B3 is decided on (#77).
 RUN_2 = 'calib-50.panel-2'
 # Run 3 (2026-09-26): the two subscription judges on the same inputs; run 2's grades stand (frozen).
-RUN = 'calib-50.panel-3'
+RUN_3 = 'calib-50.panel-3'
+# Run 4 (2026-10-02): gpt-6-sol, from the owner's codex subscription, in gpt-oss-120b's place: Groq's
+# free tier, which served gpt-oss-120b, is spent each day by the owner's own curation. gpt-6-luna was
+# graded first and passed (calib-50.result-4-luna); the owner then allowed a stronger model the same day,
+# and gpt-6.1-sol answered 400 to a ChatGPT account on the tested codex version.
+# Runs 2 and 3 stay frozen; a judge no longer on the panel is not read.
+RUN = 'calib-50.panel-4'
 # Run 2 under the rule that leaves a pair out for every judge is `calib-50.result-2b` (#77, frozen,
-# B3's decision); with the subscription judges added, `calib-50.result-3`.
-RESULT = 'calib-50.result-3'
+# B3's decision); with the subscription judges added, `calib-50.result-3` (frozen); with run 4,
+# `calib-50.result-4`.
+RESULT = 'calib-50.result-4'
 JUDGES = {'claude-sonnet-5', 'claude-sonnet'}   # the alias rows of 2026-09-24 came from claude-sonnet-5
 UNDER_TEST = 'claude-sonnet-5'
 GO = ('https://opencode.ai/zen/go/v1', 'OPENCODE_API_KEY.md', {'x-opencode-session': 'oboete'})
@@ -27,7 +34,7 @@ GO = ('https://opencode.ai/zen/go/v1', 'OPENCODE_API_KEY.md', {'x-opencode-sessi
 # API calls only: no tools. Keys are read in this process and never put in any environment.
 # The owner's grok and codex subscriptions judge too (2026-09-26), as the dogfood user with no tools
 # (docs/spike/cli-judges.md).
-PANEL = {'gpt-oss-120b': ('https://api.groq.com/openai/v1', 'GROQ_API_KEY.md', {}, 'openai/gpt-oss-120b'),
+PANEL = {'gpt-6-sol': ('dogfood', 'codex', {}, 'gpt-6-sol'),
          'deepseek-v4-pro': (*GO, 'deepseek-v4-pro'), 'glm-5.3': (*GO, 'glm-5.3'),
          'kimi-k3': (*GO, 'kimi-k3'), 'qwen3.8-max': (*GO, 'qwen3.8-max'),
          'grok-4.7': ('dogfood', 'grok', {}, 'grok-4.7'), 'gpt-6-astra': ('dogfood', 'codex', {}, 'gpt-6-astra')}
@@ -131,6 +138,9 @@ def chat(member, prompt, timeout=300):
     """(answer text, the model the provider reports) of one chat completion from a panel judge,
     temperature 0. A 429 is retried after its Retry-After (Groq's tokens per minute) up to four times;
     one that asks for more than two minutes (OpenCode Go's 5-hour limit) fails at once."""
+    if member == 'claude-sonnet-5':
+        from common import claude_json
+        return claude_json(prompt, member, timeout), member
     base, key_file, headers, model = PANEL[member]
     if base == 'dogfood':
         return cli_chat(key_file, model, prompt, timeout)
@@ -230,6 +240,12 @@ def store_doc_text(db):
     return text
 
 
+def read_runs(labels):
+    """The rows of runs 2 to 4 from the judges on the panel now."""
+    return [r for run in (RUN_2, RUN_3, RUN) if os.path.exists(f'{labels}/{run}.jsonl')
+            for r in read_jsonl(f'{labels}/{run}.jsonl') if r['judge'] in PANEL]
+
+
 def main(cmd):
     from freeze import check
     bad = check()
@@ -250,8 +266,7 @@ def main(cmd):
         items = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
         key = read_jsonl(f'{labels}/calib-50.key.jsonl')
         path = f'{labels}/{RUN}.jsonl'
-        done = {(r['id'], r['judge']) for run in (RUN_2, RUN) if os.path.exists(f'{labels}/{run}.jsonl')
-                for r in read_jsonl(f'{labels}/{run}.jsonl')}
+        done = {(r['id'], r['judge']) for r in read_runs(labels)}
         # What every panel judge reads, written once and frozen: the store is not under the freeze.
         inputs = f'{labels}/calib-50.inputs.jsonl'
         if not os.path.exists(inputs):
@@ -286,7 +301,7 @@ def main(cmd):
         print(f'{have} of {len(key) * len(PANEL)} panel grades; {failed} failed this run')
     elif cmd == 'kappa':
         grades = {k['id']: {UNDER_TEST: k['grade']} for k in read_jsonl(f'{labels}/calib-50.key.jsonl')}
-        recorded = read_jsonl(f'{labels}/{RUN_2}.jsonl') + read_jsonl(f'{labels}/{RUN}.jsonl')
+        recorded = read_runs(labels)
         for r in recorded:
             if r['grade'] is not None:       # an unusable answer leaves the pair out for that judge only
                 grades[r['id']][r['judge']] = r['grade']
@@ -315,7 +330,7 @@ def main(cmd):
         rows = [[g[j] >= 2 for j in judges] for g in grades.values()]
         fk = fleiss(rows) if rows else None
         panel_pass = bool(complete and fk is not None and fk >= PASS_KAPPA)
-        out = {'run': [RUN_2, RUN], 'complete': complete, 'judges': each,
+        out = {'run': [RUN_2, RUN_3, RUN], 'complete': complete, 'judges': each,
                'unusable': [(r['id'], r['judge']) for r in recorded if r['grade'] is None], 'left_out': left_out,
                'changed_from_run_1': {'n': len(again), 'grade': sum(a != b for a, b in again),
                                       'relevance': sum((a >= 2) != (b >= 2) for a, b in again)}, 'fleiss': fk, 'panel_pass': panel_pass,

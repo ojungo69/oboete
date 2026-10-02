@@ -92,3 +92,253 @@ Step 9, 2026-10-01: the owner's v1 store copied with `sqlite3 -readonly ~/.oboet
 - These transcript counts include the parser's own SessionEnd, one per session, which 842b08c no longer imports (a session resumed after an import would have lost its next event).
 - The current transcript import also excludes synthetic end-of-file events: a dangling tool call and a final Stop without a turn-end record. A transcript checkpoint from before prefix verification and this filtering refuses a resume; recovery imports the source again into a fresh home with `--home <new-directory>`.
 - **The worker on that home** (a debug build of 842b08c, `curate = false`, no embedder; no providers.db was made, so nothing was sent): 39 min, 82 MB peak. The transcript records' 1.02 GB of bodies are 359 MB of zstd (153,404 records; 3,986 too small to gain stay plain); raw.db is 1.42 GB on disk, 842 MB in use. knowledge.db is 3.17 GB: the raw index's trigram data 1,990 MB and its copy of the text 997 MB, 97% of that text tool output (issue #317). The home was a copy, so its v1 records are under the old device, which the record consumers leave to milestone 6's sync: they stayed plain and unindexed here.
+
+## Task 12a: the dev harnesses' protocol (D12)
+
+Fixed on 2026-10-01 in this commit, before any M6, M5, MUST-M11 or per-kind run reads a result (plan Task 12a Step 2). A later change is a dated subsection below, written before the run it applies to and naming what changed and why. Dev runs decide nothing (spec 8.1); the deciding runs on the held-out transcripts use this protocol after A88.
+
+### Sets and the dev home
+
+- **Sessions.** The replay manifest's 30 `dev` sessions (`~/.oboete/eval/replay/manifest.json`, seed `oboete-milestone-1-2026-09-26`: 24 Claude Code, 6 Codex), the sessions v1's `baseline/oboete-5fa472f04ab6` holds, so both M6 arms hold the same sessions. The 112 test questions are not read; a held-out session only under the guard below.
+- **The dev home.** A fresh `m3.py replay` of the 30 sessions with a release build of `main` (its SHA-256 recorded). M6's keys are mapped to its records before any worker run. It is then curated whole by `oboete worker --idle-ms 0` with `[summary] curate = true` and m3.py's `LIVE` entry (Claude Haiku through the owner's subscription), the config written as `stub()` writes it; `live()` and `spans()` are not used. No embedder: its runs are full text, recorded with `Answer.vector` off. It is the Window sweep's point at the default window size, reused and never curated again; its curation report (windows and their outcomes, claims per kind, provider calls) is written beside it.
+- **Files.** Questions, keys, answers, labels and every model call stay in owner-only files under `~/.oboete/eval/m6/` and `~/.oboete/eval/m5/`, as milestone 3's labels do. Each model call is kept with its model and the SHA-256 of its prompt, so a stopped run resumes without asking again and `score` asks nothing a run asked.
+- **Each run records** N, the machine, the binary's hash, the home, the vector side, and every model with the name its provider reports.
+
+### Models
+
+- **Answerer**: `claude-sonnet-5` through `claude -p` with judge.py's isolation (`common.claude_json`: no tools, hooks, MCP servers or kept session, `clean_env`), the same for every arm.
+- **Key writer** (M6) and **labeller** (M5): one panel judge per item (spec 8.1's eight), drawn by `h(f'm6-key:{SEED}:{qid}')` or `h(f'm5-label:{SEED}:{session}')`. **Checker**: the 20% of items with `h(f'm6-check:{SEED}:{qid}') % 5 == 0` (`m5-check` for M5), checked by a judge drawn by `h(f'm6-checker:{SEED}:{qid}')` (`m5-checker`) from the other seven.
+- **Graders** (an answer correct, a span holding the answer, an item shown as open, a claim's kind): three panel judges of three makers, none the answerer's, fixed here: `gpt-oss-120b` (OpenAI, through Groq), `deepseek-v4-pro` (DeepSeek) and `glm-5.3` (Zhipu), the last two through OpenCode Go. Their majority decides. Nothing is scored until all three have answered; a judge that has not answered after `calib.chat`'s retries is asked again on the next run. Each grader's agreement with the other two is reported.
+- Every panel call goes through `calib.chat` (temperature 0). `SEED` is common.py's.
+
+### M6: lookup
+
+- **Questions** (`questions-dev.jsonl`, drafted by Claude from the dev transcripts; no arm is searched while drafting). 40 lookup questions ("how did we fix X", "which command does Y", "what did we decide about Z"), each:
+  - answered in one dev session's records (a prompt, a reply or a tool output), whose session and record the drafter writes down;
+  - specific to the work (a file, a command, a value, a decision), so general knowledge does not answer it;
+  - in the language the owner used in that session;
+  - asked as of `asked_at`, one time for all 40: the day after the last dev event;
+  - left out when a later dev session changes its answer;
+  - at most two per session.
+
+  About 8 carry a date phrase, an absolute date or one relative to `asked_at` ("last week"), whose range holds the source session's day: MUST-M12's dated subset.
+- **Keys** (`m6.py keys`, `keys-dev.jsonl`). The key writer reads the question with its source record and the two records either side, each through `oboete gate` and cut at 4,000 characters (judge.py's window), and writes the answer and the records that state it (KEY). The checker reads the same and the key, and agrees or says why not (CHECK). A key the checker rejects goes back to the drafter, who fixes or drops the question before any run; the agreement rate is reported. Each key's records are mapped to the dev home's records (`device:seq`) before any worker run.
+- **Run** (`m6.py run --arm b|v1|b-cmem`). Per question, call 1 (QUERY) turns the question and `asked_at` into `{query, since, until}`. The harness runs `oboete search --all --limit 10 <query>`, with `--since` and `--until` when given, then `oboete get` on the top three hits. Call 2 (ANSWER) answers from those results only, citing their ids, or says they do not answer. The results are the search's lines as printed and the three `get` texts, each cut at 4,000 characters. The arms:
+  - `b`: the dev home, a release build of `main`;
+  - `v1`: `baseline/oboete-5fa472f04ab6` and a binary built from the `v1` branch, its SHA recorded; v1's search has no time filter, so its `since` and `until` are dropped and counted;
+  - `b-cmem`: a copy of the dev home with `oboete import claude-mem --eval-store`, for MUST-M13's zero only, not compared with v1.
+- **Scoring** (`m6.py score`).
+  - An answer is correct when the graders' majority says it gives the key's answer (CORRECT).
+  - A cited claim's spans are its evidence rows from `oboete cite`; a row is valid when `live` and the graders' majority says its quote holds the key's answer (HOLDS). A cited raw record's span is its text as `get` prints it, valid when the graders say it holds the answer. A v1 prompt is a raw record.
+  - Attributed-only hits (quote-only claims, imported documents, v1's observations and summaries) have no span: they count toward no answer, and answers that cite only them are reported apart.
+  - An answer counts when it is correct and at least one hit it cites has a valid span.
+  - Validity: valid spans over all spans of the citable hits cited, at least 0.95.
+  - MUST-M13: an imported hit printed without its `imported` label fails the run.
+  - Pass: at least 28 of 40 count, and at least v1's count plus 4 (spec 8.2 M6's 0.70 and current + 0.10, counted, not rounded); validity at least 0.95; the dated subset at least 0.70 over its own N.
+
+### M5: resume on one device
+
+- **Cuts** (`m5.py cuts`). Each dev session whose first and last events are 30 minutes or more apart (26 of the 30) is cut at the event with index `h(f'm5-cut:{SEED}:{session}') % n` among its n events at least 30 minutes after its first.
+- **Homes** (`m5.py run`). Per session, a fresh home with that session's events up to and including the cut. The curated tier is curated as the dev home is; the none tier is a copy taken before, with `curate = false`. Each tier's `oboete inject` in the session's checkout (SessionStart's text for a new session) is kept.
+- **Labels.** The labeller reads the session up to the cut, its prompts and replies without tool calls, gated, each cut at 2,000 characters, the last 80 of them, and writes the open items at the cut (work asked for or started and not finished), the next step, and the items finished or withdrawn before it (LABEL). The checker checks 20% (CHECK_LABELS); the agreement is reported.
+- **Scoring** (`m5.py score`). For each labelled item the graders say whether a tier's text shows it as still open (SHOWN). Open-item recall, open items shown as open over all open items: the curated tier at least 0.80, the none tier at least 0.50. Closed shown as open, finished or withdrawn items shown as open over all of them: the curated tier at most 10%. The next step is reported, with no line. MUST-M8's and MUST-M9's lines stay Task 8's tests.
+
+### MUST-M11's slice
+
+`m3.py overturned` on ov-B1 with milestone 3's dev overturn pairs. Per pair, the earlier decision's labelled words are the query, through `oboete search --all --limit 10` and MCP `search` with `all=true` (`common.Mcp`), then both with history on. Counted as spec 8.4 reads MUST-M11 (A108): over the pairs whose earlier and later claims both exist and are linked, an earlier decision counts as ranked current when it shows in the current rank without its later decision directly before it, or, when it is not delivered, when it ranks above any current hit (line 0%); history recall at 10 over the pairs whose earlier decision became a claim (at least 0.80). The other pairs are reported apart, as curation's miss.
+
+### Per-kind labels (MUST-M21)
+
+`m3.py kinds` draws up to 15 of the dev home's claims per kind (spec 3.2's seven), in the order of `h(f'kinds:{SEED}:{uid}')`, about 100 in all, and writes them in the label format: uid, kind, text and quotes. The graders say whether the quotes bear the claim out and whether it is of its kind (KIND). Precision per kind is reported.
+
+### Guard
+
+A script given a held-out session or pool exits unless `--decide <id>` equals `curator` in `~/.oboete/eval/deciding.json`, which milestone 3's deciding run writes (A88): no file, or another id, is a refusal.
+
+### Changed on 2026-10-02, before the dev runs' curation
+
+- **The binary.** Claude Code 2.1.287 loads a built-in plugin, `cc-plugin-plugin-authoring`, that the curator's isolation check refuses, so on main the claude entry curates nothing (#323). The dev home is replayed and its keys mapped with a release build of main (0d5de61, SHA-256 `ce6c9f28c329b8857f45aa1b6ac38a3f0e6d005bcb4a7b5d8b92e14aa861fc53`); it is curated, and M6's `b` arm, M5, MUST-M11's slice and the per-kind labels run, with a release build of main plus #323 (ceda2d3, SHA-256 `ecb94d91a7beea4efa07d35e1a50d4a8f16ab1533aba96fc7e44fcd313636070`), which changes only the curator's settings. The deciding runs use a release build of main once #323 is merged.
+- **One question replaced.** q05's key named a task-notification prompt among its records. Capture stores that prompt as a subagent's envelope, which no key maps to (m6.py's `mapped_record`, as m3.py's `map_labels`), so the key could not be mapped. As for a key the checker rejects, the drafter replaced the question, with another from the same session, before any run.
+- **The panel's OpenAI judge and one grader.** Groq's free tier, which served `gpt-oss-120b`, is spent each day by the owner's own curation (its chain puts groq first): 6 of the first 40 key calls got 429 on tokens per day. The owner asked to use the codex subscription instead (2026-10-02). `gpt-6-sol` takes `gpt-oss-120b`'s place on the panel, in the same position, so every draw names the same place, and passed calibration first (run 4 of calib-50, docs/milestone-1.md: κ 0.84); `gpt-6-astra`, calibrated in run 3, takes its grader seat. The graders are `gpt-6-astra`, `deepseek-v4-pro` and `glm-5.3`: still three makers, none the answerer's. The keys were written again with this panel before any run: all 40, none failed or rejected, and the checker agreed on 7 of 7.
+
+### Changed on 2026-10-02, before the `b` arm's runs and M5's restart
+
+- **The curating binary.** dev-m4's windows up to seq 226 (38 windows, 4 of them skipped) were curated with ceda2d3. With it, 28 of the first 61 curator answers were unanchored: the model wrote a full-width character where the record has ASCII, or quoted a tool line's code without its JSON escapes (#330), and each such answer holds the window of the chain's only entry 10 minutes. The rest of dev-m4 is curated with a release build of main plus #334, which anchors those quotes (4adeadc, SHA-256 `05d95db5ce8fc905a65401f7e36e607aeacf876a291314567ce06969f7fc95e7`).
+- **The run binary.** ceda2d3 has no `oboete cite`, with which M6's scoring reads a cited claim's evidence. M6's `b` and `b-cmem` arms, M5, MUST-M11's slice and the per-kind labels run and are scored with a release build of main once this task's harnesses and #334 are merged, its SHA-256 recorded with each run as before. M5's run with ceda2d3 was stopped before any score; its rows are kept aside (`runs-dev.ecb94d91a7be-fix323-stopped.jsonl`), and M5 runs again, homes and curation included, with the run binary.
+- **M5's sessions without a checkout.** Each tier's text is `oboete inject` run in the session's checkout. A session whose checkout is no longer on this machine (its repository moved or was removed) cannot be measured so, and a checkout made up for it would guess the repository's identity. Such a session is counted apart (`no_checkout`) and left out of the scoring: `n` is the sessions scored, `metadata.N` the sessions cut. 7 of the first 20 sessions were such.
+- **M5's homes.** A home whose replay stopped part way (raw.db without `replay.json`) is removed, with its none tier, and replayed again.
+
+### Prompts
+
+The harnesses' prompts are these texts, as Python format strings (`{{` is a brace), byte for byte; `test_m6.py`, `test_m5.py` and `test_m3.py` compare them with this file. Every text filled in has passed `oboete gate`.
+
+KEY:
+
+```text
+You write the answer key for a question about a developer's earlier coding session.
+
+Question (asked on {asked_at}):
+<<<
+{question}
+>>>
+
+Records from that session, numbered:
+{records}
+
+Answer the question from these records only, as briefly as it allows, in the question's language, and name the records that state the answer.
+Answer with JSON only: {{"answer": "<answer>", "records": [<record number>, ...]}}, or {{"answer": null, "records": []}} if these records do not answer it.
+```
+
+CHECK:
+
+```text
+Here are a question about a developer's earlier coding session, records from that session, and an answer key written from them.
+
+Question (asked on {asked_at}):
+<<<
+{question}
+>>>
+
+Records, numbered:
+{records}
+
+Answer key:
+<<<
+{key}
+>>>
+
+Does the answer key answer the question correctly from these records?
+Answer with JSON only: {{"agree": true}} or {{"agree": false, "why": "<one sentence>"}}.
+```
+
+QUERY:
+
+```text
+Today is {asked_at}. A developer asks a coding agent about earlier work:
+<<<
+{question}
+>>>
+
+Write the search that finds the answer in the developer's memory of earlier sessions: a short query in the words those sessions would use, and the date range the question names, if it names one.
+Answer with JSON only: {{"query": "<query>", "since": "<YYYY-MM-DD>" or null, "until": "<YYYY-MM-DD>" or null}}.
+```
+
+ANSWER:
+
+```text
+Today is {asked_at}. A developer asks:
+<<<
+{question}
+>>>
+
+Search results from the developer's memory of earlier sessions, each with its id:
+{results}
+
+Answer from these results only, in the question's language, and cite the ids of the results that state the answer.
+Answer with JSON only: {{"answer": "<answer>", "cites": ["<id>", ...]}}, or {{"answer": null, "cites": []}} if they do not answer it.
+```
+
+CORRECT:
+
+```text
+Question:
+<<<
+{question}
+>>>
+
+Reference answer:
+<<<
+{key}
+>>>
+
+Candidate answer:
+<<<
+{answer}
+>>>
+
+Does the candidate give the reference answer without contradicting it? More detail is fine; another answer, or none, is not.
+Answer with JSON only: {{"correct": true}} or {{"correct": false}}.
+```
+
+HOLDS:
+
+```text
+Question:
+<<<
+{question}
+>>>
+
+Reference answer:
+<<<
+{key}
+>>>
+
+Passage:
+<<<
+{span}
+>>>
+
+Does this passage by itself state the reference answer to the question?
+Answer with JSON only: {{"holds": true}} or {{"holds": false}}.
+```
+
+LABEL:
+
+```text
+Here is a developer's coding session up to a moment, its turns numbered:
+{turns}
+
+At the end of these turns, list:
+- open: the work the developer asked for or the agent started that is not finished;
+- next: the step the session would take next;
+- closed: the work finished, dropped or withdrawn before the end.
+Write each item as one short sentence in the session's language.
+Answer with JSON only: {{"open": ["<item>", ...], "next": "<step>", "closed": ["<item>", ...]}}.
+```
+
+CHECK_LABELS:
+
+```text
+Here is a developer's coding session up to a moment, its turns numbered, and labels written for that moment:
+{turns}
+
+Labels:
+{labels}
+
+Are the labels right: every open item still open at the end, every closed item finished or withdrawn before it, and no open item left out?
+Answer with JSON only: {{"agree": true}} or {{"agree": false, "why": "<one sentence>"}}.
+```
+
+SHOWN:
+
+```text
+A new coding session starts with this context:
+<<<
+{context}
+>>>
+
+An item of work:
+<<<
+{item}
+>>>
+
+Does the context show this item as still open, not finished? An item the context does not mention is not shown.
+Answer with JSON only: {{"shown_open": true}} or {{"shown_open": false}}.
+```
+
+KIND:
+
+```text
+A memory system wrote this from a developer's coding session, as a {kind} ({meaning}):
+<<<
+{text}
+>>>
+
+The quotes from the session it rests on:
+{quotes}
+
+Do the quotes bear it out, and is it a {kind}?
+Answer with JSON only: {{"borne_out": true or false, "kind_right": true or false}}.
+```
+
+KIND's `{meaning}` per kind: decision, "a choice the developer made"; preference, "how the developer wants work done, beyond one task"; lesson, "what to do or avoid, learned from a failure"; fix, "how a problem was fixed: its symptom, cause and fix"; open item, "work still to do"; repo fact, "a fact about the repository or its tools"; change, "what was changed".

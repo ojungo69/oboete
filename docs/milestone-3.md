@@ -406,7 +406,7 @@ What the owner's own claude-mem kept of the same 45 labeled decisions, 44 of the
 4. The defaults as they would ship were run once (short-2): 22 of 44.
 5. A base whose Codex prompts from sessions another agent started carry `agent_sent` (#275): a rebuilt base gets it from the transcript parser, and the frozen dev base's copy `base273` has it (the 47 records named by their rollouts).
 6. Several runs of each arm (Run to run, above). At 4 passes per arm one label can move by 3 between two runs of one binary (#262), so a declared rule should not reject on one label alone.
-7. M6 on dev, which the Window row of spec 8.2 runs at this milestone: no M6 harness exists (no questions, answer keys or scorer). Milestone 4's plan builds it (docs/milestone-4-plan.md, D12).
+7. M6 on dev, which the Window row of spec 8.2 runs at this milestone: no M6 harness exists (no questions, answer keys or scorer). Milestone 4's Task 12a builds it on dev (docs/milestone-4.md, Task 12a's protocol), and its commands are added here when it lands. The deciding run writes `~/.oboete/eval/deciding.json` with the default curator's id under `curator`: the held-out harnesses (M5, M6, Inject) read a held-out session only with `--decide <id>` equal to it (A88).
 
 ## Judge, role (a): the shrink: fails on decisions by the declared rule; off
 
