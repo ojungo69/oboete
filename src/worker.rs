@@ -2376,6 +2376,7 @@ mod tests {
     /// R12 with more to embed: a worker asked to step aside settles the call that is out and
     /// sends no other, so a backlog of batches and queries cannot keep a command waiting (Codex
     /// on #359, second round).
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_worker_asked_to_step_aside_sends_no_new_embedding_call() {
         let _contending = contending();
