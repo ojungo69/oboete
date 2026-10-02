@@ -1,6 +1,6 @@
 # oboete design spec
 
-oboete is a lightweight single-binary memory for coding agents. This spec is the design of the redesign ("design B"): what is recorded, how knowledge is made from it, how it is delivered and searched, how devices sync, how content is deleted and kept safe, how oboete is installed, run and released, and how it is evaluated and built. Status: settled 2026-09-25/26. Sections 1-8 were settled one by one with the owner on 2026-09-24/25 (owner decisions 17-22); owner decisions 23-28 and the resolutions of the compile's open points were added on 2026-09-25/26. This file is the spec of record. It replaces the design parts of docs/plan.md, and milestones and PRs cite it for acceptance.
+oboete is a lightweight single-binary memory for coding agents. This spec is the design of the redesign ("design B"): what is recorded, how knowledge is made from it, how it is delivered and searched, how devices sync, how content is deleted and kept safe, how oboete is installed, run and released, and how it is evaluated and built. Status: settled 2026-09-25/26. Sections 1-8 were settled one by one with the owner on 2026-09-24/25 (owner decisions 17-22); owner decisions 23-28 and the resolutions of the compile's open points were added on 2026-09-25/26. This file is the spec of record. It replaces the design parts of docs/plan.md, and milestones and PRs cite it for acceptance. [spec-client-runtime.md](spec-client-runtime.md) records the owner-approved direction for future external clients and conversation runtimes as a review draft; it does not claim those integrations are implemented.
 
 ## 読み方 (Reading guide)
 
@@ -337,7 +337,7 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
 
 - Imported memories (claude-mem ~150k and current oboete) are labelled imported.
 - They are for search and timeline only, with status unknown.
-- They are never injected or used as current.
+- They are never injected or used as current. History import does not imply live conversation ingestion or response-time context delivery; see [spec-client-runtime.md](spec-client-runtime.md).
 
 ### 4.6 Per-prompt injection
 
@@ -564,9 +564,9 @@ Settled: the hub stays on Cloudflare (RD/hub-platform.md); devices use hub-issue
 - Revocation stops only future sync. A lost device keeps its replica, and raw.db is unencrypted (RD/constraints-synthesis.md:85, S1-3), so the replica relies on OS disk encryption. MUST-M23's forget-limits doc says so. There is no remote wipe, because a thief can keep the device offline (Claude; overrulable).
 - Any device holding a valid hub token can erase content on every device, including their local backups, because forget rewrites backups (§6.2 step 6). Revoking the token is the only stop. MUST-M23's forget-limits doc says so (§6.3) (Claude; overrulable).
 
-### 5.13 Remote MCP for the Claude app
+### 5.13 Remote MCP for clients without local oboete
 
-- It is only for clients without a local oboete (proposal:363).
+- It is only for clients without a local oboete (proposal:363). Client capability and source/scope contracts are specified in [spec-client-runtime.md](spec-client-runtime.md), a review draft for future integrations; the Claude app is one product example, not the protocol boundary. Initial remote clients are read-only (search/get/timeline), through OAuth and per-repo grants. Device-sync tokens are never bot credentials (§5.12). MCP connectivity alone does not guarantee conversation capture or automatic context insertion before every response.
 - It goes through the hub with OAuth (workers-oauth-provider), and the Worker handles the login itself. No Access, no Zero Trust. This reverses proposal:364 (Access as the login). (owner decision 18)
 - Login: the page asks for a short-lived, single-use approval code that an already-enrolled device creates (`oboete hub approve`). (owner decision 18)
 - Alternative: GitHub OAuth restricted to one user id. (Claude; overrulable)
