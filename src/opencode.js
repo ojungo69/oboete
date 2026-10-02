@@ -28,12 +28,14 @@ export default {
         const child = spawn(exe, [...args, "hook", "opencode", event], {
           cwd: payload.cwd,
           stdio: ["pipe", read ? "pipe" : "ignore", "ignore"],
+          timeout: 3000,
+          killSignal: "SIGKILL",
         });
         let out = "";
         child.stdout?.setEncoding("utf8");
         child.stdout?.on("data", (data) => { out += data; });
         child.once("error", () => resolve(""));
-        child.once("close", () => resolve(out));
+        child.once("close", (code) => resolve(code === 0 ? out : ""));
         child.stdin.on("error", ignore);
         child.stdin.end(JSON.stringify(payload));
         child.unref();
@@ -75,7 +77,7 @@ export default {
         // Unlocated bus events can belong to another plugin instance's sessions.
         if (!location) return null;
         if (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
-        state = { dir: location.directory, started: false, message: null, parts: [], turn: null };
+        state = { dir: location.directory, started: false, message: null, parts: [], turn: null, inbox: new Map() };
       }
       sessions.set(id, state);
       if (!state.started) {
@@ -102,6 +104,7 @@ export default {
     ctx.session.hook("context", async (e) => {
       const state = session(e.sessionID, ctx.location);
       if (!state) return;
+      const turn = state.turn;
       // Cache the promise too: overlapping calls still start only one injection process. The
       // session's queued SessionStart capture runs first: its write sets or clears the
       // recording-failure line the text reports. Bounded, so a stuck capture never holds a turn.
@@ -116,8 +119,8 @@ export default {
       const text = await state.context;
       if (text) e.system.push({ type: "text", text });
       // What the turn's prompt got, at each of the turn's calls: OpenCode keeps no system text.
-      const turn = state.turn && await bounded(state.turn);
-      if (turn) e.system.push({ type: "text", text: turn });
+      const prompt = turn && await bounded(turn);
+      if (prompt) e.system.push({ type: "text", text: prompt });
     });
 
     (async () => {
@@ -129,14 +132,29 @@ export default {
         switch (ev.type) {
           case "session.inbox.enqueued":
             if (data.item?.type === "user") {
-              // A change it names may be in the cached manifest: the turn reads it again.
-              state.turn = send("UserPromptSubmit", { ...payload, prompt: data.item.payload?.text })
-                .then(contextOf)
-                .then((text) => {
-                  if (text) state.context = undefined;
-                  return text;
-                });
+              // Queue admission is not delivery. Steers may pass queued input, so retain the
+              // capture by the public inboxID until OpenCode actually uses that prompt.
+              const turn = send("UserPromptSubmit", { ...payload, prompt: data.item.payload?.text })
+                .then(contextOf);
+              if (typeof data.inboxID === "string") state.inbox.set(data.inboxID, turn);
             }
+            break;
+          case "session.inbox.delivered": {
+            const captured = state.inbox.get(data.inboxID);
+            state.inbox.delete(data.inboxID);
+            if (captured) {
+              // A boundary may deliver several steers in this execution. Its terminal clears
+              // only these delivered contexts; prompts still queued belong to later execution.
+              const turn = Promise.all([state.turn, captured]).then((texts) => texts.filter(Boolean).join("\n"));
+              state.turn = turn;
+              void turn.then((text) => {
+                if (text && state.turn === turn) state.context = undefined;
+              });
+            }
+            break;
+          }
+          case "session.inbox.cancelled":
+            state.inbox.delete(data.inboxID);
             break;
           case "session.text.ended":
             // One event per text part: keep every part of the newest assistant message.

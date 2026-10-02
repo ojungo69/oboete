@@ -12,20 +12,21 @@ const captures = [];
 const injections = [];
 // Sessions whose SessionStart capture has closed.
 const started = new Set();
-// "ok", "error" (the child reports an error) or "throw" (spawn itself throws).
+// "ok", "error", "throw", or "stall" (only the native spawn timeout closes it).
 let spawnMode = "ok";
 let active = 0;
 let maxActive = 0;
 // What a prompt's hook prints.
 let promptOutput = "";
 childProcess.spawn = (exe, args, options) => {
+  const mode = spawnMode;
   assert.equal(exe, expectedExe);
   assert.deepEqual(args.slice(0, -1), [...homeArgs, "hook", "opencode"]);
   // Only a prompt's output is read.
   const read = args.at(-1) === "UserPromptSubmit";
   assert.deepEqual(options.stdio, ["pipe", read ? "pipe" : "ignore", "ignore"]);
   assert.equal(options.shell, undefined);
-  if (spawnMode === "throw") throw new Error("spawn failed");
+  if (mode === "throw") throw new Error("spawn failed");
   const child = new EventEmitter();
   child.stdin = new EventEmitter();
   if (read) {
@@ -39,13 +40,23 @@ childProcess.spawn = (exe, args, options) => {
     captures.push({ event: args.at(-1), payload: JSON.parse(text), cwd: options.cwd });
     setImmediate(() => {
       assert.equal(child.unrefed, true);
+      if (mode === "stall" && options.timeout === undefined) return;
       active -= 1;
-      if (spawnMode === "error") {
+      if (mode === "stall") {
+        assert.equal(options.timeout, 3000);
+        assert.equal(options.killSignal, "SIGKILL");
+        if (read) child.stdout.emit("data", JSON.stringify({
+          hookSpecificOutput: { additionalContext: "expired partial context" },
+        }));
+        child.emit("close", null, "SIGKILL");
+        return;
+      }
+      if (mode === "error") {
         child.stdin.emit("error", new Error("EPIPE"));
         child.emit("error", new Error("ENOENT"));
       }
       if (args.at(-1) === "SessionStart") started.add(JSON.parse(text).session_id);
-      if (read && spawnMode === "ok") child.stdout.emit("data", promptOutput);
+      if (read && mode === "ok") child.stdout.emit("data", promptOutput);
       child.emit("close", 0);
     });
   };
@@ -99,11 +110,16 @@ function context() {
   return {
     ctx, hooks,
     get signal() { return signal; },
-    async emit(type, data, location) {
+    async emit(type, data, location, deliver = true) {
       const event = { type, data, location };
       if (waiting) { const resolve = waiting; waiting = undefined; resolve({ value: event, done: false }); }
       else queued.push(event);
       await tick();
+      // Existing scenarios deliver steering input at the next boundary. Queued input is delivered
+      // explicitly by its regression, using the public inboxID shared by both events.
+      if (deliver && type === "session.inbox.enqueued" && data.item?.type === "user" && data.item.delivery !== "queue") {
+        await this.emit("session.inbox.delivered", { sessionID: data.sessionID, inboxID: data.inboxID }, location);
+      }
     },
   };
 }
@@ -119,7 +135,11 @@ delete process.env.OBOETE_SKIP;
 const local = context();
 const cleanup = await plugin.setup(local.ctx);
 const location = local.ctx.location;
-const user = (sessionID, text) => ({ sessionID, item: { type: "user", payload: { text } } });
+let inboxID = 0;
+const user = (sessionID, text, delivery = "steer") => {
+  const id = `msg_${++inboxID}`;
+  return { sessionID, inboxID: id, item: { id, type: "user", payload: { text }, delivery } };
+};
 await local.emit("session.inbox.enqueued", user("foreign", "wrong repo"), { directory: "/other" });
 await local.emit("session.execution.succeeded", { sessionID: "unknown" });
 assert.equal(captures.length, 0);
@@ -224,6 +244,72 @@ await local.hooks.context(afterCompaction);
 assert.deepEqual(afterCompaction.system, [{ type: "text", text: "remembered context" }]);
 assert.equal(injections.length, 3);
 await drain();
+
+// Enqueue B while A is executing: B belongs only to its later delivery, and A's completion must
+// not drop it. context has no executionID; these are the official inbox lifecycle fields.
+promptOutput = JSON.stringify({ hookSpecificOutput: { additionalContext: "turn A" } });
+await local.emit("session.inbox.enqueued", user("queued-turns", "prompt A"), location);
+await drain();
+const firstA = { sessionID: "queued-turns", system: [] };
+await local.hooks.context(firstA);
+promptOutput = JSON.stringify({ hookSpecificOutput: { additionalContext: "turn B" } });
+const queuedB = user("queued-turns", "prompt B", "queue");
+await local.emit("session.inbox.enqueued", queuedB, location);
+await drain();
+const continuedA = { sessionID: "queued-turns", system: [] };
+await local.hooks.context(continuedA);
+await local.emit("session.execution.succeeded", { sessionID: "queued-turns" });
+await local.emit("session.inbox.delivered", { sessionID: "queued-turns", inboxID: queuedB.inboxID });
+const firstB = { sessionID: "queued-turns", system: [] };
+await local.hooks.context(firstB);
+assert.deepEqual([continuedA.system, firstB.system], [
+  [{ type: "text", text: "remembered context" }, { type: "text", text: "turn A" }],
+  [{ type: "text", text: "remembered context" }, { type: "text", text: "turn B" }],
+]);
+await local.emit("session.execution.succeeded", { sessionID: "queued-turns" });
+promptOutput = "";
+
+// One step boundary may promote several steers ahead of queued input. Cancelled and already
+// consumed inbox items must contribute no context; the queued prompt still starts its own turn.
+const steering = [];
+for (const text of ["cancelled context", "queued context", "first steer", "second steer"]) {
+  promptOutput = JSON.stringify({ hookSpecificOutput: { additionalContext: text } });
+  const item = user("steering", text, text.endsWith("steer") ? "steer" : "queue");
+  steering.push(item);
+  await local.emit("session.inbox.enqueued", item, location, false);
+  await drain();
+}
+const deliver = (item) => local.emit("session.inbox.delivered", { sessionID: "steering", inboxID: item.inboxID });
+await local.emit("session.inbox.cancelled", { sessionID: "steering", inboxID: steering[0].inboxID });
+await deliver(steering[2]);
+await deliver(steering[3]);
+await deliver(steering[2]); // replaying an already-consumed event cannot append it twice
+const steered = { sessionID: "steering", system: [] };
+await local.hooks.context(steered);
+assert.deepEqual(steered.system, [
+  { type: "text", text: "remembered context" },
+  { type: "text", text: "first steer\nsecond steer" },
+]);
+await local.emit("session.execution.succeeded", { sessionID: "steering" });
+await deliver(steering[1]);
+const queued = { sessionID: "steering", system: [] };
+await local.hooks.context(queued);
+assert.deepEqual(queued.system, [
+  { type: "text", text: "remembered context" }, { type: "text", text: "queued context" },
+]);
+promptOutput = "";
+
+// A stalled capture must expire and leave the serialized queue able to capture the next prompt.
+spawnMode = "stall";
+await local.emit("session.inbox.enqueued", user("one", "stalled capture"));
+await drain();
+const expired = { sessionID: "one", system: [] };
+await local.hooks.context(expired);
+assert(!expired.system.some((part) => part.text.includes("expired partial context")));
+spawnMode = "ok";
+await local.emit("session.inbox.enqueued", user("one", "after stalled capture"));
+await drain();
+assert.equal(captures.at(-1).payload.prompt, "after stalled capture");
 
 for (const mode of ["error", "throw"]) {
   spawnMode = mode;
