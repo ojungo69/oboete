@@ -168,6 +168,7 @@ pub fn text(
         None if cards.is_empty() => return Ok(None),
         None => 0,
     };
+    let fence = manifest::fenced("").encode_utf16().count();
     let mut n = cards.len();
     let (bodies, gated, from) = loop {
         let block = match n {
@@ -182,7 +183,6 @@ pub fn text(
             return Ok(None);
         };
         let (gated, from) = packet.outbound(rules);
-        let fence = manifest::fenced("").encode_utf16().count();
         if n == 0 || manifest::fenced(gated.trim()).encode_utf16().count() - fence <= cap {
             break (bodies, gated, from);
         }
