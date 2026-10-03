@@ -346,7 +346,8 @@ fn the_home_log_alone_restores_a_forget_the_backup_directory_missed() {
         &["search", "--all", "--raw", "only", "--", CANARY],
         "",
     ));
-    assert!(found.trim().is_empty(), "{found}");
+    // Search says "no hits" when it finds none (#380): the record is not among them.
+    assert!(!found.contains(CANARY), "{found}");
 }
 
 /// D1 F2: raw.db goes back to a copy from before the forget, a hook takes the seqs again and the
