@@ -135,7 +135,7 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
         k.execute_batch(
             "CREATE TABLE IF NOT EXISTS card_files(
                device TEXT NOT NULL, op_seq INTEGER NOT NULL, n INTEGER NOT NULL,
-               name TEXT NOT NULL, path TEXT NOT NULL);
+               name TEXT NOT NULL, path TEXT NOT NULL, modified INTEGER NOT NULL);
              CREATE INDEX IF NOT EXISTS card_files_name ON card_files(name);",
         )?;
         let cards: Vec<(String, i64, i64, String, String)> = k
@@ -175,11 +175,15 @@ pub(crate) fn index_files(
     lists: [&serde_json::Value; 2],
 ) -> Result<()> {
     let mut st = k.prepare(
-        "INSERT INTO card_files(device, op_seq, n, name, path) VALUES(?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO card_files(device, op_seq, n, name, path, modified)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
     )?;
-    for path in lists.iter().filter_map(|l| l.as_array()).flatten() {
-        if let Some(path) = path.as_str().map(slashed) {
-            st.execute(rusqlite::params![device, op_seq, n, file_name(&path), path])?;
+    for (modified, list) in [false, true].into_iter().zip(lists) {
+        for path in list.as_array().into_iter().flatten() {
+            if let Some(path) = path.as_str().map(slashed) {
+                let at = rusqlite::params![device, op_seq, n, file_name(&path), path, modified];
+                st.execute(at)?;
+            }
         }
     }
     Ok(())
@@ -540,6 +544,15 @@ const NOTE_ICONS: [(&str, &str); 6] = [
     ("change", "✅"),
 ];
 
+/// A card `by_file` found, with what the note ranks it by as stored, before the gate (K6) masks
+/// the card's own fields (Codex on #387): its agent and session, and whether it modified the file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Filed {
+    pub card: Card,
+    pub(crate) session: Option<(Option<String>, String)>,
+    pub(crate) modified: bool,
+}
+
 /// X5 F3: `repo`'s current cards that name a file by one of `paths` (its absolute path, and its
 /// paths relative to the working directory and to the checkout's top level), the newest first, at
 /// most `limit`. The index is the worker's: a store it has not reached yet has none.
@@ -551,7 +564,7 @@ pub fn by_file(
     paths: &[&str],
     limit: usize,
     rules: &Rules,
-) -> Result<Vec<Card>> {
+) -> Result<Vec<Filed>> {
     let paths: Vec<String> = paths.iter().map(|p| slashed(p)).collect();
     let Some(name) = paths.first().map(|p| file_name(p).to_owned()) else {
         return Ok(Vec::new());
@@ -559,13 +572,18 @@ pub fn by_file(
     if !crate::consumer::manifest::exists(k, "table", "card_files")? {
         return Ok(Vec::new());
     }
-    let marks: Vec<String> = (3..3 + paths.len()).map(|i| format!("?{i}")).collect();
+    let marks = (3..3 + paths.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut st = k.prepare(&format!(
-        "SELECT {COLUMNS} FROM cards WHERE repo = ?1 AND replaced_by IS NULL
+        "SELECT {COLUMNS}, (SELECT MAX(f.modified) FROM card_files f
+             WHERE f.device = cards.device AND f.op_seq = cards.op_seq AND f.n = cards.n
+               AND f.name = ?2 AND f.path IN ({marks}))
+         FROM cards WHERE repo = ?1 AND replaced_by IS NULL
            AND (device, op_seq, n) IN (SELECT device, op_seq, n FROM card_files
-             WHERE name = ?2 AND path IN ({}))
-         ORDER BY ts DESC, device DESC, op_seq DESC, n",
-        marks.join(", ")
+             WHERE name = ?2 AND path IN ({marks}))
+         ORDER BY ts DESC, device DESC, op_seq DESC, n"
     ))?;
     let values = [repo.to_owned(), name].into_iter().chain(paths);
     let mut rows = st.query(rusqlite::params_from_iter(values))?;
@@ -573,18 +591,23 @@ pub fn by_file(
     while out.len() < limit
         && let Some(r) = rows.next()?
     {
-        out.extend(read(r, raw, rules)?);
+        let (agent, session) = (r.get(4)?, r.get::<_, Option<String>>(5)?);
+        let modified = r.get::<_, Option<bool>>(19)?.unwrap_or(false);
+        out.extend(read(r, raw, rules)?.map(|card| Filed {
+            card,
+            session: session.map(|s| (agent, s)),
+            modified,
+        }));
     }
     Ok(out)
 }
 
 /// X5 F4, F6, F7: claude-mem's note on a file from `cards`, the newest first as `by_file` gives
-/// them for `paths`, at `now` in `tz`, read on device `local`. None without a card, or when the
-/// file was modified (`mtime`, unix ms) at or after the newest: they may tell of an older file.
+/// them, at `now` in `tz`, read on device `local`. None without a card, or when the file was
+/// modified (`mtime`, unix ms) at or after the newest: they may tell of an older file.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn file_note<Tz: chrono::TimeZone>(
-    cards: &[Card],
-    paths: &[&str],
+    cards: &[Filed],
     mtime: i64,
     local: &str,
     now: i64,
@@ -593,7 +616,7 @@ pub fn file_note<Tz: chrono::TimeZone>(
 where
     Tz::Offset: std::fmt::Display,
 {
-    let newest = cards.iter().map(|c| c.ts).max()?;
+    let newest = cards.iter().map(|f| f.card.ts).max()?;
     if mtime >= newest {
         return None;
     }
@@ -603,14 +626,11 @@ where
     let mut seen = std::collections::HashSet::new();
     let mut ranked: Vec<(u8, &Card)> = cards
         .iter()
-        .filter(|c| c.session.as_ref().is_none_or(|s| seen.insert(s.clone())))
-        .map(|c| {
-            let modified = c
-                .files_modified
-                .iter()
-                .any(|f| paths.iter().any(|p| slashed(f) == slashed(p)));
+        .filter(|f| f.session.as_ref().is_none_or(|s| seen.insert(s.clone())))
+        .map(|f| {
+            let c = &f.card;
             let named = c.files_read.len() + c.files_modified.len();
-            let score = 2 * u8::from(modified)
+            let score = 2 * u8::from(f.modified)
                 + match named {
                     0..=3 => 2,
                     4..=8 => 1,
@@ -726,14 +746,26 @@ mod tests {
         }
     }
 
-    /// A card of `session` naming `read` and `modified` (X5, docs/file-note.md).
-    fn filed(op_seq: i64, ts: i64, session: &str, read: &[&str], modified: &[&str]) -> Card {
-        Card {
+    /// A card of Claude Code's `session` naming `read` and `modified`, as `by_file` finds it for
+    /// a file it modified when `modified` is not empty (X5, docs/file-note.md).
+    fn filed(op_seq: i64, ts: i64, session: &str, read: &[&str], modified: &[&str]) -> Filed {
+        let card = Card {
             session: Some(session.into()),
             files_read: read.iter().map(|s| (*s).to_owned()).collect(),
             files_modified: modified.iter().map(|s| (*s).to_owned()).collect(),
             ..card(op_seq, 0, ts, Some("bugfix"), &format!("Card {op_seq}"))
+        };
+        Filed {
+            card,
+            session: Some((Some("claude".into()), session.into())),
+            modified: !modified.is_empty(),
         }
+    }
+
+    /// `f` with its card changed by `change`.
+    fn with(mut f: Filed, change: impl FnOnce(&mut Card)) -> Filed {
+        change(&mut f.card);
+        f
     }
 
     /// The IDs of a note's rows, in their order.
@@ -750,20 +782,17 @@ mod tests {
     fn the_note_on_a_file_is_claude_mems_text() {
         let long = format!("{}\n  tail", "x".repeat(200));
         let cards = [
-            Card {
-                kind: Some("decision".into()),
-                ..filed(3, at(3, 18, 14, 0), "s3", &["src/a.rs"], &[])
-            },
-            Card {
-                row_title: long,
-                ..filed(2, at(2, 21, 41, 0), "s2", &["src/a.rs"], &[])
-            },
-            Card {
-                row_title: " ".into(),
-                ..filed(1, at(2, 9, 5, 0), "s1", &["src/a.rs"], &[])
-            },
+            with(filed(3, at(3, 18, 14, 0), "s3", &["src/a.rs"], &[]), |c| {
+                c.kind = Some("decision".into());
+            }),
+            with(filed(2, at(2, 21, 41, 0), "s2", &["src/a.rs"], &[]), |c| {
+                c.row_title = long;
+            }),
+            with(filed(1, at(2, 9, 5, 0), "s1", &["src/a.rs"], &[]), |c| {
+                c.row_title = " ".into();
+            }),
         ];
-        let note = file_note(&cards, &["src/a.rs"], 0, "d", at(3, 18, 16, 0), &jst()).unwrap();
+        let note = file_note(&cards, 0, "d", at(3, 18, 16, 0), &jst()).unwrap();
         let expected = [
             "Current: 2026-10-03 6:16pm GMT+9",
             "This file has prior observations — supplementary context follows. The Read result below is the full requested section.",
@@ -799,7 +828,7 @@ mod tests {
                 &[],
             )
         }));
-        let note = file_note(&cards, &["src/a.rs"], 0, "d", now, &jst()).unwrap();
+        let note = file_note(&cards, 0, "d", now, &jst()).unwrap();
         assert_eq!(rows(&note).len(), 15);
         assert!(!rows(&note).contains(&"50.0"), "{note}");
         assert!(rows(&note).contains(&"49.0"), "{note}");
@@ -808,18 +837,23 @@ mod tests {
             filed(2, at(3, 11, 2, 0), "s", &["src/a.rs"], &[]),
             filed(1, at(3, 11, 1, 0), "s", &["src/a.rs"], &[]),
         ];
-        let note = file_note(&same, &["src/a.rs"], 0, "d", now, &jst()).unwrap();
+        let note = file_note(&same, 0, "d", now, &jst()).unwrap();
         assert_eq!(rows(&note), ["2.0"]);
+        // The same session text of two agents is two sessions (Codex on #387).
+        let mut codex = same[1].clone();
+        codex.session = Some((Some("codex".into()), "s".into()));
+        let note = file_note(&[same[0].clone(), codex], 0, "d", now, &jst()).unwrap();
+        assert_eq!(rows(&note), ["1.0", "2.0"]);
     }
 
     /// X5 F4: no note when the file changed at or after its newest card, or no card names it.
     #[test]
     fn no_note_when_the_file_changed_since_its_newest_card() {
         let cards = [filed(1, at(3, 10, 0, 0), "s1", &["src/a.rs"], &[])];
-        let note = |mtime| file_note(&cards, &["src/a.rs"], mtime, "d", at(3, 11, 0, 0), &jst());
+        let note = |mtime| file_note(&cards, mtime, "d", at(3, 11, 0, 0), &jst());
         assert!(note(at(3, 10, 0, 0)).is_none());
         assert!(note(at(3, 9, 59, 0)).is_some());
-        assert!(file_note(&[], &["src/a.rs"], 0, "d", 0, &jst()).is_none());
+        assert!(file_note(&[], 0, "d", 0, &jst()).is_none());
     }
 
     /// Newest first, as `recent` gives them.

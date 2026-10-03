@@ -61,7 +61,7 @@ F2. **Which files.** As claude-mem: the tool's paths, at most 10, each a regular
 
 F3. **Which cards.** The checkout's repository's current cards (not replaced, K3; not forgotten,
 once milestone 5's forget is in) whose `files_read` or `files_modified` name the file. The cards
-consumer keeps a table `card_files(device, op_seq, n, name, path)`, indexed by `name`, the path's
+consumer keeps a table `card_files(device, op_seq, n, name, path, modified)`, indexed by `name`, the path's
 last part (`\\` read as `/`): the lookup takes the rows of the file's name whose path is the
 file's absolute path, its path relative to `cwd`, or its path relative to the checkout's top level
 (cards name files as the window's lines did, C3), and the repository and currency from the cards
@@ -80,7 +80,10 @@ shown would bring the note back at every read of a file with more cards than row
 the hook state (`hookstate::KEEP`) removes it.
 
 F6. **Which rows.** claude-mem's: one card per session, the newest; ranked +2 for a modified file,
-+2 for at most 3 files named in all, +1 for at most 8; the 15 best; then by day as above.
++2 for at most 3 files named in all, +1 for at most 8; the 15 best; then by day as above. The
+session (with its agent) and whether the card modified the file are taken as stored, before the
+gate masks the card's fields: a masked session or path would merge sessions or lose the +2
+(Codex on #387).
 
 F7. **The text.** claude-mem's, with oboete's tools and IDs: `get(ID)` in place of
 `get_observations([IDs])`, and no `smart_outline` line (oboete has no code-structure tools, parity

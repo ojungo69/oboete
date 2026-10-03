@@ -373,7 +373,7 @@ mod tests {
             cards::by_file(&k, &raw, "r", paths, 40, &Rules::default())
                 .unwrap()
                 .iter()
-                .map(|c| c.op_seq)
+                .map(|f| f.card.op_seq)
                 .collect()
         };
         // Op 2's card is replaced by op 4's, and op 3's is of another repository.
@@ -387,6 +387,29 @@ mod tests {
         assert!(found(&["src/a.rs"]).is_empty());
         crate::worker::run_once(home.path()).unwrap();
         assert_eq!(found(&["src/a.rs"]), [1]);
+    }
+
+    /// X5 F6: whether a card modified the file is the index's, before the gate, so a path a rule
+    /// masks in the card still ranks as modified (Codex on #387).
+    #[test]
+    fn a_masked_path_still_counts_as_modified() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        two_records(&mut raw);
+        let secret = format!("keys/ghp_{}.txt", &"a1B2c3D4e5".repeat(4)[..36]);
+        let (kind, mut op) = window(1, 1, "curated", "");
+        op["observations"] = json!([{"type": "bugfix", "title": "T", "subtitle": "",
+            "narrative": "", "facts": [], "concepts": [], "files_read": [],
+            "files_modified": [secret]}]);
+        raw.append_ops(&[(kind, op)]).unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        let raw = raw::open(home.path()).unwrap();
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let found = cards::by_file(&k, &raw, "r", &[&secret], 40, &Rules::default()).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_ne!(found[0].card.files_modified, [secret], "the rule masks it");
+        assert!(found[0].modified);
     }
 
     fn titles(home: &Path) -> Vec<String> {
