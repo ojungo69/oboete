@@ -816,17 +816,19 @@ impl Raw {
     }
 
     /// This device's live replies (the sources `is_live` names) after `after` through `through`,
-    /// the oldest first, by their labels alone (no body): the turn ends a summary may be due for
-    /// (docs/summaries.md T1). Along the primary key from `after`: records have no index of kind.
-    pub fn replies_between(&self, after: i64, through: i64) -> Result<Vec<Labels>> {
+    /// the oldest first, at most `limit`, by their labels alone (no body): the turn ends a
+    /// summary may be due for (docs/summaries.md T1). Along the primary key from `after`: records
+    /// have no index of kind.
+    pub fn replies_between(&self, after: i64, through: i64, limit: usize) -> Result<Vec<Labels>> {
         let mut st = self.conn.prepare(&format!(
             "SELECT agent, session, repo, seq, ts, kind FROM records
              WHERE device = ?1 AND seq > ?2 AND seq <= ?3 AND type = 'event' AND kind = 'reply'
                AND source IN ('{}')
-             ORDER BY seq",
+             ORDER BY seq LIMIT ?4",
             LIVE.join("', '")
         ))?;
-        let rows = st.query_map(params![self.device, after, through], |r| {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = st.query_map(params![self.device, after, through, limit], |r| {
             Ok(Labels {
                 agent: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
                 session: r.get::<_, Option<String>>(1)?.unwrap_or_default(),

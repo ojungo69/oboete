@@ -202,6 +202,9 @@ impl Turn {
     }
 }
 
+/// How many turn ends a run reads at a time.
+const PAGE: usize = 64;
+
 /// The curation pass's summaries (T1), in the digest's place: run when `windows` (what the window
 /// phase did) sent nothing, the summary of the oldest turn end of this device after the last one
 /// it kept a summary of, up to where curation has passed. One call per run; a summary every
@@ -235,16 +238,27 @@ pub fn phase(
     // an undo lets out as it lets out a window's records (Codex on #371), oldest first. One still
     // kept back is not read again.
     let waiting = crate::providers_db::turns_waiting(db, &device)?;
-    let mut replies = Vec::new();
+    let mut replies = std::collections::VecDeque::new();
     for (seq, key, attempts) in &waiting {
         if *seq <= last && *attempts < crate::curate::ATTEMPTS && !reading.excluded.contains(key) {
-            replies.extend(raw.replies_between(seq - 1, *seq)?);
+            replies.extend(raw.replies_between(seq - 1, *seq, 1)?);
         }
     }
     let kept: std::collections::HashSet<i64> = waiting.iter().map(|w| w.0).collect();
-    // Every turn end is reached, however many records follow it (Codex on C2).
-    replies.extend(raw.replies_between(last, ck)?);
-    for r in replies {
+    // Every turn end is reached, however many records follow it (Codex on C2), a page at a time:
+    // a run asks for one, so a backlog is not read whole at every run (Codex on #371).
+    let mut after = last;
+    loop {
+        if replies.is_empty() {
+            replies.extend(raw.replies_between(after, ck, PAGE)?);
+            let Some(end) = replies.back().map(|r| r.seq) else {
+                break;
+            };
+            after = end;
+        }
+        let Some(r) = replies.pop_front() else {
+            break;
+        };
         if !covered(r.seq) {
             break;
         }
@@ -916,6 +930,34 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert!(sent[0].contains("Build the parser."), "{}", sent[0]);
         assert_eq!(run(home.path(), &completed("x")).1.len(), 0);
+    }
+
+    /// Codex on #371: the turn ends are read a page at a time, and a turn after a page of
+    /// turns the list keeps back is still reached.
+    #[test]
+    fn a_turn_after_a_page_of_kept_back_turns_is_reached() {
+        let mut records = Vec::new();
+        for _ in 0..PAGE + 2 {
+            records.push(said("s1", "prompt", "Kept back."));
+            records.push(said("s1", "reply", "Kept."));
+        }
+        records.push(Event {
+            repo: Some("q".into()),
+            ..said("s2", "prompt", "Fix the lexer.")
+        });
+        records.push(Event {
+            repo: Some("q".into()),
+            ..said("s2", "reply", "Fixed.")
+        });
+        let top = records.len() as i64;
+        let home = home(&records, &[window(1, top, "All of it.", &[])]);
+        crate::raw::open(home.path())
+            .unwrap()
+            .exclude("r", false)
+            .unwrap();
+        let (_, sent) = run(home.path(), &completed("Fixed."));
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("Fix the lexer."), "{}", sent[0]);
     }
 
     /// Test 3 (T2): the turn's prompts, its session's cards of the windows that hold the turn,
