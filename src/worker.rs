@@ -457,20 +457,23 @@ fn serve(
     before_exit: &mut impl FnMut(),
     phases: &mut Phases,
 ) -> Result<bool> {
-    if holding.lock.is_none() {
+    let reopened = holding.lock.is_some();
+    if !reopened {
         match lock(home)? {
             Some(l) => take(home, l, holding),
             None => return Ok(false),
         }
-    } else {
+    }
+    // The stores are opened by path too: after a restore, in a home that may be another by now,
+    // which is checked before anything is written to it (Codex on #359).
+    if gone(home, holding) {
+        return Err(Gone.into());
+    }
+    if reopened {
         // Opened again (a restore was asked for, or a store read as damaged), maybe from a wait
         // whose outcome said all is well: this is work, and a kill during it is reported (R10,
         // Codex on #359).
         note(home, holding.last, STOPPED);
-    }
-    // The stores are opened by path too: after a restore, in a home that may be another by now.
-    if gone(home, holding) {
-        return Err(Gone.into());
     }
     // Taken before the open, so a request a hook makes while it runs is still seen below; put
     // back when the open fails (no segment, a reader holding raw.lock), for the next worker,
@@ -2271,6 +2274,47 @@ mod tests {
         std::fs::remove_dir_all(p).unwrap();
         std::fs::create_dir_all(p.join("state")).unwrap();
         std::fs::write(p.join("state").join("worker.lock"), "").unwrap();
+    }
+
+    /// R3 with a restore asked for: a home replaced while the worker waits, which asks for a
+    /// restore, gets no outcome from the worker opening its stores again (Codex on #359).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_replaced_home_that_asks_for_a_restore_gets_no_outcome() {
+        let _contending = contending();
+        let parent = tempfile::tempdir().unwrap();
+        let p = parent.path().join("home");
+        std::fs::create_dir(&p).unwrap();
+        raw::open(&p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        let worker = resident(&p, 300);
+        until("it waits", || {
+            outcome(&p).is_some_and(|(_, why)| why.is_empty())
+        });
+        // As `replace_home`, the request written before the lock file.
+        let _ = std::fs::hard_link(
+            p.join("state").join("worker.lock"),
+            p.with_extension("old-lock"),
+        );
+        std::fs::remove_dir_all(&p).unwrap();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        crate::backup::request_restore(&p);
+        std::fs::write(p.join("state").join("worker.lock"), "").unwrap();
+        until("the old worker stops", || worker.is_finished());
+        let why = worker.join().unwrap().unwrap_err();
+        assert!(why.is::<Gone>(), "{why:#}");
+        let mut state: Vec<_> = std::fs::read_dir(p.join("state"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        state.sort();
+        assert_eq!(
+            state,
+            ["restore-wanted", "worker.lock"],
+            "written into the new home"
+        );
     }
 
     /// R3 after the lock is released: a home replaced while a worker makes its last check gets
