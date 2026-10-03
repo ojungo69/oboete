@@ -1526,11 +1526,18 @@ fn request(
         }
         shown.push(block);
     }
-    let (carried_text, mut carried_uids, offered, mut goals) = carried(raw, k, rules, w)?;
-    goals.retain(|g| !(w.from_seq..=w.to_seq).contains(g));
+    let (carried_text, mut carried_uids, offered, goals) = carried(raw, k, rules, w)?;
     // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing,
-    // and options cut from it are picked by nothing.
+    // options cut from it are picked by nothing, and a goal cut from it was not shown (Codex on
+    // #364).
     let (carried_text, shown) = fit(&carried_text, &shown, summary.window_tokens / 5);
+    let goals = goals
+        .into_iter()
+        .filter(|(seq, lines)| {
+            !(w.from_seq..=w.to_seq).contains(seq) && carried_text.contains(lines.as_str())
+        })
+        .map(|(seq, _)| seq)
+        .collect();
     carried_uids.retain(|(_, _, c)| carries(&carried_text, &c.uid));
     shown_in.retain(|(_, c)| shows(&shown, &c.uid));
     let offered = offered
@@ -3061,6 +3068,10 @@ type Carried = Vec<(String, Option<String>, crate::claims::Claim)>;
 /// ("1") settles only one of them (`gates`, #252).
 type Offered = Vec<(String, String, Vec<String>)>;
 
+/// The records the sessions' goals are read from (docs/cards.md K4), each with the lines that
+/// show it: a goal `fit` cuts was not shown (Codex on #364).
+type Goals = Vec<(i64, String)>;
+
 /// The line of its event a quote is in, through the line it ends in, trimmed, at most 200
 /// characters; `None` when the quote is a tool's (its line is often JSON, never the option list a reply numbers), the event is
 /// gone, or its text no longer holds the quote where the evidence says.
@@ -3210,7 +3221,7 @@ fn carried(
     k: &Connection,
     rules: &Rules,
     w: &Window,
-) -> Result<(String, Carried, Offered, Vec<i64>)> {
+) -> Result<(String, Carried, Offered, Goals)> {
     // On one line: `fit` keeps or cuts a line whole, and no text can start a line `carries` reads.
     let gate = |t: &str| crate::redact::outbound_with(t, rules).replace(['\n', '\r'], " ");
     // Each session with every repository its lines are in: an agent may change checkout.
@@ -3282,10 +3293,14 @@ fn carried(
     let (mut out, mut settled, mut open) = (String::new(), String::new(), String::new());
     let mut uids: Carried = Vec::new();
     let mut offered: Offered = Vec::new();
-    // The records the goals are read from (docs/cards.md K4).
-    let mut goals = Vec::new();
+    let mut goals: Goals = Vec::new();
     for (key, repos) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
+        // As the window's own heading names the session, so the curator can pair them.
+        let heading: String = format!("{} session {}", gate(agent), gate(session))
+            .chars()
+            .take(HEADING_CHARS)
+            .collect();
         let previous =
             raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset), |s| w.reads(s))?;
         let mut lines = Vec::new();
@@ -3293,8 +3308,8 @@ fn carried(
             && let Some(goal) = long_text(&e)
         {
             let goal: String = gate(&goal).chars().take(200).collect();
+            goals.push((seq, format!("### {heading}\ngoal: {goal}\n")));
             lines.push(format!("goal: {goal}"));
-            goals.push(seq);
         }
         // Proposals first: they are what an acceptance in this window answers. The assistant's
         // own before the rest (inferred, a tool's), since `fit` cuts from the end (#244).
@@ -3394,11 +3409,6 @@ fn carried(
                 uids.push((key.to_owned(), Some((*c_repo).to_owned()), c.clone()));
             }
         }
-        // As the window's own heading names the session, so the curator can pair them.
-        let heading: String = format!("{} session {}", gate(agent), gate(session))
-            .chars()
-            .take(HEADING_CHARS)
-            .collect();
         for (part, lines) in [
             (&mut out, lines),
             (&mut settled, decided_lines),
@@ -4925,9 +4935,17 @@ mod tests {
         assert!(ws[0].get("goals").is_none(), "{}", ws[0]);
         // A window over the second prompt carries the first in as its goal: its op names that
         // record and lists what was removed from it before this window was cut, which is now
-        // the part removed during the first call too.
+        // the part removed during the first call too. The rest of the first prompt as before;
+        // then room for the goal in the prompt (one `fit` cuts is not named) and no wait for the
+        // owner to stop.
         let mut curator = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
             Ok(answered("fake"))
+        };
+        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
+        assert_eq!(phase, Phase::Covered);
+        let summary = Summary {
+            idle_minutes: 0,
+            ..curating(1_000)
         };
         while run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap()
             == Phase::Covered
@@ -4938,6 +4956,37 @@ mod tests {
             (&next["goals"], &next["removed"]),
             (&json!([1]), &json!([[1, 11, 5], [1, 17, 5]]))
         );
+    }
+
+    /// Codex on #364: a goal `fit` cuts from the prompt never reached the curator, so the window
+    /// op does not name it (K4 would hide the card for a removal from a record it was not shown).
+    #[test]
+    fn a_goal_the_prompt_leaves_out_is_not_in_the_window_op() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let said = |session: &str, text: &str| Event {
+            session: session.into(),
+            ..prompt(text)
+        };
+        raw.append(&said("a", &"alpha ".repeat(33))).unwrap();
+        raw.append(&said("b", &"beta ".repeat(40))).unwrap();
+        let (rules, dev) = (Rules::default(), raw.device().to_owned());
+        let first = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        close(&mut raw, &first);
+        raw.append(&said("a", "more of a")).unwrap();
+        raw.append(&said("b", "more of b")).unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        assert_eq!((w.from_seq, w.to_seq), (3, 4));
+        let k = crate::knowledge::open(home.path()).unwrap();
+        // A fifth of 1,000 tokens, half of it for what the sessions carry in: one goal fits.
+        let req = request(&raw, &k, &rules, &curating(1_000), &w).unwrap();
+        assert!(req.prompt.contains("goal: alpha alpha"), "{}", req.prompt);
+        assert!(!req.prompt.contains("goal: beta beta"), "{}", req.prompt);
+        assert_eq!(req.goals, vec![1]);
     }
 
     /// D9: the wait of a window at the last record reads hook records only: a tombstone and a

@@ -57,7 +57,7 @@ curated before slice 2 is of this kind.
 K2. **Whose it is.** `agent`, `session` and `repo` are set only when the event records of that
 device from `from_seq` to `to_seq` have one agent, one session and one repository between them.
 Otherwise they are null, and the card is shown for no session and no repository. `ts` is the time
-of the last of those records.
+of the last of those records by seq, which need not be the latest time (a replay, a late hook).
 
 K3. **Curated again.** A window op marked `recurate` replaces the cards of the earlier ops of its
 device whose span overlaps what it curated: its own range, less the records of excluded sessions
@@ -69,7 +69,8 @@ The curation phase itself never reads a record twice, so only a recuration repla
 K4. **Removed records.** A card is not shown when a tombstone removes, from a record its curator
 was shown, something its window op does not list: the curator read it, and the card's text may
 say it. Those records are the window's own and each session's goal, its first prompt, which a
-window carries in (`goals` names the ones outside the window). The op lists what was already
+window carries in (`goals` names the ones outside the window that the prompt kept; one cut to fit
+the prompt was not shown). The op lists what was already
 removed from them when the window was cut (`removed`: each a record and, for a part of one, its
 offset and length), by this device's own tombstones up to the record that was its last before the
 window's first read; a removal that lands during the cut, or comes from another device, is not

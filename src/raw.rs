@@ -707,7 +707,10 @@ impl Raw {
         let (sessions, agent, session, repos, repo, ts): Row = self.conn.query_row(
             "SELECT COUNT(DISTINCT COALESCE(agent, '') || char(0) || COALESCE(session, '')),
                     MIN(agent), MIN(session), COUNT(DISTINCT COALESCE(repo, char(0))), MIN(repo),
-                    MAX(ts)
+                    -- The last event's, by seq: times need not grow with it (a replay, a late
+                    -- hook).
+                    (SELECT ts FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3
+                       AND type = 'event' ORDER BY seq DESC LIMIT 1)
              FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'",
             params![device, from, to],
             |r| {
@@ -2361,6 +2364,24 @@ mod tests {
         assert!(unzstd(&bomb).is_err());
         let ok = zstd::bulk::compress(b"fine", 3).unwrap();
         assert_eq!(unzstd(&ok).unwrap(), b"fine");
+    }
+
+    /// Codex on #364: a span's time is its last event's by seq, not the largest: records are not
+    /// always appended in time order (a replay, a hook that writes late).
+    #[test]
+    fn a_spans_time_is_its_last_events() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        for ts in [5_000, 9_000, 7_000] {
+            raw.append(&Event {
+                ts,
+                ..test_event("{}")
+            })
+            .unwrap();
+        }
+        let dev = raw.device().to_owned();
+        assert_eq!(raw.labels_in(&dev, 1, 3).unwrap().ts, Some(7_000));
+        assert_eq!(raw.labels_in(&dev, 1, 2).unwrap().ts, Some(9_000));
     }
 
     #[test]
