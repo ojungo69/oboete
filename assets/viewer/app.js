@@ -13,8 +13,7 @@ function el(tag, cls, ...children) {
   return e;
 }
 
-// The settings view's text is in the language chosen there, the rest of the page in English:
-// `textLang` marks which one the status line reads (#274).
+// `textLang` marks the language of a translated status line (#274).
 function setStatus(text, isError = false, textLang = null) {
   $('status').textContent = text;
   $('status').classList.toggle('error', isError);
@@ -23,10 +22,11 @@ function setStatus(text, isError = false, textLang = null) {
 }
 
 function showError(error, retry) {
-  setStatus(error.message, true);
+  const feedError = view === 'timeline';
+  setStatus(feedError ? t('feed_error', { reason: error.message }) : error.message, true, feedError ? lang : null);
   const notice = $('status').firstChild;
-  if (error.status !== 503) return notice;
-  const button = el('button', 'quiet small', 'Retry');
+  if (error.status !== 503 && !feedError) return notice;
+  const button = el('button', 'quiet small', feedError ? t('retry') : 'Retry');
   button.type = 'button';
   button.addEventListener('click', async () => {
     button.disabled = true;
@@ -68,7 +68,8 @@ let theme = THEMES.includes(recall('oboete-theme', 'auto')) ? recall('oboete-the
 function applyTheme() {
   if (theme === 'auto') delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = theme;
-  $('theme').textContent = `Theme: ${theme}`;
+  $('theme').textContent = t('theme', { theme: t(`theme_${theme}`) });
+  $('theme').title = t('theme_help');
 }
 
 // --- Entries and their details --------------------------------------------------------------
@@ -77,9 +78,9 @@ function badge(kind) {
   return el('span', `badge ${kind}`, kind);
 }
 
-function localTime(ms) {
+function localTime(ms, language = 'en-US') {
   const date = new Date(ms);
-  const time = el('time', null, date.toLocaleString('en-US'));
+  const time = el('time', null, date.toLocaleString(language));
   if (!Number.isNaN(date.getTime())) time.dateTime = date.toISOString();
   return time;
 }
@@ -198,7 +199,7 @@ function timelineEntry(item, all) {
 // --- Views ----------------------------------------------------------------------------------
 
 const LIMIT = 100;
-const VIEWS = ['timeline', 'context', 'stats', 'settings'];
+const VIEWS = ['timeline', 'records', 'context', 'stats', 'settings'];
 let view = VIEWS.includes(recall('oboete-view', 'timeline')) ? recall('oboete-view', 'timeline') : 'timeline';
 let currentRepo = '';
 let reposLoaded = false;
@@ -206,7 +207,9 @@ let reposLoaded = false;
 function setView(name) {
   view = name;
   remember('oboete-view', name);
+  document.querySelector('main').classList.toggle('timeline-view', name === 'timeline');
   $('controls').hidden = name === 'settings';
+  for (const control of document.querySelectorAll('.record-controls')) control.hidden = name === 'timeline';
   for (const b of document.querySelectorAll('#tabs .tab')) {
     b.classList.toggle('active', b.dataset.view === name);
     b.setAttribute('aria-current', b.dataset.view === name ? 'page' : 'false');
@@ -217,6 +220,7 @@ function draw(heading, list, panel) {
   $('heading').removeAttribute('lang');
   $('heading').replaceChildren(...(Array.isArray(heading) ? heading : [heading]));
   $('list').replaceChildren(...present(list));
+  $('list').classList.toggle('feed', view === 'timeline');
   $('panel').replaceChildren(...present(panel));
   $('vector').textContent = '';
   $('vector').hidden = true;
@@ -226,7 +230,7 @@ function scope(repo) {
   return repo ? { repo } : { all: '1' };
 }
 
-async function showTimeline(repo) {
+async function showRecords(repo) {
   const params = { ...scope(repo), limit: LIMIT };
   const page = await api('timeline', params);
   return () => {
@@ -251,9 +255,193 @@ async function showTimeline(repo) {
       }
     };
     more.addEventListener('click', loadMore);
-    draw('Timeline', page.items.map((item) => timelineEntry(item, !repo)), next ? [more] : []);
+    draw(t('records'), page.items.map((item) => timelineEntry(item, !repo)), next ? [more] : []);
     setStatus(page.items.length ? `${page.items.length} entries loaded.` : 'No entries recorded yet.');
   };
+}
+
+// --- The mixed feed: its cursor belongs to fetched pages, never to a live reread ------------
+
+const FEED_LIMIT = 50;
+let feed = null;
+let feedDetailId = 0;
+
+function word(tag, cls, key) {
+  const node = el(tag, cls, t(key));
+  node.dataset.i18n = key;
+  return node;
+}
+
+function shortenFile(path) {
+  const parts = path.split('/');
+  // docs/page.md P6 defines priority, rather than whichever marker comes first in the path.
+  for (const marker of ['src', 'docs', 'plugin', 'Scripts']) {
+    const at = parts.indexOf(marker);
+    if (at >= 0) return parts.slice(at).join('/');
+  }
+  return parts.slice(-3).join('/');
+}
+
+function feedHeader(item) {
+  const kind = item.kind === 'card'
+    ? (item.type ? badge(item.type) : word('span', 'badge', 'feed_card'))
+    : word('span', `badge ${item.kind}`, `feed_${item.kind}`);
+  return el('header', 'feed-card-header', kind,
+    item.agent ? el('span', 'badge feed-agent', item.agent) : null,
+    el('span', 'feed-repo', item.repo_name));
+}
+
+function feedFooter(item) {
+  const time = localTime(item.ts, lang);
+  time.dataset.feedTimestamp = String(item.ts);
+  return el('footer', 'feed-card-footer', el('code', null, item.id), time);
+}
+
+function feedCard(item) {
+  const title = item.title ? el('h3', 'feed-title', item.title) : word('h3', 'feed-title', 'untitled');
+  const subtitle = item.subtitle ? el('p', 'text feed-subtitle', item.subtitle) : null;
+  const hasFacts = item.facts.length || item.concepts.length || item.files_read.length || item.files_modified.length;
+  const facts = hasFacts ? el('section', 'feed-facts',
+    item.facts.length ? el('ul', 'facts-list', ...item.facts.map((fact) => el('li', 'text', fact))) : null,
+    item.concepts.length ? el('div', 'feed-concepts', ...item.concepts.map((concept) => el('span', 'badge', concept))) : null,
+    item.files_read.length ? el('p', 'feed-files', word('span', null, 'files_read'), ' ', item.files_read.map(shortenFile).join(', ')) : null,
+    item.files_modified.length ? el('p', 'feed-files', word('span', null, 'files_modified'), ' ', item.files_modified.map(shortenFile).join(', ')) : null) : null;
+  const narrative = item.narrative ? el('section', 'text feed-narrative', item.narrative) : null;
+  if (narrative) narrative.tabIndex = 0;
+  let mode = null;
+  const toggles = [];
+  const views = [['facts', facts], ['narrative', narrative]].filter(([, panel]) => panel);
+  for (const [name, panel] of views) {
+    panel.hidden = true;
+    panel.id = `feed-detail-${++feedDetailId}`;
+    const button = word('button', 'quiet small feed-toggle', name);
+    button.type = 'button';
+    button.setAttribute('aria-controls', panel.id);
+    button.setAttribute('aria-expanded', 'false');
+    button.setAttribute('aria-pressed', 'false');
+    button.addEventListener('click', () => {
+      mode = mode === name ? null : name;
+      if (subtitle) subtitle.hidden = mode !== null;
+      views.forEach(([key, content], index) => {
+        content.hidden = mode !== key;
+        toggles[index].classList.toggle('active', mode === key);
+        toggles[index].setAttribute('aria-expanded', String(mode === key));
+        toggles[index].setAttribute('aria-pressed', String(mode === key));
+      });
+    });
+    toggles.push(button);
+  }
+  return el('article', 'feed-card observation-card', feedHeader(item), title,
+    subtitle, toggles.length ? el('div', 'feed-toggles', ...toggles) : null,
+    facts, narrative, feedFooter(item));
+}
+
+function feedEntry(item) {
+  let card;
+  if (item.kind === 'card') card = feedCard(item);
+  else if (item.kind === 'summary') {
+    const sections = ['investigated', 'learned', 'completed', 'next_steps'];
+    card = el('article', 'feed-card summary-card', feedHeader(item),
+      item.fields.request ? el('h3', 'feed-title', item.fields.request) : null,
+      ...sections.filter((field) => item.fields[field]).map((field) => el('section', 'summary-section',
+        word('h4', 'summary-label', field), el('p', 'text', item.fields[field]))),
+      feedFooter(item));
+  } else card = el('article', 'feed-card prompt-card', feedHeader(item),
+    el('p', 'text prompt-text', item.text), feedFooter(item));
+  return el('li', 'feed-entry', card);
+}
+
+function activeFeed(state) {
+  return Boolean(state) && feed === state && state.generation === generation && view === 'timeline';
+}
+
+function updateFeedState(state) {
+  if (!activeFeed(state)) return;
+  const message = state.loading ? t('feed_loading')
+    : state.error ? t('feed_error', { reason: state.error.message })
+      : !state.keys.size ? t('feed_empty') : state.next === null ? t('feed_exhausted') : '';
+  state.notice.textContent = message;
+  state.notice.classList.toggle('error', Boolean(state.error) && !state.loading);
+  state.more.hidden = state.next === null;
+  state.more.disabled = state.loading;
+  state.retry.hidden = !state.error || state.loading;
+  state.sentinel.hidden = !state.keys.size || state.next === null || state.loading || Boolean(state.error);
+}
+
+async function readFeed(state, mode) {
+  if (!activeFeed(state)) return false;
+  if (state.loading) {
+    if (mode !== 'live') return false;
+    // A live read waits for More, so it cannot replace or race the older-page cursor.
+    await state.request;
+    if (!activeFeed(state)) return false;
+    return readFeed(state, mode);
+  }
+  // An empty feed has no older pages to retain: the new first page supplies its first cursor.
+  if (mode === 'live' && (!state.loaded || !state.keys.size)) mode = 'initial';
+  if (mode === 'more' && state.next === null) return false;
+  state.loading = true;
+  state.error = null;
+  state.retryMode = mode;
+  updateFeedState(state);
+  state.request = (async () => {
+    try {
+      const params = { ...scope(state.repo), limit: FEED_LIMIT };
+      if (mode === 'more') params.before = state.next;
+      const page = await api('feed', params);
+      if (!activeFeed(state)) return false;
+      const entries = [];
+      const unseen = new Set();
+      for (const item of page.items) {
+        const key = `${item.kind}:${item.id}`;
+        if (state.keys.has(key) || unseen.has(key)) continue;
+        entries.push(feedEntry(item));
+        unseen.add(key);
+      }
+      if (mode === 'live') $('list').prepend(...entries);
+      else {
+        $('list').append(...entries);
+        state.next = page.next;
+        state.loaded = true;
+      }
+      for (const key of unseen) state.keys.add(key);
+      setStatus('');
+      return true;
+    } catch (error) {
+      if (activeFeed(state)) state.error = error;
+      return false;
+    } finally {
+      state.loading = false;
+      updateFeedState(state);
+    }
+  })();
+  return state.request;
+}
+
+async function showFeed(repo, mine) {
+  const notice = el('p', 'feed-state');
+  notice.setAttribute('role', 'status');
+  notice.setAttribute('aria-live', 'polite');
+  const more = word('button', 'quiet more', 'more');
+  more.type = 'button';
+  const retry = word('button', 'quiet', 'retry');
+  retry.type = 'button';
+  const sentinel = el('div', 'feed-sentinel');
+  sentinel.setAttribute('aria-hidden', 'true');
+  const state = { generation: mine, repo, keys: new Set(), next: null, loaded: false, loading: false,
+    error: null, request: null, retryMode: 'initial', notice, more, retry, sentinel, observer: null };
+  feed = state;
+  more.addEventListener('click', () => void readFeed(state, 'more'));
+  retry.addEventListener('click', () => void readFeed(state, state.retryMode));
+  draw(t('timeline'), [], [el('div', 'feed-pagination', notice, more, retry, sentinel)]);
+  setStatus('');
+  if (typeof IntersectionObserver !== 'undefined') {
+    state.observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting) && !state.loading && !state.error) void readFeed(state, 'more');
+    }, { threshold: 0.1 });
+    state.observer.observe(sentinel);
+  }
+  return readFeed(state, 'initial');
 }
 
 async function showSearch(repo, q) {
@@ -334,12 +522,70 @@ async function showStats() {
 }
 
 // --- Settings (#94): injection, capture and the curator chain, in config.toml ---------------
-// The settings panel's words switch between English and Japanese; the rest of the viewer stays
-// English. The server sends codes, and the page puts them in words.
+// The settings language also selects the feed and header's words. The server sends codes,
+// and the page puts them in words.
 
 const LANGS = ['en', 'ja'];
 // Each string in the languages of LANGS, in that order.
 const TEXT = {
+  timeline: ['Timeline', 'タイムライン'],
+  records: ['Records', '記録'],
+  context: ['Context', 'コンテキスト'],
+  stats: ['Stats', '統計'],
+  settings: ['Settings', '設定'],
+  views: ['Views', '表示'],
+  repository: ['Repository', 'リポジトリ'],
+  all_repositories: ['All repositories', 'すべてのリポジトリ'],
+  repo_counts: ['{repo} ({claims} claims, {imported} imported, {records} records)', '{repo} (主張 {claims} 件、インポート {imported} 件、記録 {records} 件)'],
+  current_checkout: ['Current checkout', '現在のチェックアウト'],
+  last_activity: ['Last activity: {time}', '最終更新: {time}'],
+  refresh: ['Refresh', '更新'],
+  search: ['Search', '検索'],
+  search_placeholder: ['Words from claims, imported history or records', '主張、インポートした履歴、記録に含まれる語句'],
+  since: ['Since', '開始日'],
+  until: ['Until (whole day included)', '終了日 (当日を含む)'],
+  raw_records: ['Raw records', '元の記録'],
+  raw_below: ['Below claims and imported history', '主張とインポートした履歴の下に表示'],
+  raw_off: ['Off', '表示しない'],
+  raw_only: ['Only raw records', '元の記録のみ'],
+  history: ['Include ended claims in their place', '終了した主張も元の位置に表示'],
+  theme: ['Theme: {theme}', 'テーマ: {theme}'],
+  theme_auto: ['auto', '自動'],
+  theme_light: ['light', 'ライト'],
+  theme_dark: ['dark', 'ダーク'],
+  theme_help: ['Follow the system, or force light or dark', 'システムに合わせるか、ライト・ダークを選択'],
+  live: ['Live', '更新中'],
+  live_off: ['Viewer unreachable', 'ビューアーに接続できません'],
+  live_hint: ['Checks for new memory every few seconds', '数秒ごとに新しい記憶を確認します'],
+  unreachable: ['The viewer is not answering. Start `oboete view` again and open the address it prints.', 'ビューアーから応答がありません。`oboete view` を起動し直し、表示されたアドレスを開いてください。'],
+  more: ['More', 'もっと見る'],
+  retry: ['Retry', '再試行'],
+  feed_loading: ['Loading…', '読み込み中…'],
+  feed_empty: ['No items to display', '表示する項目はありません'],
+  feed_exhausted: ['No more items', 'すべての項目を表示しました'],
+  feed_error: ['Could not load items: {reason}', '項目を読み込めませんでした: {reason}'],
+  feed_card: ['card', 'カード'],
+  feed_summary: ['Session summary', 'セッションの要約'],
+  feed_prompt: ['Prompt', 'プロンプト'],
+  untitled: ['Untitled', 'タイトルなし'],
+  facts: ['facts', '事実'],
+  narrative: ['narrative', '説明'],
+  files_read: ['read:', '参照:'],
+  files_modified: ['modified:', '変更:'],
+  investigated: ['Investigated', '調査したこと'],
+  learned: ['Learned', '学んだこと'],
+  completed: ['Completed', '完了したこと'],
+  next_steps: ['Next steps', '次の作業'],
+  welcome_help: ['Show welcome', '使い方を表示'],
+  welcome_title: ['Welcome to oboete', 'oboete へようこそ'],
+  welcome_close: ['Close welcome', '使い方を閉じる'],
+  welcome_close_hint: ['Close (Esc)', '閉じる (Esc)'],
+  welcome_feed_h: ['The feed', 'フィード'],
+  welcome_feed: ['Cards, session summaries and prompts appear here as the worker curates your work, a few minutes after it happens.', '作業の数分後、ワーカーがまとめたカード、セッションの要約、プロンプトがここに表示されます。'],
+  welcome_settings_h: ['Settings', '設定'],
+  welcome_settings: ['The Settings tab controls what a new session receives and who curates the work.', '設定タブで、新しいセッションに渡す記憶と、作業をまとめる要約役を選べます。'],
+  welcome_recall_h: ['Recall', '思い出す'],
+  welcome_recall: ['Your agent asks oboete’s search, timeline and get to recall past work. The Records tab searches it here.', 'エージェントは oboete の search、timeline、get で過去の作業を探します。この画面では記録タブから検索できます。'],
   heading: ['Settings', '設定'],
   language: ['Language', '言語'],
   lead: [
@@ -586,6 +832,89 @@ let lang = LANGS.includes(stored) ? stored : browserLang;
 function t(key, vars = {}) {
   const text = Object.hasOwn(TEXT, key) ? TEXT[key][LANGS.indexOf(lang)] : key;
   return text.replace(/\{(\w+)\}/g, (_, k) => (Object.hasOwn(vars, k) ? String(vars[k]) : ''));
+}
+
+function applyLanguage() {
+  document.documentElement.lang = lang;
+  const labels = { 'repo-label': 'repository', refresh: 'refresh', 'search-label': 'search',
+    'search-button': 'search', 'since-label': 'since', 'until-label': 'until',
+    'raw-label': 'raw_records', 'history-label': 'history' };
+  for (const [id, key] of Object.entries(labels)) $(id).textContent = t(key);
+  $('q').placeholder = t('search_placeholder');
+  for (const option of $('raw').options) option.textContent = t(`raw_${option.value}`);
+  $('tabs').setAttribute('aria-label', t('views'));
+  for (const button of document.querySelectorAll('#tabs .tab')) button.textContent = t(button.dataset.view);
+  for (const node of document.querySelectorAll('[data-i18n]')) node.textContent = t(node.dataset.i18n);
+  for (const node of document.querySelectorAll('[data-feed-timestamp]')) {
+    node.textContent = new Date(Number(node.dataset.feedTimestamp)).toLocaleString(lang);
+  }
+  for (const option of $('repo').options) labelRepo(option);
+  $('live').textContent = t($('live').classList.contains('off') ? 'live_off' : 'live');
+  $('live').title = t('live_hint');
+  $('help').title = t('welcome_help');
+  $('help').setAttribute('aria-label', t('welcome_help'));
+  $('welcome-title').textContent = t('welcome_title');
+  $('welcome-close').title = t('welcome_close_hint');
+  $('welcome-close').setAttribute('aria-label', t('welcome_close'));
+  $('welcome-parts').replaceChildren(...['feed', 'settings', 'recall'].map((part) =>
+    el('section', null, el('h3', null, t(`welcome_${part}_h`)), el('p', null, t(`welcome_${part}`)))));
+  applyTheme();
+  if (activeFeed(feed)) {
+    $('heading').textContent = t('timeline');
+    updateFeedState(feed);
+  }
+}
+
+function labelRepo(option) {
+  if (!option.value) option.textContent = t('all_repositories');
+  else {
+    option.textContent = t('repo_counts', option.dataset);
+    option.title = `${option.value}${option.value === currentRepo ? ` (${t('current_checkout')})` : ''}${option.dataset.last === undefined ? '' : `; ${t('last_activity', { time: new Date(Number(option.dataset.last)).toLocaleString(lang) })}`}`;
+  }
+}
+
+// Welcome behaves as a modal for both mouse and keyboard, and returns focus to its opener.
+let welcomeFocus = null;
+let welcomeInert = [];
+let welcomeOverflow = '';
+
+function openWelcome() {
+  if (!$('welcome').hidden) return;
+  welcomeFocus = document.activeElement;
+  welcomeInert = [document.querySelector('.bar'), document.querySelector('main')].map((node) => [node, node.inert]);
+  for (const [node] of welcomeInert) node.inert = true;
+  welcomeOverflow = document.body.style.overflow;
+  document.body.style.overflow = 'hidden';
+  $('welcome').hidden = false;
+  $('welcome-close').focus();
+}
+
+function closeWelcome() {
+  if ($('welcome').hidden) return;
+  $('welcome').hidden = true;
+  remember('oboete-welcome-dismissed', 'true');
+  for (const [node, wasInert] of welcomeInert) node.inert = wasInert;
+  document.body.style.overflow = welcomeOverflow;
+  if (welcomeFocus?.isConnected && welcomeFocus !== document.body) welcomeFocus.focus();
+  else $('help').focus();
+}
+
+function welcomeKey(event) {
+  if ($('welcome').hidden) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeWelcome();
+  } else if (event.key === 'Tab') {
+    const dialog = $('welcome-dialog');
+    const focusable = [...dialog.querySelectorAll('button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+      .filter((node) => !node.disabled && !node.hidden);
+    const first = focusable[0] || dialog;
+    const last = focusable.at(-1) || dialog;
+    if (!dialog.contains(document.activeElement) || (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
+  }
 }
 
 // The form's values between redraws: a language switch or a move keeps what is not saved yet.
@@ -952,6 +1281,7 @@ function drawSettings() {
   pick.addEventListener('change', () => {
     lang = pick.value;
     remember('oboete-lang', lang);
+    applyLanguage();
     drawSettings();
     setStatus('');
   });
@@ -1072,7 +1402,7 @@ function drawIn(panel) {
 }
 
 const LOADERS = new Map([
-  ['timeline', showTimeline], ['context', showContext], ['stats', showStats], ['settings', showSettings],
+  ['records', showRecords], ['context', showContext], ['stats', showStats], ['settings', showSettings],
 ]);
 
 // Only the latest request may draw: an earlier, slower one must not overwrite it.
@@ -1082,10 +1412,17 @@ let drawnWithoutBaseline = false;
 async function show() {
   // First, so a settings render still out cannot draw over the tab opened after it.
   const mine = ++generation;
+  feed?.observer?.disconnect();
+  feed = null;
   // The settings tab needs no repository: it names the config.toml mistake that fails their list (#325).
   if (!reposLoaded && view !== 'settings') return refresh();
   const repo = $('repo').value;
   const q = $('q').value.trim();
+  if (view === 'timeline') {
+    const shown = await showFeed(repo, mine);
+    if (shown && version === null) drawnWithoutBaseline = true;
+    return shown;
+  }
   setStatus('Loading…');
   try {
     const search = q && view !== 'settings';
@@ -1100,24 +1437,28 @@ async function show() {
   }
 }
 
-// The current checkout always has the first option, including before its first stored record. The
-// resident viewer has none (docs/resident.md R8): All repositories is its default.
+// All repositories leads the list; the current checkout is listed before its first stored record
+// too, and stays selectable in Records. The resident viewer has none (docs/resident.md R8).
 async function loadRepos() {
   const { current, repos } = await api('repos');
-  const keep = reposLoaded ? $('repo').value : current;
+  const keep = reposLoaded ? $('repo').value : view === 'timeline' ? '' : current;
   currentRepo = current;
-  const own = current === '' ? [] : [repos.find((r) => r.repo === current) ?? { repo: current, claims: 0, imported: 0, records: 0 }];
-  const options = [...own, ...repos.filter((r) => r.repo !== current)].map((r) => {
-    const o = new Option(`${r.repo} (${r.claims} claims, ${r.imported} imported, ${r.records} records)`, r.repo);
-    o.title = `${r.repo}${r.repo === current ? ' (current checkout)' : ''}${r.last === undefined ? '' : `; last activity: ${new Date(r.last).toLocaleString('en-US')}`}`;
+  const listed = current === '' || repos.some((r) => r.repo === current) ? repos
+    : [...repos, { repo: current, claims: 0, imported: 0, records: 0 }];
+  const options = listed.map((r) => {
+    const o = new Option('', r.repo);
+    for (const key of ['repo', 'claims', 'imported', 'records', 'last']) {
+      if (r[key] !== undefined) o.dataset[key] = String(r[key]);
+    }
+    labelRepo(o);
     return o;
   });
-  $('repo').replaceChildren(...options, new Option('All repositories', ''));
-  $('repo').value = keep === '' || options.some((o) => o.value === keep) ? keep : current;
+  $('repo').replaceChildren(new Option(t('all_repositories'), ''), ...options);
+  $('repo').value = keep === '' || options.some((o) => o.value === keep) ? keep : '';
   reposLoaded = true;
 }
 
-async function refresh() {
+async function refresh(live = false) {
   let listed = true;
   try {
     await loadRepos();
@@ -1131,6 +1472,7 @@ async function refresh() {
   // Preserve unsaved settings, including when a poll began before the Settings tab opened. The
   // note of a config.toml mistake stays while the list still fails, and goes once it loads.
   if (view === 'settings' && $('panel').querySelector('.settings') && (form || !listed)) return true;
+  if (live && activeFeed(feed) && feed.repo === $('repo').value) return readFeed(feed, 'live');
   return show();
 }
 
@@ -1147,26 +1489,41 @@ async function poll() {
   try {
     const { v } = await api('version');
     $('live').classList.remove('off');
+    $('live').textContent = t('live');
     if (pollFailureNotice?.isConnected || $('status').textContent === UNREACHABLE) setStatus('');
     const changed = version === null ? drawnWithoutBaseline : v !== version;
     // Provider calls and tool records do not move v, so Stats also follows each poll.
     const wanted = !reposLoaded || (view !== 'settings' && (changed || (view === 'stats' && !$('q').value.trim())));
-    if (wanted && !(await refresh())) return;
+    if (wanted && !(await refresh(true))) return;
     // A failed redraw leaves the marker unchanged, so the next poll retries it.
     version = v;
     drawnWithoutBaseline = false;
   } catch (e) {
     $('live').classList.add('off');
-    if (e.status) pollFailureNotice = showError(e, poll);
-    else setStatus(UNREACHABLE, true);
+    $('live').textContent = t('live_off');
+    if (e.status || view === 'timeline') pollFailureNotice = showError(e.status ? e : new Error(t('unreachable')), poll);
+    else {
+      setStatus(UNREACHABLE, true);
+      pollFailureNotice = $('status').firstChild;
+    }
   } finally {
     polling = false;
   }
 }
 
 async function start() {
-  applyTheme();
+  applyLanguage();
   setView(view);
+  $('help').addEventListener('click', openWelcome);
+  $('welcome-close').addEventListener('click', closeWelcome);
+  $('welcome').addEventListener('click', (event) => {
+    if (event.target === $('welcome')) closeWelcome();
+  });
+  document.addEventListener('keydown', welcomeKey);
+  document.addEventListener('focusin', (event) => {
+    if (!$('welcome').hidden && !$('welcome-dialog').contains(event.target)) $('welcome-close').focus();
+  });
+  if (recall('oboete-welcome-dismissed', '') !== 'true') openWelcome();
   $('controls').addEventListener('submit', (e) => {
     e.preventDefault();
     void show();

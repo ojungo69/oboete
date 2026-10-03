@@ -57,6 +57,10 @@ CREATE INDEX IF NOT EXISTS ops_exclusions ON ops(device, op_seq) WHERE type = 'e
 CREATE INDEX IF NOT EXISTS ops_windows ON ops(device, op_seq) WHERE type = 'window';
 ";
 
+/// Only the viewer's prompt reads create this, never `open` or a hook.
+const PROMPT_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_prompts
+    ON records(ts DESC, device DESC, seq DESC) WHERE type = 'event' AND kind = 'prompt'";
+
 /// One agent event as captured, after redaction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
@@ -105,6 +109,30 @@ pub struct Record {
     pub device: String,
     pub seq: i64,
     pub item: Item,
+}
+
+/// A live prompt for the feed, read through `after` (D8) and gated alone as a window reads it.
+pub struct Prompt {
+    pub device: String,
+    pub seq: i64,
+    pub ts: i64,
+    pub agent: String,
+    pub repo: Option<String>,
+    pub text: String,
+}
+
+/// A prompt page's last kept record: its own time and stored ID, descending (page.md P3).
+pub type PromptPosition = (i64, String, i64);
+
+impl Prompt {
+    pub fn position(&self) -> PromptPosition {
+        (self.ts, self.device.clone(), self.seq)
+    }
+
+    /// `search::b::get`'s record key, including this device's ID too.
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.device, self.seq)
+    }
 }
 
 /// What a span of a device's events agree on (`Raw::labels_in`).
@@ -713,6 +741,76 @@ impl Raw {
                 Item::Event(e) => Some((seq, *e)),
                 _ => None,
             }))
+    }
+
+    /// P5: a newly appended live prompt moves the viewer's marker before any consumer runs.
+    /// The rowid tracks append order, including a replay whose record time is older. No text
+    /// leaves here; body reads still go through `after`. A tombstone moves its own marker.
+    pub fn prompt_version(&self) -> Result<i64> {
+        self.conn.execute_batch(PROMPT_INDEX)?;
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MAX(rowid), 0) FROM records
+             WHERE type = 'event' AND kind = 'prompt'
+               AND source IN (SELECT value FROM json_each(?1))",
+            [serde_json::to_string(&LIVE)?],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// page.md P2, P3: live-source prompts of a repository (or all), newest first after
+    /// `before`. Only this viewer read creates the index, never a hook. Body reads still use
+    /// `after`, including decompression and D8; hidden rows take no slot. One extra visible
+    /// record may be inspected only for the exhaustion flag. The display cut is the API's.
+    pub fn prompts(
+        &self,
+        repo: Option<&str>,
+        before: Option<&PromptPosition>,
+        limit: usize,
+        rules: &crate::redact::Rules,
+    ) -> Result<(Vec<Prompt>, bool)> {
+        self.conn.execute_batch(PROMPT_INDEX)?;
+        let mut st = self.conn.prepare(
+            "SELECT device, seq FROM records
+             WHERE type = 'event' AND kind = 'prompt'
+               AND source IN (SELECT value FROM json_each(?1))
+               AND (?2 IS NULL OR repo = ?2)
+               AND (?3 IS NULL OR (ts, device, seq) < (?3, ?4, ?5))
+             ORDER BY ts DESC, device DESC, seq DESC",
+        )?;
+        let mut rows = st.query(params![
+            serde_json::to_string(&LIVE)?,
+            repo,
+            before.map(|p| p.0),
+            before.map(|p| p.1.as_str()),
+            before.map(|p| p.2)
+        ])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            let (device, seq): (String, i64) = (r.get(0)?, r.get(1)?);
+            let Some(record) = self
+                .after(&device, seq - 1, 1)?
+                .pop()
+                .filter(|r| r.seq == seq)
+            else {
+                continue;
+            };
+            let Item::Event(e) = record.item else {
+                continue;
+            };
+            if out.len() == limit {
+                return Ok((out, true));
+            }
+            let gate = |s: &str| crate::redact::outbound_with(s, rules);
+            out.push(Prompt {
+                device,
+                seq,
+                ts: e.ts,
+                agent: gate(&e.agent),
+                repo: e.repo.as_deref().map(gate),
+                text: gate(&crate::curate::long_text(&e).unwrap_or_default()),
+            });
+        }
+        Ok((out, false))
     }
 
     /// The first record of the turn that `agent`'s `session` ends with its reply `reply` on this

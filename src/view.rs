@@ -806,6 +806,18 @@ impl Viewer {
                 Some(c) => serde_json::to_value(c)?,
                 None => return Ok(Response::text(404, "no such claim")),
             },
+            "feed" => {
+                let (all, limit, cursor) = match (flag(q, "all"), limit(q, 50), feed_page(q)) {
+                    (Ok(all), Ok(limit), Ok(cursor)) => (all, limit.min(100), cursor),
+                    (Err(bad), _, _) | (_, Err(bad), _) | (_, _, Err(bad)) => return Ok(bad),
+                };
+                let repo = match (all, arg("repo")) {
+                    (true, _) => None,
+                    (false, Some(r)) => Some(r.to_owned()),
+                    (false, None) => Some(self.checkout()?.0),
+                };
+                feed(&self.home, repo.as_deref(), cursor, limit)?
+            }
             "timeline" => {
                 let (all, limit, before) = match (flag(q, "all"), limit(q, 50), page(q)) {
                     (Ok(all), Ok(limit), Ok(before)) => (all, limit, before),
@@ -952,6 +964,105 @@ fn page(q: &HashMap<String, String>) -> std::result::Result<Option<(i64, String)
     }
 }
 
+/// page.md P3: each kind's position after the last one of its kind kept, as JSON the page sends
+/// back as it got it. Only kept rows move a position: one taken from the merged page's last time
+/// would skip a kind's rows at a tie.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FeedCursor {
+    cards: Option<crate::cards::Position>,
+    summaries: Option<crate::turns::Position>,
+    prompts: Option<crate::raw::PromptPosition>,
+}
+
+fn feed_page(q: &HashMap<String, String>) -> std::result::Result<FeedCursor, Response> {
+    let Some(cursor) = q.get("before").filter(|s| !s.is_empty()) else {
+        return Ok(FeedCursor::default());
+    };
+    // Refused before any store is opened.
+    if cursor.len() > 4096 {
+        return Err(bad("before"));
+    }
+    serde_json::from_str(cursor).map_err(|_| bad("before"))
+}
+
+/// The feed's three bounded pages, merged by own time, kind, then stored ID (newest first).
+/// Every payload is already gated by its table's one reader; `api` gates the answer too.
+fn feed(home: &Path, repo: Option<&str>, mut cursor: FeedCursor, limit: usize) -> Result<Value> {
+    let Some((raw, k)) = search::b::stores(home)? else {
+        return Ok(json!({"items": [], "next": null}));
+    };
+    let rules = redact::Rules::load(home)?;
+    let (cards, cards_more) =
+        crate::cards::page(&k, &raw, repo, cursor.cards.as_ref(), limit, &rules)?;
+    let (summaries, summaries_more) =
+        crate::turns::page(&k, &raw, repo, cursor.summaries.as_ref(), limit, &rules)?;
+    let (prompts, prompts_more) = raw.prompts(repo, cursor.prompts.as_ref(), limit, &rules)?;
+    let name =
+        |repo: Option<&str>| crate::consumer::manifest::repo_name(repo.unwrap_or(""), &rules);
+    // A common sort key, not another reader: summaries and prompts have no card ordinal.
+    let mut rows = Vec::new();
+    for c in cards {
+        rows.push((
+            0,
+            c.position(),
+            json!({
+                "kind": "card", "id": c.id(raw.device()), "ts": c.ts,
+                "agent": c.agent, "repo_name": name(c.repo.as_deref()), "repo": c.repo,
+                "type": c.kind, "title": c.title, "subtitle": c.subtitle, "narrative": c.narrative,
+                "facts": c.facts, "concepts": c.concepts,
+                "files_read": c.files_read, "files_modified": c.files_modified,
+            }),
+        ));
+    }
+    for mut s in summaries {
+        s.fields.remove("notes");
+        let (ts, device, seq) = s.position();
+        rows.push((
+            1,
+            (ts, device, seq, 0),
+            json!({
+                "kind": "summary", "id": s.id(raw.device()), "ts": s.ts,
+                "agent": s.agent, "repo_name": name(s.repo.as_deref()), "repo": s.repo,
+                "fields": s.fields,
+            }),
+        ));
+    }
+    for p in prompts {
+        let (ts, device, seq) = p.position();
+        let mut text: String = p.text.chars().take(2_000).collect();
+        if p.text.chars().count() > 2_000 {
+            text.push('…');
+        }
+        rows.push((2, (ts, device, seq, 0), json!({
+            "kind": "prompt", "id": p.key(), "ts": p.ts,
+            "agent": p.agent, "repo_name": name(p.repo.as_deref()), "repo": p.repo, "text": text,
+        })));
+    }
+    rows.sort_by(|(ak, a, _), (bk, b, _)| {
+        b.0.cmp(&a.0)
+            .then_with(|| ak.cmp(bk))
+            .then_with(|| b.cmp(a))
+    });
+    let more = rows.len() > limit || cards_more || summaries_more || prompts_more;
+    rows.truncate(limit);
+    let mut items = Vec::new();
+    for (kind, (ts, device, seq, n), value) in rows {
+        match kind {
+            0 => cursor.cards = Some((ts, device, seq, n)),
+            1 => cursor.summaries = Some((ts, device, seq)),
+            _ => cursor.prompts = Some((ts, device, seq)),
+        }
+        items.push(value);
+    }
+    let next = if more {
+        Some(serde_json::to_string(&cursor)?)
+    } else {
+        None
+    };
+    Ok(json!({"items": items, "next": next}))
+}
+
 /// The page's search as the search core takes it (MUST-M11 to M13); its `caller` is the
 /// viewer's checkout, set by the route.
 fn search_query(q: &HashMap<String, String>) -> std::result::Result<search::b::Query, Response> {
@@ -1025,8 +1136,9 @@ fn repos(home: &Path) -> Result<Vec<Value>> {
 
 /// Changes when what the page shows changes: an op appended (a claim, a correction, an exclusion,
 /// an import), an op the worker applied, a session started, a prompt typed, or a record hidden (a
-/// tombstone, which reads hide before the worker applies it). Other records (tool calls, replies)
-/// do not move it, so a working agent does not redraw the page between prompts.
+/// tombstone, which reads hide before the worker applies it). Live prompts move it at capture
+/// too, since the feed reads them directly (P5). Other records (tool calls, replies) do not
+/// move it, so a working agent does not redraw the page between prompts.
 fn version(home: &Path) -> Result<String> {
     let Some((raw, k)) = search::b::stores(home)? else {
         return Ok("0".into());
@@ -1038,11 +1150,12 @@ fn version(home: &Path) -> Result<String> {
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     Ok(format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}",
         raw.max_op_seq()?,
         applied.0,
         applied.1,
-        raw.tombstones()?
+        raw.tombstones()?,
+        raw.prompt_version()?
     ))
 }
 
@@ -1303,6 +1416,453 @@ mod tests {
 
     fn get(v: &Viewer, target: &str) -> Value {
         json_of(&v.route("GET", target, &[HOST, TOKEN]))
+    }
+
+    /// A feed over invented records, without the older timeline fixture's claims or imports.
+    fn feed_fixture() -> (Store, Viewer) {
+        let s = Store::new();
+        let v = Viewer {
+            home: s.home.path().to_owned(),
+            cwd: s.home.path().to_owned(),
+            port: 4321,
+            token: "t0k".into(),
+            saving: Mutex::new(()),
+            opener: Mutex::new(None),
+            live: AtomicUsize::new(0),
+        };
+        (s, v)
+    }
+
+    /// A window's cards; the source seq and their op seq (also used by their public IDs).
+    fn feed_cards(s: &mut Store, repo: &str, ts: i64, texts: &[&str]) -> (i64, i64) {
+        let seq = s.event(
+            "tool",
+            "s",
+            (repo, "main"),
+            ts,
+            json!({"output": "Read a file."}),
+        );
+        let observations: Vec<_> = texts
+            .iter()
+            .map(|text| {
+                json!({
+                    "type": "feature", "title": text, "subtitle": text, "narrative": text,
+                    "facts": [text], "concepts": ["what-changed"],
+                    "files_read": ["src/parser.rs"], "files_modified": ["docs/parser.md"]
+                })
+            })
+            .collect();
+        let op = json!({"outcome": "curated", "from_seq": seq, "to_seq": seq,
+            "observations": observations});
+        let op_seq = s
+            .raw
+            .append_ops(&[(crate::raw::OpKind::Window, op)])
+            .unwrap()[0];
+        (seq, op_seq)
+    }
+
+    /// A turn's summary, as the consumer reads it from the op log; its source seq and public ID.
+    fn feed_summary(s: &mut Store, repo: &str, ts: i64, text: &str) -> (i64, String) {
+        let seq = s.event(
+            "reply",
+            "s",
+            (repo, "main"),
+            ts,
+            json!({"assistant": "Done."}),
+        );
+        let op = crate::turns::TurnOp {
+            agent: "claude".into(),
+            session: "s".into(),
+            repo: Some(repo.into()),
+            ts,
+            from: seq,
+            through: seq,
+            read: Vec::new(),
+            goals: Vec::new(),
+            removed: Vec::new(),
+            fields: [
+                ("request", text),
+                ("investigated", text),
+                ("learned", text),
+                ("completed", text),
+                ("next_steps", text),
+                ("notes", "Not displayed."),
+            ]
+            .into_iter()
+            .map(|(f, t)| (f.to_owned(), t.to_owned()))
+            .collect(),
+            skipped: false,
+        };
+        let op_seq = s
+            .raw
+            .append_ops(&[(crate::raw::OpKind::Turn, serde_json::to_value(op).unwrap())])
+            .unwrap()[0];
+        (seq, format!("S{op_seq}"))
+    }
+
+    fn feed_ids(page: &Value) -> Vec<(String, String)> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (
+                    item["kind"].as_str().unwrap().to_owned(),
+                    item["id"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    fn feed_before(cursor: &str, limit: usize) -> String {
+        let cursor =
+            percent_encoding::utf8_percent_encode(cursor, percent_encoding::NON_ALPHANUMERIC);
+        format!("/api/feed?all=1&limit={limit}&before={cursor}")
+    }
+
+    /// page.md test 1: each kind's own time, kind and numeric ID ties, bounded pages, and a
+    /// cursor that still reaches every original row once after writes between pages.
+    #[test]
+    fn feed_orders_and_pages_each_kind_without_repeats_or_skips() {
+        let (mut s, v) = feed_fixture();
+        let (_, card1) = feed_cards(&mut s, "example.test/team/fern", 3_000, &["First card"]);
+        let (_, card2) = feed_cards(
+            &mut s,
+            "example.test/team/fern",
+            3_000,
+            &["Second", "Third"],
+        );
+        let (_, summary1) = feed_summary(&mut s, "example.test/team/fern", 3_000, "First summary");
+        let (_, summary2) = feed_summary(&mut s, "example.test/team/fern", 3_000, "Second summary");
+        let prompt1 = s.said("s", "example.test/team/fern", 3_000, "First prompt");
+        let prompt2 = s.said("s", "example.test/team/fern", 3_000, "Second prompt");
+        feed_cards(&mut s, "example.test/team/fern", 2_000, &["Older card"]);
+        feed_summary(&mut s, "example.test/team/fern", 1_000, "Older summary");
+        for n in 0..105 {
+            s.said(
+                "s",
+                "example.test/team/fern",
+                500,
+                &format!("Older prompt {n}"),
+            );
+        }
+        s.run();
+        let first = get(&v, "/api/feed?all=1&limit=100");
+        assert_eq!(first["items"].as_array().unwrap().len(), 100);
+        assert_eq!(
+            get(&v, "/api/feed?all=1")["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            50
+        );
+        assert_eq!(
+            get(&v, "/api/feed?all=1&limit=999")["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            100
+        );
+        let expected = [
+            ("card", format!("{card2}.1")),
+            ("card", format!("{card2}.0")),
+            ("card", format!("{card1}.0")),
+            ("summary", summary2),
+            ("summary", summary1),
+            ("prompt", s.key(prompt2)),
+            ("prompt", s.key(prompt1)),
+        ]
+        .map(|(kind, id)| (kind.to_owned(), id));
+        assert_eq!(&feed_ids(&first)[..7], &expected);
+        let rest = get(&v, &feed_before(first["next"].as_str().unwrap(), 100));
+        assert!(rest["next"].is_null());
+        let original: Vec<_> = feed_ids(&first)
+            .into_iter()
+            .chain(feed_ids(&rest))
+            .collect();
+        assert_eq!(original.len(), 114);
+
+        let mut page = get(&v, "/api/feed?all=1&limit=2");
+        let mut paged = feed_ids(&page);
+        // Only cards have been consumed. Other kinds' unchanged positions must survive.
+        feed_cards(
+            &mut s,
+            "example.test/team/fern",
+            4_000,
+            &["Just added card"],
+        );
+        feed_summary(
+            &mut s,
+            "example.test/team/fern",
+            4_000,
+            "Just added summary",
+        );
+        s.said("s", "example.test/team/fern", 4_000, "Just added prompt");
+        s.run();
+        for _ in 0..original.len() {
+            let Some(next) = page["next"].as_str() else {
+                break;
+            };
+            page = get(&v, &feed_before(next, 2));
+            assert!(page["items"].as_array().unwrap().len() <= 2);
+            paged.extend(feed_ids(&page));
+        }
+        assert!(page["next"].is_null());
+        let unique: std::collections::HashSet<_> = paged.iter().collect();
+        assert_eq!(unique.len(), paged.len());
+        assert!(original.iter().all(|id| unique.contains(id)));
+    }
+
+    /// page.md test 2: one repository scopes every kind, including the default checkout;
+    /// all=1 overrides it and names each repository as the manifest does.
+    #[test]
+    fn feed_scopes_every_kind_to_the_repository_or_all() {
+        let (mut s, mut v) = feed_fixture();
+        for repo in ["example.test/team/fern", "example.test/team/moss"] {
+            feed_cards(&mut s, repo, 3_000, &["A card"]);
+            feed_summary(&mut s, repo, 2_000, "A summary");
+            s.said("s", repo, 1_000, "A prompt");
+        }
+        s.run();
+        v.cwd = s.home.path().join("fern");
+        std::fs::create_dir_all(v.cwd.join(".git")).unwrap();
+        std::fs::write(
+            v.cwd.join(".git/config"),
+            "[remote \"origin\"]\nurl = https://example.test/team/fern.git\n",
+        )
+        .unwrap();
+        std::fs::write(v.cwd.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        for url in ["/api/feed?repo=example.test%2Fteam%2Ffern", "/api/feed"] {
+            let page = get(&v, url);
+            assert_eq!(
+                feed_ids(&page)
+                    .iter()
+                    .map(|(kind, _)| kind.as_str())
+                    .collect::<Vec<_>>(),
+                ["card", "summary", "prompt"]
+            );
+            for item in page["items"].as_array().unwrap() {
+                assert_eq!(item["repo"], "example.test/team/fern");
+                assert_eq!(item["repo_name"], "fern");
+            }
+            assert!(page["next"].is_null());
+        }
+        let all = get(&v, "/api/feed?repo=example.test%2Fteam%2Ffern&all=1");
+        assert_eq!(all["items"].as_array().unwrap().len(), 6);
+        assert!(
+            all["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["repo"] == "example.test/team/moss")
+        );
+        let missing = get(&v, "/api/feed?repo=missing");
+        assert_eq!(missing["items"], json!([]));
+        assert!(missing["next"].is_null());
+    }
+
+    /// page.md test 3: all three readers honor removals before a consumer catches up; skipped
+    /// summaries and imported-source prompts never enter the feed, or consume a page slot.
+    #[test]
+    fn feed_hides_removed_and_skipped_items_and_imported_prompts() {
+        let (mut s, v) = feed_fixture();
+        let repo = "example.test/team/fern";
+        let (card_seq, _) = feed_cards(&mut s, repo, 9_000, &["Hidden card"]);
+        let (summary_seq, _) = feed_summary(&mut s, repo, 8_000, "Hidden summary");
+        let prompt_seq = s.said("s", repo, 7_000, "Hidden prompt");
+        let (seq, _) = feed_summary(&mut s, repo, 6_000, "Skipped summary");
+        let skip = json!({"agent": "claude", "session": "s", "repo": repo, "ts": 6_000,
+            "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+            "fields": {}, "skipped": true});
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Turn, skip)])
+            .unwrap();
+        // The earlier summary is separately hidden: a skipped op does not replace it.
+        s.raw
+            .append_tombstone(crate::raw::Target::Record {
+                device: s.raw.device().to_owned(),
+                seq,
+            })
+            .unwrap();
+        for source in ["transcript", "oboete-v1"] {
+            s.raw
+                .append(&crate::raw::Event {
+                    kind: "prompt".into(),
+                    source: source.into(),
+                    session: "s".into(),
+                    repo: Some(repo.into()),
+                    ts: 10_000,
+                    ..crate::raw::test_event(r#"{"prompt":"Imported prompt"}"#)
+                })
+                .unwrap();
+        }
+        let (_, card) = feed_cards(&mut s, repo, 3_000, &["Visible card"]);
+        let (_, summary) = feed_summary(&mut s, repo, 2_000, "Visible summary");
+        let prompt = s
+            .raw
+            .append(&crate::raw::Event {
+                kind: "prompt".into(),
+                source: "replay".into(),
+                session: "s".into(),
+                repo: Some(repo.into()),
+                ts: 1_000,
+                ..crate::raw::test_event(r#"{"prompt":"Visible prompt"}"#)
+            })
+            .unwrap();
+        s.run();
+        for seq in [card_seq, summary_seq, prompt_seq] {
+            s.raw
+                .append_tombstone(crate::raw::Target::Record {
+                    device: s.raw.device().to_owned(),
+                    seq,
+                })
+                .unwrap();
+        }
+        let mut page = get(&v, "/api/feed?all=1&limit=1");
+        let mut ids = feed_ids(&page);
+        for _ in 0..4 {
+            let Some(cursor) = page["next"].as_str() else {
+                break;
+            };
+            page = get(&v, &feed_before(cursor, 1));
+            ids.extend(feed_ids(&page));
+        }
+        assert_eq!(
+            ids,
+            [
+                ("card".to_owned(), format!("{card}.0")),
+                ("summary".to_owned(), summary),
+                ("prompt".to_owned(), s.key(prompt))
+            ]
+        );
+        assert!(page["next"].is_null());
+        // A range removal leaves the record present, with only that text masked (D8).
+        let seq = s.said("s", repo, 11_000, "keep remove keep");
+        let body = json!({"prompt": "keep remove keep"}).to_string();
+        s.raw
+            .append_tombstone(crate::raw::Target::Range {
+                device: s.raw.device().to_owned(),
+                seq,
+                offset: body.find("remove").unwrap() as i64,
+                length: 6,
+            })
+            .unwrap();
+        let page = get(&v, "/api/feed?all=1&limit=1");
+        assert_eq!(page["items"][0]["id"], s.key(seq));
+        assert_eq!(page["items"][0]["text"], "keep ****** keep");
+    }
+
+    /// page.md test 4: a newly added field-anchored rule applies on read, not only on capture;
+    /// each card/summary field and each prompt is gated before the whole API answer.
+    #[test]
+    fn feed_applies_rules_added_after_every_kind_was_written() {
+        let (mut s, v) = feed_fixture();
+        let repo = "example.test/team/fern";
+        feed_cards(&mut s, repo, 3_000, &["invented-FERN"]);
+        feed_summary(&mut s, repo, 2_000, "invented-MOSS");
+        s.said("s", repo, 1_000, "invented-REED");
+        s.run();
+        std::fs::write(s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{id = \"invented\", regex = 'invented-([A-Z]+)$', secret_group = 1}]\n").unwrap();
+        let page = get(&v, "/api/feed?all=1");
+        assert_eq!(page["items"][0]["title"], "invented-[REDACTED]");
+        assert_eq!(page["items"][0]["facts"], json!(["invented-[REDACTED]"]));
+        assert_eq!(page["items"][1]["fields"]["request"], "invented-[REDACTED]");
+        assert_eq!(page["items"][2]["text"], "invented-[REDACTED]");
+        let answer = page.to_string();
+        for text in ["FERN", "MOSS", "REED", "Not displayed."] {
+            assert!(!answer.contains(text));
+        }
+        assert!(page["items"][1]["fields"].get("notes").is_none());
+    }
+
+    /// page.md test 5: the display cap counts Unicode characters after gating, says it cut,
+    /// and leaves the full prompt available through get's record key.
+    #[test]
+    fn feed_cuts_long_prompts_but_get_keeps_the_full_text() {
+        let (mut s, v) = feed_fixture();
+        let full = format!("{}終", "あ".repeat(2_000));
+        let seq = s.said("s", "example.test/team/fern", 1_000, &full);
+        let page = get(&v, "/api/feed?all=1");
+        let item = &page["items"][0];
+        assert_eq!(item["text"], format!("{}…", "あ".repeat(2_000)));
+        assert_eq!(item["id"], s.key(seq));
+        let doc = get(&v, &format!("/api/doc?id={}", item["id"].as_str().unwrap()));
+        assert!(doc["text"].as_str().unwrap().contains(&full));
+        let exact = "い".repeat(2_000);
+        s.said("s", "example.test/team/fern", 2_000, &exact);
+        assert_eq!(
+            get(&v, "/api/feed?all=1&limit=1")["items"][0]["text"],
+            exact
+        );
+    }
+
+    /// page.md test 6: the new endpoint passes through the same guards, before any store read.
+    #[test]
+    fn feed_requires_the_token_local_host_and_read_method() {
+        let (dir, v) = viewer("feed-guards");
+        let url = "/api/feed?all=1";
+        assert_eq!(v.route("GET", url, &[HOST]).status, 401);
+        assert_eq!(
+            v.route("GET", url, &[HOST, ("X-Oboete-Token", "wrong")])
+                .status,
+            401
+        );
+        assert_eq!(
+            v.route("GET", url, &[("Host", "foreign.example:4321"), TOKEN])
+                .status,
+            403
+        );
+        for method in ["POST", "PUT", "DELETE", "OPTIONS"] {
+            assert_eq!(v.route(method, url, &[HOST, TOKEN]).status, 405);
+        }
+        for framing in [("Transfer-Encoding", "chunked"), ("Content-Length", "0")] {
+            assert_eq!(v.route("GET", url, &[HOST, TOKEN, framing]).status, 400);
+        }
+        assert_eq!(v.route("HEAD", url, &[HOST, TOKEN]).status, 200);
+        assert_eq!(get(&v, url), json!({"items": [], "next": null}));
+        for cursor in ["%7B", "%7B%22pages%22%3A1%7D", &"7".repeat(4097)] {
+            let url = format!("{url}&before={cursor}");
+            assert_eq!(v.route("GET", &url, &[HOST, TOKEN]).status, 400, "{cursor}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// P5: prompts are read directly, so the poll marker must move on capture even while the
+    /// worker has not consumed them. Tool calls and imported prompts still do not move it.
+    #[test]
+    fn feed_version_changes_for_live_prompts_before_the_worker_runs() {
+        let (mut s, v) = feed_fixture();
+        let repo = "example.test/team/fern";
+        s.said("s", repo, 1_000, "Earlier prompt");
+        s.run();
+        let before = get(&v, "/api/version")["v"].clone();
+        s.event(
+            "tool",
+            "s",
+            (repo, "main"),
+            2_000,
+            json!({"output": "Read a file."}),
+        );
+        assert_eq!(get(&v, "/api/version")["v"], before);
+        let seq = s.said("s", repo, 3_000, "A just captured prompt");
+        let after = get(&v, "/api/version")["v"].clone();
+        assert_ne!(after, before);
+        assert_eq!(
+            get(&v, "/api/feed?all=1&limit=1")["items"][0]["id"],
+            s.key(seq)
+        );
+        s.raw
+            .append(&crate::raw::Event {
+                kind: "prompt".into(),
+                source: "transcript".into(),
+                session: "s".into(),
+                repo: Some(repo.into()),
+                ts: 4_000,
+                ..crate::raw::test_event(r#"{"prompt":"Imported prompt"}"#)
+            })
+            .unwrap();
+        assert_eq!(get(&v, "/api/version")["v"], after);
     }
 
     fn keys(hits: &Value, field: &str) -> Vec<String> {

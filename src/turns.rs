@@ -78,7 +78,14 @@ pub struct TurnSummary {
     pub fields: BTreeMap<String, String>,
 }
 
+/// A feed page's last kept summary: its turn end and stored ID, all descending (page.md P3).
+pub type Position = (i64, String, i64);
+
 impl TurnSummary {
+    pub fn position(&self) -> Position {
+        (self.ts, self.device.clone(), self.op_seq)
+    }
+
     /// Its ID as session start shows it and `get` reads it (S7, S10): `S<op seq>` on `local`, the
     /// device that reads it, and `S<device>.<op seq>` for another device's.
     pub fn id(&self, local: &str) -> String {
@@ -645,6 +652,44 @@ pub fn recent(
         out.extend(read_row(r, raw, rules)?);
     }
     Ok(out)
+}
+
+/// A repository's (or all repositories') summaries after `before`, newest first. T7-hidden
+/// rows and skips take no slot; every returned summary passes `read_row` (T8). One extra
+/// visible row may be inspected only to answer whether the page is exhausted.
+pub fn page(
+    k: &Connection,
+    raw: &Raw,
+    repo: Option<&str>,
+    before: Option<&Position>,
+    limit: usize,
+    rules: &Rules,
+) -> Result<(Vec<TurnSummary>, bool)> {
+    if !crate::consumer::manifest::exists(k, "table", "turns")? {
+        return Ok((Vec::new(), false));
+    }
+    let mut st = k.prepare(&format!(
+        "SELECT {COLUMNS} FROM turns WHERE skipped = 0
+           AND (?1 IS NULL OR repo = ?1)
+           AND (?2 IS NULL OR (ts, device, op_seq) < (?2, ?3, ?4))
+         ORDER BY ts DESC, device DESC, op_seq DESC"
+    ))?;
+    let mut rows = st.query(params![
+        repo,
+        before.map(|p| p.0),
+        before.map(|p| p.1.as_str()),
+        before.map(|p| p.2)
+    ])?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        if let Some(s) = read_row(r, raw, rules)? {
+            if out.len() == limit {
+                return Ok((out, true));
+            }
+            out.push(s);
+        }
+    }
+    Ok((out, false))
 }
 
 /// The summary an ID names (S10), as `recent` would read it: `S<op seq>` of this device's, or

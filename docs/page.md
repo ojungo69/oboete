@@ -47,7 +47,9 @@ key. The filter applies to every kind.
 P5. **Live.** The page polls `/api/version` every 3 seconds as it does now. When it changes, the
 first page is read again and new items are put on top; an item already shown is not shown twice
 (by kind and ID). Items no longer returned (hidden by a removal since) leave the list at the next
-full refresh, not by polling. claude-mem streams new rows over SSE; the viewer answers each request
+full refresh, not by polling. Nor does polling show a new item the first page does not hold: more
+than a page of new items at once, or one whose own time is older than the page's last (a card of a
+window long past); Refresh shows it in its place. claude-mem streams new rows over SSE; the viewer answers each request
 and closes, so polling stays.
 
 P6. **The cards.** claude-mem's observation card:
