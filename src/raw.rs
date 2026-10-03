@@ -606,13 +606,44 @@ impl Raw {
         to: i64,
         through: Option<i64>,
     ) -> Result<Vec<Removal>> {
+        self.removed_of(device, None, from, to, through)
+    }
+
+    /// `removed_in` over one session's records (docs/summaries.md T7): a removal from another
+    /// session's record between them is not counted; one from a record that is gone or has no
+    /// labels is.
+    pub fn removed_in_session(
+        &self,
+        device: &str,
+        (agent, session): (&str, &str),
+        from: i64,
+        to: i64,
+        through: Option<i64>,
+    ) -> Result<Vec<Removal>> {
+        self.removed_of(device, Some((agent, session)), from, to, through)
+    }
+
+    fn removed_of(
+        &self,
+        device: &str,
+        session: Option<(&str, &str)>,
+        from: i64,
+        to: i64,
+        through: Option<i64>,
+    ) -> Result<Vec<Removal>> {
         let mut st = self.conn.prepare_cached(
-            "SELECT DISTINCT target_seq, target_offset, target_length FROM records
-             WHERE type = 'tombstone' AND target_device = ?1 AND target_seq BETWEEN ?2 AND ?3
-               AND (?4 IS NULL OR device = ?1 AND seq <= ?4)
+            "SELECT DISTINCT t.target_seq, t.target_offset, t.target_length FROM records t
+             WHERE t.type = 'tombstone' AND t.target_device = ?1
+               AND t.target_seq BETWEEN ?2 AND ?3
+               AND (?4 IS NULL OR t.device = ?1 AND t.seq <= ?4)
+               AND (?5 IS NULL OR NOT EXISTS (
+                 SELECT 1 FROM records r WHERE r.device = ?1 AND r.seq = t.target_seq
+                   AND r.agent IS NOT NULL AND r.session IS NOT NULL
+                   AND (r.agent <> ?5 OR r.session <> ?6)))
              ORDER BY 1, 2, 3",
         )?;
-        let rows = st.query_map(params![device, from, to, through], |r| {
+        let (agent, session) = session.unzip();
+        let rows = st.query_map(params![device, from, to, through, agent, session], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -694,6 +725,24 @@ impl Raw {
             params![self.device, agent, session, reply],
             |r| r.get(0),
         )?)
+    }
+
+    /// The one repository of this device's events of a session from `from` to `to`, none when
+    /// they are of two (docs/cards.md K2, docs/summaries.md T5).
+    pub fn session_repo(
+        &self,
+        (agent, session): (&str, &str),
+        from: i64,
+        to: i64,
+    ) -> Result<Option<String>> {
+        let (repos, repo): (i64, Option<String>) = self.conn.query_row(
+            "SELECT COUNT(DISTINCT COALESCE(repo, char(0))), MIN(repo) FROM records
+             WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
+               AND seq BETWEEN ?4 AND ?5",
+            params![self.device, agent, session, from, to],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(repo.filter(|_| repos == 1))
     }
 
     /// The agent and session labels of `device`'s event `seq`, NUL between (how `curate` keys a

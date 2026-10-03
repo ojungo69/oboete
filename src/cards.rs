@@ -300,14 +300,13 @@ pub fn recent(
     Ok(out)
 }
 
-/// Cards, with the spans of their windows and the goals those were shown.
-pub type TurnCards = (Vec<Card>, Vec<(i64, i64)>, Vec<i64>);
+/// A card with the span of its window and the goals that window was shown.
+pub type TurnCard = (Card, (i64, i64), Vec<i64>);
 
-/// The cards a turn's summary is shown (docs/summaries.md T2): its session's on `device`, of the
-/// windows that hold any of the records `from` to `through`, the newest first, at most `limit`;
-/// with the spans of those windows and the goals they were shown, which the summary was built on
-/// too (T7).
-#[allow(clippy::too_many_arguments)]
+/// The cards a turn's summary may be shown (docs/summaries.md T2): its session's on `device`, of
+/// the windows that hold any of the records `from` to `through`, the newest first, at most
+/// `limit`; each with the span of its window and the goals it was shown, which a summary shown
+/// the card was built on too (T7).
 pub fn of_turn(
     k: &Connection,
     raw: &Raw,
@@ -316,8 +315,8 @@ pub fn of_turn(
     (from, through): (i64, i64),
     limit: usize,
     rules: &Rules,
-) -> Result<TurnCards> {
-    let mut out: TurnCards = (Vec::new(), Vec::new(), Vec::new());
+) -> Result<Vec<TurnCard>> {
+    let mut out = Vec::new();
     if !crate::consumer::manifest::exists(k, "table", "cards")? {
         return Ok(out);
     }
@@ -328,23 +327,14 @@ pub fn of_turn(
          ORDER BY ts DESC, op_seq DESC, n"
     ))?;
     let mut rows = st.query(rusqlite::params![device, agent, session, from, through])?;
-    while out.0.len() < limit
+    while out.len() < limit
         && let Some(r) = rows.next()?
     {
         let Some(card) = read(r, raw, rules)? else {
             continue;
         };
-        let span = (r.get(15)?, r.get(16)?);
-        if !out.1.contains(&span) {
-            out.1.push(span);
-        }
         let goals: Vec<i64> = serde_json::from_str(&r.get::<_, String>(18)?).unwrap_or_default();
-        for goal in goals {
-            if !out.2.contains(&goal) {
-                out.2.push(goal);
-            }
-        }
-        out.0.push(card);
+        out.push((card, (r.get(15)?, r.get(16)?), goals));
     }
     Ok(out)
 }

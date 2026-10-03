@@ -42,7 +42,7 @@ const CARDS: usize = 20;
 pub struct TurnOp {
     pub agent: String,
     pub session: String,
-    /// The repository of its reply (K2's one repository of a span is the session's here).
+    /// The one repository of the turn's records, none when they are of two (K2).
     pub repo: Option<String>,
     /// The reply's time, unix ms.
     pub ts: i64,
@@ -85,7 +85,8 @@ struct Turn {
     through: i64,
     prompts: String,
     reply: String,
-    cards: Vec<Card>,
+    /// The cards shown, as the prompt shows them, the newest first.
+    cards: Vec<String>,
     read: Vec<(i64, i64)>,
     goals: Vec<i64>,
     removed: Vec<Removal>,
@@ -93,8 +94,15 @@ struct Turn {
 
 impl Turn {
     /// The turn that reply `r` ends, read as it is now, its text gated with `rules` before it is
-    /// cut.
-    fn read(raw: &Raw, k: &Connection, rules: &Rules, r: &crate::raw::Labels) -> Result<Self> {
+    /// cut, and its cards within `window_tokens` beside the prompts and the reply, the oldest
+    /// going first (T2): those are never cut for them.
+    fn read(
+        raw: &Raw,
+        k: &Connection,
+        rules: &Rules,
+        r: &crate::raw::Labels,
+        window_tokens: u32,
+    ) -> Result<Self> {
         let device = raw.device().to_owned();
         // The removals the op lists: this device's own, up to its last record before the read,
         // as a window's (K4); one that lands during the call hides the summary.
@@ -120,7 +128,12 @@ impl Turn {
                 _ => None,
             })
             .unwrap_or_default();
-        let (cards, read, goals) = crate::cards::of_turn(
+        let prompts = gated(prompts.join("\n"), PROMPTS);
+        let reply = gated(reply, REPLY);
+        let estimate = crate::budget::estimate;
+        let mut room = window_tokens.saturating_sub(estimate(&prompts) + estimate(&reply));
+        let (mut cards, mut read, mut goals) = (Vec::new(), Vec::new(), Vec::new());
+        for (card, span, shown) in crate::cards::of_turn(
             k,
             raw,
             &device,
@@ -128,8 +141,24 @@ impl Turn {
             (from, r.seq),
             CARDS,
             rules,
-        )?;
-        let mut removed = raw.removed_in(&device, from, r.seq, Some(top))?;
+        )? {
+            let text = card_text(&card, rules);
+            let Some(left) = room.checked_sub(estimate(&text)) else {
+                break;
+            };
+            room = left;
+            cards.push(text);
+            if !read.contains(&span) {
+                read.push(span);
+            }
+            for goal in shown {
+                if !goals.contains(&goal) {
+                    goals.push(goal);
+                }
+            }
+        }
+        let mut removed =
+            raw.removed_in_session(&device, (&r.agent, &r.session), from, r.seq, Some(top))?;
         for &(a, b) in &read {
             removed.extend(raw.removed_in(&device, a, b, Some(top))?);
         }
@@ -141,12 +170,12 @@ impl Turn {
         Ok(Turn {
             agent: r.agent.clone(),
             session: r.session.clone(),
-            repo: r.repo.clone(),
+            repo: raw.session_repo((&r.agent, &r.session), from, r.seq)?,
             ts: r.ts,
             from,
             through: r.seq,
-            prompts: gated(prompts.join("\n"), PROMPTS),
-            reply: gated(reply, REPLY),
+            prompts,
+            reply,
             cards,
             read,
             goals,
@@ -216,7 +245,7 @@ pub fn phase(
         if !covered(r.seq) || reading.excluded.contains(&key) || asked(k, &device, r.seq)? {
             continue;
         }
-        let turn = Turn::read(raw, k, rules, &r)?;
+        let turn = Turn::read(raw, k, rules, &r, summary.window_tokens)?;
         let prompt = prompt(&summary.language, &turn);
         let sent = crate::curate::sha256_hex(&format!("{chain}\n{prompt}"));
         // Held in the digest's table, under the turn's reply in place of a repository.
@@ -238,8 +267,8 @@ pub fn phase(
         });
         let failed = match answer {
             Ok(res) => {
-                let op = turn.op(&res.output, rules);
-                raw.append_ops(&[(OpKind::Turn, serde_json::to_value(op)?)])?;
+                let op = fitted(turn.op(&res.output, rules))?;
+                raw.append_ops(&[(OpKind::Turn, op)])?;
                 crate::providers_db::clear_digest_pending(
                     db, &device, &r.agent, &r.session, &subject,
                 )?;
@@ -284,6 +313,27 @@ pub fn phase(
     Ok(out)
 }
 
+/// `op` as the op log keeps it (`MAX_OP_BYTES`), so an answer paid for is never lost to the cap
+/// and asked again at every run (Codex on C2). Over it, the removal list goes first, as a window
+/// op's does past its bound (the summary is then hidden by any removal, K4), then the fields: it
+/// is kept as a skip.
+fn fitted(mut op: TurnOp) -> Result<Value> {
+    let within = |op: &TurnOp| -> Result<Option<Value>> {
+        let v = serde_json::to_value(op)?;
+        Ok((v.to_string().len() <= crate::raw::MAX_OP_BYTES).then_some(v))
+    };
+    if let Some(v) = within(&op)? {
+        return Ok(v);
+    }
+    op.removed.clear();
+    if let Some(v) = within(&op)? {
+        return Ok(v);
+    }
+    op.fields.clear();
+    op.skipped = true;
+    Ok(serde_json::to_value(op)?)
+}
+
 /// Whether a summary of this device's turn ending at `through` was asked and kept, skipped or not.
 fn asked(k: &Connection, device: &str, through: i64) -> Result<bool> {
     Ok(k.query_row(
@@ -316,9 +366,26 @@ fn sooner(a: Phase, b: Phase) -> Phase {
     }
 }
 
-/// One line of a card for the prompt.
-fn one_line(text: &str) -> String {
-    text.replace(['\n', '\r'], " ")
+/// A card as the prompt shows it (T2): each text on one line, gated as it was written and as
+/// that line, since a rule may match only the flattened text (Codex on C2).
+fn card_text(c: &Card, rules: &Rules) -> String {
+    let line = |t: &str| {
+        crate::redact::flattened_with(t, rules, usize::MAX, crate::consumer::manifest::one_line)
+            .masked()
+    };
+    let kind = c.kind.as_deref().unwrap_or("note");
+    let mut out = format!("- [{kind}] {}", line(&c.title));
+    if !c.subtitle.is_empty() {
+        out.push_str(&format!(": {}", line(&c.subtitle)));
+    }
+    out.push('\n');
+    if !c.narrative.is_empty() && c.narrative != c.title {
+        out.push_str(&format!("  {}\n", line(&c.narrative)));
+    }
+    for f in &c.facts {
+        out.push_str(&format!("  - {}\n", line(f)));
+    }
+    out
 }
 
 /// The summary prompt (T3): claude-mem's request for a summary (its instruction and the six
@@ -329,18 +396,7 @@ fn prompt(language: &str, turn: &Turn) -> String {
     if !turn.cards.is_empty() {
         data.push_str("## Cards kept of the work, oldest first\n");
         for c in turn.cards.iter().rev() {
-            let kind = c.kind.as_deref().unwrap_or("note");
-            data.push_str(&format!("- [{kind}] {}", one_line(&c.title)));
-            if !c.subtitle.is_empty() {
-                data.push_str(&format!(": {}", one_line(&c.subtitle)));
-            }
-            data.push('\n');
-            if !c.narrative.is_empty() && c.narrative != c.title {
-                data.push_str(&format!("  {}\n", one_line(&c.narrative)));
-            }
-            for f in &c.facts {
-                data.push_str(&format!("  - {}\n", one_line(f)));
-            }
+            data.push_str(c);
         }
     }
     data.push_str(&format!("## The agent's reply\n{}\n", turn.reply));
@@ -469,7 +525,10 @@ pub fn recent(
         let read: Vec<(i64, i64)> = serde_json::from_str(&json(8)?).unwrap_or_default();
         let goals: Vec<i64> = serde_json::from_str(&json(9)?).unwrap_or_default();
         let listed: Vec<Removal> = serde_json::from_str(&json(10)?).unwrap_or_default();
-        let mut removed = raw.removed_in(&device, r.get(6)?, r.get(7)?, None)?;
+        // The turn is its own session's records, as they are stored (before the gate).
+        let (agent, session): (String, String) = (r.get(3)?, r.get(4)?);
+        let mut removed =
+            raw.removed_in_session(&device, (&agent, &session), r.get(6)?, r.get(7)?, None)?;
         for (a, b) in read {
             removed.extend(raw.removed_in(&device, a, b, None)?);
         }
@@ -485,8 +544,8 @@ pub fn recent(
             device,
             op_seq: r.get(1)?,
             ts: r.get(2)?,
-            agent: gate(r.get(3)?),
-            session: gate(r.get(4)?),
+            agent: gate(agent),
+            session: gate(session),
             repo: r.get::<_, Option<String>>(5)?.map(gate),
             fields: fields.into_iter().map(|(f, t)| (f, gate(t))).collect(),
         });
@@ -553,15 +612,26 @@ mod tests {
 
     /// A rule the home's config does not hold: the rescan never removes what it masks.
     fn otp() -> Rules {
+        rule("otp=([0-9]{6})")
+    }
+
+    /// Rules of one `regex`, its first group the secret, that the home's config does not hold.
+    fn rule(regex: &str) -> Rules {
         Rules::new(
-            &crate::config::parse_capture(Some(
-                "[redaction]\nextra_rules = [{ id = \"otp\", regex = 'otp=([0-9]{6})', \
-                 secret_group = 1 }]\n",
-            ))
+            &crate::config::parse_capture(Some(&format!(
+                "[redaction]\nextra_rules = [{{ id = \"r\", regex = '{regex}', secret_group = 1 }}]\n"
+            )))
             .unwrap()
             .redaction,
         )
         .unwrap()
+    }
+
+    /// A curated window op over `from` to `to` whose curator wrote `card`.
+    fn observed(from: i64, to: i64, card: Value) -> (OpKind, Value) {
+        let (kind, mut op) = window(from, to, "", &[]);
+        op["observations"] = json!([card]);
+        (kind, op)
     }
 
     /// `run` under `rules`.
@@ -691,6 +761,110 @@ mod tests {
         assert_eq!(turn_ops(home.path())[1].read, vec![(6, 6), (3, 4)]);
     }
 
+    /// Codex on C2: a card's title, subtitle, narrative and facts are each shown on one line,
+    /// and gated as that line too: a rule may match only the flattened text.
+    #[test]
+    fn a_cards_text_is_gated_as_the_line_it_is_shown_on() {
+        let card = json!({"type": "change", "title": "T otp=\n111111",
+            "subtitle": "S otp=\n222222", "narrative": "N otp=\n333333",
+            "facts": ["F otp=\n444444"], "concepts": [], "files_read": [], "files_modified": []});
+        let home = home(
+            &[
+                said("s1", "prompt", "Build."),
+                said("s1", "reply", "Built."),
+            ],
+            &[observed(1, 2, card)],
+        );
+        let (_, sent) = run_with(home.path(), &completed("Built."), &rule("otp= ([0-9]{6})"));
+        assert!(sent[0].contains("T otp="), "{}", sent[0]);
+        for digits in ["111111", "222222", "333333", "444444"] {
+            assert!(!sent[0].contains(digits), "{digits} in {}", sent[0]);
+        }
+    }
+
+    /// Codex on C2: an answer whose op would pass the op log's cap is never lost to it, which
+    /// would ask again at every run: the removal list goes first, as a window op's past its bound,
+    /// and the summary is then hidden by any removal (K4).
+    #[test]
+    fn an_op_over_the_cap_is_kept_without_its_removal_list() {
+        let mut records = vec![said("s1", "prompt", "Build.")];
+        records.extend((0..400).map(|i| said("s1", "tool", &format!("step {i}"))));
+        records.push(said("s1", "reply", "Built."));
+        let home = home(&records, &[window(1, 402, "Built.", &[])]);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        for seq in 2..=401 {
+            let device = device.clone();
+            raw.append_tombstone(Target::Record { device, seq })
+                .unwrap();
+        }
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        // Each control character is six bytes in JSON: about 62,000 of fields.
+        let wide = |n: usize| "\u{1}".repeat(n);
+        let answer = json!({"skip": false, "request": wide(300), "investigated": wide(2_000),
+            "learned": wide(2_000), "completed": wide(2_000), "next_steps": wide(2_000),
+            "notes": wide(2_000)});
+        assert_eq!(run(home.path(), &answer).1.len(), 1);
+        let ops = turn_ops(home.path());
+        assert_eq!(ops.len(), 1);
+        assert!(
+            ops[0].removed.is_empty() && !ops[0].skipped,
+            "{:?}",
+            ops[0].removed.len()
+        );
+        assert_eq!(run(home.path(), &answer).1.len(), 0);
+        assert!(shown(home.path(), &Rules::default()).is_empty());
+    }
+
+    /// The cap's last resort: fields that pass it alone go, and the turn is kept as a skip.
+    #[test]
+    fn an_op_whose_fields_pass_the_cap_is_kept_as_a_skip() {
+        let op = TurnOp {
+            agent: "claude".into(),
+            session: "s".into(),
+            repo: None,
+            ts: 0,
+            from: 1,
+            through: 2,
+            read: Vec::new(),
+            goals: Vec::new(),
+            removed: Vec::new(),
+            fields: BTreeMap::from([("notes".to_owned(), "x".repeat(70_000))]),
+            skipped: false,
+        };
+        let v = fitted(op).unwrap();
+        assert_eq!((&v["skipped"], &v["fields"]), (&json!(true), &json!({})));
+    }
+
+    /// Codex on C2 (T2): the cards fit `window_tokens` beside the prompts and the reply, the
+    /// oldest going first, and the op lists only the windows whose cards were shown.
+    #[test]
+    fn the_oldest_cards_go_first_to_fit_the_window() {
+        // About 1,760 estimated tokens a card: two fit the default 5,000, three do not.
+        let long = |c: char| {
+            json!({"type": "change", "title": "Work", "narrative": c.to_string().repeat(2_200),
+                "facts": [], "concepts": [], "files_read": [], "files_modified": []})
+        };
+        let home = home(
+            &[
+                said("s1", "prompt", "Build."),
+                said("s1", "tool", "a"),
+                said("s1", "tool", "b"),
+                said("s1", "reply", "Built."),
+            ],
+            &[
+                observed(1, 1, long('一')),
+                observed(2, 2, long('二')),
+                observed(3, 4, long('三')),
+            ],
+        );
+        let (_, sent) = run(home.path(), &completed("Built."));
+        assert!(!sent[0].contains('一'), "the oldest card was shown");
+        assert!(sent[0].contains('二') && sent[0].contains('三'));
+        assert_eq!(turn_ops(home.path())[0].read, vec![(3, 4), (2, 2)]);
+    }
+
     /// Test 4 (T4): an answer with none of the first five fields is refused; a skip is kept as
     /// an op with no fields, and the turn is not asked again.
     #[test]
@@ -775,6 +949,69 @@ mod tests {
                 "a removal of record {target}, before: {before}"
             );
         }
+    }
+
+    /// Codex on C2 (T7): the turn is its own session's records, so a removal from another
+    /// session's record inside its span does not hide its summary.
+    #[test]
+    fn a_removal_from_another_sessions_record_in_the_span_does_not_hide_it() {
+        let home = home(
+            &[
+                said("a", "prompt", "Build."),
+                said("b", "prompt", "Other."),
+                said("b", "reply", "Other done."),
+                said("a", "reply", "Built."),
+            ],
+            &[
+                window(1, 1, "Asked.", &[]),
+                window(2, 3, "Other.", &[]),
+                window(4, 4, "Built.", &[]),
+            ],
+        );
+        run(home.path(), &completed("Other."));
+        run(home.path(), &completed("Built."));
+        assert_eq!(shown(home.path(), &Rules::default()).len(), 2);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        raw.append_tombstone(Target::Record { device, seq: 2 })
+            .unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        let shown = shown(home.path(), &Rules::default());
+        assert_eq!(
+            shown.iter().map(|s| s.session.as_str()).collect::<Vec<_>>(),
+            ["a"]
+        );
+    }
+
+    /// Codex on C2 (T5, K2): a turn's repository is the one its own records are in, none when
+    /// they are in two; another session's record between them does not count.
+    #[test]
+    fn a_turn_has_its_records_one_repository_or_none() {
+        let in_q = |e: Event| Event {
+            repo: Some("q".into()),
+            ..e
+        };
+        let home = home(
+            &[
+                said("a", "prompt", "Build."),
+                in_q(said("b", "prompt", "Other.")),
+                said("a", "reply", "Built."),
+                said("c", "prompt", "Move."),
+                in_q(said("c", "tool", "ok")),
+                said("c", "reply", "Moved."),
+            ],
+            &[window(1, 3, "Built.", &[]), window(4, 6, "Moved.", &[])],
+        );
+        run(home.path(), &completed("Built."));
+        run(home.path(), &completed("Moved."));
+        let ops = turn_ops(home.path());
+        assert_eq!(
+            ops.iter()
+                .map(|o| (o.session.as_str(), o.repo.as_deref()))
+                .collect::<Vec<_>>(),
+            [("a", Some("r")), ("c", None)]
+        );
     }
 
     /// Test 7 (T6): a rebuild makes the same rows from the op log.

@@ -28,16 +28,21 @@ T1. **When.** One per turn end: a `reply` record, which only an agent's Stop wri
 subagent's stop writes none, `capture::shaped`), of a session the exclusion list does not name
 (D13), once the curation checkpoint has passed it, so the windows that hold the turn have their
 cards. A turn is its session's records after the session's previous reply, through this one. The
-worker asks for it where it asks for a digest today: when the window phase sent nothing, one call
-a run, with the digest's waits (a session still at work waits its idle time) and holds (a summary
-every entry fails waits as a window does; one given up after `ATTEMPTS` is not asked again).
+worker asks for it where it asked for a digest: when the window phase sent nothing, one call a
+run, with the digest's holds (a summary every entry fails waits as a window does; one given up
+after `ATTEMPTS` is not asked again). Unlike the digest it does not wait for the session to go
+idle: a turn is whole at its reply, and claude-mem asks at Stop. The window phase's own idle wait
+still holds back the windows of a session's last turn (Codex on C2).
 
 T2. **What it is shown**, between two fence lines, as recorded data, each text gated as a window's
 is: the turn's prompts (at most 2,000 characters in all), the cards of its session's windows that
 hold any of its records (type, title, subtitle, narrative, facts; the newest 20, by K4 and K6), and
 the reply (at most 4,000 characters). Not the tool records: the cards say what they did, and a turn
 of hundreds of tool uses still fits. A card of a window that holds two sessions has no session (K2)
-and is not shown. Within `window_tokens`, the oldest cards go first.
+and is not shown. Each of a card's texts is shown on one line and gated as that line too, since a
+rule may match only the flattened text. Within `window_tokens`, the oldest cards go first; the
+prompts and the reply are never cut for them, so with a `window_tokens` below what those take no
+card is shown.
 
 T3. **What it is asked.** claude-mem's summary request (`summary_instruction` and the six fields'
 placeholders in `code.json`), as the chain's JSON fields, in the configured language; `NOTICE`
@@ -50,16 +55,19 @@ its cap (`request` 300 characters, the others 2,000) is dropped, never cut: noth
 the gate (K6). An answer left with none of the first five fields is refused, as claude-mem's
 parser refuses it, and the next entry is asked.
 
-T5. **The op.** Kind `turn`: `agent`, `session`, `repo` (K2: one repository or none), `through`
-(the reply's seq), `from` (the turn's first record), `read` (the spans of the windows whose cards
-it was shown) with their `goals`, `removed` (as a window op lists it, over all of those records),
-and the fields or `skipped`.
+T5. **The op.** Kind `turn`: `agent`, `session`, `repo` (K2: the one repository of the turn's
+records, or none), `through` (the reply's seq), `from` (the turn's first record), `read` (the
+spans of the windows whose cards it was shown) with their `goals`, `removed` (as a window op lists
+it, over all of those records), and the fields or `skipped`. An answer paid for is never lost to
+the op log's cap: an op over it lists no removals, as a window op past its bound does, and is then
+hidden by any (K4); one still over it is kept as a skip.
 
 T6. **The table.** `consumer::turns` keeps each op in knowledge.db's `turns`; `oboete rebuild`
 makes it again and a rewind removes a device's rows above the point (K5).
 
 T7. **Hidden after a removal.** A summary is shown only while nothing is removed, beyond what its
-op lists, from the turn's records, the records of the windows whose cards it read, or their goals:
+op lists, from the turn's records (its session's: not another session's between them), the
+records of the windows whose cards it read, or their goals:
 K4's rule over all it was shown or built on. A removal that hides a card hides every summary that
 read it.
 
@@ -87,7 +95,7 @@ and its ops stay readable; spec 3.4 and 4.4 are amended with the owner's decisio
 
 | | claude-mem | oboete | Why |
 |---|---|---|---|
-| When it is written | at Stop | once the turn's windows are curated, after the idle time | one call per window (oboete's merit); the newest turn may have no summary at the very next session start |
+| When it is written | at Stop | once the turn's windows are curated (the window phase waits a session's idle time before it cuts its last window) | one call per window (oboete's merit); the newest turn may have no summary at the very next session start |
 | Whose | the calling agent's sessions | every agent's sessions in the repository | one memory across agents |
 | Files | attached from the session's tool evidence | on the cards | the cards carry them |
 | After a forget | stays | hidden (T7) | forget is oboete's |
@@ -113,3 +121,10 @@ and its ops stay readable; spec 3.4 and 4.4 are amended with the owner's decisio
    turn, or from that window's goal hides the summary; one its op lists does not.
 7. `oboete rebuild` gives the same rows; a rewind removes them.
 8. `turns::recent` gates every field with the rules as they are when it reads.
+9. A card's title, subtitle, narrative and facts are each gated as the one line the prompt shows.
+10. The cards fit `window_tokens` beside the prompts and the reply, the oldest going first, and the
+    op lists only the windows of the cards shown.
+11. A turn's repository is its own records' one, or none when they are of two.
+12. A removal from another session's record inside the turn's span does not hide it.
+13. An op over the op log's cap is kept without its removal list, or as a skip, and the turn is
+    not asked again.
