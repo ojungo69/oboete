@@ -277,6 +277,14 @@ async function showContext(repo) {
   // Omitting the viewer's own label also preserves its actual checkout branch.
   const c = await api('context', repo && repo !== currentRepo ? { repo } : {});
   return () => {
+    // The resident viewer has no checkout of its own (docs/resident.md R8): it asks for one.
+    if (c.choose) {
+      draw('Context handed to a new session', [], [
+        el('p', 'lead', 'Choose a repository above: Context shows what a new session there is handed.'),
+      ]);
+      setStatus('');
+      return;
+    }
     draw('Context handed to a new session', [], [
       !repo ? el('p', 'lead', "Context shows one checkout; All repositories uses the viewer's checkout.") : null,
       el('dl', 'claim-meta', ...row('Repository', c.repo), ...row('Branch', c.branch || '–'),
@@ -1092,13 +1100,14 @@ async function show() {
   }
 }
 
-// The current checkout always has the first option, including before its first stored record.
+// The current checkout always has the first option, including before its first stored record. The
+// resident viewer has none (docs/resident.md R8): All repositories is its default.
 async function loadRepos() {
   const { current, repos } = await api('repos');
   const keep = reposLoaded ? $('repo').value : current;
   currentRepo = current;
-  const own = repos.find((r) => r.repo === current) ?? { repo: current, claims: 0, imported: 0, records: 0 };
-  const options = [own, ...repos.filter((r) => r.repo !== current)].map((r) => {
+  const own = current === '' ? [] : [repos.find((r) => r.repo === current) ?? { repo: current, claims: 0, imported: 0, records: 0 }];
+  const options = [...own, ...repos.filter((r) => r.repo !== current)].map((r) => {
     const o = new Option(`${r.repo} (${r.claims} claims, ${r.imported} imported, ${r.records} records)`, r.repo);
     o.title = `${r.repo}${r.repo === current ? ' (current checkout)' : ''}${r.last === undefined ? '' : `; last activity: ${new Date(r.last).toLocaleString('en-US')}`}`;
     return o;

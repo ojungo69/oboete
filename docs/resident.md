@@ -19,6 +19,12 @@ owner's use, and what could be left out); what the review changed is listed at t
 - Slice 1 (R2, R3, R10, R12): the worker stays, steps aside and exits on its three conditions.
   `[worker] resident` is read, but nothing writes it yet (`oboete setup` does in slice 5), so a
   home is resident only where its owner wrote the key by hand.
+- Slice 2 (R5, R6, R8): `oboete view --resident` (hidden) is the resident viewer: its lock,
+  outcome, token file and fixed port, with no checkout; tests 3 (but `--new-token`), 4, 5 (its
+  outcome), 6, 7 and 8 (but the worker that starts it). Nothing starts it yet (slice 3), and it
+  serves until it is stopped: the once-a-minute tick that ends it is R4's, in slice 3. It runs on
+  Linux only, where keyfile's filesystem check can tell that a mode keeps the token file its
+  owner's; macOS and Windows wait for #281, and there `oboete view` stays as it is.
 
 ## Before this unit (main 7f8de51)
 

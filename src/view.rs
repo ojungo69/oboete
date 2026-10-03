@@ -46,16 +46,26 @@ const SECURITY_HEADERS: &str = "Content-Security-Policy: default-src 'none'; scr
 struct Viewer {
     home: PathBuf,
     /// Where `oboete view` was started: its checkout is the page's default scope and its search's
-    /// caller (`checkout`).
-    cwd: PathBuf,
+    /// caller (`checkout`). The resident viewer has none, and every repository is its default
+    /// scope (docs/resident.md R8).
+    cwd: Option<PathBuf>,
     port: u16,
-    token: String,
+    token: Token,
     /// Settings saves, one at a time.
     saving: Mutex<()>,
     /// The page `--open` gave the browser opener, removed by the first request with the token.
     opener: Mutex<Option<PathBuf>>,
     /// Connections being served: at most `MAX_CONNECTIONS`.
     live: AtomicUsize,
+}
+
+/// What a request's `X-Oboete-Token` must be.
+enum Token {
+    /// This run's, made at its start: `oboete view` in the foreground.
+    Run(String),
+    /// The resident viewer's: `state/view-token`, read for each request (`file_token`), so it
+    /// outlives a restart and a file that changed is never trusted from before (R6).
+    File,
 }
 
 /// One of `MAX_CONNECTIONS`, given back when its connection's thread ends, however it ends.
@@ -145,23 +155,236 @@ impl Response {
 pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let port = listener.local_addr()?.port();
-    let mut raw = [0u8; 16];
-    getrandom::fill(&mut raw).map_err(|e| anyhow!("random token: {e}"))?;
+    let token = new_token()?;
+    let url = format!("http://127.0.0.1:{port}/#t={token}");
     let viewer = Arc::new(Viewer {
         home: home.to_path_buf(),
-        cwd: std::env::current_dir()?,
+        cwd: Some(std::env::current_dir()?),
         port,
-        token: raw.iter().map(|b| format!("{b:02x}")).collect(),
+        token: Token::Run(token),
         saving: Mutex::new(()),
         opener: Mutex::new(None),
         live: AtomicUsize::new(0),
     });
-    let url = format!("http://127.0.0.1:{port}/#t={}", viewer.token);
     println!("{url}\n(open it in a browser; Ctrl-C stops the viewer)");
     if open {
         viewer.open(home, &url, open_browser);
     }
     accept(&listener, &viewer);
+    Ok(())
+}
+
+/// 16 bytes of the OS generator, in lower-case hex.
+fn new_token() -> Result<String> {
+    let mut raw = [0u8; 16];
+    getrandom::fill(&mut raw).map_err(|e| anyhow!("random token: {e}"))?;
+    Ok(raw.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The outcome of a resident start on a filesystem whose modes keep no file its owner's alone.
+const NOT_PRIVATE: &str = "this home's filesystem cannot keep the page's token to its owner";
+
+/// A resident viewer that started: its lock, held while it serves, its listener and itself.
+struct Resident {
+    lock: std::fs::File,
+    listener: TcpListener,
+    viewer: Arc<Viewer>,
+}
+
+/// The resident viewer (docs/resident.md R5, R6, R8): on `[view] port`, with the token of
+/// `state/view-token` and no checkout, until it is stopped. It says in `state/view-outcome` that it
+/// listens, or why it did not start; one that finds another holding `state/view.lock` exits
+/// and writes nothing.
+pub fn resident(home: &Path) -> Result<()> {
+    if let Some(Resident {
+        lock,
+        listener,
+        viewer,
+    }) = listen(home)?
+    {
+        accept(&listener, &viewer);
+        drop(lock);
+    }
+    Ok(())
+}
+
+/// `state/view.lock`, a regular file only: a link or a FIFO planted while another user could write
+/// in `state` is replaced, not followed or waited on (Codex on #376).
+fn view_lock(state: &Path) -> Result<std::fs::File> {
+    let path = state.join("view.lock");
+    match std::fs::symlink_metadata(&path) {
+        Ok(m) if !m.is_file() => clear(&path)?,
+        // One made under a umask that took the owner's write away is given it back, not
+        // replaced: a viewer may hold it (Codex on #376).
+        Ok(_) => crate::db::private(&path, 0o600),
+        Err(_) => {}
+    }
+    let mut file = std::fs::OpenOptions::new();
+    file.create(true).truncate(false).write(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut file, libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = file.open(&path)?;
+    // A new one: the umask takes bits from the mode asked for.
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    Ok(file)
+}
+
+/// Takes away whatever is at a fixed name in `state` before it is made anew: what was planted
+/// there while another user could write in `state`, a folder too (Codex on #376).
+fn clear(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// The resident viewer's start: the lock first, then `starting`, the filesystem check, the token
+/// file, the port, and `listening <port>`; a start that fails says why instead.
+fn listen(home: &Path) -> Result<Option<Resident>> {
+    let state = home.join("state");
+    std::fs::create_dir_all(&state)?;
+    // A `state` folder another user could change is not written into at all (CodeRabbit on #376).
+    if !own_state(home) {
+        eprintln!(
+            "oboete: {} is not this user's alone; no resident viewer",
+            state.display()
+        );
+        return Ok(None);
+    }
+    let lock = view_lock(&state)?;
+    match crate::worker::try_lock(&lock) {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+    }
+    // Replaced whole, so a reader never sees half of it.
+    let say = |what: &str| -> Result<()> {
+        let next = state.join("view-outcome.next");
+        // Made anew, so a link planted before is not written through.
+        clear(&next)?;
+        let mut file = (std::fs::OpenOptions::new().write(true).create_new(true)).open(&next)?;
+        #[cfg(unix)]
+        file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        file.write_all(what.as_bytes())?;
+        std::fs::rename(&next, state.join("view-outcome"))?;
+        Ok(())
+    };
+    let failed = |why: &str| say(why).map(|()| None);
+    say("starting")?;
+    if !crate::keyfile::private_fs(&std::fs::File::open(&state)?) {
+        return failed(NOT_PRIVATE);
+    }
+    if let Err(e) = ensure_token(home) {
+        return failed(&format!("{e:#}"));
+    }
+    let port = match crate::config::view(home) {
+        Ok(v) => v.port.get(),
+        Err(e) => return failed(&format!("{e:#}")),
+    };
+    let listener = match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return failed("port in use"),
+        Err(e) => return failed(&e.to_string()),
+    };
+    say(&format!("listening {port}"))?;
+    Ok(Some(Resident {
+        lock,
+        listener,
+        viewer: Arc::new(Viewer {
+            home: home.to_path_buf(),
+            cwd: None,
+            port,
+            token: Token::File,
+            saving: Mutex::new(()),
+            opener: Mutex::new(None),
+            live: AtomicUsize::new(0),
+        }),
+    }))
+}
+
+/// R6: whether `state` may hold the token: a folder of this user's, not a link, in a home of this
+/// user's, neither of which another user may write into, made so first as the stores make the
+/// home. Off Unix the resident viewer does not run.
+fn own_state(home: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no arguments and cannot fail.
+        let me = unsafe { libc::geteuid() };
+        let state = home.join("state");
+        // The home may be a link the owner made; `state` is the viewer's own, never one.
+        let ours =
+            |m: std::io::Result<std::fs::Metadata>| m.is_ok_and(|m| m.is_dir() && m.uid() == me);
+        if !ours(std::fs::metadata(home)) || !ours(std::fs::symlink_metadata(&state)) {
+            return false;
+        }
+        crate::db::private(home, 0o700);
+        crate::db::private(&state, 0o700);
+        let closed = |m: std::io::Result<std::fs::Metadata>| m.is_ok_and(|m| m.mode() & 0o022 == 0);
+        closed(std::fs::metadata(home)) && closed(std::fs::symlink_metadata(&state))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = home;
+        false
+    }
+}
+
+/// R6: the resident viewer's token, `state/view-token`, when it is a regular file only its owner
+/// may read, on a filesystem that enforces that (keyfile's check), and exactly 32 lower-case hex
+/// characters. Anything else is none, and every request is refused.
+fn file_token(home: &Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        // No link is followed, and a FIFO planted there does not stall the request.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(home.join("state").join("view-token"))
+            .ok()?;
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() || meta.mode() & 0o077 != 0 || !crate::keyfile::private_fs(&file) {
+            return None;
+        }
+        let mut text = String::new();
+        file.take(33).read_to_string(&mut text).ok()?;
+        (text.len() == 32 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+            .then_some(text)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = home;
+        None
+    }
+}
+
+/// R6: at the resident viewer's start, under its lock, a new token file when the file is not as
+/// `file_token` takes it (missing, or another shape, or readable by others): staged with mode
+/// 0600, synced, renamed over the old one, and its folder synced.
+fn ensure_token(home: &Path) -> Result<()> {
+    if file_token(home).is_some() {
+        return Ok(());
+    }
+    let state = home.join("state");
+    let staged = state.join("view-token.tmp");
+    // Made anew, so it has this mode and is no link planted before.
+    clear(&staged)?;
+    let mut file = std::fs::OpenOptions::new();
+    file.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut file, 0o600);
+    let mut file = file.open(&staged)?;
+    // The umask takes bits from the mode asked for, the owner's own read among them.
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    file.write_all(new_token()?.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&staged, state.join("view-token"))?;
+    std::fs::File::open(&state)?.sync_all()?;
     Ok(())
 }
 
@@ -202,11 +425,7 @@ fn send(stream: &mut TcpStream, out: &[u8], within: Duration) -> bool {
 /// address, so that the token goes on no command line, where the machine's other users could
 /// read it while the opener runs (#269).
 fn opener_page(home: &Path, port: u16, url: &str) -> std::io::Result<PathBuf> {
-    // One per port: another viewer of this home neither replaces nor removes it.
-    let page = opener_dir(home).join(format!("view-open-{port}.html"));
-    // Absolute: the opener, and a browser already running, resolve a relative path in their own
-    // working directory.
-    let page = std::path::absolute(&page).unwrap_or(page);
+    let page = opener_path(home, port);
     // Made anew, so it has this mode and is no link planted before.
     let _ = std::fs::remove_file(&page);
     let mut file = std::fs::OpenOptions::new();
@@ -221,6 +440,14 @@ fn opener_page(home: &Path, port: u16, url: &str) -> std::io::Result<PathBuf> {
         .as_bytes(),
     )?;
     Ok(page)
+}
+
+/// The page for `port`: one per port, so another viewer of this home neither replaces nor removes
+/// it. Absolute: the opener, and a browser already running, resolve a relative path in their own
+/// working directory.
+fn opener_path(home: &Path, port: u16) -> PathBuf {
+    let page = opener_dir(home).join(format!("view-open-{port}.html"));
+    std::path::absolute(&page).unwrap_or(page)
 }
 
 /// Where the page goes: the home, where the page's mode keeps it the user's own. A Windows file
@@ -450,18 +677,29 @@ impl Viewer {
         })
     }
 
+    /// A token is 32 characters, so an empty or absent header never passes (R6).
     fn token_ok(&self, given: Option<&str>) -> bool {
-        Sha256::digest(given.unwrap_or("").as_bytes()) == Sha256::digest(self.token.as_bytes())
+        let want = match &self.token {
+            Token::Run(t) => Some(t.clone()),
+            Token::File => file_token(&self.home),
+        };
+        want.is_some_and(|w| {
+            Sha256::digest(given.unwrap_or("").as_bytes()) == Sha256::digest(w.as_bytes())
+        })
     }
 
     /// A request brought the token, on any path and whatever it asks: the browser has it, and
     /// the page `--open` took it there through has done its work.
+    /// The resident viewer removes its port's page by name: `oboete view --open` wrote it (R7).
     fn token_arrived(&self) {
-        let page = self
-            .opener
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        let page = match self.token {
+            Token::File => Some(opener_path(&self.home, self.port)),
+            Token::Run(_) => self
+                .opener
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        };
         if let Some(page) = page {
             let _ = std::fs::remove_file(page);
         }
@@ -522,12 +760,15 @@ impl Viewer {
 
     /// The label and branch of the checkout the viewer was started in, read per request as
     /// `oboete exclude` labels it (through capture's gate), so an exclusion added while the viewer
-    /// runs applies to its next search (D11).
-    fn checkout(&self) -> Result<(String, String)> {
+    /// runs applies to its next search (D11); none for the resident viewer (R8).
+    fn checkout(&self) -> Result<Option<(String, String)>> {
+        let Some(cwd) = &self.cwd else {
+            return Ok(None);
+        };
         let settings = crate::capture::Settings::load(&self.home)?;
-        let cwd = self.cwd.to_string_lossy();
+        let cwd = cwd.to_string_lossy();
         let (_, repo, branch) = crate::capture::checkout(&json!({ "cwd": cwd }), &settings);
-        Ok((repo, branch.unwrap_or_default()))
+        Ok(Some((repo, branch.unwrap_or_default())))
     }
 
     /// Every route reads raw.db and knowledge.db (milestone 4 D11), never the old oboete.db;
@@ -541,7 +782,11 @@ impl Viewer {
                     Ok(query) => query,
                     Err(bad) => return Ok(bad),
                 };
-                query.caller = Some(self.checkout()?.0);
+                match self.checkout()? {
+                    Some((repo, _)) => query.caller = Some(repo),
+                    // No checkout (R8): every repository, as a search of all of them.
+                    None => query.all |= query.repo.is_none(),
+                }
                 let answer = search::b::query(&self.home, &query)?;
                 let (vector, why) = match answer.vector {
                     search::b::Vector::Used => (json!("used"), None),
@@ -569,7 +814,7 @@ impl Viewer {
                 let repo = match (all, arg("repo")) {
                     (true, _) => None,
                     (false, Some(r)) => Some(r.to_owned()),
-                    (false, None) => Some(self.checkout()?.0),
+                    (false, None) => self.checkout()?.map(|(repo, _)| repo),
                 };
                 let items = search::b::timeline(&self.home, repo.as_deref(), None, before, limit)?;
                 // The next page starts after the last entry's time and key (never an anchor,
@@ -587,7 +832,7 @@ impl Viewer {
             // Its text is SessionStart's, which `hook::start_text_read` gated itself.
             "context" => return Ok(Response::json(&self.context(arg("repo"))?)),
             "repos" => {
-                let (current, branch) = self.checkout()?;
+                let (current, branch) = self.checkout()?.unwrap_or_default();
                 json!({ "current": current, "branch": branch, "repos": repos(&self.home)? })
             }
             "version" => json!({ "v": version(&self.home)? }),
@@ -603,7 +848,15 @@ impl Viewer {
     fn context(&self, repo: Option<&str>) -> Result<Value> {
         let on = crate::config::inject(&self.home).is_ok_and(|i| i.session_start);
         let (repo, branch) = match repo {
-            None => self.checkout()?,
+            None => match self.checkout()? {
+                Some(own) => own,
+                // No checkout (R8): the page asks for a repository.
+                None => {
+                    return Ok(json!({
+                        "repo": "", "branch": "", "on": on, "chars": 0, "text": "", "choose": true,
+                    }));
+                }
+            },
             Some(r) => (r.to_owned(), newest_branch(&self.home, r)?),
         };
         let manifest = if crate::raw::exists(&self.home) {
@@ -917,9 +1170,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let v = Viewer {
             home: dir.clone(),
-            cwd: dir.clone(),
+            cwd: Some(dir.clone()),
             port: 4321,
-            token: "t0k".into(),
+            token: Token::Run("t0k".into()),
             saving: Mutex::new(()),
             opener: Mutex::new(None),
             live: AtomicUsize::new(0),
@@ -1020,9 +1273,9 @@ mod tests {
         }
         let v = Viewer {
             home: s.home.path().to_owned(),
-            cwd: dir,
+            cwd: Some(dir),
             port: 4321,
-            token: "t0k".into(),
+            token: Token::Run("t0k".into()),
             saving: Mutex::new(()),
             opener: Mutex::new(None),
             live: AtomicUsize::new(0),
@@ -1531,7 +1784,7 @@ mod tests {
             ),
             (Some(R), Some("main"), Some(true))
         );
-        let shown = crate::hook::inject_text(&v.home, &v.cwd, None);
+        let shown = crate::hook::inject_text(&v.home, v.cwd.as_deref().unwrap(), None);
         assert!(shown.contains("Parser errors go to stderr"), "{shown}");
         assert_eq!(ctx["text"], shown);
         assert_eq!(ctx["chars"], shown.chars().count());
@@ -2378,6 +2631,375 @@ mod tests {
         assert_eq!(got.len(), 64 << 20);
         assert!(writer.join().unwrap());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A resident viewer of `home` on `port` (docs/resident.md R8): no checkout, the token in its
+    /// file.
+    fn resident_of(home: &Path, port: u16) -> Viewer {
+        Viewer {
+            home: home.to_owned(),
+            cwd: None,
+            port,
+            token: Token::File,
+            saving: Mutex::new(()),
+            opener: Mutex::new(None),
+            live: AtomicUsize::new(0),
+        }
+    }
+
+    /// A port nothing listens on now.
+    fn free_port() -> u16 {
+        TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    /// A home whose config.toml names `port` as the resident viewer's.
+    fn resident_home(port: u16) -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!("[view]\nport = {port}\n"),
+        )
+        .unwrap();
+        home
+    }
+
+    fn view_outcome(home: &Path) -> String {
+        std::fs::read_to_string(home.join("state/view-outcome")).unwrap()
+    }
+
+    /// Resident test 4 (R6): the token is the file's, read for each request, and the file is 0600
+    /// when made. A file readable by group or others, one on a filesystem that does not enforce
+    /// modes, a missing, an empty, a 31-character and an upper-case file each refuse every
+    /// request, with and without a token header.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_viewers_token_is_its_files_and_any_other_file_refuses_every_request() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        ensure_token(p).unwrap();
+        let file = p.join("state/view-token");
+        let mode = |m| std::fs::set_permissions(&file, std::fs::Permissions::from_mode(m)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let token = std::fs::read_to_string(&file).unwrap();
+        let v = resident_of(p, 4321);
+        let status = |given: Option<&str>| {
+            let mut h = vec![HOST];
+            h.extend(given.map(|t| ("X-Oboete-Token", t)));
+            v.route("GET", "/api/repos", &h).status
+        };
+        assert_eq!(status(Some(&token)), 200);
+        for given in [None, Some(""), Some("t0k")] {
+            assert_eq!(status(given), 401, "{given:?}");
+        }
+        for m in [0o640, 0o604] {
+            mode(m);
+            assert_eq!((status(Some(&token)), status(None)), (401, 401), "{m:o}");
+        }
+        mode(0o600);
+        assert_eq!(status(Some(&token)), 200);
+        crate::keyfile::fake_fs(Some(0x6969));
+        let nfs = status(Some(&token));
+        crate::keyfile::fake_fs(None);
+        assert_eq!(nfs, 401);
+        let upper = token.to_uppercase();
+        for text in ["", &token[..31], upper.as_str()] {
+            std::fs::write(&file, text).unwrap();
+            for given in [Some(token.as_str()), Some(text), None] {
+                assert_eq!(status(given), 401, "{text:?} {given:?}");
+            }
+        }
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!((status(Some(&token)), status(None)), (401, 401));
+    }
+
+    /// R6: a start keeps a token file of its shape, so a bookmark outlives a restart, and replaces
+    /// one that is not (a token others could read is a new one).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_start_keeps_a_good_token_file_and_replaces_any_other() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        let file = p.join("state/view-token");
+        let read = || std::fs::read_to_string(&file).unwrap();
+        ensure_token(p).unwrap();
+        let first = read();
+        assert!(first.len() == 32 && first.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(first, first.to_lowercase());
+        ensure_token(p).unwrap();
+        assert_eq!(read(), first);
+        std::fs::write(&file, "x").unwrap();
+        ensure_token(p).unwrap();
+        let second = read();
+        assert!(second.len() == 32 && second != first);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        ensure_token(p).unwrap();
+        assert_ne!(read(), second);
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!p.join("state/view-token.tmp").exists());
+    }
+
+    /// Resident tests 3 and 5 (R5): the viewer takes its lock, binds the configured port, says
+    /// `listening <port>`, and answers there with the file's token; a second start finds the lock
+    /// held and writes nothing; after a restart the same token works. Another home's viewer on
+    /// the same port says the port is in use and serves nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_viewer_listens_on_its_port_and_says_so() {
+        let port = free_port();
+        let home = resident_home(port);
+        let p = home.path();
+        let started = listen(p).unwrap().unwrap();
+        assert_eq!(view_outcome(p), format!("listening {port}"));
+        std::fs::write(p.join("state/view-outcome"), "mark").unwrap();
+        assert!(listen(p).unwrap().is_none());
+        assert_eq!(view_outcome(p), "mark");
+        let token = std::fs::read_to_string(p.join("state/view-token")).unwrap();
+        let Resident {
+            lock,
+            listener,
+            viewer,
+        } = started;
+        let server = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            viewer.serve(s);
+            listener
+        });
+        let answer = ask(
+            port,
+            format!(
+                "GET /api/repos HTTP/1.1\r\nHost: localhost:{port}\r\nX-Oboete-Token: {token}\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        let listener = server.join().unwrap();
+        assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+        let other = resident_home(port);
+        assert!(listen(other.path()).unwrap().is_none());
+        assert_eq!(view_outcome(other.path()), "port in use");
+        assert!(!other.path().join("state/view-token.tmp").exists());
+        drop((lock, listener));
+        let again = listen(p).unwrap().unwrap();
+        assert_eq!(view_outcome(p), format!("listening {port}"));
+        assert_eq!(
+            std::fs::read_to_string(p.join("state/view-token")).unwrap(),
+            token
+        );
+        drop(again);
+    }
+
+    /// Resident test 6 (R6): on a filesystem that does not enforce modes no resident viewer
+    /// starts: no token file, no listener, and the outcome says why.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn no_resident_viewer_starts_where_files_cannot_be_the_owners_alone() {
+        let port = free_port();
+        let home = resident_home(port);
+        let p = home.path();
+        crate::keyfile::fake_fs(Some(0x6969));
+        let started = listen(p);
+        crate::keyfile::fake_fs(None);
+        assert!(started.unwrap().is_none());
+        assert!(!p.join("state/view-token").exists());
+        assert_eq!(view_outcome(p), NOT_PRIVATE);
+        TcpListener::bind(("127.0.0.1", port)).unwrap();
+    }
+
+    /// CodeRabbit on #376 (R6): a `state` folder another user could write into is made the owner's
+    /// alone first, as the stores make the home; one that is a link is refused, and nothing is
+    /// written through it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_viewer_keeps_its_state_to_its_owner_and_follows_no_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = resident_home(free_port());
+        let p = home.path();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        let mode = |q: &Path| std::fs::metadata(q).unwrap().permissions().mode() & 0o777;
+        std::fs::set_permissions(p.join("state"), std::fs::Permissions::from_mode(0o777)).unwrap();
+        // A link planted while another user could write there is not written through (Codex on
+        // #376).
+        let theirs = tempfile::tempdir().unwrap();
+        let victim = theirs.path().join("victim");
+        std::fs::write(&victim, "theirs").unwrap();
+        std::os::unix::fs::symlink(&victim, p.join("state/view-outcome.next")).unwrap();
+        // Nor is a FIFO planted as the lock waited on (Codex on #376): it is replaced.
+        let fifo = std::ffi::CString::new(p.join("state/view.lock").to_str().unwrap()).unwrap();
+        // SAFETY: a valid, NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let started = listen(p).unwrap();
+        assert!(started.is_some());
+        assert!(
+            std::fs::symlink_metadata(p.join("state/view.lock"))
+                .unwrap()
+                .is_file()
+        );
+        // Nor do folders planted at the fixed names stop the start (Codex on #376).
+        let folders = resident_home(free_port());
+        let f = folders.path();
+        for name in ["view.lock", "view-outcome.next", "view-token.tmp"] {
+            std::fs::create_dir_all(f.join("state").join(name).join("inner")).unwrap();
+        }
+        assert!(listen(f).unwrap().is_some());
+        assert!(
+            std::fs::symlink_metadata(f.join("state/view.lock"))
+                .unwrap()
+                .is_file()
+        );
+        assert_eq!(mode(&p.join("state")), 0o700);
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "theirs");
+        // Nothing goes through a link, not even a change of the mode of what it points to.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let mode_of = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(elsewhere.path(), mode_of).unwrap();
+        let other = resident_home(free_port());
+        std::os::unix::fs::symlink(elsewhere.path(), other.path().join("state")).unwrap();
+        assert!(listen(other.path()).unwrap().is_none());
+        assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+        assert_eq!(mode(elsewhere.path()), 0o755);
+    }
+
+    /// Codex on #376: a lock made under a umask that took the owner's write away is given it
+    /// back and kept, not replaced, as a viewer may hold it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_held_lock_the_owner_cannot_write_is_kept() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let home = tempfile::tempdir().unwrap();
+        let state = home.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let held = std::fs::File::create(state.join("view.lock")).unwrap();
+        held.try_lock().unwrap();
+        let mode = std::fs::Permissions::from_mode(0o466);
+        std::fs::set_permissions(state.join("view.lock"), mode).unwrap();
+        let again = view_lock(&state).unwrap();
+        assert_eq!(
+            again.metadata().unwrap().ino(),
+            held.metadata().unwrap().ino()
+        );
+        assert!(matches!(
+            again.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+    }
+
+    /// Resident test 7: the Host check holds to the configured port.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_viewers_host_is_its_ports() {
+        let home = tempfile::tempdir().unwrap();
+        let v = resident_of(home.path(), 17373);
+        for (host, want) in [
+            ("127.0.0.1:17373", 200),
+            ("localhost:17373", 200),
+            ("127.0.0.1:17374", 403),
+            ("localhost", 403),
+            ("evil.example:17373", 403),
+        ] {
+            assert_eq!(
+                v.route("GET", "/", &[("Host", host)]).status,
+                want,
+                "{host}"
+            );
+        }
+    }
+
+    /// Resident test 3 (R7): the first request with the token removes the opener page of the
+    /// viewer's port, which `oboete view --open` wrote; another port's stays.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_viewer_removes_its_ports_opener_page_once_the_token_arrives() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        ensure_token(p).unwrap();
+        let token = std::fs::read_to_string(p.join("state/view-token")).unwrap();
+        let v = resident_of(p, 4321);
+        let page = opener_page(p, 4321, "http://127.0.0.1:4321/").unwrap();
+        let other = opener_page(p, 4322, "http://127.0.0.1:4322/").unwrap();
+        assert_eq!(v.route("GET", "/api/repos", &[HOST]).status, 401);
+        assert!(page.exists());
+        let with = [HOST, ("X-Oboete-Token", token.as_str())];
+        assert_eq!(v.route("GET", "/api/repos", &with).status, 200);
+        assert!(!page.exists() && other.exists());
+    }
+
+    /// Resident test 8 (R8): with no checkout, `/api/repos` names none, the timeline and a search
+    /// cover every repository, and `/api/context` with no repository asks for one.
+    #[test]
+    fn a_resident_viewer_has_no_checkout_and_every_repository_is_its_scope() {
+        let (mut s, foreground, x) = seeded();
+        let other = s.decided(
+            "github.com/o/q",
+            1_700_400_000_000,
+            "Parser output goes to a log file.",
+            &[],
+        );
+        s.run();
+        let v = Viewer {
+            token: Token::Run("t0k".into()),
+            ..resident_of(s.home.path(), 4321)
+        };
+        let repos = get(&v, "/api/repos");
+        assert_eq!(
+            (&repos["current"], &repos["branch"]),
+            (&json!(""), &json!(""))
+        );
+        let has = |answer: &Value, field: &str, key: &str| {
+            answer[field]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["key"] == key)
+        };
+        let timeline = get(&v, "/api/timeline");
+        assert!(has(&timeline, "items", &other) && has(&timeline, "items", &x.current));
+        assert!(!has(&get(&foreground, "/api/timeline"), "items", &other));
+        let found = get(&v, "/api/search?q=parser&raw=off");
+        assert!(has(&found, "hits", &other) && has(&found, "hits", &x.current));
+        let context = get(&v, "/api/context");
+        assert_eq!(context["choose"], true);
+        assert_eq!(
+            (&context["text"], &context["repo"]),
+            (&json!(""), &json!(""))
+        );
+        let chosen = get(&v, &format!("/api/context?repo={R}"));
+        assert_eq!(chosen["repo"], R);
+        assert!(chosen.get("choose").is_none());
+    }
+
+    /// R8 with row 30-2: a search of every repository, which a viewer with no checkout makes when
+    /// it is given none, keeps its text from the embedder while a repository is excluded.
+    #[test]
+    fn a_resident_viewers_search_of_every_repository_keeps_its_text_from_the_embedder() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        crate::embed_phase::fixture::config(&s, &stub);
+        s.said("s", R, 1_000, "Open words.");
+        s.run();
+        crate::embed_phase::fixture::embed_all(&s);
+        s.raw.exclude("github.com/o/secret", false).unwrap();
+        let sent = stub.requests();
+        let v = Viewer {
+            token: Token::Run("t0k".into()),
+            ..resident_of(s.home.path(), 4321)
+        };
+        let found = get(&v, "/api/search?q=Open+words");
+        assert_eq!(found["vector"], "excluded", "{found}");
+        assert_eq!(stub.requests(), sent);
     }
 
     #[test]

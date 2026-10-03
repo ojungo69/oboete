@@ -997,6 +997,40 @@ pub fn worker(home: &Path) -> Result<Worker> {
     }
 }
 
+/// `[view]` (docs/resident.md R5): the port of the viewer a resident home keeps up, one address a
+/// bookmark can name (never 0, any port).
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct View {
+    pub port: std::num::NonZeroU16,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            port: std::num::NonZeroU16::new(17373).unwrap(),
+        }
+    }
+}
+
+/// `home`'s `[view]`, by its own parse as `worker`'s.
+pub fn view(home: &Path) -> Result<View> {
+    #[derive(Deserialize)]
+    struct File {
+        #[serde(default)]
+        view: View,
+    }
+    let path = home.join("config.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(toml::from_str::<File>(&text)
+            .map_err(|e| toml_error(&text, &e))
+            .with_context(|| format!("parse {}", path.display()))?
+            .view),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(View::default()),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
 /// `[redaction]` (spec 1.5, 6.4): rules the user adds to the built-in ones, which cannot be
 /// removed, and false positives to keep, each the SHA-256 (hex) of one exact value.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1084,6 +1118,8 @@ pub struct CaptureConfig {
     _inject: serde::de::IgnoredAny,
     #[serde(default, rename = "worker")]
     _worker: serde::de::IgnoredAny,
+    #[serde(default, rename = "view")]
+    _view: serde::de::IgnoredAny,
 }
 
 pub fn load_capture(home: &Path) -> Result<CaptureConfig> {
@@ -1187,6 +1223,8 @@ session_start = false
 off = ["codex"]
 [worker]
 resident = true
+[view]
+port = 17374
 "#;
         let c: Config = toml::from_str(text).unwrap();
         assert_eq!(c.paid_usd_per_month, 2.5);
@@ -1725,6 +1763,29 @@ model = { gone = "m" }
         }
         let set = parse_inject("[inject]\nper_prompt = true\ncorrection = false\n").unwrap();
         assert!(set.per_prompt && !set.correction);
+    }
+
+    /// `[view]` (docs/resident.md R5): the resident viewer's port, 17373 where the table names
+    /// none. Port 0 (any port, which no bookmark can name) and a mistake in the table are errors.
+    #[test]
+    fn the_resident_viewers_port_is_its_tables_or_17373() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |text: &str| {
+            std::fs::write(dir.path().join("config.toml"), text).unwrap();
+            view(dir.path())
+        };
+        let port = |v: Result<View>| v.unwrap().port.get();
+        assert_eq!(port(view(dir.path())), 17373, "no file");
+        assert_eq!(port(at("[worker]\nresident = true\n")), 17373);
+        assert_eq!(port(at("[view]\nport = 17374\n")), 17374);
+        for bad in [
+            "[view]\nport = 0\n",
+            "[view]\nport = 65536\n",
+            "[view]\nport = \"17374\"\n",
+            "[view]\nprot = 17374\n",
+        ] {
+            assert!(at(bad).is_err(), "{bad}");
+        }
     }
 
     /// `[worker]` (docs/resident.md R2): resident only where the table says so. A mistake in the
