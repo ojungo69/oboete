@@ -449,27 +449,44 @@ fn file_notes(home: &Path, payload: &Value) -> Result<Option<String>> {
         }
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let cards = crate::cards::by_file(&k, &store, &repo, &names, 40, &settings.rules)?;
-        // F5: once a session, again only for a card the last note did not consider.
-        let ids: Vec<String> = cards.iter().map(|f| f.card.id(store.device())).collect();
-        let flag: String = sha2::Sha256::digest(names[0].as_bytes())[..8]
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        let flag = format!("file-{flag}");
-        let seen = crate::hookstate::value(home, "claude", session, &flag).unwrap_or_default();
-        if ids.iter().all(|id| seen.lines().any(|l| l == id)) {
-            continue;
-        }
         let now = db::now_ms();
         let Some(note) =
             crate::cards::file_note(&cards, mtime, store.device(), now, &chrono::Local)
         else {
             continue;
         };
-        crate::hookstate::update(home, "claude", session, &flag, |_| Some(ids.join("\n")))?;
-        notes.push(note);
+        // Claude Code shows a context over 10,000 characters only as a preview: a note that would
+        // take the answer past 9,500 UTF-16 units waits, unclaimed, for a later read (CodeRabbit
+        // on #388).
+        let mut with = notes.clone();
+        with.push(note.clone());
+        if file_notes_fenced(&with).encode_utf16().count() > 9_500 {
+            continue;
+        }
+        // F5: once a session, again only for a card the last note did not consider. The check
+        // and the claim are one step under the session's lock, so parallel reads of one file
+        // give one note (Codex and CodeRabbit on #388).
+        let ids: Vec<String> = cards.iter().map(|f| f.card.id(store.device())).collect();
+        let flag: String = sha2::Sha256::digest(names[0].as_bytes())[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let mut fresh = false;
+        crate::hookstate::update(home, "claude", session, &format!("file-{flag}"), |seen| {
+            let seen = seen.unwrap_or_default();
+            fresh = !ids.iter().all(|id| seen.lines().any(|l| l == id));
+            Some(if fresh { ids.join("\n") } else { seen })
+        })?;
+        if fresh {
+            notes.push(note);
+        }
     }
-    Ok((!notes.is_empty()).then(|| crate::manifest::fence(FILE_NOTE, &notes.join("\n\n---\n\n"))))
+    Ok((!notes.is_empty()).then(|| file_notes_fenced(&notes)))
+}
+
+/// The notes on a read's files as its answer gives them: in the memory fence, each after a rule.
+fn file_notes_fenced(notes: &[String]) -> String {
+    crate::manifest::fence(FILE_NOTE, &notes.join("\n\n---\n\n"))
 }
 
 fn injection(agent: &str, event: &str, text: &str) -> Value {
@@ -2305,10 +2322,15 @@ mod tests {
 
         /// One window of session `s1` on day `day` whose cards are `cards`, curated: their IDs.
         fn cards(&mut self, day: i64, cards: Value) -> Vec<String> {
+            self.cards_of("s1", day * 86_400_000, cards)
+        }
+
+        /// One window of `session` at `ts` whose cards are `cards`, curated: their IDs.
+        fn cards_of(&mut self, session: &str, ts: i64, cards: Value) -> Vec<String> {
             let repo = self.repo.clone();
             let seq = self
                 .s
-                .event("tool", "s1", (&repo, "main"), day * 86_400_000, json!({}));
+                .event("tool", session, (&repo, "main"), ts, json!({}));
             let ids = self.s.cards(seq, seq, cards, false);
             self.s.run();
             ids
@@ -2405,6 +2427,79 @@ mod tests {
         r.cards(3, json!([Reads::card("A newer card", &["src/a.rs"])]));
         assert!(r.read("s9", "src/a.rs").contains("A newer card"));
         assert_eq!(r.read("s9", "src/a.rs"), "");
+    }
+
+    /// X5 F5: parallel reads of one file in one session give one note: the check and the claim
+    /// are one step (Codex and CodeRabbit on #388).
+    #[test]
+    fn parallel_reads_of_one_file_give_one_note() {
+        let mut r = Reads::new();
+        r.cards(2, json!([Reads::card("T", &["src/a.rs"])]));
+        let home = r.s.home.path().to_path_buf();
+        for round in 0..20 {
+            let payload = json!({"session_id": format!("p{round}"), "cwd": r.c,
+                "tool_name": "Read", "tool_input": {"file_path": format!("{}/src/a.rs", r.c)}});
+            let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let answers: Vec<String> = (0..2)
+                .map(|_| {
+                    let (home, payload, start) = (home.clone(), payload.clone(), start.clone());
+                    std::thread::spawn(move || {
+                        start.wait();
+                        hook(&home, "claude", "PreToolUse", &payload)
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|t| t.join().unwrap())
+                .collect();
+            assert_eq!(
+                answers.iter().filter(|a| !a.is_empty()).count(),
+                1,
+                "{round}"
+            );
+        }
+    }
+
+    /// X5: the answer stays within 9,500 UTF-16 units, Claude Code's 10,000-character context
+    /// with room to spare; a note left out is not counted as shown, and a later read gets it
+    /// (CodeRabbit on #388).
+    #[test]
+    fn notes_past_the_context_limit_wait_for_a_later_read() {
+        let mut r = Reads::new();
+        let files = ["src/a.rs", "src/b.rs", "src/c.rs", "src/d.rs"];
+        for f in &files[1..] {
+            let path = format!("{}/{f}", r.c);
+            std::fs::write(&path, "x".repeat(2_000)).unwrap();
+            let old = std::time::UNIX_EPOCH + Duration::from_secs(86_400);
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(old).unwrap();
+        }
+        for i in 0..15 {
+            let title = format!("{i:02} {}", "y".repeat(150));
+            r.cards_of(
+                &format!("s{i}"),
+                2 * 86_400_000 + i,
+                json!([Reads::card(&title, &files)]),
+            );
+        }
+        let paths: Vec<String> = files.iter().map(|f| format!("{}/{f}", r.c)).collect();
+        let answer = r.answer("s9", json!({"filePaths": paths}), json!({}));
+        let v: Value = serde_json::from_str(&answer).unwrap();
+        let context = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.encode_utf16().count() <= 9_500, "{}", context.len());
+        let shown = context.matches("This file has prior observations").count();
+        assert!((1..4).contains(&shown), "{shown}");
+        let later: usize = files
+            .iter()
+            .map(|f| {
+                r.read("s9", f)
+                    .matches("This file has prior observations")
+                    .count()
+            })
+            .sum();
+        assert_eq!(later, 4 - shown);
     }
 
     /// X5 F7: a title cannot close the fence.
