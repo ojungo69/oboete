@@ -10,7 +10,9 @@ Owner, 2026-10-03: the settings page is complete at the switch (「設定画面�
 sync and the cloud come after it. So every row below is built before the switch, except those of
 "Sync and devices", which follow milestone 6, and the updater, which milestone 7 builds (7.3); until
 then the page shows the installed version and says the update is not built, as spec-webui.md asks
-of a feature not built yet.
+of a feature not built yet. The switch is on the owner's WSL machine, so "at the switch" is read as
+"on Linux": where a row's other release targets wait for #281 (macOS and Windows), they are a row of
+their own that #94 waits for after the switch, not a reason to hold the switch.
 
 ## The matrix
 
@@ -26,7 +28,8 @@ left with "—" there.
 | Setting or operation | Spec | Now | Backend | Takes effect | OS | Test | Slice |
 |---|---|---|---|---|---|---|---|
 | A provider's order, on/off, daily budget, timeout, model | 1.4, 1.5 | page | `[chain]` | the next window | all | `settings.rs` `a_save_writes_only_what_changes`, `a_refused_save_leaves_the_file`, `a_model_the_entry_cannot_price_is_refused`; `view.rs` `a_settings_save_passes_every_guard_first` | built |
-| A provider's key, write-only | 6.6 | page | `save_key` | the next call | Linux; macOS and Windows with #281 | `settings.rs` `a_key_saved_from_the_page_reaches_its_file_and_no_answer`, `no_key_is_shown_or_taken`, `a_key_save_waits_for_owner_only_files_off_linux`; `view.rs` `a_key_save_answers_without_the_key` | built |
+| A provider's key, write-only | 6.6 | page | `save_key` | the next call | Linux | `settings.rs` `a_key_saved_from_the_page_reaches_its_file_and_no_answer`, `no_key_is_shown_or_taken`; `view.rs` `a_key_save_answers_without_the_key` | built |
+| A provider's key on macOS and Windows, in owner-only storage there | 6.6, spec-webui | refused (`a_key_save_waits_for_owner_only_files_off_linux`) | `save_key` | the next call | macOS, Windows | — | #281, after the switch, before #94 closes |
 | Add, edit and remove a provider entry of a supported type | 1.4 | — | `[[providers]]` | the next window | all | — | W2 |
 | Test a provider's connection, separately from a save | spec-webui | — | a typed probe | at once, nothing saved | all | — | W2 |
 | Curation on or off | 3.1, 7.4 | — | `[summary] curate` | the next window | all | — | W1 |
@@ -44,7 +47,7 @@ left with "—" there.
 | Prompt storage, tool output detail | 2.3, 2.4 | page | `[capture]` | the next record | all | `settings.rs` `a_save_writes_only_what_changes`, `a_refused_save_leaves_the_file` | built |
 | Exclude a repository from curation and embedding, and take it back | 5.5 | — | `oboete exclude` | the next window | all | — | W3 |
 | Stop recording a repository or folder | 1.5, 6.1, parity 14 | — | capture exclusion (M5 slice 4) | the next record | all | — | W3 after M5 slice 4 |
-| Additional redaction rules and allowed exceptions | 2.2, 6.4 | — | `[redaction]` | the next record and the next send | all | — | W3 |
+| Additional redaction rules and allowed exceptions | 2.2, 6.4 | — | `[redaction]` | the next record and the next send; a rule added rescans what is stored, its hits becoming range tombstones (2.2), with the rescan's state on the page | all | — | W3 |
 | Raw retention | 6.2 | — | retention (M5 slice 3) | the next retention pass | all | — | W3 after M5 slice 3 |
 | Backup location | 2.6 | — | `[backup] dir` | the next backup | all | — | W3 |
 | Correct, mute, unmute a claim | 3.4, 6.1 | — | `oboete correct`, `mute` | at once | all | — | W3 |
@@ -56,6 +59,7 @@ left with "—" there.
 | Setting or operation | Spec | Now | Backend | Takes effect | OS | Test | Slice |
 |---|---|---|---|---|---|---|---|
 | Embeddings: none, local or Workers AI, with caps | 4.10, 7.1 | — | `[embedding]` | the next window; a new space builds a new generation | all | — | W4 |
+| Workers AI's account id and token, the token write-only with its registration state | 4.10, 6.6, spec-webui | — | `[embedding] account_id`, `key_file`; `save_key` for the embedder's entry | the next embedding call | as the key rows | — | W4 |
 | The local model: source and size before the download, progress, readiness | spec-webui | — | local embedder (parity 5) | once downloaded and checked | all | — | W4 after the local embedder |
 | Index generations: building, active, rebuild after a change | 4.10 | — | `vec_generation` | when the generation is complete | all | — | W4 |
 
@@ -93,10 +97,12 @@ cloud starts from a page view or a save.
   test that names its destination, sends a small synthetic request and says what it may cost first.
   Security scope: endpoint and key handling follow the provider safety rules (`provider.rs`).
 - **W3, privacy and claims.** The terminal line at session start, exclusions, redaction rules and
-  exceptions (validated as config.toml's are), the backup location, correct, mute and unmute, the
-  global preference; then capture exclusion and retention as M5 builds them.
-- **W4, embeddings.** The embedder's choice and caps, the local model's download with its consent and
-  progress, and the generations' state; after the local embedder (parity 5).
+  exceptions (validated as config.toml's are, with the rescan an added rule starts and its state),
+  the backup location, correct, mute and unmute, the global preference; then capture exclusion and
+  retention as M5 builds them.
+- **W4, embeddings.** The embedder's choice and caps, Workers AI's account id and write-only token, the
+  local model's download with its consent and progress, and the generations' state; after the local
+  embedder (parity 5).
 - **W5, import and maintenance.** The imports with their previews, recurate with its estimate,
   rebuild and restore with their confirmations and progress; the updater's row shown as not built
   until milestone 7 builds it.
