@@ -1368,9 +1368,15 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
     let Some((raw, k)) = stores(home)? else {
         return Ok(None);
     };
+    let rules = redact::Rules::load(home)?;
+    // A session summary by the ID session start shows it under (docs/summaries.md S10): `S` and
+    // its op seq, a letter no uid, record key or imported uid starts with.
+    if let Some(s) = crate::turns::get(&k, &raw, id, &rules)? {
+        return Ok(Some(summary_text(&s, raw.device())));
+    }
     // A card by the ID session start shows it under (docs/cards.md S6): `<op seq>.<n>`, a dot
     // that no uid, record key or imported uid has.
-    if let Some(c) = crate::cards::get(&k, &raw, id, &redact::Rules::load(home)?)? {
+    if let Some(c) = crate::cards::get(&k, &raw, id, &rules)? {
         return Ok(Some(card_text(&c, raw.device())));
     }
     Ok(match named(&raw, &k, id)? {
@@ -1430,6 +1436,34 @@ fn card_text(c: &crate::cards::Card, local: &str) -> String {
     ] {
         if !list.is_empty() {
             out.push_str(&format!("{name}: {}\n", list.join(", ")));
+        }
+    }
+    out
+}
+
+/// A session summary in full, as its reader gave it (gated, T8): its ID, time and repository,
+/// its request, then claude-mem's other fields, each only when it has something.
+fn summary_text(s: &crate::turns::TurnSummary, local: &str) -> String {
+    let mut out = format!(
+        "{} {} session summary {} ({} session {})\n",
+        s.id(local),
+        crate::db::utc(s.ts),
+        s.repo.as_deref().unwrap_or("no repository"),
+        s.agent,
+        s.session
+    );
+    if let Some(request) = s.fields.get("request") {
+        out.push_str(&format!("{request}\n"));
+    }
+    for (field, label) in [
+        ("investigated", "Investigated"),
+        ("learned", "Learned"),
+        ("completed", "Completed"),
+        ("next_steps", "Next steps"),
+        ("notes", "Notes"),
+    ] {
+        if let Some(text) = s.fields.get(field) {
+            out.push_str(&format!("\n{label}: {text}\n"));
         }
     }
     out
@@ -2822,6 +2856,40 @@ mod tests {
         // The timeline anchors on the ID `get` takes (Codex on #370).
         let k = crate::knowledge::open(home).unwrap();
         assert_eq!(time_of(&s.raw, &k, &id).unwrap(), 1_000);
+    }
+
+    /// docs/summaries.md S10: `get` shows a session summary in full by the ID session start shows
+    /// it under; an ID of no summary gives none.
+    #[test]
+    fn get_shows_a_session_summary_in_full_by_its_id() {
+        let mut s = Store::new();
+        let seq = s.said("s1", R, 1_000, "Fix the parser.");
+        let op = serde_json::json!({"agent": "claude", "session": "s1", "repo": R, "ts": 2_000,
+            "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+            "fields": {"request": "Fix the parser", "investigated": "How it reads.",
+                "learned": "The last line has no newline.", "completed": "It reads to the end.",
+                "next_steps": "Measure it.", "notes": "One note."},
+            "skipped": false});
+        s.raw.append_ops(&[(crate::raw::OpKind::Turn, op)]).unwrap();
+        s.run();
+        let home = s.home.path();
+        let op_seq: i64 = crate::knowledge::open(home)
+            .unwrap()
+            .query_row("SELECT op_seq FROM turns", [], |r| r.get(0))
+            .unwrap();
+        let shown = get(home, &format!("S{op_seq}")).unwrap().unwrap();
+        assert!(shown.starts_with(&format!("S{op_seq} ")));
+        for part in [
+            "\nFix the parser\n",
+            "\nInvestigated: How it reads.\n",
+            "\nLearned: The last line has no newline.\n",
+            "\nCompleted: It reads to the end.\n",
+            "\nNext steps: Measure it.\n",
+            "\nNotes: One note.\n",
+        ] {
+            assert!(shown.contains(part), "{part:?}");
+        }
+        assert_eq!(get(home, &format!("S{}", op_seq + 1)).unwrap(), None);
     }
 
     /// The timeline: claims, imported documents and session starts, newest first, or around an

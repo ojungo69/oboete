@@ -4,7 +4,6 @@
 pub mod cards;
 pub mod claims;
 pub mod compress;
-pub mod digest;
 pub mod fts;
 pub mod gaps;
 pub mod imported;

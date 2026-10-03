@@ -102,7 +102,21 @@ S9. **Fitting.** claude-mem's order: the fields go first, then the rows are halv
 S10. **`get S<op seq>`** shows one summary whole, as `get <op seq>.<n>` shows a card.
 
 S11. **The digest retires.** Its phase stops, session start drops `## Digest of the last session`,
-and its ops stay readable; spec 3.4 and 4.4 are amended with the owner's decisions (#342).
+and its ops stay in the log, unread; the spec's sections that named it (1.1, 1.4, 1.7, 3.4, 4.1,
+4.4, 5.4, 6.2, 6.5) name the cards and session summaries (owner direction 2026-10-03).
+
+## Tests of slice 2 (through `cards::block`, `consumer::manifest::text` and `search::b::get`)
+
+1. The block shows the newest summaries among the cards by their own time, after a card of the
+   same time, `S<op seq>` (another device's with its device), `Session started` without a
+   request, and the legend starts with `🎯session`.
+2. The newest summary's four fields follow the timeline when it is not older than the newest card
+   shown, and not otherwise; `notes` is not shown.
+3. Session start shows the repository's summaries and the newest one's fields in the block.
+4. When the block does not fit: the fields go first, then the summary rows halve, the newest
+   kept, then the cards.
+5. `get S<op seq>` shows a summary in full; an ID of no summary gives none.
+6. The digest is gone from session start, the worker and `oboete rebuild`.
 
 ## Differences from claude-mem
 

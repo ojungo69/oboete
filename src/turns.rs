@@ -63,7 +63,6 @@ pub struct TurnOp {
 }
 
 /// A summary as a reader gets it: shown over no record removed since (T7), gated (T8).
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnSummary {
     pub device: String,
@@ -72,8 +71,23 @@ pub struct TurnSummary {
     pub agent: String,
     pub session: String,
     pub repo: Option<String>,
+    /// Its request on the one line its row at session start shows it on, gated as it was written
+    /// and as that line (docs/summaries.md S7, as a card's row title); empty without one.
+    pub row: String,
     /// The non-empty fields, by name.
     pub fields: BTreeMap<String, String>,
+}
+
+impl TurnSummary {
+    /// Its ID as session start shows it and `get` reads it (S7, S10): `S<op seq>` on `local`, the
+    /// device that reads it, and `S<device>.<op seq>` for another device's.
+    pub fn id(&self, local: &str) -> String {
+        if self.device == local {
+            format!("S{}", self.op_seq)
+        } else {
+            format!("S{}.{}", self.device, self.op_seq)
+        }
+    }
 }
 
 /// What a turn's summary is asked about (T2), and what it rests on (T7).
@@ -602,10 +616,13 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// What a reader reads of a turn op, in `read_row`'s order.
+const COLUMNS: &str = "device, op_seq, ts, agent, session, repo, from_seq, through, read, goals, \
+                       removed, fields";
+
 /// `repo`'s newest summaries, at most `limit`, the newest first: none that is skipped, and none
 /// while a removal its op does not list took from what it rests on (T7); every field gated with
 /// the rules as they are now (T8).
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn recent(
     k: &Connection,
     raw: &Raw,
@@ -616,48 +633,80 @@ pub fn recent(
     if !crate::consumer::manifest::exists(k, "table", "turns")? {
         return Ok(Vec::new());
     }
-    let mut st = k.prepare(
-        "SELECT device, op_seq, ts, agent, session, repo, from_seq, through, read, goals,
-                removed, fields
-         FROM turns WHERE repo = ?1 AND skipped = 0
-         ORDER BY ts DESC, device DESC, op_seq DESC",
-    )?;
+    let mut st = k.prepare(&format!(
+        "SELECT {COLUMNS} FROM turns WHERE repo = ?1 AND skipped = 0
+         ORDER BY ts DESC, device DESC, op_seq DESC"
+    ))?;
     let mut rows = st.query([repo])?;
     let mut out = Vec::new();
     while out.len() < limit
         && let Some(r) = rows.next()?
     {
-        let device: String = r.get(0)?;
-        let json = |i: usize| -> rusqlite::Result<String> { r.get(i) };
-        let read: Vec<(i64, i64)> = serde_json::from_str(&json(8)?).unwrap_or_default();
-        let goals: Vec<i64> = serde_json::from_str(&json(9)?).unwrap_or_default();
-        let listed: Vec<Removal> = serde_json::from_str(&json(10)?).unwrap_or_default();
-        // The turn is its own session's records, as they are stored (before the gate).
-        let (agent, session): (String, String) = (r.get(3)?, r.get(4)?);
-        let mut removed =
-            raw.removed_in_session(&device, (&agent, &session), r.get(6)?, r.get(7)?, None)?;
-        for (a, b) in read {
-            removed.extend(raw.removed_in(&device, a, b, None)?);
-        }
-        for g in goals {
-            removed.extend(raw.removed_in(&device, g, g, None)?);
-        }
-        if removed.iter().any(|x| !listed.contains(x)) {
-            continue;
-        }
-        let gate = |s: String| crate::redact::outbound_with(&s, rules);
-        let fields: BTreeMap<String, String> = serde_json::from_str(&json(11)?).unwrap_or_default();
-        out.push(TurnSummary {
-            device,
-            op_seq: r.get(1)?,
-            ts: r.get(2)?,
-            agent: gate(agent),
-            session: gate(session),
-            repo: r.get::<_, Option<String>>(5)?.map(gate),
-            fields: fields.into_iter().map(|(f, t)| (f, gate(t))).collect(),
-        });
+        out.extend(read_row(r, raw, rules)?);
     }
     Ok(out)
+}
+
+/// The summary an ID names (S10), as `recent` would read it: `S<op seq>` of this device's, or
+/// `S<device>.<op seq>`; none for an ID of no summary, a skip, or one hidden by a removal.
+pub fn get(k: &Connection, raw: &Raw, id: &str, rules: &Rules) -> Result<Option<TurnSummary>> {
+    let Some(rest) = id.trim().strip_prefix('S') else {
+        return Ok(None);
+    };
+    let (device, op_seq) = rest.rsplit_once('.').unwrap_or((raw.device(), rest));
+    let Ok(op_seq) = op_seq.parse::<i64>() else {
+        return Ok(None);
+    };
+    if !crate::consumer::manifest::exists(k, "table", "turns")? {
+        return Ok(None);
+    }
+    let mut st = k.prepare(&format!(
+        "SELECT {COLUMNS} FROM turns WHERE device = ?1 AND op_seq = ?2 AND skipped = 0"
+    ))?;
+    let mut rows = st.query(params![device, op_seq])?;
+    match rows.next()? {
+        Some(r) => read_row(r, raw, rules),
+        None => Ok(None),
+    }
+}
+
+/// A row of `COLUMNS` as a reader gets it (K7's one way in): none while a removal its op does not
+/// list took from what it rests on (T7), every field gated with `rules` (T8).
+fn read_row(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<TurnSummary>> {
+    let device: String = r.get(0)?;
+    let json = |i: usize| -> rusqlite::Result<String> { r.get(i) };
+    let read: Vec<(i64, i64)> = serde_json::from_str(&json(8)?).unwrap_or_default();
+    let goals: Vec<i64> = serde_json::from_str(&json(9)?).unwrap_or_default();
+    let listed: Vec<Removal> = serde_json::from_str(&json(10)?).unwrap_or_default();
+    // The turn is its own session's records, as they are stored (before the gate).
+    let (agent, session): (String, String) = (r.get(3)?, r.get(4)?);
+    let mut removed =
+        raw.removed_in_session(&device, (&agent, &session), r.get(6)?, r.get(7)?, None)?;
+    for (a, b) in read {
+        removed.extend(raw.removed_in(&device, a, b, None)?);
+    }
+    for g in goals {
+        removed.extend(raw.removed_in(&device, g, g, None)?);
+    }
+    if removed.iter().any(|x| !listed.contains(x)) {
+        return Ok(None);
+    }
+    let gate = |s: String| crate::redact::outbound_with(&s, rules);
+    let fields: BTreeMap<String, String> = serde_json::from_str(&json(11)?).unwrap_or_default();
+    let row = fields.get("request").map_or_else(String::new, |r| {
+        crate::redact::flattened_with(r, rules, usize::MAX, crate::consumer::manifest::one_line)
+            .masked()
+    });
+    Ok(Some(TurnSummary {
+        device,
+        op_seq: r.get(1)?,
+        ts: r.get(2)?,
+        agent: gate(agent),
+        session: gate(session),
+        repo: r.get::<_, Option<String>>(5)?.map(gate),
+        row,
+        fields: fields.into_iter().map(|(f, t)| (f, gate(t))).collect(),
+    }))
 }
 
 #[cfg(test)]

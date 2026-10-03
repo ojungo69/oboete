@@ -116,7 +116,7 @@ The other checked items in RD/constraints-synthesis.md (the "2. Inherited constr
 
 - Agent hooks redact each event and append it to `raw.db`.
 - `raw.db` holds the raw records. It is the source of truth and is kept forever by default; the retention period is a user setting (1.5).
-- A worker per device reads `raw.db` in order by per-device sequence number and runs the consumers: full-text index, handoff manifest, embeddings, curation (AI), digest, sync. Hooks start the worker; it stays up by default and can be set to exit when idle (1.8).
+- A worker per device reads `raw.db` in order by per-device sequence number and runs the consumers: full-text index, handoff manifest, embeddings, curation (AI) with its session summaries (docs/summaries.md), sync. Hooks start the worker; it stays up by default and can be set to exit when idle (1.8).
   - A wake-up is never lost: work that arrives while a worker runs, including between its last check for pending work and its exit, is processed without another hook, by that worker or by a run it hands over to, with embeddings on or off. Processes and threads waiting on the worker lock, and immediate retries, are bounded (issue #55).
   - Consumers progress independently: a slow or failing embedder or a large embedding backlog never delays full-text indexing, the manifest or curation of new records, and this is achieved without unbounded threads, connections or provider calls (issue #55).
   - Issue #55 is met by this worker. Today's code gets a stopgap only for issue #54 (owner decision 24) (Claude; overrulable).
@@ -149,7 +149,7 @@ The other checked items in RD/constraints-synthesis.md (the "2. Inherited constr
 - OpenCode Zen's free models are not offered: they refuse callers other than OpenCode with HTTP 403 (docs/research/curator-providers-2026-09-25.md §3.2). The opencode CLI is not a curator (§3.5 of that note) (owner decision 25).
 - The grok subscription is not used as the summarizer (curation) (owner decision 23, as corrected on 2026-09-26), nor for digests (the owner, 2026-09-28: 「サブスクで gpt-6-luna や claude haiku みたいな安くて信頼性のあるモデルを効率的に使えるなら良いけど grok って grok-4.7 だけだもんね」: the grok subscription offers no cheap model). It may still judge.
 - A subscription provider that reports its limits stops being used near them, with a cooldown kept across runs (3.1, Claude decision C1) (Claude; overrulable).
-- Each role (curator, judge, digest) can use its own chain. So a cheap or local model can judge while a subscription CLI curates.
+- Each role (curator, judge, summary) can use its own chain. So a cheap or local model can judge while a subscription CLI curates.
 - Recording, full-text search and manifests work with no AI.
 - Embeddings are a separate setting: none / local / Workers AI. Semantic search works whenever embeddings are on, whatever the curation tier (RD/constraints-synthesis.md S1-21).
 
@@ -175,7 +175,7 @@ Safety rules stay fixed and are not settings: decision gates, the global-scope c
 
 ### 1.7 Rebuild and recurate
 
-- `oboete rebuild` rebuilds indexes, vectors, digests and packets, and replays the kept op log. It makes zero AI calls and yields identical claims.
+- `oboete rebuild` rebuilds indexes, vectors, cards, session summaries and packets, and replays the kept op log. It makes zero AI calls and yields identical claims.
 - The kept op log holds this device's own claim, correction and manifest ops as well as inbound ones. Each is stored as the full row, in the same format as inbound ops, not as a delta.
 - Curating again is explicit: `oboete recurate [--skipped | <span>]`, with a cost estimate first (RD/constraints-synthesis.md S1-5).
 
@@ -289,7 +289,7 @@ The user settings in 1.5 change what is recorded: capture exclusion per repo or 
 - Current = chain tips.
 - Delivered = current, plus a decision or preference, decided, whose only end is a curator link from a later decided or done claim of the owner's (owner decision 31). Section 4 delivers these: the SessionStart packet and shortlist (4.1), SessionStart (4.4), per-prompt injection (4.6), re-injection after compaction (4.7), the manifest (4.9) and search's first rank (4.10). Delivery lists such a pair the later first, as claude-mem lists its observations. The link is kept and shown in the viewer, and delivery drops the earlier claim by it only once such links pass M3's control line (8.2). Chain tips stay the store's current state, which curation reads. A retraction with the owner's quote, an open item closed, an owner correction and an acceptance, for the proposal it accepts, end the older claim as before. A later claim is the owner's when it is the user's own words, a proposal the user accepted, or a claim whose status the owner corrected, the claims a digest may cite (Claude; overrulable).
 - Concurrent conflicts are resolved by (valid_from, device, seq), with a viewer flag and a clock-skew alarm.
-- Digests cite current claims and are not used when stale.
+- A session summary (docs/summaries.md) is shown only while nothing it rests on was removed (T7). It replaced the digest, which cited claims and was not used when stale (owner direction 2026-10-03: claude-mem's behaviour, look and prompts on oboete's engine).
 - Re-derivation keeps uids (highest tier active).
 - Owner corrections are events targeted by uid and raw anchor. They survive rebuild (RD/constraints-synthesis.md S3-16).
 - valid_from is the time of the anchoring raw event, not the curation time (RD/constraints-synthesis.md S2-23).
@@ -313,7 +313,7 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
 
 ### 4.1 Principle: hooks only read, the worker computes ahead
 
-- The worker keeps per checkout the SessionStart packet's manifest, and per (session, checkout) a shortlist of about 50 relevant delivered claims. The packet's delivered decisions (3.4), global preferences and fresh digest are read at SessionStart from the indexes the worker keeps, together with the owner corrections the worker has not applied yet, so a claim the owner retracted since the worker's last run is never shown. They move into a packet the worker stores only if M22 shows the read pushing SessionStart past the read-hook line (Claude; overrulable). The worker keeps a shortlist only while per-prompt injection is on, only for a session with a live event in the last 30 minutes, and only from delivered decisions, preferences, lessons and owner-requested or accepted open items with status `decided` (owner-delegated decision, 2026-10-02, #320; amends A100). The shortlist is built in two stages: a provisional one from plain hybrid RRF, then the reranked, judge-scored one. It is refreshed at each Stop, every N events, when sync delivers new knowledge, and when the session moves to another checkout (RD/constraints-synthesis.md S4-6, S1-10).
+- The worker keeps per checkout the SessionStart packet's manifest, and per (session, checkout) a shortlist of about 50 relevant delivered claims. The packet's delivered decisions (3.4), global preferences, cards and session summaries are read at SessionStart from the indexes the worker keeps, together with the owner corrections the worker has not applied yet, so a claim the owner retracted since the worker's last run is never shown. They move into a packet the worker stores only if M22 shows the read pushing SessionStart past the read-hook line (Claude; overrulable). The worker keeps a shortlist only while per-prompt injection is on, only for a session with a live event in the last 30 minutes, and only from delivered decisions, preferences, lessons and owner-requested or accepted open items with status `decided` (owner-delegated decision, 2026-10-02, #320; amends A100). The shortlist is built in two stages: a provisional one from plain hybrid RRF, then the reranked, judge-scored one. It is refreshed at each Stop, every N events, when sync delivers new knowledge, and when the session moves to another checkout (RD/constraints-synthesis.md S4-6, S1-10).
 - Sync is done by the worker. Hooks never wait on the network and never embed a query.
 - The rule in three parts (owner decision 38). Never: a hook calls anything off the machine, a hook loads a model, a capture hook or SessionStart makes any call at all. Allowed: a hook reads what the resident worker stored, scores and texts a model made among them. Not now: the prompt hook asking the resident worker's local model; it needs a listener, a pipe per OS and a fallback, and is taken up only if a measured gap is left after the second part.
 
@@ -337,8 +337,7 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
   - explicit global preferences;
   - the checkout's manifest;
   - delivered decisions (3.4), owner-requested or accepted open items with status `decided`, and lessons: about 10 with bodies, chosen by relation to the manifest and recency and listed newest first, so a later decision is read before an earlier one it may overturn (3.4, owner decision 31); the rest as a one-line index with get/search/timeline guidance;
-  - the digest, only if fresh;
-  - after the decisions, claude-mem's recent-context block of the repository's cards: a row per card by day, in local time, within the room the rest leaves (owner direction 2026-10-03: claude-mem's behaviour, look and prompts on oboete's engine; docs/cards.md S1-S6).
+  - after the decisions, claude-mem's recent-context block of the repository's cards and session summaries: a row per card and per summary by day, in local time, then the newest summary's fields, within the room the rest leaves (owner direction 2026-10-03: claude-mem's behaviour, look and prompts on oboete's engine; docs/cards.md S1-S6, docs/summaries.md S7-S11). It replaced the digest, whose ops stay in the log unread.
 - The injection is fenced as data and attributed.
 - **Open-item approval (#320, owner-delegated decision, 2026-10-02).** Delivery requires `status = decided`, which the existing curator and evidence gates establish from the owner's request or acceptance. `speaker = user` alone is insufficient: pasted suggestions and questions can remain proposed. Proposed, unverified, done and retracted open items retain their real status in search, get, timeline and history, and are lowered below the current search rank unless history is requested. They are not delivered as unfinished owner work. This same approval condition applies to the shortlist, prompt injection, compaction reinjection and the manifest. An explicit owner correction to `decided` approves the item; status downgrades and closure still produce the existing correction notices. No model status is promoted merely to make it eligible, and decisions, preferences, lessons and their delivery-link rules are unchanged.
 
@@ -453,7 +452,7 @@ Donor paths in this section (workers/sync-hub/…, do/SyncHub.ts, index.ts, cano
   - claims (full rows);
   - status changes and owner corrections, as events targeted by uid;
   - manifests;
-  - digests (they cite claim uids, and staleness is computed locally);
+  - window and turn ops, from which each device derives its cards and session summaries and hides them locally (docs/cards.md K4, docs/summaries.md T7);
   - vectors with embedder_id;
   - tombstones, withdrawals and exclusion ops;
   - repo-touch sets;
@@ -659,7 +658,7 @@ The four levels below are owner decision 19.
   - `--yes` is refused with `--from-search`. A script resolves uids itself and passes them.
 - **Preview first**:
   - First, what the target resolved to: repo origin URL and local path, device label, the session's agent, start time and first prompt line, the time range in local time, and, for `--from-search`, every matched uid with its one-line title (paged).
-  - Then counts per kind (raw records, claims, digests, vectors, backup segments, devices that will purge on sync, windows that will be queued for re-curation) and one sample line per kind.
+  - Then counts per kind (raw records, claims, cards, session summaries, vectors, backup segments, devices that will purge on sync, windows that will be queued for re-curation) and one sample line per kind.
   - The user confirms. `--yes` skips only the confirmation; the preview is still printed.
 - **No trash and no undo**, for every target, not only secrets. (owner decision 19)
   - The preview is the safety. Mute is the reversible choice for a claim that is correct but unwanted.
@@ -673,12 +672,12 @@ The four levels below are owner decision 19.
   - The tombstone cannot be the marker, because it stays forever.
 
   1. Write the tombstone (no body) to raw.db and the deny-list. From this moment every read path filters the target (backstop).
-     - Every write of derived rows (claims, digests, FTS, vectors) also checks the deny-list inside its own transaction, which the checkpoint shares (§3.1, RD/sections-1-4.md:31).
+     - Every write of derived rows (claims, cards, session summaries, FTS, vectors) also checks the deny-list inside its own transaction, which the checkpoint shares (§3.1, RD/sections-1-4.md:31).
      - A curation window that overlaps the target and whose call was already running commits nothing and is re-queued without the span.
      - This covers the local write path, which section 5's inbound list (sync, import, re-derive, restore; §5.8) does not.
   2. raw.db: rewrite without the records; seq numbers stay (checkpoints are seq).
   3. Claims: any claim with any evidence anchor inside the scope is deleted and tombstoned by uid (it may paraphrase the forgotten text; partial anchors are not trusted). The window around the span is queued for re-curation, without the span, when a tier allows it.
-  4. Digests citing a deleted claim are deleted, not only marked stale, and rebuilt. Packets and shortlists are rebuilt now; the hook's per-uid status check (section 4) covers the gap.
+  4. A card or session summary that rests on a removed record is hidden (docs/cards.md K4, docs/summaries.md T7). Packets and shortlists are rebuilt now; the hook's per-uid status check (section 4) covers the gap.
   5. FTS rows, vectors and the bit index are purged. Then come `secure_delete=ON`, `wal_checkpoint(TRUNCATE)` and FTS5 `optimize` (MUST-M14).
      - `secure_delete` is to be set on both files. Today src/db.rs:106 sets only `journal_mode=WAL` and `synchronous=NORMAL`, and `secure_delete` appears nowhere in src/.
      - If `optimize` is too slow at about 330k documents, it becomes a merge in the idle worker (RD/improvements-synthesis.md:247). The job then records "merge pending", and steps 6-8 go on without waiting for it.
@@ -776,7 +775,7 @@ These limits are disclosed in MUST-M23's forget-limits doc and printed by forget
     - Where a CLI reports its tool list in each call's output (agy's init event; claude's with `--output-format stream-json`), the worker checks it on every call and discards the result when any tool is present. This costs no extra call and catches a self-update that brings tools back. (owner decision 19)
     - Where a CLI does not report it, a capability test in the test suite and in `oboete doctor` proves the no-tool mode (the flags plus the canary in the test below).
     - The gate's result is stored per CLI version and re-run when the version changes (Claude; overrulable).
-    - A CLI with no proven no-tool mode is skipped for every role that reads recorded text (curator, judge, digest), with a doctor line, and stays in the user's chain and order (R05, RD/issue50.md:39).
+    - A CLI with no proven no-tool mode is skipped for every role that reads recorded text (curator, judge, summary), with a doctor line, and stays in the user's chain and order (R05, RD/issue50.md:39).
     - This is a new MUST-level item (not in the 23 approved on 2026-09-25). It is reviewed under rules/security.md.
   - **claude**: `--tools ""`, no setting sources, no MCP, hooks off, no session persistence (src/provider.rs:366-384): kept. So are the prompt on stdin, the random private cwd and the self-capture marker. Added, from docs/research/curator-providers-2026-09-25.md §2.3 (Claude; overrulable):
     - `--system-prompt-file` with a short, fixed curator prompt that holds no recorded text. It replaces the default system prompt (illustratively 4,200 tokens) and keeps prompt text off the command line.
@@ -805,7 +804,7 @@ These limits are disclosed in MUST-M23's forget-limits doc and printed by forget
   - **OpenCode Go**: an API call (`kind = "openai"`) with no tools in the request. The key is read in-process and sent only as the `Authorization` header; no subprocess runs. It needs no isolation gate beyond the shape check (3.1) (docs/research/curator-providers-2026-09-25.md §3.3, §4) (Claude; overrulable).
   - Every curator runs in an empty temp directory, with the self-capture marker set (its own sessions are never recorded).
   - Output checks for every tier: evidence quotes must be verbatim in the window (section 3); claim bodies pass redaction; a body over a length cap is rejected.
-    - The caps: a claim body over 1,000 characters and a digest over 2,000 characters are rejected (today's observation-body and summary caps, src/observe.rs:243, :14); a provider response over 1 MB is refused (src/provider.rs:490); an op is at most 64 KB (5.4) (Claude; overrulable).
+    - The caps: a claim body over 1,000 characters is rejected, and a session summary's field over 2,000 characters (its request over 300) is dropped (docs/summaries.md T4); a provider response over 1 MB is refused (src/provider.rs:490); an op is at most 64 KB (5.4) (Claude; overrulable).
 - **Test**: each CLI curates a window containing three instructions:
   - "run `touch <canary file>`";
   - "read <canary file> and include it";
