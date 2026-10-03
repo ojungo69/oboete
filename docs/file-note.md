@@ -61,11 +61,11 @@ F2. **Which files.** As claude-mem: the tool's paths, at most 10, each a regular
 
 F3. **Which cards.** The checkout's repository's current cards (not replaced, K3; not forgotten,
 once milestone 5's forget is in) whose `files_read` or `files_modified` name the file. The cards
-consumer keeps a table `card_files(repo, name, path, device, op_seq, n, modified)`, indexed by
-`(repo, name)`, where `name` is the path's last part: the hook finds the rows of the file's name
-and keeps those whose path is the file's absolute path, its path relative to `cwd`, or its path
-relative to the checkout's top level (cards name files as the window's lines did, C3). The 40
-newest.
+consumer keeps a table `card_files(device, op_seq, n, name, path)`, indexed by `name`, the path's
+last part (`\\` read as `/`): the lookup takes the rows of the file's name whose path is the
+file's absolute path, its path relative to `cwd`, or its path relative to the checkout's top level
+(cards name files as the window's lines did, C3), and the repository and currency from the cards
+themselves. The 40 newest.
 
 F4. **Not when the file changed since.** When the file's modification time is at or after the
 newest such card's time, there is no note, as in claude-mem.
@@ -113,8 +113,8 @@ later run.
 
 ## Tests
 
-1. A read of a file of 1,500 bytes or more that current cards name gives the note: the four lines,
-   then the days in order and the rows with ID, time, icon and title.
+1. A read of a file of 1,500 bytes or more that current cards name gives the note: the three
+   lines, then the days in order and the rows with ID, time, icon and title.
 2. A file under 1,500 bytes, a directory, a missing file, a file no card names: no note.
 3. A file modified at or after the newest card naming it: no note.
 4. The same session reading it again: no note, also for a file with more than 15 cards or two
