@@ -91,6 +91,13 @@ impl Consumer for Cards {
                     ],
                 )?;
                 crate::consumer::fts::cards(k, Some(k.last_insert_rowid()))?;
+                crate::cards::index_files(
+                    k,
+                    device,
+                    op.op_seq,
+                    n as i64,
+                    [&c["files_read"], &c["files_modified"]],
+                )?;
             }
         }
         Ok(last)
@@ -101,6 +108,10 @@ impl Consumer for Cards {
         k.execute(
             "DELETE FROM cards_fts WHERE rowid IN
                (SELECT rowid FROM cards WHERE device = ?1 AND op_seq > ?2)",
+            params![device, to],
+        )?;
+        k.execute(
+            "DELETE FROM card_files WHERE device = ?1 AND op_seq > ?2",
             params![device, to],
         )?;
         k.execute(
@@ -327,6 +338,78 @@ mod tests {
             ]
         );
         assert_eq!(recent(home.path(), "other"), []);
+    }
+
+    /// X5 F3 (docs/file-note.md): a file's cards by the path its window named, of its
+    /// repository, current; a store that lost the index gets it back from the worker.
+    #[test]
+    fn cards_are_found_by_the_files_they_name() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        two_records(&mut raw);
+        raw.append(&event("s2", "q", 3_000)).unwrap();
+        let named = |from: i64, files: Value, recurate: bool| {
+            let (kind, mut op) = window(from, from, "curated", "");
+            op["observations"] = json!([{"type": "bugfix", "title": "T", "subtitle": "",
+                "narrative": "", "facts": [], "concepts": [], "files_read": files,
+                "files_modified": []}]);
+            if recurate {
+                op["recurate"] = true.into();
+            }
+            (kind, op)
+        };
+        raw.append_ops(&[
+            named(1, json!(["src/a.rs", "/w/repo/lib/b.rs"]), false),
+            named(2, json!(["src/a.rs"]), false),
+            named(3, json!(["src/a.rs"]), false),
+            named(2, json!(["src/foo+a.rs"]), true),
+        ])
+        .unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        let found = |paths: &[&str]| -> Vec<i64> {
+            let raw = raw::open(home.path()).unwrap();
+            let k = crate::knowledge::open(home.path()).unwrap();
+            cards::by_file(&k, &raw, "r", paths, 40, &Rules::default())
+                .unwrap()
+                .iter()
+                .map(|f| f.card.op_seq)
+                .collect()
+        };
+        // Op 2's card is replaced by op 4's, and op 3's is of another repository.
+        assert_eq!(found(&["/w/repo/src/a.rs", "src/a.rs"]), [1]);
+        assert_eq!(found(&["/w/repo/lib/b.rs", "lib/b.rs"]), [1]);
+        assert_eq!(found(&["src/foo+a.rs"]), [4]);
+        assert!(found(&["/w/repo/a.rs", "a.rs"]).is_empty());
+        let k = crate::knowledge::open(home.path()).unwrap();
+        k.execute_batch("DROP TABLE card_files").unwrap();
+        drop(k);
+        assert!(found(&["src/a.rs"]).is_empty());
+        crate::worker::run_once(home.path()).unwrap();
+        assert_eq!(found(&["src/a.rs"]), [1]);
+    }
+
+    /// X5 F6: whether a card modified the file is the index's, before the gate, so a path a rule
+    /// masks in the card still ranks as modified (Codex on #387).
+    #[test]
+    fn a_masked_path_still_counts_as_modified() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        two_records(&mut raw);
+        let secret = format!("keys/ghp_{}.txt", &"a1B2c3D4e5".repeat(4)[..36]);
+        let (kind, mut op) = window(1, 1, "curated", "");
+        op["observations"] = json!([{"type": "bugfix", "title": "T", "subtitle": "",
+            "narrative": "", "facts": [], "concepts": [], "files_read": [],
+            "files_modified": [secret]}]);
+        raw.append_ops(&[(kind, op)]).unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        let raw = raw::open(home.path()).unwrap();
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let found = cards::by_file(&k, &raw, "r", &[&secret], 40, &Rules::default()).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_ne!(found[0].card.files_modified, [secret], "the rule masks it");
+        assert!(found[0].modified);
     }
 
     fn titles(home: &Path) -> Vec<String> {

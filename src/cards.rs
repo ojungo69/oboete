@@ -124,6 +124,68 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
             tx.commit()?;
         }
     }
+    if !crate::consumer::manifest::exists(k, "table", "card_files")? {
+        // X5 F3: the files each card names, by their last part. Filled from the cards a store
+        // already has, in the same transaction as the table, as `cards_fts` is.
+        let tx = if k.is_autocommit() {
+            Some(k.unchecked_transaction()?)
+        } else {
+            None
+        };
+        k.execute_batch(
+            "CREATE TABLE IF NOT EXISTS card_files(
+               device TEXT NOT NULL, op_seq INTEGER NOT NULL, n INTEGER NOT NULL,
+               name TEXT NOT NULL, path TEXT NOT NULL, modified INTEGER NOT NULL);
+             CREATE INDEX IF NOT EXISTS card_files_name ON card_files(name);",
+        )?;
+        let cards: Vec<(String, i64, i64, String, String)> = k
+            .prepare("SELECT device, op_seq, n, files_read, files_modified FROM cards")?
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        for (device, op_seq, n, read, modified) in cards {
+            let list = |s: &str| serde_json::from_str(s).unwrap_or_default();
+            index_files(k, &device, op_seq, n, [&list(&read), &list(&modified)])?;
+        }
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
+    }
+    Ok(())
+}
+
+/// A path as `card_files` keeps it and is searched by: `/` for `\\`.
+fn slashed(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+/// The last part of a slashed path, which `card_files` is searched by.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// X5 F3: card `(device, op_seq, n)`'s files, from its `files_read` and `files_modified` lists,
+/// into `card_files`.
+pub(crate) fn index_files(
+    k: &Connection,
+    device: &str,
+    op_seq: i64,
+    n: i64,
+    lists: [&serde_json::Value; 2],
+) -> Result<()> {
+    let mut st = k.prepare(
+        "INSERT INTO card_files(device, op_seq, n, name, path, modified)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+    for (modified, list) in [false, true].into_iter().zip(lists) {
+        for path in list.as_array().into_iter().flatten() {
+            if let Some(path) = path.as_str().map(slashed) {
+                let at = rusqlite::params![device, op_seq, n, file_name(&path), path, modified];
+                st.execute(at)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -168,6 +230,26 @@ fn gmt(seconds: i32) -> String {
     }
 }
 
+/// `2026-10-03 6:16pm GMT+9`, as claude-mem's headers give the local time.
+fn stamp<Tz: chrono::TimeZone>(t: &chrono::DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::Offset;
+    let zone = gmt(t.offset().fix().local_minus_utc());
+    format!("{} {zone}", t.format("%Y-%m-%d %-I:%M%P"))
+}
+
+/// `9:05am` as claude-mem's row shows it: `9:05a`.
+fn clock<Tz: chrono::TimeZone>(t: &chrono::DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let mut s = t.format("%-I:%M%P").to_string();
+    s.pop();
+    s
+}
+
 /// claude-mem's recent-context block (docs/cards.md S2, S3) for `cards` and the session summaries
 /// `sessions` (docs/summaries.md S7), newest first as their readers give them, shown the oldest
 /// first by day, at `now` in `tz`, read on device `local`, then `latest`'s fields when it is not
@@ -184,18 +266,8 @@ pub fn block<Tz: chrono::TimeZone>(
 where
     Tz::Offset: std::fmt::Display,
 {
-    use chrono::Offset;
     let in_tz = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(tz));
-    // `9:05am` as claude-mem's row shows it: `9:05a`.
-    let clock = |t: &chrono::DateTime<Tz>| {
-        let mut s = t.format("%-I:%M%P").to_string();
-        s.pop();
-        s
-    };
-    let header = in_tz(now).map_or_else(String::new, |t| {
-        let zone = gmt(t.offset().fix().local_minus_utc());
-        format!(", {} {zone}", t.format("%Y-%m-%d %-I:%M%P"))
-    });
+    let header = in_tz(now).map_or_else(String::new, |t| format!(", {}", stamp(&t)));
     let legend: Vec<String> = std::iter::once("🎯session".to_owned())
         .chain(ICONS.iter().zip(TYPES).map(|(i, t)| format!("{i}{t}")))
         .collect();
@@ -460,6 +532,156 @@ pub fn of_turn(
     Ok(out)
 }
 
+/// claude-mem's icons in its note on a file, not its session start's (docs/file-note.md).
+// Read by the hook from slice 2 on.
+#[cfg_attr(not(test), allow(dead_code))]
+const NOTE_ICONS: [(&str, &str); 6] = [
+    ("decision", "⚖️"),
+    ("bugfix", "🔴"),
+    ("feature", "🟣"),
+    ("refactor", "🔄"),
+    ("discovery", "🔵"),
+    ("change", "✅"),
+];
+
+/// A card `by_file` found, with what the note ranks it by as stored, before the gate (K6) masks
+/// the card's own fields (Codex on #387): its agent and session, and whether it modified the file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Filed {
+    pub card: Card,
+    pub(crate) session: Option<(Option<String>, String)>,
+    pub(crate) modified: bool,
+}
+
+/// X5 F3: `repo`'s current cards that name a file by one of `paths` (its absolute path, and its
+/// paths relative to the working directory and to the checkout's top level), the newest first, at
+/// most `limit`. The index is the worker's: a store it has not reached yet has none.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn by_file(
+    k: &Connection,
+    raw: &Raw,
+    repo: &str,
+    paths: &[&str],
+    limit: usize,
+    rules: &Rules,
+) -> Result<Vec<Filed>> {
+    let paths: Vec<String> = paths.iter().map(|p| slashed(p)).collect();
+    let Some(name) = paths.first().map(|p| file_name(p).to_owned()) else {
+        return Ok(Vec::new());
+    };
+    if !crate::consumer::manifest::exists(k, "table", "card_files")? {
+        return Ok(Vec::new());
+    }
+    let marks = (3..3 + paths.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut st = k.prepare(&format!(
+        "SELECT {COLUMNS}, (SELECT MAX(f.modified) FROM card_files f
+             WHERE f.device = cards.device AND f.op_seq = cards.op_seq AND f.n = cards.n
+               AND f.name = ?2 AND f.path IN ({marks}))
+         FROM cards WHERE repo = ?1 AND replaced_by IS NULL
+           AND (device, op_seq, n) IN (SELECT device, op_seq, n FROM card_files
+             WHERE name = ?2 AND path IN ({marks}))
+         ORDER BY ts DESC, device DESC, op_seq DESC, n"
+    ))?;
+    let values = [repo.to_owned(), name].into_iter().chain(paths);
+    let mut rows = st.query(rusqlite::params_from_iter(values))?;
+    let mut out = Vec::new();
+    while out.len() < limit
+        && let Some(r) = rows.next()?
+    {
+        let (agent, session) = (r.get(4)?, r.get::<_, Option<String>>(5)?);
+        let modified = r.get::<_, Option<bool>>(19)?.unwrap_or(false);
+        out.extend(read(r, raw, rules)?.map(|card| Filed {
+            card,
+            session: session.map(|s| (agent, s)),
+            modified,
+        }));
+    }
+    Ok(out)
+}
+
+/// X5 F4, F6, F7: claude-mem's note on a file from `cards`, the newest first as `by_file` gives
+/// them, at `now` in `tz`, read on device `local`. None without a card, or when the file was
+/// modified (`mtime`, unix ms) at or after the newest: they may tell of an older file.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn file_note<Tz: chrono::TimeZone>(
+    cards: &[Filed],
+    mtime: i64,
+    local: &str,
+    now: i64,
+    tz: &Tz,
+) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let newest = cards.iter().map(|f| f.card.ts).max()?;
+    if mtime >= newest {
+        return None;
+    }
+    // One card a session, the newest; a card of no session stands alone. Then claude-mem's
+    // rank, stable, so the newer first among equals: +2 for the file modified, +2 for at most
+    // 3 files named, +1 for at most 8.
+    let mut seen = std::collections::HashSet::new();
+    let mut ranked: Vec<(u8, &Card)> = cards
+        .iter()
+        .filter(|f| f.session.as_ref().is_none_or(|s| seen.insert(s.clone())))
+        .map(|f| {
+            let c = &f.card;
+            let named = c.files_read.len() + c.files_modified.len();
+            let score = 2 * u8::from(f.modified)
+                + match named {
+                    0..=3 => 2,
+                    4..=8 => 1,
+                    _ => 0,
+                };
+            (score, c)
+        })
+        .collect();
+    ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    let mut shown: Vec<&Card> = ranked.into_iter().take(15).map(|(_, c)| c).collect();
+    shown.sort_by_key(|c| (c.ts, c.device.clone(), c.op_seq, c.n));
+    let in_tz = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(tz));
+    let mut out = vec![
+        format!(
+            "Current: {}",
+            in_tz(now).map_or_else(String::new, |t| stamp(&t))
+        ),
+        "This file has prior observations — supplementary context follows. The Read result \
+         below is the full requested section."
+            .to_owned(),
+        "- **Need details on a past observation?** get(ID) — ~300 tokens each.".to_owned(),
+    ];
+    let mut day = String::new();
+    for c in shown {
+        let Some(t) = in_tz(c.ts) else {
+            continue;
+        };
+        let d = t.format("%b %-d, %Y").to_string();
+        if d != day {
+            out.push(format!("### {d}"));
+            day = d;
+        }
+        let icon = c
+            .kind
+            .as_deref()
+            .and_then(|k| NOTE_ICONS.iter().find(|(t, _)| *t == k))
+            .map_or("❓", |(_, i)| *i);
+        let title: String = c
+            .row_title
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(160)
+            .collect();
+        let title = if title.is_empty() { "Untitled" } else { &title };
+        out.push(format!("{} {} {icon} {title}", c.id(local), clock(&t)));
+    }
+    Some(out.join("\n"))
+}
+
 /// The current card an ID names (S3, S6), as `recent` would read it: `<op seq>.<n>` of this
 /// device's, or `<device>.<op seq>.<n>`.
 pub fn get(k: &Connection, raw: &Raw, id: &str, rules: &Rules) -> Result<Option<Card>> {
@@ -522,6 +744,116 @@ mod tests {
             files_read: Vec::new(),
             files_modified: Vec::new(),
         }
+    }
+
+    /// A card of Claude Code's `session` naming `read` and `modified`, as `by_file` finds it for
+    /// a file it modified when `modified` is not empty (X5, docs/file-note.md).
+    fn filed(op_seq: i64, ts: i64, session: &str, read: &[&str], modified: &[&str]) -> Filed {
+        let card = Card {
+            session: Some(session.into()),
+            files_read: read.iter().map(|s| (*s).to_owned()).collect(),
+            files_modified: modified.iter().map(|s| (*s).to_owned()).collect(),
+            ..card(op_seq, 0, ts, Some("bugfix"), &format!("Card {op_seq}"))
+        };
+        Filed {
+            card,
+            session: Some((Some("claude".into()), session.into())),
+            modified: !modified.is_empty(),
+        }
+    }
+
+    /// `f` with its card changed by `change`.
+    fn with(mut f: Filed, change: impl FnOnce(&mut Card)) -> Filed {
+        change(&mut f.card);
+        f
+    }
+
+    /// The IDs of a note's rows, in their order.
+    fn rows(note: &str) -> Vec<&str> {
+        note.lines()
+            .filter(|l| l.contains(" 🔴 ") || l.contains(" ⚖️ "))
+            .map(|l| l.split(' ').next().unwrap())
+            .collect()
+    }
+
+    /// X5 F7: claude-mem's file context, with oboete's IDs and `get`: its days in order, each
+    /// day's rows the oldest first, a title on one line of at most 160 characters.
+    #[test]
+    fn the_note_on_a_file_is_claude_mems_text() {
+        let long = format!("{}\n  tail", "x".repeat(200));
+        let cards = [
+            with(filed(3, at(3, 18, 14, 0), "s3", &["src/a.rs"], &[]), |c| {
+                c.kind = Some("decision".into());
+            }),
+            with(filed(2, at(2, 21, 41, 0), "s2", &["src/a.rs"], &[]), |c| {
+                c.row_title = long;
+            }),
+            with(filed(1, at(2, 9, 5, 0), "s1", &["src/a.rs"], &[]), |c| {
+                c.row_title = " ".into();
+            }),
+        ];
+        let note = file_note(&cards, 0, "d", at(3, 18, 16, 0), &jst()).unwrap();
+        let expected = [
+            "Current: 2026-10-03 6:16pm GMT+9",
+            "This file has prior observations — supplementary context follows. The Read result below is the full requested section.",
+            "- **Need details on a past observation?** get(ID) — ~300 tokens each.",
+            "### Oct 2, 2026",
+            "1.0 9:05a 🔴 Untitled",
+            &format!("2.0 9:41p 🔴 {}", "x".repeat(160)),
+            "### Oct 3, 2026",
+            "3.0 6:14p ⚖️ Card 3",
+        ]
+        .join("\n");
+        assert_eq!(note, expected);
+    }
+
+    /// X5 F6: one card a session, the newest; ranked +2 for the file modified, +2 for at most 3
+    /// files named, +1 for at most 8; the 15 best.
+    #[test]
+    fn the_note_keeps_one_card_a_session_ranked_as_claude_mem_ranks() {
+        let wide = ["a", "b", "c", "d", "e", "f", "g", "h", "src/a.rs"];
+        let now = at(3, 12, 0, 0);
+        // Newest first, as the reader gives them: the newest names nine files and only reads
+        // this one (0), the next modifies it among nine (2), fourteen more read it alone (2).
+        let mut cards = vec![
+            filed(50, at(3, 11, 50, 0), "wide", &wide, &[]),
+            filed(49, at(3, 11, 49, 0), "changed", &wide[..8], &["src/a.rs"]),
+        ];
+        cards.extend((0..14).map(|i| {
+            filed(
+                30 - i,
+                at(3, 11, 30 - i as u32, 0),
+                &format!("s{i}"),
+                &["src/a.rs"],
+                &[],
+            )
+        }));
+        let note = file_note(&cards, 0, "d", now, &jst()).unwrap();
+        assert_eq!(rows(&note).len(), 15);
+        assert!(!rows(&note).contains(&"50.0"), "{note}");
+        assert!(rows(&note).contains(&"49.0"), "{note}");
+        // Two cards of one session: the newer only.
+        let same = [
+            filed(2, at(3, 11, 2, 0), "s", &["src/a.rs"], &[]),
+            filed(1, at(3, 11, 1, 0), "s", &["src/a.rs"], &[]),
+        ];
+        let note = file_note(&same, 0, "d", now, &jst()).unwrap();
+        assert_eq!(rows(&note), ["2.0"]);
+        // The same session text of two agents is two sessions (Codex on #387).
+        let mut codex = same[1].clone();
+        codex.session = Some((Some("codex".into()), "s".into()));
+        let note = file_note(&[same[0].clone(), codex], 0, "d", now, &jst()).unwrap();
+        assert_eq!(rows(&note), ["1.0", "2.0"]);
+    }
+
+    /// X5 F4: no note when the file changed at or after its newest card, or no card names it.
+    #[test]
+    fn no_note_when_the_file_changed_since_its_newest_card() {
+        let cards = [filed(1, at(3, 10, 0, 0), "s1", &["src/a.rs"], &[])];
+        let note = |mtime| file_note(&cards, mtime, "d", at(3, 11, 0, 0), &jst());
+        assert!(note(at(3, 10, 0, 0)).is_none());
+        assert!(note(at(3, 9, 59, 0)).is_some());
+        assert!(file_note(&[], 0, "d", 0, &jst()).is_none());
     }
 
     /// Newest first, as `recent` gives them.
