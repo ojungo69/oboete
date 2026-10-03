@@ -236,7 +236,7 @@ async function showRecords(repo) {
   return () => {
     const mine = generation;
     let next = page.next;
-    const more = el('button', 'quiet more', 'More');
+    const more = word('button', 'quiet more', 'more');
     more.type = 'button';
     const loadMore = async () => {
       if (more.disabled) return;
@@ -247,7 +247,7 @@ async function showRecords(repo) {
         $('list').append(...older.items.map((item) => timelineEntry(item, !repo)));
         next = older.next;
         if (!next) more.remove();
-        setStatus(`${$('list').childElementCount} entries loaded.`);
+        setStatus(t('entries_loaded', { n: $('list').childElementCount }));
       } catch (e) {
         if (mine === generation) showError(e, loadMore);
       } finally {
@@ -256,7 +256,7 @@ async function showRecords(repo) {
     };
     more.addEventListener('click', loadMore);
     draw(t('records'), page.items.map((item) => timelineEntry(item, !repo)), next ? [more] : []);
-    setStatus(page.items.length ? `${page.items.length} entries loaded.` : 'No entries recorded yet.');
+    setStatus(page.items.length ? t('entries_loaded', { n: page.items.length }) : t('no_entries'));
   };
 }
 
@@ -456,9 +456,9 @@ async function showSearch(repo, q) {
       $('vector').textContent = `Results are full text only (${answer.vector})${answer.why ? `: ${answer.why}` : '.'}`;
       $('vector').hidden = false;
     }
-    if (answer.hits.length === LIMIT) setStatus(`The ${LIMIT} best matches. Add words to narrow the search.`);
-    else if (answer.hits.length) setStatus(`${answer.hits.length} found.`);
-    else setStatus('Nothing found.');
+    if (answer.hits.length === LIMIT) setStatus(t('best_matches', { n: LIMIT }));
+    else if (answer.hits.length) setStatus(t('found', { n: answer.hits.length }));
+    else setStatus(t('nothing_found'));
   };
 }
 
@@ -560,6 +560,12 @@ const TEXT = {
   live_hint: ['Checks for new memory every few seconds', '数秒ごとに新しい記憶を確認します'],
   unreachable: ['The viewer is not answering. Start `oboete view` again and open the address it prints.', 'ビューアーから応答がありません。`oboete view` を起動し直し、表示されたアドレスを開いてください。'],
   more: ['More', 'もっと見る'],
+  entries_loaded: ['{n} entries loaded.', '{n} 件を読み込みました。'],
+  no_entries: ['No entries recorded yet.', 'まだ記録はありません。'],
+  best_matches: ['The {n} best matches. Add words to narrow the search.', '一致度の高い {n} 件です。言葉を足すと絞り込めます。'],
+  found: ['{n} found.', '{n} 件見つかりました。'],
+  nothing_found: ['Nothing found.', '見つかりませんでした。'],
+  loading: ['Loading…', '読み込み中…'],
   retry: ['Retry', '再試行'],
   feed_loading: ['Loading…', '読み込み中…'],
   feed_empty: ['No items to display', '表示する項目はありません'],
@@ -1424,7 +1430,7 @@ async function show() {
     if (shown && version === null) drawnWithoutBaseline = true;
     return shown;
   }
-  setStatus('Loading…');
+  setStatus(t('loading'));
   try {
     const search = q && view !== 'settings';
     const render = search ? await showSearch(repo, q) : await LOADERS.get(view)(repo);
