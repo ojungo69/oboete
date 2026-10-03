@@ -631,17 +631,21 @@ impl Raw {
         to: i64,
         through: Option<i64>,
     ) -> Result<Vec<Removal>> {
-        let mut st = self.conn.prepare_cached(
+        // With a session: not a record of another session, nor an import of this one, which no
+        // live turn rests on (Codex on #371).
+        let mut st = self.conn.prepare_cached(&format!(
             "SELECT DISTINCT t.target_seq, t.target_offset, t.target_length FROM records t
              WHERE t.type = 'tombstone' AND t.target_device = ?1
                AND t.target_seq BETWEEN ?2 AND ?3
                AND (?4 IS NULL OR t.device = ?1 AND t.seq <= ?4)
                AND (?5 IS NULL OR NOT EXISTS (
                  SELECT 1 FROM records r WHERE r.device = ?1 AND r.seq = t.target_seq
-                   AND r.agent IS NOT NULL AND r.session IS NOT NULL
-                   AND (r.agent <> ?5 OR r.session <> ?6)))
+                   AND (r.agent IS NOT NULL AND r.session IS NOT NULL
+                          AND (r.agent <> ?5 OR r.session <> ?6)
+                        OR r.source NOT IN ('{}'))))
              ORDER BY 1, 2, 3",
-        )?;
+            LIVE.join("', '")
+        ))?;
         let (agent, session) = session.unzip();
         let rows = st.query_map(params![device, from, to, through, agent, session], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -730,6 +734,26 @@ impl Raw {
                 live = LIVE.join("', '")
             ),
             params![self.device, agent, session, reply],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Whether `device`'s events of `agent`'s `session` from `from` to `to` hold a live one: a
+    /// window of imported records alone is no part of a live turn (Codex on #371).
+    pub fn has_live(
+        &self,
+        device: &str,
+        (agent, session): (&str, &str),
+        from: i64,
+        to: i64,
+    ) -> Result<bool> {
+        Ok(self.conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3
+                   AND type = 'event' AND agent = ?4 AND session = ?5 AND source IN ('{}'))",
+                LIVE.join("', '")
+            ),
+            params![device, from, to, agent, session],
             |r| r.get(0),
         )?)
     }

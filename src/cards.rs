@@ -334,11 +334,15 @@ pub fn of_turn(
     while out.len() < limit
         && let Some(r) = rows.next()?
     {
+        let span: (i64, i64) = (r.get(15)?, r.get(16)?);
+        if !raw.has_live(device, (agent, session), span.0, span.1)? {
+            continue;
+        }
         let Some(card) = read(r, raw, rules)? else {
             continue;
         };
         let goals: Vec<i64> = serde_json::from_str(&r.get::<_, String>(18)?).unwrap_or_default();
-        out.push((card, (r.get(15)?, r.get(16)?), goals));
+        out.push((card, span, goals));
     }
     Ok(out)
 }

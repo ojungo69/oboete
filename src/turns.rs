@@ -833,6 +833,72 @@ mod tests {
         assert_eq!((op.from, op.repo.as_deref()), (1, Some("r")));
     }
 
+    /// Codex on #371: a card of a window of imported records alone, labelled as the live session,
+    /// is no part of the live turn.
+    #[test]
+    fn an_imported_windows_card_is_no_part_of_a_live_turn() {
+        let imported = |kind: &str, text: &str| Event {
+            source: "transcript".into(),
+            ..said("s1", kind, text)
+        };
+        let card = |title: &str| {
+            json!({"type": "change", "title": title, "narrative": "", "facts": [],
+                "concepts": [], "files_read": [], "files_modified": []})
+        };
+        let home = home(
+            &[
+                said("s1", "prompt", "Build the parser."),
+                imported("prompt", "An old request."),
+                imported("reply", "An old answer."),
+                said("s1", "reply", "Built."),
+            ],
+            &[
+                observed(1, 1, card("Live work")),
+                observed(2, 3, card("Imported work")),
+                window(4, 4, "Replied.", &[]),
+            ],
+        );
+        let (_, sent) = run(home.path(), &completed("Built."));
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("Live work"), "{}", sent[0]);
+        assert!(!sent[0].contains("Imported work"), "{}", sent[0]);
+    }
+
+    /// Codex on #371: a removal from an imported record of the same labels inside a live turn's
+    /// span does not hide the turn's summary.
+    #[test]
+    fn a_removal_from_an_imported_record_in_the_span_does_not_hide_it() {
+        let home = home(
+            &[
+                said("s1", "prompt", "Build the parser."),
+                Event {
+                    source: "transcript".into(),
+                    ..said("s1", "prompt", "An old request.")
+                },
+                said("s1", "reply", "Built."),
+            ],
+            &[
+                window(1, 1, "Asked.", &[]),
+                (
+                    OpKind::Window,
+                    json!({"outcome": "skipped", "reason": "imported:transcript",
+                        "from_seq": 2, "from_offset": null, "to_seq": 2, "to_offset": null,
+                        "elided": []}),
+                ),
+                window(3, 3, "Built the parser.", &[]),
+            ],
+        );
+        run(home.path(), &completed("Built."));
+        assert_eq!(shown(home.path(), &Rules::default()).len(), 1);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        raw.append_tombstone(Target::Record { device, seq: 2 })
+            .unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        assert_eq!(shown(home.path(), &Rules::default()).len(), 1);
+    }
+
     /// T1: a summary every provider fails waits as a window does, and the turns after it wait
     /// with it, so none is passed over for good.
     #[test]
