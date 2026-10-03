@@ -47,6 +47,63 @@ pub(crate) fn text(body: &str) -> String {
     }
 }
 
+/// Q4: index the stored card fields, without the reader's current gate. Called by the cards
+/// consumer in its transaction, and once for rows predating the index when its schema is made.
+/// `None` restores every current row after a rewind or on that first backfill.
+pub(crate) fn cards(k: &Connection, rowid: Option<i64>) -> Result<()> {
+    let mut st = k.prepare(
+        "SELECT rowid, title, subtitle, narrative, facts, concepts, files_read, files_modified
+         FROM cards WHERE replaced_by IS NULL AND (?1 IS NULL OR rowid = ?1)",
+    )?;
+    let rows = st.query_map([rowid], |r| {
+        let mut fields = Vec::new();
+        for i in 1..=7 {
+            let s: String = r.get(i)?;
+            fields.push(if i >= 4 {
+                serde_json::from_str::<Vec<String>>(&s)
+                    .unwrap_or_default()
+                    .join("\n")
+            } else {
+                s
+            });
+        }
+        Ok((r.get::<_, i64>(0)?, fields.join("\n")))
+    })?;
+    for row in rows {
+        let (id, text) = row?;
+        k.execute(
+            "INSERT OR REPLACE INTO cards_fts(rowid, text) VALUES(?1, ?2)",
+            params![id, text],
+        )?;
+    }
+    Ok(())
+}
+
+/// Q4: only the five displayed summary fields, never `notes` or a skipped turn.
+pub(crate) fn turns(k: &Connection, rowid: Option<i64>) -> Result<()> {
+    let mut st = k.prepare(
+        "SELECT rowid, fields FROM turns WHERE skipped = 0 AND (?1 IS NULL OR rowid = ?1)",
+    )?;
+    let rows = st.query_map([rowid], |r| {
+        let fields: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&r.get::<_, String>(1)?).unwrap_or_default();
+        let text = crate::turns::FIELDS[..5]
+            .iter()
+            .filter_map(|f| fields.get(*f).map(String::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok((r.get::<_, i64>(0)?, text))
+    })?;
+    for row in rows {
+        let (id, text) = row?;
+        k.execute(
+            "INSERT OR REPLACE INTO turns_fts(rowid, text) VALUES(?1, ?2)",
+            params![id, text],
+        )?;
+    }
+    Ok(())
+}
+
 /// One indexed record's text replaced by what `Raw::after` returns for it now; its row removed
 /// when that is no event. Nothing for a record this index never held.
 fn reindex(raw: &Raw, k: &Connection, device: &str, seq: i64) -> Result<()> {

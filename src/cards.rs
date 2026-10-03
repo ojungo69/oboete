@@ -108,6 +108,22 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
          );
          CREATE INDEX IF NOT EXISTS cards_repo ON cards(repo, ts);",
     )?;
+    if !crate::consumer::manifest::exists(k, "table", "cards_fts")? {
+        // A store whose cards consumer has already passed its ops needs a backfill. Creating
+        // the index and filling it commit together, also when a search opens it first.
+        let tx = if k.is_autocommit() {
+            Some(k.unchecked_transaction()?)
+        } else {
+            None
+        };
+        k.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS cards_fts USING fts5(text, tokenize='trigram');",
+        )?;
+        crate::consumer::fts::cards(k, None)?;
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
+    }
     Ok(())
 }
 
@@ -312,7 +328,15 @@ fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
         ts: r.get(3)?,
         agent: r.get::<_, Option<String>>(4)?.map(gate),
         session: r.get::<_, Option<String>>(5)?.map(gate),
-        repo: r.get::<_, Option<String>>(6)?.map(gate),
+        repo: r.get::<_, Option<String>>(6)?.map(|s| {
+            crate::redact::flattened_with(
+                &s,
+                rules,
+                usize::MAX,
+                crate::consumer::manifest::one_line,
+            )
+            .masked()
+        }),
         // One of the nine or none, whatever an op from elsewhere says (C3, Codex on #371): a
         // type is shown as it is, never gated.
         kind: r

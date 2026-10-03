@@ -46,6 +46,8 @@ pub struct Query {
     pub until: Option<i64>,
     /// MUST-M11: superseded, retracted and done claims rank where their text ranks them.
     pub history: bool,
+    pub types: Option<TypeFilter>,
+    pub order: Order,
     pub raw: RawArm,
     pub limit: usize,
     /// Evaluation only (Task 6, spec 8.2 M1): every leg leaves this session's documents out in
@@ -63,6 +65,132 @@ impl Query {
         } else {
             self.repo.as_deref().or(self.caller.as_deref())
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum Order {
+    #[default]
+    Relevance,
+    DateDesc,
+    DateAsc,
+}
+
+impl std::str::FromStr for Order {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "relevance" => Ok(Self::Relevance),
+            "date_desc" => Ok(Self::DateDesc),
+            "date_asc" => Ok(Self::DateAsc),
+            _ => anyhow::bail!("unknown order {s:?}; use relevance, date_desc or date_asc"),
+        }
+    }
+}
+
+/// Q5's comma-separated category/kind filter. Categories and concrete kinds are ORed;
+/// a shared kind (for example `decision`) matches cards, imports and claims alike.
+#[derive(Debug, Clone)]
+pub struct TypeFilter(Vec<String>);
+
+impl std::str::FromStr for TypeFilter {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let known: Vec<&str> = ["observations", "sessions", "prompts", "claims"]
+            .into_iter()
+            .chain(crate::cards::TYPES.iter().copied())
+            .chain(claims::KINDS)
+            .collect();
+        let words: Vec<String> = s.split(',').map(str::trim).map(str::to_owned).collect();
+        for word in &words {
+            anyhow::ensure!(
+                known.contains(&word.as_str()),
+                "unknown type {word:?}; known types: {}",
+                known.join(", ")
+            );
+        }
+        Ok(Self(words))
+    }
+}
+
+impl TypeFilter {
+    fn matches(&self, h: &Hit) -> bool {
+        self.accepts(&h.class, &h.kind)
+    }
+
+    fn accepts(&self, class: &Class, kind: &str) -> bool {
+        self.0.iter().any(|word| match word.as_str() {
+            "observations" => {
+                *class == Class::Card
+                    || *class == Class::Imported && kind != "summary" && kind != "prompt"
+            }
+            "sessions" => {
+                *class == Class::Summary || *class == Class::Imported && kind == "summary"
+            }
+            "prompts" => matches!(class, Class::Raw | Class::Imported) && kind == "prompt",
+            "claims" => matches!(
+                class,
+                Class::Current | Class::Delivered { .. } | Class::Superseded { .. }
+            ),
+            selected => kind == selected,
+        })
+    }
+
+    /// Filter before a full-text leg takes its depth. All identifiers are supplied by this
+    /// module; the caller's words are bound values, never SQL.
+    fn clause(&self, class: Class, column: &str) -> (String, Vec<Value>) {
+        let mut args = Vec::new();
+        let clauses: Vec<String> = self
+            .0
+            .iter()
+            .map(|word| match word.as_str() {
+                "observations" => match class {
+                    Class::Card => "1".into(),
+                    Class::Imported => format!("{column} NOT IN ('summary', 'prompt')"),
+                    _ => "0".into(),
+                },
+                "sessions" => match class {
+                    Class::Summary => "1".into(),
+                    Class::Imported => format!("{column} = 'summary'"),
+                    _ => "0".into(),
+                },
+                "prompts" => match class {
+                    Class::Raw | Class::Imported => format!("{column} = 'prompt'"),
+                    _ => "0".into(),
+                },
+                "claims" => {
+                    if matches!(
+                        class,
+                        Class::Current | Class::Delivered { .. } | Class::Superseded { .. }
+                    ) {
+                        "1".into()
+                    } else {
+                        "0".into()
+                    }
+                }
+                kind => {
+                    args.push(Value::Text(kind.to_owned()));
+                    format!("{column} = ?")
+                }
+            })
+            .collect();
+        (format!("({})", clauses.join(" OR ")), args)
+    }
+}
+
+fn type_clause(
+    q: &Query,
+    class: Class,
+    column: &str,
+    clauses: &mut Vec<String>,
+    args: &mut Vec<Value>,
+) {
+    if let Some(filter) = &q.types {
+        let (clause, values) = filter.clause(class, column);
+        clauses.push(clause);
+        args.extend(values);
     }
 }
 
@@ -125,6 +253,8 @@ pub enum Class {
         by: Option<String>,
     },
     Imported,
+    Card,
+    Summary,
     Raw,
 }
 
@@ -157,6 +287,9 @@ pub struct Hit {
     /// Through the egress gate, as the snippet is.
     pub title: String,
     pub snippet: String,
+    /// Q7: the full displayed card or imported observation's character count / 4, rounded up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_tokens: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -287,6 +420,8 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
     crate::claims::schema(&k)?;
     crate::consumer::imported::schema(&k)?;
     crate::consumer::fts::schema(&k)?;
+    crate::cards::schema(&k)?;
+    crate::turns::schema(&k)?;
     let _snapshot = k.unchecked_transaction()?;
     std::thread::scope(|s| {
         // D8: the query's call goes out while the full-text sides read (on the 178k store they
@@ -302,10 +437,11 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
         });
         let imported = match q.raw {
             RawArm::Only => None,
-            _ => Some([false, true].map(|prompts| imported_fts(&k, q, depth, prompts))),
+            _ => Some(imported_fts(&k, q, depth)),
         };
         let rows = match q.raw {
             RawArm::Off => Ok(Vec::new()),
+            _ if q.types.is_some() => filtered_raw_fts(&raw, &k, q, depth),
             _ => super::raw_order(
                 Some(&raw),
                 &k,
@@ -324,19 +460,35 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                 Err(_) => (Vector::Skipped(VectorSkip::Error), None),
             },
         };
+        let rules = redact::Rules::load(home)?;
         let (mut hits, mut lowered, mut imports, mut records) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        if let Some([knowledge, prompts]) = imported {
+        if let Some(fts) = imported {
             (hits, lowered) = claims_leg(&raw, &k, q, depth, &terms, near.as_ref())?;
-            let fts = [knowledge?, prompts?];
-            imports = imported_leg(&k, q, depth, &terms, fts, near.as_ref())?;
+            imports = imported_leg(&k, q, depth, &terms, fts?, near.as_ref(), &rules)?;
+            let cards = curated_leg(&raw, &k, q, depth, &terms, &rules, false)?;
+            let summaries = curated_leg(&raw, &k, q, depth, &terms, &rules, true)?;
+            let lists = [&cards, &summaries, &imports];
+            let keys: Vec<Vec<String>> = lists
+                .iter()
+                .map(|hits| hits.iter().map(|h| h.key.clone()).collect())
+                .collect();
+            let order = rrf_lists(&keys.iter().map(Vec::as_slice).collect::<Vec<_>>());
+            let mut by_key: HashMap<String, Hit> = cards
+                .into_iter()
+                .chain(summaries)
+                .chain(imports)
+                .map(|h| (h.key.clone(), h))
+                .collect();
+            imports = order
+                .into_iter()
+                .filter_map(|key| by_key.remove(&key))
+                .collect();
         }
         if q.raw != RawArm::Off {
             let mut order = rows?;
             if let Some(near) = &near {
-                let repos: Vec<String> = q.searched().map(str::to_owned).into_iter().collect();
-                let skip = q.skip_session.as_deref();
-                order = rrf(&order, &near.knn(&k, "r", &repos, span, skip, depth)?);
+                order = rrf(&order, &near.query_knn(&k, q, "r", depth)?);
                 order.truncate(depth);
             }
             // The records read and their snippets gated now, whatever became of the call: the
@@ -354,6 +506,7 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                     label: Label::Citable,
                     title: String::new(),
                     snippet: h.snippet,
+                    read_tokens: None,
                 });
             }
         }
@@ -362,9 +515,57 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             _ => hits.extend(imports.into_iter().chain(records)),
         }
         hits.extend(lowered);
-        hits.truncate(q.limit);
+        if let Some(filter) = &q.types {
+            hits.retain(|h| filter.matches(h));
+        }
+        // Stable sort: equal times retain Q2's relevance order. The final limit follows it.
+        match q.order {
+            Order::Relevance => {}
+            Order::DateDesc => hits.sort_by_key(|h| std::cmp::Reverse(h.when)),
+            Order::DateAsc => hits.sort_by_key(|h| h.when),
+        }
+        hits = limit_units(hits, q.limit);
         Ok(Answer { hits, vector })
     })
+}
+
+/// Apply the limit after ordering while keeping D2's claim units whole. Date order still
+/// uses each hit's own time; a unit that cannot fit is left out as `claims::place` leaves it.
+fn limit_units(hits: Vec<Hit>, limit: usize) -> Vec<Hit> {
+    let parents: HashMap<String, String> = hits
+        .iter()
+        .filter_map(|h| match &h.class {
+            Class::Delivered { later } => Some((h.key.clone(), later.clone())),
+            _ => None,
+        })
+        .collect();
+    if parents.is_empty() {
+        return hits.into_iter().take(limit).collect();
+    }
+    let root = |h: &Hit| {
+        let mut key = h.key.clone();
+        while let Some(later) = parents.get(&key) {
+            key = later.clone();
+        }
+        key
+    };
+    let mut sizes = HashMap::new();
+    for h in &hits {
+        *sizes.entry(root(h)).or_insert(0usize) += 1;
+    }
+    let mut seen = HashSet::new();
+    let mut kept = HashSet::new();
+    let mut left = limit;
+    for h in &hits {
+        let key = root(h);
+        if seen.insert(key.clone()) && sizes[&key] <= left {
+            left -= sizes[&key];
+            kept.insert(key);
+        }
+    }
+    hits.into_iter()
+        .filter(|h| kept.contains(&root(h)))
+        .collect()
 }
 
 /// The query's vector from the configured embedder (D8), or why there is none: off, no vectors,
@@ -625,6 +826,88 @@ struct Near {
 }
 
 impl Near {
+    /// Q5: keep the existing bounded KNN candidate pool, but remove unselected kinds before
+    /// taking the leg's depth and fusing its ranks. This reads only kind metadata for filtering;
+    /// the display readers below still decide visibility and gate the actual hits.
+    fn query_knn(
+        &self,
+        k: &Connection,
+        q: &Query,
+        family: &str,
+        depth: usize,
+    ) -> Result<Vec<String>> {
+        let repos = q
+            .searched()
+            .map(|r| {
+                if family == "i" {
+                    imported_repos(r).to_vec()
+                } else {
+                    vec![r.to_owned()]
+                }
+            })
+            .unwrap_or_default();
+        let skip = if family == "c" {
+            None
+        } else {
+            q.skip_session.as_deref()
+        };
+        let candidates = if q.types.is_some() {
+            CANDIDATES as usize
+        } else {
+            depth
+        };
+        let order = self.knn(k, family, &repos, (q.since, q.until), skip, candidates)?;
+        let Some(filter) = &q.types else {
+            return Ok(order);
+        };
+        let mut kept = Vec::new();
+        for key in order {
+            let (class, kind): (Class, Option<String>) = match family {
+                "c" => (
+                    Class::Current,
+                    k.query_row("SELECT kind FROM active WHERE uid = ?1", [&key], |r| {
+                        r.get(0)
+                    })
+                    .optional()?,
+                ),
+                "i" => (
+                    Class::Imported,
+                    k.query_row(
+                        "SELECT kind FROM imported WHERE uid = ?1 ORDER BY rowid DESC LIMIT 1",
+                        [&key],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+                ),
+                "r" => {
+                    let Some((device, seq)) = key.rsplit_once(':') else {
+                        continue;
+                    };
+                    let Ok(seq) = seq.parse::<i64>() else {
+                        continue;
+                    };
+                    (
+                        Class::Raw,
+                        k.query_row(
+                            "SELECT kind FROM raw_docs WHERE device = ?1 AND seq = ?2",
+                            params![device, seq],
+                            |r| r.get(0),
+                        )
+                        .optional()?,
+                    )
+                }
+                _ => unreachable!("search vector family"),
+            };
+            if kind.is_some_and(|kind| filter.accepts(&class, &kind)) {
+                kept.push(key);
+                if kept.len() == depth {
+                    break;
+                }
+            }
+        }
+        Ok(kept)
+    }
+
     /// The keys of the `kind` documents nearest the query, the best first: `CANDIDATES` from the
     /// bit index, kept to `repos` (any of them; none for every one), the time span (MUST-M12) and
     /// all but the `skip` session inside the KNN, each scored again by its fp32 vector, the best
@@ -642,14 +925,21 @@ impl Near {
             "embedding MATCH vec_bit(?)".to_owned(),
             "k = ?".into(),
             "embedder = ?".into(),
-            "kind = ?".into(),
+            if kind == "i" {
+                "kind IN ('k', 'p')"
+            } else {
+                "kind = ?"
+            }
+            .into(),
         ];
         let mut args = vec![
             Value::Blob(crate::embed::bits(&self.vector)),
             Value::Integer(CANDIDATES),
             Value::Text(self.embedder.clone()),
-            Value::Text(kind.to_owned()),
         ];
+        if kind != "i" {
+            args.push(Value::Text(kind.to_owned()));
+        }
         if !repos.is_empty() {
             clauses.push(format!("repo IN ({})", vec!["?"; repos.len()].join(", ")));
             args.extend(repos.iter().cloned().map(Value::Text));
@@ -781,6 +1071,7 @@ fn claims_leg(
         args.push(Value::Text(r.to_owned()));
     }
     super::within(&mut clauses, &mut args, "a.valid_from", (q.since, q.until));
+    type_clause(q, Class::Current, "a.kind", &mut clauses, &mut args);
     args.extend(order_args);
     let pending = claims::Pending::read(raw, k)?;
     let hidden = |uid: &str| pending.touches(k, uid);
@@ -802,9 +1093,8 @@ fn claims_leg(
     // The vector side's claims, hidden ones out and placed as above, each list fused with its
     // full-text one (D8).
     if let Some(near) = near {
-        let repos: Vec<String> = q.searched().map(str::to_owned).into_iter().collect();
         let (mut near_shown, mut near_ended) = (Vec::new(), Vec::new());
-        for uid in near.knn(k, "c", &repos, (q.since, q.until), None, depth)? {
+        for uid in near.query_knn(k, q, "c", depth)? {
             if !hidden(&uid)? {
                 place_claim(
                     k,
@@ -821,7 +1111,24 @@ fn claims_leg(
     }
     // A unit brings the claim that ended its earlier decision whatever that claim's time: an
     // earlier decision is never shown without it (D2), which `since` and `until` do not lift.
-    let (units, _) = claims::place(claims::units(k, &shown, hidden)?, q.limit);
+    let slots = if q.types.is_some() || q.order != Order::Relevance {
+        depth
+    } else {
+        q.limit
+    };
+    let mut units = claims::units(k, &shown, hidden)?;
+    if let Some(filter) = &q.types {
+        // A unit with an excluded mate cannot show its earlier claim on its own (D2).
+        units.retain(|unit| {
+            unit.iter()
+                .all(|c| filter.accepts(&Class::Current, &c.kind))
+        });
+    }
+    let (units, _) = claims::place(units, slots);
+    // A done linker can be pulled into a delivered unit from the lowered list. It takes
+    // one place there, and must not be appended a second time below the other legs.
+    let placed: HashSet<&str> = units.iter().flatten().map(|c| c.uid.as_str()).collect();
+    ended.retain(|c| !placed.contains(c.uid.as_str()));
     let hit = |c: &Claim| -> Result<Hit> {
         let class = match ended_by.get(&c.uid) {
             Some(by) => Class::Superseded { by: by.clone() },
@@ -1052,6 +1359,7 @@ fn claim_hit(raw: &Raw, k: &Connection, c: &Claim, class: Class, terms: &[String
         label,
         title: String::new(),
         snippet: super::snippet(&redact::outbound(&c.body), terms, WIDTH),
+        read_tokens: None,
     })
 }
 
@@ -1089,66 +1397,43 @@ fn imported_repos(repo: &str) -> [String; 2] {
 }
 
 /// The imported documents `q` finds, once per uid (two devices' imports of one are one): the
-/// knowledge claude-mem kept, then the prompts it recorded (D7), each kind's full-text list
-/// (`imported_fts`, read while the query's call is out) fused with its vector side's.
+/// documents in one full-text list (Q2), fused with their vector side's. Both imported vector
+/// partitions (`k` knowledge and `p` prompts) take part in that one list.
 fn imported_leg(
     k: &Connection,
     q: &Query,
     depth: usize,
     terms: &[String],
-    fts: [Vec<String>; 2],
+    mut uids: Vec<String>,
     near: Option<&Near>,
+    rules: &redact::Rules,
 ) -> Result<Vec<Hit>> {
     let mut out = Vec::new();
-    for (mut uids, kind) in fts.into_iter().zip(["k", "p"]) {
-        if let Some(near) = near {
-            // The index holds an import's repository as its claude-mem project (`vec_repo`).
-            let repos: Vec<String> = q
-                .searched()
-                .map(|r| imported_repos(r).to_vec())
-                .unwrap_or_default();
-            uids = rrf(
-                &uids,
-                &near.knn(
-                    k,
-                    kind,
-                    &repos,
-                    (q.since, q.until),
-                    q.skip_session.as_deref(),
-                    depth,
-                )?,
-            );
-            uids.truncate(depth);
-        }
-        for uid in uids {
-            out.extend(imported_hit(k, &uid, terms)?);
-        }
+    if let Some(near) = near {
+        uids = rrf(&uids, &near.query_knn(k, q, "i", depth)?);
+        uids.truncate(depth);
+    }
+    for uid in uids {
+        out.extend(imported_hit(k, &uid, terms, rules)?);
     }
     Ok(out)
 }
 
-/// The full-text side of `imported_leg` for one kind: uids, the best first.
-fn imported_fts(k: &Connection, q: &Query, depth: usize, prompts: bool) -> Result<Vec<String>> {
+/// The full-text side of `imported_leg`: uids, the best first, regardless of kind (Q2).
+fn imported_fts(k: &Connection, q: &Query, depth: usize) -> Result<Vec<String>> {
     // The index keeps no text (`content=''`): short words read the joined title and body.
     let Some((mut clauses, mut args, order, order_args)) =
         super::query_clauses(&q.text, "imported_fts", &["i.title", "i.body"])
     else {
         return Ok(Vec::new());
     };
-    clauses.push(
-        if prompts {
-            "i.kind = 'prompt'"
-        } else {
-            "i.kind <> 'prompt'"
-        }
-        .into(),
-    );
     if let Some(r) = q.searched() {
         let (sql, values) = imported_match("i.repo", r);
         clauses.push(sql);
         args.extend(values);
     }
     super::within(&mut clauses, &mut args, "i.ts", (q.since, q.until));
+    type_clause(q, Class::Imported, "i.kind", &mut clauses, &mut args);
     if let Some(s) = &q.skip_session {
         clauses.push("COALESCE(i.session, '') <> ?".into());
         args.push(Value::Text(s.clone()));
@@ -1197,27 +1482,236 @@ fn imported_fts(k: &Connection, q: &Query, depth: usize, prompts: bool) -> Resul
 }
 
 /// An imported uid's hit: its newest row.
-fn imported_hit(k: &Connection, uid: &str, terms: &[String]) -> Result<Option<Hit>> {
-    Ok(k.prepare_cached(
-        "SELECT kind, repo, ts, title, body FROM imported WHERE uid = ?1
+fn imported_hit(
+    k: &Connection,
+    uid: &str,
+    terms: &[String],
+    rules: &redact::Rules,
+) -> Result<Option<Hit>> {
+    let hit = k
+        .prepare_cached(
+            "SELECT kind, repo, ts, title, body FROM imported WHERE uid = ?1
              ORDER BY rowid DESC LIMIT 1",
-    )?
-    .query_row([uid], |r| {
-        let (title, body): (String, String) = (r.get(3)?, r.get(4)?);
-        Ok(Hit {
-            key: uid.to_owned(),
-            class: Class::Imported,
-            repo: Some(r.get(1)?),
-            when: r.get(2)?,
-            kind: r.get(0)?,
+        )?
+        .query_row([uid], |r| {
+            let (title, body): (String, String) = (r.get(3)?, r.get(4)?);
+            let flat = |s: &str| redact::flattened_with(s, rules, usize::MAX, one_line).masked();
+            Ok(Hit {
+                key: uid.to_owned(),
+                class: Class::Imported,
+                repo: Some(r.get(1)?),
+                when: r.get(2)?,
+                kind: r.get(0)?,
+                status: String::new(),
+                muted: false,
+                label: Label::Imported,
+                title: flat(&title),
+                snippet: redact::outbound_with(&super::snippet(&flat(&body), terms, WIDTH), rules),
+                read_tokens: None,
+            })
+        })
+        .optional()?;
+    match hit {
+        Some(mut hit) => {
+            if hit.kind != "summary" && hit.kind != "prompt" {
+                hit.read_tokens =
+                    imported_text(k, uid)?.map(|text| text.chars().count().div_ceil(4));
+            }
+            Ok(Some(hit))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Cards and summaries rank on their stored text, but display only through their one reader
+/// (`get` calls `cards::read` / `turns::read_row`). Hidden rows take no slot in either list.
+fn curated_leg(
+    raw: &Raw,
+    k: &Connection,
+    q: &Query,
+    depth: usize,
+    terms: &[String],
+    rules: &redact::Rules,
+    summaries: bool,
+) -> Result<Vec<Hit>> {
+    let (table, fts, current, number) = if summaries {
+        ("turns", "turns_fts", "d.skipped = 0", "0")
+    } else {
+        ("cards", "cards_fts", "d.replaced_by IS NULL", "d.n")
+    };
+    let Some((mut clauses, mut args, order, order_args)) =
+        super::query_clauses(&q.text, fts, &["f.text"])
+    else {
+        return Ok(Vec::new());
+    };
+    clauses.push(current.into());
+    type_clause(
+        q,
+        if summaries {
+            Class::Summary
+        } else {
+            Class::Card
+        },
+        if summaries { "'summary'" } else { "d.type" },
+        &mut clauses,
+        &mut args,
+    );
+    if let Some(repo) = q.searched() {
+        clauses.push("d.repo = ?".into());
+        args.push(Value::Text(repo.to_owned()));
+    }
+    super::within(&mut clauses, &mut args, "d.ts", (q.since, q.until));
+    if let Some(session) = &q.skip_session {
+        clauses.push("COALESCE(d.session, '') <> ?".into());
+        args.push(Value::Text(session.clone()));
+    }
+    args.extend(order_args);
+    let sql = format!(
+        "SELECT d.device, d.op_seq, {number} FROM {fts} f JOIN {table} d ON d.rowid = f.rowid
+         WHERE {} ORDER BY {order}d.ts DESC, d.device, d.op_seq{}",
+        clauses.join(" AND "),
+        if summaries { "" } else { ", d.n" }
+    );
+    let mut st = k.prepare(&sql)?;
+    let mut rows = st.query(params_from_iter(args))?;
+    let mut out = Vec::new();
+    while out.len() < depth
+        && let Some(row) = rows.next()?
+    {
+        let (device, seq): (String, i64) = (row.get(0)?, row.get(1)?);
+        let (key, class, repo, when, kind, title, body, read_tokens) = if summaries {
+            let id = format!("S{device}.{seq}");
+            let Some(s) = crate::turns::get(k, raw, &id, rules)? else {
+                continue;
+            };
+            let body = crate::turns::FIELDS[1..5]
+                .iter()
+                .filter_map(|f| s.fields.get(*f).map(String::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (
+                s.id(raw.device()),
+                Class::Summary,
+                s.repo,
+                s.ts,
+                "summary".to_owned(),
+                s.row,
+                body,
+                None,
+            )
+        } else {
+            let n: i64 = row.get(2)?;
+            let id = format!("{device}.{seq}.{n}");
+            let Some(c) = crate::cards::get(k, raw, &id, rules)? else {
+                continue;
+            };
+            let cost = card_text(&c, raw.device()).chars().count().div_ceil(4);
+            let body = std::iter::once(c.subtitle.as_str())
+                .chain(std::iter::once(c.narrative.as_str()))
+                .chain(
+                    c.facts
+                        .iter()
+                        .chain(&c.concepts)
+                        .chain(&c.files_read)
+                        .chain(&c.files_modified)
+                        .map(String::as_str),
+                )
+                .collect::<Vec<_>>()
+                .join("\n");
+            (
+                c.id(raw.device()),
+                Class::Card,
+                c.repo,
+                c.ts,
+                c.kind.unwrap_or_else(|| "summary".into()),
+                c.row_title,
+                body,
+                Some(cost),
+            )
+        };
+        let flat = redact::flattened_with(&body, rules, usize::MAX, one_line).masked();
+        out.push(Hit {
+            key,
+            class,
+            repo,
+            when,
+            kind,
             status: String::new(),
             muted: false,
-            label: Label::Imported,
-            title: redact::outbound(&title),
-            snippet: super::snippet(&redact::outbound(&body), terms, WIDTH),
-        })
-    })
-    .optional()?)
+            label: Label::QuoteOnly,
+            title,
+            snippet: redact::outbound_with(&super::snippet(&flat, terms, WIDTH), rules),
+            read_tokens,
+        });
+    }
+    Ok(out)
+}
+
+/// The raw full-text leg with Q5's kind restriction before its limit. Without a type filter
+/// the existing raw leg (including its bounded short-word pool) is used unchanged.
+fn filtered_raw_fts(raw: &Raw, k: &Connection, q: &Query, depth: usize) -> Result<Vec<String>> {
+    let Some((mut clauses, mut args, order, order_args)) =
+        super::query_clauses(&q.text, "raw_fts", &["f.text"])
+    else {
+        return Ok(Vec::new());
+    };
+    type_clause(q, Class::Raw, "d.kind", &mut clauses, &mut args);
+    if let Some(repo) = q.searched() {
+        clauses.push("d.repo = ?".into());
+        args.push(Value::Text(repo.to_owned()));
+    }
+    super::within(&mut clauses, &mut args, "d.ts", (q.since, q.until));
+    if let Some(session) = &q.skip_session {
+        clauses.push("COALESCE(d.session, '') <> ?".into());
+        args.push(Value::Text(session.clone()));
+    }
+    // Keep raw_order's pending-removal compensation and its bounded short-word pool.
+    let seen = super::fts_seen(Some(raw), k)?;
+    let count = depth.saturating_add(super::hidden(&seen)?.len());
+    let query = |sql: &str, args: Vec<Value>| -> Result<Vec<(String, i64)>> {
+        Ok(k.prepare(sql)?
+            .query_map(params_from_iter(args), |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    };
+    let hits = "raw_fts f JOIN raw_docs d ON d.rowid = f.rowid";
+    let rows = if order_args.is_empty() {
+        args.push(Value::Integer(super::sql_limit(count)));
+        let sql = format!(
+            "SELECT d.device, d.seq FROM {hits} WHERE {} ORDER BY {order}d.ts DESC LIMIT ?",
+            clauses.join(" AND ")
+        );
+        query(&sql, args)?
+    } else {
+        let mut pool = args.clone();
+        pool.push(Value::Integer(super::sql_limit(super::POOL)));
+        pool.extend(order_args);
+        pool.push(Value::Integer(super::sql_limit(count.min(super::POOL))));
+        let sql = format!(
+            "SELECT device, seq FROM (
+               SELECT d.device, d.seq, d.ts, f.text, f.rank FROM {hits}
+               WHERE {} ORDER BY rank, d.ts DESC, d.rowid LIMIT ?
+             ) f ORDER BY {order}ts DESC LIMIT ?",
+            clauses.join(" AND ")
+        );
+        let mut found = query(&sql, pool)?;
+        if count > super::POOL {
+            args.push(Value::Integer(super::sql_limit(count - super::POOL)));
+            args.push(Value::Integer(super::sql_limit(super::POOL)));
+            let sql = format!(
+                "SELECT d.device, d.seq FROM {hits} WHERE {} ORDER BY rank, d.ts DESC, d.rowid LIMIT ? OFFSET ?",
+                clauses.join(" AND ")
+            );
+            found.extend(query(&sql, args)?);
+        }
+        found
+    };
+    let pending = super::hidden(&seen)?;
+    Ok(rows
+        .into_iter()
+        .filter(|key| !pending.contains(key))
+        .take(depth)
+        .map(|(device, seq)| format!("{device}:{seq}"))
+        .collect())
 }
 
 /// The imported documents a search of `repo` reads: those of `imported_repos`, and of the
@@ -1240,14 +1734,16 @@ fn imported_match(col: &str, repo: &str) -> (String, [Value; 4]) {
 /// A hit on one line, as the CLI prints it and MCP returns it: its key (a claim's first 12
 /// characters, which `get` takes), its time, kind and standing, its label, its repository when
 /// `all` searched every one (MUST-M13), then its title and snippet. Gated field by field.
-pub fn line(h: &Hit, all: bool) -> String {
+pub fn line(h: &Hit, all: bool, rules: &redact::Rules) -> String {
+    // Inspect both untouched and flat views before either mask can remove the other's context.
+    let field = |s: &str| redact::flattened_with(s, rules, usize::MAX, one_line).masked();
     let key = match h.class {
         Class::Current | Class::Delivered { .. } | Class::Superseded { .. } => id(&h.key),
-        Class::Imported | Class::Raw => redact::outbound(&h.key),
+        Class::Imported | Class::Raw | Class::Card | Class::Summary => field(&h.key),
     };
     let mut standing = String::new();
     if !h.status.is_empty() {
-        standing.push_str(&format!(" {}", h.status));
+        standing.push_str(&format!(" {}", field(&h.status)));
     }
     standing.push_str(muted_label(h.muted));
     // As SessionStart's index names it (D2), whether the claim is delivered or not.
@@ -1260,19 +1756,20 @@ pub fn line(h: &Hit, all: bool) -> String {
         Label::Imported => "imported",
     };
     let repo = match (&h.repo, all) {
-        (Some(r), true) => format!(" [{}]", redact::outbound(r)),
+        (Some(r), true) => format!(" [{}]", field(r)),
         _ => String::new(),
     };
     let title = if h.title.is_empty() {
         String::new()
     } else {
-        format!("{}: ", h.title)
+        format!("{}: ", field(&h.title))
     };
+    let cost = h.read_tokens.map_or_else(String::new, |n| format!(" ~{n}"));
     format!(
-        "{key} {} {}{standing} ({label}){repo} — {title}{}\n",
+        "{key} {} {}{standing} ({label}){repo} — {title}{}{cost}\n",
         crate::db::utc(h.when),
-        h.kind,
-        h.snippet
+        field(&h.kind),
+        field(&h.snippet)
     )
 }
 
@@ -1403,6 +1900,25 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
     })
 }
 
+/// Q8: full text in the requested order, with a missing/hidden ID reported in its place.
+/// The callers gate and fence the whole reply just as they do a single item's text.
+pub fn get_many(home: &Path, ids: &[String]) -> Result<String> {
+    anyhow::ensure!(
+        (1..=20).contains(&ids.len()),
+        "ids must contain 1 to 20 ids"
+    );
+    let mut out = String::new();
+    for id in ids {
+        out.push_str(&format!("## {id}\n"));
+        match get(home, id)? {
+            Some(text) => out.push_str(&text),
+            None => out.push_str(&format!("no document {id} (ids come from search)\n")),
+        }
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 /// A card in full, as its reader gave it (gated, K6): its ID, time, type and repository, then
 /// claude-mem's fields, each part only when it has something.
 fn card_text(c: &crate::cards::Card, local: &str) -> String {
@@ -1460,7 +1976,6 @@ fn summary_text(s: &crate::turns::TurnSummary, local: &str) -> String {
         ("learned", "Learned"),
         ("completed", "Completed"),
         ("next_steps", "Next steps"),
-        ("notes", "Notes"),
     ] {
         if let Some(text) = s.fields.get(field) {
             out.push_str(&format!("\n{label}: {text}\n"));
@@ -2199,6 +2714,27 @@ pub(crate) mod fixture {
         pub fn key(&self, seq: i64) -> String {
             format!("{}:{seq}", self.raw.device())
         }
+
+        /// Invented window observations, written through the same op log as curation.
+        pub fn cards(
+            &mut self,
+            from: i64,
+            to: i64,
+            observations: serde_json::Value,
+            recurate: bool,
+        ) -> Vec<String> {
+            let count = observations.as_array().unwrap().len();
+            let op = json!({"outcome": "curated", "summary": "", "from_seq": from,
+                "to_seq": to, "from_offset": null, "to_offset": null, "elided": [],
+                "removed": [], "goals": [], "observations": observations, "recurate": recurate});
+            let seq = self.raw.append_ops(&[(OpKind::Window, op)]).unwrap()[0];
+            (0..count).map(|n| format!("{seq}.{n}")).collect()
+        }
+
+        pub fn turn(&mut self, op: serde_json::Value) -> String {
+            let seq = self.raw.append_ops(&[(OpKind::Turn, op)]).unwrap()[0];
+            format!("S{seq}")
+        }
     }
 }
 
@@ -2220,6 +2756,300 @@ mod tests {
 
     fn keys(a: &Answer) -> Vec<&str> {
         a.hits.iter().map(|h| h.key.as_str()).collect()
+    }
+
+    /// Q5: unselected vector candidates cannot use the selected kind's depth. No listener,
+    /// provider configuration or external call: the existing deterministic vector fixture.
+    #[test]
+    fn type_filter_does_not_lose_vector_hits_before_depth() {
+        let mut s = Store::new();
+        let mut docs: Vec<_> = (0..101)
+            .map(|n| {
+                (
+                    format!("obs-{n}"),
+                    "import",
+                    "feature",
+                    1_000,
+                    "Nebula".to_owned(),
+                )
+            })
+            .collect();
+        docs.push((
+            "summary".into(),
+            "import",
+            "summary",
+            2_000,
+            "Zenith".into(),
+        ));
+        let ids = s.imported_all(docs);
+        s.run();
+        crate::embed_phase::fixture::vectors(&s);
+        let vector = crate::embed::stub::vector(crate::embed::EMBEDDER, "Nebula");
+        let q = Query {
+            text: "xqv".into(),
+            repo: Some("claude-mem:p".into()),
+            types: Some("sessions".parse().unwrap()),
+            raw: RawArm::Off,
+            limit: 1,
+            ..Default::default()
+        };
+        let found = query_with(s.home.path(), &q, Some(&vector)).unwrap();
+        assert_eq!(found.vector, Vector::Used);
+        assert_eq!(keys(&found), [ids.last().unwrap().as_str()]);
+    }
+
+    /// Q2/MUST-M12: the existing imported vectors still search both knowledge and prompts,
+    /// and keep repository, date and session restrictions before taking their part.
+    #[test]
+    fn imported_vectors_keep_both_partitions_and_scope() {
+        let mut s = Store::new();
+        let ids = s.imported_all(vec![
+            ("obs".into(), "work", "feature", 1_000, "Nebula".into()),
+            ("summary".into(), "work", "summary", 2_000, "Zenith".into()),
+            ("prompt".into(), "other", "prompt", 3_000, "Quorum".into()),
+        ]);
+        s.imported("elsewhere", "elsewhere", 2_000, "Nebula", "Elsewhere.");
+        s.run();
+        crate::embed_phase::fixture::vectors(&s);
+        let vector = crate::embed::stub::vector(crate::embed::EMBEDDER, "Nebula");
+        let q = Query {
+            text: "xqv".into(),
+            repo: Some("claude-mem:p".into()),
+            raw: RawArm::Off,
+            limit: 100,
+            ..Default::default()
+        };
+        let found = query_with(s.home.path(), &q, Some(&vector)).unwrap();
+        let mut keys = keys(&found)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        keys.sort();
+        let mut wanted = ids.clone();
+        wanted.sort();
+        assert_eq!(keys, wanted);
+        let span = Query {
+            since: Some(1_500),
+            until: Some(3_000),
+            ..q.clone()
+        };
+        assert_eq!(
+            super::tests::keys(&query_with(s.home.path(), &span, Some(&vector)).unwrap()),
+            [ids[1].as_str()]
+        );
+        let skip = Query {
+            skip_session: Some("work".into()),
+            ..q
+        };
+        assert_eq!(
+            super::tests::keys(&query_with(s.home.path(), &skip, Some(&vector)).unwrap()),
+            [ids[2].as_str()]
+        );
+    }
+
+    /// Q4: consumers write the rows and their indexes in one transaction; a rollback leaves
+    /// neither searchable text, and rewind deletes lost ops and revives replaced cards.
+    #[test]
+    fn index_writes_roll_back_and_rewind_with_rows() {
+        use crate::worker::Consumer;
+        let mut s = Store::new();
+        let source = s.said("work", R, 1_000, "Widget input.");
+        let card = s.cards(
+            source,
+            source,
+            serde_json::json!([{"type": "bugfix", "title": "Azimuth"}]),
+            false,
+        )[0]
+        .clone();
+        let turn = |request| {
+            serde_json::json!({"agent": "claude", "session": "work", "repo": R,
+            "ts": 2_000, "from": source, "through": source, "read": [], "goals": [],
+            "removed": [], "fields": {"request": request}, "skipped": false})
+        };
+        let summary = s.turn(turn("Zenith"));
+        let device = s.raw.device().to_owned();
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        crate::cards::schema(&k).unwrap();
+        crate::turns::schema(&k).unwrap();
+        let tx = k.transaction().unwrap();
+        crate::consumer::cards::Cards
+            .step(&s.raw, &tx, &device, 0)
+            .unwrap();
+        crate::consumer::turns::Turns
+            .step(&s.raw, &tx, &device, 0)
+            .unwrap();
+        tx.rollback().unwrap();
+        let ask = |text| Query {
+            raw: RawArm::Off,
+            all: true,
+            ..q(text)
+        };
+        assert!(s.query(&ask("azimuth")).hits.is_empty());
+        assert!(s.query(&ask("zenith")).hits.is_empty());
+        s.run();
+        assert_eq!(keys(&s.query(&ask("azimuth"))), [card.as_str()]);
+        assert_eq!(keys(&s.query(&ask("zenith"))), [summary.as_str()]);
+        let to = s.raw.max_op_seq().unwrap();
+        s.cards(
+            source,
+            source,
+            serde_json::json!([{"type": "feature", "title": "Nebula"}]),
+            true,
+        );
+        s.turn(turn("Quorum"));
+        s.run();
+        assert!(s.query(&ask("azimuth")).hits.is_empty());
+        let tx = k.transaction().unwrap();
+        crate::consumer::cards::Cards
+            .rewind(&tx, &device, to)
+            .unwrap();
+        crate::consumer::turns::Turns
+            .rewind(&tx, &device, to)
+            .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(keys(&s.query(&ask("azimuth"))), [card.as_str()]);
+        assert_eq!(keys(&s.query(&ask("zenith"))), [summary.as_str()]);
+        assert!(s.query(&ask("nebula")).hits.is_empty());
+        assert!(s.query(&ask("quorum")).hits.is_empty());
+    }
+
+    /// Q2 keeps D2's delivered units: neither a concrete-kind filter nor a date limit may
+    /// leave an earlier owner preference without the decision that may overturn it.
+    #[test]
+    fn type_and_date_order_keep_delivered_claim_units() {
+        let mut s = Store::new();
+        let text = "Indent widgets with tabs.";
+        let source = s.said("work", R, 1_000, text);
+        let earlier = s.claim(source, text, ("preference", "decided", "user"), &[]);
+        let later = s.decided(
+            R,
+            2_000,
+            "Indent widgets with spaces, never tabs.",
+            &[&earlier],
+        );
+        s.run();
+        let only = Query {
+            raw: RawArm::Off,
+            types: Some("preference".parse().unwrap()),
+            ..q("indent widgets")
+        };
+        assert!(
+            s.query(&only).hits.is_empty(),
+            "D2 hides a unit whose mate the type filter excludes"
+        );
+        let both = Query {
+            types: Some("preference,decision".parse().unwrap()),
+            order: Order::DateAsc,
+            limit: 2,
+            ..only.clone()
+        };
+        assert_eq!(keys(&s.query(&both)), [earlier.as_str(), later.as_str()]);
+        for order in [Order::DateAsc, Order::DateDesc, Order::Relevance] {
+            let one = Query {
+                order,
+                limit: 1,
+                ..both.clone()
+            };
+            assert!(
+                s.query(&one).hits.is_empty(),
+                "D2: the whole pair takes two places"
+            );
+        }
+    }
+
+    /// Q7: a stored multiline title still makes exactly one searchable index line.
+    #[test]
+    fn multiline_imported_titles_stay_on_one_hit_line() {
+        let mut s = Store::new();
+        let id = s.imported("multiline", "r", 1_000, "Quartz\n  parser", "A reader fix.");
+        s.run();
+        let found = s.query(&q("quartz"));
+        let h = found.hits.iter().find(|h| h.key == id).unwrap();
+        let line = line(h, true, &redact::Rules::default());
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(line.contains("Quartz parser"), "{line}");
+        // The full item preserves the stored field, as before; only the index flattens it.
+        assert!(
+            get(s.home.path(), &id)
+                .unwrap()
+                .unwrap()
+                .contains("Quartz\n  parser")
+        );
+    }
+
+    #[test]
+    fn done_mates_take_one_place_in_a_delivered_unit() {
+        let mut s = Store::new();
+        let text = "Indent widgets with tabs.";
+        let source = s.said("work", R, 1_000, text);
+        let earlier = s.claim(source, text, ("preference", "decided", "user"), &[]);
+        let text = "Indent widgets with spaces, never tabs.";
+        let source = s.said("work", R, 2_000, text);
+        let later = s.claim(source, text, ("decision", "done", "user"), &[&earlier]);
+        s.run();
+        let found = s.query(&Query {
+            raw: RawArm::Off,
+            limit: 2,
+            ..q("indent widgets")
+        });
+        assert_eq!(keys(&found), [later.as_str(), earlier.as_str()]);
+    }
+
+    /// The index title's original and flat views are scanned independently, even when an
+    /// original-only rule removes the context a flat-only rule needs (Q3/Q7).
+    #[test]
+    fn imported_title_gates_original_and_flat_views_independently() {
+        const HOME: &str = "OBOETE_TEST_TOOL_LINE_HOME";
+        if let Ok(home) = std::env::var(HOME) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let found = query(
+                &home,
+                &Query {
+                    all: true,
+                    ..q("quartz")
+                },
+            )
+            .unwrap();
+            let rules = redact::Rules::load(&home).unwrap();
+            let text: String = found.hits.iter().map(|h| line(h, true, &rules)).collect();
+            assert!(
+                !text.contains("MASKME") && !text.contains("EXPOSED77"),
+                "{text}"
+            );
+            assert!(text.contains("[REDACTED]"), "{text}");
+            return;
+        }
+        let mut s = Store::new();
+        s.imported(
+            "flat-rule",
+            "r",
+            1_000,
+            "hide=MASKME\ncode=EXPOSED77",
+            "Quartz guide.",
+        );
+        s.run();
+        std::fs::write(
+            s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [\
+             { id = \"original\", regex = '^hide=(MASKME)', secret_group = 1 }, \
+             { id = \"flat\", regex = '^hide=MASKME code=(EXPOSED77)$', secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let out = std::process::Command::new(std::env::args_os().next().unwrap())
+            .args([
+                "--exact",
+                "search::b::tests::imported_title_gates_original_and_flat_views_independently",
+            ])
+            .env(HOME, s.home.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]
@@ -2359,7 +3189,10 @@ mod tests {
             assert_eq!(keys(&answer), [&new, &old]);
             let hit = serde_json::to_value(&answer.hits[0]).unwrap();
             assert_eq!(hit["muted"], muted);
-            assert_eq!(line(&answer.hits[0], false).contains("muted"), muted);
+            assert_eq!(
+                line(&answer.hits[0], false, &redact::Rules::default()).contains("muted"),
+                muted
+            );
             let view = serde_json::to_value(claim(s.home.path(), &new).unwrap().unwrap()).unwrap();
             assert_eq!(view["muted"], muted);
             assert_eq!(view["status"], "decided");
@@ -2437,7 +3270,10 @@ mod tests {
             keys(&found)
         );
         assert!(keys(&found).contains(&other.as_str()));
-        assert!(line(last, false).contains(&format!("superseded by {}", &new[..12])));
+        assert!(
+            line(last, false, &redact::Rules::default())
+                .contains(&format!("superseded by {}", &new[..12]))
+        );
         let only = s.query(&Query {
             raw: RawArm::Off,
             ..q("TTL")
@@ -2600,7 +3436,9 @@ mod tests {
             (Label::Citable, Label::Imported, Label::Citable)
         );
         let doc_hit = found.hits.iter().find(|h| h.key == doc).unwrap();
-        assert!(line(doc_hit, true).contains("(imported) [claude-mem:r]"));
+        assert!(
+            line(doc_hit, true, &redact::Rules::default()).contains("(imported) [claude-mem:r]")
+        );
         let k = crate::knowledge::open(s.home.path()).unwrap();
         let elsewhere = Claim {
             device: "0000ffff".into(),
@@ -2684,7 +3522,7 @@ mod tests {
         }
         s.run();
         let k = crate::knowledge::open(s.home.path()).unwrap();
-        let uids = imported_fts(&k, &q("設計 worker"), 2 * crate::search::POOL, false).unwrap();
+        let uids = imported_fts(&k, &q("設計 worker"), 2 * crate::search::POOL).unwrap();
         assert_eq!(uids.len(), crate::search::POOL + 1);
         assert!(uids[crate::search::POOL].ends_with(":d0"));
     }
@@ -2885,10 +3723,11 @@ mod tests {
             "\nLearned: The last line has no newline.\n",
             "\nCompleted: It reads to the end.\n",
             "\nNext steps: Measure it.\n",
-            "\nNotes: One note.\n",
         ] {
             assert!(shown.contains(part), "{part:?}");
         }
+        // Q4/Q8: notes stays stored, but is not a displayed summary section.
+        assert!(!shown.contains("One note.") && !shown.contains("Notes:"));
         assert_eq!(get(home, &format!("S{}", op_seq + 1)).unwrap(), None);
     }
 
@@ -3311,10 +4150,10 @@ mod tests {
         }
     }
 
-    /// D7: claude-mem's knowledge comes before the prompts it recorded, whatever the full-text
-    /// rank: a note that names the words once ranks above a prompt full of them.
+    /// Q2 replaces D7's knowledge-before-prompts split: imported documents share one full-text
+    /// list, so a prompt that matches better can precede an observation.
     #[test]
-    fn imported_knowledge_ranks_before_imported_prompts() {
+    fn imported_documents_share_one_full_text_order() {
         let mut s = Store::new();
         let prompt = crate::raw::ImportDoc {
             uid: "claude-mem:test:p1".into(),
@@ -3337,7 +4176,7 @@ mod tests {
             .filter(|h| h.class == Class::Imported)
             .map(|h| h.key.as_str())
             .collect();
-        assert_eq!(imported, [note.as_str(), "claude-mem:test:p1"]);
+        assert_eq!(imported, ["claude-mem:test:p1", note.as_str()]);
     }
 
     /// MUST-M12 (Task 5): the vector side keeps to the repository searched and the time span
