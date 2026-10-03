@@ -134,6 +134,24 @@ fn started(home: &Path) -> Vec<u32> {
     pids
 }
 
+/// The children of `pid` that have exited and wait to be reaped.
+fn zombies(pid: u32) -> usize {
+    let parent = pid.to_string();
+    let mut found = 0;
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let stat = std::fs::read_to_string(entry.path().join("stat")).unwrap_or_default();
+        // pid (name) state ppid …: the name may hold spaces, so it is read after its `)`.
+        let mut rest = stat
+            .rsplit_once(')')
+            .map_or("", |(_, r)| r)
+            .split_whitespace();
+        if rest.next() == Some("Z") && rest.next() == Some(parent.as_str()) {
+            found += 1;
+        }
+    }
+    found
+}
+
 /// Whether a process holds the lock file `name` of `home`'s state.
 fn held(home: &Path, name: &str) -> bool {
     std::fs::OpenOptions::new()
@@ -239,6 +257,9 @@ fn view_serves_on_its_own_address_when_the_port_is_in_use() {
         !first.starts_with(&format!("http://127.0.0.1:{port}/")),
         "{first}"
     );
+    // The resident viewer it started, which found the port taken and left, is reaped (Codex on
+    // #378).
+    assert_eq!(zombies(view.0.id()), 0);
     let _ = view.0.kill();
     let mut why = String::new();
     std::io::Read::read_to_string(&mut view.0.stderr.take().unwrap(), &mut why).unwrap();
@@ -289,4 +310,43 @@ fn the_token_file_is_0600_whatever_the_umask() {
             .mode();
         assert_eq!(mode & 0o777, 0o600, "{name}");
     }
+}
+
+/// R7: `--port 0` asks for this run's own viewer on any free port, in a resident home too: it
+/// starts nothing and serves here (Codex on #378).
+#[test]
+fn view_with_port_0_serves_here_in_a_resident_home() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    std::fs::write(
+        h.join("config.toml"),
+        format!("[worker]\nresident = true\n[view]\nport = {port}\n"),
+    )
+    .unwrap();
+    let _detached = Detached(h);
+    let mut view = Worker(
+        Command::new(env!("CARGO_BIN_EXE_oboete"))
+            .arg("--home")
+            .arg(h)
+            .args(["view", "--port", "0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut first = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(view.0.stdout.take().unwrap()),
+        &mut first,
+    )
+    .unwrap();
+    assert!(first.starts_with("http://127.0.0.1:"), "{first}");
+    assert!(
+        !first.starts_with(&format!("http://127.0.0.1:{port}/")),
+        "{first}"
+    );
+    assert!(view.0.try_wait().unwrap().is_none());
+    assert!(!held(h, "view.lock") && !held(h, "worker.lock"));
 }

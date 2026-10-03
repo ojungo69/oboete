@@ -226,9 +226,10 @@ enum Cmd {
     },
     /// Browse the memory and change the settings in a browser: a page on 127.0.0.1 (prints its URL)
     View {
-        /// Port to listen on (0 = any free port)
-        #[arg(long, default_value_t = 0)]
-        port: u16,
+        /// Port to listen on (0 = any free port); in a resident home, without it, the resident
+        /// viewer's address
+        #[arg(long)]
+        port: Option<u16>,
         /// Also open the page in the default browser
         #[arg(long)]
         open: bool,

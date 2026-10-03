@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -60,6 +60,9 @@ struct Viewer {
     /// Connections taken since the start: whether one came since the resident viewer's last look
     /// (R4).
     requests: AtomicUsize,
+    /// Set while the resident viewer decides whether it leaves, and kept once it does: no
+    /// connection is taken then.
+    closing: AtomicBool,
 }
 
 /// What a request's `X-Oboete-Token` must be.
@@ -76,7 +79,11 @@ struct Slot(Arc<Viewer>);
 
 impl Slot {
     fn take(v: &Arc<Viewer>) -> Option<Slot> {
-        if v.live.fetch_add(1, Ordering::SeqCst) < MAX_CONNECTIONS {
+        // Counted before `closing` is read, as `may_leave` sets it before it reads the count:
+        // one of the two sees the other.
+        if v.live.fetch_add(1, Ordering::SeqCst) < MAX_CONNECTIONS
+            && !v.closing.load(Ordering::SeqCst)
+        {
             return Some(Slot(Arc::clone(v)));
         }
         v.live.fetch_sub(1, Ordering::SeqCst);
@@ -157,8 +164,8 @@ impl Response {
 /// Serve until interrupted. In a resident home with no `--port`, it makes sure the resident
 /// viewer runs and prints its address instead (R7); when that viewer does not come up, it says
 /// why and serves here, on an address of this run, as in any other home.
-pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
-    if port == 0 && resident_home(home) {
+pub fn run(home: &Path, port: Option<u16>, open: bool) -> Result<()> {
+    if port.is_none() && resident_home(home) {
         match bring_up(home, Duration::from_secs(3)) {
             Ok(port) => return show_resident(home, port, open),
             Err(why) => eprintln!(
@@ -166,7 +173,7 @@ pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
             ),
         }
     }
-    let listener = TcpListener::bind(("127.0.0.1", port))?;
+    let listener = TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))?;
     let port = listener.local_addr()?.port();
     let token = fresh_token()?;
     let url = format!("http://127.0.0.1:{port}/#t={token}");
@@ -203,9 +210,9 @@ fn bring_up(home: &Path, wait: Duration) -> std::result::Result<u16, String> {
         .port
         .get();
     let _ = crate::hook::start_worker(home);
-    if !view_held(home) {
-        let _ = crate::hook::spawn_detached(home, &["view", "--resident"]);
-    }
+    let mut child = (!view_held(home))
+        .then(|| crate::hook::spawn_detached(home, &["view", "--resident"]))
+        .flatten();
     let listening = format!("listening {port}");
     let deadline = Instant::now() + wait;
     loop {
@@ -214,6 +221,11 @@ fn bring_up(home: &Path, wait: Duration) -> std::result::Result<u16, String> {
             return Ok(port);
         }
         if Instant::now() >= deadline {
+            // One that failed has left: reaped, so this run's own viewer keeps no zombie (Codex
+            // on #378).
+            if let Some(child) = child.as_mut() {
+                let _ = child.try_wait();
+            }
             return Err(outcome.unwrap_or_else(|| "it did not start".into()));
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -412,9 +424,7 @@ pub fn resident(home: &Path) -> Result<()> {
             let Some(why) = looking.leaving(id, quiet) else {
                 continue;
             };
-            if looking.live.load(Ordering::SeqCst) == 0
-                && let Ok(_saving) = looking.saving.try_lock()
-            {
+            if looking.may_leave() {
                 if !matches!(why, Leaving::Gone) {
                     let _ = say(&looking.home, &format!("left: {}", why.text()));
                 }
@@ -756,7 +766,19 @@ impl Viewer {
             opener: Mutex::new(None),
             live: AtomicUsize::new(0),
             requests: AtomicUsize::new(0),
+            closing: AtomicBool::new(false),
         }
+    }
+
+    /// Whether the resident viewer may leave now: no connection open, so no save either. Once it
+    /// may, it takes no new connection, and its exit cuts none off (Codex on #378).
+    fn may_leave(&self) -> bool {
+        self.closing.store(true, Ordering::SeqCst);
+        let free = self.live.load(Ordering::SeqCst) == 0;
+        if !free {
+            self.closing.store(false, Ordering::SeqCst);
+        }
+        free
     }
 
     /// R4: why the resident viewer leaves at a look, if it does: its home is gone (its lock file
@@ -4016,6 +4038,24 @@ mod tests {
         let (moved, _) = new_token(p).unwrap();
         assert!(!moved);
         assert_eq!(crate::config::view(p).unwrap().port.get(), 17399);
+    }
+
+    /// Codex on #378: the resident viewer leaves only with no connection open, and takes none
+    /// once it may leave, so its exit cuts none off; one that stays takes them as before.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_viewer_leaves_with_no_connection_and_takes_none_after() {
+        let home = tempfile::tempdir().unwrap();
+        let v = Arc::new(resident_of(home.path(), 17373));
+        let open = Slot::take(&v).unwrap();
+        assert!(!v.may_leave());
+        assert!(
+            Slot::take(&v).is_some(),
+            "a viewer that stays takes connections"
+        );
+        drop(open);
+        assert!(v.may_leave());
+        assert!(Slot::take(&v).is_none());
     }
 
     /// Codex on #378: a move that cannot be made changes nothing, so the old bookmark keeps
