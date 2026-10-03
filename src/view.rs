@@ -1700,15 +1700,12 @@ mod tests {
     /// A feed over invented records, without the older timeline fixture's claims or imports.
     fn feed_fixture() -> (Store, Viewer) {
         let s = Store::new();
-        let v = Viewer {
-            home: s.home.path().to_owned(),
-            cwd: Some(s.home.path().to_owned()),
-            port: 4321,
-            token: Token::Run("t0k".into()),
-            saving: Mutex::new(()),
-            opener: Mutex::new(None),
-            live: AtomicUsize::new(0),
-        };
+        let v = Viewer::new(
+            s.home.path(),
+            Some(s.home.path().to_owned()),
+            4321,
+            Token::Run("t0k".into()),
+        );
         (s, v)
     }
 
