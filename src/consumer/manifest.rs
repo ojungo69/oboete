@@ -161,17 +161,18 @@ pub fn text(
     let parts = delivered(&k, raw, repo, &manifest, rules)?;
     // The cards after the decisions (docs/cards.md S1): the most, halved each time, whose packet
     // stays within `cap` as it leaves, gated and escaped inside the fence, in UTF-16 units, the
-    // measure Cursor cuts by (S5); the rest is never cut for them. Counted first with the rest
-    // gated once and the block as built, its fields gated when read, which is cheap: a long value
-    // the gate hides frees its room (Codex on #370). The fence's own text is outside `cap`, as it
-    // always was.
+    // measure Cursor cuts by (S5); the rest is never cut for them. Counted first with the rest as
+    // read and the block as built, its fields gated when read, which is cheap; when that leaves no
+    // room, with the rest gated once, as a long value the gate hides frees its room (Codex on
+    // #370). The fence's own text is outside `cap`, as it always was.
     let cards = crate::cards::recent(&k, raw, repo, CARDS, rules)?;
     let name = repo_name(repo, rules);
-    let rest = match parts.packet(&manifest, &live, "") {
-        Some((base, _)) => base.outbound(rules).0.chars().count(),
-        None if cards.is_empty() => return Ok(None),
-        None => 0,
-    };
+    let base = parts.packet(&manifest, &live, "").map(|(base, _)| base);
+    if base.is_none() && cards.is_empty() {
+        return Ok(None);
+    }
+    let read = base.as_ref().map_or(0, |b| b.text.chars().count());
+    let mut gated_rest = None;
     let fence = manifest::fenced("").encode_utf16().count();
     let mut n = cards.len();
     let (bodies, gated, from) = loop {
@@ -179,7 +180,14 @@ pub fn text(
             0 => String::new(),
             n => crate::cards::block(&cards[..n], raw.device(), &name, now, &chrono::Local),
         };
-        if n > 0 && rest + block.chars().count() > cap {
+        let fits = |rest: usize| rest + block.chars().count() <= cap;
+        if n > 0
+            && !fits(read)
+            && !fits(*gated_rest.get_or_insert_with(|| {
+                base.as_ref()
+                    .map_or(0, |b| b.outbound(rules).0.chars().count())
+            }))
+        {
             n /= 2;
             continue;
         }
