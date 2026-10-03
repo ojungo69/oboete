@@ -941,7 +941,7 @@ fn append_batch(
     settings: &Settings,
     stats: &mut AgentStats,
 ) -> Result<()> {
-    let (records, origins): (Vec<_>, Vec<_>) = std::mem::take(batch).into_iter().unzip();
+    let (records, origins): (Vec<_>, Vec<_>) = batch.drain(..).unzip();
     stats.events += match raw.as_mut() {
         Some(raw) => raw
             .append_imported_origins(
