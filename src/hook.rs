@@ -275,7 +275,7 @@ fn run_io(
             let handed = match packet {
                 _ if !inject.session_start => Handed::Off,
                 _ if unread => Handed::Unread,
-                Some(m) => Handed::Claims(m.shown.len()),
+                Some(m) => Handed::Shown(m.shown.len(), m.cards),
                 None => Handed::Nothing,
             };
             session_start_note(japanese, handed)
@@ -394,8 +394,8 @@ enum Handed {
     Unread,
     /// An empty packet.
     Nothing,
-    /// This many claim lines.
-    Claims(usize),
+    /// This many claim lines and cards.
+    Shown(usize, usize),
 }
 
 /// The line a person sees at a session's start. It never holds stored text, a token or an
@@ -408,9 +408,16 @@ fn session_start_note(japanese: bool, handed: Handed) -> String {
         (true, Handed::Unread) => {
             "oboete: 記録は有効です。記憶を読み出せませんでした。oboete doctor で状態を確認できます。".into()
         }
-        (true, Handed::Claims(n)) => format!(
-            "oboete: 記憶は有効です。このリポジトリの記憶 {n} 件を渡しました。画面を開くには oboete view --open"
-        ),
+        (true, Handed::Shown(n, cards)) => {
+            let what = match cards {
+                0 => format!("記憶 {n} 件"),
+                c if n == 0 => format!("最近の作業 {c} 件"),
+                c => format!("記憶 {n} 件と最近の作業 {c} 件"),
+            };
+            format!(
+                "oboete: 記憶は有効です。このリポジトリの{what}を渡しました。画面を開くには oboete view --open"
+            )
+        }
         (true, Handed::Nothing) => "oboete: 記録は有効です。このリポジトリには、まだ渡せる記憶がありません。画面を開くには oboete view --open".into(),
         (false, Handed::Off) => {
             "oboete: recording is on. Handing memory over at session start is switched off.".into()
@@ -418,9 +425,16 @@ fn session_start_note(japanese: bool, handed: Handed) -> String {
         (false, Handed::Unread) => {
             "oboete: recording is on. Memory could not be read. Check with: oboete doctor".into()
         }
-        (false, Handed::Claims(n)) => format!(
-            "oboete: memory is on. {n} remembered items for this repository were handed over. Open the page with: oboete view --open"
-        ),
+        (false, Handed::Shown(n, cards)) => {
+            let what = match cards {
+                0 => format!("{n} remembered items"),
+                c if n == 0 => format!("{c} recent work entries"),
+                c => format!("{n} remembered items and {c} recent work entries"),
+            };
+            format!(
+                "oboete: memory is on. {what} for this repository were handed over. Open the page with: oboete view --open"
+            )
+        }
         (false, Handed::Nothing) => "oboete: recording is on. This repository has no memory to hand over yet. Open the page with: oboete view --open".into(),
     }
 }
@@ -3831,6 +3845,33 @@ mod tests {
         assert!(!note.contains("TERMINAL_PRIVATE_MEMORY_MARKER"));
         assert!(!note.contains("viewer-token-fixture"));
         assert!(!note.contains("token") && !note.contains("#t="));
+    }
+
+    /// docs/cards.md S1: the line counts the cards session start handed over beside the claims.
+    #[test]
+    fn session_start_note_counts_the_cards_too() {
+        let note =
+            |japanese, claims, cards| session_start_note(japanese, Handed::Shown(claims, cards));
+        assert_eq!(
+            note(true, 2, 5),
+            "oboete: 記憶は有効です。このリポジトリの記憶 2 件と最近の作業 5 件を渡しました。画面を開くには oboete view --open"
+        );
+        assert_eq!(
+            note(true, 0, 5),
+            "oboete: 記憶は有効です。このリポジトリの最近の作業 5 件を渡しました。画面を開くには oboete view --open"
+        );
+        assert_eq!(
+            note(true, 2, 0),
+            "oboete: 記憶は有効です。このリポジトリの記憶 2 件を渡しました。画面を開くには oboete view --open"
+        );
+        assert_eq!(
+            note(false, 2, 5),
+            "oboete: memory is on. 2 remembered items and 5 recent work entries for this repository were handed over. Open the page with: oboete view --open"
+        );
+        assert_eq!(
+            note(false, 0, 5),
+            "oboete: memory is on. 5 recent work entries for this repository were handed over. Open the page with: oboete view --open"
+        );
     }
 
     #[test]

@@ -181,7 +181,7 @@ impl Oboete {
 
     #[tool(
         name = "get",
-        description = "The full text of one remembered item by the id `search`, `timeline` or the session's start gave: a claim with its status and the quotes it stands on, an imported document, or a raw record."
+        description = "The full text of one remembered item by the id `search`, `timeline` or the session's start gave: a claim with its status and the quotes it stands on, a card of the session start's recent context (`412.0`) with its narrative, facts, concepts and files, an imported document, or a raw record."
     )]
     fn get(&self, Parameters(a): Parameters<GetArgs>) -> Result<CallToolResult, ErrorData> {
         match search::get(&self.home, &a.id).map_err(internal)? {

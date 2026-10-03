@@ -1162,7 +1162,7 @@ mod tests {
         let shown = show(home.path());
         assert_eq!(
             shown["inject"],
-            json!({"session_start": true, "session_start_chars": 6000, "per_prompt": false,
+            json!({"session_start": true, "session_start_chars": 9000, "per_prompt": false,
                 "per_prompt_chars": 1500, "correction": true, "correction_chars": 800})
         );
         assert_eq!(shown["ranges"]["per_prompt_chars"], json!([500, 6000]));
@@ -1197,7 +1197,7 @@ mod tests {
         let home = home_with(None);
         let shown = show(home.path());
         assert_eq!(shown["version"], "none");
-        assert_eq!(shown["inject"]["session_start_chars"], 6_000);
+        assert_eq!(shown["inject"]["session_start_chars"], 9_000);
         save_to(
             &home,
             &posted(&shown, |v| v["inject"]["session_start"] = json!(false)),
