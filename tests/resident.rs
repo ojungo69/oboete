@@ -112,17 +112,26 @@ struct Detached<'a>(&'a Path);
 
 impl Drop for Detached<'_> {
     fn drop(&mut self) {
-        let want = format!("--home\0{}\0", self.0.display());
-        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
-            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-                continue;
-            };
-            let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
-            if String::from_utf8_lossy(&cmdline).contains(&want) {
-                let _ = Command::new("kill").arg(pid.to_string()).status();
-            }
+        for pid in started(self.0) {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
         }
     }
+}
+
+/// The processes running with `--home <home>` in their command line.
+fn started(home: &Path) -> Vec<u32> {
+    let want = format!("--home\0{}\0", home.display());
+    let mut pids = Vec::new();
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
+        if String::from_utf8_lossy(&cmdline).contains(&want) {
+            pids.push(pid);
+        }
+    }
+    pids
 }
 
 /// Whether a process holds the lock file `name` of `home`'s state.
@@ -174,6 +183,14 @@ fn view_in_a_resident_home_brings_up_the_viewer_and_the_worker() {
         "{out}"
     );
     assert!(held(h, "view.lock") && held(h, "worker.lock"));
+    // They run in the home, not in the folder `oboete view` ran in, which can then go (R1;
+    // Codex on #378).
+    let pids = started(h);
+    assert!(pids.len() >= 2, "{pids:?}");
+    for pid in pids {
+        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).unwrap();
+        assert_eq!(cwd, h.canonicalize().unwrap(), "{pid}");
+    }
     let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(
         c,

@@ -238,16 +238,16 @@ fn show_resident(home: &Path, port: u16, open: bool) -> Result<()> {
 /// `oboete view --new-token` (R6): a new token file and, in a resident home, the next free port
 /// in `[view] port`, so the viewer comes back on a new address: the old one's tick sees the port
 /// change and it leaves, and the worker starts it again. Whether the port moved, and the address
-/// to bookmark.
+/// to bookmark. The move comes first: one that fails changes nothing, and the old bookmark keeps
+/// working; a token write that fails after it is mended by running the command again.
 pub fn new_token(home: &Path) -> Result<(bool, String)> {
     std::fs::create_dir_all(home.join("state"))?;
     anyhow::ensure!(owner_only(home), NOT_PRIVATE);
-    write_token(home)?;
-    let token = file_token(home).ok_or_else(|| anyhow!("the new token file"))?;
     let from = crate::config::view(home)?.port.get();
     let moved = resident_home(home);
     let port = if moved {
-        let port = (from.saturating_add(1)..=u16::MAX)
+        let port = (from..=u16::MAX)
+            .skip(1)
             .find(|&p| TcpListener::bind(("127.0.0.1", p)).is_ok())
             .ok_or_else(|| anyhow!("no free port after {from}"))?;
         crate::settings::set_view_port(home, port)?;
@@ -255,6 +255,8 @@ pub fn new_token(home: &Path) -> Result<(bool, String)> {
     } else {
         from
     };
+    write_token(home)?;
+    let token = file_token(home).ok_or_else(|| anyhow!("the new token file"))?;
     Ok((moved, format!("http://127.0.0.1:{port}/#t={token}")))
 }
 
@@ -4014,6 +4016,27 @@ mod tests {
         let (moved, _) = new_token(p).unwrap();
         assert!(!moved);
         assert_eq!(crate::config::view(p).unwrap().port.get(), 17399);
+    }
+
+    /// Codex on #378: a move that cannot be made changes nothing, so the old bookmark keeps
+    /// working. Above port 65535 there is none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_new_token_whose_move_fails_leaves_the_token_and_the_port() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        let config = "[worker]\nresident = true\n[view]\nport = 65535\n";
+        std::fs::write(p.join("config.toml"), config).unwrap();
+        ensure_token(p).unwrap();
+        let file = p.join("state/view-token");
+        let old = std::fs::read_to_string(&file).unwrap();
+        assert!(new_token(p).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), old);
+        assert_eq!(
+            std::fs::read_to_string(p.join("config.toml")).unwrap(),
+            config
+        );
     }
 
     #[test]

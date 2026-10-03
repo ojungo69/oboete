@@ -1922,8 +1922,10 @@ pub(crate) fn spawn_detached(home: &Path, args: &[&str]) -> Option<std::process:
         return None;
     }
     let exe = std::env::current_exe().ok()?;
+    // It runs in the home, so the folder the agent ran in can go while it lives (resident.md R1).
+    let home = std::path::absolute(home).ok()?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--home").arg(home).args(args);
+    cmd.arg("--home").arg(&home).args(args).current_dir(&home);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
