@@ -33,15 +33,17 @@ a card of a window of imports alone nor the removal of an import touches the tur
 The worker asks for it where it asked for a digest: when the window phase sent nothing, one call a
 run, the oldest turn end after the last one a summary was kept of (every turn end is reached,
 however many records follow it), with the digest's holds (a summary every entry fails waits as a
-window does, and the turns after it wait with it; one given up after `ATTEMPTS` is not asked
-again); a turn's holds are rows of their own table, `turn_pending`, so an upgraded home's digest
-rows never stand for one. A turn end of a session the list names is kept back there, and a run
-after an undo asks for it, as it curates a window's kept-back records, though a later turn's
-summary passed it; each run judges the sessions with turns kept back once, not their every turn,
-and reads the turn ends after the newest held or waiting one, so none is read again (Codex on
-#371). Unlike the digest it does not wait for the session
-to go idle: a turn is whole at its reply, and claude-mem asks at Stop. The window phase's own idle
-wait still holds back the windows of a session's last turn (Codex on C2).
+window does, and the turns after it wait with it; one given up after `ATTEMPTS` is kept as a
+skip, as a window given up is, and not asked again, though its request changes: that is a
+recuration's business); a turn's waits are rows of their own table, `turn_pending`, so an upgraded
+home's digest rows never stand for one, and a row a restore leaves past the restored records stands
+for nothing but its own request. A turn end of a session the list names is kept back as a window's
+records are: an op of its labels alone, read from no record's text, a skip marked `excluded`, so the
+scan goes past it and no run reads it again. A run after an undo asks for it, the oldest of each
+session the list no longer names first, one a run, though a later turn's summary passed it; each
+run judges those sessions once, not their every turn (Codex on #371). Unlike the digest it does
+not wait for the session to go idle: a turn is whole at its reply, and claude-mem asks at Stop. The
+window phase's own idle wait still holds back the windows of a session's last turn (Codex on C2).
 
 T2. **What it is shown**, between two fence lines, as recorded data, each text gated as a window's
 is: the turn's prompts (at most 2,000 characters in all), the cards of its session's windows that
@@ -144,4 +146,9 @@ and its ops stay readable; spec 3.4 and 4.4 are amended with the owner's decisio
 15. A turn starts at its session's first event after the previous reply: a window of the earlier
     turn that reaches past that reply only over other records shows none of its cards.
 16. A turn the exclusion list kept back is summarized after an undo, though a later turn of
-    another repository's session was summarized while it waited.
+    another repository's session was summarized while it waited; it is kept back as an op of its
+    labels alone, and a run after the one that kept it back writes nothing.
+17. A turn every provider fails `ATTEMPTS` times is kept as a skip and not asked again, though the
+    request changes.
+18. A waiting row past what the store holds, as a restore from backups that lack the newest records
+    leaves, does not hide the turns before it.

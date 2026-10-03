@@ -633,8 +633,7 @@ pub fn start_curation<'a>(
     })
 }
 
-/// A turn's summary waiting (`turn_pending`): after every provider failed, or kept back by the
-/// exclusion list.
+/// A turn's summary waiting (`turn_pending`) after every provider failed, until its next attempt.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnPending {
     pub device: String,
@@ -692,60 +691,6 @@ pub fn set_turn_pending(conn: &Connection, p: &TurnPending) -> Result<()> {
     Ok(())
 }
 
-/// Keeps back turn `seq` of the exclusion list's session for a run after an undo; a turn already
-/// waiting keeps its row.
-pub fn hold_turn(
-    conn: &Connection,
-    device: &str,
-    seq: i64,
-    agent: &str,
-    session: &str,
-) -> Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO turn_pending(device, seq, agent, session, prompt, reason, hold,
-           attempts, next_attempt_at) VALUES(?1, ?2, ?3, ?4, '', 'excluded', 'excluded', 0, 0)",
-        params![device, seq, agent, session],
-    )?;
-    Ok(())
-}
-
-/// The waiting turns of `device` that a run may ask for again, oldest first: not given up, of
-/// sessions `kept_back` (agent, session) does not keep back now. Each session is judged once, so
-/// the turns of one kept back long are not read at every run (Codex on #371).
-pub fn turns_waiting(
-    conn: &Connection,
-    device: &str,
-    kept_back: impl Fn(&str, &str) -> bool,
-) -> Result<Vec<i64>> {
-    let sessions: Vec<(String, String)> = conn
-        .prepare("SELECT DISTINCT agent, session FROM turn_pending WHERE device = ?1")?
-        .query_map([device], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut st = conn.prepare(
-        "SELECT seq FROM turn_pending WHERE device = ?1 AND agent = ?2 AND session = ?3
-           AND attempts < ?4",
-    )?;
-    let mut seqs = Vec::new();
-    for (agent, session) in sessions.iter().filter(|(a, s)| !kept_back(a, s)) {
-        let rows = st.query_map(
-            params![device, agent, session, crate::curate::ATTEMPTS],
-            |r| r.get(0),
-        )?;
-        seqs.extend(rows.collect::<rusqlite::Result<Vec<i64>>>()?);
-    }
-    seqs.sort_unstable();
-    Ok(seqs)
-}
-
-/// The newest of this device's turns that waits or was held, given up or not: 0 when none.
-pub fn turns_seen(conn: &Connection, device: &str) -> Result<i64> {
-    Ok(conn.query_row(
-        "SELECT COALESCE(MAX(seq), 0) FROM turn_pending WHERE device = ?1",
-        [device],
-        |r| r.get(0),
-    )?)
-}
-
 pub fn clear_turn_pending(conn: &Connection, device: &str, seq: i64) -> Result<()> {
     conn.execute(
         "DELETE FROM turn_pending WHERE device = ?1 AND seq = ?2",
@@ -757,43 +702,6 @@ pub fn clear_turn_pending(conn: &Connection, device: &str, seq: i64) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Codex on #371: the turns a run may ask for again, oldest first, judged a session at a
-    /// time: not one of a session kept back now, given up or of another device; and the newest
-    /// turn held or waiting, which the scan goes on after.
-    /// A second hold of a waiting turn leaves its row as it is.
-    #[test]
-    fn the_turns_waiting_are_those_a_run_may_ask_for_again() {
-        let home = tempfile::tempdir().unwrap();
-        let db = open(home.path()).unwrap();
-        for (device, seq, agent, session) in [
-            ("a", 5, "claude", "kept"),
-            ("a", 3, "claude", "free"),
-            ("a", 9, "claude", "free"),
-            ("b", 2, "claude", "free"),
-            ("a", 1, "codex", "free"),
-        ] {
-            hold_turn(&db, device, seq, agent, session).unwrap();
-        }
-        let given_up = TurnPending {
-            device: "a".into(),
-            seq: 4,
-            agent: "claude".into(),
-            session: "free".into(),
-            prompt: "p".into(),
-            reason: "r".into(),
-            hold: "r".into(),
-            attempts: crate::curate::ATTEMPTS,
-            next_attempt_at: 0,
-        };
-        set_turn_pending(&db, &given_up).unwrap();
-        hold_turn(&db, "a", 4, "claude", "free").unwrap();
-        assert_eq!(turn_pending_of(&db, "a", 4).unwrap(), Some(given_up));
-        let got = turns_waiting(&db, "a", |_, session| session == "kept").unwrap();
-        assert_eq!(got, [1, 3, 9]);
-        let seen = |device| turns_seen(&db, device).unwrap();
-        assert_eq!((seen("a"), seen("b"), seen("c")), (9, 2, 0));
-    }
 
     #[test]
     fn an_inflight_curation_keeps_only_metadata_and_its_current_generation() {

@@ -56,6 +56,10 @@ pub struct TurnOp {
     pub fields: BTreeMap<String, String>,
     #[serde(default)]
     pub skipped: bool,
+    /// A turn the exclusion list kept back (D13): a skip of its labels alone, which a run after an
+    /// undo asks for (Codex on #371).
+    #[serde(default)]
+    pub excluded: bool,
 }
 
 /// A summary as a reader gets it: shown over no record removed since (T7), gated (T8).
@@ -199,6 +203,7 @@ impl Turn {
                 kept(answer, rules)
             },
             skipped,
+            excluded: false,
         }
     }
 }
@@ -234,25 +239,26 @@ pub fn phase(
     // as it is now (spec 5.5).
     let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
     let out = windows;
-    // The scan goes on after the newest turn asked for and the newest held or waiting, so a turn
-    // held long is not read again at every run (Codex on #371).
-    let seen = last_asked(k, &device)?.max(crate::providers_db::turns_seen(db, &device)?);
-    // The turns held or waiting: one the list kept back, which an undo lets out as it lets out a
-    // window's records, or one a retry waits for (Codex on #371), oldest first. One still kept
-    // back is not read again.
     let key = |agent: &str, session: &str| format!("{agent}\u{0}{session}");
-    let waiting = crate::providers_db::turns_waiting(db, &device, |agent, session| {
-        reading.excluded.contains(&key(agent, session))
-    })?;
+    let kept_back = |agent: &str, session: &str| reading.excluded.contains(&key(agent, session));
+    // First the oldest turn the list kept back for a session it no longer names: an undo lets it
+    // out as it lets out a window's records (Codex on #371).
     let mut replies = std::collections::VecDeque::new();
-    for seq in waiting {
+    for seq in released(k, &device, kept_back)? {
         replies.extend(raw.replies_between(seq - 1, seq, 1)?);
+        if !replies.is_empty() {
+            break;
+        }
     }
-    // Every turn end is reached, however many records follow it (Codex on C2), a page at a time:
-    // a run asks for one, so a backlog is not read whole at every run (Codex on #371).
-    let mut after = seen;
+    // Then every turn end after the last one asked for, kept back or given up, however many
+    // records follow it (Codex on C2), a page at a time (Codex on #371).
+    let mut after = last_asked(k, &device)?;
+    // The turns kept back on the way, written a page at a time: the scan goes past them, so none
+    // is read again at the next run (Codex on #371).
+    let mut parked = Vec::new();
     loop {
         if replies.is_empty() {
+            park(raw, &mut parked)?;
             replies.extend(raw.replies_between(after, ck, PAGE)?);
             let Some(end) = replies.back().map(|r| r.seq) else {
                 break;
@@ -265,13 +271,14 @@ pub fn phase(
         if !covered(r.seq) {
             break;
         }
-        if reading.excluded.contains(&key(&r.agent, &r.session)) {
-            crate::providers_db::hold_turn(db, &device, r.seq, &r.agent, &r.session)?;
+        if kept_back(&r.agent, &r.session) {
+            parked.extend(fitted(kept_back_op(raw, &r)?)?.map(|op| (OpKind::Turn, op)));
             continue;
         }
         if asked(k, &device, r.seq)? {
             continue;
         }
+        park(raw, &mut parked)?;
         let turn = Turn::read(raw, k, rules, &r, summary.window_tokens)?;
         // What is kept of an answer at the least, a skip: a turn whose labels pass the op cap
         // even so is not asked for, as nothing paid for could be kept (Codex on C2).
@@ -284,7 +291,7 @@ pub fn phase(
             crate::providers_db::turn_pending_of(db, &device, r.seq)?.filter(|p| p.prompt == sent);
         if let Some(p) = &pending {
             if p.attempts >= crate::curate::ATTEMPTS {
-                continue;
+                return given_up(raw, db, r.seq, skip);
             }
             if p.next_attempt_at > now {
                 return Ok(sooner(out, held(&p.hold, p.next_attempt_at, now)));
@@ -330,13 +337,79 @@ pub fn phase(
             attempts: pending.map_or(0, |p| p.attempts) + i64::from(counted),
             next_attempt_at: next,
         };
-        crate::providers_db::set_turn_pending(db, &p)?;
-        // Given up: nothing waits for it, and the next run goes on to the next turn.
         if p.attempts >= crate::curate::ATTEMPTS {
-            return Ok(Phase::Covered);
+            return given_up(raw, db, r.seq, skip);
         }
+        crate::providers_db::set_turn_pending(db, &p)?;
         return Ok(sooner(out, held(hold, next, after)));
     }
+    park(raw, &mut parked)?;
+    Ok(out)
+}
+
+/// The op of a turn the exclusion list keeps back (D13): its labels alone, read from no record's
+/// text, a skip marked excluded, as a window of an excluded session's records is kept as skipped.
+fn kept_back_op(raw: &Raw, r: &crate::raw::Labels) -> Result<TurnOp> {
+    let from = raw.turn_start(&r.agent, &r.session, r.seq)?;
+    Ok(TurnOp {
+        agent: r.agent.clone(),
+        session: r.session.clone(),
+        repo: raw.session_repo((&r.agent, &r.session), from, r.seq)?,
+        ts: r.ts,
+        from,
+        through: r.seq,
+        read: Vec::new(),
+        goals: Vec::new(),
+        removed: Vec::new(),
+        fields: BTreeMap::new(),
+        skipped: true,
+        excluded: true,
+    })
+}
+
+/// Writes the ops of the turns kept back so far.
+fn park(raw: &mut Raw, parked: &mut Vec<(OpKind, Value)>) -> Result<()> {
+    if !parked.is_empty() {
+        raw.append_ops(parked)?;
+        parked.clear();
+    }
+    Ok(())
+}
+
+/// A turn every provider failed `ATTEMPTS` times is kept as a skip, as a window given up is, and
+/// never asked again: the next run goes on to the next turn.
+fn given_up(raw: &mut Raw, db: &Connection, seq: i64, skip: Value) -> Result<Phase> {
+    raw.append_ops(&[(OpKind::Turn, skip)])?;
+    crate::providers_db::clear_turn_pending(db, raw.device(), seq)?;
+    Ok(Phase::Covered)
+}
+
+/// The turns the list kept back of sessions it no longer names (D13), the oldest of each, oldest
+/// first; one asked for since is not. The sessions are judged one at a time, so one kept back
+/// long is not read at every run (Codex on #371).
+fn released(
+    k: &Connection,
+    device: &str,
+    kept_back: impl Fn(&str, &str) -> bool,
+) -> Result<Vec<i64>> {
+    let mut st = k.prepare(
+        "SELECT agent, session, MIN(through) FROM turns t
+          WHERE device = ?1 AND excluded = 1
+            AND NOT EXISTS(SELECT 1 FROM turns n
+                            WHERE n.device = t.device AND n.through = t.through AND n.excluded = 0)
+          GROUP BY agent, session",
+    )?;
+    let rows = st.query_map([device], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get(2)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (agent, session, through) = row?;
+        if !kept_back(&agent, &session) {
+            out.push(through);
+        }
+    }
+    out.sort_unstable();
     Ok(out)
 }
 
@@ -361,8 +434,9 @@ fn fitted(mut op: TurnOp) -> Result<Option<Value>> {
     within(&op)
 }
 
-/// The reply of the last turn of this device's that a summary was kept of, skipped or not; 0
-/// before the first. The turns before it were asked, given up or never to be asked.
+/// The reply of the last turn of this device's that a summary was kept of, skipped, kept back or
+/// given up; 0 before the first. The turns before it were asked, kept back, given up or never to
+/// be asked.
 fn last_asked(k: &Connection, device: &str) -> Result<i64> {
     Ok(k.query_row(
         "SELECT COALESCE(MAX(through), 0) FROM turns WHERE device = ?1",
@@ -371,10 +445,11 @@ fn last_asked(k: &Connection, device: &str) -> Result<i64> {
     )?)
 }
 
-/// Whether a summary of this device's turn ending at `through` was asked and kept, skipped or not.
+/// Whether a summary of this device's turn ending at `through` was asked and kept, skipped or not:
+/// not one the exclusion list only kept back.
 fn asked(k: &Connection, device: &str, through: i64) -> Result<bool> {
     Ok(k.query_row(
-        "SELECT EXISTS(SELECT 1 FROM turns WHERE device = ?1 AND through = ?2)",
+        "SELECT EXISTS(SELECT 1 FROM turns WHERE device = ?1 AND through = ?2 AND excluded = 0)",
         params![device, through],
         |r| r.get(0),
     )?)
@@ -518,6 +593,7 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            -- The kept fields, a JSON object by name; {} for a skip.
            fields TEXT NOT NULL DEFAULT '{}',
            skipped INTEGER NOT NULL DEFAULT 0,
+           excluded INTEGER NOT NULL DEFAULT 0,
            PRIMARY KEY (device, op_seq)
          );
          CREATE INDEX IF NOT EXISTS turns_repo ON turns(repo, ts);
@@ -968,6 +1044,133 @@ mod tests {
             .exclude("r", false)
             .unwrap();
         assert_eq!(run(home.path(), &completed("x")).1.len(), 0);
+        // Kept back as a skip of its labels alone, marked so an undo lets it out (Codex on #371).
+        let ops = turn_ops(home.path());
+        assert_eq!(ops.len(), 1);
+        let op = &ops[0];
+        assert!(op.excluded && op.skipped && op.fields.is_empty() && op.read.is_empty());
+        assert_eq!((op.from, op.through, op.session.as_str()), (1, 2, "s1"));
+    }
+
+    /// Codex on #371: a turn every provider fails `ATTEMPTS` times is kept as a skip, as a window
+    /// given up is, and not asked again, though the request changes (a recuration's business).
+    #[test]
+    fn a_turn_given_up_is_kept_as_a_skip_and_not_asked_again() {
+        let home = home(
+            &[
+                said("s1", "prompt", "Build the parser."),
+                said("s1", "reply", "Built."),
+            ],
+            &[window(1, 2, "Built the parser.", &[])],
+        );
+        let refusing = |chain: &str| {
+            let mut raw = crate::raw::open(home.path()).unwrap();
+            let k = crate::knowledge::open(home.path()).unwrap();
+            let db = crate::providers_db::open(home.path()).unwrap();
+            let mut calls = 0;
+            let mut refuse = |_: &str,
+                              _: &str,
+                              _: &crate::provider::AnswerCheck,
+                              _: &crate::provider::Gate|
+             -> Result<ChainResult> {
+                calls += 1;
+                Err(
+                    crate::provider::ChainFailed(vec![crate::provider::Fallback {
+                        provider: "fake".into(),
+                        reason: "unanchored".into(),
+                        skip: crate::provider::Skip::Refused,
+                    }])
+                    .into(),
+                )
+            };
+            let (rules, summary) = (Rules::default(), Summary::default());
+            phase(
+                &mut raw,
+                &k,
+                &db,
+                &rules,
+                &summary,
+                chain,
+                &mut refuse,
+                Phase::Idle,
+            )
+            .unwrap();
+            drop((raw, k, db));
+            crate::worker::run_once(home.path()).unwrap();
+            calls
+        };
+        for _ in 0..crate::curate::ATTEMPTS {
+            assert_eq!(refusing("chain"), 1);
+        }
+        let ops = turn_ops(home.path());
+        assert_eq!(ops.len(), 1);
+        assert!(ops[0].skipped && !ops[0].excluded && ops[0].through == 2);
+        assert_eq!(refusing("another chain"), 0);
+    }
+
+    /// Codex on #371: a waiting row past what the store holds, as a raw.db restored from backups
+    /// that lack its newest records leaves in providers.db, does not hide the turns before it.
+    #[test]
+    fn a_waiting_row_past_the_store_does_not_hide_the_turns_before_it() {
+        let home = home(
+            &[
+                said("s1", "prompt", "Build the parser."),
+                said("s1", "reply", "Built."),
+            ],
+            &[window(1, 2, "Built the parser.", &[])],
+        );
+        let device = crate::raw::open(home.path()).unwrap().device().to_owned();
+        let db = crate::providers_db::open(home.path()).unwrap();
+        for (seq, attempts) in [(90, 1), (99, crate::curate::ATTEMPTS)] {
+            crate::providers_db::set_turn_pending(
+                &db,
+                &crate::providers_db::TurnPending {
+                    device: device.clone(),
+                    seq,
+                    agent: "claude".into(),
+                    session: "lost".into(),
+                    prompt: "p".into(),
+                    reason: "r".into(),
+                    hold: "time".into(),
+                    attempts,
+                    next_attempt_at: 0,
+                },
+            )
+            .unwrap();
+        }
+        drop(db);
+        let (_, sent) = run(home.path(), &completed("Built."));
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("Build the parser."), "{}", sent[0]);
+    }
+
+    /// Codex on #371: the turns an undo lets out, the oldest of each session the list no longer
+    /// names, oldest first: not one of a session kept back now, one asked for since it was kept
+    /// back, or another device's.
+    #[test]
+    fn the_turns_released_are_the_oldest_of_each_session_let_out() {
+        let k = Connection::open_in_memory().unwrap();
+        schema(&k).unwrap();
+        for (op_seq, (device, through, agent, session, excluded)) in [
+            ("a", 5, "claude", "kept", true),
+            ("a", 3, "claude", "free", true),
+            ("a", 9, "claude", "free", true),
+            ("a", 1, "codex", "free", true),
+            ("b", 2, "claude", "free", true),
+            ("a", 3, "claude", "free", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            k.execute(
+                "INSERT INTO turns(device, op_seq, ts, agent, session, from_seq, through,
+                   skipped, excluded) VALUES(?1, ?2, 0, ?3, ?4, ?5, ?5, 1, ?6)",
+                params![device, op_seq as i64, agent, session, through, excluded],
+            )
+            .unwrap();
+        }
+        let got = released(&k, "a", |_, session| session == "kept").unwrap();
+        assert_eq!(got, [1, 9]);
     }
 
     /// Codex on #371: a turn the exclusion list kept back is summarized after an undo, though a
@@ -1084,8 +1287,8 @@ mod tests {
         assert!(sent[0].contains("Fix the lexer."), "{}", sent[0]);
     }
 
-    /// Codex on #371: a run does not read again the turns it held, so a repository kept back
-    /// long costs a run nothing: a run that finds only held turns writes nothing.
+    /// Codex on #371: a run does not read again the turns it kept back, so a repository kept back
+    /// long costs a run nothing: a run after the one that kept them back writes nothing.
     #[test]
     fn a_run_that_finds_only_held_turns_writes_nothing() {
         let home = home(
@@ -1258,6 +1461,7 @@ mod tests {
             removed: Vec::new(),
             fields: BTreeMap::from([("notes".to_owned(), "x".repeat(70_000))]),
             skipped: false,
+            excluded: false,
         };
         let v = fitted(op).unwrap().unwrap();
         assert_eq!((&v["skipped"], &v["fields"]), (&json!(true), &json!({})));

@@ -34,8 +34,8 @@ impl Consumer for Turns {
             };
             k.execute(
                 "INSERT OR REPLACE INTO turns(device, op_seq, ts, agent, session, repo, from_seq,
-                   through, read, goals, removed, fields, skipped)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                   through, read, goals, removed, fields, skipped, excluded)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     device,
                     op.op_seq,
@@ -49,7 +49,8 @@ impl Consumer for Turns {
                     serde_json::to_string(&t.goals)?,
                     serde_json::to_string(&t.removed)?,
                     serde_json::to_string(&t.fields)?,
-                    t.skipped
+                    t.skipped,
+                    t.excluded
                 ],
             )?;
         }
