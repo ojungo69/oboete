@@ -1121,12 +1121,10 @@ mod tests {
             if id == &imports[0] || cards.contains(id) {
                 let full = search::get(s.home.path(), id).unwrap().unwrap();
                 let cost = full.chars().count().div_ceil(4);
-                assert!(
-                    row.ends_with(&format!("~{cost}")),
-                    "expected ~{cost}: {row}\nget: {full}"
-                );
+                // The row and the text are not printed: they hold ids (CodeQL on #380).
+                assert!(row.ends_with(&format!("~{cost}")), "expected ~{cost}");
             } else {
-                assert!(!row.contains('~'), "{row}");
+                assert!(!row.contains('~'), "a read cost on a row without one");
             }
         }
     }
