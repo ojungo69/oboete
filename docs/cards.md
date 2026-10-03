@@ -157,8 +157,11 @@ and the op says how many were (`cards_dropped`).
   missing one for `bugfix`; a wrong label on the timeline is worse than none.
 - Concepts outside the seven go. A list holds text only, each item once.
 - A file is kept when the window's lines name it whole, not as a part of a longer path
-  (`/etc/passwd` is not named by `/tmp/etc/passwd`, nor `bar.rs` by `foo+bar.rs`: a mark a file
-  name may hold is part of it); a relative path may end a longer one. A card
+  (`/etc/passwd` is not named by `/tmp/etc/passwd`, nor `bar.rs` by `foo+bar.rs` or `foo:bar.rs`:
+  a mark a file name may hold is part of it, and a `:` ends a path only before a line number or
+  where no more of a name follows); a relative path may end a longer one. Marks text puts around a
+  path (quotes, brackets, `,`, `;`, `=`, `|`, `!`, `?`, `#`) end it, so a file name holding one
+  reads as two names: a limit. A card
   is found by its files (the note on a file), so it names none the curator was not shown.
 - A title over 300 characters, a subtitle over 500 or a narrative over 4,000 drops the card:
   nothing is cut before the gate (K6). A fact or a file over 500 characters is dropped, as is one

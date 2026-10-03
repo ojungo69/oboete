@@ -2635,10 +2635,11 @@ const CARD_ITEM: usize = 500;
 /// `foo+bar.rs`. A relative path may end a longer one (the same file under a directory), and a
 /// full stop may follow it.
 fn shows_path(text: &str, path: &str) -> bool {
-    // A letter, a digit or an ASCII mark a file name may hold (`+`, `@`) is part of one;
-    // whitespace, the marks text puts around a path and any other mark (`「`, `、`) end it.
+    // A letter, a digit or an ASCII mark a file name may hold (`+`, `@`, `:`) is part of one;
+    // whitespace, the marks text puts around a path and any other mark (`「`, `、`) end it, and a
+    // `.` or a `:` ends it where no more of a name follows (a `:` before a line number too).
     let part = |c: char| {
-        c.is_alphanumeric() || (c.is_ascii_graphic() && !"\"'`()[]{}<>,;:=|!?#".contains(c))
+        c.is_alphanumeric() || (c.is_ascii_graphic() && !"\"'`()[]{}<>,;=|!?#".contains(c))
     };
     let relative = !path.starts_with(['/', '\\', '~']) && path.get(1..2) != Some(":");
     !path.is_empty()
@@ -2651,6 +2652,7 @@ fn shows_path(text: &str, path: &str) -> bool {
             let mut after = text[at + path.len()..].chars();
             let ends = match after.next() {
                 Some('.') => after.next().is_none_or(|c| !part(c)),
+                Some(':') => after.next().is_none_or(|c| c.is_ascii_digit() || !part(c)),
                 Some(c) => !part(c),
                 None => true,
             };
@@ -8611,13 +8613,19 @@ mod tests {
     }
 
     /// Codex on #369: a character a file name may hold is no boundary (`bar.rs` is not shown by
-    /// `foo+bar.rs`, nor `scope/pkg` by `@scope/pkg`); the marks text puts around a path are.
+    /// `foo+bar.rs`, nor `scope/pkg` by `@scope/pkg`, nor either name by `foo:bar.rs`); the marks
+    /// text puts around a path are, and so is a colon before a line number.
     #[test]
     fn a_path_ends_only_at_a_mark_text_puts_around_it() {
         assert!(!shows_path("edited foo+bar.rs", "bar.rs"));
         assert!(!shows_path("npm i @scope/pkg", "scope/pkg"));
+        assert!(!shows_path("edited foo:bar.rs", "bar.rs"));
+        assert!(!shows_path("edited foo:bar.rs", "foo"));
         for said in [
             "see src/a.rs:12",
+            "src/a.rs:12:5",
+            "src/a.rs: fixed",
+            "edited src/a.rs:",
             "--file=src/a.rs",
             "(src/a.rs)",
             "\"src/a.rs\"",
