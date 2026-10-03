@@ -164,7 +164,7 @@ def backlog(home):
         most = 0
         for table, consumers, tops in (
             ('checkpoints', ('rescan', 'fts', 'anchors', 'manifest', 'gaps', 'compress'), [(device, top)]),
-            ('op_checkpoints', ('claims', 'digests', 'imported'),
+            ('op_checkpoints', ('claims', 'cards', 'turns', 'imported'),
              raw.execute('SELECT device, MAX(op_seq) FROM ops GROUP BY device').fetchall()),
         ):
             for origin, end in tops:
