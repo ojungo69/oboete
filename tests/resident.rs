@@ -39,6 +39,15 @@ impl Drop for Worker {
     }
 }
 
+/// A port nothing listens on now.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
 fn until(what: &str, mut done: impl FnMut() -> bool) {
     let t = Instant::now();
     while !done() {
@@ -90,5 +99,42 @@ fn restore_runs_beside_a_resident_worker_which_backs_up_and_exits_for_it() {
     assert!(
         String::from_utf8_lossy(&found.stdout).contains("zebra crossing"),
         "{found:?}"
+    );
+}
+
+/// R6: the token file is its owner's to read whatever the umask. Under one that takes the owner's
+/// own read away (Codex on #376), a file asked for at 0600 came out write-only, and the viewer
+/// refused every request.
+#[test]
+fn the_token_file_is_0600_whatever_the_umask() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    std::fs::write(
+        h.join("config.toml"),
+        format!("[worker]\nresident = true\n[view]\nport = {port}\n"),
+    )
+    .unwrap();
+    let _viewer = Worker(
+        Command::new("sh")
+            .args([
+                "-c",
+                "umask 0400 && exec \"$0\" --home \"$1\" view --resident",
+            ])
+            .arg(env!("CARGO_BIN_EXE_oboete"))
+            .arg(h)
+            .env("OBOETE_NO_SPAWN", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let file = h.join("state").join("view-token");
+    until("the token file", || file.exists());
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
     );
 }

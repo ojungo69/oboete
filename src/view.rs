@@ -344,6 +344,9 @@ fn ensure_token(home: &Path) -> Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut file, 0o600);
     let mut file = file.open(&staged)?;
+    // The umask takes bits from the mode asked for, the owner's own read among them.
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     file.write_all(new_token()?.as_bytes())?;
     file.sync_all()?;
     std::fs::rename(&staged, state.join("view-token"))?;
