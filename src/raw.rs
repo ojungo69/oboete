@@ -1585,7 +1585,7 @@ impl Raw {
                 // An imported record keeps its origin, and a tombstone of a forgotten one the
                 // deny row, so a restore from the segments alone forgets it again (D1 rule 14).
                 let extra = match &r.item {
-                    Item::Event(_) => self.origin_of(&r.device, r.seq)?.map(|(origin, session, ambiguous)| {
+                    Item::Event(_) | Item::Removed => self.origin_of(&r.device, r.seq)?.map(|(origin, session, ambiguous)| {
                         (
                             "import_identity",
                             serde_json::json!({ "origin": origin, "session": session, "ambiguous": ambiguous }),
@@ -2411,8 +2411,8 @@ impl Rebuild {
     }
 
     /// One backup line. Bodies are stored as zstd where that is smaller, as the compress
-    /// consumer would have; a tombstone gets no time or source back (`Raw::after` never
-    /// returns them): ts 0, source `restore`.
+    /// consumer would have; a tombstone's time is 0, since `Raw::after` returns none.
+    /// Its source is `forget` only for a validated carried denial; otherwise `restore`.
     pub fn add(&mut self, line: &str) -> Result<()> {
         let v: serde_json::Value = serde_json::from_str(line)?;
         let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str);
@@ -2500,18 +2500,6 @@ impl Rebuild {
                         ],
                     )?;
                 }
-                if let Some(identity) = v.get("import_identity") {
-                    let origin = identity["origin"].as_str().context("import origin")?;
-                    crate::forget::check_identity(origin)?;
-                    let session = identity["session"].as_str();
-                    if let Some(session) = session {
-                        crate::forget::check_identity(session)?;
-                    }
-                    self.conn.execute(
-                        "INSERT INTO import_origins(device, seq, origin, native_session, ambiguous) VALUES(?1, ?2, ?3, ?4, ?5)",
-                        params![device, seq, origin, session, i64::from(identity["ambiguous"].as_bool().unwrap_or(true))],
-                    )?;
-                }
             }
             Some("removed") => {
                 self.conn.execute(
@@ -2521,19 +2509,9 @@ impl Rebuild {
             }
             Some("tombstone") => {
                 let t = &v["target"];
-                self.conn.execute(
-                    "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq,
-                       target_offset, target_length)
-                     VALUES(?1, ?2, 'tombstone', 0, 'restore', ?3, ?4, ?5, ?6)",
-                    params![
-                        device,
-                        seq,
-                        t["device"].as_str().context("target device")?,
-                        t["seq"].as_i64().context("target seq")?,
-                        t["offset"].as_i64(),
-                        t["length"].as_i64()
-                    ],
-                )?;
+                let target_device = t["device"].as_str().context("target device")?;
+                let target_seq = t["seq"].as_i64().context("target seq")?;
+                let mut source = "restore";
                 // A forget's deny row (D1): segments alone forget it again.
                 if let Some(d) = v.get("deny") {
                     let text = |k: &str| d[k].as_str().with_context(|| format!("deny {k}"));
@@ -2551,9 +2529,42 @@ impl Rebuild {
                             text("job")?
                         ],
                     )?;
+                    // A validated carried denial makes this the durable control. Keep that
+                    // marker so replaying its request does not append another after restore.
+                    source = "forget";
                 }
+                self.conn.execute(
+                    "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq,
+                       target_offset, target_length)
+                     VALUES(?1, ?2, 'tombstone', 0, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        device,
+                        seq,
+                        source,
+                        target_device,
+                        target_seq,
+                        t["offset"].as_i64(),
+                        t["length"].as_i64()
+                    ],
+                )?;
             }
             other => anyhow::bail!("seq {seq}: unknown record type {other:?}"),
+        }
+        // A removed record keeps only its validated native hashes: subsequent backup
+        // generations still associate the tombstone's denial without restoring any body.
+        if matches!(s("type"), Some("event" | "removed"))
+            && let Some(identity) = v.get("import_identity")
+        {
+            let origin = identity["origin"].as_str().context("import origin")?;
+            crate::forget::check_identity(origin)?;
+            let session = identity["session"].as_str();
+            if let Some(session) = session {
+                crate::forget::check_identity(session)?;
+            }
+            self.conn.execute(
+                "INSERT INTO import_origins(device, seq, origin, native_session, ambiguous) VALUES(?1, ?2, ?3, ?4, ?5)",
+                params![device, seq, origin, session, i64::from(identity["ambiguous"].as_bool().unwrap_or(true))],
+            )?;
         }
         Ok(())
     }
@@ -2624,7 +2635,8 @@ impl Rebuild {
 /// Applies one forget request by identity (D1 rule 5), inside the caller's write transaction:
 /// each record's deny row, keyed by its origin, and a tombstone of every record of this store
 /// whose import origin it is, at whatever seq it has now (a re-import's copy too) and that none
-/// hides yet; then the job row. A seq reused by another record is never hidden for an old
+/// of this device's forget controls covers yet; then the job row. A rescan or another device's
+/// control cannot carry this device's incremental backup denial. A reused seq is never hidden for an old
 /// request. Whether the store lacked the job.
 pub(crate) fn apply_request(
     conn: &Connection,
@@ -2641,12 +2653,15 @@ pub(crate) fn apply_request(
             .prepare(
                 "SELECT o.device, o.seq FROM import_origins o
                  WHERE o.origin = ?1 AND NOT EXISTS (
-                   SELECT 1 FROM records t WHERE t.type = 'tombstone'
+                   SELECT 1 FROM records t WHERE t.device = ?2 AND t.type = 'tombstone'
+                     AND t.source = 'forget'
                      AND t.target_device = o.device AND t.target_seq = o.seq
                      AND t.target_offset IS NULL)
                  ORDER BY o.device, o.seq",
             )?
-            .query_map([&rec.origin], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map(params![rec.origin, device], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
             .collect::<rusqlite::Result<_>>()?;
         for (target_device, target_seq) in targets {
             let seq: i64 = conn.query_row(

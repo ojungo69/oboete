@@ -249,6 +249,206 @@ fn an_already_tombstoned_native_record_can_register_a_forget_and_survives_reimpo
     );
 }
 
+fn lose_raw_and_request_logs(home: &Path, backup: &str) {
+    for path in [
+        home.join("raw.db"),
+        home.join("raw.db-wal"),
+        home.join("raw.db-shm"),
+        home.join("forget.log"),
+        home.join(backup).join("forget.log"),
+    ] {
+        if path.exists() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+}
+
+/// The request logs are unavailable: each restored store's next backup must carry the same
+/// native denial and session cutoff, without giving a removed record its body back.
+#[test]
+fn repeated_backups_of_a_restored_forget_keep_its_denial_without_request_logs() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let id = record(home, CANARY);
+    let keep = hook_record(home, "unrelated-backup-generation-record-711");
+    ok(run(home, &["forget", "--record", &id, "--yes"], ""));
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    lose_raw_and_request_logs(home, "backups");
+    ok(run(home, &["restore"], ""));
+    for generation in ["generation-one", "generation-two"] {
+        std::fs::write(
+            home.join("config.toml"),
+            format!("[summary]\ncurate = false\n[backup]\ndir = '{generation}'\n"),
+        )
+        .unwrap();
+        ok(run(home, &["worker", "--idle-ms", "0"], ""));
+        for entry in std::fs::read_dir(home.join(generation)).unwrap() {
+            let path = entry.unwrap().path();
+            if path.to_string_lossy().ends_with(".seg.zst") {
+                let bytes = zstd::stream::decode_all(std::fs::File::open(path).unwrap()).unwrap();
+                assert!(
+                    !String::from_utf8_lossy(&bytes).contains(CANARY),
+                    "a removed body returned in its next backup"
+                );
+            }
+        }
+        lose_raw_and_request_logs(home, generation);
+        ok(run(home, &["restore"], ""));
+    }
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    db.execute("DELETE FROM ops WHERE type='migration'", [])
+        .unwrap();
+    drop(db);
+    let source = home.join("native-source.db");
+    let retried = ok(run(
+        home,
+        &["migrate", "--from", source.to_str().unwrap()],
+        "",
+    ));
+    assert!(
+        retried.contains("\"records\":0"),
+        "the native denial was lost: {retried}"
+    );
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    let line = |time: &str, prompt: &str| {
+        serde_json::json!({
+            "type":"user", "sessionId":"native-session", "cwd":"/synthetic",
+            "timestamp":time, "message":{"role":"user", "content":prompt}
+        })
+    };
+    std::fs::write(
+        projects.join("denied-cut.jsonl"),
+        format!(
+            "{}\n{}\n",
+            line("1970-01-01T00:00:00.100Z", "earlier-backup-cut-record-712"),
+            line("1970-01-01T00:00:00.101Z", CANARY)
+        ),
+    )
+    .unwrap();
+    ok(run(
+        home,
+        &["import", "transcripts", "--agent", "claude", "--yes"],
+        "",
+    ));
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    assert!(
+        !ok(run(
+            home,
+            &["search", "--all", "--raw", "only", "--", CANARY],
+            ""
+        ))
+        .contains(CANARY)
+    );
+    assert!(
+        ok(run(
+            home,
+            &[
+                "search",
+                "--all",
+                "--raw",
+                "only",
+                "--",
+                "earlier-backup-cut-record-712"
+            ],
+            ""
+        ))
+        .contains("earlier-backup-cut-record-712")
+    );
+    assert!(ok(run(home, &["get", &keep], "")).contains("unrelated-backup-generation-record-711"));
+}
+
+/// An already sealed rescan (or another device's forget control) is not this device's
+/// incremental denial. A new forget must persist one, and retries must not append it again.
+#[test]
+fn a_backed_up_rescan_still_gets_a_current_device_forget_control() {
+    for foreign_control in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+        let id = record(home, CANARY);
+        let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let (device, seq): (String, i64) = db
+            .query_row(
+                "SELECT device, seq FROM records WHERE source='oboete-v1' AND kind='prompt'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        db.execute(
+            "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq)
+             SELECT ?1, COALESCE(MAX(seq),0)+1, 'tombstone', 200, 'rescan', ?1, ?2
+             FROM records WHERE device=?1",
+            rusqlite::params![device, seq],
+        )
+        .unwrap();
+        if foreign_control {
+            db.execute(
+                "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq)
+                 VALUES('anotherdevice', 1, 'tombstone', 200, 'forget', ?1, ?2)",
+                rusqlite::params![device, seq],
+            )
+            .unwrap();
+        }
+        drop(db);
+        ok(run(home, &["worker", "--idle-ms", "0"], ""));
+        ok(run(home, &["forget", "--record", &id, "--yes"], ""));
+        let request_log = std::fs::read(home.join("forget.log")).unwrap();
+        let retry = || {
+            let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+            let before: i64 = db
+                .query_row(
+                    "SELECT MAX(seq) FROM records WHERE device=?1",
+                    [&device],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            db.execute("DELETE FROM forget_jobs", []).unwrap();
+            drop(db);
+            ok(run(home, &["forget", "--status"], ""));
+            let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+            let after: i64 = db
+                .query_row(
+                    "SELECT MAX(seq) FROM records WHERE device=?1",
+                    [&device],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(after, before, "a request retry appended another control");
+        };
+        retry();
+        ok(run(home, &["worker", "--idle-ms", "0"], ""));
+        lose_raw_and_request_logs(home, "backups");
+        ok(run(home, &["restore"], ""));
+        let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        db.execute("DELETE FROM ops WHERE type='migration'", [])
+            .unwrap();
+        drop(db);
+        let source = home.join("native-source.db");
+        let imported = ok(run(
+            home,
+            &["migrate", "--from", source.to_str().unwrap()],
+            "",
+        ));
+        assert!(
+            imported.contains("\"records\":0"),
+            "the sealed rescan lost the denial: {imported}"
+        );
+        ok(run(home, &["worker", "--idle-ms", "0"], ""));
+        assert!(
+            !ok(run(
+                home,
+                &["search", "--all", "--raw", "only", "--", CANARY],
+                ""
+            ))
+            .contains(CANARY)
+        );
+        std::fs::write(home.join("forget.log"), request_log).unwrap();
+        retry();
+    }
+}
+
 /// D1: a request log copy lost, older, of another home or damaged never stops a hook from
 /// recording, the forget stays, and the next worker writes the copy whole again.
 #[test]
