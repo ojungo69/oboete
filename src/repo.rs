@@ -17,6 +17,15 @@ pub fn key(cwd: &Path) -> String {
         .unwrap_or_else(|| root.to_string_lossy().into_owned())
 }
 
+/// The top of the working tree at or above `start`: the nearest directory holding `.git` (a linked
+/// worktree's own, unlike `find`'s root). Cards name files relative to it (docs/file-note.md F3).
+pub(crate) fn top(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|d| d.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
 /// The nearest repository root at or above `start`, and the git directory holding its `config`
 /// (a linked worktree's is the main repository's; a submodule's is its own).
 fn find(start: &Path) -> Option<(PathBuf, PathBuf)> {

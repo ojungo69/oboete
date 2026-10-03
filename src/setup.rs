@@ -22,6 +22,8 @@ const MCP_NAME: &str = "oboete";
 const CLAUDE_EVENTS: &[(&str, u32)] = &[
     ("SessionStart", 10),
     ("UserPromptSubmit", 5),
+    // Its reads only (`claude`'s matcher): the note on a file (docs/file-note.md F1).
+    ("PreToolUse", 5),
     ("PostToolUse", 5),
     ("PostToolUseFailure", 5),
     ("Stop", 5),
@@ -873,22 +875,25 @@ fn claude(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     }
     let mut root = read_json_object(&file)?;
     backup_once(&file)?;
-    let wanted = if remove {
-        vec![]
-    } else {
-        CLAUDE_EVENTS
-            .iter()
-            .map(|(event, timeout)| {
-                (
-                    event.to_string(),
-                    json!({"hooks": [{"type": "command", "command": cmd.line("claude", event), "timeout": timeout}]}),
-                )
-            })
-            .collect()
-    };
+    let wanted = if remove { vec![] } else { claude_groups(cmd) };
     merge_groups(&mut root, wanted);
     write_json(&file, &root)?;
     Ok(vec![file.display().to_string()])
+}
+
+/// oboete's hook groups in Claude Code's settings, one an event; its `PreToolUse` is for reads
+/// only, which get the note on a file (docs/file-note.md F1).
+fn claude_groups(cmd: &HookCommand) -> Vec<(String, Value)> {
+    CLAUDE_EVENTS
+        .iter()
+        .map(|(event, timeout)| {
+            let mut group = json!({"hooks": [{"type": "command", "command": cmd.line("claude", event), "timeout": timeout}]});
+            if *event == "PreToolUse" {
+                group["matcher"] = json!("Read");
+            }
+            (event.to_string(), group)
+        })
+        .collect()
 }
 
 pub(crate) fn codex_home() -> PathBuf {
@@ -3175,6 +3180,29 @@ mod tests {
         assert!(write_atomic(&real, "{}").is_err());
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "{\"a\": 1}\n");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// X5 F1: Claude Code's reads get oboete's `PreToolUse` hook, beside the user's own.
+    #[test]
+    fn claude_gets_a_pre_tool_use_hook_for_its_reads_beside_the_users() {
+        let cmd = HookCommand {
+            exe: "/x/oboete".into(),
+            home: None,
+        };
+        let user = json!({"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi"}]});
+        let mut root = json!({"hooks": {"PreToolUse": [user.clone()]}});
+        merge_groups(&mut root, claude_groups(&cmd));
+        let pre = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!((pre.len(), &pre[0]), (2, &user));
+        assert_eq!(pre[1]["matcher"], "Read");
+        let command = pre[1]["hooks"][0]["command"].as_str().unwrap();
+        assert!(command.ends_with("hook claude PreToolUse"), "{command}");
+        let others = claude_groups(&cmd);
+        assert!(
+            others
+                .iter()
+                .all(|(e, g)| e == "PreToolUse" || g.get("matcher").is_none())
+        );
     }
 
     #[test]
