@@ -729,6 +729,11 @@ fn run_as(home: &Path, idle_ms: u64, follow: bool) -> Result<()> {
     let mut embed = crate::embed_phase::Phase::new(home);
     let mut shortlist = crate::shortlist::Builder::new(home);
     let mut viewer = crate::view::Starter::new();
+    // The viewer before the stores: one that does not open still leaves the page up (Codex on
+    // #378).
+    if resident {
+        viewer.due(home);
+    }
     let phases = Phases {
         embed: Some(&mut embed),
         shortlist: Some(&mut shortlist),

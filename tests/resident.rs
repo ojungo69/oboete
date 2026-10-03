@@ -375,3 +375,30 @@ fn view_with_port_0_serves_here_in_a_resident_home() {
     assert!(view.0.try_wait().unwrap().is_none());
     assert!(!held(h, "view.lock") && !held(h, "worker.lock"));
 }
+
+/// R4: a resident worker whose store does not open still starts the viewer first, so the page
+/// is there when the store needs a look (Codex on #378).
+#[test]
+fn a_worker_whose_store_does_not_open_still_starts_the_viewer() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    std::fs::write(
+        h.join("config.toml"),
+        format!("[worker]\nresident = true\n[view]\nport = {port}\n"),
+    )
+    .unwrap();
+    std::fs::write(h.join("raw.db"), b"not a database, only text").unwrap();
+    let _detached = Detached(h);
+    let worker = Command::new(env!("CARGO_BIN_EXE_oboete"))
+        .arg("--home")
+        .arg(h)
+        .arg("worker")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!worker.success());
+    until("the viewer", || held(h, "view.lock"));
+}
