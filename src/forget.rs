@@ -259,12 +259,15 @@ pub struct Report {
 }
 
 /// The two log copies: the home's, and the backup directory's when it has one (rule 3).
-fn logs(home: &Path) -> Vec<PathBuf> {
+fn logs(home: &Path, report: &mut Report) -> Vec<PathBuf> {
     let mut out = vec![home.join(LOG)];
-    if let Ok(dir) = crate::backup::dir(home)
-        && dir != home
-    {
-        out.push(dir.join(LOG));
+    match crate::backup::dir(home) {
+        Ok(dir) if dir != home => out.push(dir.join(LOG)),
+        Ok(_) => {}
+        // Keep the safe path/[backup] context: inner TOML diagnostics can quote values.
+        Err(e) => report.problems.push(format!(
+            "backup request log directory could not be resolved: {e}"
+        )),
     }
     out
 }
@@ -358,7 +361,7 @@ fn append_log(path: &Path, requests: &[&Request]) -> Result<()> {
 pub(crate) fn reconcile(home: &Path, raw: &mut crate::raw::Raw) -> Result<Report> {
     let mut report = Report::default();
     let home_id = raw.home_id().to_owned();
-    let copies: Vec<(PathBuf, Option<Vec<Request>>)> = logs(home)
+    let copies: Vec<(PathBuf, Option<Vec<Request>>)> = logs(home, &mut report)
         .into_iter()
         .map(|p| {
             let read = read_log(&p, Some(&home_id), &mut report);
@@ -408,7 +411,7 @@ pub(crate) fn reconcile_or_say(home: &Path, raw: &mut crate::raw::Raw) -> Result
 pub(crate) fn logged(home: &Path) -> (Vec<Request>, Report) {
     let mut report = Report::default();
     let mut out: Vec<Request> = Vec::new();
-    for p in logs(home) {
+    for p in logs(home, &mut report) {
         for r in read_log(&p, None, &mut report).into_iter().flatten() {
             if !out.iter().any(|o| o.job == r.job) {
                 out.push(r);
@@ -611,6 +614,67 @@ mod tests {
         let log = std::fs::read_to_string(home.path().join(LOG)).unwrap();
         assert_eq!(log.lines().count(), 1);
         assert!(!log.contains("canary"), "{log}");
+    }
+
+    /// A malformed backup setting or unreadable config cannot undo registration or hide the
+    /// missing second log copy; fixing it lets the status command reconcile that copy.
+    #[test]
+    fn a_backup_directory_failure_is_reported_after_registration_and_recovers() {
+        for unreadable in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let h = home.path();
+            let mut raw = raw::open(h).unwrap();
+            let seq = native(
+                &mut raw,
+                "backup-log-report",
+                r#"{"prompt":"a synthetic backup log canary"}"#,
+            );
+            let config = h.join("config.toml");
+            if unreadable {
+                std::fs::create_dir(&config).unwrap();
+            } else {
+                std::fs::write(&config, "[backup]\ndir = 42\n").unwrap();
+            }
+            let p = preview(h, record(&raw, seq)).unwrap();
+            let (registered, report) = start(h, &p).expect("the request must stay registered");
+            assert_eq!(registered.records, 1);
+            assert_eq!(registered.local, "hidden; physical purge pending");
+            assert_eq!(status(h).unwrap()[0].job, registered.job);
+            assert!(!shown(&raw, seq));
+            let primary = h.join(LOG);
+            assert_eq!(report.copies, vec![primary.clone()]);
+            let log = std::fs::read_to_string(&primary).unwrap();
+            assert_eq!(log.lines().count(), 1);
+            assert_eq!(Request::parse(log.trim()).unwrap().job, registered.job);
+            assert!(!log.contains("canary"));
+            assert_eq!(
+                report.problems.len(),
+                1,
+                "backup directory resolution failed without warning: {report:?}"
+            );
+            assert!(
+                report.problems[0].contains("backup request log directory could not be resolved")
+            );
+            // Hooks use raw directly: a copy problem must not stop a new event.
+            raw::open(h)
+                .unwrap()
+                .append(&raw::test_event("a synthetic event after the log warning"))
+                .unwrap();
+            if unreadable {
+                std::fs::remove_dir(&config).unwrap();
+            }
+            std::fs::write(&config, "[backup]\ndir = 'repaired-backups'\n").unwrap();
+            run(h, None, None, false, true).unwrap();
+            let second = h.join("repaired-backups").join(LOG);
+            assert_eq!(std::fs::read_to_string(second).unwrap(), log);
+            assert_eq!(std::fs::read_to_string(primary).unwrap(), log);
+            assert_eq!(status(h).unwrap()[0].job, registered.job);
+            assert_eq!(
+                status(h).unwrap()[0].local,
+                "hidden; physical purge pending"
+            );
+            assert!(reconcile(h, &mut raw).unwrap().problems.is_empty());
+        }
     }
 
     /// Registration committed even if a later reconciliation cannot read another job. The
