@@ -2631,10 +2631,15 @@ const CARD_FILES: usize = 20;
 const CARD_ITEM: usize = 500;
 
 /// Whether `text` shows `path` whole (C3), not as a part of a longer one: `/etc/passwd` is not
-/// shown by `/tmp/etc/passwd`, nor `src/auth.rs` by `src/auth.rs.bak`. A relative path may end a
-/// longer one (the same file under a directory), and a full stop may follow it.
+/// shown by `/tmp/etc/passwd`, nor `src/auth.rs` by `src/auth.rs.bak`, nor `bar.rs` by
+/// `foo+bar.rs`. A relative path may end a longer one (the same file under a directory), and a
+/// full stop may follow it.
 fn shows_path(text: &str, path: &str) -> bool {
-    let part = |c: char| c.is_alphanumeric() || "/\\._-~".contains(c);
+    // A letter, a digit or an ASCII mark a file name may hold (`+`, `@`) is part of one;
+    // whitespace, the marks text puts around a path and any other mark (`「`, `、`) end it.
+    let part = |c: char| {
+        c.is_alphanumeric() || (c.is_ascii_graphic() && !"\"'`()[]{}<>,;:=|!?#".contains(c))
+    };
     let relative = !path.starts_with(['/', '\\', '~']) && path.get(1..2) != Some(":");
     !path.is_empty()
         && text.match_indices(path).any(|(at, _)| {
@@ -8603,6 +8608,28 @@ mod tests {
             card["files_modified"],
             json!(["/tmp/etc/passwd", "src/auth.rs.bak"])
         );
+    }
+
+    /// Codex on #369: a character a file name may hold is no boundary (`bar.rs` is not shown by
+    /// `foo+bar.rs`, nor `scope/pkg` by `@scope/pkg`); the marks text puts around a path are.
+    #[test]
+    fn a_path_ends_only_at_a_mark_text_puts_around_it() {
+        assert!(!shows_path("edited foo+bar.rs", "bar.rs"));
+        assert!(!shows_path("npm i @scope/pkg", "scope/pkg"));
+        for said in [
+            "see src/a.rs:12",
+            "--file=src/a.rs",
+            "(src/a.rs)",
+            "\"src/a.rs\"",
+            "`src/a.rs`",
+            "src/a.rs#L3",
+            "src/a.rs, then",
+            "[src/a.rs]",
+            "「src/a.rs」を見た",
+            "src/a.rs、次",
+        ] {
+            assert!(shows_path(said, "src/a.rs"), "{said}");
+        }
     }
 
     /// Cards within their own caps can still pass the op cap together: the last goes first, and
