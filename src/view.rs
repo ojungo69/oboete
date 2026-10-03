@@ -851,7 +851,7 @@ impl Viewer {
             "stats" => stats(&self.home)?,
             _ => return Ok(Response::text(404, "not found")),
         };
-        Ok(Response::json(&gated(answer)))
+        Ok(Response::json(&answered(name, answer)))
     }
 
     /// The Context page: what SessionStart shows a new session in `repo`'s checkout (the viewer's
@@ -913,6 +913,19 @@ fn failed(e: &anyhow::Error) -> Response {
 }
 
 /// `v` with every string through the outbound gate (spec 6.5), keys included.
+/// What leaves the API: every text gated (K6), except a page's cursor, the page's own state of
+/// ids and times, passed back as it came: a rule that matched it broke the paging (Codex on #373).
+fn answered(name: &str, mut answer: Value) -> Value {
+    let next = matches!(name, "feed" | "timeline")
+        .then(|| answer.get_mut("next").map(Value::take))
+        .flatten();
+    let mut answer = gated(answer);
+    if let Some(next) = next {
+        answer["next"] = next;
+    }
+    answer
+}
+
 fn gated(v: Value) -> Value {
     match v {
         Value::String(s) => Value::String(redact::outbound(&s)),
@@ -1775,6 +1788,24 @@ mod tests {
             assert!(!answer.contains(text));
         }
         assert!(page["items"][1]["fields"].get("notes").is_none());
+    }
+
+    /// Codex on #373: a page's cursor is its own state of ids and times, passed back as it came:
+    /// a rule that matched it would break the paging. The rest of the answer is gated.
+    #[test]
+    fn a_page_cursor_leaves_as_it_came_and_the_rest_gated() {
+        let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
+        let cursor = format!("{{\"prompts\":[1,\"{token}\",2]}}");
+        for name in ["feed", "timeline"] {
+            let out = answered(
+                name,
+                json!({"items": [{"text": token.clone()}], "next": cursor.clone()}),
+            );
+            assert_eq!(out["next"], cursor, "{name}");
+            assert_ne!(out["items"][0]["text"], token, "{name}");
+        }
+        let other = answered("search", json!({"next": cursor.clone()}));
+        assert_ne!(other["next"], cursor);
     }
 
     /// page.md test 5: the display cap counts Unicode characters after gating, says it cut,
