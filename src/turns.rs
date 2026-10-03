@@ -354,10 +354,7 @@ pub fn phase(
                     },
                 ));
             }
-            Err(e) => match e.downcast::<ChainFailed>() {
-                Ok(ChainFailed(failed)) => failed,
-                Err(e) => return Err(e),
-            },
+            Err(e) => e.downcast::<ChainFailed>()?.0,
         };
         // A slow call may set its reset after the phase started: judge the remaining wait now.
         let after = crate::db::now_ms();
