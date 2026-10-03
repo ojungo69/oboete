@@ -1,0 +1,24 @@
+tests/forget_cli.rs
+  s_17c3dc80287a78::t_7e42aa518741d1 194-195
+src/raw.rs
+  s_17c3dc80287a78::t_bb29228fcd8640 508
+  s_17c3dc80287a78::t_45669385d0f7c4 1275
+src/forget.rs
+  s_17c3dc80287a78::t_5eef07b7468e93 654,656
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5147f156f8bb9fd3294337808776cb3ffe9d43b2",
+  "prompts": {},
+  "sessions": {
+    "s_17c3dc80287a78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa5a-0138-7ec3-a335-cec90a7f44e9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
