@@ -299,11 +299,7 @@ fn owner_only(home: &Path) -> bool {
 
 /// Whether a viewer holds `state/view.lock` now.
 fn view_held(home: &Path) -> bool {
-    std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(home.join("state").join("view.lock"))
+    view_lock(&home.join("state"))
         .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
@@ -4038,6 +4034,21 @@ mod tests {
         let (moved, _) = new_token(p).unwrap();
         assert!(!moved);
         assert_eq!(crate::config::view(p).unwrap().port.get(), 17399);
+    }
+
+    /// A FIFO planted as the lock does not stall a look at the viewer, the worker's or `oboete
+    /// view`'s (Codex on #376).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_look_at_the_viewer_waits_on_no_planted_fifo() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("state")).unwrap();
+        let lock = home.path().join("state/view.lock");
+        let fifo = std::ffi::CString::new(lock.to_str().unwrap()).unwrap();
+        // SAFETY: a valid, NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(!view_held(home.path()));
+        assert!(std::fs::symlink_metadata(&lock).unwrap().is_file());
     }
 
     /// Codex on #378: the resident viewer leaves only with no connection open, and takes none
