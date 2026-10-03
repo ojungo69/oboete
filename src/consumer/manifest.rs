@@ -161,12 +161,14 @@ pub fn text(
     let parts = delivered(&k, raw, repo, &manifest, rules)?;
     // The cards after the decisions (docs/cards.md S1): the most, halved each time, whose packet
     // stays within `cap` as it leaves, gated and escaped inside the fence, in UTF-16 units, the
-    // measure Cursor cuts by (S5); the rest is never cut for them. Counted before the gate first,
-    // which is cheap. The fence's own text is outside `cap`, as it always was.
+    // measure Cursor cuts by (S5); the rest is never cut for them. Counted first with the rest
+    // gated once and the block as built, its fields gated when read, which is cheap: a long value
+    // the gate hides frees its room (Codex on #370). The fence's own text is outside `cap`, as it
+    // always was.
     let cards = crate::cards::recent(&k, raw, repo, CARDS, rules)?;
     let name = repo_name(repo, rules);
     let rest = match parts.packet(&manifest, &live, "") {
-        Some((base, _)) => base.text.chars().count(),
+        Some((base, _)) => base.outbound(rules).0.chars().count(),
         None if cards.is_empty() => return Ok(None),
         None => 0,
     };
@@ -2923,6 +2925,52 @@ extra_rules = [
         let fitted = at(whole.chars().count() - 1);
         assert!(fitted.contains("recent context"), "{fitted}");
         assert!(fitted.ends_with(&whole[end..]), "{fitted}");
+    }
+
+    /// Codex on #370: the gate can make the rest of the packet shorter than it was read (a long
+    /// value becomes `[REDACTED]`), and the cards take the room it frees.
+    #[test]
+    fn the_cards_take_the_room_the_gate_frees() {
+        let value = "7".repeat(60);
+        let (home, _c, _) = start(
+            |store, cwd| {
+                let (decision, _) = claimed(
+                    store,
+                    said(cwd, DAY, &format!("Keep otp={value} here.")),
+                    "decision",
+                    "decided",
+                    vec![],
+                );
+                let titles: Vec<String> = (0..8).map(|i| format!("Card number {i}")).collect();
+                let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
+                vec![decision, cards_op(1, 7, &titles)]
+            },
+            None,
+        );
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"otp\", regex = 'otp=([0-9]+)', \
+             secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let store = raw::open(home.path()).unwrap();
+        let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+        let shows = |cap: usize| {
+            let s = text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
+                .unwrap()
+                .unwrap();
+            (s.text, s.cards)
+        };
+        let (whole, cards) = shows(usize::MAX);
+        assert!(
+            whole.contains("[REDACTED]") && !whole.contains(&value),
+            "{whole}"
+        );
+        assert_eq!(cards, 8);
+        // The packet's text as the fence holds it, without the fence's own.
+        let units = manifest::fenced(whole.trim()).encode_utf16().count()
+            - manifest::fenced("").encode_utf16().count();
+        assert_eq!(shows(units), (whole.clone(), 8));
     }
 
     /// Codex on slice 3: the cards are fitted in UTF-16 units inside the fence, the measure the
