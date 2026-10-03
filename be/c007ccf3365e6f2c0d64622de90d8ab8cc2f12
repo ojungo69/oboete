@@ -1,0 +1,32 @@
+assets/viewer/app.js
+  s_80769bb20ff506::t_df3227d91ca095 92-100,702-708,737-738
+  s_80769bb20ff506::t_8362729e4d2387 739-747
+  s_80769bb20ff506::t_830d4723c0a2e2 26-27,30,40-49,55,57,85-91,152-153,157-159,166-168,173-174,183-188,190-193,195-200,204-205,210,216-217,297-298,300,391,497,499-502,517-518,523-527,534,538,541,552-565
+  s_80769bb20ff506::t_dabc38422f75c4 715-721
+  s_80769bb20ff506::t_8f13f771a12332 616-701,709-714,722-736,748-753,1038-1043,1310
+  s_821f8fcda60ea0::t_eaca4f42250c15 1700
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bec007ccf3365e6f2c0d64622de90d8ab8cc2f12",
+  "prompts": {},
+  "sessions": {
+    "s_80769bb20ff506": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10103-02b4-7650-a930-933c742dd704",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_821f8fcda60ea0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3c3ad270-2ec6-4f00-abc6-a7903bd32508",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
