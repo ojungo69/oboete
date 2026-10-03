@@ -878,6 +878,8 @@ pub fn doctor_line(p: &Provider, chain: &ChainOverlay) -> String {
 #[serde(default, deny_unknown_fields)]
 pub struct Inject {
     pub session_start: bool,
+    /// The short user-visible status at session start; it never contains stored text.
+    pub session_start_note: bool,
     /// The manifest's size in characters (`SESSION_START_CHARS`): it is stored rendered at 6,000.
     pub session_start_chars: usize,
     /// Delivered claims picked for each prompt (D9): off until the Inject harness has measured it.
@@ -900,6 +902,7 @@ impl Default for Inject {
     fn default() -> Self {
         Self {
             session_start: true,
+            session_start_note: true,
             session_start_chars: crate::consumer::manifest::CAP,
             per_prompt: false,
             per_prompt_chars: 1_500,
@@ -913,23 +916,35 @@ impl Default for Inject {
 /// recording nor this. A mistake in `[inject]` itself is an error, which injects nothing: the
 /// defaults would show the manifest to a user who turned it off (cubic on #94).
 pub fn inject(home: &Path) -> Result<Inject> {
+    inject_with_language(home).map(|(inject, _)| inject)
+}
+
+/// The terminal note's language from the same read as `[inject]`, independent of other tables.
+pub(crate) fn inject_with_language(home: &Path) -> Result<(Inject, bool)> {
     let path = home.join("config.toml");
     match std::fs::read_to_string(&path) {
-        Ok(text) => parse_inject(&text).with_context(|| format!("parse {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Inject::default()),
+        Ok(text) => {
+            parse_inject_with_language(&text).with_context(|| format!("parse {}", path.display()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((Inject::default(), true)),
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
     }
 }
 
 pub(crate) fn parse_inject(text: &str) -> Result<Inject> {
+    parse_inject_with_language(text).map(|(inject, _)| inject)
+}
+
+pub(crate) fn parse_inject_with_language(text: &str) -> Result<(Inject, bool)> {
     #[derive(Deserialize)]
     struct File {
         #[serde(default)]
         inject: Inject,
+        #[serde(default)]
+        summary: Option<toml::Value>,
     }
-    let i = toml::from_str::<File>(text)
-        .map_err(|e| toml_error(text, &e))?
-        .inject;
+    let file = toml::from_str::<File>(text).map_err(|e| toml_error(text, &e))?;
+    let i = file.inject;
     for (key, value, range) in [
         (
             "session_start_chars",
@@ -946,7 +961,13 @@ pub(crate) fn parse_inject(text: &str) -> Result<Inject> {
             range.end()
         );
     }
-    Ok(i)
+    let japanese = file.summary.as_ref().is_none_or(|s| {
+        s.as_table().is_some_and(|t| {
+            t.get("language")
+                .is_none_or(|l| l.as_str() == Some("Japanese"))
+        })
+    });
+    Ok((i, japanese))
 }
 
 /// `[redaction]` (spec 1.5, 6.4): rules the user adds to the built-in ones, which cannot be
