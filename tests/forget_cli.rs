@@ -1869,6 +1869,84 @@ fn replacing_raw_db_twice_keeps_both_forgets_and_blocks_reimport() {
     );
 }
 
+/// --finish imports before its confirmation prompt. A rolled-back raw must apply surviving
+/// request logs before that commit, not wait for a worker to hide the new native alias later.
+#[test]
+fn migrate_finish_reconciles_surviving_logs_before_committing_native_records() {
+    use std::io::Read;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let keep = hook_record(&home, "unrelated-before-finish-record-751");
+    let snapshot = root.path().join("raw-before-native-import.db");
+    std::fs::copy(home.join("raw.db"), &snapshot).unwrap();
+    let id = record(&home, CANARY);
+    std::fs::copy(home.join("native-source.db"), home.join("oboete.db")).unwrap();
+    ok(run(&home, &["forget", "--record", &id, "--yes"], ""));
+    for file in ["raw.db-wal", "raw.db-shm"] {
+        let _ = std::fs::remove_file(home.join(file));
+    }
+    let staged = home.join("raw.db.copy");
+    std::fs::copy(snapshot, &staged).unwrap();
+    std::fs::rename(staged, home.join("raw.db")).unwrap();
+    let mut child = command(&home, &["migrate", "--finish"]).spawn().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut said = Vec::new();
+    let mut byte = [0u8];
+    let prompt = b"Delete these files? Type yes to delete them: ";
+    // finish flushes this prompt after read_pass has committed, then blocks on our answer.
+    // Inspect that exact public CLI boundary before allowing any end-of-command work.
+    while !said.ends_with(prompt) && stdout.read(&mut byte).unwrap() != 0 {
+        said.push(byte[0]);
+    }
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let committed: i64 = db.query_row(
+        "SELECT COUNT(*) FROM records WHERE type='event' AND source='oboete-v1' AND kind='prompt'",
+        [], |r| r.get(0)).unwrap();
+    let denied: i64 = db
+        .query_row("SELECT COUNT(*) FROM denied_records", [], |r| r.get(0))
+        .unwrap();
+    drop(db);
+    child.stdin.take().unwrap().write_all(b"no\n").unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        said.ends_with(prompt),
+        "finish never reached its post-import confirmation"
+    );
+    assert_eq!(
+        committed, 0,
+        "--finish committed a forgotten native record before its confirmation"
+    );
+    assert_eq!(
+        denied, 1,
+        "the surviving request was not reconciled before import"
+    );
+    assert!(
+        home.join("oboete.db").exists(),
+        "a no answer deleted the source"
+    );
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    assert!(
+        !ok(run(
+            &home,
+            &["search", "--all", "--raw", "only", "--", CANARY],
+            ""
+        ))
+        .contains(CANARY)
+    );
+    assert!(ok(run(&home, &["get", &keep], "")).contains("unrelated-before-finish-record-751"));
+    assert_eq!(
+        ok(run(&home, &["forget", "--status"], "")).lines().count(),
+        1
+    );
+}
+
 /// F1 after F2: record backups carry the same home's identity after its appending device
 /// changes, so losing raw.db and restoring an older backup still applies the surviving log.
 #[test]

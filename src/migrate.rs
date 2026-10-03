@@ -251,6 +251,8 @@ pub fn finish(
     // Open to the end: its shared lock keeps a restore from swapping raw.db, with the batches the
     // pass just checked, while the answer is read and v1 is deleted.
     let mut raw = crate::raw::open(home)?;
+    // Like pass, apply surviving forget requests before this final pass can commit imports.
+    crate::forget::reconcile_or_say(home, &mut raw)?;
     let (stats, before) = read_pass(home, &mut raw, from)?;
     let mut files = old_files(home)?;
     writeln!(out, "v1's old files in {}:", home.display())?;
