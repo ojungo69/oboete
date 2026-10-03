@@ -1454,6 +1454,31 @@ impl Raw {
         Ok(seqs)
     }
 
+    /// `append_ops` for a writer of derived text (milestone 5 D1 rule 12): only while forget
+    /// denies as many records as when its inputs were read (`denied`), compared inside the write;
+    /// else nothing is written and the error is `curate::ListChanged`.
+    pub fn append_ops_fenced(
+        &mut self,
+        ops: &[(OpKind, serde_json::Value)],
+        denied: i64,
+    ) -> Result<Vec<i64>> {
+        let bodies = within_batch_cap(ops)?;
+        let tx = begin_batch(&self.conn, Duration::ZERO)?;
+        let now: i64 = tx.query_row("SELECT COUNT(*) FROM denied_records", [], |r| r.get(0))?;
+        if now != denied {
+            return Err(crate::curate::ListChanged.into());
+        }
+        for (kind, body) in ops {
+            anyhow::ensure!(
+                !forgotten_op(&tx, *kind, body)?,
+                "a forget request invalidated this derived batch; it was not recorded"
+            );
+        }
+        let seqs = insert_ops(&tx, &self.device, &bodies)?;
+        tx.commit()?;
+        Ok(seqs)
+    }
+
     /// Up to `limit` ops of `device` after `op_seq`, in op_seq order.
     pub fn ops_after(&self, device: &str, op_seq: i64, limit: usize) -> Result<Vec<Op>> {
         self.op_rows(device, op_seq, limit)?

@@ -259,6 +259,16 @@ pub fn phase(
     // A session in an excluded repository gets no summary (D13), and each call holds to the list
     // as it is now (spec 5.5).
     let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
+    // Milestone 5 D1 rule 12: the cards it shows are read once the consumers reach a forget.
+    if crate::curate::lagging(raw, k)? {
+        return Ok(sooner(
+            windows,
+            Phase::Waiting {
+                until: now,
+                up: true,
+            },
+        ));
+    }
     let out = windows;
     let key = |agent: &str, session: &str| format!("{agent}\u{0}{session}");
     let kept_back = |agent: &str, session: &str| reading.excluded.contains(&key(agent, session));
@@ -325,7 +335,20 @@ pub fn phase(
         let failed = match answer {
             Ok(res) => {
                 let op = fitted(turn.op(&res.output, rules))?.unwrap_or(skip);
-                raw.append_ops(&[(OpKind::Turn, op)])?;
+                // A forget since the turn was read: nothing of the answer is kept, and the next
+                // pass reads the turn again (milestone 5 D1 rule 12).
+                match raw.append_ops_fenced(&[(OpKind::Turn, op)], reading.denied) {
+                    Err(e) if e.is::<crate::curate::ListChanged>() => {
+                        return Ok(sooner(
+                            out,
+                            Phase::Waiting {
+                                until: now,
+                                up: true,
+                            },
+                        ));
+                    }
+                    appended => appended?,
+                };
                 crate::providers_db::clear_turn_pending(db, &device, r.seq)?;
                 return Ok(Phase::Covered);
             }
