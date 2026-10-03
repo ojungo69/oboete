@@ -227,8 +227,19 @@ fn view_lock(state: &Path) -> Result<std::fs::File> {
     if let Some(file) = open() {
         return Ok(file);
     }
-    std::fs::remove_file(&path)?;
+    clear(&path)?;
     open().ok_or_else(|| anyhow!("{} is not a file", path.display()))
+}
+
+/// Takes away whatever is at a fixed name in `state` before it is made anew: what was planted
+/// there while another user could write in `state`, a folder too (Codex on #376).
+fn clear(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// The resident viewer's start: the lock first, then `starting`, the filesystem check, the token
@@ -254,7 +265,7 @@ fn listen(home: &Path) -> Result<Option<Resident>> {
     let say = |what: &str| -> Result<()> {
         let next = state.join("view-outcome.next");
         // Made anew, so a link planted before is not written through.
-        let _ = std::fs::remove_file(&next);
+        clear(&next)?;
         (std::fs::OpenOptions::new().write(true).create_new(true))
             .open(&next)?
             .write_all(what.as_bytes())?;
@@ -361,7 +372,7 @@ fn ensure_token(home: &Path) -> Result<()> {
     let state = home.join("state");
     let staged = state.join("view-token.tmp");
     // Made anew, so it has this mode and is no link planted before.
-    let _ = std::fs::remove_file(&staged);
+    clear(&staged)?;
     let mut file = std::fs::OpenOptions::new();
     file.write(true).create_new(true);
     #[cfg(unix)]
@@ -2704,6 +2715,18 @@ mod tests {
         assert!(started.is_some());
         assert!(
             std::fs::symlink_metadata(p.join("state/view.lock"))
+                .unwrap()
+                .is_file()
+        );
+        // Nor do folders planted at the fixed names stop the start (Codex on #376).
+        let folders = resident_home(free_port());
+        let f = folders.path();
+        for name in ["view.lock", "view-outcome.next", "view-token.tmp"] {
+            std::fs::create_dir_all(f.join("state").join(name).join("inner")).unwrap();
+        }
+        assert!(listen(f).unwrap().is_some());
+        assert!(
+            std::fs::symlink_metadata(f.join("state/view.lock"))
                 .unwrap()
                 .is_file()
         );
