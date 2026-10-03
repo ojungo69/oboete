@@ -20,7 +20,11 @@ pub struct Card {
     pub repo: Option<String>,
     /// One of claude-mem's observation types; none for a card made of a window's summary (K1).
     pub kind: Option<String>,
+    /// Gated as it was written; a summary's card has its first sentence (K1).
     pub title: String,
+    /// The title on the one line its row at session start shows it on, gated as it was written
+    /// and as that line: a rule may match only the flattened title (Codex on slice 3).
+    pub row_title: String,
     pub subtitle: String,
     pub narrative: String,
     pub facts: Vec<String>,
@@ -201,7 +205,7 @@ where
             .as_deref()
             .and_then(|k| TYPES.iter().position(|t| *t == k))
             .map_or(NO_TYPE, |i| ICONS[i]);
-        let title = match c.title.trim() {
+        let title = match c.row_title.trim() {
             "" => "Untitled",
             t => t,
         };
@@ -235,17 +239,22 @@ fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
         Ok(items.into_iter().map(gate).collect())
     };
     let narrative = gate(r.get(10)?);
-    // On the one line a row shows it on, gated as it was written and as that line: a rule may
-    // match only the flattened title (Codex on slice 3). A summary's is cut from the gated
-    // narrative: a value the cut would split is whole when the rules read it.
-    let line = |t: &str| {
-        crate::redact::flattened_with(t, rules, usize::MAX, crate::consumer::manifest::one_line)
-            .masked()
+    // A summary's title is cut from the gated narrative: a value the cut would split is whole
+    // when the rules read it.
+    let (title, row_title) = match r.get::<_, String>(8)? {
+        t if t.is_empty() => {
+            let t = first_sentence(&narrative);
+            (t.clone(), t)
+        }
+        t => (gate(t.clone()), t),
     };
-    let title = match r.get::<_, String>(8)? {
-        t if t.is_empty() => line(&first_sentence(&narrative)),
-        t => line(&t),
-    };
+    let row_title = crate::redact::flattened_with(
+        &row_title,
+        rules,
+        usize::MAX,
+        crate::consumer::manifest::one_line,
+    )
+    .masked();
     Ok(Some(Card {
         device,
         op_seq: r.get(1)?,
@@ -256,6 +265,7 @@ fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
         repo: r.get::<_, Option<String>>(6)?.map(gate),
         kind: r.get(7)?,
         title,
+        row_title,
         subtitle: gate(r.get(9)?),
         narrative,
         facts: list(11)?,
@@ -344,6 +354,7 @@ mod tests {
             repo: Some("r".into()),
             kind: kind.map(str::to_owned),
             title: title.into(),
+            row_title: title.into(),
             subtitle: String::new(),
             narrative: String::new(),
             facts: Vec::new(),

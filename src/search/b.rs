@@ -2775,7 +2775,8 @@ mod tests {
         assert_eq!(get(home, &claim).unwrap().unwrap(), full);
     }
 
-    /// docs/cards.md S6: `get` shows a card in full by the ID session start shows it under.
+    /// docs/cards.md S6: `get` shows a card in full by the ID session start shows it under, its
+    /// title as written: only the row at session start puts it on one line (Codex on #370).
     #[test]
     fn get_shows_a_card_in_full_by_its_id() {
         let mut s = Store::new();
@@ -2783,7 +2784,7 @@ mod tests {
         let op = serde_json::json!({"outcome": "curated", "summary": "", "from_seq": seq,
             "from_offset": null, "to_seq": seq, "to_offset": null, "elided": [],
             "observations": [{"type": "bugfix",
-                "title": "The parser no longer drops the last line",
+                "title": "The parser no longer drops\n  the last line",
                 "subtitle": "A missing newline lost it.",
                 "narrative": "It read up to a newline, and the last line has none.",
                 "facts": ["read_line returned at EOF.", "The fix reads to the end."],
@@ -2804,7 +2805,7 @@ mod tests {
         assert!(first.starts_with(&format!("{id} ")), "{shown}");
         assert!(first.contains(" bugfix ") && first.contains(R), "{shown}");
         for part in [
-            "The parser no longer drops the last line\nA missing newline lost it.\n\n\
+            "The parser no longer drops\n  the last line\nA missing newline lost it.\n\n\
              It read up to a newline, and the last line has none.\n",
             "\nfacts:\n- read_line returned at EOF.\n- The fix reads to the end.\n",
             "\nconcepts: problem-solution, gotcha\n",
