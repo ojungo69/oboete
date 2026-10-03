@@ -1492,6 +1492,7 @@ mod tests {
             .map(|(f, t)| (f.to_owned(), t.to_owned()))
             .collect(),
             skipped: false,
+            excluded: false,
         };
         let op_seq = s
             .raw
