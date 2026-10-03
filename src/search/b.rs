@@ -2802,8 +2802,8 @@ mod tests {
         let id = format!("{op_seq}.0");
         let shown = get(home, &id).unwrap().unwrap();
         let first = shown.lines().next().unwrap();
-        assert!(first.starts_with(&format!("{id} ")), "{shown}");
-        assert!(first.contains(" bugfix ") && first.contains(R), "{shown}");
+        assert!(first.starts_with(&format!("{id} ")));
+        assert!(first.contains(" bugfix ") && first.contains(R));
         for part in [
             "The parser no longer drops\n  the last line\nA missing newline lost it.\n\n\
              It read up to a newline, and the last line has none.\n",
@@ -2811,7 +2811,7 @@ mod tests {
             "\nconcepts: problem-solution, gotcha\n",
             "\nfiles read: src/a.rs\nfiles modified: src/b.rs\n",
         ] {
-            assert!(shown.contains(part), "{part:?} in {shown}");
+            assert!(shown.contains(part), "{part:?}");
         }
         assert_eq!(get(home, &format!("{op_seq}.1")).unwrap(), None);
     }
