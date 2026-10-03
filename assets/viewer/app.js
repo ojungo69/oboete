@@ -273,7 +273,8 @@ function word(tag, cls, key) {
 }
 
 function shortenFile(path) {
-  const parts = path.split('/');
+  // Either separator, so a path recorded on Windows is shortened too (Codex on #373).
+  const parts = path.split(/[\\/]/);
   // docs/page.md P6 defines priority, rather than whichever marker comes first in the path.
   for (const marker of ['src', 'docs', 'plugin', 'Scripts']) {
     const at = parts.indexOf(marker);
