@@ -1,0 +1,28 @@
+tests/forget_cli.rs
+  s_ce2b24784deac6::t_eb658062fcc609 424-467
+  s_ce2b24784deac6::t_cce5af58ff938e 421-422
+  s_ce2b24784deac6::t_e303030b477ec7 423
+src/backup.rs
+  s_ce2b24784deac6::t_cce5af58ff938e 374-384,386-392,399
+src/worker.rs
+  s_ce2b24784deac6::t_c23fb12a9d7265 690-691,693-694,705
+  s_ce2b24784deac6::t_6eae7de65410d6 692
+  s_ce2b24784deac6::t_36eb1c43b236ef 1823-1829
+  s_ce2b24784deac6::t_68a9af6300f377 1722-1822,1830-1839
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "712d60dd47dc848bcabf7d5b5a528e7c680a0a36",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
