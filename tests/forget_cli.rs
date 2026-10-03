@@ -859,6 +859,119 @@ fn unverified_transcript_namespace(late_native: bool) {
     assert!(ok(run(home, &["get", id], "")).contains(CANARY));
 }
 
+/// D1 rule 14: a same-home live request is still authoritative when both log copies are lost.
+#[test]
+fn restore_keeps_a_same_home_live_forget_when_both_logs_are_lost() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let id = record(&home, CANARY);
+    let keep = record(&home, "same-home-unrelated-sapphire-3042");
+    let old_backup = root.path().join("before-forget");
+    copy_backup(&home.join("backups"), &old_backup);
+    ok(run(&home, &["forget", "--record", &id, "--yes"], ""));
+    std::fs::remove_file(home.join("forget.log")).unwrap();
+    std::fs::remove_dir_all(home.join("backups")).unwrap();
+    copy_backup(&old_backup, &home.join("backups"));
+    ok(run(&home, &["restore"], ""));
+    assert!(!String::from_utf8_lossy(&run(&home, &["get", &id], "").stdout).contains(CANARY));
+    assert!(ok(run(&home, &["get", &keep], "")).contains("same-home-unrelated-sapphire-3042"));
+    let pending = ok(run(&home, &["forget", "--status"], ""));
+    assert_eq!(pending.lines().count(), 1);
+    assert!(pending.contains("physical purge pending"), "{pending}");
+}
+
+/// D1: the live store's requests belong to its home, even when foreign, valid segments were
+/// named as this device's backups. The same source identity in another home stays visible.
+#[test]
+fn restoring_another_homes_segments_does_not_apply_the_live_homes_forget() {
+    let root = tempfile::tempdir().unwrap();
+    let a = root.path().join("home-a");
+    let b = root.path().join("home-b");
+    for home in [&a, &b] {
+        std::fs::create_dir(home).unwrap();
+        std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    }
+    let a_id = record(&a, CANARY);
+    let b_id = record(&b, CANARY);
+    let provenance = |home: &Path, id: &str| {
+        let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let (device, seq) = id.split_once(':').unwrap();
+        let home_id: String = db
+            .query_row("SELECT value FROM meta WHERE key='home_id'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let origin: String = db
+            .query_row(
+                "SELECT origin FROM import_origins WHERE device=?1 AND seq=?2",
+                (device, seq.parse::<i64>().unwrap()),
+                |r| r.get(0),
+            )
+            .unwrap();
+        (home_id, origin)
+    };
+    let (a_home, a_origin) = provenance(&a, &a_id);
+    let (b_home, b_origin) = provenance(&b, &b_id);
+    assert_ne!(a_home, b_home);
+    assert_eq!(a_origin, b_origin);
+    ok(run(&a, &["forget", "--record", &a_id, "--yes"], ""));
+    let (a_device, _) = a_id.split_once(':').unwrap();
+    let (b_device, _) = b_id.split_once(':').unwrap();
+    // Keep A's bodyless logs, but replace its segments and checksums with B's. Only the
+    // filenames change: the compressed records still name B's device and verified home.
+    for entry in std::fs::read_dir(a.join("backups")).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name() != "forget.log" {
+            std::fs::remove_file(entry.path()).unwrap();
+        }
+    }
+    let mut copied = 0;
+    for entry in std::fs::read_dir(b.join("backups")).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".seg.zst") && !name.ends_with(".ops.zst") {
+            continue;
+        }
+        let renamed = format!("{a_device}{}", name.strip_prefix(b_device).unwrap());
+        std::fs::copy(entry.path(), a.join("backups").join(&renamed)).unwrap();
+        let checksum =
+            std::fs::read_to_string(b.join("backups").join(format!("{name}.sha256"))).unwrap();
+        std::fs::write(
+            a.join("backups").join(format!("{renamed}.sha256")),
+            format!(
+                "{}  {renamed}\n",
+                checksum.split_whitespace().next().unwrap()
+            ),
+        )
+        .unwrap();
+        copied += 1;
+    }
+    assert!(copied > 0);
+    let restored = ok(run(&a, &["restore"], ""));
+    assert!(
+        restored.contains("a request of another home, skipped"),
+        "{restored}"
+    );
+    let found = run(&a, &["get", &b_id], "");
+    assert!(
+        found.status.success() && String::from_utf8_lossy(&found.stdout).contains(CANARY),
+        "the old live home's request hid the foreign home's record: {found:?}"
+    );
+    assert!(ok(run(&a, &["forget", "--status"], "")).is_empty());
+    assert_eq!(provenance(&a, &b_id).0, b_home);
+    let db = rusqlite::Connection::open(a.join("raw.db")).unwrap();
+    let control: (i64, i64) = db
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM forget_jobs), (SELECT COUNT(*) FROM denied_records)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(control, (0, 0));
+}
+
 /// D1 rule 14: an invalid live request must not discard a valid earlier request or swap away
 /// undamaged live data, even when neither request log survives.
 #[test]
