@@ -260,6 +260,31 @@ fn view_serves_on_its_own_address_when_the_port_is_in_use() {
     // The resident viewer it started, which found the port taken and left, is reaped (Codex on
     // #378).
     assert_eq!(zombies(view.0.id()), 0);
+    // So is the worker it started, when it leaves while this run serves on (Codex on #378).
+    let parent = view.0.id().to_string();
+    let worker = started(h)
+        .into_iter()
+        .find(|pid| {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let mut rest = stat
+                .rsplit_once(')')
+                .map_or("", |(_, r)| r)
+                .split_whitespace();
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            rest.nth(1) == Some(parent.as_str())
+                && String::from_utf8_lossy(&cmdline).contains("\0worker")
+        })
+        .expect("the worker oboete view started");
+    assert!(
+        Command::new("kill")
+            .arg(worker.to_string())
+            .status()
+            .unwrap()
+            .success()
+    );
+    until("the worker is reaped", || {
+        !Path::new(&format!("/proc/{worker}")).exists()
+    });
     let _ = view.0.kill();
     let mut why = String::new();
     std::io::Read::read_to_string(&mut view.0.stderr.take().unwrap(), &mut why).unwrap();

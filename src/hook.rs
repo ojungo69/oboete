@@ -1903,16 +1903,20 @@ pub(crate) fn last_assistant_in_transcript(path: &Path) -> String {
     last
 }
 
-/// After every append (D6): start a worker when none holds the lock. The lock is dropped before
-/// the spawn; while a worker runs, this costs one open and one failed `flock`.
-pub(crate) fn start_worker(home: &Path) -> Result<()> {
+/// After every append (D6): start a worker when none holds the lock, the child for a caller that
+/// outlives it to reap. The lock is dropped before the spawn; while a worker runs, this costs one
+/// open and one failed `flock`.
+pub(crate) fn start_worker(home: &Path) -> Result<Option<std::process::Child>> {
     if std::env::var_os("OBOETE_NO_SPAWN").is_some() {
-        return Ok(());
+        return Ok(None);
     }
-    if crate::worker::lock(home)?.is_some() {
-        let _ = spawn_detached(home, &["worker"]);
-    }
-    Ok(())
+    // The lock is let go at the end of this statement, before the spawn.
+    let free = crate::worker::lock(home)?.is_some();
+    Ok(if free {
+        spawn_detached(home, &["worker"])
+    } else {
+        None
+    })
 }
 
 /// `oboete --home <home> <args>`, detached in its own process group: the child, for a caller that

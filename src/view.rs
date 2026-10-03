@@ -209,10 +209,15 @@ fn bring_up(home: &Path, wait: Duration) -> std::result::Result<u16, String> {
         .map_err(|e| format!("{e:#}"))?
         .port
         .get();
-    let _ = crate::hook::start_worker(home);
-    let mut child = (!view_held(home))
+    let worker = crate::hook::start_worker(home).ok().flatten();
+    let viewer = (!view_held(home))
         .then(|| crate::hook::spawn_detached(home, &["view", "--resident"]))
         .flatten();
+    // Each is reaped when it leaves: this run may serve on in the foreground, and a child it
+    // never waited for would stay a zombie under it (Codex on #378).
+    for mut child in [worker, viewer].into_iter().flatten() {
+        std::thread::spawn(move || child.wait());
+    }
     let listening = format!("listening {port}");
     let deadline = Instant::now() + wait;
     loop {
@@ -221,11 +226,6 @@ fn bring_up(home: &Path, wait: Duration) -> std::result::Result<u16, String> {
             return Ok(port);
         }
         if Instant::now() >= deadline {
-            // One that failed has left: reaped, so this run's own viewer keeps no zombie (Codex
-            // on #378).
-            if let Some(child) = child.as_mut() {
-                let _ = child.try_wait();
-            }
             return Err(outcome.unwrap_or_else(|| "it did not start".into()));
         }
         std::thread::sleep(Duration::from_millis(50));
