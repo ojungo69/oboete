@@ -14,5 +14,7 @@ licensed under the Apache License, Version 2.0:
 What was taken, from plugin/modes/code.json at commit 039c6160: the names and meanings of the
 observation types and concepts, and the guidance on a title, a subtitle, a narrative and a fact
 and on what to record and what to skip. It is cut down and reworded in the curator's prompt
-(src/curate.rs, `prompt`) and named in src/cards.rs (`TYPES`, `CONCEPTS`). No code of Claude-Mem
-is included.
+(src/curate.rs, `prompt`) and named in src/cards.rs (`TYPES`, `CONCEPTS`). From the same file,
+the request for a session summary and the guidance on its six fields (request, investigated,
+learned, completed, next_steps, notes), reworded in the summary prompt (src/turns.rs, `prompt`).
+No code of Claude-Mem is included.

@@ -153,7 +153,8 @@ does not parse fails the answer, and a provider with it; a card that cannot be k
 and the op says how many were (`cards_dropped`).
 
 - It is kept when its title is not empty: claude-mem's one rule for storing an observation.
-- A type outside the nine is no type. claude-mem keeps an unknown type as written and takes a
+- A type outside the nine is no type, here and again when a card is read, since an op from
+  elsewhere may carry any text there. claude-mem keeps an unknown type as written and takes a
   missing one for `bugfix`; a wrong label on the timeline is worse than none.
 - Concepts outside the seven go. A list holds text only, each item once.
 - A file is kept when the window's lines (their text, not their ids or the session headings) name

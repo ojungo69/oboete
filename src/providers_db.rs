@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS provider_calls(
   id INTEGER PRIMARY KEY,
   ts INTEGER NOT NULL,
   provider TEXT NOT NULL,
-  role TEXT NOT NULL,                     -- curator, judge, digest
+  role TEXT NOT NULL,                     -- curator, judge, digest (before summaries), summary
   span TEXT,                              -- what the call was for (a window, a session)
   outcome TEXT NOT NULL,                  -- ok, invalid, error, wait, budget, gate, too_big,
                                           -- and an answer curate::check refused: empty, prose,
@@ -88,21 +88,24 @@ CREATE TABLE IF NOT EXISTS key_limits(
   read_at INTEGER NOT NULL,               -- unix ms of the last read, failed or not
   key_sha TEXT NOT NULL                   -- which key it read: SHA-256's first 16 hex digits, '' for none
 );
--- A session's digest that every provider failed (milestone 3 Task 9), as `pending` is for a
+-- A turn's summary (docs/summaries.md T1) that every provider failed, as `pending` is for a
 -- window: it counts only for the same request, and after D11's three attempts it is given up
--- until the request changes (the session's newer records, its claims, who is asked).
-CREATE TABLE IF NOT EXISTS digest_pending(
+-- until the request changes. Or a turn of a session the exclusion list kept back (hold
+-- 'excluded'), for a run after an undo. Its own table, so an upgraded home's `digest_pending`
+-- rows (the retired digest's, by repository) never stand for a turn (Codex on #371).
+CREATE TABLE IF NOT EXISTS turn_pending(
   device TEXT NOT NULL,
+  seq INTEGER NOT NULL,                   -- the turn's reply
   agent TEXT NOT NULL,
   session TEXT NOT NULL,
-  repo TEXT NOT NULL,
   prompt TEXT NOT NULL,
   reason TEXT NOT NULL,
   hold TEXT NOT NULL,
   attempts INTEGER NOT NULL,
   next_attempt_at INTEGER NOT NULL,
-  PRIMARY KEY(device, agent, session, repo)
+  PRIMARY KEY(device, seq)
 );
+CREATE INDEX IF NOT EXISTS turn_pending_session ON turn_pending(device, agent, session, seq);
 ";
 
 /// The viewer's ledger reads never create a database or run a schema upgrade. An absent
@@ -220,7 +223,7 @@ pub fn resume(conn: &Connection, provider: &str) -> Result<bool> {
         [],
     )?;
     conn.execute(
-        "UPDATE digest_pending SET next_attempt_at = 0 WHERE hold = 'owner'",
+        "UPDATE turn_pending SET next_attempt_at = 0 WHERE hold = 'owner'",
         [],
     )?;
     Ok(conn.execute("DELETE FROM provider_state WHERE provider=?1", [provider])? > 0)
@@ -645,14 +648,15 @@ pub fn start_curation<'a>(
     })
 }
 
-/// A session's digest waiting after every provider failed (`digest_pending`).
+/// A turn's summary waiting (`turn_pending`) after every provider failed, until its next attempt.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DigestPending {
+pub struct TurnPending {
     pub device: String,
+    /// The turn's reply.
+    pub seq: i64,
     pub agent: String,
     pub session: String,
-    pub repo: String,
-    /// The SHA-256 of the request the attempts were on.
+    /// The SHA-256 of the request the attempts were on; empty for a turn kept back.
     pub prompt: String,
     pub reason: String,
     pub hold: String,
@@ -660,44 +664,38 @@ pub struct DigestPending {
     pub next_attempt_at: i64,
 }
 
-pub fn digest_pending_of(
-    conn: &Connection,
-    device: &str,
-    agent: &str,
-    session: &str,
-    repo: &str,
-) -> Result<Option<DigestPending>> {
+pub fn turn_pending_of(conn: &Connection, device: &str, seq: i64) -> Result<Option<TurnPending>> {
     Ok(conn
         .query_row(
-            "SELECT prompt, reason, hold, attempts, next_attempt_at FROM digest_pending
-             WHERE device = ?1 AND agent = ?2 AND session = ?3 AND repo = ?4",
-            params![device, agent, session, repo],
+            "SELECT agent, session, prompt, reason, hold, attempts, next_attempt_at
+             FROM turn_pending WHERE device = ?1 AND seq = ?2",
+            params![device, seq],
             |r| {
-                Ok(DigestPending {
+                Ok(TurnPending {
                     device: device.into(),
-                    agent: agent.into(),
-                    session: session.into(),
-                    repo: repo.into(),
-                    prompt: r.get(0)?,
-                    reason: r.get(1)?,
-                    hold: r.get(2)?,
-                    attempts: r.get(3)?,
-                    next_attempt_at: r.get(4)?,
+                    seq,
+                    agent: r.get(0)?,
+                    session: r.get(1)?,
+                    prompt: r.get(2)?,
+                    reason: r.get(3)?,
+                    hold: r.get(4)?,
+                    attempts: r.get(5)?,
+                    next_attempt_at: r.get(6)?,
                 })
             },
         )
         .optional()?)
 }
 
-pub fn set_digest_pending(conn: &Connection, p: &DigestPending) -> Result<()> {
+pub fn set_turn_pending(conn: &Connection, p: &TurnPending) -> Result<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO digest_pending(device, agent, session, repo, prompt, reason, hold,
+        "INSERT OR REPLACE INTO turn_pending(device, seq, agent, session, prompt, reason, hold,
            attempts, next_attempt_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             p.device,
+            p.seq,
             p.agent,
             p.session,
-            p.repo,
             p.prompt,
             p.reason,
             p.hold,
@@ -708,17 +706,10 @@ pub fn set_digest_pending(conn: &Connection, p: &DigestPending) -> Result<()> {
     Ok(())
 }
 
-pub fn clear_digest_pending(
-    conn: &Connection,
-    device: &str,
-    agent: &str,
-    session: &str,
-    repo: &str,
-) -> Result<()> {
+pub fn clear_turn_pending(conn: &Connection, device: &str, seq: i64) -> Result<()> {
     conn.execute(
-        "DELETE FROM digest_pending WHERE device = ?1 AND agent = ?2 AND session = ?3
-           AND repo = ?4",
-        params![device, agent, session, repo],
+        "DELETE FROM turn_pending WHERE device = ?1 AND seq = ?2",
+        params![device, seq],
     )?;
     Ok(())
 }
@@ -943,21 +934,21 @@ mod tests {
             .map(|p| p.next_attempt_at)
             .collect();
         assert_eq!(due, [0, 5_000_000_000_000]);
-        // A digest that waits on the owner too.
-        let digest = DigestPending {
+        // A turn's summary that waits on the owner too.
+        let turn = TurnPending {
             device: "a".into(),
+            seq: 7,
             agent: "claude".into(),
             session: "s".into(),
-            repo: "r".into(),
             prompt: "p".into(),
             reason: "r".into(),
             hold: "owner".into(),
             attempts: 0,
             next_attempt_at: 5_000_000_000_000,
         };
-        set_digest_pending(&conn, &digest).unwrap();
+        set_turn_pending(&conn, &turn).unwrap();
         resume(&conn, "claude").unwrap();
-        let got = digest_pending_of(&conn, "a", "claude", "s", "r").unwrap();
+        let got = turn_pending_of(&conn, "a", 7).unwrap();
         assert_eq!(got.unwrap().next_attempt_at, 0);
     }
 

@@ -868,32 +868,6 @@ pub fn newest_first(units: &mut [Vec<Claim>]) {
     units.sort_by(|a, b| b.iter().map(newest).max().cmp(&a.iter().map(newest).max()));
 }
 
-/// `repo`'s current claims the owner backs, anchored on `device` at or before `seq`, the newest
-/// first, at most `limit`: those a session's digest may cite (milestone 3 Task 9). SessionStart
-/// injects the digest, so only the user's own settled words, proposals the user accepted, and
-/// claims whose status the owner corrected to decided (the active status is then the newest
-/// correction's) are shown: never a proposal, which may stand on tool content, nor a tool result
-/// or the assistant's own completion, which a passing run settles.
-pub fn anchored_through(
-    k: &Connection,
-    repo: &str,
-    device: &str,
-    seq: i64,
-    limit: usize,
-) -> Result<Vec<Claim>> {
-    tips(
-        k,
-        &format!(
-            "{TIPS} AND a.muted = 0 AND a.status NOT IN ('proposed', 'unverified') AND {}
-             AND a.anchor_device = ?2 AND a.anchor_seq <= ?3
-             ORDER BY a.valid_from DESC, a.anchor_device DESC, a.anchor_seq DESC, a.uid DESC
-             LIMIT ?4",
-            owner_backed("a")
-        ),
-        (repo, device, seq, limit as i64),
-    )
-}
-
 // `DECIDED_WHERE`'s text, which `DECIDED` repeats byte for byte. #320: an open item's
 // speaker can be the user who pasted or questioned it; only settled status grants delivery.
 macro_rules! decided_where {

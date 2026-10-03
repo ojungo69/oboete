@@ -137,6 +137,8 @@ pub enum OpKind {
     /// Where an import of records stands in its source (milestone 4 D6): a `Checkpoint` and
     /// `to_seq`, the last seq when its batch was appended.
     Migration,
+    /// A turn's summary (docs/summaries.md): a `turns::TurnOp`.
+    Turn,
 }
 
 impl OpKind {
@@ -149,6 +151,7 @@ impl OpKind {
             OpKind::Exclusion => "exclusion",
             OpKind::Import => "import",
             OpKind::Migration => "migration",
+            OpKind::Turn => "turn",
         }
     }
     fn from_name(name: &str) -> Option<Self> {
@@ -160,6 +163,7 @@ impl OpKind {
             Self::Exclusion,
             Self::Import,
             Self::Migration,
+            Self::Turn,
         ]
         .into_iter()
         .find(|k| k.name() == name)
@@ -602,13 +606,48 @@ impl Raw {
         to: i64,
         through: Option<i64>,
     ) -> Result<Vec<Removal>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT DISTINCT target_seq, target_offset, target_length FROM records
-             WHERE type = 'tombstone' AND target_device = ?1 AND target_seq BETWEEN ?2 AND ?3
-               AND (?4 IS NULL OR device = ?1 AND seq <= ?4)
+        self.removed_of(device, None, from, to, through)
+    }
+
+    /// `removed_in` over one session's records (docs/summaries.md T7): a removal from another
+    /// session's record between them is not counted; one from a record that is gone or has no
+    /// labels is.
+    pub fn removed_in_session(
+        &self,
+        device: &str,
+        (agent, session): (&str, &str),
+        from: i64,
+        to: i64,
+        through: Option<i64>,
+    ) -> Result<Vec<Removal>> {
+        self.removed_of(device, Some((agent, session)), from, to, through)
+    }
+
+    fn removed_of(
+        &self,
+        device: &str,
+        session: Option<(&str, &str)>,
+        from: i64,
+        to: i64,
+        through: Option<i64>,
+    ) -> Result<Vec<Removal>> {
+        // With a session: not a record of another session, nor an import of this one, which no
+        // live turn rests on (Codex on #371).
+        let mut st = self.conn.prepare_cached(&format!(
+            "SELECT DISTINCT t.target_seq, t.target_offset, t.target_length FROM records t
+             WHERE t.type = 'tombstone' AND t.target_device = ?1
+               AND t.target_seq BETWEEN ?2 AND ?3
+               AND (?4 IS NULL OR t.device = ?1 AND t.seq <= ?4)
+               AND (?5 IS NULL OR NOT EXISTS (
+                 SELECT 1 FROM records r WHERE r.device = ?1 AND r.seq = t.target_seq
+                   AND (r.agent IS NOT NULL AND r.session IS NOT NULL
+                          AND (r.agent <> ?5 OR r.session <> ?6)
+                        OR r.source NOT IN ('{}'))))
              ORDER BY 1, 2, 3",
-        )?;
-        let rows = st.query_map(params![device, from, to, through], |r| {
+            LIVE.join("', '")
+        ))?;
+        let (agent, session) = session.unzip();
+        let rows = st.query_map(params![device, from, to, through, agent, session], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -674,6 +713,70 @@ impl Raw {
                 Item::Event(e) => Some((seq, *e)),
                 _ => None,
             }))
+    }
+
+    /// The first record of the turn that `agent`'s `session` ends with its reply `reply` on this
+    /// device: the session's first live event after its previous live reply, or its first live
+    /// event (docs/summaries.md T1). A scan by label, as `turns`. Live alone: an import of the
+    /// same session is no boundary of a live turn (Codex on #371).
+    pub fn turn_start(&self, agent: &str, session: &str, reply: i64) -> Result<i64> {
+        // The session's first event after its previous reply, not the record after that reply,
+        // which may be another session's or a tombstone (Codex on C2). The reply at the latest.
+        Ok(self.conn.query_row(
+            &format!(
+                "SELECT COALESCE(MIN(seq), ?4) FROM records
+                 WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
+                   AND seq <= ?4 AND source IN ('{live}')
+                   AND seq > COALESCE(
+                     (SELECT MAX(seq) FROM records WHERE device = ?1 AND type = 'event'
+                        AND agent = ?2 AND session = ?3 AND kind = 'reply' AND seq < ?4
+                        AND source IN ('{live}')), 0)",
+                live = LIVE.join("', '")
+            ),
+            params![self.device, agent, session, reply],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Whether `device`'s events of `agent`'s `session` from `from` to `to` hold a live one: a
+    /// window of imported records alone is no part of a live turn (Codex on #371).
+    pub fn has_live(
+        &self,
+        device: &str,
+        (agent, session): (&str, &str),
+        from: i64,
+        to: i64,
+    ) -> Result<bool> {
+        Ok(self.conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3
+                   AND type = 'event' AND agent = ?4 AND session = ?5 AND source IN ('{}'))",
+                LIVE.join("', '")
+            ),
+            params![device, from, to, agent, session],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The one repository of this device's live events of a session from `from` to `to`, none
+    /// when they are of two (docs/summaries.md T5).
+    pub fn session_repo(
+        &self,
+        (agent, session): (&str, &str),
+        from: i64,
+        to: i64,
+    ) -> Result<Option<String>> {
+        let (repos, repo): (i64, Option<String>) = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(DISTINCT COALESCE(repo, char(0))), MIN(repo) FROM records
+                 WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
+                   AND seq BETWEEN ?4 AND ?5 AND source IN ('{}')",
+                LIVE.join("', '")
+            ),
+            params![self.device, agent, session, from, to],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(repo.filter(|_| repos == 1))
     }
 
     /// The agent and session labels of `device`'s event `seq`, NUL between (how `curate` keys a
@@ -745,18 +848,20 @@ impl Raw {
             .optional()?)
     }
 
-    /// This device's newest `limit` live event records (the sources `is_live` names), the newest
-    /// first, by their labels alone (no body): where the curation phase looks for a session whose
-    /// digest is due (milestone 3 Task 9), so an import never pushes a live session out (Codex on
-    /// #304). Down the primary key: sessions have no index (spec 1.6).
-    pub fn newest_labels(&self, limit: usize) -> Result<Vec<Labels>> {
+    /// This device's live replies (the sources `is_live` names) after `after` through `through`,
+    /// the oldest first, at most `limit`, by their labels alone (no body): the turn ends a
+    /// summary may be due for (docs/summaries.md T1). Along the primary key from `after`: records
+    /// have no index of kind.
+    pub fn replies_between(&self, after: i64, through: i64, limit: usize) -> Result<Vec<Labels>> {
         let mut st = self.conn.prepare(&format!(
             "SELECT agent, session, repo, seq, ts, kind FROM records
-             WHERE device = ?1 AND type = 'event' AND source IN ('{}')
-             ORDER BY seq DESC LIMIT ?2",
+             WHERE device = ?1 AND seq > ?2 AND seq <= ?3 AND type = 'event' AND kind = 'reply'
+               AND source IN ('{}')
+             ORDER BY seq LIMIT ?4",
             LIVE.join("', '")
         ))?;
-        let rows = st.query_map(params![self.device, limit as i64], |r| {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = st.query_map(params![self.device, after, through, limit], |r| {
             Ok(Labels {
                 agent: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
                 session: r.get::<_, Option<String>>(1)?.unwrap_or_default(),

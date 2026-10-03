@@ -263,7 +263,11 @@ fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
         agent: r.get::<_, Option<String>>(4)?.map(gate),
         session: r.get::<_, Option<String>>(5)?.map(gate),
         repo: r.get::<_, Option<String>>(6)?.map(gate),
-        kind: r.get(7)?,
+        // One of the nine or none, whatever an op from elsewhere says (C3, Codex on #371): a
+        // type is shown as it is, never gated.
+        kind: r
+            .get::<_, Option<String>>(7)?
+            .filter(|k| TYPES.contains(&k.as_str())),
         title,
         row_title,
         subtitle: gate(r.get(9)?),
@@ -296,6 +300,49 @@ pub fn recent(
         && let Some(r) = rows.next()?
     {
         out.extend(read(r, raw, rules)?);
+    }
+    Ok(out)
+}
+
+/// A card with the span of its window and the goals that window was shown.
+pub type TurnCard = (Card, (i64, i64), Vec<i64>);
+
+/// The cards a turn's summary may be shown (docs/summaries.md T2): its session's on `device`, of
+/// the windows that hold any of the records `from` to `through`, the newest first, at most
+/// `limit`; each with the span of its window and the goals it was shown, which a summary shown
+/// the card was built on too (T7).
+pub fn of_turn(
+    k: &Connection,
+    raw: &Raw,
+    device: &str,
+    (agent, session): (&str, &str),
+    (from, through): (i64, i64),
+    limit: usize,
+    rules: &Rules,
+) -> Result<Vec<TurnCard>> {
+    let mut out = Vec::new();
+    if !crate::consumer::manifest::exists(k, "table", "cards")? {
+        return Ok(out);
+    }
+    let mut st = k.prepare(&format!(
+        "SELECT {COLUMNS} FROM cards
+         WHERE device = ?1 AND agent = ?2 AND session = ?3 AND from_seq <= ?5 AND to_seq >= ?4
+           AND replaced_by IS NULL
+         ORDER BY ts DESC, op_seq DESC, n"
+    ))?;
+    let mut rows = st.query(rusqlite::params![device, agent, session, from, through])?;
+    while out.len() < limit
+        && let Some(r) = rows.next()?
+    {
+        let span: (i64, i64) = (r.get(15)?, r.get(16)?);
+        if !raw.has_live(device, (agent, session), span.0, span.1)? {
+            continue;
+        }
+        let Some(card) = read(r, raw, rules)? else {
+            continue;
+        };
+        let goals: Vec<i64> = serde_json::from_str(&r.get::<_, String>(18)?).unwrap_or_default();
+        out.push((card, span, goals));
     }
     Ok(out)
 }

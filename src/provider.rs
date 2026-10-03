@@ -251,7 +251,7 @@ impl<'a> Chain<'a> {
         }
     }
 
-    /// Walk the chain for one `role` (curator, judge, digest) and one `span` (what the call is
+    /// Walk the chain for one `role` (curator, judge, summary) and one `span` (what the call is
     /// for). `OBOETE_FAIL_PROVIDER=<name>` forces that provider to fail (fallback proof).
     pub fn run(
         &mut self,
