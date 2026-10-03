@@ -206,6 +206,7 @@ block.
 S1. **Where.** After the owner's decisions and open items (oboete's packet puts them first), before
 the digest of the last session, which the latest summary's fields replace in the next unit, and
 before the checkout's state lines (todo list, last exchange, files touched) and the live lines.
+Claude Code's terminal line at session start counts the cards it handed over beside the claims.
 
 S2. **What.** claude-mem's model text, as its format gives it, without what oboete has no data
 for yet:

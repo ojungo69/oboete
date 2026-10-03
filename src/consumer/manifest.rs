@@ -105,6 +105,8 @@ fn schema(k: &Connection) -> Result<()> {
 pub struct Start {
     pub text: String,
     pub shown: Vec<Shown>,
+    /// How many cards it shows (docs/cards.md S1).
+    pub cards: usize,
 }
 
 /// A claim shown to a session: a later injection need not repeat its body, and a correction names
@@ -197,7 +199,11 @@ pub fn text(
             Some(shown)
         })
         .collect();
-    Ok(Some(Start { text, shown }))
+    Ok(Some(Start {
+        text,
+        shown,
+        cards: n,
+    }))
 }
 
 /// The same source occurrence survived the packet's gate and cut as a whole line, not an
@@ -3014,13 +3020,16 @@ extra_rules = [
         store.append_ops(&[cards_op(1, 7, &titles)]).unwrap();
         worker::run_once(home.path()).unwrap();
         let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
-        let at = |cap: usize| {
-            text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
+        // The packet, and how many cards it shows (the terminal line counts them).
+        let shows = |cap: usize| {
+            let s = text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
                 .unwrap()
-                .unwrap()
-                .text
+                .unwrap();
+            (s.text, s.cards)
         };
+        let at = |cap: usize| shows(cap).0;
         let whole = at(usize::MAX);
+        assert_eq!(shows(usize::MAX).1, 8);
         let start = whole.find("# [r] recent context, ").expect(&whole);
         let end = start + whole[start..].find("\n## ").unwrap() + 1;
         let block = &whole[start..end];
@@ -3031,11 +3040,13 @@ extra_rules = [
             fitted.contains(".3 ") && !fitted.contains(".4 "),
             "{fitted}"
         );
+        assert_eq!(shows(rest + block.chars().count() - 1).1, 4);
         assert!(fitted.ends_with(&whole[end..]), "{fitted}");
         assert!(fitted.chars().count() < rest + block.chars().count());
         // No room for one card: no block, and the rest as it was.
         let none = at(rest);
         assert!(!none.contains("recent context"), "{none}");
+        assert_eq!(shows(rest).1, 0);
         assert_eq!(none, format!("{}{}", &whole[..start], &whole[end..]));
     }
 
