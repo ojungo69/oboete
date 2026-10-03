@@ -23,10 +23,11 @@ function setStatus(text, isError = false, textLang = null) {
 
 function showError(error, retry) {
   const feedError = view === 'timeline';
-  setStatus(feedError ? t('feed_error', { reason: error.message }) : error.message, true, feedError ? lang : null);
+  const reason = failureMessage(error);
+  setStatus(feedError ? t('feed_error', { reason }) : reason, true, lang);
   const notice = $('status').firstChild;
   if (error.status !== 503 && !feedError) return notice;
-  const button = el('button', 'quiet small', feedError ? t('retry') : 'Retry');
+  const button = word('button', 'quiet small', 'retry');
   button.type = 'button';
   button.addEventListener('click', async () => {
     button.disabled = true;
@@ -36,17 +37,24 @@ function showError(error, retry) {
   return notice;
 }
 
+function failureMessage(error) {
+  if (!error.status) return t(error.key || 'network_failed');
+  const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden',
+    404: 'not_found', 413: 'too_large', 503: 'memory_busy' };
+  const key = error.status === 404 && ['doc', 'claim'].includes(error.resource)
+    ? `${error.resource}_missing` : byStatus[error.status];
+  return key ? t('request_error', { status: error.status, reason: t(key) })
+    : t('load_failed', { status: error.status });
+}
+
 async function api(name, params = {}) {
   const res = await fetch(`/api/${name}?${new URLSearchParams(params)}`, {
     headers: { 'X-Oboete-Token': token },
   });
   if (!res.ok) {
-    let message = `${res.status}: ${await res.text()}`;
-    if (res.status === 401) {
-      message += '. This page needs the full address printed by `oboete view` (it carries the access key after #).';
-    }
-    const error = new Error(message);
+    const error = new Error();
     error.status = res.status;
+    error.resource = name;
     throw error;
   }
   return res.json();
@@ -74,7 +82,22 @@ function applyTheme() {
 
 // --- Entries and their details --------------------------------------------------------------
 
-function badge(kind) {
+function metadata(value) {
+  const key = `meta_${value}`;
+  return Object.hasOwn(TEXT, key) ? t(key) : value;
+}
+
+function badge(kind, translated = false) {
+  const key = `meta_${kind}`;
+  if (translated) {
+    if (Object.hasOwn(TEXT, key)) return word('span', `badge ${kind}`, key);
+    // Records joins a claim's kind and status; kinds such as "open item" contain a space.
+    const at = kind.lastIndexOf(' ');
+    const keys = [`meta_${kind.slice(0, at)}`, `meta_${kind.slice(at + 1)}`];
+    if (at > 0 && keys.every((k) => Object.hasOwn(TEXT, k))) {
+      return el('span', `badge ${kind}`, word('span', null, keys[0]), ' ', word('span', null, keys[1]));
+    }
+  }
   return el('span', `badge ${kind}`, kind);
 }
 
@@ -126,25 +149,29 @@ function expander(label, key, load, restore = true) {
   return button;
 }
 
-function fullText(key, label = 'Full text') {
-  const button = expander(label, `doc:${key}`, async () => {
+function fullText(key, label = null) {
+  const button = expander(label ?? word('span', null, 'full_text'), `doc:${key}`, async () => {
     const doc = await api('doc', { id: key });
     return el('section', 'detail', el('h4', null, doc.id), el('pre', 'document-text', doc.text));
   });
-  button.setAttribute('aria-label', `Full text of ${key}`);
+  button.setAttribute('aria-label', t('full_text_of', { key }));
+  button.dataset.i18nAria = 'full_text_of';
+  button.dataset.i18nVars = JSON.stringify({ key });
   return button;
 }
 
 function claimLink(uid, label = uid, restore = false) {
   // Reciprocal claim links open only on a click; restoring them would follow a cycle forever.
   const button = expander(label, `claim:${uid}`, () => claimPanel(uid), restore);
-  button.setAttribute('aria-label', `View claim ${uid}`);
+  button.setAttribute('aria-label', t('view_claim_id', { uid }));
+  button.dataset.i18nAria = 'view_claim_id';
+  button.dataset.i18nVars = JSON.stringify({ uid });
   return button;
 }
 
 function claimLinks(heading, uids) {
-  return el('section', null, el('h4', null, heading),
-    uids.length ? el('ul', 'claim-links', ...uids.map((uid) => el('li', null, claimLink(uid)))) : el('p', 'text pending', 'None.'));
+  return el('section', null, word('h4', null, heading),
+    uids.length ? el('ul', 'claim-links', ...uids.map((uid) => el('li', null, claimLink(uid)))) : word('p', 'text pending', 'none'));
 }
 
 async function claimPanel(uid) {
@@ -153,40 +180,41 @@ async function claimPanel(uid) {
     el('p', 'text', q.text), fullText(q.key, q.key)));
   const history = c.history.map((change) => el('li', null,
     el('div', 'meta', localTime(change.ts),
-      change.tier === null && change.recipe === null ? el('span', null, "Owner's correction") : null,
-      change.tier === null ? null : el('span', null, `Tier: ${change.tier}`),
-      change.recipe === null ? null : el('span', null, `Recipe: ${change.recipe}`),
-      el('span', null, change.status === null ? 'Status unchanged' : `Status: ${change.status}`)),
-    el('p', change.body === null ? 'text pending' : 'text', change.body ?? 'Text unchanged')));
+      change.tier === null && change.recipe === null ? word('span', null, 'owner_correction') : null,
+      change.tier === null ? null : word('span', null, 'tier', { tier: change.tier }),
+      change.recipe === null ? null : word('span', null, 'recipe', { recipe: change.recipe }),
+      change.status === null ? word('span', null, 'status_unchanged')
+        : el('span', null, t('claim_status', { status: metadata(change.status) }))),
+    change.body === null ? word('p', 'text pending', 'text_unchanged') : el('p', 'text', change.body)));
   return el('section', 'detail claim-view',
-    el('h3', null, `Claim ${c.uid}`),
-    el('div', 'meta', badge(c.kind), badge(c.status), badge(c.label), localTime(c.when)),
-    el('dl', 'claim-meta', ...row('Delivered', c.delivered ? 'Yes' : 'No'),
-      ...row('Speaker', c.speaker), ...row('Scope', c.scope), ...row('Repository', c.repo ?? '–')),
+    word('h3', null, 'claim_title', { uid: c.uid }),
+    el('div', 'meta', badge(c.kind, true), badge(c.status, true), badge(c.label, true), localTime(c.when)),
+    el('dl', 'claim-meta', ...row('delivered', t(c.delivered ? 'yes' : 'no')),
+      ...row('speaker', metadata(c.speaker)), ...row('scope', metadata(c.scope)), ...row('repository', c.repo ?? '–')),
     el('p', 'text', c.text),
-    c.later ? el('p', 'relation', 'Later claim: ', claimLink(c.later)) : null,
-    el('section', null, el('h4', null, 'Evidence quotes'),
-      quotes.length ? el('ul', 'quotes', ...quotes) : el('p', 'text pending', 'No evidence quotes.')),
-    claimLinks('Supersedes', c.supersedes), claimLinks('Ended by', c.ended_by),
-    el('section', null, el('h4', null, 'History (oldest first)'),
-      history.length ? el('ol', 'claim-history', ...history) : el('p', 'text pending', 'No changes.')));
+    c.later ? el('p', 'relation', word('span', null, 'later_claim'), claimLink(c.later)) : null,
+    el('section', null, word('h4', null, 'evidence_quotes'),
+      quotes.length ? el('ul', 'quotes', ...quotes) : word('p', 'text pending', 'no_evidence')),
+    claimLinks('supersedes', c.supersedes), claimLinks('ended_by', c.ended_by),
+    el('section', null, word('h4', null, 'claim_history'),
+      history.length ? el('ol', 'claim-history', ...history) : word('p', 'text pending', 'no_changes')));
 }
 
 function entryMeta(d, all) {
-  return el('div', 'meta', badge(d.class), d.label ? badge(d.label) : null,
-    badge(d.kind), d.status ? badge(d.status) : null, localTime(d.when),
+  return el('div', 'meta', badge(d.class, true), d.label ? badge(d.label, true) : null,
+    badge(d.kind, true), d.status ? badge(d.status, true) : null, localTime(d.when),
     all ? el('span', null, d.repo ?? '–') : null, el('span', null, d.key));
 }
 
 function entryActions(key, isClaim) {
-  return el('div', 'actions', fullText(key), isClaim ? claimLink(key, 'View claim', true) : null);
+  return el('div', 'actions', fullText(key), isClaim ? claimLink(key, word('span', null, 'view_claim'), true) : null);
 }
 
 // Built through el(), which leaves out the nulls: Element.append would print them as "null".
 function hitEntry(h, all) {
   return el('li', h.class === 'delivered' ? 'entry delivered' : 'entry', entryMeta(h, all),
-    h.class === 'delivered' ? el('p', 'relation', 'Earlier decision, paired with later claim: ', claimLink(h.later)) : null,
-    h.class === 'superseded' && h.by ? el('p', 'relation', 'Superseded by ', claimLink(h.by)) : null,
+    h.class === 'delivered' ? el('p', 'relation', word('span', null, 'earlier_decision'), claimLink(h.later)) : null,
+    h.class === 'superseded' && h.by ? el('p', 'relation', word('span', null, 'superseded_by'), claimLink(h.by)) : null,
     h.title ? el('p', 'title', h.title) : null, el('p', 'text', h.snippet),
     entryActions(h.key, ['current', 'delivered', 'superseded'].includes(h.class)));
 }
@@ -266,9 +294,10 @@ const FEED_LIMIT = 50;
 let feed = null;
 let feedDetailId = 0;
 
-function word(tag, cls, key) {
-  const node = el(tag, cls, t(key));
+function word(tag, cls, key, vars = {}) {
+  const node = el(tag, cls, t(key, vars));
   node.dataset.i18n = key;
+  if (Object.keys(vars).length) node.dataset.i18nVars = JSON.stringify(vars);
   return node;
 }
 
@@ -359,7 +388,7 @@ function activeFeed(state) {
 function updateFeedState(state) {
   if (!activeFeed(state)) return;
   const message = state.loading ? t('feed_loading')
-    : state.error ? t('feed_error', { reason: state.error.message })
+    : state.error ? t('feed_error', { reason: failureMessage(state.error) })
       : !state.keys.size ? t('feed_empty') : state.next === null ? t('feed_exhausted') : '';
   state.notice.textContent = message;
   state.notice.classList.toggle('error', Boolean(state.error) && !state.loading);
@@ -465,9 +494,12 @@ async function showSearch(repo, q) {
     history: $('history').checked ? '1' : '0', raw: $('raw').value });
   return () => {
     // The server puts each delivered decision immediately after the claim that ended it.
-    draw(['Search: ', el('span', 'query', q)], answer.hits.map((h) => hitEntry(h, !repo)), []);
+    draw([word('span', null, 'search_heading'), el('span', 'query', q)], answer.hits.map((h) => hitEntry(h, !repo)), []);
     if (answer.vector !== 'used') {
-      $('vector').textContent = `Results are full text only (${answer.vector})${answer.why ? `: ${answer.why}` : '.'}`;
+      const known = Object.hasOwn(TEXT, `vector_${answer.vector}`);
+      const state = t(known ? `vector_${answer.vector}` : 'vector_unavailable');
+      const reason = t(known ? `vector_why_${answer.vector}` : 'vector_why_unavailable');
+      $('vector').replaceChildren(word('span', null, answer.why ? 'vector_notice_reason' : 'vector_notice', { state, reason }));
       $('vector').hidden = false;
     }
     if (answer.hits.length === LIMIT) setStatus(t('best_matches', { n: LIMIT }));
@@ -482,31 +514,31 @@ async function showContext(repo) {
   return () => {
     // The resident viewer has no checkout of its own (docs/resident.md R8): it asks for one.
     if (c.choose) {
-      draw('Context handed to a new session', [], [
-        el('p', 'lead', 'Choose a repository above: Context shows what a new session there is handed.'),
+      draw(word('span', null, 'context_heading'), [], [
+        word('p', 'lead', 'context_choose'),
       ]);
       setStatus('');
       return;
     }
-    draw('Context handed to a new session', [], [
-      !repo ? el('p', 'lead', "Context shows one checkout; All repositories uses the viewer's checkout.") : null,
-      el('dl', 'claim-meta', ...row('Repository', c.repo), ...row('Branch', c.branch || '–'),
-        ...row('SessionStart', c.on ? 'On' : 'Off'), ...row('Size', `${c.chars} characters`)),
-      c.text ? el('pre', 'context', c.text) : el('p', 'text pending', 'Nothing is handed over for this checkout yet.'),
+    draw(word('span', null, 'context_heading'), [], [
+      !repo ? word('p', 'lead', 'context_checkout') : null,
+      el('dl', 'claim-meta', ...row('repository', c.repo), ...row('branch', c.branch || '–'),
+        ...row('session_start', t(c.on ? 'context_on' : 'context_off')), ...row('size', t('characters', { n: c.chars }))),
+      c.text ? el('pre', 'context', c.text) : word('p', 'text pending', 'context_empty'),
     ]);
     setStatus('');
   };
 }
 
 function row(term, value) {
-  return [el('dt', null, term), el('dd', null, String(value))];
+  return [word('dt', null, term), el('dd', null, String(value))];
 }
 
 function statsTable(headers, rows, empty) {
-  if (!rows.length) return el('p', 'text pending', empty);
+  if (!rows.length) return word('p', 'text pending', empty);
   return el('div', 'table-scroll', el('table', 'stats-table',
     el('thead', null, el('tr', null, ...headers.map((h) => {
-      const th = el('th', null, h);
+      const th = word('th', null, h);
       th.scope = 'col';
       return th;
     }))),
@@ -517,20 +549,20 @@ function statsTable(headers, rows, empty) {
 async function showStats() {
   const s = await api('stats');
   return () => {
-    draw('Stats (all repositories)', [], [
-      el('section', 'stat', el('h3', null, 'Records per device'),
-        statsTable(['Device', 'Records'], s.records.map((r) => [r.device, r.records]), 'No records.')),
-      el('section', 'stat', el('h3', null, 'Claims by kind and status'),
-        statsTable(['Kind', 'Status', 'Count'], s.claims.map((c) => [c.kind, c.status, c.count]), 'No claims.')),
-      el('section', 'stat', el('h3', null, 'Skipped claims'),
-        statsTable(['Reason', 'Count'], s.claim_skips.map((c) => [c.reason, c.count]), 'No skipped claims.')),
-      el('section', 'stat', el('h3', null, 'Store'), el('dl', null,
-        ...row('Size', `${s.bytes.toLocaleString('en-US')} bytes (${(s.bytes / 1048576).toFixed(1)} MB)`),
-        ...row('Rebuilding', s.rebuilding ? 'Yes' : 'No'))),
-      el('section', 'stat', el('h3', null, 'Providers, last 7 days'),
-        statsTable(['Provider', 'Role', 'OK', 'Failed', 'Waited', 'Avg ms'],
-          s.providers.map((p) => [p.provider, p.role, p.ok, p.failed, p.waited, p.avg_ms]),
-          'No provider calls in the last seven days.')),
+    draw(word('span', null, 'stats_heading'), [], [
+      el('section', 'stat', word('h3', null, 'records_per_device'),
+        statsTable(['device', 'records'], s.records.map((r) => [r.device, r.records]), 'no_records')),
+      el('section', 'stat', word('h3', null, 'claims_by_kind'),
+        statsTable(['kind', 'status', 'count'], s.claims.map((c) => [metadata(c.kind), metadata(c.status), c.count]), 'no_claims')),
+      el('section', 'stat', word('h3', null, 'skipped_claims'),
+        statsTable(['reason', 'count'], s.claim_skips.map((c) => [metadata(c.reason), c.count]), 'no_skipped_claims')),
+      el('section', 'stat', word('h3', null, 'store'), el('dl', null,
+        ...row('size', t('bytes', { bytes: s.bytes.toLocaleString('en-US'), mb: (s.bytes / 1048576).toFixed(1) })),
+        ...row('rebuilding', t(s.rebuilding ? 'yes' : 'no')))),
+      el('section', 'stat', word('h3', null, 'providers_recent'),
+        statsTable(['provider', 'role', 'ok', 'calls_failed', 'waited', 'avg_ms'],
+          s.providers.map((p) => [p.provider, metadata(p.role), p.ok, p.failed, p.waited, p.avg_ms]),
+          'no_provider_calls')),
     ]);
     setStatus('');
   };
@@ -581,6 +613,144 @@ const TEXT = {
   nothing_found: ['Nothing found.', '見つかりませんでした。'],
   loading: ['Loading…', '読み込み中…'],
   retry: ['Retry', '再試行'],
+  full_text: ['Full text', '全文を表示'],
+  full_text_of: ['Full text of {key}', '{key} の全文を表示'],
+  view_claim: ['View claim', '主張を表示'],
+  view_claim_id: ['View claim {uid}', '主張 {uid} を表示'],
+  claim_title: ['Claim {uid}', '主張 {uid}'],
+  owner_correction: ["Owner's correction", 'あなたによる訂正'],
+  tier: ['Tier: {tier}', '生成段階: {tier}'],
+  recipe: ['Recipe: {recipe}', '生成方法: {recipe}'],
+  claim_status: ['Status: {status}', '状態: {status}'],
+  status_unchanged: ['Status unchanged', '状態に変更はありません'],
+  text_unchanged: ['Text unchanged', '本文に変更はありません'],
+  delivered: ['Delivered', '記憶として渡す対象'],
+  yes: ['Yes', 'はい'],
+  no: ['No', 'いいえ'],
+  speaker: ['Speaker', '発言者'],
+  scope: ['Scope', '適用範囲'],
+  later_claim: ['Later claim: ', '後の主張: '],
+  evidence_quotes: ['Evidence quotes', '根拠となる引用'],
+  no_evidence: ['No evidence quotes.', '根拠となる引用はありません。'],
+  supersedes: ['Supersedes', '置き換えた主張'],
+  ended_by: ['Ended by', 'この主張を終了させた主張'],
+  none: ['None.', 'ありません。'],
+  claim_history: ['History (oldest first)', '変更履歴(古い順)'],
+  no_changes: ['No changes.', '変更はありません。'],
+  earlier_decision: ['Earlier decision, paired with later claim: ', '後の主張と組で渡す以前の決定: '],
+  superseded_by: ['Superseded by ', 'この主張を置き換えた主張: '],
+  search_heading: ['Search: ', '検索: '],
+  vector_notice: ['Results are full text only ({state}).', '全文検索のみの結果です({state})。'],
+  vector_notice_reason: ['Results are full text only ({state}): {reason}', '全文検索のみの結果です({state}): {reason}'],
+  vector_off: ['off', '無効'],
+  vector_excluded: ['excluded', '除外対象'],
+  'vector_no-vectors': ['no-vectors', '準備前'],
+  vector_building: ['building', '準備中'],
+  vector_waiting: ['waiting', '待機中'],
+  vector_timeout: ['timeout', '時間切れ'],
+  vector_error: ['error', '失敗'],
+  vector_unavailable: ['unavailable', '利用できません'],
+  vector_why_off: ['embedding is off', '意味に基づく検索は無効になっています。'],
+  vector_why_excluded: ['this repository or the one searched is excluded, so the query is not sent out', 'このリポジトリまたは検索対象が除外されているため、検索語句を外部に送りません。'],
+  'vector_why_no-vectors': ['no document has a vector yet', '意味に基づく検索に必要な記録の準備がまだできていません。'],
+  vector_why_building: ["the new embedder's vectors are still being made", '新しい設定で意味に基づく検索を利用できるよう、記録を準備しています。'],
+  vector_why_waiting: ['the embedder is resting, or its cap is spent', '意味に基づく検索は一時停止中、または利用上限に達しています。'],
+  vector_why_timeout: ["the query's embedding took too long", '意味に基づく検索に必要な語句の処理が、制限時間内に終わりませんでした。'],
+  vector_why_error: ['the query could not be embedded', '意味に基づく検索に必要な語句の処理に失敗しました。'],
+  vector_why_unavailable: ['Vector search is unavailable.', '意味に基づく検索を利用できません。'],
+  context_heading: ['Context handed to a new session', '新しいセッションに渡す記憶'],
+  context_choose: ['Choose a repository above: Context shows what a new session there is handed.', '上でリポジトリを選んでください。そのリポジトリの新しいセッションに渡す記憶を表示します。'],
+  context_checkout: ["Context shows one checkout; All repositories uses the viewer's checkout.", 'この画面には、1 つの作業場所で渡す記憶を表示します。「すべてのリポジトリ」を選ぶと、ビューアーを起動した作業場所の記憶を表示します。'],
+  branch: ['Branch', 'ブランチ'],
+  session_start: ['SessionStart', 'セッション開始時の受け渡し'],
+  context_on: ['On', '有効'],
+  context_off: ['Off', '無効'],
+  size: ['Size', '大きさ'],
+  characters: ['{n} characters', '{n} 文字'],
+  context_empty: ['Nothing is handed over for this checkout yet.', 'この作業場所で渡す記憶はまだありません。'],
+  stats_heading: ['Stats (all repositories)', '統計(すべてのリポジトリ)'],
+  records_per_device: ['Records per device', '端末ごとの記録数'],
+  device: ['Device', '端末'],
+  no_records: ['No records.', '記録はありません。'],
+  claims_by_kind: ['Claims by kind and status', '種類・状態ごとの主張数'],
+  kind: ['Kind', '種類'],
+  status: ['Status', '状態'],
+  count: ['Count', '件数'],
+  no_claims: ['No claims.', '主張はありません。'],
+  skipped_claims: ['Skipped claims', '採用されなかった主張'],
+  reason: ['Reason', '理由'],
+  no_skipped_claims: ['No skipped claims.', '採用されなかった主張はありません。'],
+  store: ['Store', '保存領域'],
+  bytes: ['{bytes} bytes ({mb} MB)', '{bytes} バイト({mb} メガバイト)'],
+  rebuilding: ['Rebuilding', '記憶を再構築中'],
+  providers_recent: ['Providers, last 7 days', '過去 7 日間の AI の呼び出し'],
+  provider: ['Provider', '接続先'],
+  role: ['Role', '役割'],
+  ok: ['OK', '成功'],
+  calls_failed: ['Failed', '失敗'],
+  waited: ['Waited', '待機'],
+  avg_ms: ['Avg ms', '平均時間(ミリ秒)'],
+  no_provider_calls: ['No provider calls in the last seven days.', '過去 7 日間に AI の呼び出しはありません。'],
+  meta_current: ['current', '現在の主張'],
+  meta_delivered: ['delivered', '記憶として渡す対象'],
+  meta_superseded: ['superseded', '置き換え済み'],
+  meta_imported: ['imported', 'インポート済み'],
+  meta_card: ['card', 'カード'],
+  meta_summary: ['summary', '要約'],
+  meta_raw: ['raw', '元の記録'],
+  meta_claim: ['claim', '主張'],
+  meta_start: ['start', '開始'],
+  'meta_session start': ['session start', 'セッション開始'],
+  meta_prompt: ['prompt', 'プロンプト'],
+  meta_reply: ['reply', 'エージェントの応答'],
+  meta_tool: ['tool', 'ツール'],
+  meta_envelope: ['envelope', '実行環境からの情報'],
+  meta_compaction: ['compaction', '会話の圧縮'],
+  meta_citable: ['citable', '元の記録を参照できます'],
+  'meta_quote-only': ['quote-only', '引用のみ'],
+  meta_decision: ['decision', '決定'],
+  meta_preference: ['preference', '好み・方針'],
+  meta_lesson: ['lesson', '教訓'],
+  meta_fix: ['fix', '修正'],
+  meta_bugfix: ['bugfix', '不具合の修正'],
+  meta_feature: ['feature', '機能'],
+  meta_discovery: ['discovery', '発見'],
+  meta_refactor: ['refactor', '構造の整理'],
+  meta_security_alert: ['security_alert', '安全性についての警告'],
+  meta_security_note: ['security_note', '安全性についての補足'],
+  meta_sensitive: ['sensitive', '慎重に扱う情報'],
+  'meta_open item': ['open item', '未完了の項目'],
+  'meta_repo fact': ['repo fact', 'リポジトリについての事実'],
+  meta_change: ['change', '変更'],
+  meta_decided: ['decided', '決定済み'],
+  meta_proposed: ['proposed', '提案中'],
+  meta_retracted: ['retracted', '撤回済み'],
+  meta_done: ['done', '完了'],
+  meta_unverified: ['unverified', '未確認'],
+  meta_user: ['user', 'ユーザー'],
+  'meta_assistant proposal': ['assistant proposal', 'エージェントの提案'],
+  'meta_assistant inferred': ['assistant inferred', 'エージェントの推測'],
+  'meta_tool result': ['tool result', 'ツールの結果'],
+  meta_repo: ['repo', 'このリポジトリ'],
+  meta_global: ['global', 'すべてのリポジトリ'],
+  meta_curator: ['curator', '要約'],
+  meta_embed: ['embed', '検索用の処理(記録)'],
+  meta_query: ['query', '検索用の処理(検索語句)'],
+  'meta_not a claim': ['not a claim', '主張の形式ではありません'],
+  'meta_no evidence': ['no evidence', '根拠がありません'],
+  'meta_a quote no longer reads in raw': ['a quote no longer reads in raw', '引用した元の記録を参照できなくなりました'],
+  'meta_not a correction': ['not a correction', '訂正の形式ではありません'],
+  'meta_not a claim uid': ['not a claim uid', '主張の識別子が正しくありません'],
+  'meta_corrects nothing': ['corrects nothing', '訂正する内容がありません'],
+  'meta_an unknown status': ['an unknown status', '対応していない状態です'],
+  'meta_an empty body': ['an empty body', '本文がありません'],
+  'meta_over the 1,000-character cap': ['over the 1,000-character cap', '本文が 1,000 文字の上限を超えています'],
+  request_error: ['{status}: {reason}', '{status}: {reason}'],
+  not_found: ['not found', '見つかりませんでした。'],
+  doc_missing: ['no such document', 'この記録は見つかりませんでした。'],
+  claim_missing: ['no such claim', 'この主張は見つかりませんでした。'],
+  memory_busy: ['the memory is being restored or rebuilt: try again in a moment', '記憶を復元または再構築しています。少し待ってから、もう一度お試しください。'],
+  load_failed: ['Could not load data ({status}).', '読み込めませんでした({status})。もう一度お試しください。'],
   feed_loading: ['Loading…', '読み込み中…'],
   feed_empty: ['No items to display', '表示する項目はありません'],
   feed_exhausted: ['No more items', 'すべての項目を表示しました'],
@@ -865,7 +1035,12 @@ function applyLanguage() {
   for (const option of $('raw').options) option.textContent = t(`raw_${option.value}`);
   $('tabs').setAttribute('aria-label', t('views'));
   for (const button of document.querySelectorAll('#tabs .tab')) button.textContent = t(button.dataset.view);
-  for (const node of document.querySelectorAll('[data-i18n]')) node.textContent = t(node.dataset.i18n);
+  for (const node of document.querySelectorAll('[data-i18n]')) {
+    node.textContent = t(node.dataset.i18n, JSON.parse(node.dataset.i18nVars || '{}'));
+  }
+  for (const node of document.querySelectorAll('[data-i18n-aria]')) {
+    node.setAttribute('aria-label', t(node.dataset.i18nAria, JSON.parse(node.dataset.i18nVars || '{}')));
+  }
   for (const node of document.querySelectorAll('[data-feed-timestamp]')) {
     node.textContent = new Date(Number(node.dataset.feedTimestamp)).toLocaleString(lang);
   }
@@ -1132,7 +1307,7 @@ async function saveKey(name, field, button, state) {
     if (answer.field) markInvalid(answer.field);
     setStatus(t(answer.code || byStatus[res.status] || 'other', { status: res.status }), true, lang);
   } catch (e) {
-    setStatus(e.message, true);
+    if (view === 'settings' && form === mine) setStatus(failureMessage(e), true, lang);
   } finally {
     fields.inert = false;
   }
@@ -1522,7 +1697,7 @@ async function poll() {
   } catch (e) {
     $('live').classList.add('off');
     $('live').textContent = t('live_off');
-    if (e.status || view === 'timeline') pollFailureNotice = showError(e.status ? e : new Error(t('unreachable')), poll);
+    if (e.status || view === 'timeline') pollFailureNotice = showError(e.status ? e : { key: 'unreachable' }, poll);
     else {
       setStatus(t('unreachable'), true);
       pollFailureNotice = $('status').firstChild;
