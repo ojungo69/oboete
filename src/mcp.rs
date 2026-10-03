@@ -114,6 +114,11 @@ fn failed(s: String) -> Result<CallToolResult, ErrorData> {
     )]))
 }
 
+/// A failure the model cannot act on (the store, the filesystem) is a protocol error.
+fn internal(e: anyhow::Error) -> ErrorData {
+    ErrorData::internal_error(format!("{e:#}"), None)
+}
+
 #[tool_router]
 impl Oboete {
     pub fn new(home: &Path, cwd: &Path) -> Self {
@@ -181,14 +186,8 @@ impl Oboete {
             limit: a.limit.unwrap_or(10).min(MAX_LIMIT),
             skip_session: None,
         };
-        let answer = match search::query(&self.home, &q) {
-            Ok(answer) => answer,
-            Err(e) => return failed(format!("{e:#}")),
-        };
-        let rules = match crate::redact::Rules::load(&self.home) {
-            Ok(rules) => rules,
-            Err(e) => return failed(format!("{e:#}")),
-        };
+        let answer = search::query(&self.home, &q).map_err(internal)?;
+        let rules = crate::redact::Rules::load(&self.home).map_err(internal)?;
         let out: String = answer
             .hits
             .iter()
@@ -213,15 +212,13 @@ impl Oboete {
     )]
     fn get(&self, Parameters(a): Parameters<GetArgs>) -> Result<CallToolResult, ErrorData> {
         match (a.id, a.ids) {
-            (Some(id), None) => match search::get(&self.home, &id) {
-                Ok(Some(t)) => text(t),
-                Ok(None) => failed(format!("no document {id} (ids come from search)")),
-                Err(e) => failed(format!("{e:#}")),
+            (Some(id), None) => match search::get(&self.home, &id).map_err(internal)? {
+                Some(t) => text(t),
+                None => failed(format!("no document {id} (ids come from search)")),
             },
-            (None, Some(ids)) => match search::get_many(&self.home, &ids) {
-                Ok(t) => text(t),
-                Err(e) => failed(format!("{e:#}")),
-            },
+            (None, Some(ids)) if (1..=20).contains(&ids.len()) => {
+                text(search::get_many(&self.home, &ids).map_err(internal)?)
+            }
             _ => failed("provide exactly one of id or ids (1 to 20 ids)".into()),
         }
     }
@@ -243,7 +240,9 @@ impl Oboete {
         let items =
             match search::timeline(&self.home, repo.as_deref(), anchor.as_deref(), None, limit) {
                 Ok(items) => items,
-                Err(e) => return failed(format!("{e:#}")),
+                // An anchor of nothing is the caller's to change.
+                Err(e) if anchor.is_some() => return failed(format!("{e:#}")),
+                Err(e) => return Err(internal(e)),
             };
         let out: String = items
             .iter()
