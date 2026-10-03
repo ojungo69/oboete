@@ -631,6 +631,53 @@ fn a_filename_fallback_session_is_searchable_but_not_a_verified_forget_identity(
     assert!(ok(run(home, &["get", id], "")).contains(CANARY));
 }
 
+/// D1 rule 14: an invalid live request must not discard a valid earlier request or swap away
+/// undamaged live data, even when neither request log survives.
+#[test]
+fn restore_refuses_a_malformed_live_request_before_replacing_the_stores() {
+    for malformed in [
+        rusqlite::types::Value::Text("{".into()),
+        rusqlite::types::Value::Blob(vec![0xff]),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+        let id = record(&home, CANARY);
+        let old_backup = root.path().join("before-forget");
+        copy_backup(&home.join("backups"), &old_backup);
+        ok(run(&home, &["forget", "--record", &id, "--yes"], ""));
+        let keep = hook_record(&home, "unrelated-after-backup-topaz-3482");
+        let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        db.execute(
+            "INSERT INTO forget_jobs(id, request, started, step) VALUES('malformed-second-job', ?1, 1, 1)",
+            [malformed],
+        )
+        .unwrap();
+        drop(db);
+        std::fs::remove_file(home.join("forget.log")).unwrap();
+        std::fs::remove_dir_all(home.join("backups")).unwrap();
+        copy_backup(&old_backup, &home.join("backups"));
+        let raw_before = std::fs::read(home.join("raw.db")).unwrap();
+        let knowledge_before = std::fs::read(home.join("knowledge.db")).unwrap();
+
+        let restored = run(&home, &["restore"], "");
+        assert!(
+            !restored.status.success(),
+            "restore discarded readable live forget requests after a malformed row: {restored:?}"
+        );
+        assert_eq!(std::fs::read(home.join("raw.db")).unwrap(), raw_before);
+        assert_eq!(
+            std::fs::read(home.join("knowledge.db")).unwrap(),
+            knowledge_before
+        );
+        assert!(!home.join("raw.db.restoring").exists());
+        assert!(!home.join("state/restored").exists());
+        assert!(!String::from_utf8_lossy(&run(&home, &["get", &id], "").stdout).contains(CANARY));
+        assert!(ok(run(&home, &["get", &keep], "")).contains("unrelated-after-backup-topaz-3482"));
+    }
+}
+
 /// D1 rules 4 and 14: raw.db damaged after a forget is restored from segments older than it, and
 /// the request logs forget it again.
 #[test]

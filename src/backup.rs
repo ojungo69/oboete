@@ -371,29 +371,32 @@ pub fn restore(home: &Path) -> Result<String> {
 }
 
 /// The forget requests a raw.db that still reads holds (D1 rule 14), read under the swap lock
-/// without opening it as a store; none from one that does not read.
-fn held_requests(home: &Path) -> Vec<crate::forget::Request> {
-    let read = || -> Result<Vec<crate::forget::Request>> {
-        let conn = rusqlite::Connection::open_with_flags(
-            home.join("raw.db"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        let mut st = conn.prepare("SELECT request FROM forget_jobs")?;
-        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(serde_json::from_str(&row?)?);
-        }
-        Ok(out)
+/// without opening it as a store. A lost database or unreadable table has none (F1); once the
+/// table opens, a bad row must stop the restore rather than discard other live requests.
+fn held_requests(home: &Path) -> Result<Vec<crate::forget::Request>> {
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        home.join("raw.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) else {
+        return Ok(Vec::new());
     };
-    read().unwrap_or_default()
+    let Ok(mut st) = conn.prepare("SELECT request FROM forget_jobs") else {
+        return Ok(Vec::new());
+    };
+    let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let text = row.context("read live forget request row")?;
+        out.push(serde_json::from_str(&text).context("parse live forget request")?);
+    }
+    Ok(out)
 }
 
 fn restore_locked(home: &Path, logged: Vec<crate::forget::Request>) -> Result<String> {
     // No store is open while the file is read, rebuilt and swapped; a hook waits (or fails with
     // MUST-M16's marker) instead of writing into the file that is moved aside.
     let _swap = raw::lock_for_swap(home)?;
-    let held = held_requests(home);
+    let held = held_requests(home)?;
     let dir = dir(home)?;
     let all = segments(&dir, Kind::Records)?;
     let device = device_of(home, &all)?;
