@@ -2604,11 +2604,7 @@ mod tests {
         let k = crate::knowledge::open(s.home.path()).unwrap();
         let uids = imported_fts(&k, &q("設計 worker"), 2 * crate::search::POOL, false).unwrap();
         assert_eq!(uids.len(), crate::search::POOL + 1);
-        assert!(
-            uids[crate::search::POOL].ends_with(":d0"),
-            "{}",
-            uids[crate::search::POOL]
-        );
+        assert!(uids[crate::search::POOL].ends_with(":d0"));
     }
 
     /// Row 30-2 (D13): the caller's repository and the one searched are both checked, and a
