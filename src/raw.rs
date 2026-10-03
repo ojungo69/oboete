@@ -656,17 +656,10 @@ impl Raw {
                 break;
             };
             for r in batch.into_iter().filter(|r| r.seq <= to) {
-                let Item::Event(e) = r.item else {
+                if !matches!(r.item, Item::Event(_) | Item::Removed) {
                     continue;
-                };
-                let identity: Option<(String, Option<String>, bool)> = self
-                    .conn
-                    .query_row(
-                        "SELECT origin, native_session, ambiguous FROM import_origins WHERE device = ?1 AND seq = ?2",
-                        params![device, r.seq],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                    )
-                    .optional()?;
+                }
+                let identity = self.origin_of(device, r.seq)?;
                 let (origin, session, ambiguous) = identity.with_context(|| {
                     format!(
                         "record {device}:{} has no import identity: this slice forgets imported \
@@ -674,6 +667,9 @@ impl Raw {
                         r.seq
                     )
                 })?;
+                if denied(&self.conn, Some(&origin), "")? {
+                    continue;
+                }
                 anyhow::ensure!(
                     !ambiguous,
                     "record {device}:{} has an ambiguous or unverified import identity: nothing was registered",
@@ -685,11 +681,27 @@ impl Raw {
                         r.seq
                     )
                 })?;
-                if sample.is_none() {
-                    sample = Some(e.body.chars().take(120).collect());
-                }
-                if !sources.contains(&e.source) {
-                    sources.push(e.source.clone());
+                let (source, kind, ts) = match r.item {
+                    Item::Event(e) => {
+                        if sample.is_none() {
+                            sample = Some(e.body.chars().take(120).collect());
+                        }
+                        (e.source, e.kind, e.ts)
+                    }
+                    Item::Removed => self
+                        .conn
+                        .query_row(
+                            "SELECT source, kind, ts FROM records
+                             WHERE device=?1 AND seq=?2 AND type='event'",
+                            params![device, r.seq],
+                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+                        )
+                        .optional()?
+                        .with_context(|| format!("record {device}:{} has no original import metadata: nothing was registered", r.seq))?,
+                    _ => continue,
+                };
+                if !sources.contains(&source) {
+                    sources.push(source.clone());
                 }
                 records.push(crate::forget::Record {
                     device: device.into(),
@@ -697,7 +709,7 @@ impl Raw {
                     origin,
                     session,
                     // Rule 10: only a record the transcript cut counts keeps its time.
-                    ts: (e.source != "transcript" && e.kind != "touch").then_some(e.ts),
+                    ts: (source != "transcript" && kind != "touch").then_some(ts),
                 });
                 anyhow::ensure!(
                     records.len() <= crate::forget::MAX_RECORDS,
@@ -2891,6 +2903,72 @@ pub fn test_event(body: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rescan's whole tombstone hides the sample, but forget must still deny the native
+    /// import identity in a record or span target and retain its transcript cutoff.
+    #[test]
+    fn a_tombstoned_import_can_be_forgotten_without_a_sample_and_cannot_be_reimported() {
+        for span in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let mut raw = open(home.path()).unwrap();
+            let mut event = test_event(r#"{"prompt":"tombstoned-native-canary-691"}"#);
+            event.source = "oboete-v1".into();
+            event.ts = 1_000;
+            let captured = || crate::capture::Captured {
+                event: event.clone(),
+                ledger: Vec::new(),
+            };
+            let identity = ImportIdentity {
+                origin: crate::forget::origin("synthetic", "tombstoned-native"),
+                session: crate::forget::session(&event.agent, &event.session),
+                ambiguous: None,
+                unverified: false,
+            };
+            let seq = raw
+                .append_imported_origins(&[captured()], std::slice::from_ref(&identity), "", None)
+                .unwrap()[0];
+            let device = raw.device().to_owned();
+            let tombstone = raw
+                .append_tombstone(Target::Record {
+                    device: device.clone(),
+                    seq,
+                })
+                .unwrap();
+            let target = if span {
+                crate::forget::Target::Span {
+                    device: device.clone(),
+                    from: seq,
+                    to: tombstone,
+                }
+            } else {
+                crate::forget::Target::Record {
+                    device: device.clone(),
+                    seq,
+                }
+            };
+            let preview = raw.forget_preview(target).unwrap();
+            assert_eq!(preview.count(), 1, "the tombstone hid the import identity");
+            assert!(preview.sample.is_none(), "a removed sample was shown");
+            assert_eq!(preview.records[0].ts, Some(event.ts));
+            assert_eq!(preview.sources, ["oboete-v1"]);
+            crate::forget::start(home.path(), &preview).unwrap();
+            assert!(
+                raw.append_imported_origins(
+                    &[captured()],
+                    std::slice::from_ref(&identity),
+                    "",
+                    None
+                )
+                .unwrap()
+                .is_empty(),
+                "the already tombstoned import was not denied"
+            );
+            assert_eq!(
+                raw.transcript_cut("claude", "s", None).unwrap(),
+                Some(1_000)
+            );
+        }
+    }
 
     /// F2 also covers the consistent snapshot after the first schema transaction, before
     /// the opener returns: it already carries the lineage later forgets will name.

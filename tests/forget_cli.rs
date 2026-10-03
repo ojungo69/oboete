@@ -192,6 +192,63 @@ fn forgetting_a_record_hides_it_logs_it_without_text_and_says_what_it_cannot_rea
     }
 }
 
+/// Whole-record rescan tombstones do not register native denials. Forget must still register
+/// one without a sample, so retrying an import whose checkpoint was lost cannot expose it.
+#[test]
+fn an_already_tombstoned_native_record_can_register_a_forget_and_survives_reimport() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let id = record(home, CANARY);
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let (device, seq): (String, i64) = db
+        .query_row(
+            "SELECT device, seq FROM records WHERE source='oboete-v1' AND kind='prompt'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    db.execute(
+        "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq)
+         SELECT ?1, COALESCE(MAX(seq),0)+1, 'tombstone', 200, 'rescan', ?1, ?2
+         FROM records WHERE device=?1",
+        rusqlite::params![device, seq],
+    )
+    .unwrap();
+    drop(db);
+    assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
+    let started = run(home, &["forget", "--record", &id, "--yes"], "");
+    assert!(
+        started.status.success(),
+        "the already tombstoned native record was skipped: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&started.stdout).contains(CANARY));
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    db.execute("DELETE FROM ops WHERE type='migration'", [])
+        .unwrap();
+    drop(db);
+    let source = home.join("native-source.db");
+    ok(run(
+        home,
+        &["migrate", "--from", source.to_str().unwrap()],
+        "",
+    ));
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    assert!(
+        !ok(run(
+            home,
+            &["search", "--all", "--raw", "only", "--", CANARY],
+            ""
+        ))
+        .contains(CANARY)
+    );
+    assert_eq!(
+        ok(run(home, &["forget", "--status"], "")).lines().count(),
+        1
+    );
+}
+
 /// D1: a request log copy lost, older, of another home or damaged never stops a hook from
 /// recording, the forget stays, and the next worker writes the copy whole again.
 #[test]
