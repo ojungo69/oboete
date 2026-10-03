@@ -662,6 +662,36 @@ mod tests {
         assert_eq!(c.repo.as_deref(), Some("host/otp=[REDACTED]"));
     }
 
+    /// Codex on #371: a type outside claude-mem's nine, which a synced or old op may carry, is no
+    /// type when a card is read, as the curator's own check makes it (C3): its text never reaches
+    /// a reader, who would show it ungated.
+    #[test]
+    fn a_type_outside_the_nine_is_none_when_a_card_is_read() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        two_records(&mut raw);
+        let (kind, mut op) = window(1, 2, "curated", "");
+        op["observations"] = json!([
+            {"type": "otp=AAAA1111", "title": "Odd", "subtitle": "", "narrative": "", "facts": [],
+                "concepts": [], "files_read": [], "files_modified": []},
+            {"type": "bugfix", "title": "Known", "subtitle": "", "narrative": "", "facts": [],
+                "concepts": [], "files_read": [], "files_modified": []}
+        ]);
+        raw.append_ops(&[(kind, op)]).unwrap();
+        crate::worker::run_once(home.path()).unwrap();
+        let kinds: Vec<_> = recent(home.path(), "r")
+            .into_iter()
+            .map(|c| (c.title, c.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("Odd".to_owned(), None),
+                ("Known".to_owned(), Some("bugfix".to_owned()))
+            ]
+        );
+    }
+
     /// K5: the table is derived from the op log, so a rebuild gives the same cards, replaced ones
     /// too.
     #[test]

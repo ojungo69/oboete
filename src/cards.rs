@@ -263,7 +263,11 @@ fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
         agent: r.get::<_, Option<String>>(4)?.map(gate),
         session: r.get::<_, Option<String>>(5)?.map(gate),
         repo: r.get::<_, Option<String>>(6)?.map(gate),
-        kind: r.get(7)?,
+        // One of the nine or none, whatever an op from elsewhere says (C3, Codex on #371): a
+        // type is shown as it is, never gated.
+        kind: r
+            .get::<_, Option<String>>(7)?
+            .filter(|k| TYPES.contains(&k.as_str())),
         title,
         row_title,
         subtitle: gate(r.get(9)?),
