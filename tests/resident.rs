@@ -133,8 +133,13 @@ fn the_token_file_is_0600_whatever_the_umask() {
     );
     let file = h.join("state").join("view-token");
     until("the token file", || file.exists());
-    assert_eq!(
-        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    // The lock and the outcome, made before the token, are the owner's to open again too
+    // (Codex on #376).
+    for name in ["view-token", "view.lock", "view-outcome"] {
+        let mode = std::fs::metadata(h.join("state").join(name))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{name}");
+    }
 }

@@ -212,23 +212,22 @@ pub fn resident(home: &Path) -> Result<()> {
 /// in `state` is replaced, not followed or waited on (Codex on #376).
 fn view_lock(state: &Path) -> Result<std::fs::File> {
     let path = state.join("view.lock");
-    let open = || {
-        let mut file = std::fs::OpenOptions::new();
-        file.create(true).truncate(false).write(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::custom_flags(
-            &mut file,
-            libc::O_NOFOLLOW | libc::O_NONBLOCK,
-        );
-        file.open(&path)
-            .ok()
-            .filter(|f| f.metadata().is_ok_and(|m| m.is_file()))
-    };
-    if let Some(file) = open() {
-        return Ok(file);
+    match std::fs::symlink_metadata(&path) {
+        Ok(m) if !m.is_file() => clear(&path)?,
+        // One made under a umask that took the owner's write away is given it back, not
+        // replaced: a viewer may hold it (Codex on #376).
+        Ok(_) => crate::db::private(&path, 0o600),
+        Err(_) => {}
     }
-    clear(&path)?;
-    open().ok_or_else(|| anyhow!("{} is not a file", path.display()))
+    let mut file = std::fs::OpenOptions::new();
+    file.create(true).truncate(false).write(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut file, libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = file.open(&path)?;
+    // A new one: the umask takes bits from the mode asked for.
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    Ok(file)
 }
 
 /// Takes away whatever is at a fixed name in `state` before it is made anew: what was planted
@@ -266,9 +265,10 @@ fn listen(home: &Path) -> Result<Option<Resident>> {
         let next = state.join("view-outcome.next");
         // Made anew, so a link planted before is not written through.
         clear(&next)?;
-        (std::fs::OpenOptions::new().write(true).create_new(true))
-            .open(&next)?
-            .write_all(what.as_bytes())?;
+        let mut file = (std::fs::OpenOptions::new().write(true).create_new(true)).open(&next)?;
+        #[cfg(unix)]
+        file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        file.write_all(what.as_bytes())?;
         std::fs::rename(&next, state.join("view-outcome"))?;
         Ok(())
     };
@@ -2741,6 +2741,30 @@ mod tests {
         assert!(listen(other.path()).unwrap().is_none());
         assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
         assert_eq!(mode(elsewhere.path()), 0o755);
+    }
+
+    /// Codex on #376: a lock made under a umask that took the owner's write away is given it
+    /// back and kept, not replaced, as a viewer may hold it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_held_lock_the_owner_cannot_write_is_kept() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let home = tempfile::tempdir().unwrap();
+        let state = home.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let held = std::fs::File::create(state.join("view.lock")).unwrap();
+        held.try_lock().unwrap();
+        let mode = std::fs::Permissions::from_mode(0o466);
+        std::fs::set_permissions(state.join("view.lock"), mode).unwrap();
+        let again = view_lock(&state).unwrap();
+        assert_eq!(
+            again.metadata().unwrap().ino(),
+            held.metadata().unwrap().ino()
+        );
+        assert!(matches!(
+            again.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
     }
 
     /// Resident test 7: the Host check holds to the configured port.
