@@ -107,7 +107,8 @@ fn schema(k: &Connection) -> Result<()> {
 pub struct Start {
     pub text: String,
     pub shown: Vec<Shown>,
-    /// How many cards it shows (docs/cards.md S1).
+    /// How many cards and session summary rows it shows (docs/cards.md S1, docs/summaries.md
+    /// S7): the recent work the terminal line names.
     pub cards: usize,
 }
 
@@ -212,7 +213,7 @@ pub fn text(
     Ok(Some(Start {
         text,
         shown,
-        cards: n,
+        cards: n + n_s,
     }))
 }
 
@@ -3119,6 +3120,38 @@ extra_rules = [
             one_card.contains("Card one") && !one_card.contains("Card two"),
             "{one_card}"
         );
+    }
+
+    /// Codex on #372: the summary rows the packet hands over are counted with its cards, the
+    /// recent work the terminal line names.
+    #[test]
+    fn the_summary_rows_are_counted_with_the_cards() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        store
+            .append_ops(&[
+                turn_op((1, 3), 9 * DAY, "Older turn", &[]),
+                turn_op((4, 7), 10 * DAY, "Newer turn", &[]),
+            ])
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+        let s = text(
+            home.path(),
+            &store,
+            "r",
+            "main",
+            "none",
+            &rules,
+            usize::MAX,
+            NOW,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(s.text.contains("Older turn"), "{}", s.text);
+        assert_eq!(s.cards, 2);
     }
 
     /// Spec 3.4, owner decision 31 (#295 row 1): an earlier decision that a curator link from a
