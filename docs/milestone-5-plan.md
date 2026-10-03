@@ -196,7 +196,11 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
   使っていない。
 - `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`: 成功。
 
-残り: 常駐 worker が保持している raw.db のパスが別のファイルを指したときに stores を開き直すこと
-（#359 の後）、spec 6.3 の文言、独立レビュー。この結果は全 M5 の削除 canary 成功ではない。物理
+常駐 worker は、保持している raw.db と同じパスのファイルが別のものになったとき（古いコピーを手で
+戻したときなど）、次の確認で stores を開き直す（`worker::serve`、テスト
+`a_resident_worker_opens_raw_db_again_when_another_file_takes_its_place`）。置き換わったファイルは
+別の端末の記録として読まれる（docs/cards.md S3）。
+
+残り: spec 6.3 の文言、独立レビュー。この結果は全 M5 の削除 canary 成功ではない。物理
 purge、live/legacy identity、大量 selection、uid/session/repo/time、可逆な管理、WebUI、各 OS の
 安全性と M22 は後続。

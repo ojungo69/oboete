@@ -505,6 +505,14 @@ fn serve(
             crate::backup::request_restore(home);
         }
     })?;
+    // Milestone 5: the raw.db this run holds. Another file in its place (an old copy put back by
+    // hand, docs/milestone-5-plan.md F2) is opened again at the next check, as a restore is, so
+    // the forget logs are reconciled into it and its new records are read.
+    let held = file_id(std::fs::metadata(home.join("raw.db")));
+    let replaced = || {
+        let now = file_id(std::fs::metadata(home.join("raw.db")));
+        held.is_some() && now.is_some() && now != held
+    };
     let mut k = crate::backup::open_knowledge(home)?;
     checkpoint::rewind(&raw, &k, consumers)?;
     crate::backup::check(home, &raw);
@@ -591,7 +599,9 @@ fn serve(
         }
         if !hold && let Some(phase) = phases.curation.as_mut() {
             match phase(&mut raw, &k)? {
-                Phase::Covered if crate::backup::restore_requested(home) => return Ok(true),
+                Phase::Covered if crate::backup::restore_requested(home) || replaced() => {
+                    return Ok(true);
+                }
                 Phase::Covered => again = true,
                 Phase::Waiting { until, up } if up || resident => {
                     stay = Some(stay.map_or(until, |s: i64| s.min(until)));
@@ -626,7 +636,7 @@ fn serve(
             let mut more = false;
             while Instant::now() < deadline {
                 std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
-                if crate::backup::restore_requested(home) {
+                if crate::backup::restore_requested(home) || replaced() {
                     return Ok(true);
                 }
                 if yields && !calling(phases) && steps_aside(home, &raw, holding) {
@@ -1964,6 +1974,58 @@ mod tests {
         let dir = std::fs::File::open(&old).unwrap();
         dir.set_modified(long_ago).unwrap();
         old
+    }
+
+    /// Milestone 5 (docs/milestone-5-plan.md): raw.db put back to an old copy under a resident
+    /// worker is opened again at its next check, so it reads the file hooks now write (and the
+    /// forget logs are reconciled into it), not the one it held.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_worker_opens_raw_db_again_when_another_file_takes_its_place() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("first")).unwrap();
+        let device = raw.device().to_owned();
+        drop(raw);
+        // The copy holds the record: what the WAL kept is written into the file first.
+        rusqlite::Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let old = p.join("raw-old.db");
+        std::fs::copy(p.join("raw.db"), &old).unwrap();
+        let worker = resident(p, 100);
+        let seen = |device: &str, n: i64| {
+            knowledge::open(p)
+                .ok()
+                .and_then(|k| checkpoint::get(&k, "seen", device).ok())
+                == Some(n)
+        };
+        until("the first record read", || seen(&device, 1));
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("second"))
+            .unwrap();
+        until("the second record read", || seen(&device, 2));
+        // The old copy takes raw.db's place, as a restore by hand would put it.
+        for f in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(p.join(f));
+        }
+        let staged = p.join("raw.db.copy");
+        std::fs::copy(&old, &staged).unwrap();
+        std::fs::rename(&staged, p.join("raw.db")).unwrap();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("after the copy")).unwrap();
+        raw.append(&raw::test_event("and one more")).unwrap();
+        // A file put in raw.db's place is another device's (docs/cards.md S3).
+        let copy = raw.device().to_owned();
+        let last = raw.max_seq().unwrap();
+        drop(raw);
+        until("the replaced file read", || seen(&copy, last));
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+        worker.join().unwrap().unwrap();
     }
 
     /// R3: at its idle time a resident worker backs up and prunes as a worker does before it
