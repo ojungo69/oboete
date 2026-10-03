@@ -78,6 +78,50 @@ fn a_record_without_an_import_identity_is_refused_before_registration() {
     assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
 }
 
+/// A pre-M5 copied store cannot prove its home lineage, even for a record the current
+/// importer adds. Refuse before registration, while recording and searching still work.
+#[test]
+fn a_legacy_copied_home_refuses_a_new_native_records_forget_before_registration() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    hook_record(home, "legacy-home-original-device-641");
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    // The tables/metadata left by main before M5, with the append device changed by a copy.
+    db.execute_batch(
+        "DROP TABLE import_origins; DROP TABLE denied_records; DROP TABLE forget_jobs;
+         DELETE FROM meta WHERE key IN ('home_id', 'home_id_proven');
+         UPDATE meta SET value='b2000002' WHERE key='device_id';",
+    )
+    .unwrap();
+    drop(db);
+    let id = record(home, CANARY);
+    let rejected = run(home, &["forget", "--record", &id, "--yes"], "");
+    assert!(
+        !rejected.status.success(),
+        "a legacy copied home accepted a new native record's forget"
+    );
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("home identity"));
+    assert!(ok(run(home, &["get", &id], "")).contains(CANARY));
+    assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
+    assert!(!home.join("forget.log").exists());
+    assert!(!home.join("backups/forget.log").exists());
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let controls: i64 = db
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM forget_jobs) +
+                    (SELECT COUNT(*) FROM denied_records) +
+                    (SELECT COUNT(*) FROM records WHERE type='tombstone' AND source='forget')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(controls, 0, "registration wrote partial forget controls");
+    drop(db);
+    let fresh = hook_record(home, "legacy-home-still-records-642");
+    assert!(ok(run(home, &["get", &fresh], "")).contains("legacy-home-still-records-642"));
+}
+
 fn record(home: &Path, body: &str) -> String {
     let source = home.join("native-source.db");
     let db = rusqlite::Connection::open(&source).unwrap();
@@ -201,6 +245,115 @@ fn copy_backup(from: &Path, to: &Path) {
         let file = file.unwrap();
         std::fs::copy(file.path(), to.join(file.file_name())).unwrap();
     }
+}
+
+/// A pre-M5 record segment has no home-lineage metadata. Keep its checksum valid so the
+/// public restore exercises that format, rather than the damaged-segment fallback.
+fn legacy_record_segments(home: &Path) {
+    use sha2::{Digest, Sha256};
+    for entry in std::fs::read_dir(home.join("backups")).unwrap() {
+        let path = entry.unwrap().path();
+        if !path.to_string_lossy().ends_with(".seg.zst") {
+            continue;
+        }
+        let text = String::from_utf8(
+            zstd::stream::decode_all(std::fs::File::open(&path).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let mut old = String::new();
+        for line in text.lines() {
+            let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+            let fields = record.as_object_mut().unwrap();
+            fields.remove("home_id");
+            fields.remove("home_id_proven");
+            old.push_str(&record.to_string());
+            old.push('\n');
+        }
+        let compressed = zstd::bulk::compress(old.as_bytes(), 3).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy();
+        let sum = format!("{:x}  {name}\n", Sha256::digest(&compressed));
+        let mut checksum = path.as_os_str().to_os_string();
+        checksum.push(".sha256");
+        std::fs::write(checksum, sum).unwrap();
+        std::fs::write(path, compressed).unwrap();
+    }
+}
+
+#[test]
+fn restoring_legacy_segments_does_not_authorize_a_new_native_records_forget() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let keep = hook_record(home, "legacy-backup-record-to-keep-651");
+    legacy_record_segments(home);
+    ok(run(home, &["restore"], ""));
+    assert!(ok(run(home, &["get", &keep], "")).contains("legacy-backup-record-to-keep-651"));
+    let id = record(home, CANARY);
+    let rejected = run(home, &["forget", "--record", &id, "--yes"], "");
+    assert!(
+        !rejected.status.success(),
+        "restoring legacy segments invented a verified home identity"
+    );
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("home identity"));
+    assert!(ok(run(home, &["get", &id], "")).contains(CANARY));
+    assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
+}
+
+#[test]
+fn a_fresh_homes_backup_keeps_its_authority_to_register_a_forget() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let id = record(home, CANARY);
+    ok(run(home, &["restore"], ""));
+    ok(run(home, &["forget", "--record", &id, "--yes"], ""));
+    assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
+    assert_eq!(
+        ok(run(home, &["forget", "--status"], "")).lines().count(),
+        1
+    );
+}
+
+#[test]
+fn concurrent_first_hooks_keep_a_fresh_homes_forget_authority() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let mut children = Vec::new();
+    for n in 0..8 {
+        let mut child = command(home, &["hook", "claude", "UserPromptSubmit"])
+            .spawn()
+            .unwrap();
+        let payload = serde_json::json!({
+            "session_id":format!("first-open-{n}"), "cwd":home,
+            "prompt":format!("concurrent-first-open-record-{n}-661")
+        });
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        children.push(child);
+    }
+    for child in children {
+        ok(child.wait_with_output().unwrap());
+    }
+    let id = record(home, CANARY);
+    for n in 0..8 {
+        let prompt = format!("concurrent-first-open-record-{n}-661");
+        let found = ok(run(
+            home,
+            &["search", "--all", "--raw", "only", "--", &prompt],
+            "",
+        ));
+        assert!(
+            found.contains(&prompt),
+            "a concurrent hook's record was lost: {found}"
+        );
+    }
+    ok(run(home, &["forget", "--record", &id, "--yes"], ""));
+    assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
 }
 
 #[test]

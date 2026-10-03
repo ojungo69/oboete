@@ -43,8 +43,12 @@ open が失敗して記録が止まり、戻すには手でファイルを消す
   排他ロック下で 1 回ずつ、末尾が改行でなければ先に改行を書き、
   `fsync` し、作ったときはディレクトリも同期する。各行に payload の checksum を付け、checksum
   や形が合わない行、他 home の行は、その行だけ飛ばして報告する。
-  home の id は raw.db の metadata に置き、最初の device id から作る。ファイルのコピーで
+  新規 home の id は最初の device id とし、この schema が raw を最初から作ったことの proof、
+  device id、file identity と共に、最初の schema transaction で raw の metadata に保存する。ファイルのコピーで
   将来の記録用の device id が変わっても保持し、record の backup にも運ぶ。別の権威は作らない。
+  旧 raw の device から付けた id は表示用の未検証値であり、新規 home の proof を持たない。
+  record backup は id と proof を運び、restore は明示された一致する値だけを戻す。
+  旧形式の backup と、restore のために作った staging DB は新規 home の proof にならない。
 - **reconcile は双方向で、ログのコピーの障害では拒否しない。** worker の起動と stores を開き直すたび（`backup::check`
   の後、consumer と export の前）、`oboete restore`、forget command、import command の取り込み前に、
   raw にあってコピーにない要求をコピーへ書き、コピーにあって raw にない要求を raw へ適用する。
@@ -101,6 +105,10 @@ native identity がある import はその identity を比較し、同じ文字�
 importer は capture 前の agent/session から session hash を作り、origin と同じ transaction で
 保存する。伏せ字後の label からは作らず、本文を持たない要求と record backup にも運ぶ。
 その hash がない旧 record の forget は、対応を推測せず登録前に拒否する。
+home lineage にも同じ安全条件を適用する。旧 raw の現在の device だけでは、それ以前の
+コピーとの家系を証明できないため、proof のない home は現行 importer の native record が
+追加されても第一 slice の forget を登録前に拒否する。hook・import・search は継続する。
+第一 slice の F2 保証は、この登録条件を満たす home が保存した id と proof を持つコピーを対象とする。
 チェックは append の transaction 内。fingerprint だけでは parser/redaction の変更をまたぐ
 再 import 防止を証明できないため、第一 slice は native identity のない legacy/hook raw の
 登録を具体的な理由付きで拒否する。既存の忘却がある状態で provenance を渡さない raw import

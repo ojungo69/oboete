@@ -9,6 +9,25 @@ use std::time::{Duration, Instant};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- Only this schema's creation of a fresh store proves its home lineage. Legacy metadata,
+-- including a missing device row in an existing records table, is not that proof.
+-- The id, its proof, the device and its file binding are one complete schema commit.
+INSERT OR IGNORE INTO meta(key, value)
+  SELECT 'home_id', '~fresh_device~'
+  WHERE NOT EXISTS (SELECT 1 FROM meta WHERE key='device_id')
+    AND NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='records');
+INSERT OR IGNORE INTO meta(key, value)
+  SELECT 'home_id_proven', '1'
+  WHERE NOT EXISTS (SELECT 1 FROM meta WHERE key='device_id')
+    AND NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='records');
+INSERT OR IGNORE INTO meta(key, value)
+  SELECT 'device_id', '~fresh_device~'
+  WHERE NOT EXISTS (SELECT 1 FROM meta WHERE key='device_id')
+    AND NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='records');
+INSERT OR IGNORE INTO meta(key, value)
+  SELECT 'store_file', '~fresh_file~'
+  WHERE (SELECT value FROM meta WHERE key='device_id')='~fresh_device~'
+    AND NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='records');
 -- One sequence per device holds events and tombstones (spec 1.6, 5.8). A rowid table: bodies up
 -- to the capture cap are far above the row size WITHOUT ROWID suits (under 1/20 of a page).
 CREATE TABLE IF NOT EXISTS records (
@@ -74,6 +93,33 @@ CREATE TABLE IF NOT EXISTS forget_jobs(
   id TEXT PRIMARY KEY, request TEXT NOT NULL, started INTEGER NOT NULL, step INTEGER NOT NULL
 );
 ";
+
+/// Only a fresh schema needs an identity. The replacements are OS-random hex and the native
+/// file's numeric device/inode (volume/index on Windows), never paths or user-provided SQL.
+fn schema_for_file(conn: &Connection, path: &Path) -> Result<String> {
+    let records: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='records')",
+        [],
+        |r| r.get(0),
+    )?;
+    let (id, file) = if records {
+        // Every fresh-only INSERT is skipped on an existing records table; no entropy needed.
+        (String::new(), String::new())
+    } else {
+        let mut bytes = [0_u8; 4];
+        getrandom::fill(&mut bytes)?;
+        let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let file = crate::db::store_file(path);
+        anyhow::ensure!(
+            !file.is_empty() && file.bytes().all(|b| b.is_ascii_digit() || b == b':'),
+            "raw file identity is unavailable"
+        );
+        (id, file)
+    };
+    Ok(SCHEMA
+        .replace("~fresh_device~", &id)
+        .replace("~fresh_file~", &file))
+}
 
 /// Only the viewer's prompt reads create this, never `open` or a hook.
 const PROMPT_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_prompts
@@ -440,7 +486,8 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     crate::db::wal_until(&conn, "FULL", deadline)?;
     #[cfg(target_os = "macos")]
     conn.execute_batch("PRAGMA fullfsync=ON;")?;
-    crate::db::ensure_schema_until(&conn, SCHEMA, deadline).context("raw schema")?;
+    crate::db::ensure_schema_until(&conn, &schema_for_file(&conn, &path)?, deadline)
+        .context("raw schema")?;
     // A raw.db from before the ledger named its field (milestone 2 Task 1's schema).
     crate::db::ensure_column_until(
         &mut conn,
@@ -469,9 +516,9 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     for file in ["raw.db", "raw.db-wal", "raw.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
-    // A file copied into this home gets a new device, but remains the same lineage for forget
-    // logs. Seed the lineage from the old device before ensure_device changes it; a fresh store
-    // uses its first device. Once present this metadata needs no write on a hook's open.
+    // A file copied into this home gets a new device, but keeps its proven lineage for forget
+    // logs. A legacy store keeps its old device as an unverified label before it changes;
+    // fresh stores already have the atomic schema id. Existing metadata needs no hook write.
     use rusqlite::OptionalExtension;
     let known_home: Option<String> = conn
         .query_row("SELECT value FROM meta WHERE key='home_id'", [], |r| {
@@ -593,6 +640,10 @@ impl Raw {
         anyhow::ensure!(
             device == self.device,
             "this first forget slice accepts only this device's raw records"
+        );
+        anyhow::ensure!(
+            self.home_id_proven()?,
+            "this store has no verified home identity: first-slice forget was not registered"
         );
         let (mut records, mut sources, mut sample) = (Vec::new(), Vec::<String>::new(), None);
         let mut at = from - 1;
@@ -737,6 +788,14 @@ impl Raw {
 
     pub(crate) fn home_id(&self) -> &str {
         &self.home_id
+    }
+
+    fn home_id_proven(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key='home_id_proven' AND value='1')",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     /// SQLite's `quick_check` on raw.db: an error names the first problem it reports.
@@ -1479,6 +1538,7 @@ impl Raw {
     /// `Raw::after` returns them (masked, D8) with each event's ledger rows, until `max_bytes`
     /// of lines (always one). Returns (seq, line) pairs in seq order.
     pub fn export_lines(&self, seq: i64, max_bytes: usize) -> Result<Vec<(i64, String)>> {
+        let home_id_proven = self.home_id_proven()?;
         let mut out = Vec::new();
         let (mut at, mut bytes) = (seq, 0);
         loop {
@@ -1509,6 +1569,7 @@ impl Raw {
                 // The home lineage, unlike the appending device, survives a copied file. Its
                 // record backups keep it too, so a lost raw.db still recognizes its logs.
                 v["home_id"] = serde_json::json!(self.home_id);
+                v["home_id_proven"] = serde_json::json!(home_id_proven);
                 // An imported record keeps its origin, and a tombstone of a forgotten one the
                 // deny row, so a restore from the segments alone forgets it again (D1 rule 14).
                 let extra = match &r.item {
@@ -2292,6 +2353,7 @@ pub struct Rebuild {
     conn: Connection,
     forget: Vec<crate::forget::Request>,
     home_id: Option<String>,
+    home_id_proven: Option<bool>,
 }
 
 impl Rebuild {
@@ -2313,19 +2375,26 @@ impl Rebuild {
     pub fn new(path: &Path, device: &str) -> Result<Self> {
         anyhow::ensure!(!path.exists(), "{} exists", path.display());
         let conn = Connection::open(path)?;
-        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(&schema_for_file(&conn, path)?)?;
+        // A staging file is fresh, but the history rebuilt into it is not proof of a fresh home.
+        conn.execute("DELETE FROM meta WHERE key='home_id_proven'", [])?;
         crate::db::ensure_device(&conn, path)?;
         conn.execute(
             "UPDATE meta SET value = ?1 WHERE key = 'device_id'",
             [device],
         )?;
         // Backups made before the lineage field use the partition's device as before.
-        conn.execute("INSERT INTO meta VALUES('home_id', ?1)", [device])?;
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES('home_id', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [device],
+        )?;
         conn.execute_batch("BEGIN")?;
         Ok(Self {
             conn,
             forget: Vec::new(),
             home_id: None,
+            home_id_proven: None,
         })
     }
 
@@ -2350,6 +2419,25 @@ impl Rebuild {
                     .execute("UPDATE meta SET value=?1 WHERE key='home_id'", [id])?;
                 self.home_id = Some(id.into());
             }
+        }
+        let proven = match v.get("home_id_proven") {
+            Some(value) => value.as_bool().context("backup home identity proof")?,
+            None => false,
+        };
+        anyhow::ensure!(
+            !proven || s("home_id").is_some(),
+            "a proven backup home needs its identity"
+        );
+        if let Some(known) = self.home_id_proven {
+            anyhow::ensure!(known == proven, "backup home identity proofs differ");
+        } else {
+            if proven {
+                self.conn.execute(
+                    "INSERT INTO meta(key, value) VALUES('home_id_proven', '1')",
+                    [],
+                )?;
+            }
+            self.home_id_proven = Some(proven);
         }
         match s("type") {
             Some("event") => {
@@ -2803,6 +2891,58 @@ pub fn test_event(body: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F2 also covers the consistent snapshot after the first schema transaction, before
+    /// the opener returns: it already carries the lineage later forgets will name.
+    #[test]
+    fn a_snapshot_of_first_schema_commit_keeps_forget_lineage() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("raw.db");
+        let conn = Connection::open(&path).unwrap();
+        crate::db::ensure_schema_until(
+            &conn,
+            &schema_for_file(&conn, &path).unwrap(),
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
+        drop(conn);
+        let old = home.path().join("first-schema.db");
+        std::fs::copy(&path, &old).unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let mut event = test_event(r#"{"prompt":"first-schema-forget-canary-671"}"#);
+        event.source = "oboete-v1".into();
+        let captured = || crate::capture::Captured {
+            event: event.clone(),
+            ledger: Vec::new(),
+        };
+        let identity = ImportIdentity {
+            origin: crate::forget::origin("synthetic", "first-schema"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let seq = raw
+            .append_imported_origins(&[captured()], std::slice::from_ref(&identity), "", None)
+            .unwrap()[0];
+        let preview = raw
+            .forget_preview(crate::forget::Target::Record {
+                device: raw.device().into(),
+                seq,
+            })
+            .unwrap();
+        crate::forget::start(home.path(), &preview).unwrap();
+        drop(raw);
+        std::fs::copy(old, &path).unwrap();
+        let mut restored = open(home.path()).unwrap();
+        crate::forget::reconcile(home.path(), &mut restored).unwrap();
+        assert!(
+            restored
+                .append_imported_origins(&[captured()], &[identity], "", None)
+                .unwrap()
+                .is_empty(),
+            "the first-schema snapshot changed lineage and reimported a forgotten event"
+        );
+    }
 
     /// docs/cards.md K4: what tombstones remove from a span, each once; with `through`, only
     /// what this device's own tombstones up to it remove, as another device's seqs say nothing of
