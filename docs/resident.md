@@ -60,7 +60,8 @@ phase named; the idle step is taken within such a wait too. At every idle time i
 config.toml and checks its home:
 - only a config.toml that loads and does not say `resident = true` ends it, and not while an
   embedding call is out: the call's answer is written first (R10), and no other call, a batch, a
-  query or a window, is started before it leaves. A file that does not load (one
+  query or a window, is started before it leaves, even if the file says `resident = true` again
+  meanwhile (the next hook starts it again). A file that does not load (one
   the owner is editing) leaves the mode as it was. A worker that starts while the file does not
   load is not resident, as today, and doctor says so;
 - a config.toml that changed since the worker last looked (its time or its size) starts a round,
@@ -164,7 +165,8 @@ R12. **Stepping aside for a command.** `oboete restore`, `oboete rebuild` and
 is busy, not "try again when it has exited"). Two commands may wait at once: one that still waits
 writes the file again when the other took it away. The worker looks for the file at its start,
 between rounds and on the 200 ms tick beside the restore request: it backs up (a restore reads the
-backups), closes its stores, releases the lock, records a clean outcome and exits. It does not
+backups) and, if the request is still there (a command whose wait ran out meanwhile took it away),
+closes its stores, releases the lock, records a clean outcome and exits. It does not
 step aside while an embedding call is out: the call is paid for and counted, so its answer is
 written first, and a command whose 30 s pass meanwhile says the worker is busy. Once a command
 has asked, the worker sends no other batch or query and curates no window, so a backlog cannot keep the command waiting
@@ -239,6 +241,10 @@ left as a setting to add before a public release.
   (start in the home, relative paths: Linux refuses a new file in a removed directory); it is a
   candidate for the slice that starts the processes in the home (R8), with a test that replaces
   the home inside the rescan.
+- The home is known by its lock file's device and inode number. While the worker holds the lock
+  the number stays taken; after it releases the lock on its way out, a lock file made again can
+  get the same number back (ext4 hands a freed number out again at once) and the check reads the
+  new home as its own, for the outcome note and the lock taken again.
 
 ## Tests (through `oboete worker`, `oboete view`, and HTTP requests to the listener)
 
@@ -347,3 +353,9 @@ settled a call could still curate a window, a call to a provider that a command 
 would wait on (R12); and a worker told to leave with a call out did not remember it, so the round
 after the call could send another batch or window before it looked again (R3). Both hold every
 phase that calls a provider now, and the worker told to leave goes as soon as its call is settled.
+
+Its fifth round: a command whose 30 s ran out while the worker backed up for it took its request
+away, and the worker still left, with no hook to start another; it now looks again after the
+backup (R12). Not taken: running the consumers when `oboete rebuild` stops on vectors it cannot
+read. The rebuild promises to leave that knowledge.db as it was (spec 1.7), and a worker run would
+set it aside as damaged and embed again; the records wait in raw.db for the next hook's worker.

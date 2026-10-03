@@ -190,7 +190,19 @@ fn steps_aside(home: &Path, raw: &Raw, holding: &Holding) -> bool {
         return false;
     }
     crate::backup::run(home, raw);
-    true
+    #[cfg(test)]
+    if let Some(after) = AFTER_BACKUP.get() {
+        after(home);
+    }
+    // A command that gave up meanwhile took its request away: the worker goes on, since a hook
+    // that appended during the backup found the lock held and started none (Codex on #359).
+    asked_aside(home)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test seam: what happens while the step-aside backup runs, as a command giving up.
+    static AFTER_BACKUP: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
 /// How long a command waits for a worker to step aside.
@@ -1954,7 +1966,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_resident_worker_runs_a_phase_again_at_the_time_it_waits_for() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
         let _contending = contending();
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
@@ -1962,19 +1974,33 @@ mod tests {
         let mut raw = raw::open(p).unwrap();
         raw.append(&raw::test_event("first")).unwrap();
         let polls = std::sync::Arc::new(AtomicUsize::new(0));
-        let started = Instant::now();
+        // The first wait's end and the second poll, by the clock the worker waits by: a step of
+        // the system clock moves both.
+        let (due, again) = (
+            std::sync::Arc::new(AtomicI64::new(0)),
+            std::sync::Arc::new(AtomicI64::new(0)),
+        );
         let worker = {
             let (p, polls) = (p.to_path_buf(), polls.clone());
+            let (first, second) = (due.clone(), again.clone());
             std::thread::spawn(move || {
                 let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
                     // First a wait of three idle times, then a long one; neither keeps a worker
                     // up that is not resident.
+                    let now = crate::db::now_ms();
                     let wait = match polls.fetch_add(1, Ordering::SeqCst) {
-                        0 => 300,
+                        0 => {
+                            first.store(now + 300, Ordering::SeqCst);
+                            300
+                        }
+                        1 => {
+                            second.store(now, Ordering::SeqCst);
+                            600_000
+                        }
                         _ => 600_000,
                     };
                     Ok(Phase::Waiting {
-                        until: crate::db::now_ms() + wait,
+                        until: now + wait,
                         up: false,
                     })
                 };
@@ -1989,7 +2015,7 @@ mod tests {
         };
         until("the phase ran again", || polls.load(Ordering::SeqCst) > 1);
         assert!(
-            started.elapsed() >= Duration::from_millis(300),
+            again.load(Ordering::SeqCst) >= due.load(Ordering::SeqCst),
             "the phase ran again before its time"
         );
         std::thread::sleep(Duration::from_millis(500));
@@ -2211,9 +2237,15 @@ mod tests {
         worker.join().unwrap().unwrap();
     }
 
-    /// `p` removed and made again, with a lock file of its own.
+    /// `p` removed and made again, with a lock file of its own. The old lock file lives on under
+    /// another name beside it: a file made after it is freed can get its inode number back and
+    /// read as the same file (docs/resident.md, Limits).
     #[cfg(target_os = "linux")]
     fn replace_home(p: &Path) {
+        let _ = std::fs::hard_link(
+            p.join("state").join("worker.lock"),
+            p.with_extension("old-lock"),
+        );
         std::fs::remove_dir_all(p).unwrap();
         std::fs::create_dir_all(p.join("state")).unwrap();
         std::fs::write(p.join("state").join("worker.lock"), "").unwrap();
@@ -2537,6 +2569,24 @@ mod tests {
         });
         worker.join().unwrap().unwrap();
         assert_eq!(after.load(Ordering::SeqCst), 0);
+    }
+
+    /// R12: a command that gives up while the worker backs up for it takes its request away, and
+    /// the worker goes on: a hook that appended meanwhile started none (Codex on #359, fifth
+    /// round).
+    #[test]
+    fn a_request_withdrawn_during_the_backup_keeps_the_worker() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let raw = raw::open(p).unwrap();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        std::fs::write(yield_request(p), "").unwrap();
+        AFTER_BACKUP.set(Some(|home| {
+            std::fs::remove_file(yield_request(home)).unwrap();
+        }));
+        let left = steps_aside(p, &raw, &Holding::default());
+        AFTER_BACKUP.set(None);
+        assert!(!left);
     }
 
     /// A consumer that takes the request to step aside away in its first step, as a command that
