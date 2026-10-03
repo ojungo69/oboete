@@ -1,0 +1,21 @@
+tests/forget_cli.rs
+  s_ce2b24784deac6::t_5ac91a2e3d0768 634-680
+src/worker.rs
+  s_ce2b24784deac6::t_5ac91a2e3d0768 690-694,705,1722-1839
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "516a8025ed7aafe0da52368634e6e4c140cad4c9",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
