@@ -7,7 +7,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
 
 use crate::capture::{self, Captured, Settings};
-use crate::raw::{Checkpoint, IMPORT_BATCH, ImportDoc, MAX_BATCH_BYTES, Raw, V1Row};
+use crate::raw::{
+    Checkpoint, IMPORT_BATCH, ImportDoc, ImportIdentity, MAX_BATCH_BYTES, Raw, V1Row,
+};
 
 /// The source of what v1's store holds, as records and documents in Design B (D6).
 const SOURCE: &str = "oboete-v1";
@@ -55,6 +57,9 @@ pub struct Stats {
 /// records; then the documents as import ops. Everything is read in one read transaction of the
 /// store at `from`, which is never written; a rerun imports nothing twice.
 pub fn pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<Stats> {
+    // Milestone 5 D1: the forget request logs first, so an import never brings back what a log
+    // holds and raw.db lost.
+    crate::forget::reconcile_or_say(home, raw)?;
     Ok(read_pass(home, raw, from)?.0)
 }
 
@@ -419,7 +424,21 @@ fn events(
             }
         }
         batch.bytes += bytes;
-        batch.records.extend(captured);
+        let identity = serde_json::to_string(&(&row, crate::forget::hash(stored.as_bytes())))?;
+        let session = crate::forget::session(&agent, &session);
+        batch
+            .records
+            .extend(captured.into_iter().enumerate().map(|(i, c)| {
+                (
+                    c,
+                    ImportIdentity {
+                        origin: crate::forget::origin(&key, &format!("{identity}:{i}")),
+                        session: session.clone(),
+                        ambiguous: None,
+                        unverified: false,
+                    },
+                )
+            }));
         batch.last = Some(row);
         stats.events += 1;
     }
@@ -431,7 +450,7 @@ fn events(
 /// fingerprint.
 #[derive(Default)]
 struct Batch {
-    records: Vec<Captured>,
+    records: Vec<(Captured, ImportIdentity)>,
     bytes: usize,
     last: Option<V1Row>,
 }
@@ -445,7 +464,8 @@ impl Batch {
         };
         let mut records = std::mem::take(&mut self.records);
         // Stable, so (ts, id): at most one record per event, read in id order.
-        records.sort_by_key(|c| c.event.ts);
+        records.sort_by_key(|(c, _)| c.event.ts);
+        let (records, origins): (Vec<_>, Vec<_>) = records.into_iter().unzip();
         self.bytes = 0;
         let checkpoint = Checkpoint {
             key: key.to_owned(),
@@ -454,7 +474,7 @@ impl Batch {
             prefix: None,
         };
         Ok(raw
-            .append_imported(&records, ruleset, Some(&checkpoint))?
+            .append_imported_origins(&records, &origins, ruleset, Some(&checkpoint))?
             .len() as u64)
     }
 }

@@ -824,6 +824,12 @@ impl Pending {
         Ok(p)
     }
 
+    /// Whether raw holds a tombstone the Anchors consumer has not reached: knowledge.db may still
+    /// show what it removed (milestone 5 D1 rule 12).
+    pub fn removes(&self) -> bool {
+        !self.records.is_empty()
+    }
+
     /// Whether they touch the claim `uid`: its uid, or a quote of its active derivation.
     pub fn touches(&self, k: &Connection, uid: &str) -> Result<bool> {
         Ok(self.uids.contains(uid)

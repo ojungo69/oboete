@@ -18,6 +18,7 @@ mod db;
 mod embed;
 mod embed_phase;
 mod failure;
+mod forget;
 mod gates;
 mod hook;
 mod hookstate;
@@ -85,6 +86,22 @@ enum Cmd {
     /// Rebuild knowledge.db (claims, cards, summaries, indexes, manifests) from raw.db and its op log,
     /// with no AI call
     Rebuild,
+    /// Register an irreversible forget of raw records with native import identities (physical
+    /// purge remains unfinished; legacy/hook raw is not supported by this first slice)
+    Forget {
+        /// Raw id from search: <device>:<seq>
+        #[arg(long, conflicts_with_all = ["span", "status"])]
+        record: Option<String>,
+        /// This device's raw span: <device>:<from>-<to> (at most 500 records)
+        #[arg(long, conflicts_with_all = ["record", "status"])]
+        span: Option<String>,
+        /// Print the preview and skip its confirmation
+        #[arg(long, conflicts_with = "status")]
+        yes: bool,
+        /// The requests raw.db holds, after the request logs are reconciled with it
+        #[arg(long)]
+        status: bool,
+    },
     /// Curate again what was curated before: the spans queued since (a quote a new rule masked
     /// or a forget removed), the windows every provider skipped, the imported records of a
     /// source, or a span you name. It lists the windows and an estimate; nothing is sent without
@@ -608,6 +625,12 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             println!("knowledge.db rebuilt from raw.db, with no AI call");
             Ok(())
         }
+        Cmd::Forget {
+            record,
+            span,
+            yes,
+            status,
+        } => forget::run(&home, record.as_deref(), span.as_deref(), yes, status),
         Cmd::Claims => {
             let settings = capture::Settings::load(&home)?;
             let cwd = std::env::current_dir()?;

@@ -402,6 +402,10 @@ impl Phase {
             }
         };
         let reading = Reading::now(raw, Reads::Live)?;
+        // Milestone 5 D1 rule 12: no text is sent while knowledge.db lags a forget.
+        if crate::curate::lagging(raw, k)? {
+            return Ok(Step::Idle);
+        }
         cleared(k, &embedder.id, &reading)?;
         let wait = match self.held_back(&cfg) {
             Ok(wait) => wait,

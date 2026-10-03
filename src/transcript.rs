@@ -87,6 +87,8 @@ struct Line {
     payload: Value,
     #[serde(skip)]
     synthetic: bool,
+    #[serde(skip)]
+    native_session_known: bool,
 }
 
 struct Emitter {
@@ -98,6 +100,7 @@ struct Emitter {
     /// The session's own id was read (the file name is only the fallback). A forked Codex
     /// rollout carries its parent's `session_meta` after its own.
     meta_seen: bool,
+    native_session_known: bool,
     /// Whether another agent sent a Codex rollout's prompts, from its own `session_meta` (#273).
     agent_sent: Option<bool>,
     /// Prompts the prompt hook got when they were queued, not yet delivered as user records.
@@ -138,6 +141,7 @@ impl Emitter {
             ts: ts.clone(),
             payload,
             synthetic: false,
+            native_session_known: self.native_session_known,
         };
         // SessionStart sorts first whatever its time.
         let key = if event == "SessionStart" {
@@ -327,6 +331,7 @@ fn claude_line(e: &mut Emitter, v: &Value, agent_id: Option<&str>) -> Result<()>
             && let Some(id) = v["sessionId"].as_str()
         {
             e.session = id.to_string();
+            e.native_session_known = !id.is_empty();
             e.meta_seen = true;
         }
         e.cwd = cwd.or(e.cwd.take());
@@ -483,6 +488,7 @@ fn codex_line(e: &mut Emitter, v: &Value) -> Result<()> {
                 && let Some(id) = p["id"].as_str()
             {
                 e.session = id.to_string();
+                e.native_session_known = !id.is_empty();
             }
             if !e.meta_seen {
                 e.agent_sent = Some(codex_agent_sent(p));
@@ -657,6 +663,7 @@ fn parse(path: &Path, agent: &str, subagents: &[PathBuf]) -> Result<(Vec<Line>, 
         cwd: None,
         started: false,
         meta_seen: false,
+        native_session_known: false,
         agent_sent: None,
         queued: Vec::new(),
         stats: Stats::default(),
@@ -723,6 +730,10 @@ pub fn import(
         crate::migrate::check_source(home, &v1)?;
     }
     let mut raw = yes.then(|| raw::open(home)).transpose()?;
+    // Milestone 5 D1: the forget request logs first (`migrate::pass` does it again for v1).
+    if let Some(raw) = raw.as_mut() {
+        crate::forget::reconcile_or_say(home, raw)?;
+    }
     if let Some(raw) = raw.as_mut()
         && v1.exists()
     {
@@ -805,16 +816,38 @@ pub fn import(
                     continue;
                 }
             }
-            let earliest = cut.get(&((*agent).to_owned(), session.clone()));
+            let recorded = cut.get(&((*agent).to_owned(), session.clone())).copied();
+            let earliest = match raw.as_ref() {
+                Some(raw) => raw.transcript_cut(agent, session, recorded)?,
+                None => recorded,
+            };
             let mut checkpoint = Checkpoint {
                 key: key.clone(),
                 through: seen,
                 row: None,
                 prefix: checkpoints.get(&key).and_then(|c| c.prefix.clone()),
             };
-            let mut batch = Vec::<Captured>::new();
+            let namespace = session.clone();
+            let namespace_known = first.native_session_known;
+            let fingerprints: Vec<String> = lines
+                .iter()
+                .map(|line| {
+                    let mut native = Sha256::new();
+                    hash_line(&mut native, line)?;
+                    Ok(format!("{:x}", native.finalize()))
+                })
+                .collect::<Result<_>>()?;
+            let mut counts = HashMap::<&str, usize>::new();
+            for fingerprint in &fingerprints {
+                *counts.entry(fingerprint).or_default() += 1;
+            }
+            let mut occurrences = HashMap::<String, u64>::new();
+            let mut batch = Vec::<(Captured, raw::ImportIdentity)>::new();
             let mut bytes = 0;
-            for line in lines {
+            for (line, event_hash) in lines.into_iter().zip(&fingerprints) {
+                let occurrence = occurrences.entry(event_hash.clone()).or_default();
+                let identity = format!("{event_hash}:{occurrence}");
+                *occurrence += 1;
                 let through = i64::try_from(line.seq)?;
                 if through <= seen {
                     stats.seen += 1;
@@ -824,7 +857,7 @@ pub fn import(
                 let fingerprint = Some(format!("{:x}", prefix.clone().finalize()));
                 let ts = crate::replay::fixture_ms(&clock, &json!(line.ts))
                     .context("a transcript event has no valid timestamp")?;
-                if earliest.is_some_and(|cut| ts >= *cut) {
+                if earliest.is_some_and(|cut| ts >= cut) {
                     stats.cut += 1;
                     checkpoint.through = through;
                     checkpoint.prefix = fingerprint;
@@ -841,7 +874,23 @@ pub fn import(
                     append_batch(&mut raw, &mut batch, &checkpoint, &settings, stats)?;
                     bytes = 0;
                 }
-                batch.extend(captured);
+                batch.extend(captured.into_iter().enumerate().map(|(i, c)| {
+                    (
+                        c,
+                        raw::ImportIdentity {
+                            origin: crate::forget::origin(&key, &format!("{identity}:{i}")),
+                            session: crate::forget::session(agent, &line.session),
+                            ambiguous: (counts[event_hash.as_str()] > 1
+                                || !line.native_session_known)
+                                .then(|| {
+                                    crate::forget::origin(&key, &format!("{event_hash}:0:{i}"))
+                                }),
+                            unverified: !namespace_known
+                                || !line.native_session_known
+                                || line.session != namespace,
+                        },
+                    )
+                }));
                 bytes += size;
                 checkpoint.through = through;
                 checkpoint.prefix = fingerprint;
@@ -887,19 +936,27 @@ fn hash_line(prefix: &mut Sha256, line: &Line) -> Result<()> {
 
 fn append_batch(
     raw: &mut Option<raw::Raw>,
-    batch: &mut Vec<Captured>,
+    batch: &mut Vec<(Captured, raw::ImportIdentity)>,
     checkpoint: &Checkpoint,
     settings: &Settings,
     stats: &mut AgentStats,
 ) -> Result<()> {
+    let (records, origins): (Vec<_>, Vec<_>) = batch.drain(..).unzip();
     stats.events += match raw.as_mut() {
         Some(raw) => raw
-            .append_imported(batch, settings.rules.version(), Some(checkpoint))?
+            .append_imported_origins(
+                &records,
+                &origins,
+                settings.rules.version(),
+                Some(checkpoint),
+            )?
             .len() as u64,
-        None => batch.len() as u64,
+        None => records.len() as u64,
     };
-    stats.bytes += batch.iter().map(|c| c.event.body.len() as u64).sum::<u64>();
-    batch.clear();
+    stats.bytes += records
+        .iter()
+        .map(|c| c.event.body.len() as u64)
+        .sum::<u64>();
     Ok(())
 }
 

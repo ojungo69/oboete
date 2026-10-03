@@ -259,6 +259,16 @@ pub fn phase(
     // A session in an excluded repository gets no summary (D13), and each call holds to the list
     // as it is now (spec 5.5).
     let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
+    // Milestone 5 D1 rule 12: the cards it shows are read once the consumers reach a forget.
+    if crate::curate::lagging(raw, k)? {
+        return Ok(sooner(
+            windows,
+            Phase::Waiting {
+                until: now,
+                up: true,
+            },
+        ));
+    }
     let out = windows;
     let key = |agent: &str, session: &str| format!("{agent}\u{0}{session}");
     let kept_back = |agent: &str, session: &str| reading.excluded.contains(&key(agent, session));
@@ -321,11 +331,16 @@ pub fn phase(
         let subject = format!("turn {}", r.seq);
         let answer = summarizer(&subject, &prompt, &|v| check(v, rules), &|| {
             reading.still(raw)
+        })
+        .and_then(|res| {
+            let op = fitted(turn.op(&res.output, rules))?.unwrap_or_else(|| skip.clone());
+            // The provider gate and the append fence share the ListChanged wait below. A
+            // forget after reading the turn keeps none of the answer (M5 D1 rule 12).
+            raw.append_ops_fenced(&[(OpKind::Turn, op)], reading.denied)?;
+            Ok(())
         });
         let failed = match answer {
-            Ok(res) => {
-                let op = fitted(turn.op(&res.output, rules))?.unwrap_or(skip);
-                raw.append_ops(&[(OpKind::Turn, op)])?;
+            Ok(()) => {
                 crate::providers_db::clear_turn_pending(db, &device, r.seq)?;
                 return Ok(Phase::Covered);
             }
@@ -339,10 +354,7 @@ pub fn phase(
                     },
                 ));
             }
-            Err(e) => match e.downcast::<ChainFailed>() {
-                Ok(ChainFailed(failed)) => failed,
-                Err(e) => return Err(e),
-            },
+            Err(e) => e.downcast::<ChainFailed>()?.0,
         };
         // A slow call may set its reset after the phase started: judge the remaining wait now.
         let after = crate::db::now_ms();
