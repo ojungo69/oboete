@@ -70,10 +70,12 @@ newest.
 F4. **Not when the file changed since.** When the file's modification time is at or after the
 newest such card's time, there is no note, as in claude-mem.
 
-F5. **Once a session.** The hook keeps the newest card time it showed for a file in the session's
+F5. **Once a session.** The hook keeps the IDs of the cards it showed for a file in the session's
 hook state (`hookstate`, under the agent and session, where the hooks already keep flags such as
-`injected` and `compacted`); the note comes again in that session only when a newer card names
-the file. The worker's pruning of the hook state (`hookstate::KEEP`) removes it.
+`injected` and `compacted`); the note comes again in that session only when a current card naming
+the file is not among them: a newer card, or a recuration's replacement, which keeps its window's
+time (docs/cards.md K2, K3), so a time alone would hide it (Codex on #384). The worker's pruning of
+the hook state (`hookstate::KEEP`) removes it.
 
 F6. **Which rows.** claude-mem's: one card per session, the newest; ranked +2 for a modified file,
 +2 for at most 3 files named in all, +1 for at most 8; the 15 best; then by day as above.
@@ -82,7 +84,11 @@ F7. **The text.** claude-mem's, with oboete's tools and IDs: `get(ID)` in place 
 `get_observations([IDs])`, and no `smart_outline` line (oboete has no code-structure tools, parity
 row 24). IDs as the session start's block writes them (`<op seq>.<n>`, with the device for another
 device's card, docs/cards.md S3). Each title is gated as that block gates a row (K6), then cut at
-160 characters. The icons are claude-mem's for this note.
+160 characters. The icons are claude-mem's for this note. The note is fenced as data and
+attributed, as every injection is (spec 4: the session start's fence, each closing tag in it
+escaped as that fence escapes it, docs/cards.md S5): a title may summarize hostile file or tool
+output (Codex on #384). `cards::by_file` is one of K7's ways in: it reads the cards through K3,
+K4 and K6, never the table itself.
 
 F8. **Never.** No permission decision: `permissionDecision: "allow"` would let a read through
 without the owner's own permission rules, which is not oboete's to change. No note for a
@@ -109,12 +115,14 @@ later run.
    then the days in order and the rows with ID, time, icon and title.
 2. A file under 1,500 bytes, a directory, a missing file, a file no card names: no note.
 3. A file modified at or after the newest card naming it: no note.
-4. The same session reading it again: no note; once a newer card names it: the note again.
+4. The same session reading it again: no note; once a newer card names it, or a recuration
+   replaces a card shown (with the same time): the note again.
 5. A card of another repository, a replaced card, a forgotten card: never in the note.
 6. A card naming the file by its path relative to the checkout's top level, or by its absolute
    path, is found; one naming `foo+bar.rs` is not found for `bar.rs`.
 7. At most 15 rows, one per session, ranked as F6.
-8. A title is gated as the session start's row is, and cut at 160 characters.
+8. A title is gated as the session start's row is, and cut at 160 characters; the note is inside
+   the session start's fence, and a title holding the fence's closing tag is escaped.
 9. A subagent's read, and a read in an excluded checkout: no note.
 10. The answer has no `permissionDecision`, and the hook writes no raw record.
 11. `oboete setup` adds the `PreToolUse` `Read` matcher for Claude Code and keeps the user's own
