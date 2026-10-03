@@ -232,13 +232,16 @@ pub fn phase(
     let out = windows;
     let last = last_asked(k, &device)?;
     // The turns a later turn's summary passed while they waited: one the list kept back, which
-    // an undo lets out as it lets out a window's records (Codex on #371), oldest first.
+    // an undo lets out as it lets out a window's records (Codex on #371), oldest first. One still
+    // kept back is not read again.
+    let waiting = crate::providers_db::turns_waiting(db, &device)?;
     let mut replies = Vec::new();
-    for seq in crate::providers_db::turns_waiting(db, &device, crate::curate::ATTEMPTS)? {
-        if seq <= last {
-            replies.extend(raw.replies_between(seq - 1, seq)?);
+    for (seq, key, attempts) in &waiting {
+        if *seq <= last && *attempts < crate::curate::ATTEMPTS && !reading.excluded.contains(key) {
+            replies.extend(raw.replies_between(seq - 1, *seq)?);
         }
     }
+    let kept: std::collections::HashSet<i64> = waiting.iter().map(|w| w.0).collect();
     // Every turn end is reached, however many records follow it (Codex on C2).
     replies.extend(raw.replies_between(last, ck)?);
     for r in replies {
@@ -249,10 +252,7 @@ pub fn phase(
         // Held in the digest's table, under the turn's reply in place of a repository.
         let subject = format!("turn {}", r.seq);
         if reading.excluded.contains(&key) {
-            let kept = crate::providers_db::digest_pending_of(
-                db, &device, &r.agent, &r.session, &subject,
-            )?;
-            if kept.is_none() {
+            if !kept.contains(&r.seq) {
                 crate::providers_db::set_digest_pending(
                     db,
                     &crate::providers_db::DigestPending {
