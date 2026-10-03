@@ -1,0 +1,31 @@
+tests/forget_cli.rs
+  s_ce2b24784deac6::t_da1cab2baebc10 324-378,381-383,386,427-429,436-437,447
+  s_ce2b24784deac6::t_c36af48046513d 379-380
+  s_ce2b24784deac6::t_dc5f26e1a2efd3 252-323,408,450-451
+  s_ce2b24784deac6::t_937509719a54d2 384-385,387-407,409-426,430-435,438-446,448-449
+src/raw.rs
+  s_ce2b24784deac6::t_9864617e0c0327 2638-2639
+  s_ce2b24784deac6::t_a17913550a5430 2414-2415,2540-2548,2662-2664
+  s_ce2b24784deac6::t_353dc8f2d1025b 2512-2514,2532-2534,2536-2539,2549,2656-2657
+  s_ce2b24784deac6::t_8a6795a7a631e4 1588,2553-2567
+  s_ce2b24784deac6::t_832db1cd94d1d7 2568
+docs/milestone-5-plan.md
+  s_ce2b24784deac6::t_7a96cf51e39179 66-68
+  s_ce2b24784deac6::t_19430a850488b8 69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6622fcd6f4f7821e8e7f9c16e488a56686475b8c",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
