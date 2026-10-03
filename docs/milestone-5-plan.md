@@ -217,14 +217,14 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
 設計 v1（journal）の実装を v2（D1）に置き換えた。`forget_jobs.step` は 1 のままで、物理 purge
 完了を返す経路はない。
 
-- 公開 CLI の試験 10 件（`tests/forget_cli.rs`）: import origin のない record の登録前の拒否、
+- 公開 CLI の主な回帰シナリオ（`tests/forget_cli.rs`）: import origin のない record の登録前の拒否、
   本文なしのログと届かない範囲の表示、失われた・古い・他 home の・壊れたログが hook を止めないこと、
   古い backup と capture rule の変更で v1 の event が戻らないこと、redaction rule が変わっても
   コピーした transcript が忘れた identity を保つこと、壊れた raw.db がログから忘却を回復すること、
   backup ディレクトリに届かなかった忘却を home のログだけで戻すこと、巻き戻った raw.db で新しい
   record が残り忘れた record は戻らないこと、raw.db と両方のログを失うと forget の表示どおり本文が
   戻ること、破れたログ行の後の忘却も restore で残ること。
-- 型付き API と fence の試験: `forget.rs` の 5 件と、provider の呼出し中に登録された忘却が
+- 型付き API と fence の試験: `forget.rs` の登録・ログ回復と、provider の呼出し中に登録された忘却が
   その答えを何も書かせないこと（`curate.rs`）。障害試験にオーナーのデータ・モデル・サービスは
   使っていない。
 - `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`: 成功。

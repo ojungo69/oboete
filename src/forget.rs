@@ -330,6 +330,8 @@ fn append_log(path: &Path, requests: &[&Request]) -> Result<()> {
     }
     let mut f = opts.open(path)?;
     f.lock()?;
+    #[cfg(unix)]
+    f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     let len = f.metadata()?.len();
     let mut out = Vec::new();
     if len > 0 {
@@ -614,6 +616,44 @@ mod tests {
         let log = std::fs::read_to_string(home.path().join(LOG)).unwrap();
         assert_eq!(log.lines().count(), 1);
         assert!(!log.contains("canary"), "{log}");
+    }
+
+    /// Existing request-log copies keep their hashes private even if earlier permissions were
+    /// broad; the public registration path restricts the opened files before appending.
+    #[cfg(unix)]
+    #[test]
+    fn existing_request_logs_are_private_when_registration_appends() {
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [0o644, 0o666] {
+            let home = tempfile::tempdir().unwrap();
+            let h = home.path();
+            let mut raw = raw::open(h).unwrap();
+            let seq = native(
+                &mut raw,
+                "existing-log-permissions",
+                r#"{"prompt":"a synthetic permissions canary"}"#,
+            );
+            let paths = [h.join(LOG), crate::backup::dir(h).unwrap().join(LOG)];
+            for path in &paths {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "").unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+            }
+            let p = preview(h, record(&raw, seq)).unwrap();
+            let (registered, report) = start(h, &p).unwrap();
+            assert!(report.problems.is_empty(), "{report:?}");
+            assert_eq!(report.copies.len(), 2);
+            for path in paths {
+                assert_eq!(
+                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+                    0o600,
+                    "the existing request log stayed readable by other users"
+                );
+                let log = std::fs::read_to_string(path).unwrap();
+                assert_eq!(Request::parse(log.trim()).unwrap().job, registered.job);
+                assert!(!log.contains("canary"));
+            }
+        }
     }
 
     /// A malformed backup setting or unreadable config cannot undo registration or hide the
