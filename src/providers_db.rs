@@ -693,6 +693,16 @@ pub fn set_digest_pending(conn: &Connection, p: &DigestPending) -> Result<()> {
     Ok(())
 }
 
+/// The turn ends (`turns::phase`) with a row of `device` under `attempts`, oldest first.
+pub fn turns_waiting(conn: &Connection, device: &str, attempts: i64) -> Result<Vec<i64>> {
+    let mut st = conn.prepare(
+        "SELECT CAST(substr(repo, 6) AS INTEGER) AS seq FROM digest_pending
+         WHERE device = ?1 AND repo LIKE 'turn %' AND attempts < ?2 ORDER BY seq",
+    )?;
+    let rows = st.query_map(params![device, attempts], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 pub fn clear_digest_pending(
     conn: &Connection,
     device: &str,

@@ -230,13 +230,47 @@ pub fn phase(
     // as it is now (spec 5.5).
     let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
     let out = windows;
+    let last = last_asked(k, &device)?;
+    // The turns a later turn's summary passed while they waited: one the list kept back, which
+    // an undo lets out as it lets out a window's records (Codex on #371), oldest first.
+    let mut replies = Vec::new();
+    for seq in crate::providers_db::turns_waiting(db, &device, crate::curate::ATTEMPTS)? {
+        if seq <= last {
+            replies.extend(raw.replies_between(seq - 1, seq)?);
+        }
+    }
     // Every turn end is reached, however many records follow it (Codex on C2).
-    for r in raw.replies_between(last_asked(k, &device)?, ck)? {
+    replies.extend(raw.replies_between(last, ck)?);
+    for r in replies {
         if !covered(r.seq) {
             break;
         }
         let key = format!("{}\u{0}{}", r.agent, r.session);
-        if reading.excluded.contains(&key) || asked(k, &device, r.seq)? {
+        // Held in the digest's table, under the turn's reply in place of a repository.
+        let subject = format!("turn {}", r.seq);
+        if reading.excluded.contains(&key) {
+            let kept = crate::providers_db::digest_pending_of(
+                db, &device, &r.agent, &r.session, &subject,
+            )?;
+            if kept.is_none() {
+                crate::providers_db::set_digest_pending(
+                    db,
+                    &crate::providers_db::DigestPending {
+                        device: device.clone(),
+                        agent: r.agent.clone(),
+                        session: r.session.clone(),
+                        repo: subject,
+                        prompt: String::new(),
+                        reason: "excluded".into(),
+                        hold: "excluded".into(),
+                        attempts: 0,
+                        next_attempt_at: 0,
+                    },
+                )?;
+            }
+            continue;
+        }
+        if asked(k, &device, r.seq)? {
             continue;
         }
         let turn = Turn::read(raw, k, rules, &r, summary.window_tokens)?;
@@ -247,8 +281,6 @@ pub fn phase(
         };
         let prompt = prompt(&summary.language, &turn);
         let sent = crate::curate::sha256_hex(&format!("{chain}\n{prompt}"));
-        // Held in the digest's table, under the turn's reply in place of a repository.
-        let subject = format!("turn {}", r.seq);
         let pending =
             crate::providers_db::digest_pending_of(db, &device, &r.agent, &r.session, &subject)?
                 .filter(|p| p.prompt == sent);
@@ -845,6 +877,44 @@ mod tests {
             .unwrap()
             .exclude("r", false)
             .unwrap();
+        assert_eq!(run(home.path(), &completed("x")).1.len(), 0);
+    }
+
+    /// Codex on #371: a turn the exclusion list kept back is summarized after an undo, though a
+    /// later turn of another repository's session was summarized while it waited.
+    #[test]
+    fn a_turn_an_exclusion_kept_back_is_summarized_after_the_undo() {
+        let other = |kind: &str, text: &str| Event {
+            repo: Some("q".into()),
+            ..said("s2", kind, text)
+        };
+        let home = home(
+            &[
+                said("s1", "prompt", "Build the parser."),
+                said("s1", "reply", "Built."),
+                other("prompt", "Fix the lexer."),
+                other("reply", "Fixed."),
+            ],
+            &[
+                window(1, 2, "Built the parser.", &[]),
+                window(3, 4, "Fixed the lexer.", &[]),
+            ],
+        );
+        let exclude = |undo: bool| {
+            crate::raw::open(home.path())
+                .unwrap()
+                .exclude("r", undo)
+                .unwrap()
+        };
+        exclude(false);
+        let (_, sent) = run(home.path(), &completed("Fixed."));
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("Fix the lexer."), "{}", sent[0]);
+        assert_eq!(run(home.path(), &completed("x")).1.len(), 0);
+        exclude(true);
+        let (_, sent) = run(home.path(), &completed("Built."));
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("Build the parser."), "{}", sent[0]);
         assert_eq!(run(home.path(), &completed("x")).1.len(), 0);
     }
 
