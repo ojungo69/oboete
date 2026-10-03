@@ -4989,8 +4989,8 @@ mod tests {
         let k = crate::knowledge::open(home.path()).unwrap();
         // A fifth of 1,000 tokens, half of it for what the sessions carry in: one goal fits.
         let req = request(&raw, &k, &rules, &curating(1_000), &w).unwrap();
-        assert!(req.prompt.contains("goal: alpha alpha"), "{}", req.prompt);
-        assert!(!req.prompt.contains("goal: beta beta"), "{}", req.prompt);
+        assert!(req.prompt.contains("goal: alpha alpha"));
+        assert!(!req.prompt.contains("goal: beta beta"));
         assert_eq!(req.goals, vec![1]);
     }
 
