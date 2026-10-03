@@ -209,9 +209,15 @@ fn bring_up(home: &Path, wait: Duration) -> std::result::Result<u16, String> {
         .map_err(|e| format!("{e:#}"))?
         .port
         .get();
-    let worker = crate::hook::start_worker(home).ok().flatten();
+    let worker = crate::hook::start_worker(home).unwrap_or_else(|e| {
+        eprintln!("(the worker did not start: {e:#})");
+        None
+    });
     let viewer = (!view_held(home))
-        .then(|| crate::hook::spawn_detached(home, &["view", "--resident"]))
+        .then(|| {
+            forget_outcome(home);
+            crate::hook::spawn_detached(home, &["view", "--resident"])
+        })
         .flatten();
     // Each is reaped when it leaves: this run may serve on in the foreground, and a child it
     // never waited for would stay a zombie under it (Codex on #378).
@@ -308,6 +314,12 @@ fn outcome(home: &Path) -> Option<String> {
     std::fs::read_to_string(home.join("state").join("view-outcome")).ok()
 }
 
+/// Before a viewer is started: the outcome one that is gone left is not the new one's (Codex on
+/// #378). Called only while no viewer holds the lock, so a live viewer's outcome is never taken.
+fn forget_outcome(home: &Path) {
+    let _ = std::fs::remove_file(home.join("state").join("view-outcome"));
+}
+
 /// Replaces `state/view-outcome` whole, so a reader never sees half of it.
 fn say(home: &Path, what: &str) -> Result<()> {
     let state = home.join("state");
@@ -384,6 +396,7 @@ impl Starter {
             return;
         }
         self.started = Some(now);
+        forget_outcome(home);
         self.child = (self.spawn)(home);
     }
 }
@@ -3862,6 +3875,21 @@ mod tests {
             std::process::Command::new("sleep").arg("0.3").spawn().ok()
         });
         (started, Starter::with(every, after_busy, spawn))
+    }
+
+    /// Codex on #378: the outcome a viewer that is gone left is taken away before another is
+    /// started, so no one reads it as the new one's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_start_takes_the_last_viewers_outcome_away() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        say(p, "listening 17373").unwrap();
+        let (started, mut starter) = sleeper(Duration::ZERO, Duration::from_secs(600));
+        starter.due(p);
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(outcome(p), None);
     }
 
     /// Resident tests 2 and 5 (R4): the starter starts a viewer when `state/view.lock` is free,

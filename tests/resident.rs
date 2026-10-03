@@ -402,3 +402,29 @@ fn a_worker_whose_store_does_not_open_still_starts_the_viewer() {
     assert!(!worker.success());
     until("the viewer", || held(h, "view.lock"));
 }
+
+/// R7: `oboete view` says so when the worker it is to start cannot be (Codex on #378); the
+/// viewer still comes up.
+#[test]
+fn view_says_when_the_worker_does_not_start() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    std::fs::write(
+        h.join("config.toml"),
+        format!("[worker]\nresident = true\n[view]\nport = {port}\n"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(h.join("state").join("worker.lock")).unwrap();
+    let _detached = Detached(h);
+    let out = Command::new(env!("CARGO_BIN_EXE_oboete"))
+        .arg("--home")
+        .arg(h)
+        .arg("view")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("the worker did not start"), "{said}");
+    assert!(held(h, "view.lock"));
+}
