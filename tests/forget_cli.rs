@@ -263,6 +263,261 @@ fn lose_raw_and_request_logs(home: &Path, backup: &str) {
     }
 }
 
+/// A rescan hides the body without denying its native origin. Backup and repeated restore
+/// must keep enough original metadata to preview/register forget without restoring a sample.
+#[test]
+fn a_restored_rescan_hidden_native_record_can_be_forgotten_without_its_body() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let id = record(home, CANARY);
+    let keep = hook_record(home, "unrelated-restored-rescan-record-741");
+    rescan_and_backup_native_record(home, &id);
+    lose_raw_and_request_logs(home, "rescanned");
+    ok(run(home, &["restore"], ""));
+    assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
+    assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
+    let preview = run(home, &["forget", "--record", &id], "");
+    assert!(
+        String::from_utf8_lossy(&preview.stdout).contains("Raw records: 1"),
+        "restored native metadata could not preview forget: {}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    assert!(String::from_utf8_lossy(&preview.stderr).contains("needs a terminal"));
+    assert!(!String::from_utf8_lossy(&preview.stdout).contains(CANARY));
+    std::fs::write(
+        home.join("config.toml"),
+        "[summary]\ncurate = false\n[backup]\ndir = 'rescanned-again'\n",
+    )
+    .unwrap();
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    lose_raw_and_request_logs(home, "rescanned-again");
+    ok(run(home, &["restore"], ""));
+    let registered = ok(run(home, &["forget", "--record", &id, "--yes"], ""));
+    assert!(registered.contains("Raw records: 1"));
+    assert!(
+        !registered.contains(CANARY),
+        "Removed returned a body sample"
+    );
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    lose_raw_and_request_logs(home, "rescanned-again");
+    ok(run(home, &["restore"], ""));
+    std::fs::write(
+        home.join("config.toml"),
+        "[summary]\ncurate = false\n[backup]\ndir = 'rescanned-forgotten'\n",
+    )
+    .unwrap();
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    lose_raw_and_request_logs(home, "rescanned-forgotten");
+    ok(run(home, &["restore"], ""));
+    for generation in ["rescanned", "rescanned-again", "rescanned-forgotten"] {
+        for entry in std::fs::read_dir(home.join(generation)).unwrap() {
+            let path = entry.unwrap().path();
+            if path.to_string_lossy().ends_with(".seg.zst") {
+                let bytes = zstd::stream::decode_all(std::fs::File::open(path).unwrap()).unwrap();
+                let text = String::from_utf8(bytes).unwrap();
+                assert!(
+                    !text.contains(CANARY),
+                    "a rescan-hidden body returned in its backup"
+                );
+                for line in text.lines() {
+                    let v: serde_json::Value = serde_json::from_str(line).unwrap();
+                    if v["type"] == "removed" {
+                        for field in [
+                            "body",
+                            "sample",
+                            "agent",
+                            "session",
+                            "repo",
+                            "cwd",
+                            "branch",
+                            "head",
+                            "gitdir",
+                            "ledger",
+                            "original_bytes",
+                        ] {
+                            assert!(v.get(field).is_none(), "Removed kept {field}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    db.execute("DELETE FROM ops WHERE type='migration'", [])
+        .unwrap();
+    drop(db);
+    let source = home.join("native-source.db");
+    let imported = ok(run(
+        home,
+        &["migrate", "--from", source.to_str().unwrap()],
+        "",
+    ));
+    assert!(
+        imported.contains("\"records\":0"),
+        "restored origin denial was lost: {imported}"
+    );
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    let line = |time: &str, prompt: &str| {
+        serde_json::json!({
+            "type":"user", "sessionId":"native-session", "cwd":"/synthetic",
+            "timestamp":time, "message":{"role":"user", "content":prompt}
+        })
+    };
+    std::fs::write(
+        projects.join("restored-rescan-cut.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            line(
+                "1970-01-01T00:00:00.100Z",
+                "earlier-restored-rescan-record-742"
+            ),
+            line("1970-01-01T00:00:00.101Z", CANARY),
+            line(
+                "1970-01-01T00:00:00.102Z",
+                "later-restored-rescan-record-743"
+            )
+        ),
+    )
+    .unwrap();
+    ok(run(
+        home,
+        &["import", "transcripts", "--agent", "claude", "--yes"],
+        "",
+    ));
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    for body in [CANARY, "later-restored-rescan-record-743"] {
+        assert!(
+            !ok(run(
+                home,
+                &["search", "--all", "--raw", "only", "--", body],
+                ""
+            ))
+            .contains(body)
+        );
+    }
+    assert!(
+        ok(run(
+            home,
+            &[
+                "search",
+                "--all",
+                "--raw",
+                "only",
+                "--",
+                "earlier-restored-rescan-record-742"
+            ],
+            ""
+        ))
+        .contains("earlier-restored-rescan-record-742")
+    );
+    assert!(ok(run(home, &["get", &keep], "")).contains("unrelated-restored-rescan-record-741"));
+}
+
+fn rescan_and_backup_native_record(home: &Path, id: &str) {
+    let (device, seq) = id.split_once(':').unwrap();
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    db.execute(
+        "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq)
+         SELECT ?1, COALESCE(MAX(seq),0)+1, 'tombstone', 200, 'rescan', ?1, ?2
+         FROM records WHERE device=?1",
+        rusqlite::params![device, seq.parse::<i64>().unwrap()],
+    )
+    .unwrap();
+    drop(db);
+    // A new backup generation exports the hidden record rather than its already-sealed body.
+    std::fs::write(
+        home.join("config.toml"),
+        "[summary]\ncurate = false\n[backup]\ndir = 'rescanned'\n",
+    )
+    .unwrap();
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+}
+
+/// An old or damaged Removed line cannot supply the missing cutoff from its identity, a
+/// restore timestamp, or another record. Refuse before registration through later backups too.
+#[test]
+fn restored_removed_records_with_missing_or_unverifiable_metadata_are_refused() {
+    use sha2::{Digest, Sha256};
+    for damage in [
+        "source",
+        "kind",
+        "ts",
+        "unknown-source",
+        "invalid-kind",
+        "invalid-ts",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+        let id = record(home, CANARY);
+        rescan_and_backup_native_record(home, &id);
+        for entry in std::fs::read_dir(home.join("rescanned")).unwrap() {
+            let path = entry.unwrap().path();
+            if !path.to_string_lossy().ends_with(".seg.zst") {
+                continue;
+            }
+            let bytes = zstd::stream::decode_all(std::fs::File::open(&path).unwrap()).unwrap();
+            let mut edited = String::new();
+            for line in String::from_utf8(bytes).unwrap().lines() {
+                let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+                if v["type"] == "removed" {
+                    match damage {
+                        "unknown-source" => v["source"] = serde_json::json!("unverified-source"),
+                        "invalid-kind" => v["kind"] = serde_json::json!({"unknown": true}),
+                        "invalid-ts" => v["ts"] = serde_json::json!("unknown"),
+                        field => {
+                            v.as_object_mut().unwrap().remove(field);
+                        }
+                    }
+                }
+                edited.push_str(&v.to_string());
+                edited.push('\n');
+            }
+            let compressed = zstd::bulk::compress(edited.as_bytes(), 3).unwrap();
+            let name = path.file_name().unwrap().to_string_lossy();
+            let sum = format!("{:x}  {name}\n", Sha256::digest(&compressed));
+            let mut checksum = path.as_os_str().to_os_string();
+            checksum.push(".sha256");
+            std::fs::write(checksum, sum).unwrap();
+            std::fs::write(path, compressed).unwrap();
+        }
+        lose_raw_and_request_logs(home, "rescanned");
+        ok(run(home, &["restore"], ""));
+        for repeat in [false, true] {
+            if repeat {
+                std::fs::write(
+                    home.join("config.toml"),
+                    "[summary]\ncurate = false\n[backup]\ndir = 'unknown-metadata-again'\n",
+                )
+                .unwrap();
+                ok(run(home, &["worker", "--idle-ms", "0"], ""));
+                lose_raw_and_request_logs(home, "unknown-metadata-again");
+                ok(run(home, &["restore"], ""));
+            }
+            let rejected = run(home, &["forget", "--record", &id, "--yes"], "");
+            assert!(!rejected.status.success(), "{damage} metadata was inferred");
+            assert!(
+                String::from_utf8_lossy(&rejected.stderr).contains("no original import metadata"),
+                "{damage}: {}",
+                String::from_utf8_lossy(&rejected.stderr)
+            );
+            assert!(!String::from_utf8_lossy(&rejected.stdout).contains(CANARY));
+            assert!(
+                !String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY)
+            );
+            assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
+            assert!(!home.join("forget.log").exists());
+            let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+            let denied: i64 = db
+                .query_row("SELECT COUNT(*) FROM denied_records", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(denied, 0, "{damage} metadata registered a partial denial");
+        }
+    }
+}
+
 /// The request logs are unavailable: each restored store's next backup must carry the same
 /// native denial and session cutoff, without giving a removed record its body back.
 #[test]

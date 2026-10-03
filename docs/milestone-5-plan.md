@@ -114,6 +114,8 @@ importer は capture 前の agent/session から session hash を作り、origin
 whole-record tombstone で隠れた import も、残る native identity で選ぶ。隠れた record の本文
 サンプルは返さず、元の source・kind・時刻だけを読み transcript の切れ目を判断する。
 その metadata も失われた record は推測せず拒否する。既に origin が deny された record は再登録しない。
+Removed の backup も元の source・kind・時刻だけを運び、restore と再 backup 後も登録できる。
+旧形式等でこの metadata が完全に残らない場合は、本文なしのまま登録を拒否する。
 home lineage にも同じ安全条件を適用する。旧 raw の現在の device だけでは、それ以前の
 コピーとの家系を証明できないため、proof のない home は現行 importer の native record が
 追加されても第一 slice の forget を登録前に拒否する。hook・import・search は継続する。

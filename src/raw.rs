@@ -638,7 +638,6 @@ impl Raw {
         &self,
         target: crate::forget::Target,
     ) -> Result<crate::forget::Preview> {
-        use rusqlite::OptionalExtension;
         let (device, from, to) = target.bounds()?;
         anyhow::ensure!(
             device == self.device,
@@ -692,14 +691,7 @@ impl Raw {
                         (e.source, e.kind, e.ts)
                     }
                     Item::Removed => self
-                        .conn
-                        .query_row(
-                            "SELECT source, kind, ts FROM records
-                             WHERE device=?1 AND seq=?2 AND type='event'",
-                            params![device, r.seq],
-                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
-                        )
-                        .optional()?
+                        .original_import_metadata(device, r.seq)?
                         .with_context(|| format!("record {device}:{} has no original import metadata: nothing was registered", r.seq))?,
                     _ => continue,
                 };
@@ -1581,6 +1573,16 @@ impl Raw {
                     }
                 }
                 let mut v: serde_json::Value = serde_json::from_str(&line(r, rows))?;
+                // A rescan removes the body, not eligibility to deny its native origin. Keep
+                // only the original metadata the forget preview needs for its session cutoff.
+                if matches!(r.item, Item::Removed)
+                    && let Some((source, kind, ts)) =
+                        self.original_import_metadata(&r.device, r.seq)?
+                {
+                    v["source"] = serde_json::json!(source);
+                    v["kind"] = serde_json::json!(kind);
+                    v["ts"] = serde_json::json!(ts);
+                }
                 // The home lineage, unlike the appending device, survives a copied file. Its
                 // record backups keep it too, so a lost raw.db still recognizes its logs.
                 v["home_id"] = serde_json::json!(self.home_id);
@@ -1611,6 +1613,26 @@ impl Raw {
                 }
             }
         }
+    }
+
+    /// An import's original metadata, without any body or labels. Older Removed stubs lack
+    /// kind; their restore timestamp and source must never be guessed into a transcript cut.
+    fn original_import_metadata(
+        &self,
+        device: &str,
+        seq: i64,
+    ) -> Result<Option<(String, String, i64)>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT source, kind, ts FROM records WHERE device=?1 AND seq=?2
+             AND type IN ('event', 'removed') AND source IN ('oboete-v1', 'transcript')
+             AND kind IS NOT NULL AND kind <> ''",
+                params![device, seq],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?)
     }
 
     /// An imported record's origin (D1 rule 5).
@@ -2508,9 +2530,20 @@ impl Rebuild {
                 }
             }
             Some("removed") => {
+                // Restore only a complete explicitly carried triple. A legacy or malformed
+                // line remains a bodyless, ineligible stub rather than inventing its cutoff.
+                let metadata = match (s("source"), s("kind"), i("ts")) {
+                    (Some(source), Some(kind), Some(ts))
+                        if !source.is_empty() && !kind.is_empty() =>
+                    {
+                        (source, Some(kind), ts)
+                    }
+                    _ => ("restore", None, 0),
+                };
                 self.conn.execute(
-                    "INSERT INTO records(device, seq, type, ts, source) VALUES(?1, ?2, 'removed', 0, 'restore')",
-                    params![device, seq],
+                    "INSERT INTO records(device, seq, type, ts, source, kind)
+                     VALUES(?1, ?2, 'removed', ?3, ?4, ?5)",
+                    params![device, seq, metadata.2, metadata.0, metadata.1],
                 )?;
             }
             Some("tombstone") => {
