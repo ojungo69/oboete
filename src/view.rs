@@ -57,6 +57,9 @@ struct Viewer {
     opener: Mutex<Option<PathBuf>>,
     /// Connections being served: at most `MAX_CONNECTIONS`.
     live: AtomicUsize,
+    /// Connections taken since the start: whether one came since the resident viewer's last look
+    /// (R4).
+    requests: AtomicUsize,
 }
 
 /// What a request's `X-Oboete-Token` must be.
@@ -151,21 +154,28 @@ impl Response {
     }
 }
 
-/// Serve until interrupted.
+/// Serve until interrupted. In a resident home with no `--port`, it makes sure the resident
+/// viewer runs and prints its address instead (R7); when that viewer does not come up, it says
+/// why and serves here, on an address of this run, as in any other home.
 pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
+    if port == 0 && resident_home(home) {
+        match bring_up(home, Duration::from_secs(3)) {
+            Ok(port) => return show_resident(home, port, open),
+            Err(why) => eprintln!(
+                "(the resident viewer is not up: {why}; this run serves the page on its own address)"
+            ),
+        }
+    }
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let port = listener.local_addr()?.port();
-    let token = new_token()?;
+    let token = fresh_token()?;
     let url = format!("http://127.0.0.1:{port}/#t={token}");
-    let viewer = Arc::new(Viewer {
-        home: home.to_path_buf(),
-        cwd: Some(std::env::current_dir()?),
+    let viewer = Arc::new(Viewer::new(
+        home,
+        Some(std::env::current_dir()?),
         port,
-        token: Token::Run(token),
-        saving: Mutex::new(()),
-        opener: Mutex::new(None),
-        live: AtomicUsize::new(0),
-    });
+        Token::Run(token),
+    ));
     println!("{url}\n(open it in a browser; Ctrl-C stops the viewer)");
     if open {
         viewer.open(home, &url, open_browser);
@@ -174,8 +184,82 @@ pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
     Ok(())
 }
 
+/// Whether this home keeps a resident worker and viewer (R2): Linux only, as they are for now.
+fn resident_home(home: &Path) -> bool {
+    cfg!(target_os = "linux") && crate::config::worker(home).is_ok_and(|w| w.resident)
+}
+
+/// R7: makes sure the resident viewer runs, and starts the worker too when nothing holds its
+/// lock, as a hook does: ready when `state/view.lock` is held and the outcome says it listens on
+/// the configured port, waited for up to `wait`. Nothing is sent to the port; why it is not
+/// ready otherwise.
+fn bring_up(home: &Path, wait: Duration) -> std::result::Result<u16, String> {
+    std::fs::create_dir_all(home.join("state")).map_err(|e| e.to_string())?;
+    if !owner_only(home) {
+        return Err(NOT_PRIVATE.into());
+    }
+    let port = crate::config::view(home)
+        .map_err(|e| format!("{e:#}"))?
+        .port
+        .get();
+    let _ = crate::hook::start_worker(home);
+    if !view_held(home) {
+        let _ = crate::hook::spawn_detached(home, &["view", "--resident"]);
+    }
+    let listening = format!("listening {port}");
+    let deadline = Instant::now() + wait;
+    loop {
+        let outcome = outcome(home);
+        if view_held(home) && outcome.as_deref() == Some(listening.as_str()) {
+            return Ok(port);
+        }
+        if Instant::now() >= deadline {
+            return Err(outcome.unwrap_or_else(|| "it did not start".into()));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The resident viewer's address, with the token of its file, and `--open` through the opener
+/// page, which the viewer removes when the browser brings the token (R7).
+fn show_resident(home: &Path, port: u16, open: bool) -> Result<()> {
+    let token = file_token(home).ok_or_else(|| anyhow!("the resident viewer's token file"))?;
+    let url = format!("http://127.0.0.1:{port}/#t={token}");
+    println!("{url}\n(the resident viewer: bookmark this address; it stays up)");
+    if open {
+        match opener_page(home, port, &url) {
+            Ok(page) => open_browser(&page),
+            Err(e) => eprintln!("(could not write the page for the browser: {e})"),
+        }
+    }
+    Ok(())
+}
+
+/// `oboete view --new-token` (R6): a new token file and, in a resident home, the next free port
+/// in `[view] port`, so the viewer comes back on a new address: the old one's tick sees the port
+/// change and it leaves, and the worker starts it again. Whether the port moved, and the address
+/// to bookmark.
+pub fn new_token(home: &Path) -> Result<(bool, String)> {
+    std::fs::create_dir_all(home.join("state"))?;
+    anyhow::ensure!(owner_only(home), NOT_PRIVATE);
+    write_token(home)?;
+    let token = file_token(home).ok_or_else(|| anyhow!("the new token file"))?;
+    let from = crate::config::view(home)?.port.get();
+    let moved = resident_home(home);
+    let port = if moved {
+        let port = (from.saturating_add(1)..=u16::MAX)
+            .find(|&p| TcpListener::bind(("127.0.0.1", p)).is_ok())
+            .ok_or_else(|| anyhow!("no free port after {from}"))?;
+        crate::settings::set_view_port(home, port)?;
+        port
+    } else {
+        from
+    };
+    Ok((moved, format!("http://127.0.0.1:{port}/#t={token}")))
+}
+
 /// 16 bytes of the OS generator, in lower-case hex.
-fn new_token() -> Result<String> {
+fn fresh_token() -> Result<String> {
     let mut raw = [0u8; 16];
     getrandom::fill(&mut raw).map_err(|e| anyhow!("random token: {e}"))?;
     Ok(raw.iter().map(|b| format!("{b:02x}")).collect())
@@ -183,6 +267,116 @@ fn new_token() -> Result<String> {
 
 /// The outcome of a resident start on a filesystem whose modes keep no file its owner's alone.
 const NOT_PRIVATE: &str = "this home's filesystem cannot keep the page's token to its owner";
+
+/// The outcome of a resident start whose port another program or home holds.
+const PORT_IN_USE: &str = "port in use";
+
+/// How often the resident viewer looks at its home, and the worker at the viewer (R4).
+const MINUTE: Duration = Duration::from_secs(60);
+
+/// How long the worker waits to start the viewer again after "port in use" (R4).
+const AFTER_PORT_IN_USE: Duration = Duration::from_secs(600);
+
+/// Whether the home's files can be its owner's alone, which the token file needs (R6).
+fn owner_only(home: &Path) -> bool {
+    own_state(home)
+        && std::fs::File::open(home.join("state")).is_ok_and(|d| crate::keyfile::private_fs(&d))
+}
+
+/// Whether a viewer holds `state/view.lock` now.
+fn view_held(home: &Path) -> bool {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.join("state").join("view.lock"))
+        .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+}
+
+/// `state/view-outcome`, as the resident viewer last wrote it.
+fn outcome(home: &Path) -> Option<String> {
+    std::fs::read_to_string(home.join("state").join("view-outcome")).ok()
+}
+
+/// Replaces `state/view-outcome` whole, so a reader never sees half of it.
+fn say(home: &Path, what: &str) -> Result<()> {
+    let state = home.join("state");
+    let next = state.join("view-outcome.next");
+    // Made anew, so a link planted before is not written through.
+    clear(&next)?;
+    let mut file = (std::fs::OpenOptions::new().write(true).create_new(true)).open(&next)?;
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    file.write_all(what.as_bytes())?;
+    std::fs::rename(&next, state.join("view-outcome"))?;
+    Ok(())
+}
+
+/// How a `Starter` starts the viewer: the child it reaps.
+type Spawn = Box<dyn FnMut(&Path) -> Option<std::process::Child>>;
+
+/// What starts the resident viewer for a resident worker (R4): at the worker's start and then at
+/// most once a minute, where the worker looks at its backup deadline, when the home's files can
+/// be its owner's and nothing holds `state/view.lock`; after "port in use", only every 10
+/// minutes. It keeps the viewer it started and reaps it before it starts another.
+pub struct Starter {
+    every: Duration,
+    after_busy: Duration,
+    next: Instant,
+    started: Option<Instant>,
+    child: Option<std::process::Child>,
+    spawn: Spawn,
+}
+
+impl Starter {
+    pub fn new() -> Self {
+        Self::with(
+            MINUTE,
+            AFTER_PORT_IN_USE,
+            Box::new(|home| crate::hook::spawn_detached(home, &["view", "--resident"])),
+        )
+    }
+
+    fn with(every: Duration, after_busy: Duration, spawn: Spawn) -> Self {
+        Self {
+            every,
+            after_busy,
+            next: Instant::now(),
+            started: None,
+            child: None,
+            spawn,
+        }
+    }
+
+    pub fn due(&mut self, home: &Path) {
+        // Reaped as soon as it has left, so it is no zombie for a minute.
+        if self
+            .child
+            .as_mut()
+            .is_some_and(|c| !matches!(c.try_wait(), Ok(None)))
+        {
+            self.child = None;
+        }
+        let now = Instant::now();
+        if now < self.next || self.child.is_some() {
+            return;
+        }
+        self.next = now + self.every;
+        let busy = outcome(home).as_deref() == Some(PORT_IN_USE);
+        if busy
+            && self
+                .started
+                .is_some_and(|t| now.duration_since(t) < self.after_busy)
+        {
+            return;
+        }
+        if !owner_only(home) || view_held(home) {
+            return;
+        }
+        self.started = Some(now);
+        self.child = (self.spawn)(home);
+    }
+}
 
 /// A resident viewer that started: its lock, held while it serves, its listener and itself.
 struct Resident {
@@ -192,19 +386,42 @@ struct Resident {
 }
 
 /// The resident viewer (docs/resident.md R5, R6, R8): on `[view] port`, with the token of
-/// `state/view-token` and no checkout, until it is stopped. It says in `state/view-outcome` that it
-/// listens, or why it did not start; one that finds another holding `state/view.lock` exits
-/// and writes nothing.
+/// `state/view-token` and no checkout. It says in `state/view-outcome` that it listens, or why it
+/// did not start; one that finds another holding `state/view.lock` exits and writes nothing. Once
+/// a minute it looks at its home and leaves when `leaving` says so, while no connection is live
+/// and no save runs (R4).
 pub fn resident(home: &Path) -> Result<()> {
-    if let Some(Resident {
+    let Some(Resident {
         lock,
         listener,
         viewer,
     }) = listen(home)?
-    {
-        accept(&listener, &viewer);
-        drop(lock);
-    }
+    else {
+        return Ok(());
+    };
+    let id = crate::worker::file_id(lock.metadata());
+    let looking = Arc::clone(&viewer);
+    std::thread::spawn(move || {
+        let mut seen = looking.requests.load(Ordering::SeqCst);
+        loop {
+            std::thread::sleep(MINUTE);
+            let now = looking.requests.load(Ordering::SeqCst);
+            let quiet = std::mem::replace(&mut seen, now) == now;
+            let Some(why) = looking.leaving(id, quiet) else {
+                continue;
+            };
+            if looking.live.load(Ordering::SeqCst) == 0
+                && let Ok(_saving) = looking.saving.try_lock()
+            {
+                if !matches!(why, Leaving::Gone) {
+                    let _ = say(&looking.home, &format!("left: {}", why.text()));
+                }
+                std::process::exit(0);
+            }
+        }
+    });
+    accept(&listener, &viewer);
+    drop(lock);
     Ok(())
 }
 
@@ -241,6 +458,25 @@ fn clear(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Why the resident viewer leaves (R4).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Leaving {
+    /// Its home is another now, or none: nothing is written into it.
+    Gone,
+    Moved,
+    NotResident,
+}
+
+impl Leaving {
+    fn text(self) -> &'static str {
+        match self {
+            Leaving::Gone => "its home is gone",
+            Leaving::Moved => "[view] port names another port",
+            Leaving::NotResident => "the home is no longer resident",
+        }
+    }
+}
+
 /// The resident viewer's start: the lock first, then `starting`, the filesystem check, the token
 /// file, the port, and `listening <port>`; a start that fails says why instead.
 fn listen(home: &Path) -> Result<Option<Resident>> {
@@ -260,21 +496,9 @@ fn listen(home: &Path) -> Result<Option<Resident>> {
         Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
         Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
     }
-    // Replaced whole, so a reader never sees half of it.
-    let say = |what: &str| -> Result<()> {
-        let next = state.join("view-outcome.next");
-        // Made anew, so a link planted before is not written through.
-        clear(&next)?;
-        let mut file = (std::fs::OpenOptions::new().write(true).create_new(true)).open(&next)?;
-        #[cfg(unix)]
-        file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-        file.write_all(what.as_bytes())?;
-        std::fs::rename(&next, state.join("view-outcome"))?;
-        Ok(())
-    };
-    let failed = |why: &str| say(why).map(|()| None);
-    say("starting")?;
-    if !crate::keyfile::private_fs(&std::fs::File::open(&state)?) {
+    let failed = |why: &str| say(home, why).map(|()| None);
+    say(home, "starting")?;
+    if !owner_only(home) {
         return failed(NOT_PRIVATE);
     }
     if let Err(e) = ensure_token(home) {
@@ -286,22 +510,14 @@ fn listen(home: &Path) -> Result<Option<Resident>> {
     };
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return failed("port in use"),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return failed(PORT_IN_USE),
         Err(e) => return failed(&e.to_string()),
     };
-    say(&format!("listening {port}"))?;
+    say(home, &format!("listening {port}"))?;
     Ok(Some(Resident {
         lock,
         listener,
-        viewer: Arc::new(Viewer {
-            home: home.to_path_buf(),
-            cwd: None,
-            port,
-            token: Token::File,
-            saving: Mutex::new(()),
-            opener: Mutex::new(None),
-            live: AtomicUsize::new(0),
-        }),
+        viewer: Arc::new(Viewer::new(home, None, port, Token::File)),
     }))
 }
 
@@ -363,14 +579,19 @@ fn file_token(home: &Path) -> Option<String> {
 }
 
 /// R6: at the resident viewer's start, under its lock, a new token file when the file is not as
-/// `file_token` takes it (missing, or another shape, or readable by others): staged with mode
-/// 0600, synced, renamed over the old one, and its folder synced.
+/// `file_token` takes it (missing, or another shape, or readable by others).
 fn ensure_token(home: &Path) -> Result<()> {
     if file_token(home).is_some() {
         return Ok(());
     }
+    write_token(home)
+}
+
+/// A new token file: staged with mode 0600 under a name of this process's (a viewer's start and
+/// `--new-token` may write at once), synced, renamed over the old one, and its folder synced.
+fn write_token(home: &Path) -> Result<()> {
     let state = home.join("state");
-    let staged = state.join("view-token.tmp");
+    let staged = state.join(format!("view-token.{}.tmp", std::process::id()));
     // Made anew, so it has this mode and is no link planted before.
     clear(&staged)?;
     let mut file = std::fs::OpenOptions::new();
@@ -381,7 +602,7 @@ fn ensure_token(home: &Path) -> Result<()> {
     // The umask takes bits from the mode asked for, the owner's own read among them.
     #[cfg(unix)]
     file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-    file.write_all(new_token()?.as_bytes())?;
+    file.write_all(fresh_token()?.as_bytes())?;
     file.sync_all()?;
     std::fs::rename(&staged, state.join("view-token"))?;
     std::fs::File::open(&state)?.sync_all()?;
@@ -523,7 +744,37 @@ fn saved(result: std::result::Result<Value, crate::settings::Refusal>) -> Respon
 }
 
 impl Viewer {
+    fn new(home: &Path, cwd: Option<PathBuf>, port: u16, token: Token) -> Self {
+        Self {
+            home: home.to_path_buf(),
+            cwd,
+            port,
+            token,
+            saving: Mutex::new(()),
+            opener: Mutex::new(None),
+            live: AtomicUsize::new(0),
+            requests: AtomicUsize::new(0),
+        }
+    }
+
+    /// R4: why the resident viewer leaves at a look, if it does: its home is gone (its lock file
+    /// is another than `lock`, or none), `[view] port` names another port, or config.toml loads,
+    /// does not say `resident = true`, and no request came since the last look (`quiet`). A file
+    /// that does not load leaves it as it is.
+    fn leaving(&self, lock: crate::worker::FileId, quiet: bool) -> Option<Leaving> {
+        let state = self.home.join("state");
+        if crate::worker::file_id(std::fs::metadata(state.join("view.lock"))) != lock {
+            return Some(Leaving::Gone);
+        }
+        if crate::config::view(&self.home).is_ok_and(|v| v.port.get() != self.port) {
+            return Some(Leaving::Moved);
+        }
+        (quiet && crate::config::worker(&self.home).is_ok_and(|w| !w.resident))
+            .then_some(Leaving::NotResident)
+    }
+
     fn serve(&self, mut stream: TcpStream) {
+        self.requests.fetch_add(1, Ordering::SeqCst);
         let deadline = Instant::now() + REQUEST_TIME;
         let mut buf = Vec::with_capacity(2048);
         let mut chunk = [0u8; 4096];
@@ -1295,15 +1546,7 @@ mod tests {
     fn viewer(name: &str) -> (PathBuf, Viewer) {
         let dir = std::env::temp_dir().join(format!("oboete-view-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let v = Viewer {
-            home: dir.clone(),
-            cwd: Some(dir.clone()),
-            port: 4321,
-            token: Token::Run("t0k".into()),
-            saving: Mutex::new(()),
-            opener: Mutex::new(None),
-            live: AtomicUsize::new(0),
-        };
+        let v = Viewer::new(&dir, Some(dir.clone()), 4321, Token::Run("t0k".into()));
         (dir, v)
     }
 
@@ -1398,15 +1641,7 @@ mod tests {
             )
             .unwrap();
         }
-        let v = Viewer {
-            home: s.home.path().to_owned(),
-            cwd: Some(dir),
-            port: 4321,
-            token: Token::Run("t0k".into()),
-            saving: Mutex::new(()),
-            opener: Mutex::new(None),
-            live: AtomicUsize::new(0),
-        };
+        let v = Viewer::new(s.home.path(), Some(dir), 4321, Token::Run("t0k".into()));
         (
             s,
             v,
@@ -3230,15 +3465,7 @@ mod tests {
     /// A resident viewer of `home` on `port` (docs/resident.md R8): no checkout, the token in its
     /// file.
     fn resident_of(home: &Path, port: u16) -> Viewer {
-        Viewer {
-            home: home.to_owned(),
-            cwd: None,
-            port,
-            token: Token::File,
-            saving: Mutex::new(()),
-            opener: Mutex::new(None),
-            live: AtomicUsize::new(0),
-        }
+        Viewer::new(home, None, port, Token::File)
     }
 
     /// A port nothing listens on now.
@@ -3343,7 +3570,12 @@ mod tests {
             std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert!(!p.join("state/view-token.tmp").exists());
+        let staged = std::fs::read_dir(p.join("state"))
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.ends_with(".tmp"))
+            .count();
+        assert_eq!(staged, 0);
     }
 
     /// Resident tests 3 and 5 (R5): the viewer takes its lock, binds the configured port, says
@@ -3384,7 +3616,11 @@ mod tests {
         let other = resident_home(port);
         assert!(listen(other.path()).unwrap().is_none());
         assert_eq!(view_outcome(other.path()), "port in use");
-        assert!(!other.path().join("state/view-token.tmp").exists());
+        let staged = std::fs::read_dir(other.path().join("state"))
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .any(|n| n.ends_with(".tmp"));
+        assert!(!staged);
         drop((lock, listener));
         let again = listen(p).unwrap().unwrap();
         assert_eq!(view_outcome(p), format!("listening {port}"));
@@ -3594,6 +3830,190 @@ mod tests {
         let found = get(&v, "/api/search?q=Open+words");
         assert_eq!(found["vector"], "excluded", "{found}");
         assert_eq!(stub.requests(), sent);
+    }
+
+    /// A starter whose viewer is a short `sleep`: how many it started, and the starter.
+    #[cfg(target_os = "linux")]
+    fn sleeper(every: Duration, after_busy: Duration) -> (Arc<AtomicUsize>, Starter) {
+        let started = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&started);
+        let spawn = Box::new(move |_: &Path| {
+            count.fetch_add(1, Ordering::SeqCst);
+            std::process::Command::new("sleep").arg("0.3").spawn().ok()
+        });
+        (started, Starter::with(every, after_busy, spawn))
+    }
+
+    /// Resident tests 2 and 5 (R4): the starter starts a viewer when `state/view.lock` is free,
+    /// none while the one it started runs or another holds the lock, and reaps each that left
+    /// before it starts another, so none is left a zombie.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_starter_starts_a_viewer_only_when_its_lock_is_free_and_reaps_the_one_that_left() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        let (started, mut starter) = sleeper(Duration::ZERO, Duration::from_secs(600));
+        starter.due(p);
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        // Its own still runs: none other.
+        starter.due(p);
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        // Another holds the lock: once its own has left, it is reaped and none is started.
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(p.join("state/view.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        starter.due(p);
+        assert!(
+            starter.child.is_none(),
+            "the viewer that left was not reaped"
+        );
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        drop(lock);
+        // A child another test thread forked holds the lock file until it execs: looked at again
+        // for a moment, as `worker::try_lock` waits under `cargo test`.
+        let t = Instant::now();
+        while started.load(Ordering::SeqCst) < 2 && t.elapsed() < Duration::from_secs(2) {
+            starter.due(p);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+    }
+
+    /// Resident test 5 (R4): after an outcome of "port in use" the starter tries again only once
+    /// its wait for that has passed, and it waits its minute between any two looks.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn after_a_port_in_use_the_starter_waits_before_it_tries_again() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        let (started, mut starter) = sleeper(Duration::ZERO, Duration::from_millis(800));
+        starter.due(p);
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        say(p, PORT_IN_USE).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        starter.due(p);
+        assert_eq!(started.load(Ordering::SeqCst), 1, "tried again at once");
+        std::thread::sleep(Duration::from_millis(500));
+        starter.due(p);
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+        // Between two looks, its minute.
+        let (started, mut starter) = sleeper(Duration::from_secs(60), Duration::ZERO);
+        starter.due(p);
+        std::thread::sleep(Duration::from_millis(400));
+        starter.due(p);
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+    }
+
+    /// Resident test 6 (R4, R6): where the home's files cannot be its owner's alone the starter
+    /// starts nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_starter_starts_nothing_where_files_cannot_be_the_owners_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        let (started, mut starter) = sleeper(Duration::ZERO, Duration::ZERO);
+        crate::keyfile::fake_fs(Some(0x6969));
+        starter.due(p);
+        crate::keyfile::fake_fs(None);
+        assert_eq!(started.load(Ordering::SeqCst), 0);
+    }
+
+    /// Resident test 14 and R4's tick: the viewer leaves when config.toml loads and does not say
+    /// `resident = true` and no request came since the last look, when its home is gone, or when
+    /// `[view] port` names another port; a file that does not load leaves it as it is.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_viewer_leaves_when_its_home_says_so() {
+        let port = free_port();
+        let home = resident_home(port);
+        let p = home.path();
+        let config = |text: &str| std::fs::write(p.join("config.toml"), text).unwrap();
+        config(&format!(
+            "[worker]\nresident = true\n[view]\nport = {port}\n"
+        ));
+        let Resident { lock, viewer, .. } = listen(p).unwrap().unwrap();
+        let id = crate::worker::file_id(lock.metadata());
+        assert_eq!(viewer.leaving(id, true), None);
+        config(&format!(
+            "[worker]\nresident = false\n[view]\nport = {port}\n"
+        ));
+        assert_eq!(
+            viewer.leaving(id, false),
+            None,
+            "a request came since the last look"
+        );
+        assert!(viewer.leaving(id, true).is_some());
+        config("[worker]\nresident = false\n[view\n");
+        assert_eq!(viewer.leaving(id, true), None, "a file that does not load");
+        config(&format!(
+            "[worker]\nresident = true\n[view]\nport = {}\n",
+            port + 1
+        ));
+        assert!(viewer.leaving(id, true).is_some());
+        config(&format!(
+            "[worker]\nresident = true\n[view]\nport = {port}\n"
+        ));
+        assert_eq!(viewer.leaving(id, true), None);
+        std::fs::remove_file(p.join("state/view.lock")).unwrap();
+        std::fs::write(p.join("state/view.lock"), "").unwrap();
+        assert!(viewer.leaving(id, true).is_some(), "a home replaced");
+    }
+
+    /// Resident test 3 (R6): `--new-token` replaces the token file, so the old token fails and
+    /// the new one works, and in a resident home writes the next free port into `[view] port`,
+    /// the rest of config.toml as it was.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_new_token_replaces_the_file_and_moves_a_resident_viewer_to_a_free_port() {
+        use std::os::unix::fs::PermissionsExt;
+        let port = free_port();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        let config = format!("# mine\n[worker]\nresident = true\n[view]\nport = {port}\n");
+        std::fs::write(p.join("config.toml"), &config).unwrap();
+        ensure_token(p).unwrap();
+        let file = p.join("state/view-token");
+        let old = std::fs::read_to_string(&file).unwrap();
+        let (moved, url) = new_token(p).unwrap();
+        let new = std::fs::read_to_string(&file).unwrap();
+        assert_ne!(new, old);
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let to = crate::config::view(p).unwrap().port.get();
+        assert!(moved && to > port, "{to}");
+        assert_eq!(url, format!("http://127.0.0.1:{to}/#t={new}"));
+        let text = std::fs::read_to_string(p.join("config.toml")).unwrap();
+        assert!(
+            text.starts_with("# mine\n[worker]\nresident = true\n"),
+            "{text}"
+        );
+        let v = resident_of(p, to);
+        let host = format!("127.0.0.1:{to}");
+        let status = |t: &str| {
+            v.route(
+                "GET",
+                "/api/repos",
+                &[("Host", &host), ("X-Oboete-Token", t)],
+            )
+            .status
+        };
+        assert_eq!((status(&old), status(&new)), (401, 200));
+        // Not resident: the file alone.
+        std::fs::write(p.join("config.toml"), "[view]\nport = 17399\n").unwrap();
+        let (moved, _) = new_token(p).unwrap();
+        assert!(!moved);
+        assert_eq!(crate::config::view(p).unwrap().port.get(), 17399);
     }
 
     #[test]

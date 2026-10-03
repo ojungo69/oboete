@@ -1905,22 +1905,23 @@ pub(crate) fn last_assistant_in_transcript(path: &Path) -> String {
 
 /// After every append (D6): start a worker when none holds the lock. The lock is dropped before
 /// the spawn; while a worker runs, this costs one open and one failed `flock`.
-fn start_worker(home: &Path) -> Result<()> {
+pub(crate) fn start_worker(home: &Path) -> Result<()> {
     if std::env::var_os("OBOETE_NO_SPAWN").is_some() {
         return Ok(());
     }
     if crate::worker::lock(home)?.is_some() {
-        spawn_detached(home, &["worker"]);
+        let _ = spawn_detached(home, &["worker"]);
     }
     Ok(())
 }
 
-/// `oboete --home <home> <args>`, detached in its own process group.
-fn spawn_detached(home: &Path, args: &[&str]) {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
+/// `oboete --home <home> <args>`, detached in its own process group: the child, for a caller that
+/// reaps it (a resident worker's viewer, docs/resident.md R4). `OBOETE_NO_SPAWN` starts none.
+pub(crate) fn spawn_detached(home: &Path, args: &[&str]) -> Option<std::process::Child> {
+    if std::env::var_os("OBOETE_NO_SPAWN").is_some() {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("--home").arg(home).args(args);
     cmd.stdin(std::process::Stdio::null())
@@ -1948,7 +1949,7 @@ fn spawn_detached(home: &Path, args: &[&str]) {
             unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
         }
     }
-    let _ = cmd.spawn();
+    cmd.spawn().ok()
 }
 
 #[cfg(test)]

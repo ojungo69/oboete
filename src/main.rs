@@ -236,6 +236,10 @@ enum Cmd {
         /// (docs/resident.md R5); what a resident worker starts
         #[arg(long, hide = true, conflicts_with_all = ["port", "open"])]
         resident: bool,
+        /// Replace the resident viewer's token, and move it to a new address: the old bookmark
+        /// stops opening the page
+        #[arg(long, conflicts_with_all = ["port", "open", "resident"])]
+        new_token: bool,
     },
     /// Import claude-mem's SQLite database or Claude Code and Codex transcripts
     Import {
@@ -716,6 +720,20 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             Ok(())
         }
         Cmd::View { resident: true, .. } => view::resident(&home),
+        Cmd::View {
+            new_token: true, ..
+        } => {
+            let (moved, url) = view::new_token(&home)?;
+            println!("{url}");
+            if moved {
+                println!(
+                    "Delete the old bookmark and bookmark this address: the viewer moves here within two minutes, and the old address no longer opens the page."
+                );
+            } else {
+                println!("(a new token; this home's viewer uses it once the home is resident)");
+            }
+            Ok(())
+        }
         Cmd::View { port, open, .. } => view::run(&home, port, open),
         Cmd::Replay {
             fixture,
