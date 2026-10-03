@@ -33,41 +33,64 @@ impl Consumer for Cards {
             if op.body["recurate"] == true {
                 replace(k, device, op.op_seq, &op.body)?;
             }
-            let summary = op.body["summary"].as_str().unwrap_or("").trim();
-            // A summary as long as the op keeps one may have been cut there, ungated (K6).
-            if op.body["outcome"] != "curated"
-                || summary.is_empty()
-                || summary.chars().count() >= crate::curate::MAX_SUMMARY_CHARS
-            {
+            if op.body["outcome"] != "curated" {
                 continue;
             }
+            // K1: its observations, or without that list its summary, as a card with no title. A
+            // summary as long as the op keeps one may have been cut there, ungated (K6): no card.
+            let summary = op.body["summary"].as_str().unwrap_or("").trim();
+            let of_summary = [serde_json::json!({"narrative": summary})];
+            let cards: &[serde_json::Value] = match op.body["observations"].as_array() {
+                Some(cards) => cards,
+                None if summary.is_empty()
+                    || summary.chars().count() >= crate::curate::MAX_SUMMARY_CHARS =>
+                {
+                    continue;
+                }
+                None => &of_summary,
+            };
             let labels = raw.labels_in(device, span.from, span.to)?;
             let (agent, session) = labels.session.unzip();
-            // An op that lists none: every removal from its records hides the card (K4).
-            let list = |field: &str| match &op.body[field] {
+            // A list as the table keeps it; none where the op or the card gives none. An op
+            // that lists no removal: every removal from its records hides the card (K4).
+            let list = |v: &serde_json::Value| match v {
                 list @ serde_json::Value::Array(_) => list.to_string(),
                 _ => "[]".to_owned(),
             };
-            k.execute(
-                "INSERT INTO cards(device, op_seq, n, from_seq, from_offset, to_seq, to_offset,
-                   goals, removed, ts, agent, session, repo, narrative)
-                 VALUES(?1, ?2, 0, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![
-                    device,
-                    op.op_seq,
-                    span.from,
-                    span.from_offset,
-                    span.to,
-                    span.to_offset,
-                    list("goals"),
-                    list("removed"),
-                    labels.ts.unwrap_or(op.ts),
-                    agent,
-                    session,
-                    labels.repo,
-                    summary
-                ],
-            )?;
+            let (goals, removed) = (list(&op.body["goals"]), list(&op.body["removed"]));
+            for (n, c) in cards.iter().enumerate() {
+                let text = |field: &str| c[field].as_str().unwrap_or("");
+                k.execute(
+                    "INSERT INTO cards(device, op_seq, n, from_seq, from_offset, to_seq,
+                       to_offset, goals, removed, ts, agent, session, repo, type, title,
+                       subtitle, narrative, facts, concepts, files_read, files_modified)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                       ?16, ?17, ?18, ?19, ?20, ?21)",
+                    params![
+                        device,
+                        op.op_seq,
+                        n as i64,
+                        span.from,
+                        span.from_offset,
+                        span.to,
+                        span.to_offset,
+                        goals,
+                        removed,
+                        labels.ts.unwrap_or(op.ts),
+                        agent,
+                        session,
+                        labels.repo,
+                        c["type"].as_str(),
+                        text("title"),
+                        text("subtitle"),
+                        text("narrative"),
+                        list(&c["facts"]),
+                        list(&c["concepts"]),
+                        list(&c["files_read"]),
+                        list(&c["files_modified"])
+                    ],
+                )?;
+            }
         }
         Ok(last)
     }
@@ -199,6 +222,54 @@ mod tests {
         assert_eq!(c.session.as_deref(), Some("s1"));
         assert_eq!(c.repo.as_deref(), Some("r"));
         assert_eq!(c.kind, None);
+    }
+
+    /// K1: a window op's observations are its cards, in their order, with claude-mem's fields;
+    /// its summary is then no card, and an op with an empty list has none.
+    #[test]
+    fn a_window_ops_observations_are_its_cards() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        two_records(&mut raw);
+        let (kind, mut op) = window(1, 1, "curated", "The summary.");
+        op["observations"] = json!([
+            {"type": "bugfix", "title": "The parser no longer drops the last line",
+             "subtitle": "A missing newline lost it.", "narrative": "It read up to a newline.",
+             "facts": ["read_line returned at EOF.", "The fix reads to the end."],
+             "concepts": ["problem-solution", "gotcha"],
+             "files_read": ["src/a.rs"], "files_modified": ["src/b.rs"]},
+            {"type": null, "title": "Second", "subtitle": "", "narrative": "",
+             "facts": [], "concepts": [], "files_read": [], "files_modified": []}
+        ]);
+        let (_, mut none) = window(2, 2, "curated", "Nothing worth a card.");
+        none["observations"] = json!([]);
+        raw.append_ops(&[(kind, op), (kind, none)]).unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        let cards = recent(home.path(), "r");
+        assert_eq!(cards.len(), 2, "{cards:?}");
+        let c = &cards[0];
+        assert_eq!((c.op_seq, c.n, c.kind.as_deref()), (1, 0, Some("bugfix")));
+        assert_eq!(c.title, "The parser no longer drops the last line");
+        assert_eq!(c.subtitle, "A missing newline lost it.");
+        assert_eq!(c.narrative, "It read up to a newline.");
+        assert_eq!(
+            c.facts,
+            ["read_line returned at EOF.", "The fix reads to the end."]
+        );
+        assert_eq!(c.concepts, ["problem-solution", "gotcha"]);
+        assert_eq!(
+            (&c.files_read[..], &c.files_modified[..]),
+            (&["src/a.rs".to_owned()][..], &["src/b.rs".to_owned()][..])
+        );
+        assert_eq!(
+            (
+                cards[1].n,
+                cards[1].kind.as_deref(),
+                cards[1].title.as_str()
+            ),
+            (1, None, "Second")
+        );
     }
 
     /// Every card kept, whoever it is of: (narrative, agent, session, repo), in op order.
@@ -431,6 +502,34 @@ mod tests {
             assert!(!text.contains("AAAA1111"), "{text}");
         }
         assert!(c.narrative.ends_with("Its tests pass."), "{}", c.narrative);
+    }
+
+    /// K6 for a curator's card: its title, subtitle, narrative, facts and files are each gated
+    /// with the rules as they are when it is read.
+    #[test]
+    fn a_rule_added_after_a_curators_card_was_written_masks_every_field() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        two_records(&mut raw);
+        let (kind, mut op) = window(1, 2, "curated", "The summary.");
+        op["observations"] = json!([{"type": "change", "title": "Sent otp=AAAA1111",
+            "subtitle": "With otp=AAAA1111.", "narrative": "The otp=AAAA1111 went out.",
+            "facts": ["otp=AAAA1111 is the value."], "concepts": ["gotcha"],
+            "files_read": ["logs/otp=AAAA1111.txt"], "files_modified": ["otp=AAAA1111.rs"]}]);
+        raw.append_ops(&[(kind, op)]).unwrap();
+        crate::worker::run_once(home.path()).unwrap();
+        let rules = rules(
+            home.path(),
+            r#"{ id = "otp", regex = 'otp=([A-Za-z0-9]+)', secret_group = 1 }"#,
+        );
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let cards = cards::recent(&k, &raw, "r", 10, &rules).unwrap();
+        let c = &cards[0];
+        let lists = [&c.facts, &c.files_read, &c.files_modified];
+        let texts = [&c.title, &c.subtitle, &c.narrative];
+        for text in texts.into_iter().chain(lists.into_iter().flatten()) {
+            assert!(text.contains("otp=[REDACTED]"), "{text}");
+        }
     }
 
     /// K6: a title is cut from the narrative as the gate leaves it, so a value the rules hide by

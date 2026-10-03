@@ -1945,8 +1945,13 @@ mod tests {
                 "scope": "repo", "body": "b", "quote": "q", "line": "L1", "supersedes": [],
                 "why": ""})
         };
-        let ok = serde_json::json!({"claims": [claim("decision")], "summary": "s"});
+        let ok = serde_json::json!({"claims": [claim("decision")], "summary": "s",
+            "observations": []});
         assert!(fits(&ok, &schema));
+        // Without its cards an answer is not of the shape; the curator's own check takes it
+        // (`curate::check`), as it takes a line id written as a number.
+        let no_cards = serde_json::json!({"claims": [claim("decision")], "summary": "s"});
+        assert!(!fits(&no_cards, &schema));
         // Valid JSON, wrong keys: what a free model without strict schema support returned.
         let other = serde_json::json!({"issue": "x", "resolution": "y", "decision": "z"});
         assert!(!fits(&other, &schema));
@@ -1957,7 +1962,8 @@ mod tests {
         let summary_not_text = serde_json::json!({"claims": [], "summary": 3});
         assert!(!fits(&summary_not_text, &schema));
         // Kinds outside the enum are mapped later (the claims consumer), not refused here.
-        let odd_kind = serde_json::json!({"claims": [claim("Decision")], "summary": ""});
+        let odd_kind = serde_json::json!({"claims": [claim("Decision")], "summary": "",
+            "observations": []});
         assert!(fits(&odd_kind, &schema));
     }
 

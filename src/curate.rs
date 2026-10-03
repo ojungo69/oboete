@@ -1659,6 +1659,12 @@ fn answered(
                     "summary": summary, "dropped": dropped, "lowered": gated.lowered,
                     "candidates": shown});
                 shown_records(raw, &mut op, w, &req.goals)?;
+                if let Some((cards, dropped)) = cards_of(w, &r.output) {
+                    op["observations"] = cards.into();
+                    if dropped > 0 {
+                        op["cards_dropped"] = dropped.into();
+                    }
+                }
                 Ok((op, claims))
             }
             // Counted like a provider that failed: no answer this window can use.
@@ -2612,6 +2618,106 @@ fn waiting(p: &Pending, now: i64) -> Phase {
     }
 }
 
+/// Cards one window may give (docs/cards.md slice 2).
+const MAX_CARDS: usize = 5;
+/// A card's title, subtitle and narrative, at most, in characters: a card with a longer one is
+/// dropped, not cut (K6: a reader cuts after the gate).
+const CARD_TITLE: usize = 300;
+const CARD_SUBTITLE: usize = 500;
+const CARD_NARRATIVE: usize = 4_000;
+/// A card's facts, and its files of each list, at most; and each of them, in characters.
+const CARD_FACTS: usize = 10;
+const CARD_FILES: usize = 20;
+const CARD_ITEM: usize = 500;
+
+/// Whether `text` shows `path` whole (C3), not as a part of a longer one: `/etc/passwd` is not
+/// shown by `/tmp/etc/passwd`, nor `src/auth.rs` by `src/auth.rs.bak`, nor `bar.rs` by
+/// `foo+bar.rs`. A relative path may end a longer one (the same file under a directory), and a
+/// full stop may follow it.
+fn shows_path(text: &str, path: &str) -> bool {
+    // A letter, a digit or an ASCII mark a file name may hold (`+`, `@`, `:`) is part of one;
+    // whitespace, the marks text puts around a path and any other mark (`「`, `、`) end it, and a
+    // `.` or a `:` ends it where no more of a name follows (a `:` before a line number too).
+    let part = |c: char| {
+        c.is_alphanumeric() || (c.is_ascii_graphic() && !"\"'`()[]{}<>,;=|!?#".contains(c))
+    };
+    let relative = !path.starts_with(['/', '\\', '~']) && path.get(1..2) != Some(":");
+    !path.is_empty()
+        && text.match_indices(path).any(|(at, _)| {
+            let starts = match text[..at].chars().next_back() {
+                Some('/' | '\\') => relative,
+                Some(c) => !part(c),
+                None => true,
+            };
+            let mut after = text[at + path.len()..].chars();
+            let ends = match after.next() {
+                Some('.') => after.next().is_none_or(|c| !part(c)),
+                Some(':') => after.next().is_none_or(|c| c.is_ascii_digit() || !part(c)),
+                Some(c) => !part(c),
+                None => true,
+            };
+            starts && ends
+        })
+}
+
+/// The answer's cards as the window op keeps them (docs/cards.md slice 2), and how many it
+/// gave that are not kept; none when the answer has no list of them. Each is checked alone and
+/// none fails its window: claude-mem's one rule for keeping an observation is a title. A type
+/// outside its nine is no type, a concept outside its seven goes, a file is kept when the
+/// window's lines name it (a card is found by its files, so it names none the curator did not
+/// read of), and a text over its cap drops the card.
+fn cards_of(w: &Window, answer: &Value) -> Option<(Vec<Value>, u64)> {
+    let given = answer.get("observations")?.as_array()?;
+    let text = |c: &Value, field: &str, cap: usize| -> Option<String> {
+        let t = c[field].as_str().unwrap_or("").trim();
+        (t.chars().count() <= cap).then(|| t.to_owned())
+    };
+    // The items that are text within `CARD_ITEM`, each once, at most `cap`.
+    let list = |c: &Value, field: &str, cap: usize, keep: &dyn Fn(&str) -> bool| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for item in c[field].as_array().into_iter().flatten() {
+            let item = item.as_str().unwrap_or("").trim();
+            if !item.is_empty()
+                && item.chars().count() <= CARD_ITEM
+                && keep(item)
+                && !out.iter().any(|x| x == item)
+                && out.len() < cap
+            {
+                out.push(item.to_owned());
+            }
+        }
+        out
+    };
+    // The lines' own text: their ids and the session headings are the window's marks, not what
+    // the curator read (Codex on #369).
+    let named = |path: &str| w.lines.iter().any(|l| shows_path(&l.text, path));
+    let mut kept = Vec::new();
+    for c in given {
+        let card = (|| {
+            let title = text(c, "title", CARD_TITLE).filter(|t| !t.is_empty())?;
+            let subtitle = text(c, "subtitle", CARD_SUBTITLE)?;
+            let narrative = text(c, "narrative", CARD_NARRATIVE)?;
+            let kind = c["type"]
+                .as_str()
+                .filter(|t| crate::cards::TYPES.contains(t));
+            Some(json!({"type": kind, "title": title, "subtitle": subtitle,
+                "narrative": narrative,
+                "facts": list(c, "facts", CARD_FACTS, &|_| true),
+                "concepts": list(c, "concepts", crate::cards::CONCEPTS.len(),
+                    &|x| crate::cards::CONCEPTS.contains(&x)),
+                "files_read": list(c, "files_read", CARD_FILES, &named),
+                "files_modified": list(c, "files_modified", CARD_FILES, &named)}))
+        })();
+        if kept.len() < MAX_CARDS
+            && let Some(card) = card
+        {
+            kept.push(card);
+        }
+    }
+    let dropped = (given.len() - kept.len()) as u64;
+    Some((kept, dropped))
+}
+
 /// Removals a window op lists, at most: an op that lists none has no card shown once any of
 /// its records lost a part (docs/cards.md K4).
 const MAX_REMOVED: usize = 500;
@@ -2825,6 +2931,13 @@ fn within_op_cap(mut op: Value) -> Value {
         }
         cut += 1;
         op["cut"] = cut.into();
+    }
+    // Its cards last, from the end: each is within its own caps, three can still be too many.
+    while op.to_string().len() > crate::raw::MAX_OP_BYTES
+        && let Some(cards) = op.get_mut("observations").and_then(Value::as_array_mut)
+        && cards.pop().is_some()
+    {
+        op["cards_dropped"] = (op["cards_dropped"].as_u64().unwrap_or(0) + 1).into();
     }
     op
 }
@@ -3454,9 +3567,9 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          - body: one or two concrete sentences (names, paths, numbers), at most 1,000 characters.\n\
          - quote: 5 to 200 characters copied exactly from one line (all of a shorter line, such \
          as a bare \"1\" that picks an option), the one that shows it (the developer's own line \
-         for decided): from its prompt, reply or tool output, never from a tool's input; never \
-         text shown as [REDACTED].\n\
-         - line: that line's id.\n\
+         for decided): from its prompt, reply or tool output, never from a tool's input or from \
+         the claims below; never text shown as [REDACTED].\n\
+         - line: that line's id (L1, L2, ...), never a uid.\n\
          - supersedes: the ids of claims in your answer, or the uids of kept or carried claims, \
          that this one changes, reverses or cancels (the developer chose another way, dropped or \
          removed what it set up, or decided the opposite), or that it accepts (a go-ahead such \
@@ -3473,17 +3586,45 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          session is a decided open item. When nothing is worth \
          remembering, return an empty claims array. Before you answer, check each claim against \
          the kept and carried claims below, and fill its supersedes as defined above.\n\
+         The summary and the cards are about the numbered lines only: what they asked for, did, \
+         changed, decided or found out, as the lines show it. The kept and carried claims are \
+         already known: never a card's subject or a new claim, only what a supersedes names when \
+         a line changes one. A command whose output is not shown says nothing about its result.\n\
          The summary is 2-4 sentences: what the developer asked for, what was worked on, what \
          was decided, what is still open.\n\
-         Write every body and the summary in {language}.\n\n\
-         {fence}\n{text}\n## Kept claims these lines may replace or reverse (uid: body)\n\
-         {candidates}\n## Carried from earlier in each session\n{carried}\n{fence}"
+         Also return observations: the cards of this stretch for the project's timeline. One \
+         card for each thing it built, fixed, changed, decided or found out; a concrete finding \
+         from reading code, logs or data is one too. Usually 1 to 3, at most 5; none only when \
+         every step was routine: an empty status check, an install without errors, a listing \
+         or a search that found nothing, or a result only confirmed again. For each:\n\
+         - type: bugfix (was broken, now fixed), feature (new capability), refactor \
+         (restructured, same behaviour), change (docs, config, other edits), discovery (how the \
+         existing system works), decision (a design choice and its reason), security_alert \
+         (needs attention before going on), security_note (worth recording, not urgent) or \
+         sensitive (should not spread: internal URLs, unreleased plans, personal details, \
+         business numbers, client names).\n\
+         - title: a short title of the core action or topic.\n\
+         - subtitle: one sentence, at most 24 words.\n\
+         - narrative: what was done, how it works, why it matters.\n\
+         - facts: concise statements that each stand alone: no pronouns, with file names, \
+         functions and values.\n\
+         - concepts: 2 to 5 of how-it-works, why-it-exists, what-changed, problem-solution, \
+         gotcha, pattern, trade-off.\n\
+         - files_read, files_modified: paths as the lines give them.\n\
+         Say what the system now does or what was learned (\"Login now uses OAuth2 with PKCE\"), \
+         not that it was looked at (\"Analyzed the login code\").\n\
+         Write every body, the summary and each card in {language}; a type and a concept stay \
+         as written above.\n\n\
+         {fence}\n{text}\n## Already known: kept claims these lines may replace or reverse (uid: \
+         body)\n{candidates}\n## Already known: carried from earlier in each session\n{carried}\n\
+         {fence}"
     )
 }
 
 /// The answer's shape, as the chain checks it.
 pub fn schema() -> Value {
     let text = json!({"type": "string"});
+    let texts = json!({"type": "array", "items": text});
     json!({
         "type": "object",
         "properties": {
@@ -3510,9 +3651,29 @@ pub fn schema() -> Value {
                     "additionalProperties": false
                 }
             },
-            "summary": text
+            "summary": text,
+            "observations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": crate::cards::TYPES},
+                        "title": text,
+                        "subtitle": text,
+                        "narrative": text,
+                        "facts": texts,
+                        "concepts": {"type": "array",
+                            "items": {"type": "string", "enum": crate::cards::CONCEPTS}},
+                        "files_read": texts,
+                        "files_modified": texts
+                    },
+                    "required": ["type", "title", "subtitle", "narrative", "facts", "concepts",
+                        "files_read", "files_modified"],
+                    "additionalProperties": false
+                }
+            }
         },
-        "required": ["claims", "summary"],
+        "required": ["claims", "summary", "observations"],
         "additionalProperties": false
     })
 }
@@ -8325,6 +8486,246 @@ mod tests {
             listed as u64 + op["cut"].as_u64().unwrap(),
             4 * MAX_CLAIMS as u64
         );
+    }
+
+    /// A card as a curator gives one (docs/cards.md slice 2).
+    fn card(title: &str) -> Value {
+        json!({"type": "feature", "title": title, "subtitle": "One sentence.",
+            "narrative": "What was done.", "facts": ["The parser reads one line at a time."],
+            "concepts": ["what-changed"], "files_read": [], "files_modified": []})
+    }
+
+    /// The window op of one prompt (`said`) whose answer is `output`.
+    fn op_of(said: &str, output: Value) -> Value {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&prompt(said)).unwrap();
+        let mut curator = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+            Ok(ChainResult {
+                output: output.clone(),
+                ..answered("fake")
+            })
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
+        assert_eq!(phase, Phase::Covered);
+        windows(&raw).remove(0)
+    }
+
+    fn observing(said: &str, observations: Value) -> Value {
+        op_of(
+            said,
+            json!({"claims": [], "summary": "Timestamps.", "observations": observations}),
+        )
+    }
+
+    /// docs/cards.md slice 2: the cards of an answer are kept in its window op, in their order.
+    #[test]
+    fn the_curators_cards_are_kept_in_the_window_op() {
+        let cards = json!([
+            card("The parser reads one line at a time"),
+            card("Its tests pass")
+        ]);
+        let op = observing("fix the parser", cards.clone());
+        assert_eq!(op["observations"], cards);
+        assert!(op.get("cards_dropped").is_none());
+        // No card is an answer too: the curator found nothing worth one.
+        assert_eq!(observing("ok", json!([]))["observations"], json!([]));
+    }
+
+    /// An answer without cards, or with something else in their place, is an answer as before:
+    /// its op has none, and the summary is the window's card (K1).
+    #[test]
+    fn an_answer_without_cards_gives_an_op_without_them() {
+        for output in [
+            json!({"claims": [], "summary": "s"}),
+            json!({"claims": [], "summary": "s", "observations": "none"}),
+            json!({"claims": [], "summary": "s", "observations": null}),
+        ] {
+            let op = op_of("ok", output);
+            assert_eq!(op["outcome"], "curated");
+            assert!(op.get("observations").is_none(), "{op}");
+        }
+    }
+
+    /// A card is checked alone and never fails its window: one without a title, one that is no
+    /// object, one with a text over its cap and those past the fifth are dropped and counted.
+    #[test]
+    fn a_card_the_op_cannot_keep_is_dropped_alone() {
+        let mut untitled = card("  ");
+        untitled["narrative"] = "No title.".into();
+        let mut long = card("Long");
+        long["narrative"] = "x".repeat(CARD_NARRATIVE + 1).into();
+        let given = json!([
+            card("First"),
+            untitled,
+            7,
+            long,
+            card("Second"),
+            card("Third"),
+            card("Fourth"),
+            card("Fifth"),
+            card("Sixth")
+        ]);
+        let op = observing("ok", given);
+        let kept = ["First", "Second", "Third", "Fourth", "Fifth"].map(card);
+        assert_eq!(op["observations"], json!(kept));
+        assert_eq!(op["cards_dropped"], 4);
+    }
+
+    /// A card's type is one of claude-mem's or none, its concepts are of the seven, a list holds
+    /// text only, and a file is kept when the window's lines name it.
+    #[test]
+    fn a_cards_type_concepts_and_files_are_held_to_what_is_known() {
+        let given = json!([{"type": "enhancement", "title": " The reader ",
+            "facts": ["One fact.", 3, "  "],
+            "concepts": ["gotcha", "pattern: reuse", "new-idea", "gotcha"],
+            "files_read": ["src/a.rs", "/etc/passwd"], "files_modified": ["src/b.rs"]}]);
+        let op = observing("read src/a.rs and say what it does", given);
+        assert_eq!(
+            op["observations"],
+            json!([{"type": null, "title": "The reader", "subtitle": "", "narrative": "",
+                "facts": ["One fact."], "concepts": ["gotcha"],
+                "files_read": ["src/a.rs"], "files_modified": []}])
+        );
+        assert!(op.get("cards_dropped").is_none());
+    }
+
+    /// Codex on slice 2: a file is kept when the lines show it whole, not as a part of a longer
+    /// path (`/etc/passwd` in `/tmp/etc/passwd`, `src/auth.rs` in `src/auth.rs.bak`); a relative
+    /// path may end a longer one, and a full stop may follow it.
+    #[test]
+    fn a_cards_file_is_kept_only_as_a_whole_path_its_lines_show() {
+        let given = json!([{"type": "change", "title": "Paths",
+            "files_read": ["/etc/passwd", "src/auth.rs", "src/main.rs", "notes.md",
+                "/home/u/repo/src/main.rs"],
+            "files_modified": ["/tmp/etc/passwd", "src/auth.rs.bak"]}]);
+        let said = "edited /tmp/etc/passwd and src/auth.rs.bak, then read \
+                    /home/u/repo/src/main.rs and notes.md.";
+        let op = observing(said, given);
+        let card = &op["observations"][0];
+        assert_eq!(
+            card["files_read"],
+            json!(["src/main.rs", "notes.md", "/home/u/repo/src/main.rs"])
+        );
+        assert_eq!(
+            card["files_modified"],
+            json!(["/tmp/etc/passwd", "src/auth.rs.bak"])
+        );
+    }
+
+    /// Codex on #369: the window's own marks are not what the curator read: a line's id (`L1`)
+    /// or a word of a session's heading names no file.
+    #[test]
+    fn a_cards_file_is_not_named_by_a_line_id_or_a_heading() {
+        let given = json!([{"type": "change", "title": "Marks",
+            "files_read": ["L1", "session", "notes.md"], "files_modified": []}]);
+        let op = observing("read notes.md", given);
+        assert_eq!(op["observations"][0]["files_read"], json!(["notes.md"]));
+    }
+
+    /// Codex on #369: a character a file name may hold is no boundary (`bar.rs` is not shown by
+    /// `foo+bar.rs`, nor `scope/pkg` by `@scope/pkg`, nor either name by `foo:bar.rs`); the marks
+    /// text puts around a path are, and so is a colon before a line number.
+    #[test]
+    fn a_path_ends_only_at_a_mark_text_puts_around_it() {
+        assert!(!shows_path("edited foo+bar.rs", "bar.rs"));
+        assert!(!shows_path("npm i @scope/pkg", "scope/pkg"));
+        assert!(!shows_path("edited foo:bar.rs", "bar.rs"));
+        assert!(!shows_path("edited foo:bar.rs", "foo"));
+        for said in [
+            "see src/a.rs:12",
+            "src/a.rs:12:5",
+            "src/a.rs: fixed",
+            "edited src/a.rs:",
+            "--file=src/a.rs",
+            "(src/a.rs)",
+            "\"src/a.rs\"",
+            "`src/a.rs`",
+            "src/a.rs#L3",
+            "src/a.rs, then",
+            "[src/a.rs]",
+            "「src/a.rs」を見た",
+            "src/a.rs、次",
+        ] {
+            assert!(shows_path(said, "src/a.rs"), "{said}");
+        }
+    }
+
+    /// Cards within their own caps can still pass the op cap together: the last goes first, and
+    /// the window is covered.
+    #[test]
+    fn a_window_ops_cards_are_cut_to_the_op_cap() {
+        let big = |title: &str| {
+            let mut c = card(title);
+            c["narrative"] = "語".repeat(CARD_NARRATIVE).into();
+            let facts: Vec<String> = (0..CARD_FACTS)
+                .map(|i| format!("{i}{}", "実".repeat(CARD_ITEM - 1)))
+                .collect();
+            c["facts"] = json!(facts);
+            c
+        };
+        let op = observing("ok", json!([big("First"), big("Second"), big("Third")]));
+        assert!(op.to_string().len() <= crate::raw::MAX_OP_BYTES);
+        let kept = op["observations"].as_array().unwrap();
+        assert!(
+            !kept.is_empty() && kept[0]["title"] == "First",
+            "{}",
+            kept.len()
+        );
+        assert_eq!(kept.len() as u64 + op["cards_dropped"].as_u64().unwrap(), 3);
+    }
+
+    /// The answer's shape names every field of a card as required, as a strict provider needs,
+    /// and the prompt asks for cards in the answer's language.
+    #[test]
+    fn the_answers_shape_and_the_prompt_ask_for_cards() {
+        let schema = schema();
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("observations"))
+        );
+        let card = &schema["properties"]["observations"]["items"];
+        let mut fields: Vec<&String> = card["properties"].as_object().unwrap().keys().collect();
+        let mut required: Vec<&str> = card["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        fields.sort();
+        required.sort();
+        assert_eq!(fields, required);
+        assert_eq!(card["additionalProperties"], false);
+        assert_eq!(
+            card["properties"]["type"]["enum"],
+            json!(crate::cards::TYPES)
+        );
+        let p = super::prompt("Japanese", "", "", "");
+        for word in crate::cards::TYPES.iter().chain(crate::cards::CONCEPTS) {
+            assert!(p.contains(word), "{word}");
+        }
+        assert!(p.contains("each card in Japanese"));
+    }
+
+    /// Free models wrote the carried open items as this window's cards and claims, a claim with a
+    /// uid for its line, and the result of a command whose output was elided (exp-b, 2026-10-03).
+    #[test]
+    fn the_prompt_keeps_the_summary_cards_and_claims_to_the_numbered_lines() {
+        let p = super::prompt("English", "", "", "");
+        for rule in [
+            "The summary and the cards are about the numbered lines only",
+            "already known: never a card's subject",
+            "says nothing about its result",
+            "never from a tool's input or from the claims below",
+            "that line's id (L1, L2, ...), never a uid",
+            "## Already known: kept claims",
+            "## Already known: carried from earlier",
+        ] {
+            assert!(p.contains(rule), "{rule}");
+        }
     }
 
     /// A candidate's line is `uid: body` in the fitted list; its uid quoted inside another's body

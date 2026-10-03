@@ -31,6 +31,30 @@ pub struct Card {
     pub files_modified: Vec<String>,
 }
 
+/// claude-mem's observation types, in its order (plugin/modes/code.json).
+pub const TYPES: &[&str] = &[
+    "bugfix",
+    "feature",
+    "refactor",
+    "change",
+    "discovery",
+    "decision",
+    "security_alert",
+    "security_note",
+    "sensitive",
+];
+
+/// claude-mem's observation concepts.
+pub const CONCEPTS: &[&str] = &[
+    "how-it-works",
+    "why-it-exists",
+    "what-changed",
+    "problem-solution",
+    "gotcha",
+    "pattern",
+    "trade-off",
+];
+
 pub(crate) fn schema(k: &Connection) -> Result<()> {
     k.execute_batch(
         "-- One row per card of a curated window op; the lists are JSON arrays of strings.
