@@ -255,6 +255,100 @@ fn an_old_backup_and_changed_capture_rules_do_not_reimport_a_forgotten_v1_event(
     assert!(ok(run(&home, &["forget", "--status"], "")).contains("physical purge pending"));
 }
 
+/// A v1 record's transcript boundary survives in the bodyless request when a restore loses the
+/// record itself. Earlier transcript history stays importable; the forgotten prompt does not.
+#[test]
+fn an_old_restore_keeps_the_forgotten_v1_sessions_transcript_cut() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    record(&home, "unrelated-session-before-the-forgotten-one-401");
+    let old_backup = root.path().join("before-session");
+    copy_backup(&home.join("backups"), &old_backup);
+    let source = home.join("native-source.db");
+    let db = rusqlite::Connection::open(&source).unwrap();
+    db.execute_batch(
+        "INSERT INTO sessions VALUES('forgotten-cut-session','claude','github.com/test/privacy',
+         '/synthetic',1788220800000,1788220800000);",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO events VALUES(2,'forgotten-cut-session','UserPromptSubmit',1788220800000,?1)",
+        [serde_json::json!({"prompt":CANARY}).to_string()],
+    )
+    .unwrap();
+    drop(db);
+    ok(run(
+        &home,
+        &["migrate", "--from", source.to_str().unwrap()],
+        "",
+    ));
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    let found = ok(run(
+        &home,
+        &["search", "--all", "--raw", "only", "--", CANARY],
+        "",
+    ));
+    let id = found.split_whitespace().next().unwrap();
+    ok(run(&home, &["forget", "--record", id, "--yes"], ""));
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    let line = |time: &str, prompt: &str| {
+        serde_json::json!({
+            "type":"user", "sessionId":"forgotten-cut-session", "cwd":"/synthetic",
+            "timestamp":time, "message":{"role":"user", "content":prompt}
+        })
+        .to_string()
+    };
+    std::fs::write(
+        projects.join("source.jsonl"),
+        format!(
+            "{}\n{}\n",
+            line(
+                "2026-08-31T23:59:59.000Z",
+                "earlier-transcript-record-to-keep-402"
+            ),
+            line("2026-09-01T00:00:00.000Z", CANARY)
+        ),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(home.join("backups")).unwrap();
+    copy_backup(&old_backup, &home.join("backups"));
+    ok(run(&home, &["restore"], ""));
+    ok(run(
+        &home,
+        &["import", "transcripts", "--agent", "claude", "--yes"],
+        "",
+    ));
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    let found = ok(run(
+        &home,
+        &["search", "--all", "--raw", "only", "--", CANARY],
+        "",
+    ));
+    assert!(
+        !found.contains(CANARY),
+        "the transcript brought the forgotten prompt back: {found}"
+    );
+    let earlier = ok(run(
+        &home,
+        &[
+            "search",
+            "--all",
+            "--raw",
+            "only",
+            "--",
+            "earlier-transcript-record-to-keep-402",
+        ],
+        "",
+    ));
+    assert!(
+        earlier.contains("earlier-transcript-record-to-keep-402"),
+        "{earlier}"
+    );
+}
+
 #[test]
 fn a_copied_transcript_keeps_its_forgotten_identity_under_new_redaction_rules() {
     let root = tempfile::tempdir().unwrap();
@@ -377,6 +471,109 @@ fn raw_db_gone_back_keeps_the_new_record_and_not_the_forgotten_one() {
     let fresh = hook_record(&home, "a-new-record-after-the-rollback-5521");
     assert!(ok(run(&home, &["get", &fresh], "")).contains("a-new-record-after-the-rollback-5521"));
     assert!(!String::from_utf8_lossy(&run(&home, &["get", &id], "").stdout).contains(CANARY));
+}
+
+/// F2 includes a new file taking raw.db's place: changing the device that appends new records
+/// does not make the same home's forget requests foreign, including a request registered after
+/// the first replacement and reconciled into a copy taken before it.
+#[test]
+fn replacing_raw_db_twice_keeps_both_forgets_and_blocks_reimport() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let first = record(&home, CANARY);
+    let old = root.path().join("raw-before.db");
+    std::fs::copy(home.join("raw.db"), &old).unwrap();
+    let replace = || {
+        for f in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(f));
+        }
+        let staged = home.join("raw.db.copy");
+        std::fs::copy(&old, &staged).unwrap();
+        std::fs::rename(&staged, home.join("raw.db")).unwrap();
+        ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    };
+    ok(run(&home, &["forget", "--record", &first, "--yes"], ""));
+    replace();
+    assert!(
+        !String::from_utf8_lossy(&run(&home, &["get", &first], "").stdout).contains(CANARY),
+        "the worker brought the first forgotten record back after a file replacement"
+    );
+    let second = record(&home, "forget-canary-topaz-after-replacement-381");
+    ok(run(&home, &["forget", "--record", &second, "--yes"], ""));
+    replace();
+    let source = home.join("native-source.db");
+    let imported = ok(run(
+        &home,
+        &["migrate", "--from", source.to_str().unwrap()],
+        "",
+    ));
+    assert!(imported.contains("\"records\":0"), "{imported}");
+    assert_eq!(
+        ok(run(&home, &["forget", "--status"], "")).lines().count(),
+        2
+    );
+    assert!(
+        !ok(run(
+            &home,
+            &["search", "--all", "--raw", "only", "--", "forget-canary"],
+            "",
+        ))
+        .contains("forget-canary")
+    );
+    let fresh = hook_record(&home, "unrelated-record-after-two-replacements-382");
+    assert!(
+        ok(run(&home, &["get", &fresh], ""))
+            .contains("unrelated-record-after-two-replacements-382")
+    );
+}
+
+/// F1 after F2: record backups carry the same home's identity after its appending device
+/// changes, so losing raw.db and restoring an older backup still applies the surviving log.
+#[test]
+fn restoring_a_copied_stores_backup_keeps_its_forget_log() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    record(&home, "unrelated-record-before-the-copy-391");
+    let staged = home.join("raw.db.copy");
+    std::fs::copy(home.join("raw.db"), &staged).unwrap();
+    for f in ["raw.db-wal", "raw.db-shm"] {
+        let _ = std::fs::remove_file(home.join(f));
+    }
+    std::fs::rename(&staged, home.join("raw.db")).unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        "[summary]\ncurate = false\n[backup]\ndir = 'new-backups'\n",
+    )
+    .unwrap();
+    let id = record(&home, CANARY);
+    let old_backup = root.path().join("before-forget");
+    copy_backup(&home.join("new-backups"), &old_backup);
+    ok(run(&home, &["forget", "--record", &id, "--yes"], ""));
+    std::fs::remove_dir_all(home.join("new-backups")).unwrap();
+    copy_backup(&old_backup, &home.join("new-backups"));
+    for f in ["raw.db", "raw.db-wal", "raw.db-shm"] {
+        let _ = std::fs::remove_file(home.join(f));
+    }
+    ok(run(&home, &["restore"], ""));
+    assert!(
+        !String::from_utf8_lossy(&run(&home, &["get", &id], "").stdout).contains(CANARY),
+        "the surviving log was lost when a copied store was restored from its backup"
+    );
+    assert_eq!(
+        ok(run(&home, &["forget", "--status"], "")).lines().count(),
+        1
+    );
+    let source = home.join("native-source.db");
+    let imported = ok(run(
+        &home,
+        &["migrate", "--from", source.to_str().unwrap()],
+        "",
+    ));
+    assert!(imported.contains("\"records\":0"), "{imported}");
 }
 
 /// D1 limit (F3): raw.db and both request logs lost bring the text back from older segments,

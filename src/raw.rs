@@ -292,6 +292,14 @@ fn denied(conn: &Connection, origin: Option<&str>, text: &str) -> Result<bool> {
     Ok(denied || cfg!(test) && text.contains(DENIED_IN_TESTS))
 }
 
+fn forgotten_cut(conn: &Connection, agent: &str, session: &str) -> Result<Option<i64>> {
+    Ok(conn.query_row(
+        "SELECT MIN(ts) FROM denied_records WHERE session=?1",
+        [crate::forget::session(agent, session)],
+        |r| r.get(0),
+    )?)
+}
+
 /// What `denied` refuses in tests.
 pub const DENIED_IN_TESTS: &str = "oboete-test:forgotten";
 
@@ -360,6 +368,8 @@ pub const MAX_BATCH_BYTES: usize = 4 << 20;
 pub struct Raw {
     conn: Connection,
     device: String,
+    /// The store's lineage, kept when a copied file gets a new device for future appends.
+    home_id: String,
     /// The shared hold on `<home>/raw.lock` every open keeps (see `swap_lock`).
     _swap: std::fs::File,
 }
@@ -429,13 +439,56 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     for file in ["raw.db", "raw.db-wal", "raw.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
+    // A file copied into this home gets a new device, but remains the same lineage for forget
+    // logs. Seed the lineage from the old device before ensure_device changes it; a fresh store
+    // uses its first device. Once present this metadata needs no write on a hook's open.
+    use rusqlite::OptionalExtension;
+    let known_home: Option<String> = conn
+        .query_row("SELECT value FROM meta WHERE key='home_id'", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    let previous_device = if known_home.is_none() {
+        conn.query_row("SELECT value FROM meta WHERE key='device_id'", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()?
+    } else {
+        None
+    };
+    let seed_home = |id: &str| {
+        crate::db::retry_busy(&conn, deadline, || {
+            conn.execute(
+                "INSERT OR IGNORE INTO meta(key, value) VALUES('home_id', ?1)",
+                [id],
+            )?;
+            Ok(())
+        })
+    };
+    // Seed before changing a copied store's device, so two simultaneous opens cannot choose
+    // the new device as its lineage in the gap between the two writes.
+    if let Some(id) = &previous_device {
+        seed_home(id)?;
+    }
     crate::db::ensure_device_until(&conn, &path, deadline).context("device id")?;
     let device = conn.query_row("SELECT value FROM meta WHERE key='device_id'", [], |r| {
-        r.get(0)
+        r.get::<_, String>(0)
     })?;
+    let home_id = match known_home {
+        Some(id) => id,
+        None => {
+            if previous_device.is_none() {
+                seed_home(&device)?;
+            }
+            conn.query_row("SELECT value FROM meta WHERE key='home_id'", [], |r| {
+                r.get(0)
+            })?
+        }
+    };
     Ok(Raw {
         conn,
         device,
+        home_id,
         _swap: swap,
     })
 }
@@ -589,7 +642,7 @@ impl Raw {
         );
         let request = crate::forget::Request {
             v: 1,
-            home: self.device.clone(),
+            home: self.home_id.clone(),
             job: job.into(),
             started,
             target: preview.target.clone(),
@@ -639,6 +692,10 @@ impl Raw {
 
     pub fn device(&self) -> &str {
         &self.device
+    }
+
+    pub(crate) fn home_id(&self) -> &str {
+        &self.home_id
     }
 
     /// SQLite's `quick_check` on raw.db: an error names the first problem it reports.
@@ -734,7 +791,12 @@ impl Raw {
         let mut seqs = Vec::with_capacity(batch.len());
         for (index, c) in batch.iter().enumerate() {
             let origin = origins.get(index).map(String::as_str);
-            if !denied(&tx, origin, &c.event.body)? {
+            // A transcript batch may have been prepared before a concurrent forget. Keep the
+            // native session's cut inside this transaction as well as at the importer's read.
+            let past_cut = c.event.source == "transcript"
+                && forgotten_cut(&tx, &c.event.agent, &c.event.session)?
+                    .is_some_and(|cut| c.event.ts >= cut);
+            if !past_cut && !denied(&tx, origin, &c.event.body)? {
                 let seq = insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
                 if let Some(origin) = origin {
                     tx.execute(
@@ -1377,7 +1439,10 @@ impl Raw {
                         row["field"] = serde_json::json!("~tombstoned");
                     }
                 }
-                let mut line = line(r, rows);
+                let mut v: serde_json::Value = serde_json::from_str(&line(r, rows))?;
+                // The home lineage, unlike the appending device, survives a copied file. Its
+                // record backups keep it too, so a lost raw.db still recognizes its logs.
+                v["home_id"] = serde_json::json!(self.home_id);
                 // An imported record keeps its origin, and a tombstone of a forgotten one the
                 // deny row, so a restore from the segments alone forgets it again (D1 rule 14).
                 let extra = match &r.item {
@@ -1390,10 +1455,9 @@ impl Raw {
                     _ => None,
                 };
                 if let Some((key, value)) = extra {
-                    let mut v: serde_json::Value = serde_json::from_str(&line)?;
                     v[key] = value;
-                    line = serde_json::to_string(&v)?;
                 }
+                let line = serde_json::to_string(&v)?;
                 bytes += line.len() + 1;
                 out.push((r.seq, line));
                 at = r.seq;
@@ -1728,6 +1792,19 @@ impl Raw {
         )?;
         let rows = st.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The time cut also kept by forgotten native records: a restore may keep their requests
+    /// but lose their events. Transcript-only forgets have no cut time, so do not hide earlier
+    /// unrelated history or the rest of a transcript session.
+    pub(crate) fn transcript_cut(
+        &self,
+        agent: &str,
+        session: &str,
+        recorded: Option<i64>,
+    ) -> Result<Option<i64>> {
+        let denied = forgotten_cut(&self.conn, agent, session)?;
+        Ok(recorded.into_iter().chain(denied).min())
     }
 
     /// `docs` as this device's `import` ops (D5), in appends of at most `IMPORT_BATCH` documents
@@ -2145,6 +2222,7 @@ fn line(r: &Record, ledger: Vec<serde_json::Value>) -> String {
 pub struct Rebuild {
     conn: Connection,
     forget: Vec<crate::forget::Request>,
+    home_id: Option<String>,
 }
 
 impl Rebuild {
@@ -2153,6 +2231,14 @@ impl Rebuild {
     /// cannot bring the text back.
     pub fn forget(&mut self, requests: Vec<crate::forget::Request>) {
         self.forget = requests;
+    }
+
+    pub(crate) fn home_id(&self) -> Result<String> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key='home_id'", [], |r| {
+                r.get(0)
+            })?)
     }
 
     pub fn new(path: &Path, device: &str) -> Result<Self> {
@@ -2164,10 +2250,13 @@ impl Rebuild {
             "UPDATE meta SET value = ?1 WHERE key = 'device_id'",
             [device],
         )?;
+        // Backups made before the lineage field use the partition's device as before.
+        conn.execute("INSERT INTO meta VALUES('home_id', ?1)", [device])?;
         conn.execute_batch("BEGIN")?;
         Ok(Self {
             conn,
             forget: Vec::new(),
+            home_id: None,
         })
     }
 
@@ -2179,6 +2268,20 @@ impl Rebuild {
         let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str);
         let i = |k: &str| v.get(k).and_then(serde_json::Value::as_i64);
         let (device, seq) = (s("device").context("device")?, i("seq").context("seq")?);
+        if let Some(value) = v.get("home_id") {
+            let id = value.as_str().context("backup home identity")?;
+            anyhow::ensure!(
+                !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric()),
+                "invalid backup home identity"
+            );
+            if let Some(known) = &self.home_id {
+                anyhow::ensure!(known == id, "backup home identities differ");
+            } else {
+                self.conn
+                    .execute("UPDATE meta SET value=?1 WHERE key='home_id'", [id])?;
+                self.home_id = Some(id.into());
+            }
+        }
         match s("type") {
             Some("event") => {
                 let body = s("body").unwrap_or("").as_bytes();

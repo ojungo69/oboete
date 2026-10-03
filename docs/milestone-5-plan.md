@@ -36,12 +36,14 @@ open が失敗して記録が止まり、戻すには手でファイルを消す
   本当の状態（home と backup の横の両方に記録済み、またはどちらが書けず restore で何を意味するか）
   を表示する。restore は swap のロックを取る前に両方のログを読み、ロック下で live raw.db を見直す。
 - **本文なしの要求ログ 2 部。** `<home>/forget.log` と `<backup dir>/forget.log`。1 要求 1 行の
-  JSON で、登録した home の device id、ランダムな 128 bit の job id、record ごとの device・seq・
+  JSON で、登録した home の安定した id、ランダムな 128 bit の job id、record ごとの device・seq・
   origin hash・session hash を持つ。時刻は transcript の切れ目に数える record だけが持つ。本文、
   パス、本文の fingerprint は持たない。1 要求 500 record、1 行 256 KiB まで（大きい対象は command
   が複数の要求に分ける）。追記は排他ロック下で 1 回ずつ、末尾が改行でなければ先に改行を書き、
   `fsync` し、作ったときはディレクトリも同期する。各行に payload の checksum を付け、checksum
   や形が合わない行、他 home の行は、その行だけ飛ばして報告する。
+  home の id は raw.db の metadata に置き、最初の device id から作る。ファイルのコピーで
+  将来の記録用の device id が変わっても保持し、record の backup にも運ぶ。別の権威は作らない。
 - **reconcile は双方向で、拒否しない。** worker の起動と stores を開き直すたび（`backup::check`
   の後、consumer と export の前）、`oboete restore`、forget command、import command の取り込み前に、
   raw にあってコピーにない要求をコピーへ書き、コピーにあって raw にない要求を raw へ適用する。
@@ -201,6 +203,13 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
 `a_resident_worker_opens_raw_db_again_when_another_file_takes_its_place`）。置き換わったファイルは
 別の端末の記録として読まれる（docs/cards.md S3）。
 
-残り: spec 6.3 の文言、独立レビュー。この結果は全 M5 の削除 canary 成功ではない。物理
+引き継ぎレビューで確認した 2 件の復活経路を修正した。
+raw.db を別ファイルに置き換えても home の id を保持し、古いコピーへの再置換やコピー後の backup
+からの復元で削除要求を適用する。忘れた v1 record の session hash と時刻から transcript の
+取り込み境界も回復し、準備済みの batch は追記 transaction 内でもその境界を確認する。
+CLI の追加試験 3 件と、準備後の忘却が追記を止める型付き API の試験で、先に失敗することと
+修正後の通過を確認した。削除対象より前の transcript と無関係な新規記録は残る。
+
+残り: 独立レビュー。この結果は全 M5 の削除 canary 成功ではない。物理
 purge、live/legacy identity、大量 selection、uid/session/repo/time、可逆な管理、WebUI、各 OS の
 安全性と M22 は後続。

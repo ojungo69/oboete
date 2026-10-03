@@ -130,7 +130,7 @@ impl Preview {
 }
 
 /// A registered request as raw's job row and each log line hold it (rules 3, 4): bodyless, with
-/// the home that registered it (a line of another home is never applied).
+/// the store's lineage, stable across a copied raw.db (a line of another lineage is not applied).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Request {
@@ -353,11 +353,11 @@ fn append_log(path: &Path, requests: &[&Request]) -> Result<()> {
 /// appended to each copy that lacks it. A copy that cannot be read or written is reported.
 pub(crate) fn reconcile(home: &Path, raw: &mut crate::raw::Raw) -> Result<Report> {
     let mut report = Report::default();
-    let device = raw.device().to_owned();
+    let home_id = raw.home_id().to_owned();
     let copies: Vec<(PathBuf, Option<Vec<Request>>)> = logs(home)
         .into_iter()
         .map(|p| {
-            let read = read_log(&p, Some(&device), &mut report);
+            let read = read_log(&p, Some(&home_id), &mut report);
             (p, read)
         })
         .collect();
@@ -597,6 +597,44 @@ mod tests {
         let log = std::fs::read_to_string(home.path().join(LOG)).unwrap();
         assert_eq!(log.lines().count(), 1);
         assert!(!log.contains("canary"), "{log}");
+    }
+
+    /// The importer may have prepared a transcript batch before forget registered its cut.
+    /// The append's transaction checks the current request, even with another source origin.
+    #[test]
+    fn a_prepared_transcript_batch_cannot_cross_a_new_forget_cut() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let seq = native(
+            &mut raw,
+            "native-cut",
+            r#"{"prompt":"a synthetic forgotten prompt"}"#,
+        );
+        let Item::Event(event) = raw.after(raw.device(), seq - 1, 1).unwrap().remove(0).item else {
+            panic!("the imported record was not an event");
+        };
+        let mut event = *event;
+        event.source = "transcript".into();
+        let p = raw.forget_preview(record(&raw, seq)).unwrap();
+        start(home.path(), &p).unwrap();
+        let append = |raw: &mut raw::Raw, event: raw::Event, id: &str| {
+            raw.append_imported_origins(
+                &[crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                }],
+                &[origin("synthetic-transcript", id)],
+                "",
+                None,
+            )
+            .unwrap()
+        };
+        assert!(append(&mut raw, event.clone(), "late").is_empty());
+        event.ts -= 1;
+        event.body = r#"{"prompt":"earlier unrelated history"}"#.into();
+        let kept = append(&mut raw, event, "earlier");
+        assert_eq!(kept.len(), 1);
+        assert!(shown(&raw, kept[0]));
     }
 
     /// Rule 5: a request hides every record of its origin in the store it is applied to, at

@@ -809,7 +809,11 @@ pub fn import(
                     continue;
                 }
             }
-            let earliest = cut.get(&((*agent).to_owned(), session.clone()));
+            let recorded = cut.get(&((*agent).to_owned(), session.clone())).copied();
+            let earliest = match raw.as_ref() {
+                Some(raw) => raw.transcript_cut(agent, session, recorded)?,
+                None => recorded,
+            };
             let mut checkpoint = Checkpoint {
                 key: key.clone(),
                 through: seen,
@@ -828,7 +832,7 @@ pub fn import(
                 let fingerprint = Some(format!("{:x}", prefix.clone().finalize()));
                 let ts = crate::replay::fixture_ms(&clock, &json!(line.ts))
                     .context("a transcript event has no valid timestamp")?;
-                if earliest.is_some_and(|cut| ts >= *cut) {
+                if earliest.is_some_and(|cut| ts >= cut) {
                     stats.cut += 1;
                     checkpoint.through = through;
                     checkpoint.prefix = fingerprint;

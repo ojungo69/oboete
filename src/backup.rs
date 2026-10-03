@@ -447,9 +447,11 @@ fn restore_locked(home: &Path, logged: Vec<crate::forget::Request>) -> Result<St
             ops += 1;
         }
     }
-    // Rule 14: what the live raw.db and the logs hold of this device's forgets, before the swap.
+    // Rule 14: what the live raw.db and the logs hold of this home's forgets, before the swap.
+    // A copied store may append as a new device while keeping the same home lineage.
+    let home_id = rebuild.home_id()?;
     let mut forget = held;
-    for r in logged.into_iter().filter(|r| r.home == device) {
+    for r in logged.into_iter().filter(|r| r.home == home_id) {
         if !forget.iter().any(|f| f.job == r.job) {
             forget.push(r);
         }
