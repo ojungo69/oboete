@@ -359,6 +359,225 @@ fn repeated_backups_of_a_restored_forget_keep_its_denial_without_request_logs() 
     assert!(ok(run(home, &["get", &keep], "")).contains("unrelated-backup-generation-record-711"));
 }
 
+/// Only the new append device is backed up after raw.db is replaced. Its forget control must
+/// keep the denial through another backup/restore, even though its target is never restored.
+#[test]
+fn a_cross_device_forgets_backups_keep_its_denial_without_the_target_record() {
+    cross_device_denial_survives_backups(false);
+}
+
+/// The request's original coordinates may name a re-imported alias absent after rollback.
+/// Those hints cannot bind the current control to its stable origin during backup.
+#[test]
+fn a_cross_device_alias_forgets_backups_keep_its_denial_without_the_original_hint() {
+    cross_device_denial_survives_backups(true);
+}
+
+fn cross_device_denial_survives_backups(alias: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let first = record(&home, CANARY);
+    let (original_device, original_seq) = first.split_once(':').unwrap();
+    let snapshot = root.path().join("raw-before-forget.db");
+    std::fs::copy(home.join("raw.db"), &snapshot).unwrap();
+    let source = home.join("native-source.db");
+    let selected = if alias {
+        let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        db.execute("DELETE FROM ops WHERE type='migration'", [])
+            .unwrap();
+        drop(db);
+        let imported = ok(run(
+            &home,
+            &["migrate", "--from", source.to_str().unwrap()],
+            "",
+        ));
+        assert!(imported.contains("\"records\":1"), "{imported}");
+        let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let (device, seq): (String, i64) = db
+            .query_row(
+                "SELECT device, seq FROM records WHERE source='oboete-v1' AND kind='prompt'
+             ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        drop(db);
+        let id = format!("{device}:{seq}");
+        assert_ne!(id, first, "re-import did not create a distinct alias");
+        assert!(ok(run(&home, &["get", &id], "")).contains(CANARY));
+        id
+    } else {
+        first.clone()
+    };
+    ok(run(&home, &["forget", "--record", &selected, "--yes"], ""));
+    let request_log = std::fs::read(home.join("forget.log")).unwrap();
+    let request: serde_json::Value = serde_json::from_slice(&request_log).unwrap();
+    assert_eq!(
+        format!(
+            "{}:{}",
+            request["request"]["records"][0]["device"].as_str().unwrap(),
+            request["request"]["records"][0]["seq"].as_i64().unwrap()
+        ),
+        selected
+    );
+    for f in ["raw.db-wal", "raw.db-shm"] {
+        let _ = std::fs::remove_file(home.join(f));
+    }
+    let staged = home.join("raw.db.copy");
+    std::fs::copy(&snapshot, &staged).unwrap();
+    std::fs::rename(&staged, home.join("raw.db")).unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        "[summary]\ncurate = false\n[backup]\ndir = 'device-b-one'\n",
+    )
+    .unwrap();
+    // No A segments or request logs are available to either restore below.
+    std::fs::remove_dir_all(home.join("backups")).unwrap();
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let current_device: String = db
+        .query_row("SELECT value FROM meta WHERE key='device_id'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_ne!(
+        current_device, original_device,
+        "the replacement did not rotate the append device"
+    );
+    let target: (String, i64) = db
+        .query_row(
+            "SELECT target_device, target_seq FROM records WHERE device=?1 AND source='forget'",
+            [&current_device],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        target,
+        (original_device.to_owned(), original_seq.parse().unwrap())
+    );
+    drop(db);
+    let retry = || {
+        let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let before: i64 = db
+            .query_row(
+                "SELECT MAX(seq) FROM records WHERE device=?1",
+                [&current_device],
+                |r| r.get(0),
+            )
+            .unwrap();
+        db.execute("DELETE FROM forget_jobs", []).unwrap();
+        drop(db);
+        ok(run(&home, &["forget", "--status"], ""));
+        let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let after: i64 = db
+            .query_row(
+                "SELECT MAX(seq) FROM records WHERE device=?1",
+                [&current_device],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, before, "a retry appended another control");
+    };
+    retry();
+    let keep = hook_record(&home, "unrelated-current-device-backup-record-721");
+    lose_raw_and_request_logs(&home, "device-b-one");
+    ok(run(&home, &["restore"], ""));
+    std::fs::write(
+        home.join("config.toml"),
+        "[summary]\ncurate = false\n[backup]\ndir = 'device-b-two'\n",
+    )
+    .unwrap();
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    for generation in ["device-b-one", "device-b-two"] {
+        for entry in std::fs::read_dir(home.join(generation)).unwrap() {
+            let path = entry.unwrap().path();
+            if path.to_string_lossy().ends_with(".seg.zst") {
+                let bytes = zstd::stream::decode_all(std::fs::File::open(path).unwrap()).unwrap();
+                let text = String::from_utf8(bytes).unwrap();
+                assert!(
+                    !text.contains(CANARY),
+                    "the forgotten body returned in a B backup"
+                );
+                for line in text.lines() {
+                    let v: serde_json::Value = serde_json::from_str(line).unwrap();
+                    assert_eq!(
+                        v["device"].as_str().unwrap(),
+                        current_device,
+                        "the fixture accidentally backed up the original target's device"
+                    );
+                }
+            }
+        }
+    }
+    lose_raw_and_request_logs(&home, "device-b-two");
+    ok(run(&home, &["restore"], ""));
+    let retried = ok(run(
+        &home,
+        &["migrate", "--from", source.to_str().unwrap()],
+        "",
+    ));
+    assert!(
+        retried.contains("\"records\":0"),
+        "the target-free denial was lost: {retried}"
+    );
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    let line = |time: &str, prompt: &str| {
+        serde_json::json!({
+            "type":"user", "sessionId":"native-session", "cwd":"/synthetic",
+            "timestamp":time, "message":{"role":"user", "content":prompt}
+        })
+    };
+    std::fs::write(
+        projects.join("target-free-cut.jsonl"),
+        format!(
+            "{}\n{}\n",
+            line(
+                "1970-01-01T00:00:00.100Z",
+                "earlier-target-free-cut-record-722"
+            ),
+            line("1970-01-01T00:00:00.101Z", CANARY)
+        ),
+    )
+    .unwrap();
+    ok(run(
+        &home,
+        &["import", "transcripts", "--agent", "claude", "--yes"],
+        "",
+    ));
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    assert!(
+        !ok(run(
+            &home,
+            &["search", "--all", "--raw", "only", "--", CANARY],
+            ""
+        ))
+        .contains(CANARY)
+    );
+    assert!(
+        ok(run(
+            &home,
+            &[
+                "search",
+                "--all",
+                "--raw",
+                "only",
+                "--",
+                "earlier-target-free-cut-record-722"
+            ],
+            ""
+        ))
+        .contains("earlier-target-free-cut-record-722")
+    );
+    assert!(
+        ok(run(&home, &["get", &keep], "")).contains("unrelated-current-device-backup-record-721")
+    );
+    std::fs::write(home.join("forget.log"), request_log).unwrap();
+    retry();
+}
+
 /// An already sealed rescan (or another device's forget control) is not this device's
 /// incremental denial. A new forget must persist one, and retries must not append it again.
 #[test]

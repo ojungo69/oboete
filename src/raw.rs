@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS records (
   body BLOB,                   -- NULL for a tombstone
   original_bytes INTEGER,      -- set when head-and-tail cut the body
   target_device TEXT, target_seq INTEGER, target_offset INTEGER, target_length INTEGER,
+  deny_origin TEXT,            -- a forget control's stable denial, even without its target
   PRIMARY KEY (device, seq)
 );
 -- D8: a read finds the tombstones of the records it returns by their target.
@@ -513,6 +514,8 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
         deadline,
     )
     .context("migrate import identity confidence")?;
+    crate::db::ensure_column_until(&mut conn, "records", "deny_origin", "TEXT", deadline)
+        .context("migrate forget control identity")?;
     for file in ["raw.db", "raw.db-wal", "raw.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -1591,8 +1594,8 @@ impl Raw {
                             serde_json::json!({ "origin": origin, "session": session, "ambiguous": ambiguous }),
                         )
                     }),
-                    Item::Tombstone(Target::Record { device, seq }) => {
-                        self.deny_of(device, *seq)?.map(|d| ("deny", d))
+                    Item::Tombstone(Target::Record { .. }) => {
+                        self.deny_of(&r.device, r.seq)?.map(|d| ("deny", d))
                     }
                     _ => None,
                 };
@@ -1623,15 +1626,18 @@ impl Raw {
             .optional()?)
     }
 
-    /// The deny row of a forgotten record, by its origin, as a tombstone's backup line carries it.
+    /// A control's stable denial, including when only its device's backup was restored.
+    /// Legacy unbound controls use their actual target's provenance, never the request's hints.
     fn deny_of(&self, device: &str, seq: i64) -> Result<Option<serde_json::Value>> {
         use rusqlite::OptionalExtension;
         Ok(self
             .conn
             .query_row(
                 "SELECT d.origin, d.device, d.seq, d.ts, d.session, d.job
-                 FROM import_origins o JOIN denied_records d ON d.origin = o.origin
-                 WHERE o.device = ?1 AND o.seq = ?2",
+                 FROM records t LEFT JOIN import_origins o
+                   ON o.device = t.target_device AND o.seq = t.target_seq
+                 JOIN denied_records d ON d.origin = COALESCE(t.deny_origin, o.origin)
+                 WHERE t.device = ?1 AND t.seq = ?2 AND t.type = 'tombstone'",
                 params![device, seq],
                 |r| {
                     Ok(serde_json::json!({
@@ -2512,16 +2518,18 @@ impl Rebuild {
                 let target_device = t["device"].as_str().context("target device")?;
                 let target_seq = t["seq"].as_i64().context("target seq")?;
                 let mut source = "restore";
+                let mut deny_origin = None;
                 // A forget's deny row (D1): segments alone forget it again.
                 if let Some(d) = v.get("deny") {
                     let text = |k: &str| d[k].as_str().with_context(|| format!("deny {k}"));
-                    crate::forget::check_identity(text("origin")?)?;
+                    let origin = text("origin")?;
+                    crate::forget::check_identity(origin)?;
                     crate::forget::check_identity(text("session")?)?;
                     self.conn.execute(
                         "INSERT OR IGNORE INTO denied_records(origin, device, seq, ts, session, job)
                          VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
                         params![
-                            text("origin")?,
+                            origin,
                             text("device")?,
                             d["seq"].as_i64().context("deny seq")?,
                             d["ts"].as_i64(),
@@ -2532,11 +2540,12 @@ impl Rebuild {
                     // A validated carried denial makes this the durable control. Keep that
                     // marker so replaying its request does not append another after restore.
                     source = "forget";
+                    deny_origin = Some(origin);
                 }
                 self.conn.execute(
                     "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq,
-                       target_offset, target_length)
-                     VALUES(?1, ?2, 'tombstone', 0, ?3, ?4, ?5, ?6, ?7)",
+                       target_offset, target_length, deny_origin)
+                     VALUES(?1, ?2, 'tombstone', 0, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         device,
                         seq,
@@ -2544,7 +2553,8 @@ impl Rebuild {
                         target_device,
                         target_seq,
                         t["offset"].as_i64(),
-                        t["length"].as_i64()
+                        t["length"].as_i64(),
+                        deny_origin
                     ],
                 )?;
             }
@@ -2655,6 +2665,7 @@ pub(crate) fn apply_request(
                  WHERE o.origin = ?1 AND NOT EXISTS (
                    SELECT 1 FROM records t WHERE t.device = ?2 AND t.type = 'tombstone'
                      AND t.source = 'forget'
+                     AND (t.deny_origin IS NULL OR t.deny_origin = o.origin)
                      AND t.target_device = o.device AND t.target_seq = o.seq
                      AND t.target_offset IS NULL)
                  ORDER BY o.device, o.seq",
@@ -2670,9 +2681,9 @@ pub(crate) fn apply_request(
                 |row| row.get(0),
             )?;
             conn.execute(
-                "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq)
-                 VALUES(?1, ?2, 'tombstone', ?3, 'forget', ?4, ?5)",
-                params![device, seq, r.started, target_device, target_seq],
+                "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq, deny_origin)
+                 VALUES(?1, ?2, 'tombstone', ?3, 'forget', ?4, ?5, ?6)",
+                params![device, seq, r.started, target_device, target_seq, rec.origin],
             )?;
         }
     }

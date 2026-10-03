@@ -67,6 +67,8 @@ open が失敗して記録が止まり、戻すには手でファイルを消す
   対応を失わない。rescan 等で既に隠れた対象にも、現端末がまだ持たない forget control を新しい seq
   で記録し、次の incremental backup に deny を運ぶ。deny を検証して復元した control はその印を
   保ち、同じ要求の retry で control を増やさない。Removed 行の本文と sample は復元しない。
+  control 自身も deny の origin を保持し、対象 record の端末を含まない backup の restore と再 backup
+  でも対応を失わない。要求の `(device, seq)` は出所の記録だけで、deny との対応付けには使わない。
 - **派生書込の fence。** `curate::Reading` は window の入力を読む前に `denied_records` の件数を読み、
   Window と Turn の全 writer が raw の追記 transaction の中でそれと比べ、違えば何も記録せずに
   切り直す（`append_ops_fenced`）。knowledge.db が raw の tombstone に遅れている間（Anchors の
