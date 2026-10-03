@@ -1,0 +1,36 @@
+src/cards.rs
+  s_821f8fcda60ea0::t_42ec2a84c82930 602
+  s_821f8fcda60ea0::t_fd26d5171d8bb2 7,148-151,154-155,176-177,184-198,200-205,214-226,245-256,488,493-494,514-601,603
+docs/cards.md
+  s_821f8fcda60ea0::t_39a14c5250c5b7 207,209-210,219,230-233
+docs/spec.md
+  s_821f8fcda60ea0::t_96689e50976e27 113,146,172,285,309,332,447,653,667,672,770,799
+docs/summaries.md
+  s_821f8fcda60ea0::t_90d6cbc03b8de1 96-110
+src/consumer/manifest.rs
+  s_821f8fcda60ea0::t_7926498c15eb95 57-58,139-140,169,173,177-179,181-195,197-198,205,208,226-237,418,424,1548-1550,1557,1574,1581,1585,1588,1592,1598,1609,1634,2932-3038,3482,3520
+src/main.rs
+  s_821f8fcda60ea0::t_a0ff510ded3af0 84
+src/mcp.rs
+  s_821f8fcda60ea0::t_73fc7c2170c2d2 184
+src/search/b.rs
+  s_821f8fcda60ea0::t_1d90c0d52c00b8 1371-1376,1379,1444-1471,2853-2886
+src/turns.rs
+  s_821f8fcda60ea0::t_ebf54a399db690 70-72,77-88,514-517,531-534,540,545-606
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "85abc593cc5480d981968ebc351fca961bad1b92",
+  "prompts": {},
+  "sessions": {
+    "s_821f8fcda60ea0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3c3ad270-2ec6-4f00-abc6-a7903bd32508",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
