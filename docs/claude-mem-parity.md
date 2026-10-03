@@ -38,8 +38,9 @@ each milestone and new features are added here.
 
 - Several curators in a chain with fallback; the installed claude-mem has one provider.
 - Records are stored before any model runs, so a curator that stops loses nothing.
-- The page needs a token and checks the Host header. The installed claude-mem answers any local program without
-  one, its settings route included (checked on the owner's PC, 2026-10-03).
+- The page's API needs a token (the page's own files are served without one) and every request's
+  Host header is checked. The installed claude-mem answers any local program without one, its
+  settings route included (checked on the owner's PC, 2026-10-03).
 - Redaction is always on.
 - Search on the owner's questions: nDCG@10 0.545 with vectors against claude-mem's 0.244 (spec 4.10).
 - Memory: 13 MB at its peak for the recording path, against claude-mem's 120 MB worker and 4.65 GB of Chroma

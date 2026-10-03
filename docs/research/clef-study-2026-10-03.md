@@ -85,5 +85,6 @@ because llama.cpp's `/v1/systemone` route (merged 2026-10-02) is the same reques
 
 ## 5. Order
 
-Nothing here comes before the PC switch. The spec wording (section 1 and 3) goes into the next docs
-PR as owner decision 37. The probe of section 2 runs when it does not delay the switch.
+Nothing here comes before the PC switch. The spec wording of sections 1 and 3 is owner decision 38,
+in the docs PR that brings this study. The probe of section 2 runs when it does not delay the
+switch.
