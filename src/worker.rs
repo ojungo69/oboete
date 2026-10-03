@@ -462,6 +462,11 @@ fn serve(
             Some(l) => take(home, l, holding),
             None => return Ok(false),
         }
+    } else {
+        // Opened again (a restore was asked for, or a store read as damaged), maybe from a wait
+        // whose outcome said all is well: this is work, and a kill during it is reported (R10,
+        // Codex on #359).
+        note(home, holding.last, STOPPED);
     }
     // The stores are opened by path too: after a restore, in a home that may be another by now.
     if gone(home, holding) {
@@ -2671,6 +2676,61 @@ mod tests {
         std::fs::write(yield_request(&p), "").unwrap();
         until("it steps aside for a new request", || worker.is_finished());
         worker.join().unwrap().unwrap();
+    }
+
+    /// R10: a resident worker that waited with a clean outcome and is asked for a restore opens
+    /// the stores again as work: a kill during the restore or the rounds after it is reported
+    /// (Codex on #359).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_restore_asked_for_while_it_waits_is_work_doctor_reports_a_kill_in() {
+        use std::sync::{Arc, Mutex};
+        struct Outcomes(std::path::PathBuf, Arc<Mutex<Vec<String>>>);
+        impl Consumer for Outcomes {
+            fn name(&self) -> &'static str {
+                "outcomes"
+            }
+            fn step(&mut self, raw: &Raw, _: &Connection, _: &str, _: i64) -> Result<i64> {
+                let why = outcome(&self.0).map(|(_, why)| why).unwrap_or_default();
+                self.1.lock().unwrap().push(why);
+                raw.max_seq()
+            }
+            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+                Ok(())
+            }
+        }
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path().to_path_buf();
+        raw::open(&p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let worker = {
+            let (p, seen) = (p.clone(), seen.clone());
+            std::thread::spawn(move || {
+                let held = lock(&p)?;
+                let phases = Phases {
+                    yields: true,
+                    resident: true,
+                    ..Phases::default()
+                };
+                let consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Outcomes(p.clone(), seen))];
+                run_holding(&p, 600_000, consumers, || {}, held, phases)
+            })
+        };
+        until("it waits", || {
+            outcome(&p).is_some_and(|(_, why)| why.is_empty())
+        });
+        seen.lock().unwrap().clear();
+        crate::backup::request_restore(&p);
+        until("it reads again", || !seen.lock().unwrap().is_empty());
+        assert_eq!(seen.lock().unwrap()[0], STOPPED);
+        let held = lock_asking(&p).unwrap();
+        worker.join().unwrap().unwrap();
+        drop(held);
     }
 
     /// R12 with two commands: one that gives up takes only its own request away, so the worker

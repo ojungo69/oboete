@@ -687,8 +687,11 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             // appended while the lock was held started no worker (Codex on #359).
             drop(held);
             let ran = worker::run_once(&home);
-            println!("{}", said?);
-            ran
+            let said = said?;
+            // Restored only once its records are searchable again (Codex on #359).
+            ran?;
+            println!("{said}");
+            Ok(())
         }
         Cmd::View { port, open } => view::run(&home, port, open),
         Cmd::Replay {

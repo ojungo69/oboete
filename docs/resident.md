@@ -367,3 +367,10 @@ and in the 50 ms before the other wrote it again the worker could send a call; e
 has a file of its own (R12). And a restore that failed returned before running the consumers, so a
 record a hook appended while it held the lock waited for the next hook; it now runs them as one
 that succeeds does, and returns the restore's error.
+
+
+Its seventh round: the restore's line was printed before the consumers had run, so a run that
+then failed still said the records were restored; it is printed once they ran. And a resident
+worker asked for a restore while it waited, with an outcome that said all was well, opened the
+stores again under that outcome, so a kill during the restore was not reported; opening them again
+now records the run as work (R10).
