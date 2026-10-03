@@ -213,6 +213,14 @@ pub fn resident(home: &Path) -> Result<()> {
 fn listen(home: &Path) -> Result<Option<Resident>> {
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
+    // A `state` folder another user could change is not written into at all (CodeRabbit on #376).
+    if !own_state(home) {
+        eprintln!(
+            "oboete: {} is not this user's alone; no resident viewer",
+            state.display()
+        );
+        return Ok(None);
+    }
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -261,6 +269,34 @@ fn listen(home: &Path) -> Result<Option<Resident>> {
             live: AtomicUsize::new(0),
         }),
     }))
+}
+
+/// R6: whether `state` may hold the token: a folder of this user's, not a link, in a home of this
+/// user's, neither of which another user may write into, made so first as the stores make the
+/// home. Off Unix the resident viewer does not run.
+fn own_state(home: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no arguments and cannot fail.
+        let me = unsafe { libc::geteuid() };
+        let state = home.join("state");
+        // The home may be a link the owner made; `state` is the viewer's own, never one.
+        let ours =
+            |m: std::io::Result<std::fs::Metadata>| m.is_ok_and(|m| m.is_dir() && m.uid() == me);
+        if !ours(std::fs::metadata(home)) || !ours(std::fs::symlink_metadata(&state)) {
+            return false;
+        }
+        crate::db::private(home, 0o700);
+        crate::db::private(&state, 0o700);
+        let closed = |m: std::io::Result<std::fs::Metadata>| m.is_ok_and(|m| m.mode() & 0o022 == 0);
+        closed(std::fs::metadata(home)) && closed(std::fs::symlink_metadata(&state))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = home;
+        false
+    }
 }
 
 /// R6: the resident viewer's token, `state/view-token`, when it is a regular file only its owner
@@ -2614,6 +2650,32 @@ mod tests {
         assert!(!p.join("state/view-token").exists());
         assert_eq!(view_outcome(p), NOT_PRIVATE);
         TcpListener::bind(("127.0.0.1", port)).unwrap();
+    }
+
+    /// CodeRabbit on #376 (R6): a `state` folder another user could write into is made the owner's
+    /// alone first, as the stores make the home; one that is a link is refused, and nothing is
+    /// written through it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_viewer_keeps_its_state_to_its_owner_and_follows_no_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = resident_home(free_port());
+        let p = home.path();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        let mode = |q: &Path| std::fs::metadata(q).unwrap().permissions().mode() & 0o777;
+        std::fs::set_permissions(p.join("state"), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let started = listen(p).unwrap();
+        assert!(started.is_some());
+        assert_eq!(mode(&p.join("state")), 0o700);
+        // Nothing goes through a link, not even a change of the mode of what it points to.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let mode_of = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(elsewhere.path(), mode_of).unwrap();
+        let other = resident_home(free_port());
+        std::os::unix::fs::symlink(elsewhere.path(), other.path().join("state")).unwrap();
+        assert!(listen(other.path()).unwrap().is_none());
+        assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+        assert_eq!(mode(elsewhere.path()), 0o755);
     }
 
     /// Resident test 7: the Host check holds to the configured port.
