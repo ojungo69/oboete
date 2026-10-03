@@ -469,6 +469,9 @@ fn serve(
     // R10: a resident worker is killed at every shutdown of the PC. While it waits its outcome
     // says all is well, so doctor reports a kill during a round and none during a wait.
     let mut waited = false;
+    // R3: told to leave while a call is out, it settles that call and leaves, and starts no other
+    // in between (Codex on #359).
+    let mut departing = false;
     loop {
         if gone(home, holding) {
             return Err(Gone.into());
@@ -476,11 +479,13 @@ fn serve(
         // An embedding call that is out is work in flight: its answer is settled before the
         // worker steps aside (R12) and before its outcome says all is well (R10).
         let calling = |phases: &Phases| phases.embed.as_ref().is_some_and(|e| e.busy());
-        // And once a command has asked, no other call is sent: a backlog of batches and queries
-        // would keep the command waiting for as long as it lasts.
+        // And once a command has asked, or the worker is to leave, no other call is sent, by the
+        // embedding phase or by curation: a backlog would keep the command waiting for as long as
+        // it lasts.
         let asked = yields && asked_aside(home);
+        let hold = asked || departing;
         if let Some(e) = phases.embed.as_mut() {
-            e.hold(asked);
+            e.hold(hold);
         }
         if asked && !calling(phases) && steps_aside(home, &raw, holding) {
             return Ok(false);
@@ -522,7 +527,7 @@ fn serve(
         {
             again = true;
         }
-        if let Some(phase) = phases.curation.as_mut() {
+        if !hold && let Some(phase) = phases.curation.as_mut() {
             match phase(&mut raw, &k)? {
                 Phase::Covered if crate::backup::restore_requested(home) => return Ok(true),
                 Phase::Covered => again = true,
@@ -546,6 +551,9 @@ fn serve(
         // starts once it has nothing left to wait for. A resident worker (R3) waits again after
         // each idle time that passes with nothing new, also within a longer wait for a phase.
         let leaving = loop {
+            if departing && !calling(phases) {
+                break true;
+            }
             let phase = stay.map(|until| u64::try_from(until - crate::db::now_ms()).unwrap_or(0));
             let wait = match phase {
                 Some(phase) if resident => phase.min(idle_ms),
@@ -590,10 +598,12 @@ fn serve(
                 crate::hookstate::prune(home, crate::hookstate::KEEP);
             }
             // Only a config.toml that loads and does not say `resident = true` ends it: one the
-            // owner is still editing leaves it as it is.
-            // A call that is out is settled first: the next idle time looks again.
-            if !calling(phases) && crate::config::worker(home).is_ok_and(|w| !w.resident) {
-                break true;
+            // owner is still editing leaves it as it is. A call that is out is settled first.
+            if crate::config::worker(home).is_ok_and(|w| !w.resident) {
+                if !calling(phases) {
+                    break true;
+                }
+                departing = true;
             }
             // A setting the owner changed is followed without a new record.
             let now = config_stamp(home);
@@ -2421,6 +2431,112 @@ mod tests {
         });
         worker.join().unwrap().unwrap();
         assert_eq!(stub.requests(), 0);
+    }
+
+    /// R12 with curation to do: a worker asked to step aside while an embedding call is out
+    /// settles that call and runs no curation, which would start a call the command waits for
+    /// (Codex on #359, fourth round).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_worker_asked_to_step_aside_runs_no_curation_while_it_settles_a_call() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        let mut embed = crate::embed_phase::Phase::new(p);
+        let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+        let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+        // A command asks before the worker's first round.
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        std::fs::write(yield_request(p), "").unwrap();
+        let curations = std::sync::Arc::new(AtomicUsize::new(0));
+        let worker = {
+            let (p, curations) = (p.to_path_buf(), curations.clone());
+            std::thread::spawn(move || {
+                let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+                    curations.fetch_add(1, Ordering::SeqCst);
+                    Ok(Phase::Idle)
+                };
+                let phases = Phases {
+                    embed: Some(&mut embed),
+                    curation: Some(&mut phase),
+                    yields: true,
+                    resident: true,
+                    ..Phases::default()
+                };
+                run_holding(&p, 600_000, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+            })
+        };
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(!worker.is_finished(), "it left a call unsettled");
+        release.send(()).unwrap();
+        until("it steps aside once the call is settled", || {
+            worker.is_finished()
+        });
+        worker.join().unwrap().unwrap();
+        assert_eq!(curations.load(Ordering::SeqCst), 0);
+    }
+
+    /// R3 with curation to do: a resident worker told to leave while an embedding call is out
+    /// settles it and leaves, with no curation round in between (Codex on #359, fourth round).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_worker_told_to_leave_runs_no_curation_after_the_call() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        let mut embed = crate::embed_phase::Phase::new(p);
+        let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+        let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+        let (released, after) = (
+            std::sync::Arc::new(AtomicBool::new(false)),
+            std::sync::Arc::new(AtomicUsize::new(0)),
+        );
+        let worker = {
+            let (p, released, after) = (p.to_path_buf(), released.clone(), after.clone());
+            std::thread::spawn(move || {
+                let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+                    if released.load(Ordering::SeqCst) {
+                        after.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(Phase::Idle)
+                };
+                let phases = Phases {
+                    embed: Some(&mut embed),
+                    curation: Some(&mut phase),
+                    resident: true,
+                    ..Phases::default()
+                };
+                run_holding(&p, 300, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+            })
+        };
+        let device = raw::open(p).unwrap().device().to_owned();
+        until("the first round", || {
+            knowledge::open(p)
+                .and_then(|k| checkpoint::get(&k, "seen", &device))
+                .is_ok_and(|at| at == 1)
+        });
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+        // Several idle times: it has seen the change.
+        std::thread::sleep(Duration::from_millis(1_200));
+        assert!(!worker.is_finished(), "it left a call unsettled");
+        released.store(true, Ordering::SeqCst);
+        release.send(()).unwrap();
+        until("it leaves once the call is settled", || {
+            worker.is_finished()
+        });
+        worker.join().unwrap().unwrap();
+        assert_eq!(after.load(Ordering::SeqCst), 0);
     }
 
     /// A consumer that takes the request to step aside away in its first step, as a command that

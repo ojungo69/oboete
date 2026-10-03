@@ -59,7 +59,8 @@ for every wait of a phase, not only D10's short ones, and runs the phase again a
 phase named; the idle step is taken within such a wait too. At every idle time it re-reads
 config.toml and checks its home:
 - only a config.toml that loads and does not say `resident = true` ends it, and not while an
-  embedding call is out: the call's answer is written first (R10). A file that does not load (one
+  embedding call is out: the call's answer is written first (R10), and no other call, a batch, a
+  query or a window, is started before it leaves. A file that does not load (one
   the owner is editing) leaves the mode as it was. A worker that starts while the file does not
   load is not resident, as today, and doctor says so;
 - a config.toml that changed since the worker last looked (its time or its size) starts a round,
@@ -166,7 +167,7 @@ between rounds and on the 200 ms tick beside the restore request: it backs up (a
 backups), closes its stores, releases the lock, records a clean outcome and exits. It does not
 step aside while an embedding call is out: the call is paid for and counted, so its answer is
 written first, and a command whose 30 s pass meanwhile says the worker is busy. Once a command
-has asked, the worker sends no other batch or query, so a backlog cannot keep the command waiting
+has asked, the worker sends no other batch or query and curates no window, so a backlog cannot keep the command waiting
 for longer than the call that was out; a request that goes away (its command gave up) starts a
 round, and the embedding goes on. The lock goes
 only after the stores are closed: the command that takes it may swap them at once. Only `oboete
@@ -340,3 +341,9 @@ Codex's second round, on the fixes:
 
 Its third round, on those: a request withdrawn while the phase was held left a resident worker's
 embedding stopped until the next record. The wait now sees the request go and starts a round (R12).
+
+Its fourth round, through the GitHub app: only the embedding phase was held, so a round that
+settled a call could still curate a window, a call to a provider that a command asking for the lock
+would wait on (R12); and a worker told to leave with a call out did not remember it, so the round
+after the call could send another batch or window before it looked again (R3). Both hold every
+phase that calls a provider now, and the worker told to leave goes as soon as its call is settled.
