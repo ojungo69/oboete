@@ -237,14 +237,14 @@ pub fn phase(
     // The turns a later turn's summary passed while they waited: one the list kept back, which
     // an undo lets out as it lets out a window's records (Codex on #371), oldest first. One still
     // kept back is not read again.
-    let waiting = crate::providers_db::turns_waiting(db, &device)?;
+    let key = |agent: &str, session: &str| format!("{agent}\u{0}{session}");
+    let waiting = crate::providers_db::turns_waiting(db, &device, last, |agent, session| {
+        reading.excluded.contains(&key(agent, session))
+    })?;
     let mut replies = std::collections::VecDeque::new();
-    for (seq, key, attempts) in &waiting {
-        if *seq <= last && *attempts < crate::curate::ATTEMPTS && !reading.excluded.contains(key) {
-            replies.extend(raw.replies_between(seq - 1, *seq, 1)?);
-        }
+    for seq in waiting {
+        replies.extend(raw.replies_between(seq - 1, seq, 1)?);
     }
-    let kept: std::collections::HashSet<i64> = waiting.iter().map(|w| w.0).collect();
     // Every turn end is reached, however many records follow it (Codex on C2), a page at a time:
     // a run asks for one, so a backlog is not read whole at every run (Codex on #371).
     let mut after = last;
@@ -262,26 +262,8 @@ pub fn phase(
         if !covered(r.seq) {
             break;
         }
-        let key = format!("{}\u{0}{}", r.agent, r.session);
-        // Held in the digest's table, under the turn's reply in place of a repository.
-        let subject = format!("turn {}", r.seq);
-        if reading.excluded.contains(&key) {
-            if !kept.contains(&r.seq) {
-                crate::providers_db::set_digest_pending(
-                    db,
-                    &crate::providers_db::DigestPending {
-                        device: device.clone(),
-                        agent: r.agent.clone(),
-                        session: r.session.clone(),
-                        repo: subject,
-                        prompt: String::new(),
-                        reason: "excluded".into(),
-                        hold: "excluded".into(),
-                        attempts: 0,
-                        next_attempt_at: 0,
-                    },
-                )?;
-            }
+        if reading.excluded.contains(&key(&r.agent, &r.session)) {
+            crate::providers_db::hold_turn(db, &device, r.seq, &r.agent, &r.session)?;
             continue;
         }
         if asked(k, &device, r.seq)? {
@@ -296,8 +278,7 @@ pub fn phase(
         let prompt = prompt(&summary.language, &turn);
         let sent = crate::curate::sha256_hex(&format!("{chain}\n{prompt}"));
         let pending =
-            crate::providers_db::digest_pending_of(db, &device, &r.agent, &r.session, &subject)?
-                .filter(|p| p.prompt == sent);
+            crate::providers_db::turn_pending_of(db, &device, r.seq)?.filter(|p| p.prompt == sent);
         if let Some(p) = &pending {
             if p.attempts >= crate::curate::ATTEMPTS {
                 continue;
@@ -306,6 +287,7 @@ pub fn phase(
                 return Ok(sooner(out, held(&p.hold, p.next_attempt_at, now)));
             }
         }
+        let subject = format!("turn {}", r.seq);
         let answer = summarizer(&subject, &prompt, &|v| check(v, rules), &|| {
             reading.still(raw)
         });
@@ -313,9 +295,7 @@ pub fn phase(
             Ok(res) => {
                 let op = fitted(turn.op(&res.output, rules))?.unwrap_or(skip);
                 raw.append_ops(&[(OpKind::Turn, op)])?;
-                crate::providers_db::clear_digest_pending(
-                    db, &device, &r.agent, &r.session, &subject,
-                )?;
+                crate::providers_db::clear_turn_pending(db, &device, r.seq)?;
                 return Ok(Phase::Covered);
             }
             // Nothing more went out: the next pass reads the list again.
@@ -336,18 +316,18 @@ pub fn phase(
         // A slow call may set its reset after the phase started: judge the remaining wait now.
         let after = crate::db::now_ms();
         let (hold, next, counted) = crate::curate::hold(&failed, after);
-        let p = crate::providers_db::DigestPending {
+        let p = crate::providers_db::TurnPending {
             device: device.clone(),
+            seq: r.seq,
             agent: r.agent.clone(),
             session: r.session.clone(),
-            repo: subject,
             prompt: sent,
             reason: ChainFailed(failed).to_string(),
             hold: hold.into(),
             attempts: pending.map_or(0, |p| p.attempts) + i64::from(counted),
             next_attempt_at: next,
         };
-        crate::providers_db::set_digest_pending(db, &p)?;
+        crate::providers_db::set_turn_pending(db, &p)?;
         // Given up: nothing waits for it, and the next run goes on to the next turn.
         if p.attempts >= crate::curate::ATTEMPTS {
             return Ok(Phase::Covered);
@@ -930,6 +910,54 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert!(sent[0].contains("Build the parser."), "{}", sent[0]);
         assert_eq!(run(home.path(), &completed("x")).1.len(), 0);
+    }
+
+    /// Codex on #371: an upgraded home's digest rows, whose repository may read like a turn, do
+    /// not stand for a turn's hold.
+    #[test]
+    fn an_old_digest_row_named_like_a_turn_does_not_stand_for_its_hold() {
+        let other = |kind: &str, text: &str| Event {
+            repo: Some("q".into()),
+            ..said("s2", kind, text)
+        };
+        let home = home(
+            &[
+                said("s1", "prompt", "Build the parser."),
+                said("s1", "reply", "Built."),
+                other("prompt", "Fix the lexer."),
+                other("reply", "Fixed."),
+            ],
+            &[
+                window(1, 2, "Built the parser.", &[]),
+                window(3, 4, "Fixed the lexer.", &[]),
+            ],
+        );
+        let device = crate::raw::open(home.path()).unwrap().device().to_owned();
+        let db = crate::providers_db::open(home.path()).unwrap();
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS digest_pending(device TEXT NOT NULL, agent TEXT NOT NULL,
+               session TEXT NOT NULL, repo TEXT NOT NULL, prompt TEXT NOT NULL,
+               reason TEXT NOT NULL, hold TEXT NOT NULL, attempts INTEGER NOT NULL,
+               next_attempt_at INTEGER NOT NULL, PRIMARY KEY(device, agent, session, repo))",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO digest_pending VALUES(?1, 'claude', 'old', 'turn 2', 'p', 'r', 'r', 3, 0)",
+            [&device],
+        )
+        .unwrap();
+        let exclude = |undo: bool| {
+            crate::raw::open(home.path())
+                .unwrap()
+                .exclude("r", undo)
+                .unwrap()
+        };
+        exclude(false);
+        assert_eq!(run(home.path(), &completed("Fixed.")).1.len(), 1);
+        exclude(true);
+        let (_, sent) = run(home.path(), &completed("Built."));
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("Build the parser."), "{}", sent[0]);
     }
 
     /// Codex on #371: the turn ends are read a page at a time, and a turn after a page of

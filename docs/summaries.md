@@ -32,9 +32,11 @@ through this one. The worker asks for it where it asked for a digest: when the w
 nothing, one call a run, the oldest turn end after the last one a summary was kept of (every turn
 end is reached, however many records follow it), with the digest's holds (a summary every entry
 fails waits as a window does, and the turns after it wait with it; one given up after `ATTEMPTS`
-is not asked again). A turn end of a session the list names is kept back, a row in the digest's
-table, and a run after an undo asks for it, as it curates a window's kept-back records, though a
-later turn's summary passed it (Codex on #371). Unlike the digest it does not wait for the session
+is not asked again); a turn's holds are rows of their own table, `turn_pending`, so an upgraded
+home's digest rows never stand for one. A turn end of a session the list names is kept back there,
+and a run after an undo asks for it, as it curates a window's kept-back records, though a later
+turn's summary passed it; each run judges the sessions with turns kept back once, not their every
+turn (Codex on #371). Unlike the digest it does not wait for the session
 to go idle: a turn is whole at its reply, and claude-mem asks at Stop. The window phase's own idle
 wait still holds back the windows of a session's last turn (Codex on C2).
 
