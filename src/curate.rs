@@ -1531,11 +1531,10 @@ fn request(
     // options cut from it are picked by nothing, and a goal cut from it was not shown (Codex on
     // #364).
     let (carried_text, shown) = fit(&carried_text, &shown, summary.window_tokens / 5);
+    let kept = carried_text.lines().count();
     let goals = goals
         .into_iter()
-        .filter(|(seq, lines)| {
-            !(w.from_seq..=w.to_seq).contains(seq) && carried_text.contains(lines.as_str())
-        })
+        .filter(|&(seq, line)| line < kept && !(w.from_seq..=w.to_seq).contains(&seq))
         .map(|(seq, _)| seq)
         .collect();
     carried_uids.retain(|(_, _, c)| carries(&carried_text, &c.uid));
@@ -3068,9 +3067,10 @@ type Carried = Vec<(String, Option<String>, crate::claims::Claim)>;
 /// ("1") settles only one of them (`gates`, #252).
 type Offered = Vec<(String, String, Vec<String>)>;
 
-/// The records the sessions' goals are read from (docs/cards.md K4), each with the lines that
-/// show it: a goal `fit` cuts was not shown (Codex on #364).
-type Goals = Vec<(i64, String)>;
+/// The records the sessions' goals are read from (docs/cards.md K4), each with the number of its
+/// line in the carried text: `fit` keeps whole lines from the start, and a goal it cuts was not
+/// shown (Codex on #364; by place, as two goals may read the same).
+type Goals = Vec<(i64, usize)>;
 
 /// The line of its event a quote is in, through the line it ends in, trimmed, at most 200
 /// characters; `None` when the quote is a tool's (its line is often JSON, never the option list a reply numbers), the event is
@@ -3304,12 +3304,13 @@ fn carried(
         let previous =
             raw.previous_window_ops(agent, session, (w.from_seq, w.from_offset), |s| w.reads(s))?;
         let mut lines = Vec::new();
+        let mut goal = None;
         if let Some((seq, e)) = raw.first_prompt(agent, session, |s| w.reads(s))?
-            && let Some(goal) = long_text(&e)
+            && let Some(text) = long_text(&e)
         {
-            let goal: String = gate(&goal).chars().take(200).collect();
-            goals.push((seq, format!("### {heading}\ngoal: {goal}\n")));
-            lines.push(format!("goal: {goal}"));
+            let text: String = gate(&text).chars().take(200).collect();
+            lines.push(format!("goal: {text}"));
+            goal = Some(seq);
         }
         // Proposals first: they are what an acceptance in this window answers. The assistant's
         // own before the rest (inferred, a tool's), since `fit` cuts from the end (#244).
@@ -3408,6 +3409,10 @@ fn carried(
                 out.push(format!("{line} {} in {place}: {}", c.uid, gate(&c.body)));
                 uids.push((key.to_owned(), Some((*c_repo).to_owned()), c.clone()));
             }
+        }
+        // Its goal is the line after the session's heading.
+        if let Some(seq) = goal {
+            goals.push((seq, out.lines().count() + 1));
         }
         for (part, lines) in [
             (&mut out, lines),
@@ -4986,6 +4991,37 @@ mod tests {
         let req = request(&raw, &k, &rules, &curating(1_000), &w).unwrap();
         assert!(req.prompt.contains("goal: alpha alpha"), "{}", req.prompt);
         assert!(!req.prompt.contains("goal: beta beta"), "{}", req.prompt);
+        assert_eq!(req.goals, vec![1]);
+    }
+
+    /// Codex on #364: two sessions whose goal blocks read the same (their headings cut to the
+    /// same text, the same first prompt): the one `fit` cuts is still not named.
+    #[test]
+    fn a_goal_cut_beside_one_that_reads_the_same_is_not_in_the_window_op() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let long = |n: &str| format!("s{}{n}", "x".repeat(HEADING_CHARS));
+        let said = |session: &str, text: &str| Event {
+            session: session.into(),
+            ..prompt(text)
+        };
+        raw.append(&said(&long("1"), &"alpha ".repeat(33))).unwrap();
+        raw.append(&said(&long("2"), &"alpha ".repeat(33))).unwrap();
+        let (rules, dev) = (Rules::default(), raw.device().to_owned());
+        let first = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        close(&mut raw, &first);
+        raw.append(&said(&long("1"), "more of one")).unwrap();
+        raw.append(&said(&long("2"), "more of two")).unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        assert_eq!((w.from_seq, w.to_seq), (3, 4));
+        let k = crate::knowledge::open(home.path()).unwrap();
+        // 200 tokens for what the sessions carry in: the first block and the second's heading.
+        let req = request(&raw, &k, &rules, &curating(2_000), &w).unwrap();
+        assert_eq!(req.prompt.matches("goal: alpha alpha").count(), 1);
         assert_eq!(req.goals, vec![1]);
     }
 
