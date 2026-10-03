@@ -1,0 +1,21 @@
+src/raw.rs
+  s_821f8fcda60ea0::t_c7032f45997141 819-822,827,830-831
+src/turns.rs
+  s_821f8fcda60ea0::t_b151ce4ce4e6b4 205-207,241,244,248-261,935-962
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1b4451062f72f2951783c251dccba5a041f420dc",
+  "prompts": {},
+  "sessions": {
+    "s_821f8fcda60ea0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3c3ad270-2ec6-4f00-abc6-a7903bd32508",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
