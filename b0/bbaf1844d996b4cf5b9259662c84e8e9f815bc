@@ -1,0 +1,38 @@
+src/raw.rs
+  s_ce2b24784deac6::t_7cc63dc3650d73 17-19,519-521,2387-2391
+  s_ce2b24784deac6::t_07163a9397b072 799,2895,2897-2901,2908-2924,2926-2946
+  s_ce2b24784deac6::t_b4514ac8b29a75 2925
+  s_ce2b24784deac6::t_d0520247f94522 14,119-121,2896
+  s_ce2b24784deac6::t_07a141f219f5b9 16,23-30,97-118,122-123,489-490,2378,2902-2907
+  s_ce2b24784deac6::t_3f65bb80bb08e9 1541,1572,2356,2397,2423-2440
+  s_ce2b24784deac6::t_8c6b213678a203 2379-2380
+  s_ce2b24784deac6::t_bac17baaef565a 12-13,15,20-22,644-647,793-798
+  s_ce2b24784deac6::t_bee8b68ff0caba 800
+  s_ce2b24784deac6::t_d30e8675cf3805 2441
+tests/forget_cli.rs
+  s_ce2b24784deac6::t_29082fcd2550af 81-124
+  s_ce2b24784deac6::t_f2b5695db3123e 302,315-349,354
+  s_ce2b24784deac6::t_dc9f381a8b866a 250-301
+  s_ce2b24784deac6::t_700b7353afb9b1 303-314
+  s_ce2b24784deac6::t_1cc84195ee6b40 350-353,355-358
+docs/milestone-5-plan.md
+  s_ce2b24784deac6::t_4f3c17272a9c3b 49
+  s_ce2b24784deac6::t_8d92ca83bccb34 46-47
+  s_ce2b24784deac6::t_f85ee2ec249294 50-51,108-111
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b0bbaf1844d996b4cf5b9259662c84e8e9f815bc",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
