@@ -393,11 +393,25 @@ async function readFeed(state, mode) {
       if (!activeFeed(state)) return false;
       const entries = [];
       const unseen = new Set();
+      let joined = false;
       for (const item of page.items) {
         const key = `${item.kind}:${item.id}`;
-        if (state.keys.has(key) || unseen.has(key)) continue;
+        if (state.keys.has(key)) {
+          // Live, only what is newer than the newest item shown goes on top: an unseen item
+          // below a shown one is older than it (a card made late for an early window), and a
+          // page with none shown left a gap; Refresh shows those in their place (P5; Codex on
+          // #373).
+          joined = true;
+          if (mode === 'live') break;
+          continue;
+        }
+        if (unseen.has(key)) continue;
         entries.push(feedEntry(item));
         unseen.add(key);
+      }
+      if (mode === 'live' && !joined) {
+        entries.length = 0;
+        unseen.clear();
       }
       if (mode === 'live') $('list').prepend(...entries);
       else {
