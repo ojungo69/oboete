@@ -38,18 +38,20 @@ open が失敗して記録が止まり、戻すには手でファイルを消す
 - **本文なしの要求ログ 2 部。** `<home>/forget.log` と `<backup dir>/forget.log`。1 要求 1 行の
   JSON で、登録した home の安定した id、ランダムな 128 bit の job id、record ごとの device・seq・
   origin hash・session hash を持つ。時刻は transcript の切れ目に数える record だけが持つ。本文、
-  パス、本文の fingerprint は持たない。1 要求 500 record、1 行 256 KiB まで（大きい対象は command
-  が複数の要求に分ける）。追記は排他ロック下で 1 回ずつ、末尾が改行でなければ先に改行を書き、
+  パス、本文の fingerprint は持たない。1 要求 500 record、1 行 256 KiB まで（第一 slice は
+  500 件を超える選択を登録前に拒否し、利用者が範囲を分ける。自動分割は slice 3）。追記は
+  排他ロック下で 1 回ずつ、末尾が改行でなければ先に改行を書き、
   `fsync` し、作ったときはディレクトリも同期する。各行に payload の checksum を付け、checksum
   や形が合わない行、他 home の行は、その行だけ飛ばして報告する。
   home の id は raw.db の metadata に置き、最初の device id から作る。ファイルのコピーで
   将来の記録用の device id が変わっても保持し、record の backup にも運ぶ。別の権威は作らない。
-- **reconcile は双方向で、副本の障害では拒否しない。** worker の起動と stores を開き直すたび（`backup::check`
+- **reconcile は双方向で、ログのコピーの障害では拒否しない。** worker の起動と stores を開き直すたび（`backup::check`
   の後、consumer と export の前）、`oboete restore`、forget command、import command の取り込み前に、
   raw にあってコピーにない要求をコピーへ書き、コピーにあって raw にない要求を raw へ適用する。
   読めない・書けないコピーは報告して飛ばす（command の出力、`forget --status`）。`raw::open` と
   hook は reconcile しない。読めた要求を raw.db に適用できなかった場合は、deny のないまま
   import・consumer・provider が進まないよう caller へ失敗を返す。
+  `start` が raw に登録した後の失敗は、登録済みの Status とログの問題を返し、登録失敗と表示しない。
 - **適用は seq ではなく identity で。** identity は import origin だけで、`(device, seq)` は出所の
   記録にとどめる。要求の適用は、保存された import origin が一致する record をすべて（再 import 後の
   重複も）tombstone で隠し、deny 行は origin で `INSERT OR IGNORE` する。Claim と Correction の op
@@ -86,8 +88,12 @@ spec 6.3 に書く限界とする。forget が表示する限界は次のとお�
 
 imported document は既存の uid/source/source_id を使う。raw record には版付きの
 source identity と fingerprint を別表で持たせる。v1 は source device と元 event id、
-transcript は agent/session と安定した event ordinal を使い、内容の fingerprint で
+transcript は agent/session と event の fingerprint 内の出現順を使い、内容の fingerprint で
 同じ id の差替えを見分ける。コピー元のファイルパスは identity にしない。
+別の event の追加で変わる全体の行番号は identity にしない。同じ fingerprint が複数ある
+event と、native session id のない event は検索用に取り込むが、第一 slice の forget では
+登録前に拒否する。後の import が一致する重複を認識したら、既存の最初の出現も同じ transaction
+で曖昧にする。既存の forget と重なる曖昧な batch の取り込みは拒否し、復活も推測による削除もしない。
 要求ログにはこれらの hash と record id だけを残す。検索文・本文・引用は保存しない。
 native identity がある import はその identity を比較し、同じ文字列の別 event まで消さない。
 importer は capture 前の agent/session から session hash を作り、origin と同じ transaction で
@@ -212,7 +218,8 @@ raw.db を別ファイルに置き換えても home の id を保持し、古い
 からの復元で削除要求を適用する。忘れた v1 record の session hash と時刻から transcript の
 取り込み境界も回復し、準備済みの batch は追記 transaction 内でもその境界を確認する。
 伏せ字ルールを外した後も取り込み境界が一致し、raw への要求適用がロックで失敗した import は
-続行しない。CLI の追加試験 5 件と、準備後の忘却が追記を止める型付き API の試験で、先に失敗することと
+続行しない。前の行の追加、同じ event の重複、native session id のない記録も合成データで試験した。
+CLI と、準備後の忘却が追記を止める型付き API の試験で、先に失敗することと
 修正後の通過を確認した。削除対象より前の transcript と無関係な新規記録は残る。
 
 残り: 独立レビュー。この結果は全 M5 の削除 canary 成功ではない。物理

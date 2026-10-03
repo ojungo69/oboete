@@ -219,7 +219,11 @@ pub fn start(home: &Path, preview: &Preview) -> Result<(Status, Report)> {
     getrandom::fill(&mut id)?;
     let job: String = id.iter().map(|b| format!("{b:02x}")).collect();
     let request = raw.forget_start(preview, &job, crate::db::now_ms())?;
-    let report = reconcile(home, &mut raw)?;
+    // It is registered already. A later log failure is reported alongside that true status.
+    let report = reconcile(home, &mut raw).unwrap_or_else(|e| Report {
+        problems: vec![format!("the request logs were not reconciled: {e:#}")],
+        ..Report::default()
+    });
     Ok((status_of(&request), report))
 }
 
@@ -552,6 +556,7 @@ mod tests {
         let identity = raw::ImportIdentity {
             origin: origin("synthetic", id),
             session: session(&event.agent, &event.session),
+            ambiguous: None,
         };
         raw.append_imported_origins(
             &[crate::capture::Captured {
@@ -607,6 +612,32 @@ mod tests {
         assert!(!log.contains("canary"), "{log}");
     }
 
+    /// Registration committed even if a later reconciliation cannot read another job. The
+    /// caller receives its true registered state and the log problem, never "not registered".
+    #[test]
+    fn a_registered_request_keeps_its_status_when_later_reconciliation_fails() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let seq = native(
+            &mut raw,
+            "registered",
+            r#"{"prompt":"a synthetic registered request"}"#,
+        );
+        let p = raw.forget_preview(record(&raw, seq)).unwrap();
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO forget_jobs(id, request, started, step) VALUES('broken', 'not JSON', 0, 1)",
+                [],
+            )
+            .unwrap();
+        let (status, report) = start(home.path(), &p).expect("the request was already registered");
+        assert_eq!(status.records, 1);
+        assert_eq!(status.local, "hidden; physical purge pending");
+        assert!(!report.problems.is_empty());
+        assert!(!shown(&raw, seq));
+    }
+
     /// The importer may have prepared a transcript batch before forget registered its cut.
     /// The append's transaction checks the current request, even with another source origin.
     #[test]
@@ -629,6 +660,7 @@ mod tests {
             let identity = raw::ImportIdentity {
                 origin: origin("synthetic-transcript", id),
                 session: session(&event.agent, &event.session),
+                ambiguous: None,
             };
             raw.append_imported_origins(
                 &[crate::capture::Captured {

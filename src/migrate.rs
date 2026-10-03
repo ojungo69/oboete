@@ -434,6 +434,7 @@ fn events(
                     ImportIdentity {
                         origin: crate::forget::origin(&key, &format!("{identity}:{i}")),
                         session: session.clone(),
+                        ambiguous: None,
                     },
                 )
             }));

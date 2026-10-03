@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS denied_records(
 -- An imported record's native identity, hashed (forget::origin): no original id or text.
 CREATE TABLE IF NOT EXISTS import_origins(
   device TEXT NOT NULL, seq INTEGER NOT NULL, origin TEXT NOT NULL, native_session TEXT,
+  ambiguous INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(device, seq)
 );
 CREATE INDEX IF NOT EXISTS import_origins_origin ON import_origins(origin);
@@ -371,6 +372,9 @@ pub const MAX_BATCH_BYTES: usize = 4 << 20;
 pub struct ImportIdentity {
     pub origin: String,
     pub session: String,
+    /// A repeated event's occurrence-zero origin. Its records stay distinct, but a forget
+    /// cannot choose one without a native event identifier.
+    pub ambiguous: Option<String>,
 }
 
 pub struct Raw {
@@ -452,6 +456,14 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
         deadline,
     )
     .context("migrate import session identity")?;
+    crate::db::ensure_column_until(
+        &mut conn,
+        "import_origins",
+        "ambiguous",
+        "INTEGER NOT NULL DEFAULT 1",
+        deadline,
+    )
+    .context("migrate import identity confidence")?;
     for file in ["raw.db", "raw.db-wal", "raw.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -594,21 +606,26 @@ impl Raw {
                 let Item::Event(e) = r.item else {
                     continue;
                 };
-                let identity: Option<(String, Option<String>)> = self
+                let identity: Option<(String, Option<String>, bool)> = self
                     .conn
                     .query_row(
-                        "SELECT origin, native_session FROM import_origins WHERE device = ?1 AND seq = ?2",
+                        "SELECT origin, native_session, ambiguous FROM import_origins WHERE device = ?1 AND seq = ?2",
                         params![device, r.seq],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                     )
                     .optional()?;
-                let (origin, session) = identity.with_context(|| {
+                let (origin, session, ambiguous) = identity.with_context(|| {
                     format!(
                         "record {device}:{} has no import identity: this slice forgets imported \
                          records only; nothing was registered",
                         r.seq
                     )
                 })?;
+                anyhow::ensure!(
+                    !ambiguous,
+                    "record {device}:{} has an ambiguous or unverified import identity: nothing was registered",
+                    r.seq
+                );
                 let session = session.with_context(|| {
                     format!(
                         "record {device}:{} has no native session identity: nothing was registered",
@@ -788,6 +805,9 @@ impl Raw {
         for identity in origins {
             crate::forget::check_identity(&identity.origin)?;
             crate::forget::check_identity(&identity.session)?;
+            if let Some(group) = &identity.ambiguous {
+                crate::forget::check_identity(group)?;
+            }
         }
         let bytes: usize = batch.iter().map(|c| c.event.body.len()).sum();
         anyhow::ensure!(
@@ -815,6 +835,18 @@ impl Raw {
         for (index, c) in batch.iter().enumerate() {
             let identity = origins.get(index);
             let origin = identity.map(|i| i.origin.as_str());
+            if let Some(group) = identity.and_then(|i| i.ambiguous.as_ref()) {
+                anyhow::ensure!(
+                    !denied(&tx, Some(group), "")?,
+                    "an ambiguous transcript event overlaps a surviving forget request: this batch was not imported"
+                );
+                // A duplicate recognized after a checkpoint also marks its existing occurrence
+                // zero: forget_start reads this again while holding the write transaction.
+                tx.execute(
+                    "UPDATE import_origins SET ambiguous=1 WHERE origin=?1",
+                    [group],
+                )?;
+            }
             // A transcript batch may have been prepared before a concurrent forget. Keep the
             // native session's cut inside this transaction as well as at the importer's read.
             let past_cut = c.event.source == "transcript"
@@ -830,8 +862,8 @@ impl Raw {
                 let seq = insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
                 if let Some(identity) = identity {
                     tx.execute(
-                        "INSERT INTO import_origins(device, seq, origin, native_session) VALUES(?1, ?2, ?3, ?4)",
-                        params![self.device, seq, identity.origin, identity.session],
+                        "INSERT INTO import_origins(device, seq, origin, native_session, ambiguous) VALUES(?1, ?2, ?3, ?4, ?5)",
+                        params![self.device, seq, identity.origin, identity.session, i64::from(identity.ambiguous.is_some())],
                     )?;
                 }
                 seqs.push(seq);
@@ -1476,10 +1508,10 @@ impl Raw {
                 // An imported record keeps its origin, and a tombstone of a forgotten one the
                 // deny row, so a restore from the segments alone forgets it again (D1 rule 14).
                 let extra = match &r.item {
-                    Item::Event(_) => self.origin_of(&r.device, r.seq)?.map(|(origin, session)| {
+                    Item::Event(_) => self.origin_of(&r.device, r.seq)?.map(|(origin, session, ambiguous)| {
                         (
                             "import_identity",
-                            serde_json::json!({ "origin": origin, "session": session }),
+                            serde_json::json!({ "origin": origin, "session": session, "ambiguous": ambiguous }),
                         )
                     }),
                     Item::Tombstone(Target::Record { device, seq }) => {
@@ -1502,14 +1534,14 @@ impl Raw {
     }
 
     /// An imported record's origin (D1 rule 5).
-    fn origin_of(&self, device: &str, seq: i64) -> Result<Option<(String, Option<String>)>> {
+    fn origin_of(&self, device: &str, seq: i64) -> Result<Option<(String, Option<String>, bool)>> {
         use rusqlite::OptionalExtension;
         Ok(self
             .conn
             .query_row(
-                "SELECT origin, native_session FROM import_origins WHERE device = ?1 AND seq = ?2",
+                "SELECT origin, native_session, ambiguous FROM import_origins WHERE device = ?1 AND seq = ?2",
                 params![device, seq],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?)
     }
@@ -2372,8 +2404,8 @@ impl Rebuild {
                         crate::forget::check_identity(session)?;
                     }
                     self.conn.execute(
-                        "INSERT INTO import_origins(device, seq, origin, native_session) VALUES(?1, ?2, ?3, ?4)",
-                        params![device, seq, origin, session],
+                        "INSERT INTO import_origins(device, seq, origin, native_session, ambiguous) VALUES(?1, ?2, ?3, ?4, ?5)",
+                        params![device, seq, origin, session, i64::from(identity["ambiguous"].as_bool().unwrap_or(true))],
                     )?;
                 }
             }

@@ -418,6 +418,219 @@ fn a_copied_transcript_keeps_its_forgotten_identity_under_new_redaction_rules() 
     );
 }
 
+/// A newly recognized earlier event changes the parsed ordinals, but not the native contents
+/// of the forgotten event. Its request still applies after an older checkpoint is restored.
+#[test]
+fn inserting_an_earlier_transcript_event_does_not_restore_a_forgotten_prompt() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    record(&home, "seed-before-transcript-501");
+    let old_backup = root.path().join("before-transcript");
+    copy_backup(&home.join("backups"), &old_backup);
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    let line = |time: &str, prompt: &str| {
+        serde_json::json!({
+            "type":"user", "sessionId":"ordinal-session", "cwd":"/synthetic",
+            "timestamp":time, "message":{"role":"user", "content":prompt}
+        })
+        .to_string()
+    };
+    let canary = line("2026-09-01T00:00:01.000Z", CANARY);
+    let path = projects.join("source.jsonl");
+    std::fs::write(&path, format!("{canary}\n")).unwrap();
+    let args = ["import", "transcripts", "--agent", "claude", "--yes"];
+    ok(run(&home, &args, ""));
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    let found = ok(run(
+        &home,
+        &["search", "--all", "--raw", "only", "--", CANARY],
+        "",
+    ));
+    let id = found.split_whitespace().next().unwrap();
+    ok(run(&home, &["forget", "--record", id, "--yes"], ""));
+    std::fs::remove_dir_all(home.join("backups")).unwrap();
+    copy_backup(&old_backup, &home.join("backups"));
+    ok(run(&home, &["restore"], ""));
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n{canary}\n",
+            line("2026-09-01T00:00:00.000Z", "earlier-transcript-record-502")
+        ),
+    )
+    .unwrap();
+    ok(run(&home, &args, ""));
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    let found = ok(run(
+        &home,
+        &["search", "--all", "--raw", "only", "--", CANARY],
+        "",
+    ));
+    assert!(
+        !found.contains(CANARY),
+        "the changed ordinal restored the prompt: {found}"
+    );
+    let earlier = ok(run(
+        &home,
+        &[
+            "search",
+            "--all",
+            "--raw",
+            "only",
+            "--",
+            "earlier-transcript-record-502",
+        ],
+        "",
+    ));
+    assert!(
+        earlier.contains("earlier-transcript-record-502"),
+        "{earlier}"
+    );
+}
+
+/// A unique event can become indistinguishable from another after a later import. Both records
+/// stay searchable, but even the original raw ID cannot authorize a guessed forget.
+#[test]
+fn a_transcript_event_that_gains_an_identical_twin_cannot_be_forgotten_by_guessing() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    let line = serde_json::json!({
+        "type":"user", "sessionId":"duplicate-session", "cwd":"/synthetic",
+        "timestamp":"2026-09-01T00:00:01.000Z",
+        "message":{"role":"user", "content":CANARY}
+    })
+    .to_string();
+    let path = projects.join("source.jsonl");
+    std::fs::write(&path, format!("{line}\n")).unwrap();
+    let args = ["import", "transcripts", "--agent", "claude", "--yes"];
+    ok(run(home, &args, ""));
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    let first = ok(run(
+        home,
+        &["search", "--all", "--raw", "only", "--", CANARY],
+        "",
+    ));
+    let id = first.split_whitespace().next().unwrap();
+    std::fs::write(&path, format!("{line}\n{line}\n")).unwrap();
+    ok(run(home, &args, ""));
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    let rejected = run(home, &["forget", "--record", id, "--yes"], "");
+    assert!(
+        !rejected.status.success(),
+        "an ambiguous transcript identity was accepted"
+    );
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("ambiguous"));
+    assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
+    let kept = ok(run(
+        home,
+        &["search", "--all", "--raw", "only", "--", CANARY],
+        "",
+    ));
+    assert_eq!(
+        kept.lines().filter(|line| line.contains(CANARY)).count(),
+        2,
+        "{kept}"
+    );
+}
+
+#[test]
+fn a_forgotten_unique_transcript_event_cannot_return_as_an_ambiguous_pair() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let keep = record(&home, "unrelated-record-before-ambiguous-transcript-511");
+    let old_backup = root.path().join("old-backup");
+    copy_backup(&home.join("backups"), &old_backup);
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    let line = serde_json::json!({
+        "type":"user", "sessionId":"ambiguous-after-forget", "cwd":"/synthetic",
+        "timestamp":"2026-09-01T00:00:01.000Z", "message":{"role":"user", "content":CANARY}
+    })
+    .to_string();
+    let path = projects.join("source.jsonl");
+    std::fs::write(&path, format!("{line}\n")).unwrap();
+    let args = ["import", "transcripts", "--agent", "claude", "--yes"];
+    ok(run(&home, &args, ""));
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    let found = ok(run(
+        &home,
+        &["search", "--all", "--raw", "only", "--", CANARY],
+        "",
+    ));
+    ok(run(
+        &home,
+        &[
+            "forget",
+            "--record",
+            found.split_whitespace().next().unwrap(),
+            "--yes",
+        ],
+        "",
+    ));
+    std::fs::remove_dir_all(home.join("backups")).unwrap();
+    copy_backup(&old_backup, &home.join("backups"));
+    ok(run(&home, &["restore"], ""));
+    std::fs::write(&path, format!("{line}\n{line}\n")).unwrap();
+    let imported = run(&home, &args, "");
+    assert!(
+        !imported.status.success(),
+        "the ambiguous pair bypassed the surviving request"
+    );
+    assert!(String::from_utf8_lossy(&imported.stderr).contains("ambiguous"));
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    let found = ok(run(
+        &home,
+        &["search", "--all", "--raw", "only", "--", CANARY],
+        "",
+    ));
+    assert!(!found.contains(CANARY), "{found}");
+    assert!(
+        ok(run(&home, &["get", &keep], ""))
+            .contains("unrelated-record-before-ambiguous-transcript-511")
+    );
+}
+
+#[test]
+fn a_filename_fallback_session_is_searchable_but_not_a_verified_forget_identity() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    let line = serde_json::json!({
+        "type":"user", "cwd":"/synthetic", "timestamp":"2026-09-01T00:00:01.000Z",
+        "message":{"role":"user", "content":CANARY}
+    });
+    std::fs::write(projects.join("filename-only.jsonl"), format!("{line}\n")).unwrap();
+    ok(run(
+        home,
+        &["import", "transcripts", "--agent", "claude", "--yes"],
+        "",
+    ));
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    let found = ok(run(
+        home,
+        &["search", "--all", "--raw", "only", "--", CANARY],
+        "",
+    ));
+    let id = found.split_whitespace().next().unwrap();
+    let rejected = run(home, &["forget", "--record", id, "--yes"], "");
+    assert!(
+        !rejected.status.success(),
+        "a filename was accepted as a stable native session"
+    );
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("unverified"));
+    assert!(ok(run(home, &["get", id], "")).contains(CANARY));
+}
+
 /// D1 rules 4 and 14: raw.db damaged after a forget is restored from segments older than it, and
 /// the request logs forget it again.
 #[test]
