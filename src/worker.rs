@@ -147,6 +147,16 @@ pub fn lock(home: &Path) -> Result<Option<Lock>> {
         .open(state.join("worker.lock"))?;
     match try_lock(&f) {
         Ok(()) => {
+            #[cfg(test)]
+            if let Some(after) = AFTER_OPEN.get() {
+                after(home);
+            }
+            // The home was replaced since the file was opened: the lock is the old one's, and
+            // nothing is written into the new one by path (R3, Codex on #359). A command asking
+            // for the lock takes the new home's at its next try.
+            if file_id(std::fs::metadata(state.join("worker.lock"))) != file_id(f.metadata()) {
+                return Ok(None);
+            }
             // Replaced whole, never rewritten in place: a number cut off by a crash or a full disk
             // would start the count again below the last recorded outcome's.
             // One that is unreadable anyway goes on from the last recorded outcome's.
@@ -212,6 +222,8 @@ fn steps_aside(home: &Path, raw: &Raw, holding: &Holding) -> bool {
 thread_local! {
     /// A test seam: what happens while the step-aside backup runs, as a command giving up.
     static AFTER_BACKUP: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    /// A test seam: what happens once the lock file is open and locked, as a home replaced.
+    static AFTER_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
 /// How long a command waits for a worker to step aside.
@@ -2357,6 +2369,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(why.is::<Gone>(), "{why:#}");
+        let state: Vec<_> = std::fs::read_dir(p.join("state"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(state, ["worker.lock"], "written into the new home");
+    }
+
+    /// R3 while the lock is taken: a home replaced after its lock file was opened gets no lock
+    /// number, and the lock is not given (Codex on #359).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_home_replaced_while_its_lock_is_taken_gets_no_lock_number() {
+        let parent = tempfile::tempdir().unwrap();
+        let p = parent.path().join("home");
+        std::fs::create_dir(&p).unwrap();
+        AFTER_OPEN.set(Some(replace_home));
+        let got = lock(&p);
+        AFTER_OPEN.set(None);
+        assert!(got.unwrap().is_none());
         let state: Vec<_> = std::fs::read_dir(p.join("state"))
             .unwrap()
             .map(|e| e.unwrap().file_name())

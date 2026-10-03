@@ -382,3 +382,10 @@ Its ninth round: the first taking of the lock wrote its record the same way, bef
 and the restore let the lock go before its consumers ran, so a command that took the lock then
 could leave the restored records unread while the restore said they were back. `take` checks the
 home before it writes, and the restore hands its lock to the consumers' run.
+
+Its tenth round: taking the lock wrote the lock number by path before any check, so a home replaced
+after the lock file was opened got the old home's number. The lock file is now compared with the
+home's before anything is written, and the lock is not given when they differ; a command asking for
+it takes the new home's at its next try (R3). Not taken: another check between a command taking the
+lock and its restore. The lock is checked as it is taken and the restore starts at once after; a
+home replaced during the restore's own writes is the gap Limits names.
