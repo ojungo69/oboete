@@ -84,7 +84,7 @@ enum Head {
     Body(usize, Save),
 }
 
-/// A write that takes a request's body: the settings, or a key.
+/// A typed write that takes a request's body.
 type Save = fn(&Viewer, &[u8]) -> Response;
 
 #[derive(Debug)]
@@ -357,11 +357,12 @@ impl Viewer {
         send(&mut stream, &resp.bytes(head_only), ANSWER_TIME);
     }
 
-    /// The two saves go through `save_gate`; every other request is answered by `route`.
+    /// Typed writes go through `save_gate`; every other request is answered by `route`.
     fn head(&self, method: &str, target: &str, headers: &[(&str, &str)]) -> Head {
         let (cap, save): (usize, Save) = match (method, target) {
             ("POST", "/api/settings") => (MAX_BODY, Self::save),
             ("POST", "/api/key") => (MAX_KEY_BODY, Self::save_key),
+            ("POST", "/api/resume") => (MAX_BODY, Self::resume),
             _ => return Head::Answer(self.route(method, target, headers)),
         };
         match self.save_gate(headers, cap) {
@@ -433,6 +434,10 @@ impl Viewer {
     /// A key written to its entry's key file (#94 part 3); the answer never holds it.
     fn save_key(&self, body: &[u8]) -> Response {
         saved(crate::settings::save_key(&self.home, &self.saving, body))
+    }
+
+    fn resume(&self, body: &[u8]) -> Response {
+        saved(crate::settings::resume(&self.home, &self.saving, body))
     }
 
     /// DNS rebinding: a page on another name that resolves to 127.0.0.1 sends its own Host.
@@ -1859,8 +1864,132 @@ mod tests {
         serde_json::to_vec(&json!({"version": shown["version"],
             "inject": {"session_start": false, "session_start_chars": 6000, "per_prompt": false,
                 "per_prompt_chars": 1500, "correction": true, "correction_chars": 800},
-            "capture": shown["capture"], "chain": chain}))
+            "summary": shown["summary"], "paid_usd_per_month": shown["paid_usd_per_month"],
+            "gemini": shown["gemini"], "capture": shown["capture"], "chain": chain}))
         .unwrap()
+    }
+
+    #[test]
+    fn resume_passes_the_save_guards_and_only_clears_the_stop() {
+        let (dir, v) = viewer("w1-resume");
+        let config = "providers = []\n[summary]\ncurate = false # invented settings\n";
+        std::fs::write(dir.join("config.toml"), config).unwrap();
+        let db = crate::providers_db::open(&dir).unwrap();
+        for provider in ["owner-stopped", "other-stopped"] {
+            crate::providers_db::set_state(
+                &db,
+                provider,
+                crate::providers_db::State {
+                    down_until: crate::providers_db::OWNER_HOLD,
+                    fails: 3,
+                    backoff: 2,
+                },
+            )
+            .unwrap();
+        }
+        for (device, hold) in [("owner-device", "owner"), ("time-device", "time")] {
+            crate::providers_db::set_pending(
+                &db,
+                &crate::providers_db::Pending {
+                    device: device.into(),
+                    from_seq: 1,
+                    from_offset: None,
+                    to_seq: 2,
+                    to_offset: None,
+                    reason: "invented-reason".into(),
+                    hold: hold.into(),
+                    attempts: 2,
+                    next_attempt_at: 5_000_000_000_000,
+                    since: 1,
+                    prompt: "invented-hash".into(),
+                },
+            )
+            .unwrap();
+        }
+        let calls = crate::providers_db::last_calls(&db, 10).unwrap();
+        let body = br#"{"provider":"owner-stopped"}"#;
+        save_guards(&v, "/api/resume", MAX_BODY, body);
+        for method in ["GET", "HEAD", "PUT", "PATCH", "OPTIONS", "DELETE"] {
+            let r = request(&v, method, "/api/resume", &[HOST, TOKEN], b"");
+            assert_eq!(
+                r.status,
+                if matches!(method, "GET" | "HEAD") {
+                    404
+                } else {
+                    405
+                }
+            );
+        }
+        let send = |target: &str, body: &[u8]| {
+            let len = body.len().to_string();
+            request(
+                &v,
+                "POST",
+                target,
+                &[
+                    HOST,
+                    TOKEN,
+                    ("Origin", "http://127.0.0.1:4321"),
+                    ("Content-Type", "application/json"),
+                    ("Content-Length", &len),
+                ],
+                body,
+            )
+        };
+        assert_eq!(send("/api/resume?x=1", body).status, 405);
+        for invalid in [
+            br#"{"provider":true}"#.as_slice(),
+            br#"{"provider":"owner-stopped","command":"anything"}"#,
+            br#"{}"#,
+            b"not JSON",
+        ] {
+            assert_eq!(send("/api/resume", invalid).status, 400);
+        }
+        assert_eq!(send("/api/resume", br#"{"provider":""}"#).status, 422);
+        let shown = get(&v, "/api/settings");
+        assert_eq!(shown["stopped"], json!(["other-stopped", "owner-stopped"]));
+        assert_eq!(
+            crate::providers_db::state(&db, "owner-stopped")
+                .unwrap()
+                .down_until,
+            crate::providers_db::OWNER_HOLD
+        );
+        let resumed = json_of(&send("/api/resume", body));
+        assert_eq!(
+            resumed,
+            json!({"provider": "owner-stopped", "resumed": true})
+        );
+        assert_eq!(
+            crate::providers_db::state(&db, "owner-stopped").unwrap(),
+            crate::providers_db::State::default()
+        );
+        assert_eq!(
+            get(&v, "/api/settings")["stopped"],
+            json!(["other-stopped"])
+        );
+        assert_eq!(
+            crate::providers_db::pending_of(&db, "owner-device")
+                .unwrap()
+                .unwrap()
+                .next_attempt_at,
+            0
+        );
+        assert_eq!(
+            crate::providers_db::pending_of(&db, "time-device")
+                .unwrap()
+                .unwrap()
+                .next_attempt_at,
+            5_000_000_000_000
+        );
+        assert_eq!(json_of(&send("/api/resume", body))["resumed"], false);
+        assert_eq!(crate::providers_db::last_calls(&db, 10).unwrap(), calls);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            config
+        );
+        assert!(!dir.join("raw.db").exists() && !dir.join("knowledge.db").exists());
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// #94 test 3: the two saves are the requests with a body, and a head passes every check

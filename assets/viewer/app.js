@@ -335,9 +335,64 @@ const TEXT = {
   heading: ['Settings', '設定'],
   language: ['Language', '言語'],
   lead: [
-    'These settings are kept in config.toml in the oboete home. They apply from the next session start or the next curation window; nothing needs a restart.',
-    'ここでの設定は、oboete のホームにある config.toml に保存されます。次のセッションの開始時か、次の要約から反映されます。再起動は必要ありません。',
+    'The controls start with saved values. Edits stay on this page until you save them in config.toml. Recording and memory delivery read them at their next use; the background summarizer reads them before its next window, even while it stays running. This page cannot tell which values a running request has loaded. Opening this page or saving sends nothing to a provider.',
+    '最初は保存済みの値を表示します。変更は「保存」を押すまでこの画面だけに残ります。記録・記憶の受け渡しには次の利用時から反映されます。要約の設定は、次のまとまりを処理する前に読み直すので、処理が動き続けていても反映されます。現在実行中の呼び出しが読み込んでいる値は、この画面では確認できません。画面を開いたり保存したりしても、要約役への送信は始まりません。',
   ],
+  summary_h: ['Summarizing recorded activity', '記録の要約'],
+  summary_desc: [
+    'When enabled, the background summarizer may send recorded text to the providers below. Paid calls can cost money. Turning it off keeps existing memories and stops new summaries at the next run.',
+    '有効にすると、バックグラウンドの要約処理が記録した本文を下の要約役へ送ることがあります。有料の呼び出しには費用がかかります。無効にしても既存の記憶は残り、次の処理で設定を読み直すと、新しい要約を止めます。',
+  ],
+  curate_on: ['Summarize recorded activity (default: off)', '記録を要約する(既定: 切)'],
+  summary_language: ['Language of summaries', '要約を書く言語'],
+  summary_language_desc: [
+    'Write the language you want, such as English. Default: Japanese. Changing the language does not start a call.',
+    '要約を書いてほしい言語を自由に入力します。例: English。既定は Japanese(日本語)です。言語を変えても呼び出しは始まりません。',
+  ],
+  summary_advanced: ['Text size and waiting time', '一度に送る大きさと待ち時間'],
+  window_tokens: ['Text per request ({min} to {max} estimated tokens)', '一度に送る大きさ(推定トークン数、{min}〜{max})'],
+  window_tokens_desc: [
+    'Default: 5,000. Tokens are small pieces of text counted by a model. Larger requests can send more text and cost more. Saving does not send a request.',
+    '既定は 5,000 です。トークンはモデルが数える小さな本文の単位です。大きくすると一度に送る本文が増え、費用が増えることがあります。保存しても送信は始まりません。',
+  ],
+  idle_minutes: ['Wait after the last activity (minutes, {min} to {max})', '最後の記録から待つ時間(分、{min}〜{max})'],
+  idle_minutes_desc: [
+    'Default: 10 minutes. Waits for more activity before sending a short request. Zero skips this wait. The actual wait is at most 30 minutes, even when a larger value is saved. Changing it does not start a paid call.',
+    '既定は 10 分です。短い記録を送る前に、続きの記録を待ちます。0 ではこの待ち時間をなくします。大きい値を保存しても実際に待つのは最大 30 分です。変更しても有料の呼び出しは始まりません。',
+  ],
+  saved_value: ['Saved: {value}', '保存済み: {value}'],
+  value_on: ['On', '入'],
+  value_off: ['Off', '切'],
+  spending_h: ['Paid calls and spending', '有料の呼び出しと利用額'],
+  paid_cap: ['Monthly limit for paid calls (USD)', '有料の呼び出しの月額上限(米ドル)'],
+  paid_cap_desc: [
+    'Default: USD 5 per calendar month (UTC). Zero stops paid calls; free and subscription providers can still be used. This limit covers the paid calls recorded by oboete. Search embeddings have their own limit. Saving the limit costs nothing.',
+    '既定は暦月ごとに 5 米ドル(UTC)です。0 では有料の呼び出しを止め、無料・サブスクリプションの要約役は引き続き使えます。oboete が記録する有料の呼び出しが対象で、検索用の処理には別の上限があります。上限を保存するだけでは費用はかかりません。',
+  ],
+  month_spend: ['Recorded spending this month (UTC): {usd}', '今月の記録された利用額(UTC): {usd}'],
+  no_spend: ['Nothing has been spent this month (UTC).', '今月(UTC)の利用額はありません。'],
+  spend_unavailable: ['This month\'s spending could not be read.', '今月の利用額を読み込めませんでした。'],
+  gemini_label: ['Where to add Gemini', 'Gemini を加える場所'],
+  gemini_none: ['Do not add automatically (default)', '自動では加えない(既定)'],
+  gemini_before: ['Before subscription providers', 'サブスクリプションの要約役の前'],
+  gemini_after: ['After subscription providers', 'サブスクリプションの要約役の後'],
+  gemini_desc: [
+    'Gemini sends text to Google and can cost money within the paid limit. An existing Gemini entry keeps its place, and the order below takes priority. To stop using that entry, turn off its Use checkbox. Saving this choice sends nothing.',
+    'Gemini は本文を Google に送り、有料の上限内で費用がかかることがあります。すでに登録した Gemini は元の場所に残り、下で指定した順番が優先されます。その要約役を使わない場合は「使う」のチェックを外します。この選択を保存しても送信は始まりません。',
+  ],
+  stopped_h: ['Providers waiting for you', '再開の操作を待っている要約役'],
+  stopped_desc: [
+    'Use again clears the stop and makes waiting work eligible at the next background run. It keeps the Use checkbox and spending limits. Later calls may cost money. This button sends nothing and does not start the summarizer.',
+    '「再び使う」で停止を解除し、待っている処理を次のバックグラウンド処理で再試行できる状態に戻します。「使う」のチェックと利用額の上限は維持します。後の呼び出しには費用がかかることがあります。このボタンでは送信や要約処理の起動はしません。',
+  ],
+  stopped_none: ['No providers are waiting for your action.', '再開の操作を待っている要約役はありません。'],
+  resume: ['Use again', '再び使う'],
+  resume_label: ['Use {name} again', '{name} を再び使う'],
+  resumed: ['The stop was cleared. It can be used at the next eligible background run.', '停止を解除しました。条件が整えば次のバックグラウンド処理で使われます。'],
+  not_stopped: ['This provider was already available.', 'この要約役の停止はすでに解除されていました。'],
+  providers_unavailable: ['Provider stops could not be read or changed. Please try again.', '要約役の停止状態を読み込み・変更できませんでした。もう一度お試しください。'],
+  resume_failed: ['The provider could not be resumed ({status}).', '要約役を再開できませんでした({status})。'],
+  network_failed: ['The viewer could not be reached. Please try again.', 'ビューアーに接続できませんでした。もう一度お試しください。'],
   inject_h: ['Handing memory to agents', '記憶の受け渡し'],
   inject_desc: [
     'The summary of your memory that an agent is given when a session starts.',
@@ -469,7 +524,7 @@ const TEXT = {
   differs_daily_budget: ['calls a day', '1 日の回数'],
   differs_timeout_s: ['timeout', '待ち時間'],
   save: ['Save', '保存'],
-  saved: ['Saved.', '保存しました。'],
+  saved: ['Saved. Summary and spending settings apply when the background summarizer next reads them, before its next window.', '保存しました。要約と利用額の設定は、次のまとまりを処理する前に読み直すと反映されます。'],
   warnings_h: ['Notes on config.toml', 'config.toml についての注意'],
   file_error: [
     'config.toml has a mistake, so this page shows no settings. Run `oboete doctor` to see the line.',
@@ -490,8 +545,8 @@ const TEXT = {
     'このモデルは月の上限の外で課金されるおそれがあるため、ここでは設定できません。',
   ],
   chain_empty: [
-    'Please keep at least one curator in use. To stop curation, set [summary] curate = false.',
-    '要約役を少なくとも 1 つは使う設定にしてください。要約を止めるには、[summary] curate = false を設定します。',
+    'Please keep at least one provider in use. To stop summaries, turn off Summarize recorded activity above.',
+    '要約役を少なくとも 1 つは使う設定にしてください。要約を止めるには、上の「記録を要約する」を切にします。',
   ],
   file_invalid: [
     'config.toml has a mistake, so this page cannot change it. Run `oboete doctor` to see the line.',
@@ -535,6 +590,12 @@ function formOf(s) {
   const text = (v) => (v === null || v === undefined ? '' : String(v));
   return {
     version: s.version,
+    saved: { summary: { ...s.summary }, paid_usd_per_month: s.paid_usd_per_month, gemini: s.gemini },
+    summary: { ...s.summary, window_tokens: String(s.summary.window_tokens), idle_minutes: String(s.summary.idle_minutes) },
+    paid_usd_per_month: String(s.paid_usd_per_month),
+    gemini: s.gemini ?? 'none',
+    usd_this_month: s.usd_this_month,
+    stopped: s.stopped,
     inject: { ...s.inject, ...Object.fromEntries(SIZES.map((k) => [k, String(s.inject[k])])) },
     capture: { ...s.capture },
     chain: s.chain.map((e) => ({
@@ -567,8 +628,9 @@ function checkbox(checked, onChange) {
 // A text or number field that keeps its value in the form as it is typed; `field` is the name
 // the server uses when it refuses the value.
 function input(type, value, placeholder, field, onInput) {
-  const i = el('input');
-  i.type = type;
+  const i = el(type === 'textarea' ? 'textarea' : 'input');
+  if (type === 'textarea') i.rows = 2;
+  else i.type = type;
   if (type === 'number') {
     i.inputMode = 'numeric';
     i.step = '1';
@@ -589,6 +651,52 @@ function input(type, value, placeholder, field, onInput) {
 
 function note(text) {
   return el('span', 'note', text);
+}
+
+function stoppedState() {
+  const state = el('div', 'stopped-state');
+  if (form.stopped === null) state.append(note(t('providers_unavailable')));
+  else if (!form.stopped.length) state.append(note(t('stopped_none')));
+  else state.append(el('ul', 'stopped', ...form.stopped.map((name) => {
+    const button = el('button', 'quiet small', t('resume'));
+    button.type = 'button';
+    button.setAttribute('aria-label', t('resume_label', { name }));
+    button.addEventListener('click', () => void resumeProvider(name, button));
+    return el('li', null, el('span', 'entry-name', name), button);
+  })));
+  return state;
+}
+
+async function resumeProvider(name, button) {
+  const mine = form;
+  const fields = button.closest('.settings');
+  const state = button.closest('.stopped-state');
+  button.disabled = true;
+  fields.inert = true;
+  try {
+    const res = await fetch('/api/resume', {
+      method: 'POST',
+      headers: { 'X-Oboete-Token': token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: name }),
+      referrerPolicy: 'same-origin',
+      credentials: 'omit',
+    });
+    const answer = (res.headers.get('content-type') || '').startsWith('application/json') ? await res.json() : {};
+    if (view !== 'settings' || form !== mine) return;
+    if (res.ok) {
+      mine.stopped = mine.stopped.filter((provider) => provider !== answer.provider);
+      state.replaceWith(stoppedState());
+      setStatus(t(answer.resumed ? 'resumed' : 'not_stopped'), false, lang);
+      return;
+    }
+    const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
+    setStatus(t(answer.code || byStatus[res.status] || 'resume_failed', { status: res.status }), true, lang);
+  } catch {
+    if (view === 'settings' && form === mine) setStatus(t('network_failed'), true, lang);
+  } finally {
+    button.disabled = false;
+    fields.inert = false;
+  }
 }
 
 function keyState(r) {
@@ -728,6 +836,16 @@ function saveBody() {
     sizes[key] = whole(form.inject[key], ...form.ranges[key]);
     if (Number.isNaN(sizes[key])) return { field: `inject.${key}` };
   }
+  const summary = { curate: form.summary.curate, language: form.summary.language };
+  for (const key of ['window_tokens', 'idle_minutes']) {
+    summary[key] = whole(form.summary[key], ...form.ranges[key]);
+    if (Number.isNaN(summary[key])) return { field: `summary.${key}` };
+  }
+  const paid = form.paid_usd_per_month.trim();
+  const cap = Number(paid);
+  const [least, most] = form.ranges.paid_usd_per_month;
+  if (paid === '' || !Number.isFinite(cap) || cap < least || (most !== null && cap > most)) return { field: 'paid_usd_per_month' };
+  if (!['none', 'before-subscriptions', 'after-subscriptions'].includes(form.gemini)) return { field: 'gemini' };
   const chain = [];
   for (const r of form.chain) {
     // Empty follows the curator's own value; a value config.toml has already stays as it is.
@@ -746,6 +864,9 @@ function saveBody() {
   return {
     body: {
       version: form.version,
+      summary,
+      paid_usd_per_month: cap,
+      gemini: form.gemini === 'none' ? null : form.gemini,
       inject: {
         session_start: form.inject.session_start,
         per_prompt: form.inject.per_prompt,
@@ -759,7 +880,7 @@ function saveBody() {
 }
 
 function markInvalid(field) {
-  const i = [...document.querySelectorAll('#panel input')].find((x) => x.dataset.field === field);
+  const i = [...document.querySelectorAll('#panel input, #panel select, #panel textarea')].find((x) => x.dataset.field === field);
   if (!i) return;
   i.classList.add('invalid');
   i.setAttribute('aria-invalid', 'true');
@@ -805,8 +926,8 @@ async function saveSettings(button) {
     fields.inert = false;
     if (answer.field) markInvalid(answer.field);
     setStatus(t(code, { status: res.status }), true, lang);
-  } catch (e) {
-    setStatus(e.message, true);
+  } catch {
+    if (view === 'settings' && form === mine) setStatus(t('network_failed'), true, lang);
   } finally {
     button.disabled = false;
     fields.inert = false;
@@ -834,6 +955,37 @@ function drawSettings() {
     return;
   }
   const f = form;
+  const saved = (value) => note(t('saved_value', { value }));
+  const summaryLanguage = input('textarea', f.summary.language, 'Japanese', 'summary.language', (v) => { f.summary.language = v; });
+  summaryLanguage.className = 'summary-language';
+  const summarySize = (key) => {
+    const i = input('number', f.summary[key], '', `summary.${key}`, (v) => { f.summary[key] = v; });
+    const [min, max] = f.ranges[key];
+    [i.min, i.max] = [min, max];
+    return el('label', 'field', el('span', null, t(key, { min: min.toLocaleString(lang), max: max.toLocaleString(lang) })),
+      i, saved(f.saved.summary[key]), note(t(`${key}_desc`)));
+  };
+  const cap = input('number', f.paid_usd_per_month, '', 'paid_usd_per_month', (v) => { f.paid_usd_per_month = v; });
+  cap.min = f.ranges.paid_usd_per_month[0];
+  if (f.ranges.paid_usd_per_month[1] !== null) cap.max = f.ranges.paid_usd_per_month[1];
+  cap.step = 'any';
+  cap.inputMode = 'decimal';
+  const usd = (v) => new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', maximumFractionDigits: 6 }).format(v);
+  const spending = f.usd_this_month === null ? t('spend_unavailable')
+    : f.usd_this_month === 0 ? t('no_spend') : t('month_spend', { usd: usd(f.usd_this_month) });
+  const geminiOptions = { none: 'gemini_none', 'before-subscriptions': 'gemini_before', 'after-subscriptions': 'gemini_after' };
+  const gemini = el('select', null, ...Object.entries(geminiOptions).map(([value, key]) => {
+    const option = el('option', null, t(key));
+    option.value = value;
+    return option;
+  }));
+  gemini.value = f.gemini;
+  gemini.dataset.field = 'gemini';
+  gemini.addEventListener('change', () => {
+    f.gemini = gemini.value;
+    gemini.classList.remove('invalid');
+    gemini.removeAttribute('aria-invalid');
+  });
   const size = (key, label) => {
     const i = input('number', f.inject[key], '', `inject.${key}`, (v) => { f.inject[key] = v; });
     const [least, most] = f.ranges[key];
@@ -860,6 +1012,22 @@ function drawSettings() {
   save.type = 'submit';
   const formEl = el('form', null,
     el('section', null,
+      el('h3', null, t('summary_h')), el('p', 'desc', t('summary_desc')),
+      el('label', 'check', checkbox(f.summary.curate, (v) => { f.summary.curate = v; }), t('curate_on')),
+      saved(t(f.saved.summary.curate ? 'value_on' : 'value_off')),
+      el('label', 'field', el('span', null, t('summary_language')), summaryLanguage,
+        saved(f.saved.summary.language), note(t('summary_language_desc'))),
+      el('details', null, el('summary', null, t('summary_advanced')),
+        el('div', 'grid', summarySize('window_tokens'), summarySize('idle_minutes')))),
+    el('section', null,
+      el('h3', null, t('spending_h')),
+      el('div', 'spending-cap',
+        el('label', 'field', el('span', null, t('paid_cap')), cap, saved(usd(f.saved.paid_usd_per_month))),
+        el('p', 'spend', spending)),
+      el('p', 'desc', t('paid_cap_desc')),
+      el('label', 'field', el('span', null, t('gemini_label')), gemini,
+        saved(t(geminiOptions[f.saved.gemini ?? 'none'])), note(t('gemini_desc')))),
+    el('section', null,
       el('h3', null, t('inject_h')),
       el('p', 'desc', t('inject_desc')),
       flag('session_start', 'inject_on'), size('session_start_chars', 'inject_chars'),
@@ -874,6 +1042,8 @@ function drawSettings() {
       el('h3', null, t('chain_h')),
       el('p', 'desc', t('chain_desc')),
       el('div', 'scroll', el('table', 'chain', el('thead', null, head), rows))),
+    el('section', null,
+      el('h3', null, t('stopped_h')), el('p', 'desc', t('stopped_desc')), stoppedState()),
     f.warnings.length
       ? el('section', 'warnings', el('h3', null, t('warnings_h')), el('ul', null, ...f.warnings.map((w) => el('li', null, w))))
       : null,

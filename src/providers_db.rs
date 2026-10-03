@@ -105,6 +105,21 @@ CREATE TABLE IF NOT EXISTS digest_pending(
 );
 ";
 
+/// The viewer's ledger reads never create a database or run a schema upgrade. An absent
+/// ledger is different from one that cannot be read: only the former means no spend yet.
+pub fn read_only(home: &Path) -> Result<Option<Connection>> {
+    let path = home.join("providers.db");
+    match std::fs::metadata(&path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).context("read providers ledger"),
+    }
+    let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .context("read providers ledger")?;
+    conn.busy_timeout(std::time::Duration::from_secs(2))?;
+    Ok(Some(conn))
+}
+
 pub fn open(home: &Path) -> Result<Connection> {
     let deadline = std::time::Instant::now() + crate::db::OPEN_WRITE_WAIT;
     let path = home.join("providers.db");
