@@ -208,6 +208,29 @@ pub fn resident(home: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `state/view.lock`, a regular file only: a link or a FIFO planted while another user could write
+/// in `state` is replaced, not followed or waited on (Codex on #376).
+fn view_lock(state: &Path) -> Result<std::fs::File> {
+    let path = state.join("view.lock");
+    let open = || {
+        let mut file = std::fs::OpenOptions::new();
+        file.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::custom_flags(
+            &mut file,
+            libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        );
+        file.open(&path)
+            .ok()
+            .filter(|f| f.metadata().is_ok_and(|m| m.is_file()))
+    };
+    if let Some(file) = open() {
+        return Ok(file);
+    }
+    std::fs::remove_file(&path)?;
+    open().ok_or_else(|| anyhow!("{} is not a file", path.display()))
+}
+
 /// The resident viewer's start: the lock first, then `starting`, the filesystem check, the token
 /// file, the port, and `listening <port>`; a start that fails says why instead.
 fn listen(home: &Path) -> Result<Option<Resident>> {
@@ -221,11 +244,7 @@ fn listen(home: &Path) -> Result<Option<Resident>> {
         );
         return Ok(None);
     }
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(state.join("view.lock"))?;
+    let lock = view_lock(&state)?;
     match crate::worker::try_lock(&lock) {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
@@ -2677,8 +2696,17 @@ mod tests {
         let victim = theirs.path().join("victim");
         std::fs::write(&victim, "theirs").unwrap();
         std::os::unix::fs::symlink(&victim, p.join("state/view-outcome.next")).unwrap();
+        // Nor is a FIFO planted as the lock waited on (Codex on #376): it is replaced.
+        let fifo = std::ffi::CString::new(p.join("state/view.lock").to_str().unwrap()).unwrap();
+        // SAFETY: a valid, NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         let started = listen(p).unwrap();
         assert!(started.is_some());
+        assert!(
+            std::fs::symlink_metadata(p.join("state/view.lock"))
+                .unwrap()
+                .is_file()
+        );
         assert_eq!(mode(&p.join("state")), 0o700);
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "theirs");
         // Nothing goes through a link, not even a change of the mode of what it points to.
