@@ -1,0 +1,22 @@
+src/migrate.rs
+  s_ce2b24784deac6::t_5d4d04e450a5d7 254-255
+tests/forget_cli.rs
+  s_ce2b24784deac6::t_3a55752baf6024 1872-1921,1924,1926-1929,1931,1935,1942,1945
+  s_ce2b24784deac6::t_5db31677a81403 1922-1923,1925,1930,1932-1934,1936-1941,1943-1944,1946-1949
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e0ce259699bc144f862540264b937b5da4c32180",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
