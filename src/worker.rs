@@ -1807,8 +1807,7 @@ mod tests {
                 let staged = p.join("raw.db.copy");
                 std::fs::copy(&old, &staged).unwrap();
                 std::fs::rename(staged, p.join("raw.db")).unwrap();
-                std::fs::write(p.join("config.toml"), "[embedding]\nprovider = 'none'\n")
-                    .unwrap();
+                std::fs::write(p.join("config.toml"), "[embedding]\nprovider = 'none'\n").unwrap();
             } else {
                 assert_ne!(
                     raw.device(),

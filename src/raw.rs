@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS denied_records(
 -- An imported record's native identity, hashed (forget::origin): no original id or text.
 CREATE TABLE IF NOT EXISTS import_origins(
   device TEXT NOT NULL, seq INTEGER NOT NULL, origin TEXT NOT NULL, native_session TEXT,
-  ambiguous INTEGER NOT NULL DEFAULT 0,
+  ambiguous INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY(device, seq)
 );
 CREATE INDEX IF NOT EXISTS import_origins_origin ON import_origins(origin);
