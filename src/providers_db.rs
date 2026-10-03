@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS provider_calls(
   id INTEGER PRIMARY KEY,
   ts INTEGER NOT NULL,
   provider TEXT NOT NULL,
-  role TEXT NOT NULL,                     -- curator, judge, digest
+  role TEXT NOT NULL,                     -- curator, judge, digest (before summaries), summary
   span TEXT,                              -- what the call was for (a window, a session)
   outcome TEXT NOT NULL,                  -- ok, invalid, error, wait, budget, gate, too_big,
                                           -- and an answer curate::check refused: empty, prose,

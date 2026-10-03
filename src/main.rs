@@ -42,6 +42,7 @@ mod settings;
 mod setup;
 mod shortlist;
 mod transcript;
+mod turns;
 mod view;
 mod worker;
 

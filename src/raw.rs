@@ -137,6 +137,8 @@ pub enum OpKind {
     /// Where an import of records stands in its source (milestone 4 D6): a `Checkpoint` and
     /// `to_seq`, the last seq when its batch was appended.
     Migration,
+    /// A turn's summary (docs/summaries.md): a `turns::TurnOp`.
+    Turn,
 }
 
 impl OpKind {
@@ -149,6 +151,7 @@ impl OpKind {
             OpKind::Exclusion => "exclusion",
             OpKind::Import => "import",
             OpKind::Migration => "migration",
+            OpKind::Turn => "turn",
         }
     }
     fn from_name(name: &str) -> Option<Self> {
@@ -160,6 +163,7 @@ impl OpKind {
             Self::Exclusion,
             Self::Import,
             Self::Migration,
+            Self::Turn,
         ]
         .into_iter()
         .find(|k| k.name() == name)
@@ -674,6 +678,22 @@ impl Raw {
                 Item::Event(e) => Some((seq, *e)),
                 _ => None,
             }))
+    }
+
+    /// The first record of the turn that `agent`'s `session` ends with its reply `reply` on this
+    /// device: the one after the session's previous reply, or the session's first record
+    /// (docs/summaries.md T1). A scan by label, as `turns`.
+    pub fn turn_start(&self, agent: &str, session: &str, reply: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(
+               (SELECT MAX(seq) + 1 FROM records WHERE device = ?1 AND type = 'event'
+                  AND agent = ?2 AND session = ?3 AND kind = 'reply' AND seq < ?4),
+               (SELECT MIN(seq) FROM records WHERE device = ?1 AND type = 'event'
+                  AND agent = ?2 AND session = ?3),
+               ?4)",
+            params![self.device, agent, session, reply],
+            |r| r.get(0),
+        )?)
     }
 
     /// The agent and session labels of `device`'s event `seq`, NUL between (how `curate` keys a

@@ -64,6 +64,8 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
         Box::new(crate::consumer::digest::Digests),
         // The op log's cards (docs/cards.md): what each curated window was.
         Box::new(crate::consumer::cards::Cards),
+        // The op log's session summaries (docs/summaries.md): what each turn was.
+        Box::new(crate::consumer::turns::Turns),
         // Imported documents (milestone 4 D5), for search only.
         Box::new(crate::consumer::imported::Imported),
         Box::new(crate::consumer::manifest::Manifest::new(home)),
@@ -800,26 +802,26 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
         );
         let windows =
             crate::curate::run_phase(raw, k, db, &rules, &cfg.summary, &chain, &mut curator)?;
-        // The same chain, as the digest role (Task 9): spec 1.4 lets each role have its own, and
-        // one list serves until measurement asks for two.
-        let mut digester = |span: &str,
-                            prompt: &str,
-                            check: &crate::provider::AnswerCheck,
-                            gate: &crate::provider::Gate| {
+        // The same chain, as the summary role (docs/summaries.md T1), in the digest's place: spec
+        // 1.4 lets each role have its own, and one list serves until measurement asks for two.
+        let mut summarizer = |span: &str,
+                              prompt: &str,
+                              check: &crate::provider::AnswerCheck,
+                              gate: &crate::provider::Gate| {
             crate::provider::Chain::new(&cfg.providers, db)
                 .paid_cap(cfg.paid_usd_per_month)
                 .check(check)
                 .gate(gate)
-                .run("digest", span, prompt, &crate::digest::answer_schema())
+                .run("summary", span, prompt, &crate::turns::answer_schema())
         };
-        crate::digest::phase(
+        crate::turns::phase(
             raw,
             k,
             db,
             &rules,
             &cfg.summary,
             &chain,
-            &mut digester,
+            &mut summarizer,
             windows,
         )
     })
@@ -2926,20 +2928,16 @@ mod tests {
         })
     }
 
-    /// A digester that cites the first two claims it is shown.
-    fn fake_digester(
+    /// A summarizer that answers each turn with a request and what was completed.
+    fn fake_summarizer(
         _: &str,
         prompt: &str,
         check: &crate::provider::AnswerCheck,
         _: &crate::provider::Gate,
     ) -> Result<crate::provider::ChainResult> {
-        let lines: Vec<serde_json::Value> = prompt
-            .lines()
-            .filter_map(|l| l.split_once(": [").map(|(uid, _)| uid))
-            .take(2)
-            .map(|uid| serde_json::json!({"text": format!("about {uid}"), "uids": [uid]}))
-            .collect();
-        let output = serde_json::json!({ "lines": lines });
+        let output = serde_json::json!({"skip": false, "request": format!("a turn of {}", prompt.len()),
+            "investigated": "", "learned": "", "completed": "it ran", "next_steps": "",
+            "notes": ""});
         assert_eq!(check(&output), None, "{output}");
         Ok(crate::provider::ChainResult {
             provider: "fake".into(),
@@ -2948,7 +2946,7 @@ mod tests {
         })
     }
 
-    /// A worker run with the fake roles curating and digesting, in small windows.
+    /// A worker run with the fake roles curating and summarizing, in small windows.
     fn curate_all(home: &Path) -> Result<()> {
         let rules = crate::capture::Settings::load(home)?.rules;
         let summary = crate::config::Summary {
@@ -2960,14 +2958,14 @@ mod tests {
         let mut phase = |raw: &mut Raw, k: &Connection| {
             let windows =
                 crate::curate::run_phase(raw, k, &db, &rules, &summary, "", &mut fake_curator)?;
-            crate::digest::phase(
+            crate::turns::phase(
                 raw,
                 k,
                 &db,
                 &rules,
                 &summary,
                 "",
-                &mut fake_digester,
+                &mut fake_summarizer,
                 windows,
             )
         };
@@ -3102,7 +3100,7 @@ mod tests {
                 .count()
         };
         assert!(
-            count("claims") > 0 && count("derivations") > 0 && count("digests") > 0,
+            count("claims") > 0 && count("derivations") > 0 && count("turns") > 0,
             "{want:#?}"
         );
         assert!(commits >= 40, "{commits} commits");
