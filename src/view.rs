@@ -3504,6 +3504,21 @@ mod tests {
             .port()
     }
 
+    /// A resident viewer listening in a new home, on a port `free_port` gave: a test running
+    /// alongside may take that port before `listen` binds it, so a port in use is tried again
+    /// with another.
+    #[cfg(target_os = "linux")]
+    fn listening() -> (u16, tempfile::TempDir, Resident) {
+        for _ in 0..5 {
+            let port = free_port();
+            let home = resident_home(port);
+            if let Some(started) = listen(home.path()).unwrap() {
+                return (port, home, started);
+            }
+        }
+        panic!("no port stayed free in five tries");
+    }
+
     /// A home whose config.toml names `port` as the resident viewer's.
     fn resident_home(port: u16) -> tempfile::TempDir {
         let home = tempfile::tempdir().unwrap();
@@ -3612,10 +3627,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_resident_viewer_listens_on_its_port_and_says_so() {
-        let port = free_port();
-        let home = resident_home(port);
+        let (port, home, started) = listening();
         let p = home.path();
-        let started = listen(p).unwrap().unwrap();
         assert_eq!(view_outcome(p), format!("listening {port}"));
         std::fs::write(p.join("state/view-outcome"), "mark").unwrap();
         assert!(listen(p).unwrap().is_none());
