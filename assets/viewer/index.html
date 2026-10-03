@@ -14,29 +14,30 @@
     <h1>oboete</h1>
     <span id="live" class="live" title="Checks for new memory every few seconds">Live</span>
     <button type="button" id="theme" class="quiet small" title="Follow the system, or force light or dark">Theme: auto</button>
+    <button type="button" id="help" class="quiet small" aria-label="Show welcome" title="Show welcome">?</button>
   </div>
   <form id="controls" role="search">
     <label class="field">
-      <span>Repository</span>
+      <span id="repo-label">Repository</span>
       <select id="repo"></select>
     </label>
-    <label class="field grow">
-      <span>Search</span>
+    <label class="field grow record-controls">
+      <span id="search-label">Search</span>
       <input id="q" type="search" autocomplete="off" placeholder="Words from claims, imported history or records">
     </label>
-    <button type="submit">Search</button>
+    <button type="submit" id="search-button" class="record-controls">Search</button>
     <button type="button" id="refresh" class="quiet">Refresh</button>
-    <div class="filters">
+    <div class="filters record-controls">
       <label class="field">
-        <span>Since</span>
+        <span id="since-label">Since</span>
         <input id="since" type="date">
       </label>
       <label class="field">
-        <span>Until (whole day included)</span>
+        <span id="until-label">Until (whole day included)</span>
         <input id="until" type="date">
       </label>
       <label class="field">
-        <span>Raw records</span>
+        <span id="raw-label">Raw records</span>
         <select id="raw">
           <option value="below">Below claims and imported history</option>
           <option value="off">Off</option>
@@ -45,12 +46,13 @@
       </label>
       <label class="history-filter">
         <input id="history" type="checkbox">
-        <span>Include ended claims in their place</span>
+        <span id="history-label">Include ended claims in their place</span>
       </label>
     </div>
   </form>
   <nav id="tabs" aria-label="Views">
     <button type="button" data-view="timeline" class="tab">Timeline</button>
+    <button type="button" data-view="records" class="tab">Records</button>
     <button type="button" data-view="context" class="tab">Context</button>
     <button type="button" data-view="stats" class="tab">Stats</button>
     <button type="button" data-view="settings" class="tab">Settings</button>
@@ -63,6 +65,15 @@
   <ol id="list" class="entries"></ol>
   <div id="panel"></div>
 </main>
+<div id="welcome" class="welcome-backdrop" hidden>
+  <article id="welcome-dialog" class="welcome-dialog" role="dialog" aria-modal="true" aria-labelledby="welcome-title" tabindex="-1">
+    <header class="welcome-header">
+      <h2 id="welcome-title">Welcome to oboete</h2>
+      <button type="button" id="welcome-close" class="quiet" aria-label="Close welcome" title="Close (Esc)">×</button>
+    </header>
+    <div id="welcome-parts" class="welcome-parts"></div>
+  </article>
+</div>
 <noscript><p class="notice">The viewer needs JavaScript.</p></noscript>
 </body>
 </html>

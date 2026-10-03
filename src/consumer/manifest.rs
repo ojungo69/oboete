@@ -551,7 +551,7 @@ impl Delivered {
 
 /// The repository's name as the cards' header shows it: its last part, gated with the whole and
 /// again as shown, on one line.
-fn repo_name(repo: &str, rules: &crate::redact::Rules) -> String {
+pub(crate) fn repo_name(repo: &str, rules: &crate::redact::Rules) -> String {
     let gated = crate::redact::outbound_with(repo, rules);
     let last = gated
         .rsplit(['/', '\\'])

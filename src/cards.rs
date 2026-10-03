@@ -47,12 +47,19 @@ pub const TYPES: &[&str] = &[
     "sensitive",
 ];
 
+/// A feed page's last kept card: its window time and stored ID, all descending (page.md P3).
+pub type Position = (i64, String, i64, i64);
+
 /// claude-mem's icon of each of `TYPES`, in its order.
 const ICONS: [&str; 9] = ["●", "◆", "↻", "✓", "○", "⚖", "⚠", "⚷", "⊘"];
 /// claude-mem's icon for a type it does not know: here a card without one (K1).
 const NO_TYPE: &str = "📝";
 
 impl Card {
+    pub fn position(&self) -> Position {
+        (self.ts, self.device.clone(), self.op_seq, self.n)
+    }
+
     /// Its ID as session start shows it and `get` reads it (docs/cards.md S3): `<op seq>.<n>` on
     /// `local`, the device that reads it, and `<device>.<op seq>.<n>` for another device's card
     /// (a copied home keeps the ops of the device it was copied from; sync brings others').
@@ -345,6 +352,45 @@ pub fn recent(
         out.extend(read(r, raw, rules)?);
     }
     Ok(out)
+}
+
+/// A repository's (or all repositories') cards after `before`, newest first. The one reader
+/// still skips K4-hidden rows without using a slot. The boolean says another visible row
+/// exists: at most one extra is inspected for exhaustion, never returned or used as a cursor.
+pub fn page(
+    k: &Connection,
+    raw: &Raw,
+    repo: Option<&str>,
+    before: Option<&Position>,
+    limit: usize,
+    rules: &Rules,
+) -> Result<(Vec<Card>, bool)> {
+    if !crate::consumer::manifest::exists(k, "table", "cards")? {
+        return Ok((Vec::new(), false));
+    }
+    let mut st = k.prepare(&format!(
+        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL
+           AND (?1 IS NULL OR repo = ?1)
+           AND (?2 IS NULL OR (ts, device, op_seq, n) < (?2, ?3, ?4, ?5))
+         ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
+    ))?;
+    let mut rows = st.query(rusqlite::params![
+        repo,
+        before.map(|p| p.0),
+        before.map(|p| p.1.as_str()),
+        before.map(|p| p.2),
+        before.map(|p| p.3)
+    ])?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        if let Some(c) = read(r, raw, rules)? {
+            if out.len() == limit {
+                return Ok((out, true));
+            }
+            out.push(c);
+        }
+    }
+    Ok((out, false))
 }
 
 /// A card with the span of its window and the goals that window was shown.
