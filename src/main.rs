@@ -75,11 +75,12 @@ enum Cmd {
         /// Hook event name (e.g. SessionStart, PreInvocation, UserPromptSubmit, PostToolUse, Stop, PreCompact, SessionEnd)
         event: String,
     },
-    /// Run Design B's consumers over raw.db until idle (hooks start it; one per home)
+    /// Run Design B's consumers over raw.db (hooks start it; one per home). It exits when idle,
+    /// or stays where config.toml says `[worker] resident = true`
     Worker {
-        /// Exit after this long without a new record
-        #[arg(long, default_value_t = 60_000)]
-        idle_ms: u64,
+        /// Exit after this long without a new record, whatever config.toml says
+        #[arg(long)]
+        idle_ms: Option<u64>,
     },
     /// Rebuild knowledge.db (claims, digests, indexes, manifests) from raw.db and its op log,
     /// with no AI call
@@ -370,7 +371,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Worker { idle_ms } => worker::run(&home, idle_ms),
+        Cmd::Worker { idle_ms: Some(ms) } => worker::run(&home, ms),
+        Cmd::Worker { idle_ms: None } => worker::run_default(&home),
         Cmd::Inject {
             session,
             prompt: true,
@@ -680,14 +682,16 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         }
         Cmd::Restore => {
             // The worker's lock, so no worker reads raw.db while it is replaced.
-            let held = worker::lock(&home)?.ok_or_else(|| {
-                anyhow::anyhow!("a worker is running; try again when it has exited")
-            })?;
-            let said = backup::restore(&home)?;
+            let held = worker::lock_asking(&home)?;
+            let said = backup::restore(&home);
             // Derived data was moved aside: it is rebuilt before this returns, so a search right
-            // after finds the restored records.
-            drop(held);
-            worker::run_once(&home)?;
+            // after finds the restored records. After a restore that failed too: a hook that
+            // appended while the lock was held started no worker. Under the same lock, so another
+            // command cannot take it between (Codex on #359).
+            let ran = worker::run_once_holding(&home, held);
+            let said = said?;
+            // Restored only once its records are searchable again (Codex on #359).
+            ran?;
             println!("{said}");
             Ok(())
         }
@@ -748,5 +752,25 @@ mod tests {
                 .unwrap(),
             3
         );
+    }
+
+    /// A restore that fails still runs the consumers, as one that succeeds does: a hook that
+    /// appended while it held the worker lock started no worker (Codex on #359).
+    #[test]
+    fn a_restore_that_fails_runs_the_consumers() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let seq = raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        let cli = Cli::try_parse_from(["oboete", "restore"]).unwrap();
+        let why = run(cli.cmd, p.to_owned()).unwrap_err().to_string();
+        assert!(why.contains("no usable backup segment"), "{why}");
+        let k = knowledge::open(p).unwrap();
+        let read: Option<i64> = k
+            .query_row("SELECT MIN(seq) FROM checkpoints", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(read, Some(seq));
     }
 }

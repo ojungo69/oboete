@@ -970,6 +970,32 @@ pub(crate) fn parse_inject_with_language(text: &str) -> Result<(Inject, bool)> {
     Ok((i, japanese))
 }
 
+/// `[worker]` (docs/resident.md R2): whether the worker a hook starts stays when it is idle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Worker {
+    pub resident: bool,
+}
+
+/// `home`'s `[worker]`, by its own parse as `inject`'s. An error is not "off": a worker that
+/// stays keeps staying while the owner's edit does not load (R3).
+pub fn worker(home: &Path) -> Result<Worker> {
+    #[derive(Deserialize)]
+    struct File {
+        #[serde(default)]
+        worker: Worker,
+    }
+    let path = home.join("config.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(toml::from_str::<File>(&text)
+            .map_err(|e| toml_error(&text, &e))
+            .with_context(|| format!("parse {}", path.display()))?
+            .worker),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Worker::default()),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
 /// `[redaction]` (spec 1.5, 6.4): rules the user adds to the built-in ones, which cannot be
 /// removed, and false positives to keep, each the SHA-256 (hex) of one exact value.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1055,6 +1081,8 @@ pub struct CaptureConfig {
     _chain: serde::de::IgnoredAny,
     #[serde(default, rename = "inject")]
     _inject: serde::de::IgnoredAny,
+    #[serde(default, rename = "worker")]
+    _worker: serde::de::IgnoredAny,
 }
 
 pub fn load_capture(home: &Path) -> Result<CaptureConfig> {
@@ -1156,6 +1184,8 @@ paid_usd_per_month = 2.5
 session_start = false
 [chain]
 off = ["codex"]
+[worker]
+resident = true
 "#;
         let c: Config = toml::from_str(text).unwrap();
         assert_eq!(c.paid_usd_per_month, 2.5);
@@ -1694,6 +1724,31 @@ model = { gone = "m" }
         }
         let set = parse_inject("[inject]\nper_prompt = true\ncorrection = false\n").unwrap();
         assert!(set.per_prompt && !set.correction);
+    }
+
+    /// `[worker]` (docs/resident.md R2): resident only where the table says so. A mistake in the
+    /// table, or a file that is not TOML, is an error: a worker reads that as "stay as you are".
+    #[test]
+    fn a_worker_is_resident_only_where_its_table_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |text: &str| {
+            std::fs::write(dir.path().join("config.toml"), text).unwrap();
+            worker(dir.path())
+        };
+        assert!(!worker(dir.path()).unwrap().resident, "no file");
+        assert!(!at("[summary]\ncurate = true\n").unwrap().resident);
+        assert!(at("[worker]\nresident = true\n").unwrap().resident);
+        assert!(!at("[worker]\nresident = false\n").unwrap().resident);
+        for bad in [
+            "[worker]\nresident = \"true\"\n",
+            "[worker]\nresidant = true\n",
+            "[worker]\nresident = true\n[worker\n",
+        ] {
+            assert!(at(bad).is_err(), "{bad}");
+        }
+        // Other tables are not its business.
+        let other = at("[chain]\noff = 3\n[worker]\nresident = true\n");
+        assert!(other.unwrap().resident);
     }
 
     #[test]

@@ -130,6 +130,8 @@ pub struct Phase {
     home: PathBuf,
     flight: Option<InFlight>,
     asked: Option<Asked>,
+    /// The worker was asked to step aside: what is out is settled, nothing new is sent.
+    held: bool,
     answered: Option<Answer>,
     unasked: Option<String>,
     db: Option<Connection>,
@@ -168,6 +170,7 @@ impl Phase {
             home: home.to_owned(),
             flight: None,
             asked: None,
+            held: false,
             answered: None,
             unasked: None,
             db: None,
@@ -183,6 +186,18 @@ impl Phase {
     pub fn done(&self) -> bool {
         self.flight.as_ref().is_some_and(|f| f.thread.is_finished())
             || self.asked.as_ref().is_some_and(|a| a.thread.is_finished())
+    }
+
+    /// Whether a call is out or its answer not yet settled: the worker neither steps aside nor
+    /// calls itself waiting until then (docs/resident.md R10, R12).
+    pub fn busy(&self) -> bool {
+        self.flight.is_some() || self.asked.is_some()
+    }
+
+    /// While `on`, a call that comes back is settled and no batch or query is sent: a worker
+    /// asked to step aside must not start what the asking command would wait for (R12).
+    pub fn hold(&mut self, on: bool) {
+        self.held = on;
     }
 
     /// One step: a finished call's vectors written, or the next batch sent, or what it waits on.
@@ -229,7 +244,7 @@ impl Phase {
         tombstones: i64,
     ) -> Result<bool> {
         use crate::providers_db as pdb;
-        if self.asked.is_some() {
+        if self.asked.is_some() || self.held {
             return Ok(false);
         }
         let Ok(config) = crate::config::load(&self.home) else {
@@ -364,6 +379,9 @@ impl Phase {
             });
             self.finish(k, &f.batch, f.call, sent, ms)?;
             return Ok(Step::Covered);
+        }
+        if self.held {
+            return Ok(Step::Idle);
         }
         // Read again each poll: a worker that stays up follows the owner's edits.
         let loaded = crate::config::load(&self.home)

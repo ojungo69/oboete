@@ -266,7 +266,7 @@ fn sample_spawns(
 /// Drains the consumers for the warm arm; an error when another process holds the worker lock,
 /// whose consumers may not be drained.
 fn drain_for_read(home: &Path) -> Result<()> {
-    crate::worker::drained(home)?
+    crate::worker::drained(home, false)?
         .map(drop)
         .context("another process holds the worker lock: stop it before --read-sample")
 }
@@ -680,7 +680,7 @@ mod tests {
         .unwrap();
         let (cold, chars) = read_in_process(home.path(), &root, 3);
         assert_eq!((cold.len(), chars), (3, 0));
-        drop(crate::worker::drained(home.path()).unwrap());
+        drop(crate::worker::drained(home.path(), false).unwrap());
         let (warm, chars) = read_in_process(home.path(), &root, 3);
         assert_eq!(warm.len(), 3);
         let text = hook::inject_text(home.path(), &root, Some("read-sample"));
