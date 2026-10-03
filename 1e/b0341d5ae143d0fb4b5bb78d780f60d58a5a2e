@@ -1,0 +1,26 @@
+tests/forget_cli.rs
+  s_ce2b24784deac6::t_fcd984ca5a1b3c 195-244,247
+  s_ce2b24784deac6::t_619e84b5563f79 245-246,248-251
+docs/milestone-5-plan.md
+  s_ce2b24784deac6::t_dac9a76cf5bac0 108-110
+src/raw.rs
+  s_ce2b24784deac6::t_fcd984ca5a1b3c 2907-2964,2967
+  s_ce2b24784deac6::t_74385707e499a6 659,661-662,670-672,684-704,712
+  s_ce2b24784deac6::t_6bd70492e3f5ef 2965-2966,2968-2972
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1eb0341d5ae143d0fb4b5bb78d780f60d58a5a2e",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
