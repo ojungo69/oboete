@@ -126,7 +126,7 @@ else:
             for consumer in ('rescan', 'fts', 'anchors', 'manifest', 'gaps', 'compress'):
                 k.execute('INSERT OR REPLACE INTO checkpoints VALUES(?,?,?)', (consumer, 'local', top))
             for device, top in raw.execute('SELECT device,MAX(op_seq) FROM ops GROUP BY device'):
-                for consumer in ('claims', 'digests', 'imported'):
+                for consumer in ('claims', 'cards', 'turns', 'imported'):
                     k.execute('INSERT OR REPLACE INTO op_checkpoints VALUES(?,?,?)', (consumer, device, top))
     raw.commit()
     k.commit()
@@ -450,12 +450,12 @@ def test_backlog_checks_every_consumer_and_remote_ops(fixture_home):
     with sqlite3.connect(home / 'knowledge.db') as db:
         for consumer in ('rescan', 'fts', 'anchors', 'manifest', 'gaps', 'compress'):
             db.execute('INSERT INTO checkpoints VALUES(?,?,?)', (consumer, 'old', 2))
-        for consumer in ('claims', 'digests', 'imported'):
+        for consumer in ('claims', 'cards', 'turns', 'imported'):
             db.execute('INSERT INTO op_checkpoints VALUES(?,?,?)', (consumer, 'remote', 3))
     assert hooks.backlog(home)['backlog'] == 0
     for table, consumers, top in [
         ('checkpoints', ('rescan', 'fts', 'anchors', 'manifest', 'gaps', 'compress'), 2),
-        ('op_checkpoints', ('claims', 'digests', 'imported'), 3),
+        ('op_checkpoints', ('claims', 'cards', 'turns', 'imported'), 3),
     ]:
         for consumer in consumers:
             with sqlite3.connect(home / 'knowledge.db') as db:

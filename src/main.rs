@@ -15,7 +15,6 @@ mod consumer;
 mod crash;
 mod curate;
 mod db;
-mod digest;
 mod embed;
 mod embed_phase;
 mod failure;
@@ -83,7 +82,7 @@ enum Cmd {
         #[arg(long)]
         idle_ms: Option<u64>,
     },
-    /// Rebuild knowledge.db (claims, digests, indexes, manifests) from raw.db and its op log,
+    /// Rebuild knowledge.db (claims, cards, summaries, indexes, manifests) from raw.db and its op log,
     /// with no AI call
     Rebuild,
     /// Curate again what was curated before: the spans queued since (a quote a new rule masked

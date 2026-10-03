@@ -204,9 +204,10 @@ fetch more, then the recent observations and session summaries by day (its
 `src/services/context/` at 039c6160). oboete's packet keeps its own sections and gains that
 block.
 
-S1. **Where.** After the owner's decisions and open items (oboete's packet puts them first), before
-the digest of the last session, which the latest summary's fields replace in the next unit, and
+S1. **Where.** After the owner's decisions and open items (oboete's packet puts them first), and
 before the checkout's state lines (todo list, last exchange, files touched) and the live lines.
+The session summaries share the block (docs/summaries.md S7 to S9); the digest it replaced is gone
+(S11).
 Claude Code's terminal line at session start counts the cards it handed over beside the claims.
 
 S2. **What.** claude-mem's model text, as its format gives it, without what oboete has no data
@@ -215,7 +216,7 @@ for yet:
 ```text
 # [<repository name>] recent context, 2026-10-03 7:37am GMT+9
 
-Legend: ●bugfix ◆feature ↻refactor ✓change ○discovery ⚖decision ⚠security_alert ⚷security_note ⊘sensitive
+Legend: 🎯session ●bugfix ◆feature ↻refactor ✓change ○discovery ⚖decision ⚠security_alert ⚷security_note ⊘sensitive
 Format: ID TIME TYPE TITLE
 Fetch details: get(ID) | Search: search(query)
 
@@ -226,9 +227,10 @@ Fetch details: get(ID) | Search: search(query)
 420.1 6:05a ● Two workers no longer race for one lock
 ```
 
-- No `Mode:` line: oboete has one set of types. No `🎯session` in the legend and no session rows
-  until session summaries exist (next unit). No `Stats:` line and no footer: claude-mem counts
-  the tokens each observation's work took, and oboete does not count a window's.
+- No `Mode:` line: oboete has one set of types. The legend starts with `🎯session` and the
+  session summaries are rows among the cards (docs/summaries.md S7, S8). No `Stats:` line and no
+  footer: claude-mem counts the tokens each observation's work took, and oboete does not count a
+  window's.
 - The times are local, as claude-mem's are: the header's date and `h:mmam` with the offset as
   `GMT+9`, each day `Mon D, YYYY`, each row `H:MMa` or `H:MMp`, and `"` for a row in the same
   minute as the row before it that day.

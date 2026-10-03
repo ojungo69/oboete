@@ -4,6 +4,7 @@
 
 use crate::raw::{Raw, Removal};
 use crate::redact::Rules;
+use crate::turns::TurnSummary;
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -144,11 +145,14 @@ fn gmt(seconds: i32) -> String {
     }
 }
 
-/// claude-mem's recent-context block (docs/cards.md S2, S3) for `cards`, newest first as `recent`
-/// gives them, shown the oldest first by day, at `now` in `tz`, read on device `local`. `name` is
-/// the repository's.
+/// claude-mem's recent-context block (docs/cards.md S2, S3) for `cards` and the session summaries
+/// `sessions` (docs/summaries.md S7), newest first as their readers give them, shown the oldest
+/// first by day, at `now` in `tz`, read on device `local`, then `latest`'s fields when it is not
+/// older than the newest card (S8). `name` is the repository's.
 pub fn block<Tz: chrono::TimeZone>(
     cards: &[Card],
+    sessions: &[TurnSummary],
+    latest: Option<&TurnSummary>,
     local: &str,
     name: &str,
     now: i64,
@@ -169,22 +173,36 @@ where
         let zone = gmt(t.offset().fix().local_minus_utc());
         format!(", {} {zone}", t.format("%Y-%m-%d %-I:%M%P"))
     });
-    let legend: Vec<String> = ICONS
-        .iter()
-        .zip(TYPES)
-        .map(|(i, t)| format!("{i}{t}"))
+    let legend: Vec<String> = std::iter::once("🎯session".to_owned())
+        .chain(ICONS.iter().zip(TYPES).map(|(i, t)| format!("{i}{t}")))
         .collect();
     let mut out = format!(
         "# [{name}] recent context{header}\n\nLegend: {}\nFormat: ID TIME TYPE TITLE\n\
          Fetch details: get(ID) | Search: search(query)\n\n",
         legend.join(" ")
     );
-    // In time order; a window's cards in the order its curator wrote them.
-    let mut shown: Vec<&Card> = cards.iter().collect();
-    shown.sort_by(|a, b| (a.ts, &a.device, a.op_seq, a.n).cmp(&(b.ts, &b.device, b.op_seq, b.n)));
+    // In time order, a summary after the cards of its time (claude-mem's); a window's cards in
+    // the order its curator wrote them.
+    enum Row<'a> {
+        Card(&'a Card),
+        Session(&'a TurnSummary),
+    }
+    let mut rows: Vec<Row> = cards
+        .iter()
+        .map(Row::Card)
+        .chain(sessions.iter().map(Row::Session))
+        .collect();
+    rows.sort_by_key(|r| match r {
+        Row::Card(c) => (c.ts, false, c.device.clone(), c.op_seq, c.n),
+        Row::Session(s) => (s.ts, true, s.device.clone(), s.op_seq, 0),
+    });
     let (mut day, mut minute) = (String::new(), String::new());
-    for c in shown {
-        let Some(t) = in_tz(c.ts) else {
+    for row in rows {
+        let ts = match row {
+            Row::Card(c) => c.ts,
+            Row::Session(s) => s.ts,
+        };
+        let Some(t) = in_tz(ts) else {
             continue;
         };
         let d = t.format("%b %-d, %Y").to_string();
@@ -193,6 +211,19 @@ where
             day = d;
             minute.clear();
         }
+        let c = match row {
+            Row::Card(c) => c,
+            // A summary's own date and time, and the minute of the card before it kept.
+            Row::Session(s) => {
+                let request = match s.row.trim() {
+                    "" => "Session started",
+                    r => r,
+                };
+                let at = t.format("%b %-d, %-I:%M %p");
+                out.push_str(&format!("{} {request} ({at})\n", s.id(local)));
+                continue;
+            }
+        };
         let m = clock(&t);
         let time = if m == minute {
             "\"".to_owned()
@@ -210,6 +241,18 @@ where
             t => t,
         };
         out.push_str(&format!("{} {time} {icon} {title}\n", c.id(local)));
+    }
+    if let Some(s) = latest.filter(|s| cards.iter().all(|c| c.ts <= s.ts)) {
+        for (field, label) in [
+            ("investigated", "Investigated"),
+            ("learned", "Learned"),
+            ("completed", "Completed"),
+            ("next_steps", "Next Steps"),
+        ] {
+            if let Some(text) = s.fields.get(field).filter(|t| !t.is_empty()) {
+                out.push_str(&format!("**{label}**: {text}\n\n"));
+            }
+        }
     }
     out
 }
@@ -446,13 +489,13 @@ mod tests {
     /// another device's card is named with its device.
     #[test]
     fn the_block_is_claude_mems_recent_context_in_local_time() {
-        let block = block(&four(), "d", "oboete", at(3, 7, 37, 0), &jst());
+        let block = block(&four(), &[], None, "d", "oboete", at(3, 7, 37, 0), &jst());
         assert_eq!(
             block,
             "# [oboete] recent context, 2026-10-03 7:37am GMT+9\n\
              \n\
-             Legend: ●bugfix ◆feature ↻refactor ✓change ○discovery ⚖decision ⚠security_alert \
-             ⚷security_note ⊘sensitive\n\
+             Legend: 🎯session ●bugfix ◆feature ↻refactor ✓change ○discovery ⚖decision \
+             ⚠security_alert ⚷security_note ⊘sensitive\n\
              Format: ID TIME TYPE TITLE\n\
              Fetch details: get(ID) | Search: search(query)\n\
              \n\
@@ -472,6 +515,95 @@ mod tests {
     }
 
     fn block_of(tz: &FixedOffset) -> String {
-        block(&four(), "d", "oboete", at(3, 7, 37, 0), tz)
+        block(&four(), &[], None, "d", "oboete", at(3, 7, 37, 0), tz)
+    }
+
+    /// A summary of turn op `op_seq` at `ts` that asked `request`, with `fields`.
+    fn summary(op_seq: i64, ts: i64, request: &str, fields: &[(&str, &str)]) -> TurnSummary {
+        let mut all: std::collections::BTreeMap<String, String> = fields
+            .iter()
+            .map(|(f, t)| ((*f).to_owned(), (*t).to_owned()))
+            .collect();
+        if !request.is_empty() {
+            all.insert("request".into(), request.into());
+        }
+        TurnSummary {
+            device: "d".into(),
+            op_seq,
+            ts,
+            agent: "claude".into(),
+            session: "s".into(),
+            repo: Some("r".into()),
+            row: request.into(),
+            fields: all,
+        }
+    }
+
+    /// docs/summaries.md S7, S8: the newest summaries are rows among the cards by their own time,
+    /// after a card of the same time, `S<op seq>` (another device's with its device) and
+    /// `Session started` without a request; the newest one's four fields follow the timeline when
+    /// it is not older than the newest card shown.
+    #[test]
+    fn the_block_shows_the_session_summaries_among_the_cards() {
+        let newest = summary(
+            500,
+            at(3, 6, 20, 0),
+            "Fix the lock race",
+            &[
+                ("investigated", "How two workers take the lock."),
+                ("learned", "The lock was never released."),
+                ("completed", "Workers release it on exit."),
+                ("next_steps", "Measure the wait."),
+                ("notes", "Not shown."),
+            ],
+        );
+        let other = TurnSummary {
+            device: "e".into(),
+            ..summary(450, at(2, 21, 41, 10), "", &[])
+        };
+        let sessions = [newest.clone(), other];
+        let shown = block(
+            &four(),
+            &sessions,
+            Some(&newest),
+            "d",
+            "oboete",
+            at(3, 7, 37, 0),
+            &jst(),
+        );
+        let timeline = shown.split_once("### ").unwrap().1;
+        assert_eq!(
+            timeline,
+            "Oct 2, 2026\n\
+             e.400.0 9:05a 📝 A summary card\n\
+             412.0 9:41p ○ The worker leaves a lock it no longer holds\n\
+             Se.450 Session started (Oct 2, 9:41 PM)\n\
+             413.0 \" ✓ The lock file is removed on exit\n\
+             ### Oct 3, 2026\n\
+             420.1 6:05a ● Two workers no longer race for one lock\n\
+             S500 Fix the lock race (Oct 3, 6:20 AM)\n\
+             **Investigated**: How two workers take the lock.\n\
+             \n\
+             **Learned**: The lock was never released.\n\
+             \n\
+             **Completed**: Workers release it on exit.\n\
+             \n\
+             **Next Steps**: Measure the wait.\n\
+             \n"
+        );
+        // Older than the newest card shown: no fields.
+        let older = summary(501, at(3, 6, 0, 0), "Earlier", &[("learned", "Something.")]);
+        let shown = block(
+            &four(),
+            std::slice::from_ref(&older),
+            Some(&older),
+            "d",
+            "oboete",
+            at(3, 7, 37, 0),
+            &jst(),
+        );
+        assert!(
+            shown.contains("S501 Earlier (Oct 3, 6:00 AM)\n") && !shown.contains("**Learned**")
+        );
     }
 }
