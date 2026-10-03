@@ -1952,6 +1952,11 @@ pub fn known(home: &Path, repo: &str) -> Result<bool> {
 
 /// The time of what `id` names (`Named`), for `timeline`'s anchor: one thing, or an error.
 fn time_of(raw: &Raw, k: &Connection, id: &str) -> Result<i64> {
+    // A card by its ID, as `get` takes it (docs/cards.md S6, Codex on #370): only its time is
+    // read, so no rule is needed to gate it.
+    if let Some(c) = crate::cards::get(k, raw, id, &redact::Rules::default())? {
+        return Ok(c.ts);
+    }
     Ok(match named(raw, k, id)? {
         None => anyhow::bail!("no document {id} to anchor on"),
         Some(Named::Claims(uids)) => {
@@ -2814,6 +2819,9 @@ mod tests {
             assert!(shown.contains(part), "{part:?}");
         }
         assert_eq!(get(home, &format!("{op_seq}.1")).unwrap(), None);
+        // The timeline anchors on the ID `get` takes (Codex on #370).
+        let k = crate::knowledge::open(home).unwrap();
+        assert_eq!(time_of(&s.raw, &k, &id).unwrap(), 1_000);
     }
 
     /// The timeline: claims, imported documents and session starts, newest first, or around an
