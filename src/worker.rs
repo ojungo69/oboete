@@ -1882,7 +1882,6 @@ mod tests {
     }
 
     /// Waits up to 10 s for `done`.
-    #[cfg(target_os = "linux")]
     fn until(what: &str, mut done: impl FnMut() -> bool) {
         let t = Instant::now();
         while !done() {
