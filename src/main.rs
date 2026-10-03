@@ -681,13 +681,14 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         Cmd::Restore => {
             // The worker's lock, so no worker reads raw.db while it is replaced.
             let held = worker::lock_asking(&home)?;
-            let said = backup::restore(&home)?;
+            let said = backup::restore(&home);
             // Derived data was moved aside: it is rebuilt before this returns, so a search right
-            // after finds the restored records.
+            // after finds the restored records. After a restore that failed too: a hook that
+            // appended while the lock was held started no worker (Codex on #359).
             drop(held);
-            worker::run_once(&home)?;
-            println!("{said}");
-            Ok(())
+            let ran = worker::run_once(&home);
+            println!("{}", said?);
+            ran
         }
         Cmd::View { port, open } => view::run(&home, port, open),
         Cmd::Replay {
@@ -746,5 +747,25 @@ mod tests {
                 .unwrap(),
             3
         );
+    }
+
+    /// A restore that fails still runs the consumers, as one that succeeds does: a hook that
+    /// appended while it held the worker lock started no worker (Codex on #359).
+    #[test]
+    fn a_restore_that_fails_runs_the_consumers() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let seq = raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        let cli = Cli::try_parse_from(["oboete", "restore"]).unwrap();
+        let why = run(cli.cmd, p.to_owned()).unwrap_err().to_string();
+        assert!(why.contains("no usable backup segment"), "{why}");
+        let k = knowledge::open(p).unwrap();
+        let read: Option<i64> = k
+            .query_row("SELECT MIN(seq) FROM checkpoints", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(read, Some(seq));
     }
 }

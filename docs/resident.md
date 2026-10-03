@@ -160,10 +160,12 @@ R11. **What is measured before the PR is ready** (spec 1.8), on WSL with the own
   home exists yet, and a copied config has live providers).
 
 R12. **Stepping aside for a command.** `oboete restore`, `oboete rebuild` and
-`oboete recurate --yes` that find the worker lock held write `state/worker-yield` and wait up to
-30 s for the lock, removing the file when they hold it or give up (the message then says the worker
-is busy, not "try again when it has exited"). Two commands may wait at once: one that still waits
-writes the file again when the other took it away. The worker looks for the file at its start,
+`oboete recurate --yes` that find the worker lock held each write a file of their own in
+`state/worker-yield/` and wait up to 30 s for the lock, removing their file when they hold it or
+give up (the message then says the worker is busy, not "try again when it has exited"). Two
+commands may wait at once: one that gives up never takes the other's request away. A file older
+than a minute, which a command that died left, is ignored and removed by the next command that
+asks. The worker looks for a request at its start,
 between rounds and on the 200 ms tick beside the restore request: it backs up (a restore reads the
 backups) and, if the request is still there (a command whose wait ran out meanwhile took it away),
 closes its stores, releases the lock, records a clean outcome and exits. It does not
@@ -278,7 +280,7 @@ left as a setting to add before a public release.
     `resident = true` and no worker running, `oboete correct` and `oboete rebuild` return, and an
     explicit `--idle-ms 60000` exits when idle.
 12. `oboete rebuild` and `oboete restore` succeed against a resident worker (R12), and a
-    `worker-yield` file older than a minute is ignored.
+    request older than a minute is ignored.
 13. A viewer killed while records keep arriving is back within the minute.
 14. `[view] port` changed while the viewer runs: within its tick it leaves, and the next start
     listens on the new port.
@@ -359,3 +361,9 @@ away, and the worker still left, with no hook to start another; it now looks aga
 backup (R12). Not taken: running the consumers when `oboete rebuild` stops on vectors it cannot
 read. The rebuild promises to leave that knowledge.db as it was (spec 1.7), and a worker run would
 set it aside as damaged and embed again; the records wait in raw.db for the next hook's worker.
+
+Its sixth round: a command that gave up removed the one request file while another still waited,
+and in the 50 ms before the other wrote it again the worker could send a call; each command now
+has a file of its own (R12). And a restore that failed returned before running the consumers, so a
+record a hook appended while it held the lock waited for the next hook; it now runs them as one
+that succeeds does, and returns the restore's error.

@@ -167,19 +167,28 @@ pub fn lock(home: &Path) -> Result<Option<Lock>> {
     }
 }
 
-/// Where a command that needs the worker lock asks the worker that holds it to step aside
-/// (docs/resident.md R12).
-fn yield_request(home: &Path) -> std::path::PathBuf {
+/// Where commands that need the worker lock ask the worker that holds it to step aside, a file
+/// each, so one that gives up takes only its own request away (docs/resident.md R12).
+fn yield_requests(home: &Path) -> std::path::PathBuf {
     home.join("state").join("worker-yield")
 }
 
-/// Whether a command asked within the last minute. An older request was left by a command that
-/// died. One dated after now (the clock went back) is not obeyed either: a worker that works on
-/// is the smaller harm than one that never works.
-fn asked_aside(home: &Path) -> bool {
-    std::fs::metadata(yield_request(home))
-        .and_then(|m| m.modified())
-        .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < Duration::from_secs(60)))
+/// A request older than this was left by a command that died: a command waits half of it.
+const STALE: Duration = Duration::from_secs(60);
+
+/// How long ago a request was made; none when that cannot be read or is after now.
+fn age(request: &std::fs::DirEntry) -> Option<Duration> {
+    request.metadata().ok()?.modified().ok()?.elapsed().ok()
+}
+
+/// Whether a command asked within the last minute. One dated after now (the clock went back) is
+/// not obeyed either: a worker that works on is the smaller harm than one that never works.
+pub(crate) fn asked_aside(home: &Path) -> bool {
+    std::fs::read_dir(yield_requests(home))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|r| age(&r).is_some_and(|age| age < STALE))
 }
 
 /// R12, the worker's side: when a command asked, what is new is backed up (a restore reads the
@@ -215,18 +224,21 @@ pub fn lock_asking(home: &Path) -> Result<Lock> {
     if let Some(held) = lock(home)? {
         return Ok(held);
     }
-    let ask = yield_request(home);
+    static ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = yield_requests(home);
+    std::fs::create_dir_all(&dir)?;
+    for old in std::fs::read_dir(&dir)?.flatten() {
+        if age(&old).is_some_and(|age| age >= STALE) {
+            let _ = std::fs::remove_file(old.path());
+        }
+    }
+    let n = ASKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let ask = dir.join(format!("{}.{n}", std::process::id()));
     std::fs::write(&ask, "")?;
     let until = Instant::now() + ASK;
     let held = loop {
         match lock(home) {
-            Ok(None) if Instant::now() < until => {
-                // Another command that gave up took the request away with its own.
-                if !ask.exists() {
-                    let _ = std::fs::write(&ask, "");
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
+            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(50)),
             tried => break tried,
         }
     };
@@ -1879,6 +1891,13 @@ mod tests {
         }
     }
 
+    /// A command's request to step aside, as a test makes one: the file, its folder made.
+    fn yield_request(home: &Path) -> std::path::PathBuf {
+        let dir = yield_requests(home);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("test")
+    }
+
     /// A session's flags last changed longer ago than a prune keeps them.
     #[cfg(target_os = "linux")]
     fn stale_flags(p: &Path) -> std::path::PathBuf {
@@ -2154,7 +2173,7 @@ mod tests {
             std::fs::read_dir(p.join("backups")).is_ok_and(|d| d.count() > 0),
             "it let go without a backup"
         );
-        assert!(!p.join("state").join("worker-yield").exists());
+        assert!(!asked_aside(p));
         assert!(last_failure(p).is_none());
         drop(held);
         // `oboete rebuild` is such a command: it swaps knowledge.db as soon as it has the lock,
@@ -2177,8 +2196,7 @@ mod tests {
         let _contending = contending();
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
-        let ask = p.join("state").join("worker-yield");
-        std::fs::create_dir_all(p.join("state")).unwrap();
+        let ask = yield_request(p);
         std::fs::write(&ask, "").unwrap();
         let old = std::time::SystemTime::now() - Duration::from_secs(61);
         let file = std::fs::File::options().write(true).open(&ask).unwrap();
@@ -2656,39 +2674,37 @@ mod tests {
         worker.join().unwrap().unwrap();
     }
 
-    /// R12 with two commands: one that gives up takes the request file away, and the other puts
-    /// its request back (Codex on #359).
+    /// R12 with two commands: one that gives up takes only its own request away, so the worker
+    /// never sees the other's go (Codex on #359). A request a command that died left a minute ago
+    /// goes with the next command that asks.
     #[test]
-    fn a_waiting_command_puts_its_request_back_when_another_took_it_away() {
+    fn a_command_that_gives_up_leaves_the_request_of_one_still_waiting() {
         let _contending = contending();
         let home = tempfile::tempdir().unwrap();
         let p = home.path().to_path_buf();
         let _held = lock(&p).unwrap().unwrap();
-        let ask = yield_request(&p);
-        let waiter = {
-            let p = p.clone();
+        let dead = yield_request(&p);
+        std::fs::write(&dead, "").unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(61);
+        let file = std::fs::File::options().write(true).open(&dead).unwrap();
+        file.set_modified(old).unwrap();
+        assert!(!asked_aside(&p));
+        let wait = |p: std::path::PathBuf| {
             std::thread::spawn(move || {
                 let _contending = contending();
                 lock_asking(&p).map(drop)
             })
         };
-        let t = Instant::now();
-        while !ask.exists() {
-            assert!(t.elapsed() < Duration::from_secs(10), "it never asked");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        std::fs::remove_file(&ask).unwrap();
-        let t = Instant::now();
-        while !ask.exists() {
-            assert!(
-                t.elapsed() < Duration::from_secs(2),
-                "its request stayed away"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let why = waiter.join().unwrap().unwrap_err().to_string();
+        let first = wait(p.clone());
+        until("the first asks", || asked_aside(&p));
+        std::thread::sleep(Duration::from_secs(1));
+        let second = wait(p.clone());
+        let why = first.join().unwrap().unwrap_err().to_string();
         assert!(why.contains("the worker is busy"), "{why}");
-        assert!(!ask.exists());
+        assert!(asked_aside(&p), "the second's request went with the first");
+        assert!(second.join().unwrap().is_err());
+        assert!(!asked_aside(&p));
+        assert!(!dead.exists(), "the dead command's request stayed");
     }
 
     // M2 (spec 8.2): a crash at 20 points gives the rows of a run with none.

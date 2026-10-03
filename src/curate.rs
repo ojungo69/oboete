@@ -6513,7 +6513,7 @@ mod tests {
             refused.to_string().contains("the worker is busy"),
             "{refused}"
         );
-        assert!(!home.path().join("state").join("worker-yield").exists());
+        assert!(!crate::worker::asked_aside(home.path()));
     }
 
     /// A recuration of the middle of a queued or skipped span leaves the parts on both sides,
