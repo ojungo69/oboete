@@ -1,0 +1,43 @@
+tests/forget_cli.rs
+  s_ce2b24784deac6::t_8a88e0e7301e29 421-477,608-612
+  s_ce2b24784deac6::t_930efa21fa805e 478-510
+  s_ce2b24784deac6::t_876b398a686ef9 511-545,593-595,606,614,622-624
+  s_ce2b24784deac6::t_6452d254759fad 546-567,570,572-574,583,587,591,596,615,620,625
+  s_ce2b24784deac6::t_96f565af1c5271 568-569,571,575-582,584-586,588-590,592,597-605,607,613,616-619,621,626-633
+docs/milestone-5-plan.md
+  s_ce2b24784deac6::t_b4dfdff84af166 41-43,48,54
+  s_ce2b24784deac6::t_fbdc7e9674cf1c 91,93-96,221-222
+src/transcript.rs
+  s_ce2b24784deac6::t_95689b322c676f 831-839
+  s_ce2b24784deac6::t_dfbca0c0d2e4a4 840,846
+  s_ce2b24784deac6::t_f0bad7fcab2b6b 843
+  s_ce2b24784deac6::t_f95cf8e05f20ad 90-91,103,144,334,491,666
+  s_ce2b24784deac6::t_82a1d776d27244 841-842,847-849,882-886
+src/raw.rs
+  s_ce2b24784deac6::t_645f4c77db0e2c 1511,1514,1537,1542,1544,2407-2408
+  s_ce2b24784deac6::t_9a6558214e6b48 68,375-377,459-466,609,612,614,617,624-628,808-810,838,843-849,865-866
+  s_ce2b24784deac6::t_b4dfdff84af166 839-842
+src/forget.rs
+  s_ce2b24784deac6::t_6e30187455c9e9 615-636,639
+  s_ce2b24784deac6::t_95689b322c676f 559
+  s_ce2b24784deac6::t_b4dfdff84af166 222-226
+  s_ce2b24784deac6::t_bf568b2734bfae 637-638,640,663
+src/migrate.rs
+  s_ce2b24784deac6::t_569673c0894ec7 437
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "512b06e72e98cf2c68e849c1966799a4ab184e30",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
