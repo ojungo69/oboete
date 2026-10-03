@@ -122,9 +122,9 @@ pub struct Lock(#[allow(dead_code)] std::fs::File, u64);
 
 /// Which file a lock file is: its device and inode. `None` where the system has none to give, and
 /// for a file that cannot be read.
-type FileId = Option<(u64, u64)>;
+pub(crate) type FileId = Option<(u64, u64)>;
 
-fn file_id(file: std::io::Result<std::fs::Metadata>) -> FileId {
+pub(crate) fn file_id(file: std::io::Result<std::fs::Metadata>) -> FileId {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -354,6 +354,8 @@ pub struct Phases<'a, 'f> {
     pub yields: bool,
     /// It stays when it is idle (R2, R3). Only `run_default` sets it, from `[worker] resident`.
     pub resident: bool,
+    /// What starts the resident viewer, for a resident worker (docs/resident.md R4).
+    pub viewer: Option<&'a mut crate::view::Starter>,
 }
 
 pub(crate) fn run_holding(
@@ -506,10 +508,17 @@ fn serve(
     let mut k = crate::backup::open_knowledge(home)?;
     checkpoint::rewind(&raw, &k, consumers)?;
     crate::backup::check(home, &raw);
-    let mut due = |raw: &Raw, holding: &Holding| {
-        if Instant::now() >= *next_backup && !gone(home, holding) {
+    // The resident viewer is started where the backup deadline is looked at (R4).
+    let mut due = |raw: &Raw, holding: &Holding, viewer: Option<&mut crate::view::Starter>| {
+        if gone(home, holding) {
+            return;
+        }
+        if Instant::now() >= *next_backup {
             crate::backup::run(home, raw);
             *next_backup = Instant::now() + crate::backup::EVERY;
+        }
+        if let Some(viewer) = viewer {
+            viewer.due(home);
         }
     };
     let (resident, yields) = (phases.resident, phases.yields);
@@ -552,9 +561,9 @@ fn serve(
             if gone(home, holding) {
                 return Err(Gone.into());
             }
-            due(&raw, holding);
+            due(&raw, holding, phases.viewer.as_deref_mut());
         }
-        due(&raw, holding);
+        due(&raw, holding, phases.viewer.as_deref_mut());
         // D3 and milestone 4's D8 and D9: once the consumers have drained, the embedding phase, the
         // shortlists, then one window. A call in flight, or a window that waits only on time
         // within D10's 30 minutes, keeps the worker up until then; a phase's progress starts the
@@ -630,7 +639,7 @@ fn serve(
                     more = true;
                     break;
                 }
-                due(&raw, holding);
+                due(&raw, holding, phases.viewer.as_deref_mut());
             }
             if more || phase == Some(wait) {
                 break false;
@@ -719,12 +728,19 @@ fn run_as(home: &Path, idle_ms: u64, follow: bool) -> Result<()> {
     let mut curation = curation(home);
     let mut embed = crate::embed_phase::Phase::new(home);
     let mut shortlist = crate::shortlist::Builder::new(home);
+    let mut viewer = crate::view::Starter::new();
+    // The viewer before the stores: one that does not open still leaves the page up (Codex on
+    // #378).
+    if resident {
+        viewer.due(home);
+    }
     let phases = Phases {
         embed: Some(&mut embed),
         shortlist: Some(&mut shortlist),
         curation: Some(&mut *curation),
         yields: true,
         resident,
+        viewer: resident.then_some(&mut viewer),
     };
     run_holding(home, idle_ms, consumers(home), || {}, Some(held), phases)
 }

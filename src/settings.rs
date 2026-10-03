@@ -548,6 +548,24 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
     Ok(show(home))
 }
 
+/// `[view] port` set to `port`, the rest of config.toml as it was (`oboete view --new-token`,
+/// docs/resident.md R6); a file changed by hand between the read and the write is not overwritten.
+pub fn set_view_port(home: &Path, port: u16) -> anyhow::Result<()> {
+    let path = home.join("config.toml");
+    let was = bytes(home)?;
+    let text = utf8(was.as_deref()).ok_or_else(|| anyhow::anyhow!("config.toml is not UTF-8"))?;
+    let mut doc: toml_edit::DocumentMut = text.parse()?;
+    put(&mut doc, "view", "port", i64::from(port).into());
+    let candidate = doc.to_string();
+    config::parse_capture(Some(&candidate))?;
+    let staged = crate::setup::stage(&path, &candidate)?;
+    anyhow::ensure!(
+        version(bytes(home)?.as_deref()) == version(was.as_deref()),
+        "config.toml changed while the port was written; try again"
+    );
+    staged.commit()
+}
+
 /// Each entry as it is without `[chain]`: what a value equal to its own is compared with, and
 /// what its model rule is taken from.
 fn alone(path: &Path, doc: &toml_edit::DocumentMut) -> Option<config::Config> {

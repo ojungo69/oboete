@@ -1903,26 +1903,37 @@ pub(crate) fn last_assistant_in_transcript(path: &Path) -> String {
     last
 }
 
-/// After every append (D6): start a worker when none holds the lock. The lock is dropped before
-/// the spawn; while a worker runs, this costs one open and one failed `flock`.
-fn start_worker(home: &Path) -> Result<()> {
+/// After every append (D6): start a worker when none holds the lock, the child for a caller that
+/// outlives it to reap. The lock is dropped before the spawn; while a worker runs, this costs one
+/// open and one failed `flock`.
+pub(crate) fn start_worker(home: &Path) -> Result<Option<std::process::Child>> {
     if std::env::var_os("OBOETE_NO_SPAWN").is_some() {
-        return Ok(());
+        return Ok(None);
     }
-    if crate::worker::lock(home)?.is_some() {
-        spawn_detached(home, &["worker"]);
-    }
-    Ok(())
+    // The lock is let go at the end of this statement, before the spawn.
+    let free = crate::worker::lock(home)?.is_some();
+    Ok(if free {
+        // `OBOETE_NO_SPAWN` was looked at above: none here is a spawn that failed (Codex on #378).
+        Some(
+            spawn_detached(home, &["worker"])
+                .ok_or_else(|| anyhow::anyhow!("the worker could not be spawned"))?,
+        )
+    } else {
+        None
+    })
 }
 
-/// `oboete --home <home> <args>`, detached in its own process group.
-fn spawn_detached(home: &Path, args: &[&str]) {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
+/// `oboete --home <home> <args>`, detached in its own process group: the child, for a caller that
+/// reaps it (a resident worker's viewer, docs/resident.md R4). `OBOETE_NO_SPAWN` starts none.
+pub(crate) fn spawn_detached(home: &Path, args: &[&str]) -> Option<std::process::Child> {
+    if std::env::var_os("OBOETE_NO_SPAWN").is_some() {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    // It runs in the home, so the folder the agent ran in can go while it lives (resident.md R1).
+    let home = std::path::absolute(home).ok()?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--home").arg(home).args(args);
+    cmd.arg("--home").arg(&home).args(args).current_dir(&home);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -1948,7 +1959,7 @@ fn spawn_detached(home: &Path, args: &[&str]) {
             unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
         }
     }
-    let _ = cmd.spawn();
+    cmd.spawn().ok()
 }
 
 #[cfg(test)]

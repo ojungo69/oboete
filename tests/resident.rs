@@ -1,6 +1,8 @@
 //! docs/resident.md: `oboete worker` in a home whose config.toml says `[worker] resident = true`
 //! stays when it is idle (R2), says so in its outcome while it waits (R10), and steps aside for
-//! `oboete restore`, backing up first (R12). Linux only, as the resident worker is for now.
+//! `oboete restore`, backing up first (R12); `oboete view` there brings up the resident viewer
+//! and the worker (R7), or serves on its own when the viewer cannot start. Linux only, as the
+//! resident worker is for now.
 #![cfg(target_os = "linux")]
 
 use std::io::Write;
@@ -64,12 +66,14 @@ fn restore_runs_beside_a_resident_worker_which_backs_up_and_exits_for_it() {
     let payload = serde_json::json!({"session_id": "s", "prompt": "zebra crossing notes"});
     let hook = ["hook", "claude", "UserPromptSubmit"];
     assert!(oboete(h, &hook, &payload.to_string()).status.success());
-    // As a hook starts it: with no idle time of its own.
+    // As a hook starts it: with no idle time of its own, and no viewer, which this test is not
+    // about.
     let mut worker = Worker(
         Command::new(env!("CARGO_BIN_EXE_oboete"))
             .arg("--home")
             .arg(h)
             .arg("worker")
+            .env("OBOETE_NO_SPAWN", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -100,6 +104,195 @@ fn restore_runs_beside_a_resident_worker_which_backs_up_and_exits_for_it() {
         String::from_utf8_lossy(&found.stdout).contains("zebra crossing"),
         "{found:?}"
     );
+}
+
+/// The processes `oboete view` started detached in `home` (the worker, the viewer), stopped when
+/// the test ends however it ends: found by their `--home` argument.
+struct Detached<'a>(&'a Path);
+
+impl Drop for Detached<'_> {
+    fn drop(&mut self) {
+        for pid in started(self.0) {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
+    }
+}
+
+/// The processes running with `--home <home>` in their command line.
+fn started(home: &Path) -> Vec<u32> {
+    let want = format!("--home\0{}\0", home.display());
+    let mut pids = Vec::new();
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
+        if String::from_utf8_lossy(&cmdline).contains(&want) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+/// The children of `pid` that have exited and wait to be reaped.
+fn zombies(pid: u32) -> usize {
+    let parent = pid.to_string();
+    let mut found = 0;
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let stat = std::fs::read_to_string(entry.path().join("stat")).unwrap_or_default();
+        // pid (name) state ppid …: the name may hold spaces, so it is read after its `)`.
+        let mut rest = stat
+            .rsplit_once(')')
+            .map_or("", |(_, r)| r)
+            .split_whitespace();
+        if rest.next() == Some("Z") && rest.next() == Some(parent.as_str()) {
+            found += 1;
+        }
+    }
+    found
+}
+
+/// Whether a process holds the lock file `name` of `home`'s state.
+fn held(home: &Path, name: &str) -> bool {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.join("state").join(name))
+        .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+}
+
+/// Resident test 2 (R7): `oboete view` in a resident home with nothing running starts the viewer
+/// and the worker, both locks held, and prints the address with the token of the viewer's file,
+/// which answers there.
+#[test]
+fn view_in_a_resident_home_brings_up_the_viewer_and_the_worker() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    std::fs::write(
+        h.join("config.toml"),
+        format!("[worker]\nresident = true\n[view]\nport = {port}\n"),
+    )
+    .unwrap();
+    let _detached = Detached(h);
+    // As the owner runs it: it may start processes. One that does not return (it serves on its own
+    // address) is killed, and the test fails.
+    let mut view = Worker(
+        Command::new(env!("CARGO_BIN_EXE_oboete"))
+            .arg("--home")
+            .arg(h)
+            .arg("view")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    until("oboete view returns", || {
+        view.0.try_wait().unwrap().is_some()
+    });
+    assert!(view.0.wait().unwrap().success());
+    let mut out = String::new();
+    std::io::Read::read_to_string(&mut view.0.stdout.take().unwrap(), &mut out).unwrap();
+    let token = std::fs::read_to_string(h.join("state").join("view-token")).unwrap();
+    assert!(
+        out.starts_with(&format!("http://127.0.0.1:{port}/#t={token}\n")),
+        "{out}"
+    );
+    assert!(held(h, "view.lock") && held(h, "worker.lock"));
+    // They run in the home, not in the folder `oboete view` ran in, which can then go (R1;
+    // Codex on #378).
+    let pids = started(h);
+    assert!(pids.len() >= 2, "{pids:?}");
+    for pid in pids {
+        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).unwrap();
+        assert_eq!(cwd, h.canonicalize().unwrap(), "{pid}");
+    }
+    let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        c,
+        "GET /api/repos HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Oboete-Token: {token}\r\n\r\n"
+    )
+    .unwrap();
+    let mut answer = String::new();
+    std::io::Read::read_to_string(&mut c, &mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+}
+
+/// Resident test 5 (R7): with the port held by another program, `oboete view` says why and
+/// serves on an address of its own; it sends that program nothing.
+#[test]
+fn view_serves_on_its_own_address_when_the_port_is_in_use() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let foreign = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    foreign.set_nonblocking(true).unwrap();
+    let port = foreign.local_addr().unwrap().port();
+    std::fs::write(
+        h.join("config.toml"),
+        format!("[worker]\nresident = true\n[view]\nport = {port}\n"),
+    )
+    .unwrap();
+    let _detached = Detached(h);
+    let mut view = Worker(
+        Command::new(env!("CARGO_BIN_EXE_oboete"))
+            .arg("--home")
+            .arg(h)
+            .arg("view")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut first = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(view.0.stdout.take().unwrap()),
+        &mut first,
+    )
+    .unwrap();
+    assert!(first.starts_with("http://127.0.0.1:"), "{first}");
+    assert!(
+        !first.starts_with(&format!("http://127.0.0.1:{port}/")),
+        "{first}"
+    );
+    // The resident viewer it started, which found the port taken and left, is reaped (Codex on
+    // #378).
+    assert_eq!(zombies(view.0.id()), 0);
+    // So is the worker it started, when it leaves while this run serves on (Codex on #378).
+    let parent = view.0.id().to_string();
+    let worker = started(h)
+        .into_iter()
+        .find(|pid| {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let mut rest = stat
+                .rsplit_once(')')
+                .map_or("", |(_, r)| r)
+                .split_whitespace();
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            rest.nth(1) == Some(parent.as_str())
+                && String::from_utf8_lossy(&cmdline).contains("\0worker")
+        })
+        .expect("the worker oboete view started");
+    assert!(
+        Command::new("kill")
+            .arg(worker.to_string())
+            .status()
+            .unwrap()
+            .success()
+    );
+    until("the worker is reaped", || {
+        !Path::new(&format!("/proc/{worker}")).exists()
+    });
+    let _ = view.0.kill();
+    let mut why = String::new();
+    std::io::Read::read_to_string(&mut view.0.stderr.take().unwrap(), &mut why).unwrap();
+    assert!(why.contains("port in use"), "{why}");
+    assert!(matches!(
+        foreign.accept().map(|_| ()).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    ));
 }
 
 /// R6: the token file is its owner's to read whatever the umask. Under one that takes the owner's
@@ -142,4 +335,96 @@ fn the_token_file_is_0600_whatever_the_umask() {
             .mode();
         assert_eq!(mode & 0o777, 0o600, "{name}");
     }
+}
+
+/// R7: `--port 0` asks for this run's own viewer on any free port, in a resident home too: it
+/// starts nothing and serves here (Codex on #378).
+#[test]
+fn view_with_port_0_serves_here_in_a_resident_home() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    std::fs::write(
+        h.join("config.toml"),
+        format!("[worker]\nresident = true\n[view]\nport = {port}\n"),
+    )
+    .unwrap();
+    let _detached = Detached(h);
+    let mut view = Worker(
+        Command::new(env!("CARGO_BIN_EXE_oboete"))
+            .arg("--home")
+            .arg(h)
+            .args(["view", "--port", "0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut first = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(view.0.stdout.take().unwrap()),
+        &mut first,
+    )
+    .unwrap();
+    assert!(first.starts_with("http://127.0.0.1:"), "{first}");
+    assert!(
+        !first.starts_with(&format!("http://127.0.0.1:{port}/")),
+        "{first}"
+    );
+    assert!(view.0.try_wait().unwrap().is_none());
+    assert!(!held(h, "view.lock") && !held(h, "worker.lock"));
+}
+
+/// R4: a resident worker whose store does not open still starts the viewer first, so the page
+/// is there when the store needs a look (Codex on #378).
+#[test]
+fn a_worker_whose_store_does_not_open_still_starts_the_viewer() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    std::fs::write(
+        h.join("config.toml"),
+        format!("[worker]\nresident = true\n[view]\nport = {port}\n"),
+    )
+    .unwrap();
+    std::fs::write(h.join("raw.db"), b"not a database, only text").unwrap();
+    let _detached = Detached(h);
+    let worker = Command::new(env!("CARGO_BIN_EXE_oboete"))
+        .arg("--home")
+        .arg(h)
+        .arg("worker")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!worker.success());
+    until("the viewer", || held(h, "view.lock"));
+}
+
+/// R7: `oboete view` says so when the worker it is to start cannot be (Codex on #378); the
+/// viewer still comes up.
+#[test]
+fn view_says_when_the_worker_does_not_start() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    std::fs::write(
+        h.join("config.toml"),
+        format!("[worker]\nresident = true\n[view]\nport = {port}\n"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(h.join("state").join("worker.lock")).unwrap();
+    let _detached = Detached(h);
+    let out = Command::new(env!("CARGO_BIN_EXE_oboete"))
+        .arg("--home")
+        .arg(h)
+        .arg("view")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("the worker did not start"), "{said}");
+    assert!(held(h, "view.lock"));
 }

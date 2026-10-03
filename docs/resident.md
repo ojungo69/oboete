@@ -25,6 +25,17 @@ owner's use, and what could be left out); what the review changed is listed at t
   serves until it is stopped: the once-a-minute tick that ends it is R4's, in slice 3. It runs on
   Linux only, where keyfile's filesystem check can tell that a mode keeps the token file its
   owner's; macOS and Windows wait for #281, and there `oboete view` stays as it is.
+- Slice 3 (R4, R7, R6's `--new-token`): a resident worker starts the viewer (`view::Starter`) at
+  its start and then at most once a minute where it looks at its backup deadline, when the home's
+  files can be its owner's and nothing holds `state/view.lock`, every 10 minutes after "port in
+  use", and reaps the one it started as soon as it has left. The viewer looks at its home once a
+  minute and leaves on R4's conditions (R9's binary waits for slice 4), writing `left: <why>` but
+  into a home that is gone. `oboete view` in a resident home brings up both and prints the address
+  with the file's token, or says why and serves on its own address; `oboete view --new-token`
+  replaces the token and, in a resident home, writes the next free port into `[view] port`.
+  Tests 2, 3 (`--new-token`), 5, 13 (as the starter's restart of a viewer that left) and 14 (as
+  the viewer's look). `OBOETE_NO_SPAWN`, the tests' switch for hooks, also keeps a worker from
+  starting a viewer.
 
 ## Before this unit (main 7f8de51)
 
