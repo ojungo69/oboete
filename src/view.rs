@@ -814,7 +814,8 @@ impl Viewer {
                 let repo = match (all, arg("repo")) {
                     (true, _) => None,
                     (false, Some(r)) => Some(r.to_owned()),
-                    (false, None) => Some(self.checkout()?.0),
+                    // No checkout (the resident viewer, R8): every repository.
+                    (false, None) => self.checkout()?.map(|(repo, _)| repo),
                 };
                 feed(&self.home, repo.as_deref(), cursor, limit)?
             }
@@ -1436,9 +1437,9 @@ mod tests {
         let s = Store::new();
         let v = Viewer {
             home: s.home.path().to_owned(),
-            cwd: s.home.path().to_owned(),
+            cwd: Some(s.home.path().to_owned()),
             port: 4321,
-            token: "t0k".into(),
+            token: Token::Run("t0k".into()),
             saving: Mutex::new(()),
             opener: Mutex::new(None),
             live: AtomicUsize::new(0),
@@ -1638,14 +1639,15 @@ mod tests {
             s.said("s", repo, 1_000, "A prompt");
         }
         s.run();
-        v.cwd = s.home.path().join("fern");
-        std::fs::create_dir_all(v.cwd.join(".git")).unwrap();
+        let cwd = s.home.path().join("fern");
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
         std::fs::write(
-            v.cwd.join(".git/config"),
+            cwd.join(".git/config"),
             "[remote \"origin\"]\nurl = https://example.test/team/fern.git\n",
         )
         .unwrap();
-        std::fs::write(v.cwd.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(cwd.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        v.cwd = Some(cwd);
         for url in ["/api/feed?repo=example.test%2Fteam%2Ffern", "/api/feed"] {
             let page = get(&v, url);
             assert_eq!(
