@@ -1488,7 +1488,6 @@ async function refresh(live = false) {
 let version = null;
 let polling = false;
 let pollFailureNotice = null;
-const UNREACHABLE = 'The viewer is not answering. Start `oboete view` again and open the address it prints.';
 
 async function poll() {
   if (polling || document.visibilityState !== 'visible') return;
@@ -1497,7 +1496,8 @@ async function poll() {
     const { v } = await api('version');
     $('live').classList.remove('off');
     $('live').textContent = t('live');
-    if (pollFailureNotice?.isConnected || $('status').textContent === UNREACHABLE) setStatus('');
+    // Either language's, as the page may have switched since (Codex on #373).
+    if (pollFailureNotice?.isConnected || TEXT.unreachable.includes($('status').textContent)) setStatus('');
     const changed = version === null ? drawnWithoutBaseline : v !== version;
     // Provider calls and tool records do not move v, so Stats also follows each poll.
     const wanted = !reposLoaded || (view !== 'settings' && (changed || (view === 'stats' && !$('q').value.trim())));
@@ -1510,7 +1510,7 @@ async function poll() {
     $('live').textContent = t('live_off');
     if (e.status || view === 'timeline') pollFailureNotice = showError(e.status ? e : new Error(t('unreachable')), poll);
     else {
-      setStatus(UNREACHABLE, true);
+      setStatus(t('unreachable'), true);
       pollFailureNotice = $('status').firstChild;
     }
   } finally {
