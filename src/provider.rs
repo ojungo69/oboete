@@ -1170,9 +1170,13 @@ pub(crate) const CODEX_OFF: [&str; 7] = [
 ];
 
 /// codex features on by default in 0.155.1 and 0.157.0, besides `CODEX_OFF`, with which the gate
-/// proved codex cannot act. Another feature on fails the gate until it is reviewed: it may be a
-/// tool the profile does not govern, and a hosted one never reaches the probe's own model.
-pub(crate) const CODEX_ON: [&str; 46] = [
+/// proved codex cannot act, and those of 0.160.0 reviewed since. Another feature on fails the
+/// gate until it is reviewed: it may be a tool the profile does not govern, and a hosted one never
+/// reaches the probe's own model.
+/// `write_stdin_approval` (0.160.0): input to a terminal launched with more than the current
+/// permissions waits for an approval, and off it waits for none
+/// (codex-rs/core/src/unified_exec/stdin_approval.rs at rust-v0.160.0). No tool comes with it.
+pub(crate) const CODEX_ON: [&str; 47] = [
     "auth_elicitation",
     "browser_use_full_cdp_access",
     "code_mode_host",
@@ -1219,6 +1223,7 @@ pub(crate) const CODEX_ON: [&str; 46] = [
     "view_image",
     "workspace_dependencies",
     "worktrees",
+    "write_stdin_approval",
 ];
 
 /// The flags of the curator's `codex exec` after `exec`, with the permission profile `profile`;

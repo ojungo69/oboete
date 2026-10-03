@@ -625,6 +625,17 @@ mod tests {
         );
     }
 
+    /// codex 0.160.0 turns `write_stdin_approval` on by default: input to a terminal that was
+    /// launched with more than the current permissions waits for an approval (off, it waits for
+    /// none). It offers the model no tool, so it is reviewed and the gate passes with it on.
+    #[test]
+    fn the_stdin_approval_of_codex_0_160_does_not_fail_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let features = FEATURES.to_owned() + "; echo 'write_stdin_approval  stable  true'";
+        let (_, g) = gate_with(&fake(dir.path(), &features, REFUSES), dir.path());
+        assert_eq!(g, Gate::Passed);
+    }
+
     #[test]
     fn a_hosted_tool_left_on_fails_the_gate() {
         let dir = tempfile::tempdir().unwrap();
