@@ -29,9 +29,6 @@ fn cap(field: &str) -> usize {
     if field == "request" { 300 } else { 2_000 }
 }
 
-/// How many of this device's newest records the phase reads for turn ends: records have no
-/// session index (spec 1.6), as for the digest this replaces.
-const RECENT: usize = 2_000;
 /// What a turn is shown at most (T2): its prompts and its reply, in characters, and its cards.
 const PROMPTS: usize = 2_000;
 const REPLY: usize = 4_000;
@@ -108,16 +105,15 @@ impl Turn {
         // as a window's (K4); one that lands during the call hides the summary.
         let top = raw.max_seq_of(&device)?;
         let from = raw.turn_start(&r.agent, &r.session, r.seq)?;
-        let gated = |t: String, n: usize| -> String {
-            crate::redact::outbound_with(&t, rules)
-                .chars()
-                .take(n)
-                .collect()
-        };
+        let gate = |t: &str| crate::redact::outbound_with(t, rules);
+        let cut = |t: String, n: usize| -> String { t.chars().take(n).collect() };
+        // Each prompt gated alone, as a window gates each record: a rule anchored to a whole
+        // prompt still holds beside another (Codex on C2).
         let prompts: Vec<String> = raw
             .events_between(&r.agent, &r.session, "prompt", from - 1, r.seq)?
             .iter()
             .filter_map(crate::curate::long_text)
+            .map(|p| gate(&p))
             .collect();
         let reply = raw
             .after(&device, r.seq - 1, 1)?
@@ -128,8 +124,8 @@ impl Turn {
                 _ => None,
             })
             .unwrap_or_default();
-        let prompts = gated(prompts.join("\n"), PROMPTS);
-        let reply = gated(reply, REPLY);
+        let prompts = cut(prompts.join("\n"), PROMPTS);
+        let reply = cut(gate(&reply), REPLY);
         let estimate = crate::budget::estimate;
         let mut room = window_tokens.saturating_sub(estimate(&prompts) + estimate(&reply));
         let (mut cards, mut read, mut goals) = (Vec::new(), Vec::new(), Vec::new());
@@ -142,7 +138,7 @@ impl Turn {
             CARDS,
             rules,
         )? {
-            let text = card_text(&card, rules);
+            let text = card_text(&card);
             let Some(left) = room.checked_sub(estimate(&text)) else {
                 break;
             };
@@ -184,18 +180,18 @@ impl Turn {
     }
 
     /// The op an answer makes of it (T4, T5).
-    fn op(self, answer: &Value, rules: &Rules) -> TurnOp {
+    fn op(&self, answer: &Value, rules: &Rules) -> TurnOp {
         let skipped = answer["skip"] == true;
         TurnOp {
-            agent: self.agent,
-            session: self.session,
-            repo: self.repo,
+            agent: self.agent.clone(),
+            session: self.session.clone(),
+            repo: self.repo.clone(),
             ts: self.ts,
             from: self.from,
             through: self.through,
-            read: self.read,
-            goals: self.goals,
-            removed: self.removed,
+            read: self.read.clone(),
+            goals: self.goals.clone(),
+            removed: self.removed.clone(),
             fields: if skipped {
                 BTreeMap::new()
             } else {
@@ -207,9 +203,9 @@ impl Turn {
 }
 
 /// The curation pass's summaries (T1), in the digest's place: run when `windows` (what the window
-/// phase did) sent nothing, the summary of the oldest turn end among this device's newest records
-/// that curation has passed and none was asked of. One call per run; a summary every provider
-/// fails waits as a window does.
+/// phase did) sent nothing, the summary of the oldest turn end of this device after the last one
+/// it kept a summary of, up to where curation has passed. One call per run; a summary every
+/// provider fails waits as a window does, and the turns after it wait with it.
 #[allow(clippy::too_many_arguments)]
 pub fn phase(
     raw: &mut Raw,
@@ -233,19 +229,22 @@ pub fn phase(
     // A session in an excluded repository gets no summary (D13), and each call holds to the list
     // as it is now (spec 5.5).
     let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
-    let mut out = windows;
-    let mut replies: Vec<_> = raw
-        .newest_labels(RECENT)?
-        .into_iter()
-        .filter(|l| l.kind == "reply")
-        .collect();
-    replies.reverse();
-    for r in replies {
+    let out = windows;
+    // Every turn end is reached, however many records follow it (Codex on C2).
+    for r in raw.replies_between(last_asked(k, &device)?, ck)? {
+        if !covered(r.seq) {
+            break;
+        }
         let key = format!("{}\u{0}{}", r.agent, r.session);
-        if !covered(r.seq) || reading.excluded.contains(&key) || asked(k, &device, r.seq)? {
+        if reading.excluded.contains(&key) || asked(k, &device, r.seq)? {
             continue;
         }
         let turn = Turn::read(raw, k, rules, &r, summary.window_tokens)?;
+        // What is kept of an answer at the least, a skip: a turn whose labels pass the op cap
+        // even so is not asked for, as nothing paid for could be kept (Codex on C2).
+        let Some(skip) = fitted(turn.op(&json!({"skip": true}), rules))? else {
+            continue;
+        };
         let prompt = prompt(&summary.language, &turn);
         let sent = crate::curate::sha256_hex(&format!("{chain}\n{prompt}"));
         // Held in the digest's table, under the turn's reply in place of a repository.
@@ -258,8 +257,7 @@ pub fn phase(
                 continue;
             }
             if p.next_attempt_at > now {
-                out = sooner(out, held(&p.hold, p.next_attempt_at, now));
-                continue;
+                return Ok(sooner(out, held(&p.hold, p.next_attempt_at, now)));
             }
         }
         let answer = summarizer(&subject, &prompt, &|v| check(v, rules), &|| {
@@ -267,7 +265,7 @@ pub fn phase(
         });
         let failed = match answer {
             Ok(res) => {
-                let op = fitted(turn.op(&res.output, rules))?;
+                let op = fitted(turn.op(&res.output, rules))?.unwrap_or(skip);
                 raw.append_ops(&[(OpKind::Turn, op)])?;
                 crate::providers_db::clear_digest_pending(
                     db, &device, &r.agent, &r.session, &subject,
@@ -316,22 +314,32 @@ pub fn phase(
 /// `op` as the op log keeps it (`MAX_OP_BYTES`), so an answer paid for is never lost to the cap
 /// and asked again at every run (Codex on C2). Over it, the removal list goes first, as a window
 /// op's does past its bound (the summary is then hidden by any removal, K4), then the fields: it
-/// is kept as a skip.
-fn fitted(mut op: TurnOp) -> Result<Value> {
+/// is kept as a skip. None when even that is over it.
+fn fitted(mut op: TurnOp) -> Result<Option<Value>> {
     let within = |op: &TurnOp| -> Result<Option<Value>> {
         let v = serde_json::to_value(op)?;
         Ok((v.to_string().len() <= crate::raw::MAX_OP_BYTES).then_some(v))
     };
     if let Some(v) = within(&op)? {
-        return Ok(v);
+        return Ok(Some(v));
     }
     op.removed.clear();
     if let Some(v) = within(&op)? {
-        return Ok(v);
+        return Ok(Some(v));
     }
     op.fields.clear();
     op.skipped = true;
-    Ok(serde_json::to_value(op)?)
+    within(&op)
+}
+
+/// The reply of the last turn of this device's that a summary was kept of, skipped or not; 0
+/// before the first. The turns before it were asked, given up or never to be asked.
+fn last_asked(k: &Connection, device: &str) -> Result<i64> {
+    Ok(k.query_row(
+        "SELECT COALESCE(MAX(through), 0) FROM turns WHERE device = ?1",
+        [device],
+        |r| r.get(0),
+    )?)
 }
 
 /// Whether a summary of this device's turn ending at `through` was asked and kept, skipped or not.
@@ -366,24 +374,18 @@ fn sooner(a: Phase, b: Phase) -> Phase {
     }
 }
 
-/// A card as the prompt shows it (T2): each text on one line, gated as it was written and as
-/// that line, since a rule may match only the flattened text (Codex on C2).
-fn card_text(c: &Card, rules: &Rules) -> String {
-    let line = |t: &str| {
-        crate::redact::flattened_with(t, rules, usize::MAX, crate::consumer::manifest::one_line)
-            .masked()
-    };
+/// A card as the prompt shows it (T2): each text as it was written and as its reader gated it
+/// (K6), never joined into one line, which would make a text the gate did not read (Codex on C2).
+fn card_text(c: &Card) -> String {
     let kind = c.kind.as_deref().unwrap_or("note");
-    let mut out = format!("- [{kind}] {}", line(&c.title));
-    if !c.subtitle.is_empty() {
-        out.push_str(&format!(": {}", line(&c.subtitle)));
-    }
-    out.push('\n');
-    if !c.narrative.is_empty() && c.narrative != c.title {
-        out.push_str(&format!("  {}\n", line(&c.narrative)));
+    let mut out = format!("- [{kind}] {}\n", c.title);
+    for text in [&c.subtitle, &c.narrative] {
+        if !text.is_empty() && *text != c.title {
+            out.push_str(&format!("  {text}\n"));
+        }
     }
     for f in &c.facts {
-        out.push_str(&format!("  - {}\n", line(f)));
+        out.push_str(&format!("  - {f}\n"));
     }
     out
 }
@@ -711,6 +713,124 @@ mod tests {
         assert_eq!(shown[0].fields["request"], "Build the parser");
     }
 
+    /// Codex on C2 (T1): every turn end is reached, however many records follow it.
+    #[test]
+    fn a_turn_end_far_behind_the_newest_records_still_gets_its_summary() {
+        let mut records = vec![
+            said("s1", "prompt", "Build."),
+            said("s1", "reply", "Built."),
+        ];
+        records.extend((0..2_001).map(|i| said("s1", "tool", &format!("step {i}"))));
+        let home = home(
+            &records,
+            &[
+                window(1, 2, "Built.", &[]),
+                window(3, 2_003, "Stepped.", &[]),
+            ],
+        );
+        assert_eq!(run(home.path(), &completed("Built.")).1.len(), 1);
+        assert_eq!(turn_ops(home.path())[0].through, 2);
+    }
+
+    /// Codex on C2 (T5): a turn whose op could not be kept even as a skip (its labels pass the op
+    /// cap) is not asked for: nothing is paid for that cannot be kept.
+    #[test]
+    fn a_turn_whose_op_cannot_be_kept_is_not_asked_for() {
+        let session = "s".repeat(70_000);
+        let home = home(
+            &[
+                said(&session, "prompt", "Build."),
+                said(&session, "reply", "Built."),
+            ],
+            &[window(1, 2, "Built.", &[])],
+        );
+        assert_eq!(run(home.path(), &completed("Built.")).1.len(), 0);
+        assert!(turn_ops(home.path()).is_empty());
+    }
+
+    /// Codex on C2 (T2): a turn starts at its session's first event after the previous reply, so
+    /// a window of the earlier turn that reaches past that reply only over other records (here
+    /// two tombstones) shows none of its cards.
+    #[test]
+    fn a_turn_starts_at_its_sessions_first_event_after_the_previous_reply() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        raw.append(&said("s1", "prompt", "Old.")).unwrap();
+        raw.append(&said("s1", "reply", "Old done.")).unwrap();
+        for seq in [998, 999] {
+            let device = device.clone();
+            raw.append_tombstone(Target::Record { device, seq })
+                .unwrap();
+        }
+        raw.append(&said("s1", "prompt", "New.")).unwrap();
+        raw.append(&said("s1", "reply", "New done.")).unwrap();
+        raw.append_ops(&[
+            window(1, 4, "Old work.", &[]),
+            window(5, 6, "New work.", &[]),
+        ])
+        .unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        run(home.path(), &completed("Old."));
+        let (_, sent) = run(home.path(), &completed("New."));
+        assert!(sent[0].contains("New work."), "{}", sent[0]);
+        assert!(!sent[0].contains("Old work."), "{}", sent[0]);
+        assert_eq!(turn_ops(home.path())[1].from, 5);
+    }
+
+    /// T1: a summary every provider fails waits as a window does, and the turns after it wait
+    /// with it, so none is passed over for good.
+    #[test]
+    fn a_held_turn_holds_the_turns_after_it() {
+        let home = home(
+            &[
+                said("s1", "prompt", "One."),
+                said("s1", "reply", "One done."),
+                said("s1", "prompt", "Two."),
+                said("s1", "reply", "Two done."),
+            ],
+            &[window(1, 2, "One.", &[]), window(3, 4, "Two.", &[])],
+        );
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let db = crate::providers_db::open(home.path()).unwrap();
+        let until = crate::db::now_ms() + 60_000;
+        let mut calls = 0;
+        let mut failing = |_: &str,
+                           _: &str,
+                           _: &crate::provider::AnswerCheck,
+                           _: &crate::provider::Gate|
+         -> Result<ChainResult> {
+            calls += 1;
+            Err(
+                crate::provider::ChainFailed(vec![crate::provider::Fallback {
+                    provider: "fake".into(),
+                    reason: "rate limited".into(),
+                    skip: crate::provider::Skip::Wait(until),
+                }])
+                .into(),
+            )
+        };
+        let (rules, summary) = (Rules::default(), Summary::default());
+        let phase = phase(
+            &mut raw,
+            &k,
+            &db,
+            &rules,
+            &summary,
+            "chain",
+            &mut failing,
+            Phase::Idle,
+        )
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert!(matches!(phase, Phase::Waiting { .. }), "{phase:?}");
+        drop((raw, k, db));
+        assert_eq!(run(home.path(), &completed("Two.")).1.len(), 0);
+        assert!(turn_ops(home.path()).is_empty());
+    }
+
     /// Test 2 (D13): a session in an excluded repository gets no call.
     #[test]
     fn an_excluded_sessions_turn_gets_no_call() {
@@ -761,13 +881,33 @@ mod tests {
         assert_eq!(turn_ops(home.path())[1].read, vec![(6, 6), (3, 4)]);
     }
 
-    /// Codex on C2: a card's title, subtitle, narrative and facts are each shown on one line,
-    /// and gated as that line too: a rule may match only the flattened text.
+    /// Codex on C2: each prompt is gated alone, as a window gates each record: a rule anchored to
+    /// a whole prompt still holds when the turn has two.
     #[test]
-    fn a_cards_text_is_gated_as_the_line_it_is_shown_on() {
+    fn each_prompt_is_gated_alone() {
+        let home = home(
+            &[
+                said("s1", "prompt", "otp=654321"),
+                said("s1", "prompt", "Continue."),
+                said("s1", "reply", "Built."),
+            ],
+            &[window(1, 3, "Built.", &[])],
+        );
+        let (_, sent) = run_with(home.path(), &completed("Built."), &rule("^otp=([0-9]{6})$"));
+        assert!(sent[0].contains("Continue."), "{}", sent[0]);
+        assert!(!sent[0].contains("654321"), "{}", sent[0]);
+    }
+
+    /// Codex on C2: a card's title, subtitle, narrative and facts are shown as they were written
+    /// and gated (K6), never joined into one line: a rule that matches only the joined text, as
+    /// `otp= ([0-9]{6})` matches `otp=` and a line break before the digits once joined, finds
+    /// nothing to show it.
+    #[test]
+    fn a_cards_text_is_shown_as_written_never_joined_into_one_line() {
         let card = json!({"type": "change", "title": "T otp=\n111111",
             "subtitle": "S otp=\n222222", "narrative": "N otp=\n333333",
-            "facts": ["F otp=\n444444"], "concepts": [], "files_read": [], "files_modified": []});
+            "facts": ["F otp=\n444444", "otp=555555"], "concepts": [], "files_read": [],
+            "files_modified": []});
         let home = home(
             &[
                 said("s1", "prompt", "Build."),
@@ -775,11 +915,18 @@ mod tests {
             ],
             &[observed(1, 2, card)],
         );
-        let (_, sent) = run_with(home.path(), &completed("Built."), &rule("otp= ([0-9]{6})"));
-        assert!(sent[0].contains("T otp="), "{}", sent[0]);
-        for digits in ["111111", "222222", "333333", "444444"] {
-            assert!(!sent[0].contains(digits), "{digits} in {}", sent[0]);
+        let (_, sent) = run_with(home.path(), &completed("Built."), &rule("otp= ?([0-9]{6})"));
+        for (written, joined) in [
+            ("T otp=\n111111", "otp= 111111"),
+            ("N otp=\n333333", "otp= 333333"),
+        ] {
+            assert!(
+                sent[0].contains(written) && !sent[0].contains(joined),
+                "{}",
+                sent[0]
+            );
         }
+        assert!(!sent[0].contains("555555"), "{}", sent[0]);
     }
 
     /// Codex on C2: an answer whose op would pass the op log's cap is never lost to it, which
@@ -833,7 +980,7 @@ mod tests {
             fields: BTreeMap::from([("notes".to_owned(), "x".repeat(70_000))]),
             skipped: false,
         };
-        let v = fitted(op).unwrap();
+        let v = fitted(op).unwrap().unwrap();
         assert_eq!((&v["skipped"], &v["fields"]), (&json!(true), &json!({})));
     }
 

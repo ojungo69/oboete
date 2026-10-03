@@ -712,16 +712,17 @@ impl Raw {
     }
 
     /// The first record of the turn that `agent`'s `session` ends with its reply `reply` on this
-    /// device: the one after the session's previous reply, or the session's first record
+    /// device: the session's first event after its previous reply, or its first event
     /// (docs/summaries.md T1). A scan by label, as `turns`.
     pub fn turn_start(&self, agent: &str, session: &str, reply: i64) -> Result<i64> {
+        // The session's first event after its previous reply, not the record after that reply,
+        // which may be another session's or a tombstone (Codex on C2). The reply at the latest.
         Ok(self.conn.query_row(
-            "SELECT COALESCE(
-               (SELECT MAX(seq) + 1 FROM records WHERE device = ?1 AND type = 'event'
-                  AND agent = ?2 AND session = ?3 AND kind = 'reply' AND seq < ?4),
-               (SELECT MIN(seq) FROM records WHERE device = ?1 AND type = 'event'
-                  AND agent = ?2 AND session = ?3),
-               ?4)",
+            "SELECT COALESCE(MIN(seq), ?4) FROM records
+             WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3 AND seq <= ?4
+               AND seq > COALESCE(
+                 (SELECT MAX(seq) FROM records WHERE device = ?1 AND type = 'event'
+                    AND agent = ?2 AND session = ?3 AND kind = 'reply' AND seq < ?4), 0)",
             params![self.device, agent, session, reply],
             |r| r.get(0),
         )?)
@@ -814,18 +815,18 @@ impl Raw {
             .optional()?)
     }
 
-    /// This device's newest `limit` live event records (the sources `is_live` names), the newest
-    /// first, by their labels alone (no body): where the curation phase looks for a session whose
-    /// digest is due (milestone 3 Task 9), so an import never pushes a live session out (Codex on
-    /// #304). Down the primary key: sessions have no index (spec 1.6).
-    pub fn newest_labels(&self, limit: usize) -> Result<Vec<Labels>> {
+    /// This device's live replies (the sources `is_live` names) after `after` through `through`,
+    /// the oldest first, by their labels alone (no body): the turn ends a summary may be due for
+    /// (docs/summaries.md T1). Along the primary key from `after`: records have no index of kind.
+    pub fn replies_between(&self, after: i64, through: i64) -> Result<Vec<Labels>> {
         let mut st = self.conn.prepare(&format!(
             "SELECT agent, session, repo, seq, ts, kind FROM records
-             WHERE device = ?1 AND type = 'event' AND source IN ('{}')
-             ORDER BY seq DESC LIMIT ?2",
+             WHERE device = ?1 AND seq > ?2 AND seq <= ?3 AND type = 'event' AND kind = 'reply'
+               AND source IN ('{}')
+             ORDER BY seq",
             LIVE.join("', '")
         ))?;
-        let rows = st.query_map(params![self.device, limit as i64], |r| {
+        let rows = st.query_map(params![self.device, after, through], |r| {
             Ok(Labels {
                 agent: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
                 session: r.get::<_, Option<String>>(1)?.unwrap_or_default(),

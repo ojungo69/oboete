@@ -27,10 +27,12 @@ about a fifth of claude-mem's.
 T1. **When.** One per turn end: a `reply` record, which only an agent's Stop writes (a
 subagent's stop writes none, `capture::shaped`), of a session the exclusion list does not name
 (D13), once the curation checkpoint has passed it, so the windows that hold the turn have their
-cards. A turn is its session's records after the session's previous reply, through this one. The
-worker asks for it where it asked for a digest: when the window phase sent nothing, one call a
-run, with the digest's holds (a summary every entry fails waits as a window does; one given up
-after `ATTEMPTS` is not asked again). Unlike the digest it does not wait for the session to go
+cards. A turn is its session's records from its first event after the session's previous reply,
+through this one. The worker asks for it where it asked for a digest: when the window phase sent
+nothing, one call a run, the oldest turn end after the last one a summary was kept of (every turn
+end is reached, however many records follow it), with the digest's holds (a summary every entry
+fails waits as a window does, and the turns after it wait with it; one given up after `ATTEMPTS`
+is not asked again). Unlike the digest it does not wait for the session to go
 idle: a turn is whole at its reply, and claude-mem asks at Stop. The window phase's own idle wait
 still holds back the windows of a session's last turn (Codex on C2).
 
@@ -39,8 +41,9 @@ is: the turn's prompts (at most 2,000 characters in all), the cards of its sessi
 hold any of its records (type, title, subtitle, narrative, facts; the newest 20, by K4 and K6), and
 the reply (at most 4,000 characters). Not the tool records: the cards say what they did, and a turn
 of hundreds of tool uses still fits. A card of a window that holds two sessions has no session (K2)
-and is not shown. Each of a card's texts is shown on one line and gated as that line too, since a
-rule may match only the flattened text. Within `window_tokens`, the oldest cards go first; the
+and is not shown. Each prompt is gated alone, as a window gates each record, and a card's texts are
+shown as they were written and gated (K6), never joined into one line, which would make a text
+the gate did not read. Within `window_tokens`, the oldest cards go first; the
 prompts and the reply are never cut for them, so with a `window_tokens` below what those take no
 card is shown.
 
@@ -60,7 +63,8 @@ records, or none), `through` (the reply's seq), `from` (the turn's first record)
 spans of the windows whose cards it was shown) with their `goals`, `removed` (as a window op lists
 it, over all of those records), and the fields or `skipped`. An answer paid for is never lost to
 the op log's cap: an op over it lists no removals, as a window op past its bound does, and is then
-hidden by any (K4); one still over it is kept as a skip.
+hidden by any (K4); one still over it is kept as a skip; and a turn whose op would pass the cap
+even as a skip (its labels alone) is not asked for.
 
 T6. **The table.** `consumer::turns` keeps each op in knowledge.db's `turns`; `oboete rebuild`
 makes it again and a rewind removes a device's rows above the point (K5).
@@ -121,10 +125,14 @@ and its ops stay readable; spec 3.4 and 4.4 are amended with the owner's decisio
    turn, or from that window's goal hides the summary; one its op lists does not.
 7. `oboete rebuild` gives the same rows; a rewind removes them.
 8. `turns::recent` gates every field with the rules as they are when it reads.
-9. A card's title, subtitle, narrative and facts are each gated as the one line the prompt shows.
+9. A card's title, subtitle, narrative and facts are shown as they were written and gated, never
+   joined into one line; each prompt is gated alone.
 10. The cards fit `window_tokens` beside the prompts and the reply, the oldest going first, and the
     op lists only the windows of the cards shown.
 11. A turn's repository is its own records' one, or none when they are of two.
 12. A removal from another session's record inside the turn's span does not hide it.
 13. An op over the op log's cap is kept without its removal list, or as a skip, and the turn is
-    not asked again.
+    not asked again; a turn whose op would pass the cap even as a skip is not asked for.
+14. A turn end followed by more than 2,000 records still gets its summary.
+15. A turn starts at its session's first event after the previous reply: a window of the earlier
+    turn that reaches past that reply only over other records shows none of its cards.
