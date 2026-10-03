@@ -2688,7 +2688,9 @@ fn cards_of(w: &Window, answer: &Value) -> Option<(Vec<Value>, u64)> {
         }
         out
     };
-    let named = |path: &str| shows_path(&w.text, path);
+    // The lines' own text: their ids and the session headings are the window's marks, not what
+    // the curator read (Codex on #369).
+    let named = |path: &str| w.lines.iter().any(|l| shows_path(&l.text, path));
     let mut kept = Vec::new();
     for c in given {
         let card = (|| {
@@ -8610,6 +8612,16 @@ mod tests {
             card["files_modified"],
             json!(["/tmp/etc/passwd", "src/auth.rs.bak"])
         );
+    }
+
+    /// Codex on #369: the window's own marks are not what the curator read: a line's id (`L1`)
+    /// or a word of a session's heading names no file.
+    #[test]
+    fn a_cards_file_is_not_named_by_a_line_id_or_a_heading() {
+        let given = json!([{"type": "change", "title": "Marks",
+            "files_read": ["L1", "session", "notes.md"], "files_modified": []}]);
+        let op = observing("read notes.md", given);
+        assert_eq!(op["observations"][0]["files_read"], json!(["notes.md"]));
     }
 
     /// Codex on #369: a character a file name may hold is no boundary (`bar.rs` is not shown by

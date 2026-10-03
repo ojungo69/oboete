@@ -156,7 +156,8 @@ and the op says how many were (`cards_dropped`).
 - A type outside the nine is no type. claude-mem keeps an unknown type as written and takes a
   missing one for `bugfix`; a wrong label on the timeline is worse than none.
 - Concepts outside the seven go. A list holds text only, each item once.
-- A file is kept when the window's lines name it whole, not as a part of a longer path
+- A file is kept when the window's lines (their text, not their ids or the session headings) name
+  it whole, not as a part of a longer path
   (`/etc/passwd` is not named by `/tmp/etc/passwd`, nor `bar.rs` by `foo+bar.rs` or `foo:bar.rs`:
   a mark a file name may hold is part of it, and a `:` ends a path only before a line number or
   where no more of a name follows); a relative path may end a longer one. Marks text puts around a
