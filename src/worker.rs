@@ -395,7 +395,11 @@ fn take(home: &Path, l: Lock, holding: &mut Holding) {
         holding.home = file_id(l.0.metadata());
     }
     holding.last = l.1;
-    note(home, l.1, STOPPED);
+    // Not into a home replaced since the lock was opened; the run stops at its next check (R3,
+    // Codex on #359).
+    if !gone(home, holding) {
+        note(home, l.1, STOPPED);
+    }
     holding.lock = Some(l);
 }
 
@@ -1029,6 +1033,18 @@ fn put_back(home: &Path, name: &str) -> Result<()> {
 /// released can still be held for a moment by a child another thread forked (it keeps the open
 /// file until it execs), which made hook tests run nothing under a parallel suite.
 #[allow(dead_code)] // Task 12's replay drains without waiting.
+/// `run_once` under a lock the caller holds, which it releases when the consumers have run.
+pub fn run_once_holding(home: &Path, held: Lock) -> Result<()> {
+    run_holding(
+        home,
+        0,
+        consumers(home),
+        || {},
+        Some(held),
+        Phases::default(),
+    )
+}
+
 pub fn run_once(home: &Path) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut held = lock(home)?;
@@ -2315,6 +2331,37 @@ mod tests {
             ["restore-wanted", "worker.lock"],
             "written into the new home"
         );
+    }
+
+    /// R3 at the first taking: a lock taken in a home replaced before the run records it gets
+    /// the run's outcome nowhere (Codex on #359).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_lock_taken_before_the_home_was_replaced_writes_nothing_into_the_new_one() {
+        let parent = tempfile::tempdir().unwrap();
+        let p = parent.path().join("home");
+        std::fs::create_dir(&p).unwrap();
+        raw::open(&p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        let held = lock(&p).unwrap().unwrap();
+        replace_home(&p);
+        let why = run_holding(
+            &p,
+            0,
+            vec![Box::new(Seen)],
+            || {},
+            Some(held),
+            Phases::default(),
+        )
+        .unwrap_err();
+        assert!(why.is::<Gone>(), "{why:#}");
+        let state: Vec<_> = std::fs::read_dir(p.join("state"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(state, ["worker.lock"], "written into the new home");
     }
 
     /// R3 after the lock is released: a home replaced while a worker makes its last check gets

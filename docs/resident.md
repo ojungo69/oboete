@@ -377,3 +377,8 @@ now records the run as work (R10).
 Its eighth round: that record was written before the home was checked, so a home replaced while
 the worker waited, whose replacement asked for a restore, got the old worker's outcome. The home is
 checked first (R3).
+
+Its ninth round: the first taking of the lock wrote its record the same way, before any check;
+and the restore let the lock go before its consumers ran, so a command that took the lock then
+could leave the restored records unread while the restore said they were back. `take` checks the
+home before it writes, and the restore hands its lock to the consumers' run.
