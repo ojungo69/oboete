@@ -224,6 +224,10 @@ enum Cmd {
         /// Also open the page in the default browser
         #[arg(long)]
         open: bool,
+        /// The resident viewer: on `[view] port`, with the token of state/view-token
+        /// (docs/resident.md R5); what a resident worker starts
+        #[arg(long, hide = true, conflicts_with_all = ["port", "open"])]
+        resident: bool,
     },
     /// Import claude-mem's SQLite database or Claude Code and Codex transcripts
     Import {
@@ -695,7 +699,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             println!("{said}");
             Ok(())
         }
-        Cmd::View { port, open } => view::run(&home, port, open),
+        Cmd::View { resident: true, .. } => view::resident(&home),
+        Cmd::View { port, open, .. } => view::run(&home, port, open),
         Cmd::Replay {
             fixture,
             repo_root,

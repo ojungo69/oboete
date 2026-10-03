@@ -97,6 +97,25 @@ pub(crate) fn valid(key: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._~+/=:-".contains(&b))
 }
 
+/// Whether `file` is on a filesystem in `PRIVATE_FS`, where a mode keeps it its owner's: the
+/// resident viewer's token is kept only there (docs/resident.md R6). Not yet off Linux (#281).
+pub(crate) fn private_fs(file: &std::fs::File) -> bool {
+    #[cfg(target_os = "linux")]
+    return linux::private(file);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        false
+    }
+}
+
+/// The filesystem magic `private_fs` sees on this thread instead of the real one; `None`, the
+/// real one.
+#[cfg(test)]
+pub(crate) fn fake_fs(magic: Option<u32>) {
+    FS.with(|f| f.set(magic));
+}
+
 /// Writes `key` as line 2 of `path`, the key file a chain entry names.
 pub(crate) fn write(path: &Path, key: &str, home: &Path) -> Result<Written, Refused> {
     if !valid(key) {
@@ -357,7 +376,7 @@ mod linux {
     }
 
     /// Whether `file` is on a filesystem in `PRIVATE_FS`; not when that cannot be told.
-    fn private(file: &std::fs::File) -> bool {
+    pub(super) fn private(file: &std::fs::File) -> bool {
         let magic = magic(file);
         #[cfg(test)]
         let magic = FS.with(|f| f.get()).or(magic);
