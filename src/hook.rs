@@ -1913,7 +1913,11 @@ pub(crate) fn start_worker(home: &Path) -> Result<Option<std::process::Child>> {
     // The lock is let go at the end of this statement, before the spawn.
     let free = crate::worker::lock(home)?.is_some();
     Ok(if free {
-        spawn_detached(home, &["worker"])
+        // `OBOETE_NO_SPAWN` was looked at above: none here is a spawn that failed (Codex on #378).
+        Some(
+            spawn_detached(home, &["worker"])
+                .ok_or_else(|| anyhow::anyhow!("the worker could not be spawned"))?,
+        )
     } else {
         None
     })

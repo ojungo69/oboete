@@ -345,7 +345,6 @@ pub struct Starter {
     every: Duration,
     after_busy: Duration,
     next: Instant,
-    started: Option<Instant>,
     child: Option<std::process::Child>,
     spawn: Spawn,
 }
@@ -364,7 +363,6 @@ impl Starter {
             every,
             after_busy,
             next: Instant::now(),
-            started: None,
             child: None,
             spawn,
         }
@@ -384,18 +382,17 @@ impl Starter {
             return;
         }
         self.next = now + self.every;
-        let busy = outcome(home).as_deref() == Some(PORT_IN_USE);
-        if busy
-            && self
-                .started
-                .is_some_and(|t| now.duration_since(t) < self.after_busy)
-        {
+        // The wait is the outcome's own age, so a worker started anew waits too (Codex on #378).
+        let busy = outcome(home).as_deref() == Some(PORT_IN_USE)
+            && std::fs::metadata(home.join("state").join("view-outcome"))
+                .and_then(|m| m.modified())
+                .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < self.after_busy));
+        if busy {
             return;
         }
         if !owner_only(home) || view_held(home) {
             return;
         }
-        self.started = Some(now);
         forget_outcome(home);
         self.child = (self.spawn)(home);
     }
@@ -3948,6 +3945,14 @@ mod tests {
         std::thread::sleep(Duration::from_millis(400));
         starter.due(p);
         assert_eq!(started.load(Ordering::SeqCst), 1, "tried again at once");
+        // A worker started anew waits too: the wait is the outcome's (Codex on #378).
+        let (anew, mut fresh) = sleeper(Duration::ZERO, Duration::from_millis(800));
+        fresh.due(p);
+        assert_eq!(
+            anew.load(Ordering::SeqCst),
+            0,
+            "a new starter tried at once"
+        );
         std::thread::sleep(Duration::from_millis(500));
         starter.due(p);
         assert_eq!(started.load(Ordering::SeqCst), 2);
