@@ -1,0 +1,23 @@
+src/raw.rs
+  s_ce2b24784deac6::t_2e29dddbffe3bf 87
+docs/spec.md
+  s_ce2b24784deac6::t_2e29dddbffe3bf 726
+src/worker.rs
+  s_ce2b24784deac6::t_cf9a53372cdd4a 1810
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d535c9cc976ba7932443d4ded3178aec4947caaf",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
