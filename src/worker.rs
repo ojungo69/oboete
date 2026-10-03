@@ -1746,6 +1746,7 @@ mod tests {
             origin: crate::forget::origin("synthetic", "idle-exit-import"),
             session: crate::forget::session(&event.agent, &event.session),
             ambiguous: None,
+            unverified: false,
         };
         let seq = raw
             .append_imported_origins(

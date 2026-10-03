@@ -94,6 +94,8 @@ transcript は agent/session と event の fingerprint 内の出現順を使い�
 event と、native session id のない event は検索用に取り込むが、第一 slice の forget では
 登録前に拒否する。後の import が一致する重複を認識したら、既存の最初の出現も同じ transaction
 で曖昧にする。既存の forget と重なる曖昧な batch の取り込みは拒否し、復活も推測による削除もしない。
+先頭の namespace が native session id から作られていない場合は、後の行に id が現れても
+未検証のままとする。既存の forget がある home では、未検証の raw 本文を取り込まない。
 要求ログにはこれらの hash と record id だけを残す。検索文・本文・引用は保存しない。
 native identity がある import はその identity を比較し、同じ文字列の別 event まで消さない。
 importer は capture 前の agent/session から session hash を作り、origin と同じ transaction で

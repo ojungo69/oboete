@@ -827,7 +827,8 @@ pub fn import(
                 row: None,
                 prefix: checkpoints.get(&key).and_then(|c| c.prefix.clone()),
             };
-            let native_session = crate::forget::session(agent, session);
+            let namespace = session.clone();
+            let namespace_known = first.native_session_known;
             let fingerprints: Vec<String> = lines
                 .iter()
                 .map(|line| {
@@ -878,12 +879,15 @@ pub fn import(
                         c,
                         raw::ImportIdentity {
                             origin: crate::forget::origin(&key, &format!("{identity}:{i}")),
-                            session: native_session.clone(),
+                            session: crate::forget::session(agent, &line.session),
                             ambiguous: (counts[event_hash.as_str()] > 1
                                 || !line.native_session_known)
                                 .then(|| {
                                     crate::forget::origin(&key, &format!("{event_hash}:0:{i}"))
                                 }),
+                            unverified: !namespace_known
+                                || !line.native_session_known
+                                || line.session != namespace,
                         },
                     )
                 }));

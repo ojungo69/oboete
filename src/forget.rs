@@ -557,6 +557,7 @@ mod tests {
             origin: origin("synthetic", id),
             session: session(&event.agent, &event.session),
             ambiguous: None,
+            unverified: false,
         };
         raw.append_imported_origins(
             &[crate::capture::Captured {
@@ -661,6 +662,7 @@ mod tests {
                 origin: origin("synthetic-transcript", id),
                 session: session(&event.agent, &event.session),
                 ambiguous: None,
+                unverified: false,
             };
             raw.append_imported_origins(
                 &[crate::capture::Captured {

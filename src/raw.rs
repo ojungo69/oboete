@@ -375,6 +375,8 @@ pub struct ImportIdentity {
     /// A repeated event's occurrence-zero origin. Its records stay distinct, but a forget
     /// cannot choose one without a native event identifier.
     pub ambiguous: Option<String>,
+    /// The parsed import namespace has no verified native session.
+    pub unverified: bool,
 }
 
 pub struct Raw {
@@ -820,14 +822,16 @@ impl Raw {
         }
         // No hook imports: the batch waits for another writer as a non-hook open does (#362).
         let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
-        if origins.is_empty() && batch.iter().any(|c| c.event.kind != "touch") {
+        if batch.iter().enumerate().any(|(index, c)| {
+            c.event.kind != "touch" && origins.get(index).is_none_or(|i| i.unverified)
+        }) {
             let has_denials: bool =
                 tx.query_row("SELECT EXISTS(SELECT 1 FROM denied_records)", [], |r| {
                     r.get(0)
                 })?;
             anyhow::ensure!(
                 !has_denials,
-                "cannot import raw without a native source identity after forget; use an importer that preserves provenance"
+                "cannot import raw without a native source identity after forget; use an importer that preserves verified provenance"
             );
         }
         let from_seq = next_seq(&tx, &self.device)?;
@@ -863,7 +867,7 @@ impl Raw {
                 if let Some(identity) = identity {
                     tx.execute(
                         "INSERT INTO import_origins(device, seq, origin, native_session, ambiguous) VALUES(?1, ?2, ?3, ?4, ?5)",
-                        params![self.device, seq, identity.origin, identity.session, i64::from(identity.ambiguous.is_some())],
+                        params![self.device, seq, identity.origin, identity.session, i64::from(identity.ambiguous.is_some() || identity.unverified)],
                     )?;
                 }
                 seqs.push(seq);

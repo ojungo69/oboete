@@ -600,16 +600,34 @@ fn a_forgotten_unique_transcript_event_cannot_return_as_an_ambiguous_pair() {
 
 #[test]
 fn a_filename_fallback_session_is_searchable_but_not_a_verified_forget_identity() {
+    unverified_transcript_namespace(false);
+}
+
+#[test]
+fn a_late_native_session_does_not_verify_a_filename_import_namespace() {
+    unverified_transcript_namespace(true);
+}
+
+fn unverified_transcript_namespace(late_native: bool) {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
     let projects = home.join("claude/projects/synthetic");
     std::fs::create_dir_all(&projects).unwrap();
-    let line = serde_json::json!({
+    let mut line = serde_json::json!({
         "type":"user", "cwd":"/synthetic", "timestamp":"2026-09-01T00:00:01.000Z",
         "message":{"role":"user", "content":CANARY}
     });
-    std::fs::write(projects.join("filename-only.jsonl"), format!("{line}\n")).unwrap();
+    let content = if late_native {
+        let mut late = line.clone();
+        late["sessionId"] = "late-native-session".into();
+        late["timestamp"] = "2026-09-01T00:00:02.000Z".into();
+        line["message"]["content"] = "earlier-unlabelled-context-521".into();
+        format!("{line}\n{late}\n")
+    } else {
+        format!("{line}\n")
+    };
+    std::fs::write(projects.join("filename-only.jsonl"), content).unwrap();
     ok(run(
         home,
         &["import", "transcripts", "--agent", "claude", "--yes"],

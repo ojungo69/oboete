@@ -435,6 +435,7 @@ fn events(
                         origin: crate::forget::origin(&key, &format!("{identity}:{i}")),
                         session: session.clone(),
                         ambiguous: None,
+                        unverified: false,
                     },
                 )
             }));
