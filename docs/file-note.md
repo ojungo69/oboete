@@ -70,11 +70,13 @@ newest.
 F4. **Not when the file changed since.** When the file's modification time is at or after the
 newest such card's time, there is no note, as in claude-mem.
 
-F5. **Once a session.** The hook keeps the IDs of the cards it showed for a file in the session's
+F5. **Once a session.** The hook keeps, for a file, the IDs of every card it considered (the
+current cards naming the file, the 40 newest of F3, not only the rows F6 shows) in the session's
 hook state (`hookstate`, under the agent and session, where the hooks already keep flags such as
 `injected` and `compacted`); the note comes again in that session only when a current card naming
 the file is not among them: a newer card, or a recuration's replacement, which keeps its window's
-time (docs/cards.md K2, K3), so a time alone would hide it (Codex on #384). The worker's pruning of
+time (docs/cards.md K2, K3), so a time alone would hide it (Codex on #384). Keeping only the rows
+shown would bring the note back at every read of a file with more cards than rows (Codex on #384). The worker's pruning of
 the hook state (`hookstate::KEEP`) removes it.
 
 F6. **Which rows.** claude-mem's: one card per session, the newest; ranked +2 for a modified file,
@@ -115,8 +117,9 @@ later run.
    then the days in order and the rows with ID, time, icon and title.
 2. A file under 1,500 bytes, a directory, a missing file, a file no card names: no note.
 3. A file modified at or after the newest card naming it: no note.
-4. The same session reading it again: no note; once a newer card names it, or a recuration
-   replaces a card shown (with the same time): the note again.
+4. The same session reading it again: no note, also for a file with more than 15 cards or two
+   cards of one session; once a newer card names it, or a recuration replaces a card (with the
+   same time): the note again.
 5. A card of another repository, a replaced card, a forgotten card: never in the note.
 6. A card naming the file by its path relative to the checkout's top level, or by its absolute
    path, is found; one naming `foo+bar.rs` is not found for `bar.rs`.
