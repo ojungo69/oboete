@@ -55,19 +55,21 @@ CREATE INDEX IF NOT EXISTS ops_exclusions ON ops(device, op_seq) WHERE type = 'e
 -- The curation checkpoint, which SessionStart reads (Task 8, MUST-M9): the last window op without
 -- a scan of the ops after it (178,370 imports took 136 ms).
 CREATE INDEX IF NOT EXISTS ops_windows ON ops(device, op_seq) WHERE type = 'window';
--- M5: bodyless deletion authority; privacy.db replays these after an older backup restore.
+-- Milestone 5 D1 (docs/milestone-5-plan.md): what forget denies, by the record's import origin,
+-- the one identity (rule 5); `device` and `seq` are where it was when it was forgotten, `ts` its
+-- time only when it counted toward the transcript cut (rule 10), `session` its labels' hash.
 CREATE TABLE IF NOT EXISTS denied_records(
-  device TEXT NOT NULL, seq INTEGER NOT NULL, fingerprint TEXT NOT NULL, origin TEXT,
-  PRIMARY KEY(device,seq)
+  origin TEXT PRIMARY KEY, device TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER,
+  session TEXT NOT NULL, job TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS denied_fingerprint ON denied_records(fingerprint);
-CREATE INDEX IF NOT EXISTS denied_origin ON denied_records(origin);
+-- An imported record's native identity, hashed (forget::origin): no original id or text.
 CREATE TABLE IF NOT EXISTS import_origins(
-  device TEXT NOT NULL, seq INTEGER NOT NULL, origin TEXT, fingerprint TEXT NOT NULL,
-  PRIMARY KEY(device,seq)
+  device TEXT NOT NULL, seq INTEGER NOT NULL, origin TEXT NOT NULL, PRIMARY KEY(device, seq)
 );
+CREATE INDEX IF NOT EXISTS import_origins_origin ON import_origins(origin);
+-- Each forget request, bodyless, as its log line holds it (rules 4, 14).
 CREATE TABLE IF NOT EXISTS forget_jobs(
-  id TEXT PRIMARY KEY, target TEXT NOT NULL, started INTEGER NOT NULL, step INTEGER NOT NULL
+  id TEXT PRIMARY KEY, request TEXT NOT NULL, started INTEGER NOT NULL, step INTEGER NOT NULL
 );
 ";
 
@@ -277,18 +279,14 @@ pub struct V1Row {
     pub session_id: String,
 }
 
-/// The durable deny-list, inside the append transaction. A database error is never permission.
-/// The old test-only sentinel still pins importer routing; real deletion is tested separately.
-fn denied(
-    conn: &Connection,
-    fingerprint: Option<&str>,
-    origin: Option<&str>,
-    text: &str,
-) -> Result<bool> {
+/// Whether an import must leave an item out because the owner forgot it (spec 8.4, A104): the
+/// deny-list, by the item's origin, read inside the append transaction; a database error is
+/// never permission. In tests a text holding `DENIED_IN_TESTS` stands for a forgotten one too, so
+/// the tests pin where it is asked.
+fn denied(conn: &Connection, origin: Option<&str>, text: &str) -> Result<bool> {
     let denied: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM denied_records WHERE (?2 IS NOT NULL AND origin=?2)
-          OR (?2 IS NULL AND fingerprint=?1))",
-        params![fingerprint, origin],
+        "SELECT EXISTS(SELECT 1 FROM denied_records WHERE origin = ?1)",
+        [origin],
         |r| r.get(0),
     )?;
     Ok(denied || cfg!(test) && text.contains(DENIED_IN_TESTS))
@@ -362,7 +360,6 @@ pub const MAX_BATCH_BYTES: usize = 4 << 20;
 pub struct Raw {
     conn: Connection,
     device: String,
-    home: std::path::PathBuf,
     /// The shared hold on `<home>/raw.lock` every open keeps (see `swap_lock`).
     _swap: std::fs::File,
 }
@@ -401,7 +398,6 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
         false,
         OPEN_WAIT.min(deadline.saturating_duration_since(std::time::Instant::now())),
     )?;
-    crate::forget::before_new_raw(home)?;
     // A restore that stopped after moving the damaged file aside and before renaming the rebuilt
     // one in: `raw.db.restored` is only ever a whole rebuild (it gets that name once its records
     // are committed), so the rename is finished here instead of creating an empty store.
@@ -437,14 +433,11 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     let device = conn.query_row("SELECT value FROM meta WHERE key='device_id'", [], |r| {
         r.get(0)
     })?;
-    let raw = Raw {
+    Ok(Raw {
         conn,
         device,
-        home: home.to_owned(),
         _swap: swap,
-    };
-    raw.sync_privacy()?;
-    Ok(raw)
+    })
 }
 
 /// `open`'s error when a restore still holds raw.db after `OPEN_WAIT`: a reader answers "try
@@ -504,117 +497,144 @@ pub fn lock_for_swap(home: &Path) -> Result<std::fs::File> {
 }
 
 impl Raw {
-    /// An accepted request may have outlived its raw transaction or an old backup restore.
-    fn sync_privacy(&self) -> Result<()> {
-        if crate::forget::needs_apply(&self.conn, &self.home)? {
-            let tx = rusqlite::Transaction::new_unchecked(
-                &self.conn,
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            crate::forget::apply(&tx, &self.home, &self.device)?;
-            tx.commit()?;
-        }
-        Ok(())
-    }
-
+    /// What forget would register for `target` (D1): each imported record's origin, session hash
+    /// and cut time, read on this connection, so `forget_start` reads it again inside its
+    /// transaction. A record with no import origin is refused: it cannot be told from a record
+    /// that reuses its seq (slice 3a gives live records one).
     pub(crate) fn forget_preview(
         &self,
         target: crate::forget::Target,
     ) -> Result<crate::forget::Preview> {
-        self.sync_privacy()?;
-        self.resolve_forget(target)
-    }
-
-    /// Reads only: start calls this inside its writer transaction, so a restore/reimport cannot
-    /// replace the preview's records between resolving their identities and registering them.
-    fn resolve_forget(&self, target: crate::forget::Target) -> Result<crate::forget::Preview> {
         use rusqlite::OptionalExtension;
         let (device, from, to) = target.bounds()?;
         anyhow::ensure!(
             device == self.device,
             "this first forget slice accepts only this device's raw records"
         );
-        let version = privacy_version(&self.conn, &self.home, &self.device)?;
-        let mut records = Vec::new();
-        let mut sample = None;
+        let (mut records, mut sources, mut sample) = (Vec::new(), Vec::<String>::new(), None);
         let mut at = from - 1;
-        loop {
+        while at < to {
             let take = usize::try_from(to - at)
                 .unwrap_or(usize::MAX)
                 .min(crate::forget::MAX_RECORDS + 1);
-            let batch = self.read_after_within(device, at, take, MAX_BATCH_BYTES)?;
-            let Some(last) = batch.last() else { break };
-            let last = last.seq;
-            for r in batch.into_iter().filter(|r| r.seq <= to) {
-                if let Item::Event(e) = r.item {
-                    if sample.is_none() {
-                        sample = Some(e.body.chars().take(120).collect());
-                    }
-                    let origin: Option<String> = self
-                        .conn
-                        .query_row(
-                            "SELECT origin FROM import_origins WHERE device=?1 AND seq=?2",
-                            params![device, r.seq],
-                            |r| r.get(0),
-                        )
-                        .optional()?
-                        .flatten();
-                    records.push(crate::forget::Record {
-                        device: device.into(),
-                        seq: r.seq,
-                        fingerprint: crate::forget::fingerprint(&e)?,
-                        origin,
-                    });
-                    anyhow::ensure!(
-                        records.len() <= crate::forget::MAX_RECORDS,
-                        "split this selection into spans of at most {} records",
-                        crate::forget::MAX_RECORDS
-                    );
-                }
-            }
-            if last >= to {
+            let batch = self.after_within(device, at, take, MAX_BATCH_BYTES)?;
+            let Some(last) = batch.last().map(|r| r.seq) else {
                 break;
+            };
+            for r in batch.into_iter().filter(|r| r.seq <= to) {
+                let Item::Event(e) = r.item else {
+                    continue;
+                };
+                let origin: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT origin FROM import_origins WHERE device = ?1 AND seq = ?2",
+                        params![device, r.seq],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let origin = origin.with_context(|| {
+                    format!(
+                        "record {device}:{} has no import identity: this slice forgets imported \
+                         records only; nothing was registered",
+                        r.seq
+                    )
+                })?;
+                if sample.is_none() {
+                    sample = Some(e.body.chars().take(120).collect());
+                }
+                if !sources.contains(&e.source) {
+                    sources.push(e.source.clone());
+                }
+                records.push(crate::forget::Record {
+                    device: device.into(),
+                    seq: r.seq,
+                    origin,
+                    session: crate::forget::session(&e.agent, &e.session),
+                    // Rule 10: only a record the transcript cut counts keeps its time.
+                    ts: (e.source != "transcript" && e.kind != "touch").then_some(e.ts),
+                });
+                anyhow::ensure!(
+                    records.len() <= crate::forget::MAX_RECORDS,
+                    "split this selection into spans of at most {} records",
+                    crate::forget::MAX_RECORDS
+                );
             }
             at = last;
         }
-        anyhow::ensure!(
-            version == privacy_version(&self.conn, &self.home, &self.device)?,
-            "forget preview is stale; preview again"
-        );
         Ok(crate::forget::Preview {
             target,
-            version,
             records,
+            denied: self.denied_count()?,
+            sources,
             sample,
         })
     }
 
+    /// Registers `preview` as job `job` in one raw write transaction (D1 rule 1): read again and
+    /// compared under the write lock, so a record replaced since, or another forget since,
+    /// makes it stale and nothing is written. The request, for the logs.
     pub(crate) fn forget_start(
         &mut self,
         preview: &crate::forget::Preview,
-    ) -> Result<crate::forget::Status> {
+        job: &str,
+        started: i64,
+    ) -> Result<crate::forget::Request> {
         preview.validate()?;
         let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+        let again = self.forget_preview(preview.target.clone())?;
         anyhow::ensure!(
-            preview.version == privacy_version(&tx, &self.home, &self.device)?,
+            again.token()? == preview.token()?,
             "forget preview is stale; preview again"
         );
-        let resolved = self.resolve_forget(preview.target.clone())?;
-        anyhow::ensure!(
-            resolved.token()? == preview.token()?,
-            "forget preview is stale; preview again"
-        );
-        crate::forget::register(&self.home, preview)?;
-        #[cfg(test)]
-        if let Some(registered) = crate::forget::REGISTERED.get() {
-            registered();
-        }
-        crate::forget::apply(&tx, &self.home, &self.device)?;
-        let status = crate::forget::status(&self.home)?
-            .pop()
-            .context("registered forget request is missing")?;
+        let request = crate::forget::Request {
+            v: 1,
+            home: self.device.clone(),
+            job: job.into(),
+            started,
+            target: preview.target.clone(),
+            records: preview.records.clone(),
+        };
+        request.check()?;
+        apply_request(&tx, &self.device, &request)?;
         tx.commit()?;
-        Ok(status)
+        Ok(request)
+    }
+
+    /// Applies each of `requests` that raw does not hold, by identity (rule 5), in one
+    /// transaction: how many it applied.
+    pub(crate) fn forget_apply(&mut self, requests: &[crate::forget::Request]) -> Result<usize> {
+        if requests.is_empty() {
+            return Ok(0);
+        }
+        let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+        let mut applied = 0;
+        for r in requests {
+            r.check()?;
+            applied += usize::from(apply_request(&tx, &self.device, r)?);
+        }
+        tx.commit()?;
+        Ok(applied)
+    }
+
+    /// Every request raw holds, oldest first (rule 4).
+    pub(crate) fn forget_requests(&self) -> Result<Vec<crate::forget::Request>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT request FROM forget_jobs ORDER BY started, id")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(serde_json::from_str(&row?)?);
+        }
+        Ok(out)
+    }
+
+    /// How many records forget denies: the derived writers' fence (rule 12).
+    pub fn denied_count(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM denied_records", [], |r| r.get(0))?)
     }
 
     pub fn device(&self) -> &str {
@@ -652,7 +672,6 @@ impl Raw {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        crate::forget::apply(&tx, &self.home, &self.device)?;
         let seq = insert_event(&tx, &self.device, e, ledger, ruleset)?;
         tx.commit()?;
         Ok(seq)
@@ -672,7 +691,10 @@ impl Raw {
         self.append_imported_origins(batch, &[], ruleset, checkpoint)
     }
 
-    /// The native source identity is hashed by the importer; fingerprints also protect old rows.
+    /// `append_imported` with each record's native identity, hashed by its importer
+    /// (`forget::origin`): kept beside the record, and a record whose origin forget denies is not
+    /// recorded (D1 rule 5). After any forget, an import without identities is refused: nothing
+    /// could tell a forgotten record in it.
     pub fn append_imported_origins(
         &mut self,
         batch: &[crate::capture::Captured],
@@ -698,7 +720,6 @@ impl Raw {
         }
         // No hook imports: the batch waits for another writer as a non-hook open does (#362).
         let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
-        crate::forget::apply(&tx, &self.home, &self.device)?;
         if origins.is_empty() && batch.iter().any(|c| c.event.kind != "touch") {
             let has_denials: bool =
                 tx.query_row("SELECT EXISTS(SELECT 1 FROM denied_records)", [], |r| {
@@ -712,19 +733,15 @@ impl Raw {
         let from_seq = next_seq(&tx, &self.device)?;
         let mut seqs = Vec::with_capacity(batch.len());
         for (index, c) in batch.iter().enumerate() {
-            let fingerprint = crate::forget::fingerprint(&c.event)?;
-            let origin = origins.get(index);
-            if !denied(
-                &tx,
-                Some(&fingerprint),
-                origin.map(String::as_str),
-                &c.event.body,
-            )? {
+            let origin = origins.get(index).map(String::as_str);
+            if !denied(&tx, origin, &c.event.body)? {
                 let seq = insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
-                tx.execute(
-                    "INSERT INTO import_origins(device,seq,origin,fingerprint) VALUES(?1,?2,?3,?4)",
-                    params![self.device, seq, origin, fingerprint],
-                )?;
+                if let Some(origin) = origin {
+                    tx.execute(
+                        "INSERT INTO import_origins(device, seq, origin) VALUES(?1, ?2, ?3)",
+                        params![self.device, seq, origin],
+                    )?;
+                }
                 seqs.push(seq);
             }
         }
@@ -792,7 +809,6 @@ impl Raw {
     /// The targets of `device`'s tombstones after `seq`: what a reader must hide itself until
     /// its consumer has reached them.
     pub fn tombstones_after(&self, device: &str, seq: i64) -> Result<Vec<(String, i64)>> {
-        self.sync_privacy()?;
         let mut st = self.conn.prepare(
             "SELECT target_device, target_seq FROM records
              WHERE device = ?1 AND seq > ?2 AND type = 'tombstone'",
@@ -1257,17 +1273,6 @@ impl Raw {
         limit: usize,
         max_bytes: usize,
     ) -> Result<Vec<Record>> {
-        self.sync_privacy()?;
-        self.read_after_within(device, seq, limit, max_bytes)
-    }
-
-    fn read_after_within(
-        &self,
-        device: &str,
-        seq: i64,
-        limit: usize,
-        max_bytes: usize,
-    ) -> Result<Vec<Record>> {
         let mut st = self.conn.prepare(
             "SELECT device, seq, type, ts, kind, agent, session, repo, branch, head, gitdir, cwd,
                     source, body, original_bytes,
@@ -1373,18 +1378,21 @@ impl Raw {
                     }
                 }
                 let mut line = line(r, rows);
-                if matches!(r.item, Item::Event(_)) {
-                    use rusqlite::OptionalExtension;
-                    let identity: Option<(Option<String>, String)> = self.conn.query_row(
-                        "SELECT origin,fingerprint FROM import_origins WHERE device=?1 AND seq=?2",
-                        params![r.device,r.seq], |r| Ok((r.get(0)?,r.get(1)?)),
-                    ).optional()?;
-                    if let Some((origin, fingerprint)) = identity {
-                        let mut value: serde_json::Value = serde_json::from_str(&line)?;
-                        value["import_identity"] =
-                            serde_json::json!({"origin":origin,"fingerprint":fingerprint});
-                        line = serde_json::to_string(&value)?;
+                // An imported record keeps its origin, and a tombstone of a forgotten one the
+                // deny row, so a restore from the segments alone forgets it again (D1 rule 14).
+                let extra = match &r.item {
+                    Item::Event(_) => self
+                        .origin_of(&r.device, r.seq)?
+                        .map(|o| ("import_identity", serde_json::json!({ "origin": o }))),
+                    Item::Tombstone(Target::Record { device, seq }) => {
+                        self.deny_of(device, *seq)?.map(|d| ("deny", d))
                     }
+                    _ => None,
+                };
+                if let Some((key, value)) = extra {
+                    let mut v: serde_json::Value = serde_json::from_str(&line)?;
+                    v[key] = value;
+                    line = serde_json::to_string(&v)?;
                 }
                 bytes += line.len() + 1;
                 out.push((r.seq, line));
@@ -1396,15 +1404,48 @@ impl Raw {
         }
     }
 
+    /// An imported record's origin (D1 rule 5).
+    fn origin_of(&self, device: &str, seq: i64) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT origin FROM import_origins WHERE device = ?1 AND seq = ?2",
+                params![device, seq],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The deny row of a forgotten record, by its origin, as a tombstone's backup line carries it.
+    fn deny_of(&self, device: &str, seq: i64) -> Result<Option<serde_json::Value>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT d.origin, d.device, d.seq, d.ts, d.session, d.job
+                 FROM import_origins o JOIN denied_records d ON d.origin = o.origin
+                 WHERE o.device = ?1 AND o.seq = ?2",
+                params![device, seq],
+                |r| {
+                    Ok(serde_json::json!({
+                        "origin": r.get::<_, String>(0)?, "device": r.get::<_, String>(1)?,
+                        "seq": r.get::<_, i64>(2)?, "ts": r.get::<_, Option<i64>>(3)?,
+                        "session": r.get::<_, String>(4)?, "job": r.get::<_, String>(5)?,
+                    }))
+                },
+            )
+            .optional()?)
+    }
+
     /// D1: `ops` as this device's next op seqs, in one transaction: a window op and the claims
     /// it yields commit together, and with them the curation checkpoint (D2).
     pub fn append_ops(&mut self, ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<i64>> {
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
-        crate::forget::apply(&tx, &self.home, &self.device)?;
         for (kind, body) in ops {
             anyhow::ensure!(
-                !forgotten_op(&tx, &self.device, *kind, body)?,
+                !forgotten_op(&tx, *kind, body)?,
                 "a forget request invalidated this derived batch; it was not recorded"
             );
         }
@@ -1415,7 +1456,6 @@ impl Raw {
 
     /// Up to `limit` ops of `device` after `op_seq`, in op_seq order.
     pub fn ops_after(&self, device: &str, op_seq: i64, limit: usize) -> Result<Vec<Op>> {
-        self.sync_privacy()?;
         self.op_rows(device, op_seq, limit)?
             .into_iter()
             .map(|r| {
@@ -1670,16 +1710,11 @@ impl Raw {
     /// A body that would take its op over `MAX_OP_BYTES` is clipped with a marker; a document
     /// `denied` asks to leave out is not appended. The ops appended.
     pub fn append_imports(&mut self, docs: Vec<ImportDoc>) -> Result<usize> {
-        self.sync_privacy()?;
         let (mut batch, mut bytes, mut appended) = (Vec::new(), 0, 0);
         for doc in docs {
             let text = format!("{}\n{}", doc.title, doc.body);
-            if denied(
-                &self.conn,
-                None,
-                Some(&crate::forget::origin(&doc.source, &doc.source_id)),
-                &text,
-            )? {
+            let origin = crate::forget::origin(&doc.source, &doc.source_id);
+            if denied(&self.conn, Some(&origin), &text)? {
                 continue;
             }
             let body = serde_json::to_value(within_op_cap(doc)?)?;
@@ -2084,13 +2119,15 @@ fn line(r: &Record, ledger: Vec<serde_json::Value>) -> String {
 /// is the file's own, which a rename keeps.
 pub struct Rebuild {
     conn: Connection,
-    privacy: Option<(std::path::PathBuf, String)>,
+    forget: Vec<crate::forget::Request>,
 }
 
 impl Rebuild {
-    /// Restore applies bodyless controls before making its rebuilt file visible.
-    pub fn apply_privacy(&mut self, home: &Path, device: &str) {
-        self.privacy = Some((home.to_owned(), device.to_owned()));
+    /// The forget requests the live raw.db and the logs hold, which `finish` applies to the
+    /// rebuilt store before it is renamed in (D1 rule 14): a backup directory older than a forget
+    /// cannot bring the text back.
+    pub fn forget(&mut self, requests: Vec<crate::forget::Request>) {
+        self.forget = requests;
     }
 
     pub fn new(path: &Path, device: &str) -> Result<Self> {
@@ -2105,7 +2142,7 @@ impl Rebuild {
         conn.execute_batch("BEGIN")?;
         Ok(Self {
             conn,
-            privacy: None,
+            forget: Vec::new(),
         })
     }
 
@@ -2167,15 +2204,12 @@ impl Rebuild {
                     )?;
                 }
                 if let Some(identity) = v.get("import_identity") {
-                    let fingerprint = identity["fingerprint"]
-                        .as_str()
-                        .context("import identity fingerprint")?;
-                    let origin = identity["origin"].as_str();
-                    crate::forget::check_identity(fingerprint)?;
-                    if let Some(origin) = origin {
-                        crate::forget::check_identity(origin)?;
-                    }
-                    self.conn.execute("INSERT INTO import_origins(device,seq,origin,fingerprint) VALUES(?1,?2,?3,?4)", params![device,seq,origin,fingerprint])?;
+                    let origin = identity["origin"].as_str().context("import origin")?;
+                    crate::forget::check_identity(origin)?;
+                    self.conn.execute(
+                        "INSERT INTO import_origins(device, seq, origin) VALUES(?1, ?2, ?3)",
+                        params![device, seq, origin],
+                    )?;
                 }
             }
             Some("removed") => {
@@ -2199,6 +2233,24 @@ impl Rebuild {
                         t["length"].as_i64()
                     ],
                 )?;
+                // A forget's deny row (D1): segments alone forget it again.
+                if let Some(d) = v.get("deny") {
+                    let text = |k: &str| d[k].as_str().with_context(|| format!("deny {k}"));
+                    crate::forget::check_identity(text("origin")?)?;
+                    crate::forget::check_identity(text("session")?)?;
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO denied_records(origin, device, seq, ts, session, job)
+                         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            text("origin")?,
+                            text("device")?,
+                            d["seq"].as_i64().context("deny seq")?,
+                            d["ts"].as_i64(),
+                            text("session")?,
+                            text("job")?
+                        ],
+                    )?;
+                }
             }
             other => anyhow::bail!("seq {seq}: unknown record type {other:?}"),
         }
@@ -2251,10 +2303,16 @@ impl Rebuild {
                         < json_extract(w.body, '$.to_seq') - json_extract(w.body, '$.from_seq') + 1))",
             [],
         )?;
-        // Check missing records before adding the controls' reserved seqs: a tombstone must not
-        // make an old window appear to have records a damaged backup actually lost.
-        if let Some((home, device)) = self.privacy {
-            crate::forget::apply(&self.conn, &home, &device)?;
+        // After that check: a forget's tombstones take new seqs, which must not make an old window
+        // look as if the records a damaged backup lost were there.
+        let device: String =
+            self.conn
+                .query_row("SELECT value FROM meta WHERE key = 'device_id'", [], |r| {
+                    r.get(0)
+                })?;
+        for r in &self.forget {
+            r.check()?;
+            apply_request(&self.conn, &device, r)?;
         }
         self.conn.execute_batch("COMMIT")?;
         self.conn.close().map_err(|(_, e)| e)?;
@@ -2262,51 +2320,73 @@ impl Rebuild {
     }
 }
 
-fn privacy_version(conn: &Connection, home: &Path, device: &str) -> Result<crate::forget::Version> {
-    Ok(crate::forget::Version {
-        device: device.into(),
-        seq: conn.query_row(
-            "SELECT COALESCE(MAX(seq),0) FROM records WHERE device=?1",
-            [device],
-            |r| r.get(0),
-        )?,
-        op_seq: conn.query_row(
-            "SELECT COALESCE(MAX(op_seq),0) FROM ops WHERE device=?1",
-            [device],
-            |r| r.get(0),
-        )?,
-        control: crate::forget::version(home)?,
-    })
-}
-
-/// Final raw-write fence for an answer composed before registration. Recuration of a window
-/// spanning a denied record waits for the physical-purge slice to rebuild its remaining span.
-fn forgotten_op(
+/// Applies one forget request by identity (D1 rule 5), inside the caller's write transaction:
+/// each record's deny row, keyed by its origin, and a tombstone of every record of this store
+/// whose import origin it is, at whatever seq it has now (a re-import's copy too) and that none
+/// hides yet; then the job row. A seq reused by another record is never hidden for an old
+/// request. Whether the store lacked the job.
+pub(crate) fn apply_request(
     conn: &Connection,
     device: &str,
-    kind: OpKind,
-    body: &serde_json::Value,
+    r: &crate::forget::Request,
 ) -> Result<bool> {
+    for rec in &r.records {
+        conn.execute(
+            "INSERT OR IGNORE INTO denied_records(origin, device, seq, ts, session, job)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![rec.origin, rec.device, rec.seq, rec.ts, rec.session, r.job],
+        )?;
+        let targets: Vec<(String, i64)> = conn
+            .prepare(
+                "SELECT o.device, o.seq FROM import_origins o
+                 WHERE o.origin = ?1 AND NOT EXISTS (
+                   SELECT 1 FROM records t WHERE t.type = 'tombstone'
+                     AND t.target_device = o.device AND t.target_seq = o.seq
+                     AND t.target_offset IS NULL)
+                 ORDER BY o.device, o.seq",
+            )?
+            .query_map([&rec.origin], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (target_device, target_seq) in targets {
+            let seq: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM records WHERE device = ?1",
+                [device],
+                |row| row.get(0),
+            )?;
+            conn.execute(
+                "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq)
+                 VALUES(?1, ?2, 'tombstone', ?3, 'forget', ?4, ?5)",
+                params![device, seq, r.started, target_device, target_seq],
+            )?;
+        }
+    }
+    Ok(conn.execute(
+        "INSERT OR IGNORE INTO forget_jobs(id, request, started, step) VALUES(?1, ?2, ?3, 1)",
+        params![r.job, serde_json::to_string(r)?, r.started],
+    )? == 1)
+}
+
+/// A Claim or Correction op anchored on a record forget denies, by the record's origin (D1 rule
+/// 5): never recorded. Window and turn ops are fenced by `Reading` (rule 12).
+fn forgotten_op(conn: &Connection, kind: OpKind, body: &serde_json::Value) -> Result<bool> {
     let anchor = |e: &serde_json::Value| -> Result<bool> {
         Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM denied_records WHERE device=?1 AND seq=?2)",
+            "SELECT EXISTS(SELECT 1 FROM import_origins o JOIN denied_records d
+               ON d.origin = o.origin WHERE o.device = ?1 AND o.seq = ?2)",
             params![e["device"].as_str(), e["seq"].as_i64()],
             |r| r.get(0),
         )?)
     };
     match kind {
-        OpKind::Window => Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM denied_records WHERE device=?1 AND seq BETWEEN ?2 AND ?3)", params![device,body["from_seq"].as_i64(),body["to_seq"].as_i64()], |r| r.get(0))?),
         OpKind::Claim => {
             for e in body["evidence"].as_array().into_iter().flatten() {
-                if anchor(e)? { return Ok(true); }
+                if anchor(e)? {
+                    return Ok(true);
+                }
             }
             Ok(false)
         }
         OpKind::Correction => anchor(&body["anchor"]),
-        OpKind::Digest => Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM denied_records d JOIN records r ON r.device=d.device AND r.seq=d.seq
-             WHERE r.device=?1 AND r.agent=?2 AND r.session=?3 AND r.seq<=?4)",
-            params![body["through"]["device"].as_str(),body["agent"].as_str(),body["session"].as_str(),body["through"]["seq"].as_i64()], |r| r.get(0))?),
         _ => Ok(false),
     }
 }
@@ -2884,9 +2964,7 @@ mod tests {
         assert_eq!(open(home.path()).unwrap().device(), first);
         // The same store copied elsewhere (another machine's home) is another device.
         let copy = tempfile::tempdir().unwrap();
-        for file in ["raw.db", "privacy.db", "privacy.head"] {
-            std::fs::copy(home.path().join(file), copy.path().join(file)).unwrap();
-        }
+        std::fs::copy(home.path().join("raw.db"), copy.path().join("raw.db")).unwrap();
         let other = open(copy.path()).unwrap();
         assert_ne!(other.device(), first);
         assert_eq!(open(copy.path()).unwrap().device(), other.device());
@@ -2953,9 +3031,7 @@ mod tests {
             .unwrap();
         drop(raw);
         let copy = tempfile::tempdir().unwrap();
-        for file in ["raw.db", "privacy.db", "privacy.head"] {
-            std::fs::copy(home.path().join(file), copy.path().join(file)).unwrap();
-        }
+        std::fs::copy(home.path().join("raw.db"), copy.path().join("raw.db")).unwrap();
         let mut other = open(copy.path()).unwrap();
         other.exclude("x", false).unwrap();
         assert_eq!(other.exclusions().unwrap(), ["x"]);

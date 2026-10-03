@@ -508,6 +508,9 @@ fn serve(
     let mut k = crate::backup::open_knowledge(home)?;
     checkpoint::rewind(&raw, &k, consumers)?;
     crate::backup::check(home, &raw);
+    // Milestone 5 D1 rule 7: the forget request logs after the segments are checked, before any
+    // consumer runs and before the export.
+    crate::forget::reconcile_or_say(home, &mut raw);
     // The resident viewer is started where the backup deadline is looked at (R4).
     let mut due = |raw: &Raw, holding: &Holding, viewer: Option<&mut crate::view::Starter>| {
         if gone(home, holding) {
@@ -1305,7 +1308,6 @@ mod tests {
     #[test]
     fn a_failed_run_leaves_its_reason_and_the_next_good_run_clears_it() {
         let home = tempfile::tempdir().unwrap();
-        drop(crate::raw::open(home.path()).unwrap()); // durable zero-control history before damage
         std::fs::write(home.path().join("raw.db"), b"not a database at all").unwrap();
         assert!(run(home.path(), 0).is_err()); // damaged, and no backup to restore from
         let why = last_failure(home.path()).unwrap();

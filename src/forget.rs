@@ -1,24 +1,21 @@
-//! M5 slice 1: a bodyless, durable request to forget. Physical purge is a later slice;
-//! accepting a request never reports it complete. `privacy.db` is outside raw's restore.
+//! Milestone 5 slice 1 (docs/milestone-5-plan.md, D1): a bodyless request to forget imported raw
+//! records. raw.db is the one authority: one raw transaction writes the deny rows, the tombstones
+//! and the job row. Two bodyless request logs, in the home and beside the backups, are its
+//! redundancy: reconciled in both directions, never compared, and never a reason to refuse an open.
+//! Physical purge is a later slice.
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
-use std::path::Path;
+use std::io::{IsTerminal, Read, Seek, Write};
+use std::path::{Path, PathBuf};
 
-/// One bounded registration. Larger selections use several spans until paged purge lands.
+/// One request's records; a larger selection is several requests (rule 9).
 pub const MAX_RECORDS: usize = 500;
-
-#[cfg(test)]
-thread_local! {
-    // Only the process-crash test pauses between the two durable stores.
-    pub(crate) static REGISTERED: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
-    static INITIALIZING: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
-    static JOURNAL_WRITING: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
-    static FULL_JOURNAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
+/// One log line's bytes at most (rule 9).
+const MAX_LINE: usize = 256 << 10;
+/// What a log's name is, in the home and in the backup directory (rule 3).
+const LOG: &str = "forget.log";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -47,7 +44,10 @@ impl Target {
     }
 
     pub fn parse(text: &str, span: bool) -> Result<Self> {
-        let (device, range) = text.split_once(':').context("expected <device>:<seq> or <device>:<from>-<to>; uid and document forget is not available yet")?;
+        let (device, range) = text.split_once(':').context(
+            "expected <device>:<seq> or <device>:<from>-<to>; uid and document forget is not \
+             available yet",
+        )?;
         let target = if span {
             let (from, to) = range
                 .split_once('-')
@@ -68,36 +68,28 @@ impl Target {
     }
 }
 
+/// One record a request forgets, bodyless (rule 3): where it was, its import origin (the one
+/// identity, rule 5), its session's hash, and its time only when it counted toward the transcript
+/// cut (rule 10).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Head {
-    version: u32,
-    identity: String,
-    through: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct Version {
-    pub device: String,
-    pub seq: i64,
-    pub op_seq: i64,
-    pub control: Option<Head>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Record {
     pub device: String,
     pub seq: i64,
-    pub fingerprint: String,
-    pub origin: Option<String>,
+    pub origin: String,
+    pub session: String,
+    pub ts: Option<i64>,
 }
 
+/// What forget would register, shown before it is confirmed.
 #[derive(Debug, Clone)]
 pub struct Preview {
     pub(crate) target: Target,
-    pub(crate) version: Version,
     pub(crate) records: Vec<Record>,
+    /// How many deny rows raw held when it was read: the fence's count (rule 12).
+    pub(crate) denied: i64,
+    /// The sources of the records, for the limits forget prints.
+    pub(crate) sources: Vec<String>,
     pub sample: Option<String>,
 }
 
@@ -109,22 +101,16 @@ impl Preview {
             "no raw records matched; nothing was registered"
         );
         anyhow::ensure!(
-            self.records.len() <= MAX_RECORDS
-                && self
-                    .version
-                    .seq
-                    .checked_add(self.records.len() as i64)
-                    .is_some(),
-            "forget selection exceeds its bounds"
+            self.records.len() <= MAX_RECORDS,
+            "split this selection into spans of at most {MAX_RECORDS} records"
         );
-        for record in &self.records {
+        for r in &self.records {
             anyhow::ensure!(
-                record.device == device && (from..=to).contains(&record.seq),
+                r.device == device && (from..=to).contains(&r.seq),
                 "forget selection differs from its preview"
             );
-            let origin = record.origin.as_deref().with_context(|| format!("record {}:{} has no native source identity; this legacy or hook record cannot be forgotten safely by this slice; nothing was registered", record.device,record.seq))?;
-            check_identity(origin)?;
-            check_identity(&record.fingerprint)?;
+            check_identity(&r.origin)?;
+            check_identity(&r.session)?;
         }
         Ok(())
     }
@@ -132,22 +118,92 @@ impl Preview {
     pub fn count(&self) -> usize {
         self.records.len()
     }
+
+    /// The same records, under the same deny-list: a start that reads another is stale.
     pub(crate) fn token(&self) -> Result<String> {
         Ok(hash(&serde_json::to_vec(&(
             &self.target,
-            &self.version,
             &self.records,
+            self.denied,
         ))?))
     }
 }
 
+/// A registered request as raw's job row and each log line hold it (rules 3, 4): bodyless, with
+/// the home that registered it (a line of another home is never applied).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Request {
+    pub v: u32,
+    pub home: String,
+    pub job: String,
+    pub started: i64,
+    pub target: Target,
+    pub records: Vec<Record>,
+}
+
+impl Request {
+    pub(crate) fn check(&self) -> Result<()> {
+        anyhow::ensure!(self.v == 1, "unknown request version {}", self.v);
+        anyhow::ensure!(
+            self.job.len() == 32 && self.job.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid job id"
+        );
+        let (device, from, to) = self.target.bounds()?;
+        anyhow::ensure!(
+            !self.records.is_empty() && self.records.len() <= MAX_RECORDS,
+            "invalid record count"
+        );
+        for r in &self.records {
+            anyhow::ensure!(
+                r.device == device && (from..=to).contains(&r.seq),
+                "a record outside its target"
+            );
+            check_identity(&r.origin)?;
+            check_identity(&r.session)?;
+        }
+        Ok(())
+    }
+
+    /// Its log line: the request and a checksum of it, so a damaged line is skipped alone.
+    fn line(&self) -> Result<String> {
+        let request = serde_json::to_string(self)?;
+        let line = format!(
+            "{{\"sum\":\"{}\",\"request\":{request}}}",
+            hash(request.as_bytes())
+        );
+        anyhow::ensure!(line.len() <= MAX_LINE, "a request line over its cap");
+        Ok(line)
+    }
+
+    /// A line as `line` writes it: the checksum is of the request as it is written again, which
+    /// is the text it was written from.
+    fn parse(line: &str) -> Result<Self> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Line {
+            sum: String,
+            request: Request,
+        }
+        anyhow::ensure!(line.len() <= MAX_LINE, "a line over its cap");
+        let l: Line = serde_json::from_str(line).context("not a request line")?;
+        anyhow::ensure!(
+            l.sum == hash(serde_json::to_string(&l.request)?.as_bytes()),
+            "a line whose checksum does not match"
+        );
+        l.request.check()?;
+        Ok(l.request)
+    }
+}
+
+/// A job as `forget --status` shows it.
 #[derive(Debug, Clone, Serialize)]
 pub struct Status {
     pub job: String,
     pub target: Target,
+    pub records: usize,
     pub started: i64,
     pub local: &'static str,
-    pub hub: &'static str,
 }
 
 pub fn preview(home: &Path, target: Target) -> Result<Preview> {
@@ -155,48 +211,243 @@ pub fn preview(home: &Path, target: Target) -> Result<Preview> {
     crate::raw::open(home)?.forget_preview(target)
 }
 
-pub fn start(home: &Path, preview: &Preview) -> Result<Status> {
-    crate::raw::open(home)?.forget_start(preview)
-}
-
-/// Raw open recovers an intent committed before its raw transaction. No purge is claimed.
-pub fn resume(home: &Path) -> Result<Vec<Status>> {
-    if crate::raw::exists(home) {
-        let _raw = crate::raw::open(home)?;
-    }
-    status(home)
+/// Registers `preview` in one raw transaction (rule 1), then writes it to both logs, after the
+/// commit and outside raw's lock (rule 2). What each log copy got is in the report.
+pub fn start(home: &Path, preview: &Preview) -> Result<(Status, Report)> {
+    let mut raw = crate::raw::open(home)?;
+    let mut id = [0_u8; 16];
+    getrandom::fill(&mut id)?;
+    let job: String = id.iter().map(|b| format!("{b:02x}")).collect();
+    let request = raw.forget_start(preview, &job, crate::db::now_ms())?;
+    let report = reconcile(home, &mut raw)?;
+    Ok((status_of(&request), report))
 }
 
 pub fn status(home: &Path) -> Result<Vec<Status>> {
-    let Some(journal) = Journal::read(home)? else {
-        if home.join("raw.db").try_exists()? {
-            let conn = Connection::open_with_flags(
-                crate::raw::path(home),
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )?;
-            let expected: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM meta WHERE key='privacy_head')",
-                [],
-                |r| r.get(0),
-            )?;
-            anyhow::ensure!(
-                !expected,
-                "privacy journal is missing; refusing an empty history"
-            );
-        } else {
-            before_new_raw(home)?;
-        }
+    if !crate::raw::exists(home) {
         return Ok(Vec::new());
+    }
+    Ok(crate::raw::open(home)?
+        .forget_requests()?
+        .iter()
+        .map(status_of)
+        .collect())
+}
+
+fn status_of(r: &Request) -> Status {
+    Status {
+        job: r.job.clone(),
+        target: r.target.clone(),
+        records: r.records.len(),
+        started: r.started,
+        local: "hidden; physical purge pending",
+    }
+}
+
+/// What a reconcile found: lines skipped, copies it could not read or write. Never a refusal.
+#[derive(Debug, Default)]
+pub struct Report {
+    /// Requests the logs held that raw.db lacked, now applied.
+    pub applied: usize,
+    pub problems: Vec<String>,
+    /// The copies written or already whole.
+    pub copies: Vec<PathBuf>,
+}
+
+/// The two log copies: the home's, and the backup directory's when it has one (rule 3).
+fn logs(home: &Path) -> Vec<PathBuf> {
+    let mut out = vec![home.join(LOG)];
+    if let Ok(dir) = crate::backup::dir(home)
+        && dir != home
+    {
+        out.push(dir.join(LOG));
+    }
+    out
+}
+
+/// One log copy's requests of this home, oldest first; damaged lines and lines of another home
+/// are reported and skipped (rules 9, "a line names its home").
+fn read_log(path: &Path, device: Option<&str>, report: &mut Report) -> Option<Vec<Request>> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(e) => {
+            report
+                .problems
+                .push(format!("{} could not be read: {e}", path.display()));
+            return None;
+        }
     };
-    anyhow::ensure!(
-        journal.head_present,
-        "privacy head is missing; initialization is unfinished"
-    );
-    journal
-        .controls(0)?
+    // Bytes that are not text spoil only their own line.
+    let text = String::from_utf8_lossy(&bytes);
+    let mut out = Vec::new();
+    for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.is_empty()) {
+        match Request::parse(line) {
+            Ok(r) if device.is_none_or(|d| r.home == d) => out.push(r),
+            Ok(_) => report.problems.push(format!(
+                "{} line {}: a request of another home, skipped",
+                path.display(),
+                n + 1
+            )),
+            Err(e) => {
+                report
+                    .problems
+                    .push(format!("{} line {}: {e:#}, skipped", path.display(), n + 1))
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Appends `requests` to the log at `path`, one at a time under an exclusive lock on the file: a
+/// newline first when the last byte is not one, each line written whole and synced, the
+/// directory synced when the file is made (rule 9).
+fn append_log(path: &Path, requests: &[&Request]) -> Result<()> {
+    if requests.is_empty() {
+        return Ok(());
+    }
+    let made = !path.exists();
+    // As the export makes the backup directory: private when oboete makes it.
+    if let Some(dir) = path.parent()
+        && !dir.exists()
+    {
+        std::fs::create_dir_all(dir)?;
+        crate::db::private(dir, 0o700);
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true).append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut f = opts.open(path)?;
+    f.lock()?;
+    let len = f.metadata()?.len();
+    let mut out = Vec::new();
+    if len > 0 {
+        let mut last = [0_u8; 1];
+        f.seek(std::io::SeekFrom::Start(len - 1))?;
+        f.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            out.push(b'\n');
+        }
+    }
+    for r in requests {
+        out.extend(r.line()?.as_bytes());
+        out.push(b'\n');
+    }
+    f.write_all(&out)?;
+    f.sync_all()?;
+    if made && let Some(dir) = path.parent() {
+        #[cfg(unix)]
+        std::fs::File::open(dir)?.sync_all()?;
+        #[cfg(not(unix))]
+        let _ = dir;
+    }
+    Ok(())
+}
+
+/// Rule 4, in both directions and never refusing: every request a readable log copy holds that
+/// raw.db lacks is applied to it (by identity, rule 5), and every request raw.db holds is
+/// appended to each copy that lacks it. A copy that cannot be read or written is reported.
+pub(crate) fn reconcile(home: &Path, raw: &mut crate::raw::Raw) -> Result<Report> {
+    let mut report = Report::default();
+    let device = raw.device().to_owned();
+    let copies: Vec<(PathBuf, Option<Vec<Request>>)> = logs(home)
         .into_iter()
-        .map(|c| c.status(&journal.head.identity))
-        .collect()
+        .map(|p| {
+            let read = read_log(&p, Some(&device), &mut report);
+            (p, read)
+        })
+        .collect();
+    let held: std::collections::HashSet<String> =
+        raw.forget_requests()?.into_iter().map(|r| r.job).collect();
+    let mut missing: Vec<Request> = Vec::new();
+    for r in copies.iter().filter_map(|(_, c)| c.as_ref()).flatten() {
+        if !held.contains(&r.job) && !missing.iter().any(|m| m.job == r.job) {
+            missing.push(r.clone());
+        }
+    }
+    report.applied = raw.forget_apply(&missing)?;
+    let all = raw.forget_requests()?;
+    for (path, copy) in copies {
+        let Some(copy) = copy else {
+            continue;
+        };
+        let lacking: Vec<&Request> = all
+            .iter()
+            .filter(|r| !copy.iter().any(|c| c.job == r.job))
+            .collect();
+        match append_log(&path, &lacking) {
+            Ok(()) => report.copies.push(path),
+            Err(e) => report
+                .problems
+                .push(format!("{} could not be written: {e:#}", path.display())),
+        }
+    }
+    Ok(report)
+}
+
+/// `reconcile` where it must not stop the work: what it could not do goes to stderr.
+pub(crate) fn reconcile_or_say(home: &Path, raw: &mut crate::raw::Raw) {
+    match reconcile(home, raw) {
+        Ok(r) => {
+            for p in r.problems {
+                eprintln!("oboete: forget request log: {p}");
+            }
+        }
+        Err(e) => eprintln!("oboete: forget request logs: {e:#}"),
+    }
+}
+
+/// Both log copies' requests, of any home, read before a restore takes raw's swap lock (no log I/O
+/// under it); the restore keeps those of its device.
+pub(crate) fn logged(home: &Path) -> (Vec<Request>, Report) {
+    let mut report = Report::default();
+    let mut out: Vec<Request> = Vec::new();
+    for p in logs(home) {
+        for r in read_log(&p, None, &mut report).into_iter().flatten() {
+            if !out.iter().any(|o| o.job == r.job) {
+                out.push(r);
+            }
+        }
+    }
+    (out, report)
+}
+
+/// What forget cannot reach, printed before it asks (docs/milestone-5-plan.md, Limits).
+fn limits(sources: &[String]) -> String {
+    let mut out = String::from(
+        "Physical purge is not built yet: the record stays in raw.db, hidden, and older backup \
+         segments still hold its text, hidden again when they are restored.\n\
+         A packet already handed to an agent and a curation call already sent are not taken \
+         back.\n\
+         The request is logged without the text, by hashes; someone who holds a log or the \
+         backups can check a guess of the exact stored text against them.\n\
+         If raw.db and both request logs are lost, the request is lost and the text can come \
+         back from older backups.\n",
+    );
+    let mut outside: Vec<&str> = Vec::new();
+    for s in sources {
+        let what = match s.as_str() {
+            "oboete-v1" => "the old oboete v1 store it was moved from",
+            "transcript" => "the agent's own transcript files",
+            _ => "the place it was imported from",
+        };
+        if !outside.contains(&what) {
+            outside.push(what);
+        }
+    }
+    if outside.is_empty() {
+        out.push_str("oboete knows no copy of it outside its own store.\n");
+    } else {
+        out.push_str(&format!(
+            "Copies outside oboete keep it: {}. Delete it there too.\n",
+            outside.join(", ")
+        ));
+    }
+    out
 }
 
 pub fn run(
@@ -205,11 +456,12 @@ pub fn run(
     span: Option<&str>,
     yes: bool,
     show: bool,
-    retry: bool,
 ) -> Result<()> {
-    if show || retry {
-        let jobs = if retry { resume(home)? } else { status(home)? };
-        for job in jobs {
+    if crate::raw::exists(home) {
+        reconcile_or_say(home, &mut crate::raw::open(home)?);
+    }
+    if show {
+        for job in status(home)? {
             println!("{}", serde_json::to_string(&job)?);
         }
         return Ok(());
@@ -217,19 +469,22 @@ pub fn run(
     let target = match (record, span) {
         (Some(r), None) => Target::parse(r, false)?,
         (None, Some(s)) => Target::parse(s, true)?,
-        _ => anyhow::bail!("choose --record, --span, --status or --resume"),
+        _ => anyhow::bail!("choose --record, --span or --status"),
     };
     let p = preview(home, target)?;
     println!("Target: {}", serde_json::to_string(&p.target)?);
-    println!("raw records: {}", p.count());
+    println!("Raw records: {}", p.count());
     if let Some(sample) = &p.sample {
-        println!("sample: {}", crate::redact::outbound(sample));
+        println!("Sample: {}", crate::redact::outbound(sample));
     }
     p.validate()?;
-    println!(
-        "Physical purge is not implemented yet. This request will remain unfinished.\nAgent transcripts, migration snapshots and evaluation copies remain outside this request."
-    );
+    print!("{}", limits(&p.sources));
     if !yes {
+        // A pipe cannot answer for the owner: `--yes` says it on the command line.
+        anyhow::ensure!(
+            std::io::stdin().is_terminal(),
+            "the confirmation needs a terminal; run it in one, or pass --yes"
+        );
         println!("Register this irreversible request? Type yes:");
         std::io::stdout().flush()?;
         let mut answer = String::new();
@@ -239,7 +494,16 @@ pub fn run(
             return Ok(());
         }
     }
-    println!("{}", serde_json::to_string(&start(home, &p)?)?);
+    let (status, report) = start(home, &p)?;
+    println!("{}", serde_json::to_string(&status)?);
+    for c in &report.copies {
+        println!("Request logged in {}", c.display());
+    }
+    for p in &report.problems {
+        println!(
+            "Not logged: {p}. raw.db holds the request; a restore from the backups alone would not."
+        );
+    }
     Ok(())
 }
 
@@ -250,19 +514,7 @@ pub(crate) fn hash(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Same event imported through another path. Source/path/capture location are not its identity.
-pub(crate) fn fingerprint(e: &crate::raw::Event) -> Result<String> {
-    let body = serde_json::from_str::<serde_json::Value>(&e.body)
-        .unwrap_or_else(|_| e.body.clone().into());
-    Ok(format!(
-        "v1:{}",
-        hash(&serde_json::to_vec(&(
-            &e.agent, &e.session, &e.kind, e.ts, body
-        ))?)
-    ))
-}
-
-/// A native event identity, versioned and hashed before persistence. No original id/text kept.
+/// A native event identity, versioned and hashed before it is kept: no original id or text.
 pub(crate) fn origin(source: &str, id: &str) -> String {
     format!(
         "v1:{}",
@@ -270,476 +522,17 @@ pub(crate) fn origin(source: &str, id: &str) -> String {
     )
 }
 
+/// A session's labels as a log line keeps them, hashed.
+pub(crate) fn session(agent: &str, session: &str) -> String {
+    origin(agent, session)
+}
+
 pub(crate) fn check_identity(s: &str) -> Result<()> {
     anyhow::ensure!(
         s.strip_prefix("v1:")
             .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())),
-        "unknown or damaged privacy identity"
+        "unknown or damaged identity"
     );
-    Ok(())
-}
-
-pub(crate) struct Control {
-    seq: i64,
-    started: i64,
-    target: Target,
-    watermark: i64,
-    records: Vec<Record>,
-}
-
-impl Control {
-    fn status(&self, identity: &str) -> Result<Status> {
-        self.target.bounds()?;
-        Ok(Status {
-            job: format!("{identity}:{}", self.seq),
-            target: self.target.clone(),
-            started: self.started,
-            local: "pending_physical_purge",
-            hub: "not_connected",
-        })
-    }
-}
-
-struct Journal {
-    conn: Connection,
-    head: Head,
-    head_present: bool,
-}
-
-impl Journal {
-    fn read(home: &Path) -> Result<Option<Self>> {
-        let head = match std::fs::File::open(home.join("privacy.head")) {
-            Ok(file) => {
-                let mut bytes = Vec::new();
-                file.take(4097).read_to_end(&mut bytes)?;
-                anyhow::ensure!(bytes.len() <= 4096, "privacy head is over its cap");
-                Some(serde_json::from_slice::<Head>(&bytes).context("privacy head is unreadable")?)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e).context("read privacy head"),
-        };
-        let path = home.join("privacy.db");
-        match std::fs::symlink_metadata(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && head.is_none() => {
-                return Ok(None);
-            }
-            Err(e) => return Err(e).context("privacy journal is missing or unreadable"),
-            Ok(m) => anyhow::ensure!(
-                m.is_file() && !m.file_type().is_symlink(),
-                "privacy journal is not a regular file"
-            ),
-        }
-        // No CREATE: missing controls remain an error. Read-write permits SQLite to roll back
-        // a hot journal after a registrar died before commit, before we validate its authority.
-        let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .context("open privacy journal")?;
-        conn.busy_timeout(std::time::Duration::from_secs(2))?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        anyhow::ensure!(version == 1, "unknown privacy journal version {version}");
-        let identity: String = conn.query_row("SELECT identity FROM journal", [], |r| r.get(0))?;
-        let (through, count): (i64, i64) = conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0), COUNT(*) FROM requests",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        anyhow::ensure!(through == count, "privacy journal has a missing control");
-        if let Some(head) = &head {
-            anyhow::ensure!(
-                head.version == 1 && head.identity == identity && head.through <= through,
-                "privacy journal is older than its durable head or has another identity"
-            );
-        } else {
-            anyhow::ensure!(
-                through == 0,
-                "privacy head is missing for a nonempty journal"
-            );
-        }
-        Ok(Some(Self {
-            conn,
-            head_present: head.is_some(),
-            head: Head {
-                version: 1,
-                identity,
-                through,
-            },
-        }))
-    }
-
-    fn create(home: &Path) -> Result<Self> {
-        if let Some(mut j) = Self::read(home)? {
-            if !j.head_present {
-                write_head(home, &j.head)?;
-                j.head_present = true;
-            }
-            return Ok(j);
-        }
-        let path = home.join("privacy.db.initializing");
-        // No request is written to this name. A killed initializer leaves raw readable and the
-        // next registrar (under raw's writer lock) replaces its empty, partial schema.
-        for name in ["privacy.db.initializing", "privacy.db.initializing-journal"] {
-            match std::fs::remove_file(home.join(name)) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(e).context("remove interrupted privacy initialization");
-                }
-                _ => {}
-            }
-        }
-        let conn = Connection::open(&path)?;
-        #[cfg(test)]
-        if let Some(initializing) = INITIALIZING.get() {
-            initializing();
-        }
-        crate::db::private(&path, 0o600);
-        conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA;
-          BEGIN IMMEDIATE;
-          PRAGMA user_version=1;
-          CREATE TABLE journal(identity TEXT NOT NULL);
-          CREATE TABLE requests(seq INTEGER PRIMARY KEY, started INTEGER NOT NULL, target TEXT NOT NULL,
-            watermark INTEGER NOT NULL, token TEXT NOT NULL UNIQUE);
-          CREATE TABLE targets(request INTEGER NOT NULL, device TEXT NOT NULL, seq INTEGER NOT NULL,
-            fingerprint TEXT NOT NULL, origin TEXT, PRIMARY KEY(request,device,seq));")?;
-        let mut random = [0_u8; 16];
-        getrandom::fill(&mut random)?;
-        let identity = hash(&random);
-        conn.execute("INSERT INTO journal VALUES(?1)", [&identity])?;
-        conn.execute_batch("COMMIT")?;
-        conn.close().map_err(|(_, e)| e)?;
-        std::fs::rename(&path, home.join("privacy.db"))?;
-        sync_dir(home)?;
-        let head = Head {
-            version: 1,
-            identity,
-            through: 0,
-        };
-        write_head(home, &head)?;
-        Self::read(home)?.context("new privacy journal is missing")
-    }
-
-    fn controls(&self, after: i64) -> Result<Vec<Control>> {
-        let mut out = Vec::new();
-        let mut st = self.conn.prepare("SELECT seq,started,target,watermark FROM requests WHERE seq>?1 AND seq<=?2 ORDER BY seq")?;
-        let mut rows = st.query(params![after, self.head.through])?;
-        while let Some(r) = rows.next()? {
-            let seq = r.get(0)?;
-            let text: String = r.get(2)?;
-            anyhow::ensure!(
-                text.len() <= crate::raw::MAX_OP_BYTES,
-                "privacy target is over the op cap"
-            );
-            let target: Target = serde_json::from_str(&text)?;
-            target.bounds()?;
-            let records = self.conn.prepare("SELECT device,seq,fingerprint,origin FROM targets WHERE request=?1 ORDER BY device,seq")?
-                .query_map([seq], |r| Ok(Record { device:r.get(0)?,seq:r.get(1)?,fingerprint:r.get(2)?,origin:r.get(3)? }))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            anyhow::ensure!(
-                !records.is_empty() && records.len() <= MAX_RECORDS,
-                "privacy request has an invalid target count"
-            );
-            let (device, from, to) = target.bounds()?;
-            let watermark: i64 = r.get(3)?;
-            for r in &records {
-                anyhow::ensure!(
-                    r.device == device && (from..=to).contains(&r.seq) && r.seq <= watermark,
-                    "privacy record is outside its target"
-                );
-                check_identity(&r.fingerprint)?;
-                if let Some(origin) = &r.origin {
-                    check_identity(origin)?;
-                }
-            }
-            anyhow::ensure!(
-                watermark.checked_add(records.len() as i64).is_some(),
-                "privacy sequence is exhausted"
-            );
-            out.push(Control {
-                seq,
-                started: r.get(1)?,
-                target,
-                watermark,
-                records,
-            });
-        }
-        Ok(out)
-    }
-}
-
-pub(crate) fn version(home: &Path) -> Result<Option<Head>> {
-    let journal = Journal::read(home)?;
-    if let Some(j) = &journal {
-        anyhow::ensure!(
-            j.head_present,
-            "privacy head is missing; initialization is unfinished"
-        );
-    }
-    Ok(journal.map(|j| j.head))
-}
-
-/// Called while raw's writer transaction is held: another registration cannot interleave.
-pub(crate) fn register(home: &Path, p: &Preview) -> Result<()> {
-    let journal = Journal::create(home)?;
-    let token = p.token()?;
-    if journal
-        .conn
-        .query_row("SELECT seq FROM requests WHERE token=?1", [&token], |r| {
-            r.get::<_, i64>(0)
-        })
-        .optional()?
-        .is_some()
-    {
-        return Ok(());
-    }
-    write_head(home, &journal.head)?; // also completes an empty journal's interrupted creation
-    drop(journal.conn);
-    let mut conn = Connection::open(home.join("privacy.db"))?;
-    conn.busy_timeout(std::time::Duration::from_secs(2))?;
-    conn.execute_batch("PRAGMA synchronous=EXTRA")?;
-    #[cfg(target_os = "macos")]
-    conn.execute_batch("PRAGMA fullfsync=ON")?;
-    #[cfg(test)]
-    if FULL_JOURNAL.get() {
-        let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
-        conn.pragma_update(None, "max_page_count", pages)?;
-    }
-    #[cfg(test)]
-    if JOURNAL_WRITING.get().is_some() {
-        conn.pragma_update(None, "cache_size", 1)?;
-    }
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let seq = journal
-        .head
-        .through
-        .checked_add(1)
-        .context("privacy sequence exhausted")?;
-    let target = serde_json::to_string(&p.target)?;
-    anyhow::ensure!(
-        target.len() <= crate::raw::MAX_OP_BYTES,
-        "privacy target is over the op cap"
-    );
-    tx.execute(
-        "INSERT INTO requests VALUES(?1,?2,?3,?4,?5)",
-        params![seq, crate::db::now_ms(), target, p.version.seq, token],
-    )?;
-    for record in &p.records {
-        tx.execute(
-            "INSERT INTO targets VALUES(?1,?2,?3,?4,?5)",
-            params![
-                seq,
-                record.device,
-                record.seq,
-                record.fingerprint,
-                record.origin
-            ],
-        )?;
-    }
-    #[cfg(test)]
-    if let Some(writing) = JOURNAL_WRITING.get() {
-        writing();
-    }
-    tx.commit()?;
-    write_head(
-        home,
-        &Head {
-            through: seq,
-            ..journal.head
-        },
-    )
-}
-
-/// Replay into raw's transaction, including a newly restored store before its file is swapped.
-pub(crate) fn apply(conn: &Connection, home: &Path, device: &str) -> Result<()> {
-    let applied = applied_head(conn)?;
-    let journal = Journal::read(home)?;
-    check_applied(applied.as_ref(), journal.as_ref().map(|j| &j.head))?;
-    let journal = match journal {
-        Some(j) if j.head_present => j,
-        _ => {
-            // A readable raw store with no marker proves this is initialization, never a
-            // replacement for a lost history. Persist zero controls before raw records it.
-            anyhow::ensure!(
-                applied.is_none(),
-                "privacy head is missing; refusing an empty deny-list"
-            );
-            Journal::create(home)?
-        }
-    };
-    for c in journal.controls(applied.as_ref().map_or(0, |h| h.through))? {
-        let status = c.status(&journal.head.identity)?;
-        for r in c.records {
-            let inserted = conn.execute("INSERT OR IGNORE INTO denied_records(device,seq,fingerprint,origin) VALUES(?1,?2,?3,?4)", params![r.device,r.seq,r.fingerprint,r.origin])?;
-            if inserted != 0 {
-                let next: i64 = conn.query_row(
-                    "SELECT MAX(COALESCE(MAX(seq),0),?2)+1 FROM records WHERE device=?1",
-                    params![device, c.watermark],
-                    |r| r.get(0),
-                )?;
-                conn.execute("INSERT INTO records(device,seq,type,ts,source,target_device,target_seq) VALUES(?1,?2,'tombstone',?3,'forget',?4,?5)", params![device,next,c.started,r.device,r.seq])?;
-            }
-        }
-        conn.execute(
-            "INSERT OR IGNORE INTO forget_jobs(id,target,started,step) VALUES(?1,?2,?3,1)",
-            params![
-                status.job,
-                serde_json::to_string(&status.target)?,
-                c.started
-            ],
-        )?;
-    }
-    conn.execute("INSERT INTO meta(key,value) VALUES('privacy_head',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(&journal.head)?])?;
-    Ok(())
-}
-
-pub(crate) fn needs_apply(conn: &Connection, home: &Path) -> Result<bool> {
-    let got = applied_head(conn)?;
-    let journal = Journal::read(home)?;
-    let expected = journal.as_ref().map(|j| &j.head);
-    check_applied(got.as_ref(), expected)?;
-    if journal.as_ref().is_none_or(|j| !j.head_present) {
-        anyhow::ensure!(
-            got.is_none(),
-            "privacy head is missing; refusing an empty deny-list"
-        );
-        return Ok(true);
-    }
-    Ok(got.as_ref() != expected)
-}
-
-fn applied_head(conn: &Connection) -> Result<Option<Head>> {
-    let head: Option<String> = conn
-        .query_row("SELECT value FROM meta WHERE key='privacy_head'", [], |r| {
-            r.get(0)
-        })
-        .optional()?;
-    Ok(head.map(|s| serde_json::from_str(&s)).transpose()?)
-}
-
-fn check_applied(applied: Option<&Head>, current: Option<&Head>) -> Result<()> {
-    let Some(applied) = applied else {
-        return Ok(());
-    };
-    let current = current.context("privacy journal is missing; refusing an empty deny-list")?;
-    anyhow::ensure!(
-        applied.version == 1
-            && applied.identity == current.identity
-            && applied.through <= current.through,
-        "privacy journal was rolled back"
-    );
-    Ok(())
-}
-
-/// Before a restore discards the current raw store, preserve its independent evidence that
-/// controls existed. A fresh Rebuild cannot check that: its meta table has no privacy head yet.
-/// Called under raw.lock exclusively, before any file is moved or a staged restore is removed.
-pub(crate) fn before_restore(home: &Path) -> Result<()> {
-    let journal = Journal::read(home)?;
-    let current = journal.as_ref().map(|j| &j.head);
-    let verified = journal.as_ref().is_some_and(|j| j.head_present);
-    if !home.join("raw.db").try_exists()? {
-        anyhow::ensure!(
-            verified,
-            "cannot restore: raw and deletion authority are missing; zero controls are not proven"
-        );
-        return Ok(());
-    }
-    let read = || -> Result<Option<Head>> {
-        let conn = Connection::open_with_flags(
-            crate::raw::path(home),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        conn.busy_timeout(std::time::Duration::from_secs(2))?;
-        applied_head(&conn)
-    };
-    match read() {
-        Ok(applied) => {
-            check_applied(applied.as_ref(), current)?;
-            if !verified {
-                anyhow::ensure!(
-                    applied.is_none(),
-                    "privacy head is missing; refusing an empty deny-list"
-                );
-                Journal::create(home)?;
-            }
-            Ok(())
-        }
-        Err(e) if crate::backup::corrupt(&e) => {
-            anyhow::ensure!(
-                verified,
-                "cannot restore: raw is corrupt and deletion authority is missing; zero controls are not proven"
-            );
-            Ok(())
-        }
-        Err(e) => Err(e).context("check current raw deletion authority before restore"),
-    }
-}
-
-/// Missing/unreadable raw beside old stores/backups is not a fresh home. Do not manufacture an
-/// unmarked raw file that would then falsely justify initializing an empty control history.
-pub(crate) fn before_new_raw(home: &Path) -> Result<()> {
-    let journal = Journal::read(home)?;
-    if journal.as_ref().is_some_and(|j| j.head_present) {
-        return Ok(());
-    }
-    let path = home.join("raw.db");
-    if path.try_exists()? {
-        let read = || -> Result<Option<Head>> {
-            let conn =
-                Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            applied_head(&conn)
-        };
-        if let Ok(applied) = read() {
-            check_applied(applied.as_ref(), journal.as_ref().map(|j| &j.head))?;
-            anyhow::ensure!(
-                applied.is_none(),
-                "privacy head is missing; refusing an empty deny-list"
-            );
-            return Ok(()); // a readable, unmarked current raw store proves legacy zero history
-        }
-    }
-    let mut old = crate::backup::has_segments(home)?;
-    for name in [
-        "knowledge.db",
-        "knowledge.db-wal",
-        "knowledge.db-shm",
-        "raw.db.restoring",
-        "raw.db.restored",
-    ] {
-        old |= home.join(name).try_exists()?;
-    }
-    if !path.try_exists()? {
-        old |= home.join("raw.db-wal").try_exists()? || home.join("raw.db-shm").try_exists()?;
-    }
-    anyhow::ensure!(
-        !old,
-        "deletion authority is unknown beside existing stores or backups; refusing to initialize empty controls"
-    );
-    Ok(())
-}
-
-fn write_head(home: &Path, head: &Head) -> Result<()> {
-    let path = home.join("privacy.head.part");
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = opts.open(&path)?;
-    file.write_all(&serde_json::to_vec(head)?)?;
-    file.sync_all()?;
-    std::fs::rename(&path, home.join("privacy.head"))?;
-    sync_dir(home)
-}
-
-fn sync_dir(home: &Path) -> Result<()> {
-    #[cfg(unix)]
-    std::fs::File::open(home)?.sync_all()?;
-    #[cfg(not(unix))]
-    let _ = home;
     Ok(())
 }
 
@@ -748,287 +541,156 @@ mod tests {
     use super::*;
     use crate::raw::{self, Item};
 
-    fn record(home: &Path) -> (raw::Raw, Target) {
-        let mut raw = raw::open(home).unwrap();
-        let seq = native(&mut raw, 1, r#"{"prompt":"synthetic forget canary"}"#);
-        let target = Target::Record {
-            device: raw.device().into(),
-            seq,
-        };
-        (raw, target)
-    }
-
-    fn native(raw: &mut raw::Raw, id: usize, body: &str) -> i64 {
+    /// An imported record of origin `id`, as an importer appends it.
+    fn native(raw: &mut raw::Raw, id: &str, body: &str) -> i64 {
         let mut event = raw::test_event(body);
-        event.source = "transcript".into();
+        event.source = "oboete-v1".into();
         raw.append_imported_origins(
             &[crate::capture::Captured {
                 event,
                 ledger: Vec::new(),
             }],
-            &[origin("synthetic", &id.to_string())],
+            &[origin("synthetic", id)],
             "",
             None,
         )
-        .unwrap()[0]
+        .unwrap()
+        .first()
+        .copied()
+        .unwrap_or(0)
     }
 
-    #[test]
-    fn a_stale_preview_registers_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut raw, target) = record(dir.path());
-        let p = preview(dir.path(), target).unwrap();
-        raw.append(&raw::test_event(r#"{"prompt":"a later record"}"#))
-            .unwrap();
-        assert!(
-            start(dir.path(), &p)
-                .unwrap_err()
-                .to_string()
-                .contains("stale")
-        );
-        assert!(status(dir.path()).unwrap().is_empty());
-        assert!(matches!(
-            raw.after(raw.device(), 0, 1).unwrap()[0].item,
-            Item::Event(_)
-        ));
-    }
-
-    #[test]
-    fn a_failed_raw_commit_replays_the_durable_request_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut raw, target) = record(dir.path());
-        let p = raw.forget_preview(target).unwrap();
-        crate::crash::at(1);
-        let failed = raw.forget_start(&p);
-        crate::crash::off();
-        assert!(failed.is_err());
-        drop(raw);
-        assert_eq!(resume(dir.path()).unwrap().len(), 1);
-        assert_eq!(resume(dir.path()).unwrap().len(), 1);
-        let raw = raw::open(dir.path()).unwrap();
-        assert!(matches!(
-            raw.after(raw.device(), 0, 1).unwrap()[0].item,
-            Item::Removed
-        ));
-        assert_eq!(raw.after(raw.device(), 0, 10).unwrap().len(), 2);
-    }
-
-    #[test]
-    fn a_head_write_failure_registers_no_deletion() {
-        let dir = tempfile::tempdir().unwrap();
-        let (raw, target) = record(dir.path());
-        let p = preview(dir.path(), target).unwrap();
-        std::fs::create_dir(dir.path().join("privacy.head.part")).unwrap();
-        assert!(start(dir.path(), &p).is_err());
-        assert!(status(dir.path()).unwrap().is_empty());
-        assert!(matches!(
-            raw.after(raw.device(), 0, 1).unwrap()[0].item,
-            Item::Event(_)
-        ));
-    }
-
-    #[test]
-    fn a_window_composed_before_forget_cannot_commit_its_answer() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut raw, target) = record(dir.path());
-        let window =
-            serde_json::json!({"from_seq":1,"to_seq":1,"summary":"synthetic forget canary"});
-        let p = raw.forget_preview(target).unwrap();
-        raw.forget_start(&p).unwrap();
-        assert!(raw.append_ops(&[(raw::OpKind::Window, window)]).is_err());
-        assert_eq!(
-            raw.max_op_seq().unwrap(),
-            0,
-            "a rejected answer moved its checkpoint"
-        );
-    }
-
-    #[test]
-    fn another_native_event_with_the_same_text_is_not_denied() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut raw, target) = record(dir.path());
-        let p = raw.forget_preview(target).unwrap();
-        raw.forget_start(&p).unwrap();
-        let second = native(&mut raw, 2, r#"{"prompt":"synthetic forget canary"}"#);
-        assert!(matches!(
-            raw.after(raw.device(), second - 1, 1).unwrap()[0].item,
-            Item::Event(_)
-        ));
-        let mut event = raw::test_event(r#"{"prompt":"masked differently"}"#);
-        event.source = "transcript".into();
-        let unsupported = raw.append_imported(
-            &[crate::capture::Captured {
-                event,
-                ledger: Vec::new(),
-            }],
-            "",
-            None,
-        );
-        assert!(
-            unsupported
-                .unwrap_err()
-                .to_string()
-                .contains("native source identity")
-        );
-    }
-
-    #[test]
-    fn sqlite_full_accepts_no_part_of_a_span() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut raw = raw::open(dir.path()).unwrap();
-        for n in 0..MAX_RECORDS {
-            native(&mut raw, n, &format!("{{\"prompt\":\"synthetic-{n}\"}}"));
-        }
-        let p = raw
-            .forget_preview(Target::Span {
-                device: raw.device().into(),
-                from: 1,
-                to: MAX_RECORDS as i64,
-            })
-            .unwrap();
-        FULL_JOURNAL.set(true);
-        let failed = raw.forget_start(&p);
-        FULL_JOURNAL.set(false);
-        let e = failed.unwrap_err();
-        assert!(e.chain().any(|e| matches!(e.downcast_ref::<rusqlite::Error>(), Some(rusqlite::Error::SqliteFailure(e,_)) if e.code==rusqlite::ErrorCode::DiskFull)), "{e:#}");
-        assert!(status(dir.path()).unwrap().is_empty());
-        assert_eq!(
-            raw.after(raw.device(), 0, MAX_RECORDS + 1)
-                .unwrap()
-                .into_iter()
-                .filter(|r| matches!(r.item, Item::Event(_)))
-                .count(),
-            MAX_RECORDS
-        );
-    }
-
-    #[test]
-    fn registrar_process() {
-        let Some(home) = std::env::var_os("OBOETE_TEST_CRASH_HOME") else {
-            return;
-        };
-        let home = Path::new(&home);
-        let (mut raw, mut target) = record(home);
-        let phase = std::env::var("OBOETE_TEST_CRASH_PHASE").unwrap_or_default();
-        if phase == "journal" {
-            for n in 2..=MAX_RECORDS {
-                native(&mut raw, n, "{\"prompt\":\"synthetic\"}");
-            }
-            target = Target::Span {
-                device: raw.device().into(),
-                from: 1,
-                to: MAX_RECORDS as i64,
-            };
-        }
-        let p = raw.forget_preview(target).unwrap();
-        let stopped = || {
-            let home = std::env::var_os("OBOETE_TEST_CRASH_HOME").unwrap();
-            std::fs::write(Path::new(&home).join("registered"), b"ready").unwrap();
-            loop {
-                std::thread::park();
-            }
-        };
-        if phase == "initialize" {
-            // A readable, unmarked legacy raw store is trustworthy evidence for zero controls.
-            // Initialize it under interruption; do not remove an accepted deletion request.
-            drop(raw);
-            for name in ["privacy.db", "privacy.head"] {
-                std::fs::remove_file(home.join(name)).unwrap();
-            }
-            let conn = Connection::open(home.join("raw.db")).unwrap();
-            conn.execute("DELETE FROM meta WHERE key='privacy_head'", [])
-                .unwrap();
-            drop(conn);
-            INITIALIZING.set(Some(stopped));
-            let _ = raw::open(home);
-            panic!("the parent should kill legacy initialization");
-        } else if phase == "journal" {
-            JOURNAL_WRITING.set(Some(stopped));
-        } else {
-            REGISTERED.set(Some(stopped));
-        }
-        let _ = raw.forget_start(&p);
-        panic!("the parent should kill this process at the durable boundary");
-    }
-
-    #[test]
-    fn a_killed_registrar_recovers_without_a_second_request() {
-        let home = tempfile::tempdir().unwrap();
-        kill_at(home.path(), "register");
-        let jobs = resume(home.path()).unwrap();
-        assert_eq!(jobs.len(), 1);
-        let raw = raw::open(home.path()).unwrap();
-        assert!(matches!(
-            raw.after(raw.device(), 0, 1).unwrap()[0].item,
-            Item::Removed
-        ));
-        assert_eq!(resume(home.path()).unwrap()[0].job, jobs[0].job);
-    }
-
-    #[test]
-    fn a_killed_journal_writer_rolls_back_and_can_resume() {
-        let home = tempfile::tempdir().unwrap();
-        kill_at(home.path(), "journal");
-        assert!(
-            std::fs::metadata(home.path().join("privacy.db-journal"))
-                .unwrap()
-                .len()
-                > 0
-        );
-        assert!(
-            resume(home.path()).unwrap().is_empty(),
-            "an uncommitted request survived"
-        );
-        let raw = raw::open(home.path()).unwrap();
-        let records = raw.after(raw.device(), 0, MAX_RECORDS + 1).unwrap();
-        assert_eq!(records.len(), MAX_RECORDS);
-        assert!(records.iter().all(|r| matches!(r.item, Item::Event(_))));
-        let p = raw
-            .forget_preview(Target::Record {
-                device: raw.device().into(),
-                seq: 1,
-            })
-            .unwrap();
-        assert!(start(home.path(), &p).is_ok());
-    }
-
-    fn kill_at(home: &Path, phase: &str) {
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "forget::tests::registrar_process", "--nocapture"])
-            .env("OBOETE_TEST_CRASH_HOME", home)
-            .env("OBOETE_TEST_CRASH_PHASE", phase)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !home.join("registered").exists() {
-            if child.try_wait().unwrap().is_some() || std::time::Instant::now() > deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("the child never reached the durable registration");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        child.kill().unwrap();
-        assert!(!child.wait().unwrap().success());
-    }
-
-    #[test]
-    fn a_killed_initializer_can_retry_without_losing_data() {
-        let home = tempfile::tempdir().unwrap();
-        kill_at(home.path(), "initialize");
-        let raw = raw::open(home.path()).unwrap();
-        assert!(matches!(
-            raw.after(raw.device(), 0, 1).unwrap()[0].item,
-            Item::Event(_)
-        ));
-        let target = Target::Record {
+    fn record(raw: &raw::Raw, seq: i64) -> Target {
+        Target::Record {
             device: raw.device().into(),
-            seq: 1,
-        };
-        let p = preview(home.path(), target).unwrap();
+            seq,
+        }
+    }
+
+    fn shown(raw: &raw::Raw, seq: i64) -> bool {
+        raw.after(raw.device(), seq - 1, 1)
+            .unwrap()
+            .first()
+            .is_some_and(|r| r.seq == seq && matches!(r.item, Item::Event(_)))
+    }
+
+    /// Rule 1: one raw transaction hides the record, denies its origin and keeps the job; rule 5:
+    /// an import of the same origin is not recorded again, another origin is.
+    #[test]
+    fn a_forget_hides_the_record_and_its_origin_is_not_imported_again() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let seq = native(&mut raw, "a", r#"{"prompt":"a synthetic canary"}"#);
+        let p = raw.forget_preview(record(&raw, seq)).unwrap();
+        assert_eq!(p.count(), 1);
+        let (status, report) = start(home.path(), &p).unwrap();
+        assert_eq!(status.records, 1);
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert!(!shown(&raw, seq));
+        assert_eq!(
+            native(&mut raw, "a", r#"{"prompt":"a synthetic canary"}"#),
+            0
+        );
+        let other = native(&mut raw, "b", r#"{"prompt":"another record"}"#);
+        assert!(shown(&raw, other));
+        assert_eq!(raw.forget_requests().unwrap().len(), 1);
+        let log = std::fs::read_to_string(home.path().join(LOG)).unwrap();
+        assert_eq!(log.lines().count(), 1);
+        assert!(!log.contains("canary"), "{log}");
+    }
+
+    /// Rule 5: a request hides every record of its origin in the store it is applied to, at
+    /// whatever seq it has, and never another record that took the old seq.
+    #[test]
+    fn a_request_follows_its_origin_and_never_a_reused_seq() {
+        let first = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(first.path()).unwrap();
+        let seq = native(&mut raw, "a", r#"{"prompt":"forgotten"}"#);
+        let p = raw.forget_preview(record(&raw, seq)).unwrap();
+        let (_, _) = start(first.path(), &p).unwrap();
+        let request = raw.forget_requests().unwrap().remove(0);
+        // Another store of the same device where the seq holds another record, and the origin
+        // came in later at another seq.
+        let second = tempfile::tempdir().unwrap();
+        std::fs::copy(first.path().join("raw.db"), second.path().join("raw.db")).unwrap();
+        let mut other = raw::open(second.path()).unwrap();
+        let conn = rusqlite::Connection::open(second.path().join("raw.db")).unwrap();
+        conn.execute_batch(
+            "DELETE FROM records; DELETE FROM import_origins; DELETE FROM denied_records;
+             DELETE FROM forget_jobs;",
+        )
+        .unwrap();
+        let reused = native(&mut other, "b", r#"{"prompt":"took the seq"}"#);
+        assert_eq!(reused, seq);
+        let moved = native(&mut other, "a", r#"{"prompt":"forgotten"}"#);
+        assert_eq!(
+            other.forget_apply(std::slice::from_ref(&request)).unwrap(),
+            1
+        );
+        assert!(shown(&other, reused));
+        assert!(!shown(&other, moved));
+        // Applied once.
+        assert_eq!(other.forget_apply(&[request]).unwrap(), 0);
+    }
+
+    /// Rule 12's count is in the preview: a forget between a preview and its start makes it
+    /// stale, and nothing is registered.
+    #[test]
+    fn a_preview_read_before_another_forget_is_stale() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let a = native(&mut raw, "a", r#"{"prompt":"one"}"#);
+        let b = native(&mut raw, "b", r#"{"prompt":"two"}"#);
+        let late = raw.forget_preview(record(&raw, a)).unwrap();
+        let p = raw.forget_preview(record(&raw, b)).unwrap();
         start(home.path(), &p).unwrap();
-        assert_eq!(status(home.path()).unwrap().len(), 1);
+        let e = start(home.path(), &late).unwrap_err();
+        assert!(e.to_string().contains("stale"), "{e:#}");
+        assert_eq!(raw.forget_requests().unwrap().len(), 1);
+        assert!(shown(&raw, a));
+    }
+
+    /// Rule 9: a torn line is skipped alone, and the next append starts on a line of its own.
+    #[test]
+    fn a_torn_line_is_skipped_alone_and_the_next_line_starts_on_its_own() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let a = native(&mut raw, "a", r#"{"prompt":"one"}"#);
+        start(home.path(), &raw.forget_preview(record(&raw, a)).unwrap()).unwrap();
+        let path = home.path().join(LOG);
+        let whole = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, &whole[..whole.len() - 20]).unwrap();
+        let b = native(&mut raw, "b", r#"{"prompt":"two"}"#);
+        start(home.path(), &raw.forget_preview(record(&raw, b)).unwrap()).unwrap();
+        let mut report = Report::default();
+        let read = read_log(&path, Some(raw.device()), &mut report).unwrap();
+        // The torn first line is skipped; the second request, and the first written again from
+        // raw.db by the reconcile after it, read.
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        let jobs: std::collections::HashSet<String> = read.into_iter().map(|r| r.job).collect();
+        assert_eq!(jobs.len(), 2);
+    }
+
+    /// "A line names its home": a request of another home in a log is reported, not applied.
+    #[test]
+    fn a_line_of_another_home_is_not_applied() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let a = native(&mut raw, "a", r#"{"prompt":"one"}"#);
+        let mut p = raw.forget_preview(record(&raw, a)).unwrap();
+        p.validate().unwrap();
+        let foreign = Request {
+            v: 1,
+            home: "elsewhere".into(),
+            job: "0".repeat(32),
+            started: 1,
+            target: p.target.clone(),
+            records: std::mem::take(&mut p.records),
+        };
+        append_log(&home.path().join(LOG), &[&foreign]).unwrap();
+        let report = reconcile(home.path(), &mut raw).unwrap();
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        assert!(shown(&raw, a));
     }
 }

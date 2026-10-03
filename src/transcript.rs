@@ -723,6 +723,10 @@ pub fn import(
         crate::migrate::check_source(home, &v1)?;
     }
     let mut raw = yes.then(|| raw::open(home)).transpose()?;
+    // Milestone 5 D1: the forget request logs first (`migrate::pass` does it again for v1).
+    if let Some(raw) = raw.as_mut() {
+        crate::forget::reconcile_or_say(home, raw);
+    }
     if let Some(raw) = raw.as_mut()
         && v1.exists()
     {

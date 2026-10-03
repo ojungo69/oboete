@@ -140,12 +140,6 @@ fn segments(dir: &Path, kind: Kind) -> Result<Vec<Segment>> {
     Ok(out)
 }
 
-/// Metadata only: raw creation must not mistake a lost store with backups for a new home.
-pub(crate) fn has_segments(home: &Path) -> Result<bool> {
-    let dir = dir(home)?;
-    Ok(!segments(&dir, Kind::Records)?.is_empty() || !segments(&dir, Kind::Ops)?.is_empty())
-}
-
 /// The records of this home's raw.db above the last backed-up seq, then its ops above the last
 /// backed-up op seq, as sealed segments (records first: a restore then never holds a window op
 /// whose records it lacks).
@@ -362,10 +356,44 @@ fn device_of(home: &Path, segs: &[Segment]) -> Result<String> {
 /// that verify, in seq order. Returns what was done, for stderr and doctor
 /// (`<home>/state/restored`).
 pub fn restore(home: &Path) -> Result<String> {
+    // Milestone 5 D1: the forget request logs are read before raw's swap lock, and written after
+    // it from the restored raw.db; no log I/O under the lock.
+    let (logged, mut report) = crate::forget::logged(home);
+    let mut note = restore_locked(home, logged)?;
+    match raw::open(home).and_then(|mut raw| crate::forget::reconcile(home, &mut raw)) {
+        Ok(r) => report.problems.extend(r.problems),
+        Err(e) => report.problems.push(format!("{e:#}")),
+    }
+    for p in &report.problems {
+        note.push_str(&format!("; forget request log: {p}"));
+    }
+    Ok(note)
+}
+
+/// The forget requests a raw.db that still reads holds (D1 rule 14), read under the swap lock
+/// without opening it as a store; none from one that does not read.
+fn held_requests(home: &Path) -> Vec<crate::forget::Request> {
+    let read = || -> Result<Vec<crate::forget::Request>> {
+        let conn = rusqlite::Connection::open_with_flags(
+            home.join("raw.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let mut st = conn.prepare("SELECT request FROM forget_jobs")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(serde_json::from_str(&row?)?);
+        }
+        Ok(out)
+    };
+    read().unwrap_or_default()
+}
+
+fn restore_locked(home: &Path, logged: Vec<crate::forget::Request>) -> Result<String> {
     // No store is open while the file is read, rebuilt and swapped; a hook waits (or fails with
     // MUST-M16's marker) instead of writing into the file that is moved aside.
     let _swap = raw::lock_for_swap(home)?;
-    crate::forget::before_restore(home)?;
+    let held = held_requests(home);
     let dir = dir(home)?;
     let all = segments(&dir, Kind::Records)?;
     let device = device_of(home, &all)?;
@@ -419,7 +447,14 @@ pub fn restore(home: &Path) -> Result<String> {
             ops += 1;
         }
     }
-    rebuild.apply_privacy(home, &device);
+    // Rule 14: what the live raw.db and the logs hold of this device's forgets, before the swap.
+    let mut forget = held;
+    for r in logged.into_iter().filter(|r| r.home == device) {
+        if !forget.iter().any(|f| f.job == r.job) {
+            forget.push(r);
+        }
+    }
+    rebuild.forget(forget);
     let dropped = rebuild.finish()?;
     let whole = home.join("raw.db.restored");
     std::fs::rename(&tmp, &whole)?;

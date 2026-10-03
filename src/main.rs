@@ -90,19 +90,17 @@ enum Cmd {
     /// purge remains unfinished; legacy/hook raw is not supported by this first slice)
     Forget {
         /// Raw id from search: <device>:<seq>
-        #[arg(long, conflicts_with_all = ["span", "status", "resume"])]
+        #[arg(long, conflicts_with_all = ["span", "status"])]
         record: Option<String>,
         /// This device's raw span: <device>:<from>-<to> (at most 500 records)
-        #[arg(long, conflicts_with_all = ["record", "status", "resume"])]
+        #[arg(long, conflicts_with_all = ["record", "status"])]
         span: Option<String>,
         /// Print the preview and skip its confirmation
-        #[arg(long, conflicts_with_all = ["status", "resume"])]
+        #[arg(long, conflicts_with = "status")]
         yes: bool,
-        #[arg(long, conflicts_with = "resume")]
-        status: bool,
-        /// Recover a request interrupted before raw accepted it; does not claim physical purge
+        /// The requests raw.db holds, after the request logs are reconciled with it
         #[arg(long)]
-        resume: bool,
+        status: bool,
     },
     /// Curate again what was curated before: the spans queued since (a quote a new rule masked
     /// or a forget removed), the windows every provider skipped, the imported records of a
@@ -632,15 +630,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             span,
             yes,
             status,
-            resume,
-        } => forget::run(
-            &home,
-            record.as_deref(),
-            span.as_deref(),
-            yes,
-            status,
-            resume,
-        ),
+        } => forget::run(&home, record.as_deref(), span.as_deref(), yes, status),
         Cmd::Claims => {
             let settings = capture::Settings::load(&home)?;
             let cwd = std::env::current_dir()?;

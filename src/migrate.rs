@@ -55,6 +55,9 @@ pub struct Stats {
 /// records; then the documents as import ops. Everything is read in one read transaction of the
 /// store at `from`, which is never written; a rerun imports nothing twice.
 pub fn pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<Stats> {
+    // Milestone 5 D1: the forget request logs first, so an import never brings back what a log
+    // holds and raw.db lost.
+    crate::forget::reconcile_or_say(home, raw);
     Ok(read_pass(home, raw, from)?.0)
 }
 

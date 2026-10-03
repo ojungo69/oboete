@@ -775,7 +775,7 @@ mod tests {
         drop(store);
         // The copy gets a new device id: the tombstone stays under the old one, unindexed.
         let copy = tempfile::tempdir().unwrap();
-        for f in ["raw.db", "knowledge.db", "privacy.db", "privacy.head"] {
+        for f in ["raw.db", "knowledge.db"] {
             std::fs::copy(p.join(f), copy.path().join(f)).unwrap();
         }
         let moved = crate::raw::open(copy.path()).unwrap();
