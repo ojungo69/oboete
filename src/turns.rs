@@ -112,6 +112,7 @@ impl Turn {
         let prompts: Vec<String> = raw
             .events_between(&r.agent, &r.session, "prompt", from - 1, r.seq)?
             .iter()
+            .filter(|e| crate::raw::is_live(&e.source))
             .filter_map(crate::curate::long_text)
             .map(|p| gate(&p))
             .collect();
@@ -803,6 +804,33 @@ mod tests {
         assert!(sent[0].contains("New work."), "{}", sent[0]);
         assert!(!sent[0].contains("Old work."), "{}", sent[0]);
         assert_eq!(turn_ops(home.path())[1].from, 5);
+    }
+
+    /// Codex on #371: an import of the same session between a live prompt and its reply is no
+    /// turn boundary and no part of the turn: it starts at the live prompt, and its prompts and
+    /// its repository are the live records'.
+    #[test]
+    fn an_imported_reply_of_the_session_is_no_turn_boundary() {
+        let imported = |kind: &str, text: &str| Event {
+            source: "transcript".into(),
+            repo: Some("q".into()),
+            ..said("s1", kind, text)
+        };
+        let home = home(
+            &[
+                said("s1", "prompt", "Build the parser."),
+                imported("prompt", "An old request."),
+                imported("reply", "An old answer."),
+                said("s1", "reply", "Built."),
+            ],
+            &[window(1, 4, "Built the parser.", &[])],
+        );
+        let (_, sent) = run(home.path(), &completed("Built."));
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("Build the parser."), "{}", sent[0]);
+        assert!(!sent[0].contains("An old request."), "{}", sent[0]);
+        let op = &turn_ops(home.path())[0];
+        assert_eq!((op.from, op.repo.as_deref()), (1, Some("r")));
     }
 
     /// T1: a summary every provider fails waits as a window does, and the turns after it wait

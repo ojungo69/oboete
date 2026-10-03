@@ -712,24 +712,30 @@ impl Raw {
     }
 
     /// The first record of the turn that `agent`'s `session` ends with its reply `reply` on this
-    /// device: the session's first event after its previous reply, or its first event
-    /// (docs/summaries.md T1). A scan by label, as `turns`.
+    /// device: the session's first live event after its previous live reply, or its first live
+    /// event (docs/summaries.md T1). A scan by label, as `turns`. Live alone: an import of the
+    /// same session is no boundary of a live turn (Codex on #371).
     pub fn turn_start(&self, agent: &str, session: &str, reply: i64) -> Result<i64> {
         // The session's first event after its previous reply, not the record after that reply,
         // which may be another session's or a tombstone (Codex on C2). The reply at the latest.
         Ok(self.conn.query_row(
-            "SELECT COALESCE(MIN(seq), ?4) FROM records
-             WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3 AND seq <= ?4
-               AND seq > COALESCE(
-                 (SELECT MAX(seq) FROM records WHERE device = ?1 AND type = 'event'
-                    AND agent = ?2 AND session = ?3 AND kind = 'reply' AND seq < ?4), 0)",
+            &format!(
+                "SELECT COALESCE(MIN(seq), ?4) FROM records
+                 WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
+                   AND seq <= ?4 AND source IN ('{live}')
+                   AND seq > COALESCE(
+                     (SELECT MAX(seq) FROM records WHERE device = ?1 AND type = 'event'
+                        AND agent = ?2 AND session = ?3 AND kind = 'reply' AND seq < ?4
+                        AND source IN ('{live}')), 0)",
+                live = LIVE.join("', '")
+            ),
             params![self.device, agent, session, reply],
             |r| r.get(0),
         )?)
     }
 
-    /// The one repository of this device's events of a session from `from` to `to`, none when
-    /// they are of two (docs/cards.md K2, docs/summaries.md T5).
+    /// The one repository of this device's live events of a session from `from` to `to`, none
+    /// when they are of two (docs/summaries.md T5).
     pub fn session_repo(
         &self,
         (agent, session): (&str, &str),
@@ -737,9 +743,12 @@ impl Raw {
         to: i64,
     ) -> Result<Option<String>> {
         let (repos, repo): (i64, Option<String>) = self.conn.query_row(
-            "SELECT COUNT(DISTINCT COALESCE(repo, char(0))), MIN(repo) FROM records
-             WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
-               AND seq BETWEEN ?4 AND ?5",
+            &format!(
+                "SELECT COUNT(DISTINCT COALESCE(repo, char(0))), MIN(repo) FROM records
+                 WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
+                   AND seq BETWEEN ?4 AND ?5 AND source IN ('{}')",
+                LIVE.join("', '")
+            ),
             params![self.device, agent, session, from, to],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;

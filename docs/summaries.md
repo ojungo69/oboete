@@ -27,8 +27,9 @@ about a fifth of claude-mem's.
 T1. **When.** One per turn end: a `reply` record, which only an agent's Stop writes (a
 subagent's stop writes none, `capture::shaped`), of a session the exclusion list does not name
 (D13), once the curation checkpoint has passed it, so the windows that hold the turn have their
-cards. A turn is its session's records from its first event after the session's previous reply,
-through this one. The worker asks for it where it asked for a digest: when the window phase sent
+cards. A turn is its session's live records from its first event after the session's previous
+reply, through this one: an import of the same session is no boundary and no part of it (Codex on
+#371). The worker asks for it where it asked for a digest: when the window phase sent
 nothing, one call a run, the oldest turn end after the last one a summary was kept of (every turn
 end is reached, however many records follow it), with the digest's holds (a summary every entry
 fails waits as a window does, and the turns after it wait with it; one given up after `ATTEMPTS`
