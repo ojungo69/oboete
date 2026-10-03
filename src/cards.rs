@@ -533,8 +533,6 @@ pub fn of_turn(
 }
 
 /// claude-mem's icons in its note on a file, not its session start's (docs/file-note.md).
-// Read by the hook from slice 2 on.
-#[cfg_attr(not(test), allow(dead_code))]
 const NOTE_ICONS: [(&str, &str); 6] = [
     ("decision", "⚖️"),
     ("bugfix", "🔴"),
@@ -556,7 +554,6 @@ pub struct Filed {
 /// X5 F3: `repo`'s current cards that name a file by one of `paths` (its absolute path, and its
 /// paths relative to the working directory and to the checkout's top level), the newest first, at
 /// most `limit`. The index is the worker's: a store it has not reached yet has none.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn by_file(
     k: &Connection,
     raw: &Raw,
@@ -605,7 +602,6 @@ pub fn by_file(
 /// X5 F4, F6, F7: claude-mem's note on a file from `cards`, the newest first as `by_file` gives
 /// them, at `now` in `tz`, read on device `local`. None without a card, or when the file was
 /// modified (`mtime`, unix ms) at or after the newest: they may tell of an older file.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn file_note<Tz: chrono::TimeZone>(
     cards: &[Filed],
     mtime: i64,
