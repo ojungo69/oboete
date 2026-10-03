@@ -146,7 +146,7 @@ oboete does not copy. The request grows by those 390 tokens and the answer by it
 the default entries (Groq free: 8,000 tokens a request, 1,250 of them kept for the answer); with
 the cards' instructions and C1a's rule about 64% are. `window_tokens` stays at 5,000: a window over an entry's
 ceiling goes to the next entry without a call, and a Groq entry is bound first by its 40,000
-tokens a day, which is about six windows.
+tokens a day, which is about six windows. `idle_minutes` stays at 10 too (spec decision 39).
 
 C3. **Each card is checked alone and never fails its window** (`curate::cards_of`). A claim that
 does not parse fails the answer, and a provider with it; a card that cannot be kept is dropped,
@@ -195,7 +195,8 @@ window carries in, within its existing budget.
 2. **The curator writes cards**: `observations` in its answer (C1 to C5).
 3. **Session start shows the cards** (S1 to S6 below), then **session summaries** (claude-mem's
    request, investigated, learned, completed, next steps, with their rows and fields in the same
-   block), the **page**, the **tools** and the **note on a file**, each its own unit.
+   block), the **page**, the **tools** and the **note on a file**, each its own unit; the note on
+   a file comes before the switch (spec decision 39).
 
 ## Session start shows the cards (slice 3)
 
