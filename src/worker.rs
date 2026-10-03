@@ -62,6 +62,8 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
         Box::new(crate::consumer::claims::Anchors),
         // The op log's digests (Task 9), shown while every claim they cite is current.
         Box::new(crate::consumer::digest::Digests),
+        // The op log's cards (docs/cards.md): what each curated window was.
+        Box::new(crate::consumer::cards::Cards),
         // Imported documents (milestone 4 D5), for search only.
         Box::new(crate::consumer::imported::Imported),
         Box::new(crate::consumer::manifest::Manifest::new(home)),

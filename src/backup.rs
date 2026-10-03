@@ -1244,6 +1244,53 @@ mod tests {
         assert_eq!(ops.last().map(|s| (s.first, s.last)), Some((3, 3)));
     }
 
+    /// docs/cards.md K4 after a restore that lost records: a removal made at a seq the lost
+    /// records had still hides the card of a window cut before the loss, as any removal its op
+    /// does not list does.
+    #[test]
+    fn a_removal_at_a_reused_seq_hides_the_card_of_a_window_cut_before_the_loss() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        for i in 0..10 {
+            let event = raw::Event {
+                kind: "tool".into(),
+                repo: Some("r".into()),
+                ..raw::test_event("{}")
+            };
+            raw.append(&event).unwrap();
+            if (i + 1) % 5 == 0 {
+                export(p).unwrap(); // segments 1-5, 6-10
+            }
+        }
+        // Cut over records 1 to 3 while the store held ten.
+        let op = serde_json::json!({"outcome": "curated", "summary": "Kept.", "from_seq": 1,
+            "from_offset": null, "to_seq": 3, "to_offset": null});
+        raw.append_ops(&[(raw::OpKind::Window, op)]).unwrap();
+        drop(raw);
+        export(p).unwrap();
+        let newest = segments(&p.join("backups"), Kind::Records)
+            .unwrap()
+            .remove(1)
+            .path;
+        std::fs::write(&newest, b"damaged").unwrap();
+        damage_raw(p);
+        crate::worker::run_once(p).unwrap();
+        let cards = |raw: &Raw| {
+            let k = crate::knowledge::open(p).unwrap();
+            let rules = crate::redact::Rules::default();
+            crate::cards::recent(&k, raw, "r", 10, &rules)
+                .unwrap()
+                .len()
+        };
+        let mut raw = raw::open(p).unwrap();
+        assert_eq!((raw.max_seq().unwrap(), cards(&raw)), (5, 1));
+        let device = raw.device().to_owned();
+        let removed = raw.append_tombstone(raw::Target::Record { device, seq: 2 });
+        assert_eq!(removed.unwrap(), 6);
+        assert_eq!(cards(&raw), 0);
+    }
+
     #[test]
     fn a_hole_in_the_op_log_sets_aside_every_op_after_it() {
         let home = tempfile::tempdir().unwrap();
