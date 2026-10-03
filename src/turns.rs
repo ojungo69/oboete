@@ -620,6 +620,20 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS turns_repo ON turns(repo, ts);
          CREATE INDEX IF NOT EXISTS turns_through ON turns(device, through);",
     )?;
+    if !crate::consumer::manifest::exists(k, "table", "turns_fts")? {
+        let tx = if k.is_autocommit() {
+            Some(k.unchecked_transaction()?)
+        } else {
+            None
+        };
+        k.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(text, tokenize='trigram');",
+        )?;
+        crate::consumer::fts::turns(k, None)?;
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
+    }
     Ok(())
 }
 
@@ -748,7 +762,15 @@ fn read_row(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<TurnSu
         ts: r.get(2)?,
         agent: gate(agent),
         session: gate(session),
-        repo: r.get::<_, Option<String>>(5)?.map(gate),
+        repo: r.get::<_, Option<String>>(5)?.map(|s| {
+            crate::redact::flattened_with(
+                &s,
+                rules,
+                usize::MAX,
+                crate::consumer::manifest::one_line,
+            )
+            .masked()
+        }),
         row,
         fields: fields.into_iter().map(|(f, t)| (f, gate(t))).collect(),
     }))

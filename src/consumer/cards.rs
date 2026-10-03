@@ -90,6 +90,7 @@ impl Consumer for Cards {
                         list(&c["files_modified"])
                     ],
                 )?;
+                crate::consumer::fts::cards(k, Some(k.last_insert_rowid()))?;
             }
         }
         Ok(last)
@@ -97,6 +98,11 @@ impl Consumer for Cards {
 
     fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> {
         schema(k)?;
+        k.execute(
+            "DELETE FROM cards_fts WHERE rowid IN
+               (SELECT rowid FROM cards WHERE device = ?1 AND op_seq > ?2)",
+            params![device, to],
+        )?;
         k.execute(
             "DELETE FROM cards WHERE device = ?1 AND op_seq > ?2",
             params![device, to],
@@ -106,6 +112,7 @@ impl Consumer for Cards {
             "UPDATE cards SET replaced_by = NULL WHERE device = ?1 AND replaced_by > ?2",
             params![device, to],
         )?;
+        crate::consumer::fts::cards(k, None)?;
         Ok(())
     }
 }
@@ -137,6 +144,11 @@ fn replace(k: &Connection, device: &str, op_seq: i64, op: &serde_json::Value) ->
                 k.execute(
                     "UPDATE cards SET replaced_by = ?1 WHERE device = ?2 AND op_seq = ?3",
                     params![op_seq, device, earlier],
+                )?;
+                k.execute(
+                    "DELETE FROM cards_fts WHERE rowid IN
+                       (SELECT rowid FROM cards WHERE device = ?1 AND op_seq = ?2)",
+                    params![device, earlier],
                 )?;
             }
         }

@@ -157,7 +157,7 @@ enum Cmd {
     /// Serve the memory as an MCP server on stdin/stdout (search / get / timeline tools)
     Mcp,
     /// Search what is remembered (this repository unless --all or --repo): the decisions and
-    /// other claims first, then claude-mem's imported history, then the raw records, then the
+    /// other claims first, then cards, session summaries and imported history, then raw records and the
     /// claims later ones ended
     Search {
         /// Words or a sentence. Ranked by the 3-character pieces they share; a 2-character word
@@ -180,15 +180,23 @@ enum Cmd {
         /// Rank the claims later ones ended where their words rank them
         #[arg(long)]
         history: bool,
+        /// Comma-separated categories or kinds (observations, sessions, prompts, claims, bugfix, ...)
+        #[arg(long = "type")]
+        kind: Option<String>,
+        /// relevance (default), date_desc or date_asc
+        #[arg(long, default_value = "relevance")]
+        order: String,
         /// The raw records: below the rest (below), not at all (off), or alone (only)
         #[arg(long, default_value = "below")]
         raw: String,
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
-    /// Print one in full by its id from `search` or the session's start: a claim's uid (or its
-    /// first characters), a card's `op.n`, an imported document's uid, or a record's `device:seq`
-    Get { id: String },
+    /// Print 1–20 chosen ids in full: claims, cards, summaries, imports or raw records
+    Get {
+        #[arg(required = true, num_args = 1..)]
+        ids: Vec<String>,
+    },
     /// Claims, imported history and session starts, newest first (this repository unless --all)
     Timeline {
         #[arg(long)]
@@ -409,6 +417,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             since,
             until,
             history,
+            kind,
+            order,
             raw,
             limit,
         } => {
@@ -420,13 +430,15 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 since: since.map(|s| search::b::time(&s, false)).transpose()?,
                 until: until.map(|s| search::b::time(&s, true)).transpose()?,
                 history,
+                types: kind.as_deref().map(str::parse).transpose()?,
+                order: order.parse()?,
                 raw: match raw.as_str() {
                     "below" => search::b::RawArm::Below,
                     "off" => search::b::RawArm::Off,
                     "only" => search::b::RawArm::Only,
                     other => anyhow::bail!("--raw {other}: use below, off or only"),
                 },
-                limit,
+                limit: limit.min(100),
                 skip_session: None,
             };
             let answer = search::b::query(&home, &q)?;
@@ -436,20 +448,24 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 eprintln!("oboete: full text only: {}", why.why());
             }
             let shown = q.searched().is_none();
-            emit(
-                &answer
-                    .hits
-                    .iter()
-                    .map(|h| search::b::line(h, shown))
-                    .collect::<String>(),
-            )
+            let rules = redact::Rules::load(&home)?;
+            let out = answer
+                .hits
+                .iter()
+                .map(|h| search::b::line(h, shown, &rules))
+                .collect::<String>();
+            emit(if out.is_empty() { "no hits" } else { &out })
         }
-        Cmd::Get { id } => match search::b::get(&home, &id)? {
-            Some(text) => emit(&text),
-            None => Err(anyhow::anyhow!(
-                "no document {id} (ids come from `oboete search`)"
-            )),
-        },
+        Cmd::Get { ids } => {
+            if let [id] = ids.as_slice() {
+                match search::b::get(&home, id)? {
+                    Some(text) => emit(&text),
+                    None => Err(anyhow::anyhow!("no document {id} (ids come from search)")),
+                }
+            } else {
+                emit(&search::b::get_many(&home, &ids)?)
+            }
+        }
         Cmd::Timeline { all, anchor, limit } => {
             let mut out = String::new();
             let repo = repo_filter(all)?;

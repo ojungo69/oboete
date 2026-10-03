@@ -33,6 +33,11 @@ impl Consumer for Turns {
                 continue;
             };
             k.execute(
+                "DELETE FROM turns_fts WHERE rowid IN
+                   (SELECT rowid FROM turns WHERE device = ?1 AND op_seq = ?2)",
+                params![device, op.op_seq],
+            )?;
+            k.execute(
                 "INSERT OR REPLACE INTO turns(device, op_seq, ts, agent, session, repo, from_seq,
                    through, read, goals, removed, fields, skipped, excluded)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
@@ -53,12 +58,18 @@ impl Consumer for Turns {
                     t.excluded
                 ],
             )?;
+            crate::consumer::fts::turns(k, Some(k.last_insert_rowid()))?;
         }
         Ok(last)
     }
 
     fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> {
         schema(k)?;
+        k.execute(
+            "DELETE FROM turns_fts WHERE rowid IN
+               (SELECT rowid FROM turns WHERE device = ?1 AND op_seq > ?2)",
+            params![device, to],
+        )?;
         k.execute(
             "DELETE FROM turns WHERE device = ?1 AND op_seq > ?2",
             params![device, to],
