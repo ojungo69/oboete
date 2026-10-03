@@ -771,7 +771,7 @@ fn claims_leg(
     near: Option<&Near>,
 ) -> Result<(Vec<Hit>, Vec<Hit>)> {
     claims::schema(k)?;
-    let Some((mut clauses, mut args, ranked)) =
+    let Some((mut clauses, mut args, order, order_args)) =
         super::query_clauses(&q.text, "claims_fts", &["f.text"])
     else {
         return Ok((Vec::new(), Vec::new()));
@@ -781,6 +781,7 @@ fn claims_leg(
         args.push(Value::Text(r.to_owned()));
     }
     super::within(&mut clauses, &mut args, "a.valid_from", (q.since, q.until));
+    args.extend(order_args);
     let pending = claims::Pending::read(raw, k)?;
     let hidden = |uid: &str| pending.touches(k, uid);
     // The ended claims with what ended them: kept out of `units`, which would pair them.
@@ -788,7 +789,7 @@ fn claims_leg(
     let (mut shown, mut ended) = (Vec::new(), Vec::new());
     // A pending claim is only hidden, and an ended or done one is lowered below the rest: the
     // claims after them take their places, so the leg holds `depth` it shows first (Codex on #306).
-    claims_pages(k, (clauses, args, ranked), depth, |read| {
+    claims_pages(k, (clauses, args, order), depth, |read| {
         for uid in read {
             if !hidden(&uid)? {
                 place_claim(k, uid, q.history, &mut ended_by, &mut shown, &mut ended)?;
@@ -844,19 +845,18 @@ fn claims_leg(
 /// matches are all left out shows fewer.
 fn claims_pages(
     k: &Connection,
-    (clauses, mut args, ranked): (Vec<String>, Vec<Value>, bool),
+    (clauses, mut args, order): (Vec<String>, Vec<Value>, String),
     depth: usize,
     mut page: impl FnMut(Vec<String>) -> Result<bool>,
 ) -> Result<()> {
-    let order = if ranked {
-        "rank, a.valid_from DESC"
-    } else {
-        "a.valid_from DESC"
-    };
     args.push(Value::Integer(super::sql_limit(depth)));
+    // ponytail: a mixed query's short words (8 at most) read every matching claim here, at each
+    // page; a claim is a sentence, so a `LIKE` is cheap. Reorder only the best `POOL` as the raw
+    // leg does if a repository's claims make a search slow (Codex's probe on #360: 60,000
+    // matching claims, 20 words, ten pages: 7.2 s where the rank alone took 2.0 s).
     let sql = format!(
         "SELECT c.uid FROM claims_fts f JOIN claims c ON c.rowid = f.rowid
-         JOIN active a ON a.uid = c.uid WHERE {} ORDER BY {order} LIMIT ? OFFSET ?",
+         JOIN active a ON a.uid = c.uid WHERE {} ORDER BY {order}a.valid_from DESC LIMIT ? OFFSET ?",
         clauses.join(" AND ")
     );
     let mut st = k.prepare(&sql)?;
@@ -910,15 +910,22 @@ pub fn delivered_ranked(
     };
     let mut lists: Vec<Vec<String>> = Vec::new();
     for text in texts {
-        let Some((mut clauses, mut args, ranked)) =
+        let Some((mut clauses, mut args, order, order_args)) =
             super::query_clauses(text, "claims_fts", &["f.text"])
         else {
             continue;
         };
         clauses.push(format!("a.repo = ? AND {}", claims::DECIDED_WHERE));
         args.push(Value::Text(repo.to_owned()));
+        // The hook's cold start waits for this, asked with whole prompts: their short words
+        // are not counted, and it ranks and costs what it did (Codex on #360).
+        let order = if order_args.is_empty() {
+            order
+        } else {
+            "rank, ".into()
+        };
         let mut list = Vec::new();
-        claims_pages(k, (clauses, args, ranked), depth, |read| {
+        claims_pages(k, (clauses, args, order), depth, |read| {
             for uid in read {
                 if keep(&uid)? {
                     list.push(uid);
@@ -1122,8 +1129,8 @@ fn imported_leg(
 
 /// The full-text side of `imported_leg` for one kind: uids, the best first.
 fn imported_fts(k: &Connection, q: &Query, depth: usize, prompts: bool) -> Result<Vec<String>> {
-    // The index keeps no text (`content=''`): a query too short for a trigram reads the rows.
-    let Some((mut clauses, mut args, ranked)) =
+    // The index keeps no text (`content=''`): short words read the joined title and body.
+    let Some((mut clauses, mut args, order, order_args)) =
         super::query_clauses(&q.text, "imported_fts", &["i.title", "i.body"])
     else {
         return Ok(Vec::new());
@@ -1149,20 +1156,44 @@ fn imported_fts(k: &Connection, q: &Query, depth: usize, prompts: bool) -> Resul
     // Once per uid before the limit: two devices' imports of one document are one (Codex on
     // #306), its newest row, as the embedding phase reads it.
     clauses.push("i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)".into());
-    let order = if ranked {
-        "rank, i.ts DESC"
-    } else {
-        "i.ts DESC"
+    let query = |sql: &str, args: Vec<Value>| -> Result<Vec<String>> {
+        Ok(k.prepare(sql)?
+            .query_map(params_from_iter(args), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
     };
-    args.push(Value::Integer(super::sql_limit(depth)));
+    let hits = "imported_fts f JOIN imported i ON i.rowid = f.rowid";
+    if order_args.is_empty() {
+        args.push(Value::Integer(super::sql_limit(depth)));
+        let sql = format!(
+            "SELECT i.uid FROM {hits} WHERE {} ORDER BY {order}i.ts DESC LIMIT ?",
+            clauses.join(" AND ")
+        );
+        return query(&sql, args);
+    }
+    // As the raw leg: the short words reorder the best `POOL` rows (`i` names them), and a hit
+    // below them keeps its place.
+    let mut pool = args.clone();
+    pool.push(Value::Integer(super::sql_limit(super::POOL)));
+    pool.extend(order_args);
+    pool.push(Value::Integer(super::sql_limit(depth.min(super::POOL))));
     let sql = format!(
-        "SELECT i.uid FROM imported_fts f JOIN imported i ON i.rowid = f.rowid
-         WHERE {} ORDER BY {order} LIMIT ?",
+        "SELECT uid FROM (
+           SELECT i.uid, i.ts, i.title, i.body, f.rank FROM {hits}
+           WHERE {} ORDER BY rank, i.ts DESC, i.rowid LIMIT ?
+         ) i ORDER BY {order}ts DESC LIMIT ?",
         clauses.join(" AND ")
     );
-    Ok(k.prepare(&sql)?
-        .query_map(params_from_iter(args), |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?)
+    let mut found = query(&sql, pool)?;
+    if depth > super::POOL {
+        args.push(Value::Integer(super::sql_limit(depth - super::POOL)));
+        args.push(Value::Integer(super::sql_limit(super::POOL)));
+        let sql = format!(
+            "SELECT i.uid FROM {hits} WHERE {} ORDER BY rank, i.ts DESC, i.rowid LIMIT ? OFFSET ?",
+            clauses.join(" AND ")
+        );
+        found.extend(query(&sql, args)?);
+    }
+    Ok(found)
 }
 
 /// An imported uid's hit: its newest row.
@@ -2110,6 +2141,126 @@ mod tests {
     }
 
     #[test]
+    fn a_short_japanese_word_boosts_claims_beside_a_long_word() {
+        for (both_at, long_at) in [(1_000, 2_000), (2_000, 1_000)] {
+            let mut s = Store::new();
+            let both = s.decided(R, both_at, "設計 worker", &[]);
+            let long = s.decided(R, long_at, "worker", &[]);
+            let short = s.decided(R, 3_000, "設計", &[]);
+            s.run();
+            let ask = |text| Query {
+                raw: RawArm::Off,
+                since: Some(500),
+                until: Some(4_000),
+                ..q(text)
+            };
+            assert_eq!(
+                keys(&s.query(&ask("worker"))),
+                [long.as_str(), both.as_str()]
+            );
+            assert_eq!(
+                keys(&s.query(&ask("worker absent"))),
+                [long.as_str(), both.as_str()]
+            );
+            assert_eq!(
+                keys(&s.query(&ask("設 worker"))),
+                [long.as_str(), both.as_str()]
+            );
+            assert_eq!(
+                keys(&s.query(&ask("設計"))),
+                [short.as_str(), both.as_str()]
+            );
+            assert_eq!(
+                keys(&s.query(&ask("設計 worker"))),
+                [both.as_str(), long.as_str()]
+            );
+            let k = crate::knowledge::open(s.home.path()).unwrap();
+            let found: Vec<String> = delivered_ranked(&s.raw, &k, &["設計 worker"], None, R, 20)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.uid)
+                .collect();
+            // The hook's cold start waits for this path, asked with whole prompts: it ranks by
+            // bm25 alone, as before (Codex on #360).
+            assert_eq!(found, [long, both]);
+        }
+    }
+
+    #[test]
+    fn a_short_ascii_word_boosts_every_leg_and_one_character_changes_nothing() {
+        for (both_at, long_at) in [(1_000, 2_000), (2_000, 1_000)] {
+            let mut s = Store::new();
+            let both = s.decided(R, both_at, "M5 forget", &[]);
+            let long = s.decided(R, long_at, "forget", &[]);
+            s.imported("both", "r", both_at, "M5", "forget");
+            s.imported("long", "r", long_at, "", "forget");
+            s.run();
+            let (raw_both, raw_long) = (s.key(1), s.key(2));
+            for text in ["forget", "M forget"] {
+                assert_eq!(
+                    keys(&s.query(&q(text))),
+                    [
+                        long.as_str(),
+                        both.as_str(),
+                        "claude-mem:test:long",
+                        "claude-mem:test:both",
+                        raw_long.as_str(),
+                        raw_both.as_str()
+                    ]
+                );
+            }
+            assert_eq!(
+                keys(&s.query(&q("M5 forget"))),
+                [
+                    both.as_str(),
+                    long.as_str(),
+                    "claude-mem:test:both",
+                    "claude-mem:test:long",
+                    raw_both.as_str(),
+                    raw_long.as_str()
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn short_word_boosts_treat_like_wildcards_and_backslashes_literally() {
+        for (word, decoy) in [("A%", "AX"), ("A_", "AX"), ("%_", "XY"), ("\\_", "\\X")] {
+            let mut s = Store::new();
+            let both = s.decided(R, 1_000, &format!("{word} worker"), &[]);
+            let long = s.decided(R, 2_000, &format!("{decoy} worker"), &[]);
+            s.imported("both", "r", 1_000, word, "worker");
+            s.imported("long", "r", 2_000, decoy, "worker");
+            s.run();
+            let (raw_both, raw_long) = (s.key(1), s.key(2));
+            assert_eq!(
+                keys(&s.query(&q("worker"))),
+                [
+                    long.as_str(),
+                    both.as_str(),
+                    "claude-mem:test:long",
+                    "claude-mem:test:both",
+                    raw_long.as_str(),
+                    raw_both.as_str()
+                ],
+                "{word}"
+            );
+            assert_eq!(
+                keys(&s.query(&q(&format!("{word} worker")))),
+                [
+                    both.as_str(),
+                    long.as_str(),
+                    "claude-mem:test:both",
+                    "claude-mem:test:long",
+                    raw_both.as_str(),
+                    raw_long.as_str()
+                ],
+                "{word}"
+            );
+        }
+    }
+
+    #[test]
     fn a_muted_claim_keeps_its_search_rank_and_is_labelled() {
         let mut s = Store::new();
         let old = s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
@@ -2397,6 +2548,63 @@ mod tests {
             "{:?}",
             found.hits[0]
         );
+    }
+
+    #[test]
+    fn a_short_japanese_word_boosts_imported_titles_and_bodies() {
+        for in_title in [false, true] {
+            for (both_at, long_at) in [(1_000, 2_000), (2_000, 1_000)] {
+                let mut s = Store::new();
+                let (title, body) = if in_title {
+                    ("設計", "worker")
+                } else {
+                    ("", "設計 worker")
+                };
+                s.imported("both", "r", both_at, title, body);
+                s.imported("long", "r", long_at, "", "worker");
+                s.imported("short", "r", 3_000, "設計", "");
+                s.run();
+                let ask = |text| Query {
+                    raw: RawArm::Off,
+                    since: Some(500),
+                    until: Some(4_000),
+                    ..q(text)
+                };
+                assert_eq!(
+                    keys(&s.query(&ask("worker"))),
+                    ["claude-mem:test:long", "claude-mem:test:both"]
+                );
+                assert_eq!(
+                    keys(&s.query(&ask("設 worker"))),
+                    ["claude-mem:test:long", "claude-mem:test:both"]
+                );
+                assert_eq!(
+                    keys(&s.query(&ask("設計"))),
+                    ["claude-mem:test:short", "claude-mem:test:both"]
+                );
+                assert_eq!(
+                    keys(&s.query(&ask("設計 worker"))),
+                    ["claude-mem:test:both", "claude-mem:test:long"]
+                );
+            }
+        }
+    }
+
+    /// As the raw leg: an imported hit below the best `POOL` keeps its place under a larger depth
+    /// (Codex on #360).
+    #[test]
+    fn an_imported_hit_below_the_pool_keeps_its_place_under_a_larger_depth() {
+        let mut s = Store::new();
+        // The first and longest ranks last.
+        for n in 0..=crate::search::POOL {
+            let body = if n == 0 { "設計 worker" } else { "worker" };
+            s.imported(&format!("d{n}"), "r", 1_000 * (n as i64 + 1), "", body);
+        }
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let uids = imported_fts(&k, &q("設計 worker"), 2 * crate::search::POOL, false).unwrap();
+        assert_eq!(uids.len(), crate::search::POOL + 1);
+        assert!(uids[crate::search::POOL].ends_with(":d0"));
     }
 
     /// Row 30-2 (D13): the caller's repository and the one searched are both checked, and a

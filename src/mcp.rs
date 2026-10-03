@@ -30,7 +30,8 @@ pub struct Oboete {
 #[derive(Deserialize, JsonSchema)]
 pub struct SearchArgs {
     /// Words or a sentence, in any language. Results that share the most of its 3-character
-    /// pieces come first (Unicode case folding); a query too short for pieces matches its terms
+    /// pieces come first (Unicode case folding), and among them those that hold its 2-character
+    /// words (同期, M5; not ASCII letters or hiragana only); a query too short for pieces matches its terms
     /// as literal substrings, all required.
     query: String,
     /// Search every repository instead of the current one.

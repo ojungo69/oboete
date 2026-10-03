@@ -159,9 +159,10 @@ enum Cmd {
     /// other claims first, then claude-mem's imported history, then the raw records, then the
     /// claims later ones ended
     Search {
-        /// Words or a sentence. Ranked by the 3-character pieces they share; a query too short
-        /// for that matches its terms as literal substrings, all required. Put `--` before a
-        /// term that starts with `-`
+        /// Words or a sentence. Ranked by the 3-character pieces they share; a 2-character word
+        /// beside longer ones (同期, M5; not one of ASCII letters or of hiragana only) puts the hits that hold it
+        /// first. A query too short for pieces matches its terms as literal substrings, all
+        /// required. Put `--` before a term that starts with `-`
         query: Vec<String>,
         #[arg(long)]
         all: bool,
