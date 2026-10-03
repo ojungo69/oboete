@@ -161,18 +161,12 @@ pub fn text(
     let parts = delivered(&k, raw, repo, &manifest, rules)?;
     // The cards after the decisions (docs/cards.md S1): the most, halved each time, whose packet
     // stays within `cap` as it leaves, gated and escaped inside the fence, in UTF-16 units, the
-    // measure Cursor cuts by (S5); the rest is never cut for them. Counted first with the rest as
-    // read and the block as built, its fields gated when read, which is cheap; when that leaves no
-    // room, with the rest gated once, as a long value the gate hides frees its room (Codex on
-    // #370). The fence's own text is outside `cap`, as it always was.
+    // measure Cursor cuts by (S5); the rest is never cut for them. Each count is judged on the
+    // gated packet: the gate can free room in the rest, or in a row only as the block composes it,
+    // so no count taken before it is a bound (Codex on #370). The fence's own text is outside
+    // `cap`, as it always was.
     let cards = crate::cards::recent(&k, raw, repo, CARDS, rules)?;
     let name = repo_name(repo, rules);
-    let base = parts.packet(&manifest, &live, "").map(|(base, _)| base);
-    if base.is_none() && cards.is_empty() {
-        return Ok(None);
-    }
-    let read = base.as_ref().map_or(0, |b| b.text.chars().count());
-    let mut gated_rest = None;
     let fence = manifest::fenced("").encode_utf16().count();
     let mut n = cards.len();
     let (bodies, gated, from) = loop {
@@ -180,17 +174,6 @@ pub fn text(
             0 => String::new(),
             n => crate::cards::block(&cards[..n], raw.device(), &name, now, &chrono::Local),
         };
-        let fits = |rest: usize| rest + block.chars().count() <= cap;
-        if n > 0
-            && !fits(read)
-            && !fits(*gated_rest.get_or_insert_with(|| {
-                base.as_ref()
-                    .map_or(0, |b| b.outbound(rules).0.chars().count())
-            }))
-        {
-            n /= 2;
-            continue;
-        }
         let Some((packet, bodies)) = parts.packet(&manifest, &live, &block) else {
             return Ok(None);
         };
@@ -2976,6 +2959,52 @@ extra_rules = [
         );
         assert_eq!(cards, 8);
         // The packet's text as the fence holds it, without the fence's own.
+        let units = manifest::fenced(whole.trim()).encode_utf16().count()
+            - manifest::fenced("").encode_utf16().count();
+        assert_eq!(shows(units), (whole.clone(), 8));
+    }
+
+    /// Codex on #370: a rule that masks a card's row only as the block composes it (here it needs
+    /// the row's type icon) frees its room too: each count is judged on the gated packet.
+    #[test]
+    fn a_rule_that_masks_a_composed_card_row_frees_its_room() {
+        let long = "Z".repeat(60);
+        let (home, _c, _) = start(
+            |store, cwd| {
+                let (decision, _) = claimed(
+                    store,
+                    said(cwd, DAY, "Keep the parser small."),
+                    "decision",
+                    "decided",
+                    vec![],
+                );
+                let mut titles: Vec<String> = (0..7).map(|i| format!("Card number {i}")).collect();
+                titles.push(long.clone());
+                let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
+                vec![decision, cards_op(1, 7, &titles)]
+            },
+            None,
+        );
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"row\", regex = '● (Z{60})', \
+             secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let store = raw::open(home.path()).unwrap();
+        let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+        let shows = |cap: usize| {
+            let s = text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
+                .unwrap()
+                .unwrap();
+            (s.text, s.cards)
+        };
+        let (whole, cards) = shows(usize::MAX);
+        assert!(
+            whole.contains("[REDACTED]") && !whole.contains(&long),
+            "{whole}"
+        );
+        assert_eq!(cards, 8);
         let units = manifest::fenced(whole.trim()).encode_utf16().count()
             - manifest::fenced("").encode_utf16().count();
         assert_eq!(shows(units), (whole.clone(), 8));

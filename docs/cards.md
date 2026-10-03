@@ -253,7 +253,8 @@ S5. **Size.** The packet's cap rises from 6,000 to 9,000 characters: claude-mem'
 may take 10,000, and Cursor drops a context over 10,000 (oboete keeps it under its 9,500 units).
 The block gets the room the rest of the packet leaves and is fitted as claude-mem fits its own:
 the number of cards halves until it fits, down to one; with no room for one there is no block.
-It is measured as the packet leaves: gated (a mask can make the rest longer than it was read),
+It is measured as the packet leaves, each count on the gated packet: a mask can make the rest
+longer or shorter than it was read, and a row shorter only as the block composes it (Codex on #370),
 with each closing tag escaped as the fence escapes it, in UTF-16 units, the measure Cursor cuts by
 (Codex on slice 3). The fence's own text is outside the cap, as it always was.
 The rest of the packet is never cut for it, and the stored manifest keeps its own 6,000, so its
