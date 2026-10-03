@@ -599,15 +599,17 @@ fn serve(
         }
         if !hold && let Some(phase) = phases.curation.as_mut() {
             match phase(&mut raw, &k)? {
-                Phase::Covered if crate::backup::restore_requested(home) || replaced() => {
-                    return Ok(true);
-                }
                 Phase::Covered => again = true,
                 Phase::Waiting { until, up } if up || resident => {
                     stay = Some(stay.map_or(until, |s: i64| s.min(until)));
                 }
                 Phase::Waiting { .. } | Phase::Idle => {}
             }
+        }
+        // Every phase can start another round. A progressed embed or shortlist must not keep
+        // the old raw handle while curation is idle or waiting (M5 F2).
+        if crate::backup::restore_requested(home) || replaced() {
+            return Ok(true);
         }
         if again {
             continue;
@@ -1733,6 +1735,100 @@ mod tests {
     #[test]
     fn a_nonresident_worker_reopens_a_replacement_while_it_decides_to_exit() {
         replacement_at_idle_exit(false);
+    }
+
+    /// M5 F2: an embedding reply starts another round even when curation is idle. The next
+    /// round must reconcile the replacement before a consumer or provider sees it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn embedding_progress_does_not_skip_reopening_raw_while_curation_is_idle() {
+        let _contending = contending();
+        let mut s = crate::search::b::fixture::Store::new();
+        s.decided(
+            "github.com/example/replacement",
+            1_000,
+            "The parser reads one line at a time.",
+            &[],
+        );
+        s.run();
+        let stub = crate::embed::stub::Stub::start();
+        crate::embed_phase::fixture::config(&s, &stub);
+        let p = s.home.path();
+        let mut event = raw::test_event("embedding-reopen-forget-canary-6831");
+        event.source = "oboete-v1".into();
+        let identity = raw::ImportIdentity {
+            origin: crate::forget::origin("synthetic", "embedding-reopen-import"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let seq = s
+            .raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                }],
+                &[identity],
+                "",
+                None,
+            )
+            .unwrap()[0];
+        let device = s.raw.device().to_owned();
+        drop(s.raw);
+        let old = p.join("raw-before-forget.db");
+        std::fs::copy(p.join("raw.db"), &old).unwrap();
+        let preview = crate::forget::preview(
+            p,
+            crate::forget::Target::Record {
+                device: device.clone(),
+                seq,
+            },
+        )
+        .unwrap();
+        crate::forget::start(p, &preview).unwrap();
+        let raw = raw::open(p).unwrap();
+        let mut k = knowledge::open(p).unwrap();
+        drain(&raw, &mut k, &mut consumers(p)).unwrap();
+        let mut embed = crate::embed_phase::Phase::new(p);
+        assert!(matches!(
+            embed.poll(&raw, &k).unwrap(),
+            Phase::Waiting { .. }
+        ));
+        until("the stub embedding reply", || embed.done());
+        drop((raw, k));
+        let mut calls = 0;
+        let mut phase = |raw: &mut Raw, _: &Connection| -> Result<Phase> {
+            calls += 1;
+            if calls == 1 {
+                for file in ["raw.db-wal", "raw.db-shm"] {
+                    let _ = std::fs::remove_file(p.join(file));
+                }
+                let staged = p.join("raw.db.copy");
+                std::fs::copy(&old, &staged).unwrap();
+                std::fs::rename(staged, p.join("raw.db")).unwrap();
+                std::fs::write(p.join("config.toml"), "[embedding]\nprovider = 'none'\n")
+                    .unwrap();
+            } else {
+                assert_ne!(
+                    raw.device(),
+                    device,
+                    "embedding progress started another round over the old raw.db"
+                );
+                assert!(matches!(
+                    raw.after(&device, seq - 1, 1).unwrap()[0].item,
+                    raw::Item::Removed
+                ));
+            }
+            Ok(Phase::Idle)
+        };
+        let phases = Phases {
+            embed: Some(&mut embed),
+            curation: Some(&mut phase),
+            ..Phases::default()
+        };
+        run_holding(p, 0, consumers(p), || {}, None, phases).unwrap();
+        assert_eq!(calls, 2);
     }
 
     #[cfg(target_os = "linux")]
