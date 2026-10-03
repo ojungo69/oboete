@@ -1156,29 +1156,44 @@ fn imported_fts(k: &Connection, q: &Query, depth: usize, prompts: bool) -> Resul
     // Once per uid before the limit: two devices' imports of one document are one (Codex on
     // #306), its newest row, as the embedding phase reads it.
     clauses.push("i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)".into());
-    let sql = if order_args.is_empty() {
-        format!(
-            "SELECT i.uid FROM imported_fts f JOIN imported i ON i.rowid = f.rowid
-             WHERE {} ORDER BY {order}i.ts DESC LIMIT ?",
-            clauses.join(" AND ")
-        )
-    } else {
-        // As the raw leg: the short words reorder the best `POOL` rows; `i` names them.
-        args.push(Value::Integer(super::sql_limit(depth.max(super::POOL))));
-        args.extend(order_args);
-        format!(
-            "SELECT uid FROM (
-               SELECT i.uid, i.ts, i.title, i.body, f.rank
-               FROM imported_fts f JOIN imported i ON i.rowid = f.rowid
-               WHERE {} ORDER BY rank, i.ts DESC LIMIT ?
-             ) i ORDER BY {order}ts DESC LIMIT ?",
-            clauses.join(" AND ")
-        )
+    let query = |sql: &str, args: Vec<Value>| -> Result<Vec<String>> {
+        Ok(k.prepare(sql)?
+            .query_map(params_from_iter(args), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
     };
-    args.push(Value::Integer(super::sql_limit(depth)));
-    Ok(k.prepare(&sql)?
-        .query_map(params_from_iter(args), |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?)
+    let hits = "imported_fts f JOIN imported i ON i.rowid = f.rowid";
+    if order_args.is_empty() {
+        args.push(Value::Integer(super::sql_limit(depth)));
+        let sql = format!(
+            "SELECT i.uid FROM {hits} WHERE {} ORDER BY {order}i.ts DESC LIMIT ?",
+            clauses.join(" AND ")
+        );
+        return query(&sql, args);
+    }
+    // As the raw leg: the short words reorder the best `POOL` rows (`i` names them), and a hit
+    // below them keeps its place.
+    let mut pool = args.clone();
+    pool.push(Value::Integer(super::sql_limit(super::POOL)));
+    pool.extend(order_args);
+    pool.push(Value::Integer(super::sql_limit(depth.min(super::POOL))));
+    let sql = format!(
+        "SELECT uid FROM (
+           SELECT i.uid, i.ts, i.title, i.body, f.rank FROM {hits}
+           WHERE {} ORDER BY rank, i.ts DESC, i.rowid LIMIT ?
+         ) i ORDER BY {order}ts DESC LIMIT ?",
+        clauses.join(" AND ")
+    );
+    let mut found = query(&sql, pool)?;
+    if depth > super::POOL {
+        args.push(Value::Integer(super::sql_limit(depth - super::POOL)));
+        args.push(Value::Integer(super::sql_limit(super::POOL)));
+        let sql = format!(
+            "SELECT i.uid FROM {hits} WHERE {} ORDER BY rank, i.ts DESC, i.rowid LIMIT ? OFFSET ?",
+            clauses.join(" AND ")
+        );
+        found.extend(query(&sql, args)?);
+    }
+    Ok(found)
 }
 
 /// An imported uid's hit: its newest row.
@@ -2573,6 +2588,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// As the raw leg: an imported hit below the best `POOL` keeps its place under a larger depth
+    /// (Codex on #360).
+    #[test]
+    fn an_imported_hit_below_the_pool_keeps_its_place_under_a_larger_depth() {
+        let mut s = Store::new();
+        // The first and longest ranks last.
+        for n in 0..=crate::search::POOL {
+            let body = if n == 0 { "設計 worker" } else { "worker" };
+            s.imported(&format!("d{n}"), "r", 1_000 * (n as i64 + 1), "", body);
+        }
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let uids = imported_fts(&k, &q("設計 worker"), 2 * crate::search::POOL, false).unwrap();
+        assert_eq!(uids.len(), crate::search::POOL + 1);
+        assert!(
+            uids[crate::search::POOL].ends_with(":d0"),
+            "{}",
+            uids[crate::search::POOL]
+        );
     }
 
     /// Row 30-2 (D13): the caller's repository and the one searched are both checked, and a

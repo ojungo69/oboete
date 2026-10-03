@@ -244,30 +244,46 @@ pub(crate) fn raw_order(
     let before = hidden(&raw_db)?.len();
     // Enough rows that the hidden ones cannot take the place of visible ones.
     let rows = limit.saturating_add(before);
-    let sql = if order_args.is_empty() {
-        format!(
-            "SELECT d.device, d.seq FROM raw_fts f JOIN raw_docs d ON d.rowid = f.rowid
-             WHERE {} ORDER BY {order}d.ts DESC LIMIT ?",
+    let query = |sql: &str, args: Vec<Value>| -> Result<Vec<(String, i64)>> {
+        Ok(k.prepare(sql)?
+            .query_map(params_from_iter(args), |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?)
+    };
+    let hits = "raw_fts f JOIN raw_docs d ON d.rowid = f.rowid";
+    let rows = if order_args.is_empty() {
+        args.push(Value::Integer(sql_limit(rows)));
+        let sql = format!(
+            "SELECT d.device, d.seq FROM {hits} WHERE {} ORDER BY {order}d.ts DESC LIMIT ?",
             clauses.join(" AND ")
-        )
+        );
+        query(&sql, args)?
     } else {
-        // The short words reorder the best `POOL` rows; `f` names them for `order`.
-        args.push(Value::Integer(sql_limit(rows.max(POOL))));
-        args.extend(order_args);
-        format!(
+        // The short words reorder the best `POOL` rows; `f` names them for `order`. A hit below
+        // them keeps its place, however many are asked for (Codex on #360).
+        let mut pool = args.clone();
+        pool.push(Value::Integer(sql_limit(POOL)));
+        pool.extend(order_args);
+        pool.push(Value::Integer(sql_limit(rows.min(POOL))));
+        let sql = format!(
             "SELECT device, seq FROM (
-               SELECT d.device, d.seq, d.ts, f.text, f.rank
-               FROM raw_fts f JOIN raw_docs d ON d.rowid = f.rowid
-               WHERE {} ORDER BY rank, d.ts DESC LIMIT ?
+               SELECT d.device, d.seq, d.ts, f.text, f.rank FROM {hits}
+               WHERE {} ORDER BY rank, d.ts DESC, d.rowid LIMIT ?
              ) f ORDER BY {order}ts DESC LIMIT ?",
             clauses.join(" AND ")
-        )
+        );
+        let mut found = query(&sql, pool)?;
+        if rows > POOL {
+            args.push(Value::Integer(sql_limit(rows - POOL)));
+            args.push(Value::Integer(sql_limit(POOL)));
+            let sql = format!(
+                "SELECT d.device, d.seq FROM {hits}
+                 WHERE {} ORDER BY rank, d.ts DESC, d.rowid LIMIT ? OFFSET ?",
+                clauses.join(" AND ")
+            );
+            found.extend(query(&sql, args)?);
+        }
+        found
     };
-    args.push(Value::Integer(sql_limit(rows)));
-    let rows: Vec<(String, i64)> = k
-        .prepare(&sql)?
-        .query_map(params_from_iter(args), |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<Result<_, _>>()?;
     let pending = hidden(&raw_db)?;
     Ok(rows
         .into_iter()
@@ -607,6 +623,34 @@ mod tests {
             .iter()
             .map(|h| h.seq)
             .collect()
+    }
+
+    /// A hit below the best `POOL` keeps its place however many hits are asked for: the short
+    /// words reorder only the pool (Codex on #360: a limit over `POOL` reordered every hit).
+    #[test]
+    fn a_hit_below_the_pool_keeps_its_place_under_a_larger_limit() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut store = crate::raw::open(p).unwrap();
+        // The first and longest ranks last.
+        for n in 0..=POOL {
+            let body = if n == 0 { "設計 worker" } else { "worker" };
+            store
+                .append(&crate::raw::Event {
+                    ts: 1_000 * (n as i64 + 1),
+                    repo: Some("github.com/o/r".into()),
+                    ..crate::raw::test_event(body)
+                })
+                .unwrap();
+        }
+        crate::worker::run_once(p).unwrap();
+        let seqs: Vec<i64> = raw(p, "設計 worker", Some("github.com/o/r"), 2 * POOL)
+            .unwrap()
+            .iter()
+            .map(|h| h.seq)
+            .collect();
+        assert_eq!(seqs.len(), POOL + 1);
+        assert_eq!((seqs[0], seqs[POOL]), (POOL as i64 + 1, 1));
     }
 
     /// A word of hiragana only has no trigram at any length (particles and endings), and says as
