@@ -1,0 +1,21 @@
+src/forget.rs
+  s_ce2b24784deac6::t_508c89e3354765 619-674,677
+  s_ce2b24784deac6::t_17259d5b62b148 262,264-270,364,414
+  s_ce2b24784deac6::t_a26c9fb907a317 675-676,678-679
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e40a93d72a3445abd54d804d110073c073a30ce3",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
