@@ -259,6 +259,15 @@ fn an_old_backup_and_changed_capture_rules_do_not_reimport_a_forgotten_v1_event(
 /// record itself. Earlier transcript history stays importable; the forgotten prompt does not.
 #[test]
 fn an_old_restore_keeps_the_forgotten_v1_sessions_transcript_cut() {
+    restored_v1_session_cut(false);
+}
+
+#[test]
+fn an_old_restore_keeps_the_native_cut_when_session_redaction_changes() {
+    restored_v1_session_cut(true);
+}
+
+fn restored_v1_session_cut(mask_session: bool) {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
@@ -279,6 +288,13 @@ fn an_old_restore_keeps_the_forgotten_v1_sessions_transcript_cut() {
     )
     .unwrap();
     drop(db);
+    if mask_session {
+        std::fs::write(
+            home.join("config.toml"),
+            "[summary]\ncurate = false\n[redaction]\nextra_rules = [{id='session-mask', regex='forgotten-cut-session'}]\n",
+        )
+        .unwrap();
+    }
     ok(run(
         &home,
         &["migrate", "--from", source.to_str().unwrap()],
@@ -316,6 +332,7 @@ fn an_old_restore_keeps_the_forgotten_v1_sessions_transcript_cut() {
     std::fs::remove_dir_all(home.join("backups")).unwrap();
     copy_backup(&old_backup, &home.join("backups"));
     ok(run(&home, &["restore"], ""));
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
     ok(run(
         &home,
         &["import", "transcripts", "--agent", "claude", "--yes"],
@@ -360,13 +377,19 @@ fn a_copied_transcript_keeps_its_forgotten_identity_under_new_redaction_rules() 
     copy_backup(&home.join("backups"), &old_backup);
     let sessions = home.join("codex/sessions");
     std::fs::create_dir_all(&sessions).unwrap();
+    let home_json = serde_json::to_string(&home.to_string_lossy()).unwrap();
+    let home_json = &home_json[1..home_json.len() - 1];
     let content = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src/testdata/transcripts/codex-basic.jsonl"),
     )
     .unwrap()
     .replace("Add a 50ms timeout to fetchJson", CANARY)
-    .replace("/work/svc", &home.to_string_lossy())
-    .replace("/work/parent", &home.to_string_lossy());
+    .replace("/work/svc", home_json)
+    .replace("/work/parent", home_json);
+    for line in content.lines() {
+        serde_json::from_str::<serde_json::Value>(line)
+            .expect("the transcript fixture is valid JSON");
+    }
     std::fs::write(sessions.join("rollout-source.jsonl"), &content).unwrap();
     let args = ["import", "transcripts", "--agent", "codex", "--yes"];
     let imported = ok(run(&home, &args, ""));
@@ -470,6 +493,48 @@ fn raw_db_gone_back_keeps_the_new_record_and_not_the_forgotten_one() {
     assert!(imported.contains("\"records\":0"), "{imported}");
     let fresh = hook_record(&home, "a-new-record-after-the-rollback-5521");
     assert!(ok(run(&home, &["get", &fresh], "")).contains("a-new-record-after-the-rollback-5521"));
+    assert!(!String::from_utf8_lossy(&run(&home, &["get", &id], "").stdout).contains(CANARY));
+}
+
+/// A real competing SQLite writer makes applying a surviving log fail. Releasing it as soon
+/// as the error is reported must not let that same import proceed without the request.
+#[test]
+fn an_import_stops_when_a_surviving_forget_request_cannot_be_applied() {
+    use std::io::BufRead;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let id = record(&home, CANARY);
+    let old = root.path().join("before-forget.db");
+    std::fs::copy(home.join("raw.db"), &old).unwrap();
+    ok(run(&home, &["forget", "--record", &id, "--yes"], ""));
+    for f in ["raw.db-wal", "raw.db-shm"] {
+        let _ = std::fs::remove_file(home.join(f));
+    }
+    std::fs::copy(&old, home.join("raw.db")).unwrap();
+    let lock = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let source = home.join("native-source.db");
+    let mut child = command(&home, &["migrate", "--from", source.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut errors = std::io::BufReader::new(child.stderr.take().unwrap());
+    let mut error = String::new();
+    errors.read_line(&mut error).unwrap();
+    lock.execute_batch("ROLLBACK").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(error.contains("locked"), "{error}");
+    assert!(
+        !out.status.success(),
+        "the import continued after failing to apply the surviving request: {error}"
+    );
+    ok(run(
+        &home,
+        &["migrate", "--from", source.to_str().unwrap()],
+        "",
+    ));
     assert!(!String::from_utf8_lossy(&run(&home, &["get", &id], "").stdout).contains(CANARY));
 }
 

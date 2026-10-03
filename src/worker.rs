@@ -518,7 +518,7 @@ fn serve(
     crate::backup::check(home, &raw);
     // Milestone 5 D1 rule 7: the forget request logs after the segments are checked, before any
     // consumer runs and before the export.
-    crate::forget::reconcile_or_say(home, &mut raw);
+    crate::forget::reconcile_or_say(home, &mut raw)?;
     // The resident viewer is started where the backup deadline is looked at (R4).
     let mut due = |raw: &Raw, holding: &Holding, viewer: Option<&mut crate::view::Starter>| {
         if gone(home, holding) {

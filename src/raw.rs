@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS denied_records(
 );
 -- An imported record's native identity, hashed (forget::origin): no original id or text.
 CREATE TABLE IF NOT EXISTS import_origins(
-  device TEXT NOT NULL, seq INTEGER NOT NULL, origin TEXT NOT NULL, PRIMARY KEY(device, seq)
+  device TEXT NOT NULL, seq INTEGER NOT NULL, origin TEXT NOT NULL, native_session TEXT,
+  PRIMARY KEY(device, seq)
 );
 CREATE INDEX IF NOT EXISTS import_origins_origin ON import_origins(origin);
 -- Each forget request, bodyless, as its log line holds it (rules 4, 14).
@@ -292,10 +293,10 @@ fn denied(conn: &Connection, origin: Option<&str>, text: &str) -> Result<bool> {
     Ok(denied || cfg!(test) && text.contains(DENIED_IN_TESTS))
 }
 
-fn forgotten_cut(conn: &Connection, agent: &str, session: &str) -> Result<Option<i64>> {
+fn forgotten_cut(conn: &Connection, session: &str) -> Result<Option<i64>> {
     Ok(conn.query_row(
         "SELECT MIN(ts) FROM denied_records WHERE session=?1",
-        [crate::forget::session(agent, session)],
+        [session],
         |r| r.get(0),
     )?)
 }
@@ -364,6 +365,13 @@ pub const MAX_OP_BYTES: usize = 64 << 10;
 /// body escaped once, and a few hundred bytes of fields per op), well within what a restore reads.
 pub const MAX_BATCH_OPS: usize = 1024;
 pub const MAX_BATCH_BYTES: usize = 4 << 20;
+
+/// Import provenance before capture changes labels: only hashes, never the native session text.
+#[derive(Debug, Clone)]
+pub struct ImportIdentity {
+    pub origin: String,
+    pub session: String,
+}
 
 pub struct Raw {
     conn: Connection,
@@ -436,6 +444,14 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
         deadline,
     )
     .context("migrate ledger")?;
+    crate::db::ensure_column_until(
+        &mut conn,
+        "import_origins",
+        "native_session",
+        "TEXT",
+        deadline,
+    )
+    .context("migrate import session identity")?;
     for file in ["raw.db", "raw.db-wal", "raw.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -578,18 +594,24 @@ impl Raw {
                 let Item::Event(e) = r.item else {
                     continue;
                 };
-                let origin: Option<String> = self
+                let identity: Option<(String, Option<String>)> = self
                     .conn
                     .query_row(
-                        "SELECT origin FROM import_origins WHERE device = ?1 AND seq = ?2",
+                        "SELECT origin, native_session FROM import_origins WHERE device = ?1 AND seq = ?2",
                         params![device, r.seq],
-                        |r| r.get(0),
+                        |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .optional()?;
-                let origin = origin.with_context(|| {
+                let (origin, session) = identity.with_context(|| {
                     format!(
                         "record {device}:{} has no import identity: this slice forgets imported \
                          records only; nothing was registered",
+                        r.seq
+                    )
+                })?;
+                let session = session.with_context(|| {
+                    format!(
+                        "record {device}:{} has no native session identity: nothing was registered",
                         r.seq
                     )
                 })?;
@@ -603,7 +625,7 @@ impl Raw {
                     device: device.into(),
                     seq: r.seq,
                     origin,
-                    session: crate::forget::session(&e.agent, &e.session),
+                    session,
                     // Rule 10: only a record the transcript cut counts keeps its time.
                     ts: (e.source != "transcript" && e.kind != "touch").then_some(e.ts),
                 });
@@ -755,7 +777,7 @@ impl Raw {
     pub fn append_imported_origins(
         &mut self,
         batch: &[crate::capture::Captured],
-        origins: &[String],
+        origins: &[ImportIdentity],
         ruleset: &str,
         checkpoint: Option<&Checkpoint>,
     ) -> Result<Vec<i64>> {
@@ -763,8 +785,9 @@ impl Raw {
             origins.is_empty() || origins.len() == batch.len(),
             "import identity count differs from records"
         );
-        for origin in origins {
-            crate::forget::check_identity(origin)?;
+        for identity in origins {
+            crate::forget::check_identity(&identity.origin)?;
+            crate::forget::check_identity(&identity.session)?;
         }
         let bytes: usize = batch.iter().map(|c| c.event.body.len()).sum();
         anyhow::ensure!(
@@ -790,18 +813,25 @@ impl Raw {
         let from_seq = next_seq(&tx, &self.device)?;
         let mut seqs = Vec::with_capacity(batch.len());
         for (index, c) in batch.iter().enumerate() {
-            let origin = origins.get(index).map(String::as_str);
+            let identity = origins.get(index);
+            let origin = identity.map(|i| i.origin.as_str());
             // A transcript batch may have been prepared before a concurrent forget. Keep the
             // native session's cut inside this transaction as well as at the importer's read.
             let past_cut = c.event.source == "transcript"
-                && forgotten_cut(&tx, &c.event.agent, &c.event.session)?
-                    .is_some_and(|cut| c.event.ts >= cut);
+                && forgotten_cut(
+                    &tx,
+                    &identity.map_or_else(
+                        || crate::forget::session(&c.event.agent, &c.event.session),
+                        |i| i.session.clone(),
+                    ),
+                )?
+                .is_some_and(|cut| c.event.ts >= cut);
             if !past_cut && !denied(&tx, origin, &c.event.body)? {
                 let seq = insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
-                if let Some(origin) = origin {
+                if let Some(identity) = identity {
                     tx.execute(
-                        "INSERT INTO import_origins(device, seq, origin) VALUES(?1, ?2, ?3)",
-                        params![self.device, seq, origin],
+                        "INSERT INTO import_origins(device, seq, origin, native_session) VALUES(?1, ?2, ?3, ?4)",
+                        params![self.device, seq, identity.origin, identity.session],
                     )?;
                 }
                 seqs.push(seq);
@@ -1446,9 +1476,12 @@ impl Raw {
                 // An imported record keeps its origin, and a tombstone of a forgotten one the
                 // deny row, so a restore from the segments alone forgets it again (D1 rule 14).
                 let extra = match &r.item {
-                    Item::Event(_) => self
-                        .origin_of(&r.device, r.seq)?
-                        .map(|o| ("import_identity", serde_json::json!({ "origin": o }))),
+                    Item::Event(_) => self.origin_of(&r.device, r.seq)?.map(|(origin, session)| {
+                        (
+                            "import_identity",
+                            serde_json::json!({ "origin": origin, "session": session }),
+                        )
+                    }),
                     Item::Tombstone(Target::Record { device, seq }) => {
                         self.deny_of(device, *seq)?.map(|d| ("deny", d))
                     }
@@ -1469,14 +1502,14 @@ impl Raw {
     }
 
     /// An imported record's origin (D1 rule 5).
-    fn origin_of(&self, device: &str, seq: i64) -> Result<Option<String>> {
+    fn origin_of(&self, device: &str, seq: i64) -> Result<Option<(String, Option<String>)>> {
         use rusqlite::OptionalExtension;
         Ok(self
             .conn
             .query_row(
-                "SELECT origin FROM import_origins WHERE device = ?1 AND seq = ?2",
+                "SELECT origin, native_session FROM import_origins WHERE device = ?1 AND seq = ?2",
                 params![device, seq],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?)
     }
@@ -1803,7 +1836,7 @@ impl Raw {
         session: &str,
         recorded: Option<i64>,
     ) -> Result<Option<i64>> {
-        let denied = forgotten_cut(&self.conn, agent, session)?;
+        let denied = forgotten_cut(&self.conn, &crate::forget::session(agent, session))?;
         Ok(recorded.into_iter().chain(denied).min())
     }
 
@@ -2334,9 +2367,13 @@ impl Rebuild {
                 if let Some(identity) = v.get("import_identity") {
                     let origin = identity["origin"].as_str().context("import origin")?;
                     crate::forget::check_identity(origin)?;
+                    let session = identity["session"].as_str();
+                    if let Some(session) = session {
+                        crate::forget::check_identity(session)?;
+                    }
                     self.conn.execute(
-                        "INSERT INTO import_origins(device, seq, origin) VALUES(?1, ?2, ?3)",
-                        params![device, seq, origin],
+                        "INSERT INTO import_origins(device, seq, origin, native_session) VALUES(?1, ?2, ?3, ?4)",
+                        params![device, seq, origin, session],
                     )?;
                 }
             }

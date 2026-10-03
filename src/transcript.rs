@@ -725,7 +725,7 @@ pub fn import(
     let mut raw = yes.then(|| raw::open(home)).transpose()?;
     // Milestone 5 D1: the forget request logs first (`migrate::pass` does it again for v1).
     if let Some(raw) = raw.as_mut() {
-        crate::forget::reconcile_or_say(home, raw);
+        crate::forget::reconcile_or_say(home, raw)?;
     }
     if let Some(raw) = raw.as_mut()
         && v1.exists()
@@ -820,7 +820,8 @@ pub fn import(
                 row: None,
                 prefix: checkpoints.get(&key).and_then(|c| c.prefix.clone()),
             };
-            let mut batch = Vec::<(Captured, String)>::new();
+            let native_session = crate::forget::session(agent, session);
+            let mut batch = Vec::<(Captured, raw::ImportIdentity)>::new();
             let mut bytes = 0;
             for line in lines {
                 let through = i64::try_from(line.seq)?;
@@ -852,12 +853,15 @@ pub fn import(
                 let mut native = Sha256::new();
                 hash_line(&mut native, &line)?;
                 let identity = format!("{through}:{:x}", native.finalize());
-                batch.extend(
-                    captured
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, c)| (c, crate::forget::origin(&key, &format!("{identity}:{i}")))),
-                );
+                batch.extend(captured.into_iter().enumerate().map(|(i, c)| {
+                    (
+                        c,
+                        raw::ImportIdentity {
+                            origin: crate::forget::origin(&key, &format!("{identity}:{i}")),
+                            session: native_session.clone(),
+                        },
+                    )
+                }));
                 bytes += size;
                 checkpoint.through = through;
                 checkpoint.prefix = fingerprint;
@@ -903,7 +907,7 @@ fn hash_line(prefix: &mut Sha256, line: &Line) -> Result<()> {
 
 fn append_batch(
     raw: &mut Option<raw::Raw>,
-    batch: &mut Vec<(Captured, String)>,
+    batch: &mut Vec<(Captured, raw::ImportIdentity)>,
     checkpoint: &Checkpoint,
     settings: &Settings,
     stats: &mut AgentStats,

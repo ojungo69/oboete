@@ -7,7 +7,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
 
 use crate::capture::{self, Captured, Settings};
-use crate::raw::{Checkpoint, IMPORT_BATCH, ImportDoc, MAX_BATCH_BYTES, Raw, V1Row};
+use crate::raw::{
+    Checkpoint, IMPORT_BATCH, ImportDoc, ImportIdentity, MAX_BATCH_BYTES, Raw, V1Row,
+};
 
 /// The source of what v1's store holds, as records and documents in Design B (D6).
 const SOURCE: &str = "oboete-v1";
@@ -57,7 +59,7 @@ pub struct Stats {
 pub fn pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<Stats> {
     // Milestone 5 D1: the forget request logs first, so an import never brings back what a log
     // holds and raw.db lost.
-    crate::forget::reconcile_or_say(home, raw);
+    crate::forget::reconcile_or_say(home, raw)?;
     Ok(read_pass(home, raw, from)?.0)
 }
 
@@ -423,12 +425,18 @@ fn events(
         }
         batch.bytes += bytes;
         let identity = serde_json::to_string(&(&row, crate::forget::hash(stored.as_bytes())))?;
-        batch.records.extend(
-            captured
-                .into_iter()
-                .enumerate()
-                .map(|(i, c)| (c, crate::forget::origin(&key, &format!("{identity}:{i}")))),
-        );
+        let session = crate::forget::session(&agent, &session);
+        batch
+            .records
+            .extend(captured.into_iter().enumerate().map(|(i, c)| {
+                (
+                    c,
+                    ImportIdentity {
+                        origin: crate::forget::origin(&key, &format!("{identity}:{i}")),
+                        session: session.clone(),
+                    },
+                )
+            }));
         batch.last = Some(row);
         stats.events += 1;
     }
@@ -440,7 +448,7 @@ fn events(
 /// fingerprint.
 #[derive(Default)]
 struct Batch {
-    records: Vec<(Captured, String)>,
+    records: Vec<(Captured, ImportIdentity)>,
     bytes: usize,
     last: Option<V1Row>,
 }

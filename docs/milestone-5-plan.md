@@ -44,11 +44,12 @@ open が失敗して記録が止まり、戻すには手でファイルを消す
   や形が合わない行、他 home の行は、その行だけ飛ばして報告する。
   home の id は raw.db の metadata に置き、最初の device id から作る。ファイルのコピーで
   将来の記録用の device id が変わっても保持し、record の backup にも運ぶ。別の権威は作らない。
-- **reconcile は双方向で、拒否しない。** worker の起動と stores を開き直すたび（`backup::check`
+- **reconcile は双方向で、副本の障害では拒否しない。** worker の起動と stores を開き直すたび（`backup::check`
   の後、consumer と export の前）、`oboete restore`、forget command、import command の取り込み前に、
   raw にあってコピーにない要求をコピーへ書き、コピーにあって raw にない要求を raw へ適用する。
   読めない・書けないコピーは報告して飛ばす（command の出力、`forget --status`）。`raw::open` と
-  hook は reconcile しない。
+  hook は reconcile しない。読めた要求を raw.db に適用できなかった場合は、deny のないまま
+  import・consumer・provider が進まないよう caller へ失敗を返す。
 - **適用は seq ではなく identity で。** identity は import origin だけで、`(device, seq)` は出所の
   記録にとどめる。要求の適用は、保存された import origin が一致する record をすべて（再 import 後の
   重複も）tombstone で隠し、deny 行は origin で `INSERT OR IGNORE` する。Claim と Correction の op
@@ -89,6 +90,9 @@ transcript は agent/session と安定した event ordinal を使い、内容の
 同じ id の差替えを見分ける。コピー元のファイルパスは identity にしない。
 要求ログにはこれらの hash と record id だけを残す。検索文・本文・引用は保存しない。
 native identity がある import はその identity を比較し、同じ文字列の別 event まで消さない。
+importer は capture 前の agent/session から session hash を作り、origin と同じ transaction で
+保存する。伏せ字後の label からは作らず、本文を持たない要求と record backup にも運ぶ。
+その hash がない旧 record の forget は、対応を推測せず登録前に拒否する。
 チェックは append の transaction 内。fingerprint だけでは parser/redaction の変更をまたぐ
 再 import 防止を証明できないため、第一 slice は native identity のない legacy/hook raw の
 登録を具体的な理由付きで拒否する。既存の忘却がある状態で provenance を渡さない raw import
@@ -207,7 +211,8 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
 raw.db を別ファイルに置き換えても home の id を保持し、古いコピーへの再置換やコピー後の backup
 からの復元で削除要求を適用する。忘れた v1 record の session hash と時刻から transcript の
 取り込み境界も回復し、準備済みの batch は追記 transaction 内でもその境界を確認する。
-CLI の追加試験 3 件と、準備後の忘却が追記を止める型付き API の試験で、先に失敗することと
+伏せ字ルールを外した後も取り込み境界が一致し、raw への要求適用がロックで失敗した import は
+続行しない。CLI の追加試験 5 件と、準備後の忘却が追記を止める型付き API の試験で、先に失敗することと
 修正後の通過を確認した。削除対象より前の transcript と無関係な新規記録は残る。
 
 残り: 独立レビュー。この結果は全 M5 の削除 canary 成功ではない。物理

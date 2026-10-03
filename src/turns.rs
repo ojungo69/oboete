@@ -331,24 +331,16 @@ pub fn phase(
         let subject = format!("turn {}", r.seq);
         let answer = summarizer(&subject, &prompt, &|v| check(v, rules), &|| {
             reading.still(raw)
+        })
+        .and_then(|res| {
+            let op = fitted(turn.op(&res.output, rules))?.unwrap_or_else(|| skip.clone());
+            // The provider gate and the append fence share the ListChanged wait below. A
+            // forget after reading the turn keeps none of the answer (M5 D1 rule 12).
+            raw.append_ops_fenced(&[(OpKind::Turn, op)], reading.denied)?;
+            Ok(())
         });
         let failed = match answer {
-            Ok(res) => {
-                let op = fitted(turn.op(&res.output, rules))?.unwrap_or(skip);
-                // A forget since the turn was read: nothing of the answer is kept, and the next
-                // pass reads the turn again (milestone 5 D1 rule 12).
-                match raw.append_ops_fenced(&[(OpKind::Turn, op)], reading.denied) {
-                    Err(e) if e.is::<crate::curate::ListChanged>() => {
-                        return Ok(sooner(
-                            out,
-                            Phase::Waiting {
-                                until: now,
-                                up: true,
-                            },
-                        ));
-                    }
-                    appended => appended?,
-                };
+            Ok(()) => {
                 crate::providers_db::clear_turn_pending(db, &device, r.seq)?;
                 return Ok(Phase::Covered);
             }

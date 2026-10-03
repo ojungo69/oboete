@@ -389,16 +389,14 @@ pub(crate) fn reconcile(home: &Path, raw: &mut crate::raw::Raw) -> Result<Report
     Ok(report)
 }
 
-/// `reconcile` where it must not stop the work: what it could not do goes to stderr.
-pub(crate) fn reconcile_or_say(home: &Path, raw: &mut crate::raw::Raw) {
-    match reconcile(home, raw) {
-        Ok(r) => {
-            for p in r.problems {
-                eprintln!("oboete: forget request log: {p}");
-            }
-        }
-        Err(e) => eprintln!("oboete: forget request logs: {e:#}"),
+/// Copy problems are warnings; failing to apply a parsed request to raw must stop the caller
+/// before any import, consumer or provider phase proceeds without its deny rows.
+pub(crate) fn reconcile_or_say(home: &Path, raw: &mut crate::raw::Raw) -> Result<()> {
+    let report = reconcile(home, raw)?;
+    for p in report.problems {
+        eprintln!("oboete: forget request log: {p}");
     }
+    Ok(())
 }
 
 /// Both log copies' requests, of any home, read before a restore takes raw's swap lock (no log I/O
@@ -426,7 +424,13 @@ fn limits(sources: &[String]) -> String {
          The request is logged without the text, by hashes; someone who holds a log or the \
          backups can check a guess of the exact stored text against them.\n\
          If raw.db and both request logs are lost, the request is lost and the text can come \
-         back from older backups.\n",
+         back from older backups.\n\
+         After an older file replaces raw.db, SessionStart may show a forgotten record until \
+         the worker reopens the stores and applies the request logs.\n\
+         A crash between raw's commit and the first log line, followed by loss of raw.db \
+         before the worker starts, loses the request too.\n\
+         Restoring segments with no surviving request log recovers denials but not the \
+         request's progress rows.\n",
     );
     let mut outside: Vec<&str> = Vec::new();
     for s in sources {
@@ -458,7 +462,7 @@ pub fn run(
     show: bool,
 ) -> Result<()> {
     if crate::raw::exists(home) {
-        reconcile_or_say(home, &mut crate::raw::open(home)?);
+        reconcile_or_say(home, &mut crate::raw::open(home)?)?;
     }
     if show {
         for job in status(home)? {
@@ -545,12 +549,16 @@ mod tests {
     fn native(raw: &mut raw::Raw, id: &str, body: &str) -> i64 {
         let mut event = raw::test_event(body);
         event.source = "oboete-v1".into();
+        let identity = raw::ImportIdentity {
+            origin: origin("synthetic", id),
+            session: session(&event.agent, &event.session),
+        };
         raw.append_imported_origins(
             &[crate::capture::Captured {
                 event,
                 ledger: Vec::new(),
             }],
-            &[origin("synthetic", id)],
+            &[identity],
             "",
             None,
         )
@@ -618,12 +626,16 @@ mod tests {
         let p = raw.forget_preview(record(&raw, seq)).unwrap();
         start(home.path(), &p).unwrap();
         let append = |raw: &mut raw::Raw, event: raw::Event, id: &str| {
+            let identity = raw::ImportIdentity {
+                origin: origin("synthetic-transcript", id),
+                session: session(&event.agent, &event.session),
+            };
             raw.append_imported_origins(
                 &[crate::capture::Captured {
                     event,
                     ledger: Vec::new(),
                 }],
-                &[origin("synthetic-transcript", id)],
+                &[identity],
                 "",
                 None,
             )
