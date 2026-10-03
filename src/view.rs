@@ -234,7 +234,11 @@ fn listen(home: &Path) -> Result<Option<Resident>> {
     // Replaced whole, so a reader never sees half of it.
     let say = |what: &str| -> Result<()> {
         let next = state.join("view-outcome.next");
-        std::fs::write(&next, what)?;
+        // Made anew, so a link planted before is not written through.
+        let _ = std::fs::remove_file(&next);
+        (std::fs::OpenOptions::new().write(true).create_new(true))
+            .open(&next)?
+            .write_all(what.as_bytes())?;
         std::fs::rename(&next, state.join("view-outcome"))?;
         Ok(())
     };
@@ -2667,9 +2671,16 @@ mod tests {
         std::fs::create_dir_all(p.join("state")).unwrap();
         let mode = |q: &Path| std::fs::metadata(q).unwrap().permissions().mode() & 0o777;
         std::fs::set_permissions(p.join("state"), std::fs::Permissions::from_mode(0o777)).unwrap();
+        // A link planted while another user could write there is not written through (Codex on
+        // #376).
+        let theirs = tempfile::tempdir().unwrap();
+        let victim = theirs.path().join("victim");
+        std::fs::write(&victim, "theirs").unwrap();
+        std::os::unix::fs::symlink(&victim, p.join("state/view-outcome.next")).unwrap();
         let started = listen(p).unwrap();
         assert!(started.is_some());
         assert_eq!(mode(&p.join("state")), 0o700);
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "theirs");
         // Nothing goes through a link, not even a change of the mode of what it points to.
         let elsewhere = tempfile::tempdir().unwrap();
         let mode_of = std::fs::Permissions::from_mode(0o755);
