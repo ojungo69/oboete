@@ -234,12 +234,14 @@ pub fn phase(
     // as it is now (spec 5.5).
     let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
     let out = windows;
-    let last = last_asked(k, &device)?;
-    // The turns a later turn's summary passed while they waited: one the list kept back, which
-    // an undo lets out as it lets out a window's records (Codex on #371), oldest first. One still
-    // kept back is not read again.
+    // The scan goes on after the newest turn asked for and the newest held or waiting, so a turn
+    // held long is not read again at every run (Codex on #371).
+    let seen = last_asked(k, &device)?.max(crate::providers_db::turns_seen(db, &device)?);
+    // The turns held or waiting: one the list kept back, which an undo lets out as it lets out a
+    // window's records, or one a retry waits for (Codex on #371), oldest first. One still kept
+    // back is not read again.
     let key = |agent: &str, session: &str| format!("{agent}\u{0}{session}");
-    let waiting = crate::providers_db::turns_waiting(db, &device, last, |agent, session| {
+    let waiting = crate::providers_db::turns_waiting(db, &device, |agent, session| {
         reading.excluded.contains(&key(agent, session))
     })?;
     let mut replies = std::collections::VecDeque::new();
@@ -248,7 +250,7 @@ pub fn phase(
     }
     // Every turn end is reached, however many records follow it (Codex on C2), a page at a time:
     // a run asks for one, so a backlog is not read whole at every run (Codex on #371).
-    let mut after = last;
+    let mut after = seen;
     loop {
         if replies.is_empty() {
             replies.extend(raw.replies_between(after, ck, PAGE)?);
@@ -1080,6 +1082,49 @@ mod tests {
         let (_, sent) = run(home.path(), &completed("Fixed."));
         assert_eq!(sent.len(), 1);
         assert!(sent[0].contains("Fix the lexer."), "{}", sent[0]);
+    }
+
+    /// Codex on #371: a run does not read again the turns it held, so a repository kept back
+    /// long costs a run nothing: a run that finds only held turns writes nothing.
+    #[test]
+    fn a_run_that_finds_only_held_turns_writes_nothing() {
+        let home = home(
+            &[
+                said("s1", "prompt", "Build the parser."),
+                said("s1", "reply", "Built."),
+                said("s1", "prompt", "Test it."),
+                said("s1", "reply", "Tested."),
+            ],
+            &[window(1, 4, "Built and tested the parser.", &[])],
+        );
+        crate::raw::open(home.path())
+            .unwrap()
+            .exclude("r", false)
+            .unwrap();
+        assert_eq!(run(home.path(), &completed("x")).1.len(), 0);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let db = crate::providers_db::open(home.path()).unwrap();
+        let mut summarizer = |_: &str,
+                              _: &str,
+                              _: &crate::provider::AnswerCheck,
+                              _: &crate::provider::Gate|
+         -> Result<ChainResult> { unreachable!() };
+        crate::crash::off();
+        let summary = Summary::default();
+        let rules = Rules::default();
+        phase(
+            &mut raw,
+            &k,
+            &db,
+            &rules,
+            &summary,
+            "chain",
+            &mut summarizer,
+            Phase::Idle,
+        )
+        .unwrap();
+        assert_eq!(crate::crash::count(), 0);
     }
 
     /// Test 3 (T2): the turn's prompts, its session's cards of the windows that hold the turn,

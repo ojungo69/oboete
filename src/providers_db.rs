@@ -709,14 +709,12 @@ pub fn hold_turn(
     Ok(())
 }
 
-/// The waiting turns of `device` at or before `through` that a run may ask for again, oldest
-/// first: not given up, of sessions `kept_back` (agent, session) does not keep back now. Each
-/// session is judged once, so the turns of one kept back long are not read at every run (Codex
-/// on #371).
+/// The waiting turns of `device` that a run may ask for again, oldest first: not given up, of
+/// sessions `kept_back` (agent, session) does not keep back now. Each session is judged once, so
+/// the turns of one kept back long are not read at every run (Codex on #371).
 pub fn turns_waiting(
     conn: &Connection,
     device: &str,
-    through: i64,
     kept_back: impl Fn(&str, &str) -> bool,
 ) -> Result<Vec<i64>> {
     let sessions: Vec<(String, String)> = conn
@@ -725,18 +723,27 @@ pub fn turns_waiting(
         .collect::<rusqlite::Result<_>>()?;
     let mut st = conn.prepare(
         "SELECT seq FROM turn_pending WHERE device = ?1 AND agent = ?2 AND session = ?3
-           AND seq <= ?4 AND attempts < ?5",
+           AND attempts < ?4",
     )?;
     let mut seqs = Vec::new();
     for (agent, session) in sessions.iter().filter(|(a, s)| !kept_back(a, s)) {
         let rows = st.query_map(
-            params![device, agent, session, through, crate::curate::ATTEMPTS],
+            params![device, agent, session, crate::curate::ATTEMPTS],
             |r| r.get(0),
         )?;
         seqs.extend(rows.collect::<rusqlite::Result<Vec<i64>>>()?);
     }
     seqs.sort_unstable();
     Ok(seqs)
+}
+
+/// The newest of this device's turns that waits or was held, given up or not: 0 when none.
+pub fn turns_seen(conn: &Connection, device: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(seq), 0) FROM turn_pending WHERE device = ?1",
+        [device],
+        |r| r.get(0),
+    )?)
 }
 
 pub fn clear_turn_pending(conn: &Connection, device: &str, seq: i64) -> Result<()> {
@@ -752,7 +759,8 @@ mod tests {
     use super::*;
 
     /// Codex on #371: the turns a run may ask for again, oldest first, judged a session at a
-    /// time: not one of a session kept back now, given up, after `through` or of another device.
+    /// time: not one of a session kept back now, given up or of another device; and the newest
+    /// turn held or waiting, which the scan goes on after.
     /// A second hold of a waiting turn leaves its row as it is.
     #[test]
     fn the_turns_waiting_are_those_a_run_may_ask_for_again() {
@@ -781,8 +789,10 @@ mod tests {
         set_turn_pending(&db, &given_up).unwrap();
         hold_turn(&db, "a", 4, "claude", "free").unwrap();
         assert_eq!(turn_pending_of(&db, "a", 4).unwrap(), Some(given_up));
-        let got = turns_waiting(&db, "a", 8, |_, session| session == "kept").unwrap();
-        assert_eq!(got, [1, 3]);
+        let got = turns_waiting(&db, "a", |_, session| session == "kept").unwrap();
+        assert_eq!(got, [1, 3, 9]);
+        let seen = |device| turns_seen(&db, device).unwrap();
+        assert_eq!((seen("a"), seen("b"), seen("c")), (9, 2, 0));
     }
 
     #[test]

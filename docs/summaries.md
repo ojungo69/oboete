@@ -29,15 +29,17 @@ subagent's stop writes none, `capture::shaped`), of a session the exclusion list
 (D13), once the curation checkpoint has passed it, so the windows that hold the turn have their
 cards. A turn is its session's live records from its first event after the session's previous
 reply, through this one: an import of the same session is no boundary and no part of it, so neither
-a card of a window of imports alone nor the removal of an import touches the turn (Codex on #371). The worker asks for it where it asked for a digest: when the window phase sent
-nothing, one call a run, the oldest turn end after the last one a summary was kept of (every turn
-end is reached, however many records follow it), with the digest's holds (a summary every entry
-fails waits as a window does, and the turns after it wait with it; one given up after `ATTEMPTS`
-is not asked again); a turn's holds are rows of their own table, `turn_pending`, so an upgraded
-home's digest rows never stand for one. A turn end of a session the list names is kept back there,
-and a run after an undo asks for it, as it curates a window's kept-back records, though a later
-turn's summary passed it; each run judges the sessions with turns kept back once, not their every
-turn (Codex on #371). Unlike the digest it does not wait for the session
+a card of a window of imports alone nor the removal of an import touches the turn (Codex on #371).
+The worker asks for it where it asked for a digest: when the window phase sent nothing, one call a
+run, the oldest turn end after the last one a summary was kept of (every turn end is reached,
+however many records follow it), with the digest's holds (a summary every entry fails waits as a
+window does, and the turns after it wait with it; one given up after `ATTEMPTS` is not asked
+again); a turn's holds are rows of their own table, `turn_pending`, so an upgraded home's digest
+rows never stand for one. A turn end of a session the list names is kept back there, and a run
+after an undo asks for it, as it curates a window's kept-back records, though a later turn's
+summary passed it; each run judges the sessions with turns kept back once, not their every turn,
+and reads the turn ends after the newest held or waiting one, so none is read again (Codex on
+#371). Unlike the digest it does not wait for the session
 to go idle: a turn is whole at its reply, and claude-mem asks at Stop. The window phase's own idle
 wait still holds back the windows of a session's last turn (Codex on C2).
 
