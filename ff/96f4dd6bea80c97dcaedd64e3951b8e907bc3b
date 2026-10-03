@@ -1,0 +1,21 @@
+docs/cards.md
+  s_821f8fcda60ea0::t_e781b4bf797552 159-161,222
+src/curate.rs
+  s_821f8fcda60ea0::t_125e7c1c1f39bd 2634-2656,2685,8549-8571
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ff96f4dd6bea80c97dcaedd64e3951b8e907bc3b",
+  "prompts": {},
+  "sessions": {
+    "s_821f8fcda60ea0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3c3ad270-2ec6-4f00-abc6-a7903bd32508",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
