@@ -1,7 +1,8 @@
 //! The viewer's settings page (#94): what it shows of config.toml, and its one write. The page
-//! edits `[inject]`, `[capture]` and `[chain]`; the rest of the file, comments included, stays as
-//! it is (toml_edit). No key file's contents, header or `extra` value goes into an answer, and an
-//! error's text never does either: it could quote a value from the file (`config::toml_error`).
+//! edits summary, spending, Gemini, injection, capture and chain settings; the rest of the file,
+//! comments included, stays as it is (toml_edit). No key file's contents, header or `extra` value
+//! goes into an answer, and an error's text never does either: it could quote a value from the
+//! file (`config::toml_error`).
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -93,10 +94,21 @@ pub fn show(home: &Path) -> Value {
     let Some(((cfg, capture, inject), alone)) = read else {
         return json!({"version": version, "error": "file_invalid"});
     };
-    // Read, not made: the worker makes providers.db.
-    let db = (home.join("providers.db").exists())
-        .then(|| crate::providers_db::open(home).ok())
-        .flatten();
+    let ledger = crate::providers_db::read_only(home);
+    let db = ledger.as_ref().ok().and_then(Option::as_ref);
+    let (spend, stopped) = match &ledger {
+        Ok(Some(db)) => (
+            crate::providers_db::usd_this_month(db).ok(),
+            crate::providers_db::stopped(db).ok().map(|rows| {
+                rows.into_iter()
+                    .filter(|(_, until)| *until == crate::providers_db::OWNER_HOLD)
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>()
+            }),
+        ),
+        Ok(None) => (Some(0.0), Some(Vec::new())),
+        Err(_) => (None, None),
+    };
     // One row per name, as `[chain]` sets every entry of a name alike.
     let chain: Vec<Value> = names(&cfg.providers)
         .into_iter()
@@ -114,11 +126,21 @@ pub fn show(home: &Path) -> Value {
                 .into_iter()
                 .find(|r| rules.contains(r))
                 .unwrap_or(config::ModelRule::Any);
-            entry(&same, &cfg.chain, rule, db.as_ref())
+            entry(&same, &cfg.chain, rule, db)
         })
         .collect();
     json!({
         "version": version,
+        "summary": {
+            "curate": cfg.summary.curate,
+            "language": cfg.summary.language,
+            "window_tokens": cfg.summary.window_tokens,
+            "idle_minutes": cfg.summary.idle_minutes,
+        },
+        "paid_usd_per_month": cfg.paid_usd_per_month,
+        "gemini": cfg.gemini.map(gemini_place),
+        "usd_this_month": spend,
+        "stopped": stopped,
         "inject": {
             "session_start": inject.session_start,
             "session_start_chars": inject.session_start_chars,
@@ -137,6 +159,10 @@ pub fn show(home: &Path) -> Value {
         "warnings": cfg.warnings,
         // The page checks and words its fields by these, so they are stated once.
         "ranges": {
+            "window_tokens": [0, u32::MAX],
+            "idle_minutes": [0, u32::MAX],
+            // No finite upper limit in config.toml; JSON cannot carry infinity.
+            "paid_usd_per_month": [0, null],
             "session_start_chars": range(config::SESSION_START_CHARS),
             "per_prompt_chars": range(config::PER_PROMPT_CHARS),
             "correction_chars": range(config::CORRECTION_CHARS),
@@ -154,6 +180,13 @@ fn tool_output(t: ToolOutput) -> &'static str {
     match t {
         ToolOutput::Full => "full",
         ToolOutput::HeadTail => "head-tail",
+    }
+}
+
+fn gemini_place(place: config::GeminiPlace) -> &'static str {
+    match place {
+        config::GeminiPlace::BeforeSubscriptions => "before-subscriptions",
+        config::GeminiPlace::AfterSubscriptions => "after-subscriptions",
     }
 }
 
@@ -263,10 +296,23 @@ fn entry(
 #[serde(deny_unknown_fields)]
 struct Save {
     version: String,
+    summary: SummaryIn,
+    paid_usd_per_month: f64,
+    gemini: Option<config::GeminiPlace>,
     inject: InjectIn,
     capture: CaptureIn,
     /// Every chain entry once, in the order the page wants.
     chain: Vec<EntryIn>,
+}
+
+/// Only the summary fields the page edits; `shrink` stays as the file has it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SummaryIn {
+    curate: bool,
+    language: String,
+    window_tokens: u32,
+    idle_minutes: u32,
 }
 
 #[derive(Deserialize)]
@@ -306,6 +352,32 @@ struct KeySave {
     entry: String,
     key: String,
     version: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Resume {
+    provider: String,
+}
+
+/// The same operation as `oboete resume`: clear the stop and make owner-held work eligible
+/// at the worker's next run. This request starts no worker and sends no provider call.
+pub fn resume(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
+    let posted: Resume =
+        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
+    if posted.provider.is_empty() {
+        return Err(refused(422, "bad_entry", "provider"));
+    }
+    let _held = saving
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let unavailable = || refused(503, "providers_unavailable", "");
+    let mut db = crate::providers_db::open(home).map_err(|_| unavailable())?;
+    // All the cooldown and retry changes succeed together or are rolled back together.
+    let tx = db.transaction().map_err(|_| unavailable())?;
+    let resumed = crate::providers_db::resume(&tx, &posted.provider).map_err(|_| unavailable())?;
+    tx.commit().map_err(|_| unavailable())?;
+    Ok(json!({"provider": posted.provider, "resumed": resumed}))
 }
 
 /// Writes a key typed on the page into the key file its entry names (`keyfile`), against the
@@ -383,6 +455,35 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
     let chain = checked(&posted, &base, &now)?;
     // The order changes when the chain's does, not when `order` would be spelled another way.
     let reordered = !(posted.chain.iter().map(|e| e.name.as_str())).eq(names(&now.providers));
+    if posted.paid_usd_per_month != now.paid_usd_per_month {
+        put_root(
+            &mut doc,
+            "paid_usd_per_month",
+            Some(posted.paid_usd_per_month.into()),
+        );
+    }
+    if posted.gemini != now.gemini {
+        put_root(
+            &mut doc,
+            "gemini",
+            posted.gemini.map(|p| gemini_place(p).into()),
+        );
+    }
+    let s = &posted.summary;
+    if s.curate != now.summary.curate {
+        put(&mut doc, "summary", "curate", s.curate.into());
+    }
+    if s.language != now.summary.language {
+        put(&mut doc, "summary", "language", s.language.as_str().into());
+    }
+    for (key, value, was) in [
+        ("window_tokens", s.window_tokens, now.summary.window_tokens),
+        ("idle_minutes", s.idle_minutes, now.summary.idle_minutes),
+    ] {
+        if value != was {
+            put(&mut doc, "summary", key, i64::from(value).into());
+        }
+    }
     let i = &posted.inject;
     for (key, now, was) in [
         ("session_start", i.session_start, inject.session_start),
@@ -478,6 +579,9 @@ struct Chain {
 /// or the entries are not the chain's; each value equal to the entry's own is left out. `now` is
 /// the file as it applies before the save.
 fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result<Chain, Refusal> {
+    if !posted.paid_usd_per_month.is_finite() || posted.paid_usd_per_month < 0.0 {
+        return Err(refused(422, "range", "paid_usd_per_month"));
+    }
     let i = &posted.inject;
     for (field, value, range) in [
         (
@@ -623,6 +727,43 @@ fn keep_unknown(chain: &mut Chain, now: &ChainOverlay, own: &[&str]) {
     keep(&mut chain.daily_budget, &now.daily_budget, &unknown);
     keep(&mut chain.timeout_s, &now.timeout_s, &unknown);
     keep(&mut chain.model, &now.model, &unknown);
+}
+
+/// Changes a top-level value while keeping its comment; `None` removes an optional setting.
+fn put_root(doc: &mut toml_edit::DocumentMut, key: &str, value: Option<toml_edit::Value>) {
+    if let Some(mut value) = value {
+        if let Some(old) = doc.get(key).and_then(toml_edit::Item::as_value) {
+            *value.decor_mut() = old.decor().clone();
+        }
+        doc[key] = toml_edit::Item::Value(value);
+    } else {
+        // TOML has no null value for Gemini. Keep the removed line's comments at the end
+        // of the document instead of dropping them with its key.
+        let comments = doc
+            .as_table()
+            .get_key_value(key)
+            .map(|(name, item)| {
+                let prefix = name
+                    .leaf_decor()
+                    .prefix()
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                let suffix = item
+                    .as_value()
+                    .and_then(|v| v.decor().suffix())
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                format!("{prefix}{suffix}")
+            })
+            .unwrap_or_default();
+        doc.remove(key);
+        if comments.contains('#') {
+            doc.set_trailing(format!(
+                "{}\n{comments}\n",
+                doc.trailing().as_str().unwrap_or("")
+            ));
+        }
+    }
 }
 
 /// Sets `table.key`, making the table (a `[table]`, not an inline one) when it is missing. A value
@@ -772,13 +913,332 @@ mod tests {
             })
             .collect();
         let mut v = json!({"version": shown["version"], "inject": shown["inject"],
-            "capture": shown["capture"], "chain": chain});
+            "summary": shown["summary"], "paid_usd_per_month": shown["paid_usd_per_month"],
+            "gemini": shown["gemini"], "capture": shown["capture"], "chain": chain});
         change(&mut v);
         serde_json::to_vec(&v).unwrap()
     }
 
     fn save_to(home: &tempfile::TempDir, body: &[u8]) -> Result<Value, Refusal> {
         save(home.path(), &Mutex::new(()), body)
+    }
+
+    #[test]
+    fn the_summary_shows_saved_values_and_the_parser_ranges() {
+        let home = home_with(None);
+        let shown = show(home.path());
+        assert_eq!(
+            shown["summary"],
+            json!({"curate": false, "language": "Japanese", "window_tokens": 5000,
+                "idle_minutes": 10})
+        );
+        assert_eq!(
+            shown["ranges"]["window_tokens"],
+            json!([0, 4_294_967_295_u32])
+        );
+        assert_eq!(
+            shown["ranges"]["idle_minutes"],
+            json!([0, 4_294_967_295_u32])
+        );
+        assert!(!home.path().join("config.toml").exists());
+        assert!(!home.path().join("providers.db").exists());
+
+        let home = home_with(Some(
+            "[summary]\ncurate = true\nlanguage = \"\"\nwindow_tokens = 0\nidle_minutes = 4294967295\n",
+        ));
+        assert_eq!(
+            show(home.path())["summary"],
+            json!({"curate": true, "language": "", "window_tokens": 0,
+                "idle_minutes": 4_294_967_295_u32})
+        );
+    }
+
+    #[test]
+    fn a_summary_save_is_lossless_and_stale_checked() {
+        let text = "# invented settings\n[summary]\ncurate = false # owner switch\n\
+            language = \"Japanese\" # language note\nwindow_tokens = 5000 # size note\n\
+            idle_minutes = 10 # wait note\nshrink = true\nfuture = \"kept\"\n\
+            [backup]\ndir = \"invented-backups\" # unrelated\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        let unchanged = save_to(&home, &posted(&shown, |_| {})).unwrap();
+        assert_eq!(file(&home).as_deref(), Some(text));
+        assert_eq!(unchanged["version"], shown["version"]);
+        let body = posted(&shown, |v| {
+            v["summary"] = json!({"curate": true, "language": "English\n日本語 <example>",
+                "window_tokens": 0, "idle_minutes": 4_294_967_295_u32});
+        });
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(saved["summary"]["language"], "English\n日本語 <example>");
+        let cfg = config::load(home.path()).unwrap();
+        assert!(cfg.summary.curate && cfg.summary.shrink);
+        assert_eq!(cfg.summary.window_tokens, 0);
+        assert_eq!(cfg.summary.idle_minutes, u32::MAX);
+        let after = file(&home).unwrap();
+        for kept in [
+            "# invented settings",
+            "# owner switch",
+            "# language note",
+            "# size note",
+            "# wait note",
+            "shrink = true",
+            "future = \"kept\"",
+            "dir = \"invented-backups\" # unrelated",
+        ] {
+            assert!(after.contains(kept), "{kept}: {after}");
+        }
+        assert!(!home.path().join("providers.db").exists());
+        let stale = save_to(&home, &body).unwrap_err();
+        assert_eq!((stale.status, stale.code), (409, "stale"));
+        assert_eq!(file(&home).as_deref(), Some(after.as_str()));
+    }
+
+    #[test]
+    fn the_paid_cap_takes_finite_values_of_0_or_more_only() {
+        let home = home_with(Some(
+            "paid_usd_per_month = 5.0 # monthly cap\n[summary]\nfuture = 7\n",
+        ));
+        let mut shown = show(home.path());
+        assert_eq!(shown["paid_usd_per_month"], 5.0);
+        assert_eq!(shown["ranges"]["paid_usd_per_month"], json!([0, null]));
+        for cap in [0.0, 0.125, 5.0, 1.0e300] {
+            shown = save_to(
+                &home,
+                &posted(&shown, |v| v["paid_usd_per_month"] = json!(cap)),
+            )
+            .unwrap();
+            assert_eq!(shown["paid_usd_per_month"], cap);
+            assert_eq!(config::load(home.path()).unwrap().paid_usd_per_month, cap);
+            let text = file(&home).unwrap();
+            assert!(
+                text.contains("# monthly cap") && text.contains("future = 7"),
+                "{text}"
+            );
+        }
+        let before = file(&home).unwrap();
+        let invalid = [
+            ("paid_usd_per_month", json!(-0.1)),
+            ("paid_usd_per_month", json!("5")),
+            ("paid_usd_per_month", Value::Null),
+        ];
+        for (field, value) in invalid {
+            let refusal = save_to(&home, &posted(&shown, |v| v[field] = value)).unwrap_err();
+            assert_eq!(refusal.status, 422);
+            assert_eq!(file(&home).as_deref(), Some(before.as_str()));
+        }
+        for (field, value) in [
+            ("curate", json!("true")),
+            ("language", json!(42)),
+            ("window_tokens", json!(-1)),
+            ("window_tokens", json!(4_294_967_296_u64)),
+            ("window_tokens", json!(1.5)),
+            ("idle_minutes", json!(-1)),
+            ("idle_minutes", json!(4_294_967_296_u64)),
+            ("idle_minutes", json!(1.5)),
+            ("shrink", json!(true)),
+        ] {
+            let refusal =
+                save_to(&home, &posted(&shown, |v| v["summary"][field] = value)).unwrap_err();
+            assert_eq!((refusal.status, refusal.code), (422, "type"), "{field}");
+            assert_eq!(file(&home).as_deref(), Some(before.as_str()));
+        }
+        let overflow = String::from_utf8(posted(&shown, |v| v["paid_usd_per_month"] = json!(0)))
+            .unwrap()
+            .replace("\"paid_usd_per_month\":0", "\"paid_usd_per_month\":1e999");
+        assert!(save_to(&home, overflow.as_bytes()).is_err());
+        assert_eq!(file(&home).as_deref(), Some(before.as_str()));
+        assert!(!home.path().join("providers.db").exists());
+    }
+
+    #[test]
+    fn the_spend_and_the_owner_stops_are_read_without_a_write() {
+        let empty = home_with(None);
+        let shown = show(empty.path());
+        assert_eq!(shown["usd_this_month"], 0.0);
+        assert_eq!(shown["stopped"], json!([]));
+        assert!(!empty.path().join("providers.db").exists());
+
+        let home = home_with(Some("providers = []\n"));
+        let db = Connection::open(home.path().join("providers.db")).unwrap();
+        // An older ledger needs no schema upgrade to read its spend and stops.
+        db.execute_batch(
+            "CREATE TABLE provider_calls(provider TEXT, ts INTEGER, role TEXT, usd REAL);
+            CREATE TABLE provider_state(provider TEXT, down_until INTEGER);
+            INSERT INTO provider_state VALUES ('owner-stopped', 9223372036854775807),
+                ('time-stopped', 9223372036854775806), ('expired', 1);",
+        )
+        .unwrap();
+        for (provider, ts, role, usd) in [
+            ("removed-entry", crate::db::now_ms(), "curator", Some(0.25)),
+            ("other-entry", crate::db::now_ms(), "digest", Some(0.5)),
+            ("embedding", crate::db::now_ms(), "embed", Some(99.0)),
+            ("embedding", crate::db::now_ms(), "query", Some(99.0)),
+            ("old-entry", 1, "curator", Some(88.0)),
+            ("free-entry", crate::db::now_ms(), "curator", None),
+        ] {
+            db.execute(
+                "INSERT INTO provider_calls VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![provider, ts, role, usd],
+            )
+            .unwrap();
+        }
+        let before = std::fs::read(home.path().join("providers.db")).unwrap();
+        let shown = show(home.path());
+        assert_eq!(shown["usd_this_month"], 0.75);
+        assert_eq!(shown["stopped"], json!(["owner-stopped"]));
+        assert_eq!(
+            std::fs::read(home.path().join("providers.db")).unwrap(),
+            before
+        );
+        assert!(!home.path().join("providers.db-wal").exists());
+        assert_eq!(file(&home).as_deref(), Some("providers = []\n"));
+
+        let damaged = home_with(Some("providers = []\n"));
+        std::fs::write(
+            damaged.path().join("providers.db"),
+            "invented damaged ledger",
+        )
+        .unwrap();
+        let shown = show(damaged.path());
+        assert!(shown.get("error").is_none());
+        assert_eq!(shown["usd_this_month"], Value::Null);
+        assert_eq!(shown["stopped"], Value::Null);
+        assert_eq!(
+            std::fs::read_to_string(damaged.path().join("providers.db")).unwrap(),
+            "invented damaged ledger"
+        );
+    }
+
+    #[test]
+    fn geminis_place_follows_the_config_chain() {
+        let home = home_with(Some("[summary]\nfuture = \"kept\" # unchanged\n"));
+        let mut shown = show(home.path());
+        assert!(
+            shown.get("gemini").is_some(),
+            "Gemini's saved choice must be shown"
+        );
+        assert_eq!(shown["gemini"], Value::Null);
+        for place in [
+            json!("before-subscriptions"),
+            json!("after-subscriptions"),
+            Value::Null,
+        ] {
+            shown = save_to(&home, &posted(&shown, |v| v["gemini"] = place.clone())).unwrap();
+            assert_eq!(shown["gemini"], place);
+            let cfg = config::load(home.path()).unwrap();
+            let gemini = cfg.providers.iter().position(|p| p.name() == "gemini");
+            match place.as_str() {
+                Some("before-subscriptions") => {
+                    let first_cli = cfg
+                        .providers
+                        .iter()
+                        .position(|p| matches!(p, Provider::Cli { .. }))
+                        .unwrap();
+                    assert_eq!(gemini, Some(first_cli - 1));
+                }
+                Some("after-subscriptions") => assert_eq!(gemini, Some(cfg.providers.len() - 1)),
+                _ => assert!(gemini.is_none()),
+            }
+            assert_eq!(
+                shown["chain"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p["name"] == "gemini"),
+                place != Value::Null
+            );
+            assert!(
+                file(&home)
+                    .unwrap()
+                    .contains("future = \"kept\" # unchanged")
+            );
+            assert!(!home.path().join("providers.db").exists());
+        }
+        let before = file(&home).unwrap();
+        for invalid in [json!("none"), json!("elsewhere"), json!(true), json!(1)] {
+            let refusal = save_to(&home, &posted(&shown, |v| v["gemini"] = invalid)).unwrap_err();
+            assert!(matches!(
+                (refusal.status, refusal.code),
+                (422, "type") | (400, "bad_request")
+            ));
+            assert_eq!(file(&home).as_deref(), Some(before.as_str()));
+        }
+
+        // The parser keeps an explicit Gemini entry and lets [chain] order take precedence.
+        let explicit = home_with(Some(
+            "gemini = \"before-subscriptions\" # place\n\
+            [chain]\norder = [\"subscription\", \"gemini\"]\n\
+            [[providers]]\nkind = \"cli\"\nname = \"subscription\"\ncli = \"invented-cli\"\n\
+            [[providers]]\nkind = \"openai\"\nname = \"gemini\"\n\
+            base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"invented-model\"\n",
+        ));
+        let shown = show(explicit.path());
+        let saved = save_to(
+            &explicit,
+            &posted(&shown, |v| v["gemini"] = json!("after-subscriptions")),
+        )
+        .unwrap();
+        assert_eq!(saved["chain"][0]["name"], "subscription");
+        assert_eq!(saved["chain"][1]["name"], "gemini");
+        assert!(
+            file(&explicit)
+                .unwrap()
+                .contains("gemini = \"after-subscriptions\" # place")
+        );
+        let saved = save_to(&explicit, &posted(&saved, |v| v["gemini"] = Value::Null)).unwrap();
+        assert_eq!(saved["gemini"], Value::Null);
+        assert_eq!(saved["chain"][1]["name"], "gemini");
+    }
+
+    #[test]
+    fn taking_gemini_out_keeps_its_comments() {
+        let home = home_with(Some(
+            "# invented heading\ngemini = \"after-subscriptions\" # place note\n\
+            paid_usd_per_month = 5.0 # cap note\n[summary]\nfuture = \"kept\" # future note\n",
+        ));
+        let shown = show(home.path());
+        let saved = save_to(&home, &posted(&shown, |v| v["gemini"] = Value::Null)).unwrap();
+        assert_eq!(saved["gemini"], Value::Null);
+        let text = file(&home).unwrap();
+        for comment in [
+            "# invented heading",
+            "# place note",
+            "# cap note",
+            "# future note",
+        ] {
+            assert!(text.contains(comment), "missing {comment}: {text}");
+        }
+        assert_eq!(config::load(home.path()).unwrap().gemini, None);
+    }
+
+    #[test]
+    fn a_top_level_setting_changed_keeps_the_comments_above_it() {
+        let home = home_with(Some(
+            "# cap heading\n\"paid_usd_per_month\" = 5.0 # cap suffix\n\
+            # Gemini heading\n\"gemini\" = \"before-subscriptions\" # Gemini suffix\n\
+            [summary]\nfuture = \"kept\" # unrelated\n",
+        ));
+        let shown = show(home.path());
+        let saved = save_to(
+            &home,
+            &posted(&shown, |v| {
+                v["paid_usd_per_month"] = json!(0.125);
+                v["gemini"] = json!("after-subscriptions");
+            }),
+        )
+        .unwrap();
+        assert_eq!(saved["paid_usd_per_month"], 0.125);
+        assert_eq!(saved["gemini"], "after-subscriptions");
+        let text = file(&home).unwrap();
+        for kept in [
+            "# cap heading",
+            "# Gemini heading",
+            "\"paid_usd_per_month\" = 0.125 # cap suffix",
+            "\"gemini\" = \"after-subscriptions\" # Gemini suffix",
+            "future = \"kept\" # unrelated",
+        ] {
+            assert!(text.contains(kept), "missing {kept}: {text}");
+        }
     }
 
     fn at<'a>(shown: &'a Value, name: &str) -> &'a Value {
@@ -1562,7 +2022,9 @@ mod tests {
             let body = json!({"version": shown["version"], "inject": {"session_start": true,
                 "session_start_chars": 6000, "per_prompt": false, "per_prompt_chars": 1500,
                 "correction": true, "correction_chars": 800}, "capture": {"store_prompts": true,
-                "tool_output": "full"}, "chain": []});
+                "tool_output": "full"}, "chain": [], "summary": {"curate": false,
+                "language": "Japanese", "window_tokens": 5000, "idle_minutes": 10},
+                "paid_usd_per_month": 5.0});
             let r = save_to(&home, &serde_json::to_vec(&body).unwrap()).unwrap_err();
             assert_eq!((r.status, r.code), (422, "file_invalid"), "{text}");
             assert_eq!(file(&home).as_deref(), Some(text));

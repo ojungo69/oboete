@@ -32,11 +32,11 @@ left with "—" there.
 | A provider's key on macOS and Windows, in owner-only storage there | 6.6, spec-webui | refused (`a_key_save_waits_for_owner_only_files_off_linux`) | `save_key` | the next call | macOS, Windows | — | #281, after the switch, before #94 closes |
 | Add, edit and remove a provider entry of a supported type | 1.4 | — | `[[providers]]` | the next window | all | — | W2 |
 | Test a provider's connection, separately from a save | spec-webui | — | a typed probe | at once, nothing saved | all | — | W2 |
-| Curation on or off | 3.1, 7.4 | — | `[summary] curate` | the next window | all | — | W1 |
-| Summary language, window size, idle wait | 3.1 | — | `[summary]` | the next window | all | — | W1 |
-| The monthly cap of paid calls, with the month's spend beside it | 1.4, parity 13 | — | `paid_usd_per_month`, providers.db | the next call | all | — | W1 |
-| Gemini's place in the chain | 1.4 | — | `gemini` | the next window | all | — | W1 |
-| Resume a provider stopped for the owner | 1.4 | — | `oboete resume` | the worker's next pass | all | — | W1 |
+| Curation on or off | 3.1, 7.4 | page | `[summary] curate` | the next window | all | `settings.rs` `the_summary_shows_saved_values_and_the_parser_ranges`, `a_summary_save_is_lossless_and_stale_checked` | W1 |
+| Summary language, window size, idle wait | 3.1 | page | `[summary]` | the next window | all | `settings.rs` `a_summary_save_is_lossless_and_stale_checked`, `the_paid_cap_takes_finite_values_of_0_or_more_only` | W1 |
+| The monthly cap of paid calls, with the month's spend beside it | 1.4, parity 13 | page | `paid_usd_per_month`, providers.db | the next call | all | `settings.rs` `the_paid_cap_takes_finite_values_of_0_or_more_only`, `the_spend_and_the_owner_stops_are_read_without_a_write`, `a_top_level_setting_changed_keeps_the_comments_above_it` | W1 |
+| Gemini's place in the chain | 1.4 | page | `gemini` | the next window | all | `settings.rs` `geminis_place_follows_the_config_chain`, `taking_gemini_out_keeps_its_comments` | W1 |
+| Resume a provider stopped for the owner | 1.4 | page | `oboete resume` | the worker's next pass | all | `view.rs` `resume_passes_the_save_guards_and_only_clears_the_stop`; `settings.rs` `the_spend_and_the_owner_stops_are_read_without_a_write` | W1 |
 
 ### Delivery, capture and privacy
 
