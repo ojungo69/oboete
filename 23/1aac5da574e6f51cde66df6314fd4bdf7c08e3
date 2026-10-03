@@ -1,0 +1,21 @@
+docs/claude-mem-parity.md
+  s_821f8fcda60ea0::t_48c7cfae1b676f 41-43
+docs/research/clef-study-2026-10-03.md
+  s_821f8fcda60ea0::t_17d64ddea6e699 88-90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "231aac5da574e6f51cde66df6314fd4bdf7c08e3",
+  "prompts": {},
+  "sessions": {
+    "s_821f8fcda60ea0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3c3ad270-2ec6-4f00-abc6-a7903bd32508",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
