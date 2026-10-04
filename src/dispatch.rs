@@ -42,7 +42,10 @@ impl Admission {
     }
 
     pub(crate) fn release(&self) {
-        self.held.lock().unwrap_or_else(|p| p.into_inner()).take();
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 }
 
@@ -608,6 +611,72 @@ connection.close()
         released_before_response(true, "direct", true);
     }
 
+    fn serve_redirects(
+        listener: std::net::TcpListener,
+        waiting: Arc<AtomicBool>,
+        status: u16,
+    ) -> Vec<(String, Vec<u8>)> {
+        let mut seen = Vec::new();
+        'requests: for n in 0..2 {
+            let until = Instant::now() + Duration::from_secs(2);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if waiting.load(Ordering::Acquire) {
+                            break 'requests;
+                        }
+                        assert!(Instant::now() < until, "redirect did not connect");
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(e) => panic!("redirect accept: {e}"),
+                }
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                assert_eq!(socket.read(&mut byte).unwrap(), 1);
+                head.push(byte[0]);
+            }
+            // The short probe detects a consumed redirect body, after headers arrive.
+            socket
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
+            let header = String::from_utf8(head).unwrap();
+            let method = header.split_whitespace().next().unwrap().to_owned();
+            let length = header
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|len| len.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            let mut body = vec![0; length];
+            let mut read = 0;
+            while read < length {
+                match socket.read(&mut body[read..]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => read += n,
+                }
+            }
+            body.truncate(read);
+            seen.push((method, body));
+            let reply = if n == 0 {
+                format!(
+                    "HTTP/1.1 {status} Redirect\r\nLocation: /next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".into()
+            };
+            let _ = socket.write_all(reply.as_bytes());
+        }
+        seen
+    }
+
     /// Existing ureq redirects switch 302 to a bodyless GET; 307 retains POST but does not
     /// rewind an already-consumed JSON body. The admitted reader must keep both behaviours.
     #[test]
@@ -618,67 +687,7 @@ connection.close()
             let url = format!("http://{}/", listener.local_addr().unwrap());
             let finished = Arc::new(AtomicBool::new(false));
             let waiting = Arc::clone(&finished);
-            let server = std::thread::spawn(move || {
-                let mut seen = Vec::new();
-                'requests: for n in 0..2 {
-                    let until = Instant::now() + Duration::from_secs(2);
-                    let mut socket = loop {
-                        match listener.accept() {
-                            Ok((socket, _)) => break socket,
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                if waiting.load(Ordering::Acquire) {
-                                    break 'requests;
-                                }
-                                assert!(Instant::now() < until, "redirect did not connect");
-                                std::thread::sleep(Duration::from_millis(1));
-                            }
-                            Err(e) => panic!("redirect accept: {e}"),
-                        }
-                    };
-                    socket
-                        .set_read_timeout(Some(Duration::from_secs(5)))
-                        .unwrap();
-                    let mut head = Vec::new();
-                    while !head.ends_with(b"\r\n\r\n") {
-                        let mut byte = [0];
-                        assert_eq!(socket.read(&mut byte).unwrap(), 1);
-                        head.push(byte[0]);
-                    }
-                    // The short probe detects a consumed redirect body, after headers arrive.
-                    socket
-                        .set_read_timeout(Some(Duration::from_millis(200)))
-                        .unwrap();
-                    let header = String::from_utf8(head).unwrap();
-                    let method = header.split_whitespace().next().unwrap().to_owned();
-                    let length = header
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(|len| len.trim().parse::<usize>().unwrap())
-                        })
-                        .unwrap_or(0);
-                    let mut body = vec![0; length];
-                    let mut read = 0;
-                    while read < length {
-                        match socket.read(&mut body[read..]) {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => read += n,
-                        }
-                    }
-                    body.truncate(read);
-                    seen.push((method, body));
-                    let reply = if n == 0 {
-                        format!(
-                            "HTTP/1.1 {status} Redirect\r\nLocation: /next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                        )
-                    } else {
-                        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".into()
-                    };
-                    let _ = socket.write_all(reply.as_bytes());
-                }
-                seen
-            });
+            let server = std::thread::spawn(move || serve_redirects(listener, waiting, status));
             let config = Config::builder()
                 .proxy(None)
                 .max_redirects(10)
