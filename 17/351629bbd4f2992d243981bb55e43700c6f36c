@@ -1,0 +1,26 @@
+src/provider.rs
+  s_ce2b24784deac6::t_5a027023f98aa8 2013-2018,2739,2774-2775,2841-2847,2854-2855,2874
+  s_ce2b24784deac6::t_e574549baef5bb 2738,2840
+  s_ce2b24784deac6::t_0f671e5b9d6953 1973-1976,2036-2040,2740-2751,2777-2839,2848-2853,2856-2863,2873
+  s_ce2b24784deac6::t_1c362de45e338d 1832-1918,1920-1940,1942-1943,1952,1957-1959,1966-1972,1977-1978,2005,2022,2042
+  s_ce2b24784deac6::t_ff93d27649fe05 2752-2773,2776
+  s_ce2b24784deac6::t_bc1bf2c7363333 2864-2872
+  s_ce2b24784deac6::t_051042695bd679 1919
+  s_ce2b24784deac6::t_5b49134b98b05a 2875
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "17351629bbd4f2992d243981bb55e43700c6f36c",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
