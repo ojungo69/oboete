@@ -500,8 +500,13 @@ pub fn resident(home: &Path) -> Result<()> {
                 continue;
             }
             match executable.change() {
-                crate::executable::Change::Replaced => looking
-                    .replace(|| crate::executable::exec(crate::executable::Role::Viewer, id, None)),
+                crate::executable::Change::Replaced
+                    if crate::executable::startup_ready(&looking.home) =>
+                {
+                    looking.replace(|| {
+                        crate::executable::exec(crate::executable::Role::Viewer, id, None)
+                    });
+                }
                 crate::executable::Change::Missing if looking.may_leave() => {
                     let _ = say(&looking.home, "left: executable missing");
                     std::process::exit(0);

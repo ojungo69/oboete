@@ -39,7 +39,10 @@ owner's use, and what could be left out); what the review changed is listed at t
 - Slice 4 (R9): worker and viewer keep their startup executable path, loaded file identity and
   original arguments. A renamed image is executed in place; detached starts use that same path.
   The worker checks only its dedicated loop, outside transactions and after embedding replies
-  are joined and settled. The viewer checks on its minute tick, freezes admission only with no
+  are joined and settled. Before exec, both validate one read-only config snapshot with the
+  existing capture/redaction and worker/view types; an unreadable or unloadable file defers
+  replacement while the old mode/service stays up. Missing config uses startup defaults.
+  The viewer checks on its minute tick, freezes admission only with no
   request/save live, and restores admission when exec fails. A first missing-path observation
   gives a complete minute; recovery or another metadata error cancels it. Only continued
   NotFound ends the process. The exec boundary uses libc execve: a failed standard Command exec
@@ -171,6 +174,10 @@ tick, but not while an embedding call is out. The viewer looks only on its once-
 conditions). A path that is gone ends a process only when it is still gone at the next minute
 check. Hooks already run the new binary; this keeps the time in which an old process and new hooks
 share the stores short.
+Before exec, a config snapshot must pass the startup capture/redaction and worker/view readers.
+A file being edited or unreadable defers that exec until a later normal round/tick; no cached
+rules or environment snapshot replace the current egress checks. The file may still change
+after this preflight under the existing local-path check/write Limits.
 
 R10. **A kill while it waits is not an alarm.** A resident worker is killed at every shutdown of
 the PC or of WSL (this PC: about every two to five days, by the journal's boot list). The worker

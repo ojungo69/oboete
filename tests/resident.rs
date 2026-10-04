@@ -856,6 +856,105 @@ fn malformed_or_wrong_role_exec_metadata_refuses_before_creating_a_home() {
     }
 }
 
+fn binary_update_waits_for_loadable_config(viewer: bool) {
+    use std::os::unix::fs::MetadataExt;
+    let scratch = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    let config =
+        format!("[worker]\nresident = true\n[summary]\ncurate = false\n[view]\nport = {port}\n");
+    std::fs::write(h.join("config.toml"), &config).unwrap();
+    let executable = scratch.path().join("oboete");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
+    let (mut process, port) = if viewer {
+        copied_viewer(&executable, h, port)
+    } else {
+        (
+            Worker(copied_spawn(&mut copied_command(
+                &executable,
+                h,
+                &["worker"],
+            ))),
+            port,
+        )
+    };
+    let pid = process.0.id();
+    let lock = if viewer { "view.lock" } else { "worker.lock" };
+    until("the original resident holds its home", || held(h, lock));
+    if viewer {
+        assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    }
+    let image = format!("/proc/{pid}/exe");
+    let original = std::fs::metadata(&image).unwrap();
+    let generation =
+        (!viewer).then(|| std::fs::read_to_string(h.join("state/worker-gen")).unwrap());
+    let valid = std::fs::read_to_string(h.join("config.toml")).unwrap();
+    std::fs::write(h.join("config.toml"), "[worker\nresident = true\n").unwrap();
+    let next = scratch.path().join("oboete.next");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
+    let replacement = std::fs::metadata(&next).unwrap();
+    std::fs::rename(next, executable).unwrap();
+    let waiting = Instant::now();
+    let observation = if viewer {
+        Duration::from_secs(65)
+    } else {
+        Duration::from_secs(1)
+    };
+    until_within(
+        "the unloadable config keeps the old resident serving",
+        Duration::from_secs(75),
+        || {
+            assert!(
+                process.0.try_wait().unwrap().is_none(),
+                "replacement exited instead of keeping the old resident"
+            );
+            assert!(held(h, lock), "replacement released the old lock");
+            let current = std::fs::metadata(&image).unwrap();
+            assert_eq!(
+                (current.dev(), current.ino()),
+                (original.dev(), original.ino()),
+                "replacement ran with unloadable config"
+            );
+            waiting.elapsed() >= observation
+        },
+    );
+    if viewer {
+        assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    }
+    std::fs::write(h.join("config.toml"), valid).unwrap();
+    until_within(
+        "the repaired config allows the new image",
+        Duration::from_secs(75),
+        || {
+            std::fs::metadata(&image).is_ok_and(|current| {
+                (current.dev(), current.ino()) == (replacement.dev(), replacement.ino())
+            })
+        },
+    );
+    if viewer {
+        assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    } else {
+        until("the new worker finished initialization", || {
+            held(h, lock)
+                && std::fs::read_to_string(h.join("state/worker-gen"))
+                    .is_ok_and(|current| Some(&current) != generation.as_ref())
+        });
+    }
+    assert!(held(h, lock));
+    assert!(process.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn worker_update_defers_until_malformed_config_is_repaired() {
+    binary_update_waits_for_loadable_config(false);
+}
+
+#[test]
+fn viewer_update_defers_until_malformed_config_is_repaired() {
+    binary_update_waits_for_loadable_config(true);
+}
+
 #[test]
 fn restore_runs_beside_a_resident_worker_which_backs_up_and_exits_for_it() {
     let home = tempfile::tempdir().unwrap();

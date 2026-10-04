@@ -115,6 +115,35 @@ pub(crate) fn check_lock(
     Ok(())
 }
 
+/// A replacement starts these readers again. One read-only snapshot avoids dropping a live
+/// resident into startup errors while its owner is editing; egress still validates per call.
+pub(crate) fn startup_ready(home: &Path) -> bool {
+    let text = match std::fs::read_to_string(home.join("config.toml")) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return false,
+    };
+    startup_text_ready(text.as_deref())
+}
+
+fn startup_text_ready(text: Option<&str>) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Settings {
+        #[serde(default, rename = "worker")]
+        _worker: crate::config::Worker,
+        #[serde(default, rename = "view")]
+        _view: crate::config::View,
+    }
+    let capture = match crate::config::parse_capture(text) {
+        Ok(capture) => capture,
+        Err(_) => return false,
+    };
+    if crate::redact::Rules::new(&capture.redaction).is_err() {
+        return false;
+    }
+    text.is_none_or(|text| toml::from_str::<Settings>(text).is_ok())
+}
+
 #[cfg(target_os = "linux")]
 fn inherited_viewer() -> Option<u32> {
     let value = std::env::var(VIEWER_HANDOFF).ok()?;
@@ -316,6 +345,47 @@ impl Binary {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn startup_config_uses_defaults_or_checks_capture_redaction_and_resident_settings() {
+        assert!(startup_text_ready(None));
+        assert!(startup_text_ready(Some("")));
+        assert!(startup_text_ready(Some(
+            "[worker]\nresident = true\n[view]\nport = 17374\n[capture]\nstore_prompts = false\ntool_output = 'head-tail'\n"
+        )));
+        assert!(startup_text_ready(Some(
+            "[[redaction.extra_rules]]\nid = 'synthetic'\nregex = 'canary-[a-z]+'\n"
+        )));
+        for invalid in [
+            "[worker\nresident = true",
+            "[worker]\nresident = 'editing'",
+            "[worker]\nresident = true\nresdient = true",
+            "[view]\nport = 0",
+            "[view]\nport = 65536",
+            "[view]\nport = 17374\nextra = true",
+            "[capture]\ntool_output = 'unknown'",
+            "[redactions]\nallowlist = []",
+            "[redaction]\nallowlist = ['synthetic-not-a-hash']",
+            "[[redaction.extra_rules]]\nid = 'synthetic'\nregex = '['",
+            "[[redaction.extra_rules]]\nid = 'synthetic'\nregex = '(canary)'\nsecret_group = 2",
+        ] {
+            assert!(!startup_text_ready(Some(invalid)));
+        }
+    }
+
+    #[test]
+    fn unreadable_config_defers_replacement_and_a_repaired_file_is_rechecked() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("config.toml");
+        assert!(startup_ready(home.path()));
+        std::fs::create_dir(&path).unwrap();
+        assert!(!startup_ready(home.path()));
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, "[worker\n").unwrap();
+        assert!(!startup_ready(home.path()));
+        std::fs::write(&path, "[worker]\nresident = true\n").unwrap();
+        assert!(startup_ready(home.path()));
+    }
 
     #[test]
     fn only_the_same_process_and_known_lock_roles_can_restore_a_home_handoff() {

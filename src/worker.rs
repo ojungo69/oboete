@@ -598,7 +598,7 @@ fn serve(
         let calling = |phases: &Phases| phases.embed.as_ref().is_some_and(|e| e.busy());
         if yields && !calling(phases) {
             match holding.executable.change() {
-                crate::executable::Change::Replaced => {
+                crate::executable::Change::Replaced if crate::executable::startup_ready(home) => {
                     let _ = crate::executable::exec(
                         crate::executable::Role::Worker,
                         holding.home,
@@ -609,7 +609,7 @@ fn serve(
                     );
                 }
                 crate::executable::Change::Missing => return Ok(false),
-                crate::executable::Change::Stay => {}
+                crate::executable::Change::Stay | crate::executable::Change::Replaced => {}
             }
         }
         // And once a command has asked, or the worker is to leave, no other call is sent, by the
@@ -711,7 +711,9 @@ fn serve(
                 }
                 if yields && !calling(phases) {
                     match holding.executable.change() {
-                        crate::executable::Change::Replaced => {
+                        crate::executable::Change::Replaced
+                            if crate::executable::startup_ready(home) =>
+                        {
                             let _ = crate::executable::exec(
                                 crate::executable::Role::Worker,
                                 holding.home,
@@ -722,7 +724,7 @@ fn serve(
                             );
                         }
                         crate::executable::Change::Missing => return Ok(false),
-                        crate::executable::Change::Stay => {}
+                        crate::executable::Change::Stay | crate::executable::Change::Replaced => {}
                     }
                 }
                 if crate::backup::restore_requested(home) || replaced() {
@@ -2289,29 +2291,94 @@ mod tests {
         assert!(!crate::backup::restore_requested(p));
     }
 
-    /// Children that other threads fork hold the lock file until they exec: a lock just dropped
-    /// is taken again all the same.
+    /// Forks can retain the dropped OFD until exec. Once every owned spawn round completes,
+    /// the lock is strictly available again; no scheduler-duration promise is involved.
     #[cfg(unix)]
     #[test]
     fn a_lock_just_dropped_is_taken_again_while_other_threads_spawn() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        const ISOLATED: &str = "OBOETE_TEST_LOCK_SPAWN_ROUNDS";
+        if std::env::var_os(ISOLATED).is_none() {
+            // Other libtest tests also fork. Isolate only this fixture, not the entire suite.
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "worker::tests::a_lock_just_dropped_is_taken_again_while_other_threads_spawn",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .envs(std::env::vars_os().filter(|(key, _)| {
+                    let key = key.to_string_lossy().to_ascii_uppercase();
+                    !["KEY", "TOKEN", "SECRET", "PASSWORD"]
+                        .iter()
+                        .any(|word| key.contains(word))
+                }))
+                .env(ISOLATED, "1")
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let start = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "isolated lock fixture failed");
+                    return;
+                }
+                if start.elapsed() >= Duration::from_secs(120) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("isolated lock fixture stuck");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let _strict = contending(); // Existing test helper: every taking uses File::try_lock once.
         let home = tempfile::tempdir().unwrap();
-        let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let spawners: Vec<_> = (0..4)
-            .map(|_| {
-                let stop = stop.clone();
-                std::thread::spawn(move || {
-                    while !stop.load(Ordering::Relaxed) {
-                        let _ = std::process::Command::new("true").status();
+        let taken = std::thread::scope(|scope| {
+            let (completed, results) = std::sync::mpsc::channel();
+            let mut rounds = Vec::new();
+            let mut spawners = Vec::new();
+            for spawner in 0..4 {
+                let (release, round) = std::sync::mpsc::channel();
+                rounds.push(release);
+                let completed = completed.clone();
+                spawners.push(scope.spawn(move || {
+                    while let Ok(round) = round.recv() {
+                        let status = std::process::Command::new("true").env_clear().status();
+                        completed.send((spawner, round, status)).unwrap();
                     }
-                })
-            })
-            .collect();
-        let taken = (0..100)
-            .take_while(|_| lock(home.path()).unwrap().is_some())
-            .count();
-        stop.store(true, Ordering::Relaxed);
-        spawners.into_iter().for_each(|t| t.join().unwrap());
+                }));
+            }
+            let mut taken = 0;
+            for round in 0..100 {
+                let held = lock(home.path()).unwrap().expect("initial round taking");
+                for release in &rounds {
+                    release.send(round).unwrap();
+                }
+                drop(held);
+                let mut finished = [false; 4];
+                for _ in 0..4 {
+                    let (spawner, completed_round, status) = results
+                        .recv_timeout(Duration::from_secs(30))
+                        .expect("owned spawn round stuck");
+                    assert_eq!(completed_round, round);
+                    assert!(!finished[spawner], "duplicate spawn completion");
+                    finished[spawner] = true;
+                    assert!(status.unwrap().success(), "owned child failed");
+                }
+                assert!(finished.into_iter().all(|done| done));
+                drop(
+                    lock(home.path())
+                        .unwrap()
+                        .expect("a completed spawn round retained the dropped lock"),
+                );
+                taken += 1;
+            }
+            drop(rounds); // Stop every owned receiver before joining its spawner.
+            for spawner in spawners {
+                spawner.join().unwrap();
+            }
+            taken
+        });
         assert_eq!(taken, 100, "a dropped lock was still held");
     }
 
