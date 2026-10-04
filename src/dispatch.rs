@@ -632,6 +632,8 @@ connection.close()
                     Err(e) => panic!("redirect accept: {e}"),
                 }
             };
+            // Accepted sockets can inherit nonblocking mode from the listener on BSD.
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
