@@ -428,6 +428,8 @@ pub struct ImportIdentity {
 
 pub struct Raw {
     conn: Connection,
+    home: std::path::PathBuf,
+    file_identity: Option<String>,
     device: String,
     /// The store's lineage, kept when a copied file gets a new device for future appends.
     home_id: String,
@@ -481,7 +483,26 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
             return Err(e).context("finish a stopped restore");
         }
     }
+    // Give first creation the same nonempty identity witness as an existing file. This is
+    // after stopped-restore recovery and under the swap hold; an interrupted empty creation is
+    // the same state Connection::open already leaves before its first schema transaction.
+    let mut create = std::fs::OpenOptions::new();
+    create.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        create.mode(0o600);
+    }
+    match create.open(&path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("create {}", path.display())),
+    }
+    let file_before = crate::db::store_file(&path);
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+    // A changed path invalidates send/registration admission without introducing a new open
+    // failure: the resident worker's existing before/after observation reopens the stores.
+    let mut bound = !file_before.is_empty() && crate::db::store_file(&path) == file_before;
     #[cfg(test)]
     crate::crash::arm(&conn);
     crate::db::wal_until(&conn, "FULL", deadline)?;
@@ -550,7 +571,15 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     if let Some(id) = &previous_device {
         seed_home(id)?;
     }
+    bound &= crate::db::store_file(&path) == file_before;
     crate::db::ensure_device_until(&conn, &path, deadline).context("device id")?;
+    let file_identity: String =
+        conn.query_row("SELECT value FROM meta WHERE key='store_file'", [], |r| {
+            r.get(0)
+        })?;
+    let file_identity =
+        (bound && file_identity == file_before && crate::db::store_file(&path) == file_before)
+            .then_some(file_identity);
     let device = conn.query_row("SELECT value FROM meta WHERE key='device_id'", [], |r| {
         r.get::<_, String>(0)
     })?;
@@ -567,6 +596,8 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     };
     Ok(Raw {
         conn,
+        home: home.to_owned(),
+        file_identity,
         device,
         home_id,
         _swap: swap,
@@ -630,6 +661,22 @@ pub fn lock_for_swap(home: &Path) -> Result<std::fs::File> {
 }
 
 impl Raw {
+    /// Order a sender's final read with forget, without holding a SQLite transaction.
+    pub(crate) fn dispatch(&self) -> Result<crate::dispatch::Guard> {
+        let admission = crate::dispatch::Admission::shared(&self.home)?;
+        self.current()?;
+        Ok(admission)
+    }
+
+    fn current(&self) -> Result<()> {
+        let current = crate::db::store_file(&self.home.join("raw.db"));
+        if current.is_empty() || self.file_identity.as_deref() != Some(current.as_str()) {
+            return Err(anyhow::Error::new(crate::curate::ListChanged))
+                .context("raw.db was replaced: reopen before dispatch or registration");
+        }
+        Ok(())
+    }
+
     /// What forget would register for `target` (D1): each imported record's origin, session hash
     /// and cut time, read on this connection, so `forget_start` reads it again inside its
     /// transaction. A record with no import origin is refused: it cannot be told from a record
@@ -733,6 +780,9 @@ impl Raw {
         started: i64,
     ) -> Result<crate::forget::Request> {
         preview.validate()?;
+        let _dispatch =
+            crate::dispatch::exclusive(&self.home).context("forget was not registered")?;
+        self.current()?;
         let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
         let again = self.forget_preview(preview.target.clone())?;
         anyhow::ensure!(
@@ -759,6 +809,8 @@ impl Raw {
         if requests.is_empty() {
             return Ok(0);
         }
+        let _dispatch = crate::dispatch::exclusive(&self.home)?;
+        self.current()?;
         let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
         let mut applied = 0;
         for r in requests {
@@ -2962,6 +3014,60 @@ pub fn test_event(body: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_wait_failure_is_bounded_and_registers_no_partial_forget() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let mut event = test_event(r#"{"prompt":"native-timeout-canary-903"}"#);
+        event.source = "transcript".into();
+        let identity = ImportIdentity {
+            origin: crate::forget::origin("synthetic-dispatch", "timeout-903"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let seq = raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                }],
+                &[identity],
+                "",
+                None,
+            )
+            .unwrap()[0];
+        let preview = crate::forget::preview(
+            home.path(),
+            crate::forget::Target::Record {
+                device: raw.device().into(),
+                seq,
+            },
+        )
+        .unwrap();
+        let held = raw.dispatch().unwrap();
+        let began = Instant::now();
+        let rejected = crate::forget::start(home.path(), &preview);
+        let elapsed = began.elapsed();
+        assert!(
+            rejected.is_err(),
+            "a transmitting batch permitted registration"
+        );
+        assert!(elapsed >= crate::db::OPEN_WRITE_WAIT && elapsed < Duration::from_secs(15));
+        assert_eq!(raw.denied_count().unwrap(), 0);
+        assert!(crate::forget::status(home.path()).unwrap().is_empty());
+        assert!(!home.path().join("forget.log").exists());
+        assert!(!home.path().join("backups/forget.log").exists());
+        held.release();
+        assert_eq!(
+            crate::forget::start(home.path(), &preview)
+                .unwrap()
+                .0
+                .records,
+            1
+        );
+    }
 
     /// A rescan's whole tombstone hides the sample, but forget must still deny the native
     /// import identity in a record or span target and retain its transcript cutoff.

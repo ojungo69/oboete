@@ -223,6 +223,8 @@ impl Builder {
                 && !excluded
                 && !text.is_empty()
                 && cooled
+                // D1 applies to new query asks too; settled answers and text ranking still run.
+                && !crate::curate::lagging(raw, k)?
                 && e.ask(k, &id, &text, &reading, &rules, tombstones)?
             {
                 asks.push(key);
@@ -1168,6 +1170,76 @@ mod tests {
         );
         assert_eq!(run(&s, &mut k, &mut phase, NOW + 17 * MIN), Phase::Covered);
         assert_eq!(queries(&s), 2);
+    }
+
+    /// D1 holds only new asks while a real native record's forget is ahead of consumers.
+    #[test]
+    fn a_native_forget_holds_new_query_asks_until_the_consumers_drain() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.decided(R, MIN, "Parser errors go to stderr.", &[]);
+        s.event(
+            "prompt",
+            "live",
+            (R, "main"),
+            NOW - MIN,
+            json!({"prompt": "parser errors"}),
+        );
+        let mut event = crate::raw::test_event(r#"{"prompt":"native-policy-canary-902"}"#);
+        event.source = "transcript".into();
+        event.session = "native-history".into();
+        let identity = crate::raw::ImportIdentity {
+            origin: crate::forget::origin("synthetic-dispatch", "policy-902"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let seq = s
+            .raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                }],
+                &[identity],
+                "",
+                None,
+            )
+            .unwrap()[0];
+        s.run();
+        embedded(&s, &stub);
+        let home = s.home.path();
+        let preview = crate::forget::preview(
+            home,
+            crate::forget::Target::Record {
+                device: s.raw.device().into(),
+                seq,
+            },
+        )
+        .unwrap();
+        crate::forget::start(home, &preview).unwrap();
+        let mut k = crate::knowledge::open(home).unwrap();
+        assert!(crate::curate::lagging(&s.raw, &k).unwrap());
+        let mut phase = crate::embed_phase::Phase::new(home);
+        phase.poll(&s.raw, &k).unwrap();
+        let mut builder = Builder::new(home);
+        builder.run(&s.raw, &mut k, Some(&mut phase), NOW).unwrap();
+        assert_eq!(
+            queries(&s),
+            0,
+            "a new ask bypassed the actual native forget lag"
+        );
+        assert!(!phase.busy());
+        s.run();
+        assert!(!crate::curate::lagging(&s.raw, &k).unwrap());
+        builder.run(&s.raw, &mut k, Some(&mut phase), NOW).unwrap();
+        assert_eq!(
+            queries(&s),
+            1,
+            "draining the tombstone did not resume the query"
+        );
+        wait(|| phase.done());
+        phase.poll(&s.raw, &k).unwrap();
     }
 
     /// An unchanged query keeps its semantic candidates across replies and a worker restart.

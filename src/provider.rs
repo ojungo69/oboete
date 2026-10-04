@@ -202,7 +202,7 @@ pub type AnswerCheck<'a> = dyn Fn(&Value) -> Option<&'static str> + 'a;
 
 /// The egress gate (spec 5.5): asked before each call that sends the prompt out, a retry too. An
 /// error stops the run there, with no further call.
-pub type Gate<'a> = dyn Fn() -> Result<()> + 'a;
+pub type Gate<'a> = dyn Fn() -> Result<Option<crate::dispatch::Guard>> + 'a;
 
 pub struct Chain<'a> {
     providers: &'a [Provider],
@@ -344,16 +344,15 @@ impl<'a> Chain<'a> {
                     continue;
                 }
             }
-            if let Some(gate) = self.gate {
-                gate()?;
-            }
+            let admission = self.gate.map(|gate| gate()).transpose()?.flatten();
             let (used, _) = providers_db::calls_in_a_day(conn, &name)?;
             let started = Instant::now();
             let forced = forced_fail.as_deref() == Some(name.as_str());
             let mut result = if forced {
+                drop(admission);
                 Err(CallError::other("forced failure (OBOETE_FAIL_PROVIDER)"))
             } else {
-                call(p, prompt, schema)
+                call(p, prompt, schema, admission)
             };
             // The retry is a second request: only when the daily budget has room for it.
             if let Err(e) = &result
@@ -368,10 +367,8 @@ impl<'a> Chain<'a> {
                 // A 429 is an answer with an HTTP error status: not billed.
                 record("wait", ms, Some(&detail), true, Usage::default(), None)?;
                 std::thread::sleep(Duration::from_secs_f64(wait + 0.5));
-                if let Some(gate) = self.gate {
-                    gate()?;
-                }
-                result = call(p, prompt, schema);
+                let admission = self.gate.map(|gate| gate()).transpose()?.flatten();
+                result = call(p, prompt, schema, admission);
             }
             // The headers hold whatever the answer turns out to be.
             let rate = match &result {
@@ -560,7 +557,12 @@ pub(crate) fn next_state(was: providers_db::State, e: &CallError) -> providers_d
     }
 }
 
-fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Answer, CallError> {
+fn call(
+    p: &Provider,
+    prompt: &str,
+    schema: &Value,
+    admission: Option<crate::dispatch::Guard>,
+) -> Result<Answer, CallError> {
     match p {
         Provider::Openai {
             base_url,
@@ -597,6 +599,7 @@ fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Answer, CallError>
                 headers,
                 prompt,
                 schema,
+                admission,
             )
         }
         Provider::Cli {
@@ -604,7 +607,7 @@ fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Answer, CallError>
             model,
             timeout_s,
             ..
-        } => cli_headless(cli, model.as_deref(), *timeout_s, prompt, schema),
+        } => cli_headless(cli, model.as_deref(), *timeout_s, prompt, schema, admission),
     }
 }
 
@@ -712,6 +715,23 @@ fn free_limit(url: &str, key: &str) -> Option<u32> {
 /// `redirects` redirects, and a server on this machine (Ollama, the tests' servers) never reached
 /// through the environment's proxy.
 pub(crate) fn agent(url: &str, timeout: Duration, redirects: u32) -> ureq::Agent {
+    agent_config(url, timeout, redirects).into()
+}
+
+pub(crate) fn admitted_agent(
+    url: &str,
+    timeout: Duration,
+    redirects: u32,
+    admission: Option<&crate::dispatch::Guard>,
+) -> ureq::Agent {
+    let config = agent_config(url, timeout, redirects);
+    match admission {
+        Some(admission) => crate::dispatch::agent(config, admission.clone()),
+        None => config.into(),
+    }
+}
+
+fn agent_config(url: &str, timeout: Duration, redirects: u32) -> ureq::config::Config {
     let mut config = ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .http_status_as_error(false)
@@ -720,7 +740,7 @@ pub(crate) fn agent(url: &str, timeout: Duration, redirects: u32) -> ureq::Agent
     if is_loopback(url) {
         config = config.proxy(None);
     }
-    config.build().into()
+    config.build()
 }
 
 #[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, as the tests pass them
@@ -733,6 +753,7 @@ fn openai_compat(
     headers: &std::collections::BTreeMap<String, String>,
     prompt: &str,
     schema: &Value,
+    admission: Option<crate::dispatch::Guard>,
 ) -> Result<Answer, CallError> {
     let mut body = json!({
         "model": model,
@@ -745,7 +766,8 @@ fn openai_compat(
     }
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     // ureq's own default of 10 redirects.
-    let mut req = agent(&url, Duration::from_secs(timeout_s), 10).post(&url);
+    let mut req =
+        admitted_agent(&url, Duration::from_secs(timeout_s), 10, admission.as_ref()).post(&url);
     for (k, v) in headers {
         req = req.header(k, v);
     }
@@ -754,9 +776,11 @@ fn openai_compat(
             config::read_key(key_file).map_err(|e| CallError::other(format!("{e:#}")).unsent())?;
         req = req.header("Authorization", &format!("Bearer {key}"));
     }
-    let mut resp = req
-        .send_json(&body)
-        .map_err(|e| CallError::other(format!("http request: {}", transport(&e))))?;
+    let mut resp = match &admission {
+        Some(admission) => crate::dispatch::json(req, &body, admission),
+        None => req.send_json(&body),
+    }
+    .map_err(|e| CallError::other(format!("http request: {}", transport(&e))))?;
     let status = resp.status().as_u16();
     let rate = rate_left(resp.headers());
     let retry_after_s = resp
@@ -1555,6 +1579,7 @@ fn cli_headless(
     timeout_s: u64,
     prompt: &str,
     schema: &Value,
+    admission: Option<crate::dispatch::Guard>,
 ) -> Result<Answer, CallError> {
     // codex's answer says nothing of its allowance (`codex exec --json`): its app server is asked
     // before the call, and a window at its line rests codex with nothing sent (issue #166).
@@ -1580,7 +1605,7 @@ fn cli_headless(
         .env_clear()
         .envs(curator_env(std::env::vars_os(), cfg!(windows)))
         .env(hook::SKIP_ENV, "1");
-    let (out, ran) = run_cli(cmd, stdin, Duration::from_secs(timeout_s));
+    let (out, ran) = run_cli(cmd, stdin, Duration::from_secs(timeout_s), admission);
     let stdout = String::from_utf8_lossy(&out);
     // claude's reset holds whatever else fails below, a failed or timed-out run included.
     let rest = if cli == "claude" {
@@ -1813,6 +1838,7 @@ fn run_cli(
     mut cmd: Command,
     stdin: Option<String>,
     timeout: Duration,
+    admission: Option<crate::dispatch::Guard>,
 ) -> (Vec<u8>, Result<(), CallError>) {
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
@@ -1827,8 +1853,23 @@ fn run_cli(
     };
     let feeder = child.stdin.take().zip(stdin).map(|(mut w, text)| {
         // A child that exits without reading just makes the write fail.
-        std::thread::spawn(move || w.write_all(text.as_bytes()).ok())
+        let admission = admission.clone();
+        std::thread::spawn(move || {
+            let sent = w.write_all(text.as_bytes()).ok();
+            drop(w);
+            if let Some(admission) = admission {
+                admission.release();
+            }
+            sent
+        })
     });
+    // Prompt-file providers were handed their whole input by successful spawn. For stdin
+    // providers, the feeder owns the release until every prompt byte was handed over.
+    if feeder.is_none()
+        && let Some(admission) = &admission
+    {
+        admission.release();
+    }
     // Read as it comes, into a buffer the caller can take without joining: on a timeout a
     // grandchild may still hold the pipe open.
     let drain = |r: Option<Box<dyn Read + Send>>| {
@@ -2446,7 +2487,7 @@ mod tests {
             [user] fix the date parser in src/ingest/csv_reader.py\n\
             [assistant] added %d.%m.%Y; 21 tests pass\n--- END ---";
         for (cli, model) in [("claude", "haiku"), ("codex", "gpt-6-luna")] {
-            let a = cli_headless(cli, Some(model), 180, prompt, &schema)
+            let a = cli_headless(cli, Some(model), 180, prompt, &schema, None)
                 .unwrap_or_else(|e| panic!("{cli}: {}", e.message));
             assert!(a.value["summary"].is_string(), "{cli}: {}", a.value);
             eprintln!("{cli}: {:?}, rest until {:?}", a.usage, a.cool_until);
@@ -2496,13 +2537,14 @@ mod tests {
         };
         // Larger than any pipe buffer in both directions.
         let big = "x".repeat(300_000);
-        let (out, ran) = run_cli(sh("cat"), Some(big.clone()), Duration::from_secs(10));
+        let (out, ran) = run_cli(sh("cat"), Some(big.clone()), Duration::from_secs(10), None);
         ran.unwrap();
         assert_eq!(out, big.as_bytes());
         let err = run_cli(
             sh("head -c 1100000 /dev/zero"),
             None,
             Duration::from_secs(10),
+            None,
         )
         .1
         .unwrap_err();
@@ -2511,6 +2553,7 @@ mod tests {
             sh("echo said; echo boom >&2; exit 3"),
             None,
             Duration::from_secs(10),
+            None,
         );
         assert_eq!(out, b"said\n", "stdout is kept on a failure");
         let err = ran.unwrap_err();
@@ -2521,11 +2564,60 @@ mod tests {
             err.message
         );
         let start = Instant::now();
-        let (out, ran) = run_cli(sh("echo early; sleep 5"), None, Duration::from_secs(1));
+        let (out, ran) = run_cli(
+            sh("echo early; sleep 5"),
+            None,
+            Duration::from_secs(1),
+            None,
+        );
         let err = ran.unwrap_err();
         assert!(err.message.contains("timed out"), "{}", err.message);
         assert_eq!(out, b"early\n", "and on a timeout");
         assert!(start.elapsed() < Duration::from_secs(4));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_releases_dispatch_after_stdin_before_its_answer() {
+        let home = tempfile::tempdir().unwrap();
+        let admission = crate::dispatch::Admission::shared(home.path()).unwrap();
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "cat >/dev/null; sleep 1; printf answered"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let (done_at, done) = std::sync::mpsc::sync_channel(1);
+        let sender = std::thread::spawn(move || {
+            let result = run_cli(
+                command,
+                Some("synthetic prompt ".repeat(20_000)),
+                Duration::from_secs(3),
+                Some(admission),
+            );
+            done_at.send(()).unwrap();
+            result
+        });
+        let path = home.path().join("dispatch.lock");
+        let registration = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let until = Instant::now() + Duration::from_millis(500);
+        let mut acquired = false;
+        while Instant::now() < until {
+            if registration.try_lock().is_ok() {
+                acquired = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let waiting = matches!(done.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        let (output, result) = sender.join().unwrap();
+        result.unwrap();
+        assert_eq!(output, b"answered");
+        assert!(acquired && waiting, "CLI admission lasted until its answer");
     }
 
     #[test]
@@ -2876,6 +2968,7 @@ mod tests {
             &headers,
             "p",
             &json!({}),
+            None,
         )
         .unwrap();
         assert_eq!(v["summary"], "s");
@@ -2897,6 +2990,7 @@ mod tests {
                 &Default::default(),
                 "p",
                 &json!({}),
+                None,
             )
             .unwrap();
             assert_eq!(v["summary"], "f");
@@ -2911,6 +3005,7 @@ mod tests {
             &Default::default(),
             "p",
             &json!({}),
+            None,
         )
         .unwrap_err();
         assert!(e.invalid(), "{}", e.message);
@@ -2929,6 +3024,7 @@ mod tests {
             &Default::default(),
             "p",
             &json!({}),
+            None,
         )
         .unwrap_err();
         assert_eq!((e.status, e.message.as_str()), (Some(429), "http 429"));
@@ -2944,6 +3040,7 @@ mod tests {
             &Default::default(),
             "p",
             &json!({}),
+            None,
         )
         .unwrap_err();
         assert!(e.message.contains("larger than"), "{}", e.message);
@@ -3001,6 +3098,7 @@ mod tests {
                 &Default::default(),
                 "p",
                 &json!({}),
+                None,
             )
             .unwrap_err();
             assert_eq!(e.message, want);
@@ -3020,6 +3118,7 @@ mod tests {
             &Default::default(),
             "p",
             &json!({}),
+            None,
         )
         .unwrap_err();
         assert_eq!(e.retry_after_s, Some(1.5));
@@ -3038,6 +3137,7 @@ mod tests {
             &Default::default(),
             "p",
             &json!({}),
+            None,
         )
         .unwrap_err();
         assert!(!e.message.contains("canary"), "{}", e.message);
@@ -3059,6 +3159,7 @@ mod tests {
             &Default::default(),
             "p",
             &json!({}),
+            None,
         )
         .unwrap_err();
         assert_eq!(e.message, "http 403");
@@ -3077,6 +3178,7 @@ mod tests {
             &Default::default(),
             "p",
             &json!({}),
+            None,
         )
         .unwrap_err();
         assert_eq!(e.retry_after_s, None);
@@ -3118,7 +3220,7 @@ mod tests {
         let gate = || {
             asked.set(asked.get() + 1);
             anyhow::ensure!(asked.get() == 1, "the list changed");
-            Ok(())
+            Ok(None)
         };
         let Err(err) =
             Chain::new(&providers, &conn)
@@ -3669,7 +3771,7 @@ mod tests {
                 limits.usd_per_mtok_out = 1.0;
                 limits.max_output_tokens = 4000;
             }
-            call(&p, "short", &json!({"type": "object"})).unwrap();
+            call(&p, "short", &json!({"type": "object"}), None).unwrap();
             let req = got.recv().unwrap();
             let body: Value =
                 serde_json::from_str(&req[req.find("\r\n\r\n").unwrap() + 4..]).unwrap();

@@ -466,6 +466,9 @@ fn restore_locked(home: &Path, logged: Vec<crate::forget::Request>) -> Result<St
     // Durable before the damaged file goes: an open that finds neither would make an empty store.
     #[cfg(unix)]
     std::fs::File::open(home)?.sync_all()?;
+    // Reconstruction was isolated. Its denials become live at the swap: order that moment
+    // after any sender's actual transmission, outside every raw SQLite transaction.
+    let _dispatch = crate::dispatch::exclusive(home)?;
     // Everything that must not outlive the old raw.db goes before the swap, so a restore that
     // stops at any point is either redone (raw.db still damaged) or complete.
     // Derived data is rebuilt from what was restored: a skipped segment leaves a gap below raw's

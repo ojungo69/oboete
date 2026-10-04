@@ -15,6 +15,7 @@ mod consumer;
 mod crash;
 mod curate;
 mod db;
+mod dispatch;
 mod embed;
 mod embed_phase;
 mod failure;

@@ -1629,7 +1629,9 @@ fn answered(
         &sha256_hex(&req.prompt),
     )?;
     let answer = curator(&span, &req.prompt, &|v| check(w, v), &|| {
-        w.reading.still(raw)
+        let dispatch = raw.dispatch()?;
+        w.reading.still(raw)?;
+        Ok(Some(dispatch))
     });
     drop(in_flight);
     Ok(match answer {
@@ -4885,6 +4887,118 @@ mod tests {
     fn open(home: &std::path::Path) -> (Raw, Connection) {
         let raw = crate::raw::open(home).unwrap();
         (raw, providers_db::open(home).unwrap())
+    }
+
+    /// F2: an explicitly recurated native transcript window cannot use a replaced authority
+    /// at its final provider gate, after the current device registered that origin's forget.
+    #[cfg(unix)]
+    #[test]
+    fn a_native_recuration_gate_refuses_an_old_raw_handle_after_replacement_and_forget() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let (mut raw, db) = open(h);
+        let path = h.join("raw.db");
+        let checkpoint = || {
+            Connection::open(&path)
+                .unwrap()
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
+        };
+        checkpoint();
+        let snapshot = h.join("before-native.db");
+        std::fs::copy(&path, &snapshot).unwrap();
+        let mut event =
+            crate::raw::test_event(r#"{"prompt":"native-recuration-authority-canary-904"}"#);
+        event.source = "transcript".into();
+        let captured = crate::capture::Captured {
+            event: event.clone(),
+            ledger: Vec::new(),
+        };
+        let identity = crate::raw::ImportIdentity {
+            origin: crate::forget::origin("synthetic-dispatch", "authority-904"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        raw.append_imported_origins(
+            std::slice::from_ref(&captured),
+            std::slice::from_ref(&identity),
+            "",
+            None,
+        )
+        .unwrap();
+        let reading = Reading::now(&raw, Reads::Source("transcript".into())).unwrap();
+        let summary = curating(WINDOW_TOKENS);
+        let rules = Rules::default();
+        let window = window_at(
+            &raw,
+            raw.device(),
+            (0, None),
+            None,
+            summary.cut(),
+            &rules,
+            &reading,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(window.aside.is_none());
+        assert!(
+            window
+                .text
+                .contains("native-recuration-authority-canary-904")
+        );
+        checkpoint();
+        for sidecar in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(h.join(sidecar));
+        }
+        let stage = h.join("replacement.db");
+        std::fs::copy(snapshot, &stage).unwrap();
+        std::fs::rename(stage, &path).unwrap();
+        let mut current = crate::raw::open(h).unwrap();
+        let seq = current
+            .append_imported_origins(&[captured], &[identity], "", None)
+            .unwrap()[0];
+        let preview = crate::forget::preview(
+            h,
+            crate::forget::Target::Record {
+                device: current.device().into(),
+                seq,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            preview.count(),
+            1,
+            "the current native alias must actually be eligible"
+        );
+        assert_eq!(crate::forget::start(h, &preview).unwrap().0.records, 1);
+        assert_eq!(current.denied_count().unwrap(), 1);
+        assert_eq!(raw.denied_count().unwrap(), 0);
+        let called = std::cell::Cell::new(false);
+        let mut curator = |_: &str, prompt: &str, _: &AnswerCheck, gate: &Gate| {
+            let _admission = gate()?;
+            assert!(prompt.contains("native-recuration-authority-canary-904"));
+            called.set(true);
+            Ok(answered("synthetic"))
+        };
+        let result = recurate_window(
+            &mut raw,
+            &kn(),
+            &db,
+            &rules,
+            &summary,
+            &mut curator,
+            &window,
+            None,
+        );
+        assert!(
+            !called.get(),
+            "a native recuration provider gate accepted a replaced raw authority"
+        );
+        assert!(
+            result.is_err(),
+            "a replaced authority was admitted for recuration"
+        );
     }
 
     #[test]

@@ -330,7 +330,9 @@ pub fn phase(
         }
         let subject = format!("turn {}", r.seq);
         let answer = summarizer(&subject, &prompt, &|v| check(v, rules), &|| {
-            reading.still(raw)
+            let dispatch = raw.dispatch()?;
+            reading.still(raw)?;
+            Ok(Some(dispatch))
         })
         .and_then(|res| {
             let op = fitted(turn.op(&res.output, rules))?.unwrap_or_else(|| skip.clone());

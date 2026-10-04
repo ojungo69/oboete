@@ -53,6 +53,13 @@ pub enum Sent {
     Unsent(anyhow::Error),
 }
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_SEND_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 /// The thread's body: rules loaded, raw.db opened, exclusions and tombstones checked against the
 /// batch's, raw.db closed, then the call. What it took, in ms, beside what became of it.
 pub fn send(home: &Path, batch: &Batch, embedder: &Embedder, timeout: Duration) -> (Sent, i64) {
@@ -63,19 +70,27 @@ pub fn send(home: &Path, batch: &Batch, embedder: &Embedder, timeout: Duration) 
             "the redaction rules changed since the batch was composed"
         );
         crate::raw::open(home).and_then(|raw| {
+            let dispatch = raw.dispatch()?;
             batch.reading.still(&raw)?;
             anyhow::ensure!(
                 raw.tombstones()? == batch.tombstones,
                 "the tombstones changed since the batch was composed"
             );
-            Ok(())
+            Ok(dispatch)
         })
     });
-    if let Err(e) = still {
-        return (Sent::Unsent(e), 0);
-    }
+    let dispatch = match still {
+        Ok(dispatch) => dispatch,
+        Err(e) => return (Sent::Unsent(e), 0),
+    };
+    #[cfg(test)]
+    AFTER_SEND_CHECK.with(|at| {
+        if let Some(at) = at.borrow_mut().take() {
+            at();
+        }
+    });
     let texts: Vec<&str> = batch.texts.iter().map(String::as_str).collect();
-    let sent = match embedder.run(&texts, timeout) {
+    let sent = match embedder.run_admitted(&texts, timeout, Some(dispatch)) {
         Ok(v) => Sent::Vectors(v),
         Err(f) => Sent::Failed(f),
     };
@@ -1737,6 +1752,129 @@ mod tests {
     use crate::search::b::fixture::Store;
 
     const R: &str = "github.com/o/r";
+
+    /// A current native record's registration waits for a batch already through its final
+    /// check to send. Hooks still append, and registration completes before model headers.
+    #[test]
+    fn a_native_forget_orders_with_dispatch_without_waiting_for_embedding_headers() {
+        use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+        const CANARY: &str = "native-dispatch-forget-canary-901";
+        let mut s = Store::new();
+        let stub = Stub::start();
+        config(&s, &stub);
+        let response = stub.hold();
+        let mut event = crate::raw::test_event(&serde_json::json!({"prompt": CANARY}).to_string());
+        event.source = "transcript".into();
+        event.kind = "prompt".into();
+        event.repo = Some(R.into());
+        let identity = crate::raw::ImportIdentity {
+            origin: crate::forget::origin("synthetic-dispatch", "native-901"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let seq = s
+            .raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                }],
+                &[identity],
+                "",
+                None,
+            )
+            .unwrap()[0];
+        // Imported raw is held for recuration, but an ordinary claim anchored in it is an
+        // active embedding document. Forget still targets the genuine native raw record.
+        derive(&mut s, seq, CANARY, CANARY);
+        s.run();
+        let home = s.home.path().to_owned();
+        let preview = crate::forget::preview(
+            &home,
+            crate::forget::Target::Record {
+                device: s.raw.device().into(),
+                seq,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            preview.count(),
+            1,
+            "the fixture is a genuinely eligible native record"
+        );
+        let k = crate::knowledge::open(&home).unwrap();
+        let loaded = crate::config::load(&home).unwrap();
+        let embedder = Embedder::from_config(&loaded.embedding).unwrap().unwrap();
+        let reading = Reading::now(&s.raw, Reads::Live).unwrap();
+        let rules = crate::redact::Rules::load(&home).unwrap();
+        let batch = pending(&s.raw, &k, &embedder.id, &reading, &rules, false)
+            .unwrap()
+            .unwrap();
+        assert!(batch.texts.iter().any(|t| t.contains(CANARY)));
+        let (checked_at, checked) = sync_channel(1);
+        let (transmit, begin) = sync_channel(1);
+        let sending_home = home.clone();
+        let sender = std::thread::spawn(move || {
+            AFTER_SEND_CHECK.with(|at| {
+                *at.borrow_mut() = Some(Box::new(move || {
+                    checked_at.send(()).unwrap();
+                    begin.recv_timeout(Duration::from_secs(3)).unwrap();
+                }));
+            });
+            send(&sending_home, &batch, &embedder, Duration::from_secs(3))
+        });
+        checked.recv_timeout(Duration::from_secs(3)).unwrap();
+        let (started_at, started) = sync_channel(1);
+        let (registered_at, registered) = sync_channel(1);
+        let registering_home = home.clone();
+        let forget = std::thread::spawn(move || {
+            started_at.send(()).unwrap();
+            let result = crate::forget::start(&registering_home, &preview);
+            registered_at.send(result.is_ok()).unwrap();
+            result
+        });
+        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        // The dispatch hold is independent of raw's writer transaction.
+        crate::raw::open(&home)
+            .unwrap()
+            .append(&crate::raw::test_event(
+                "an unrelated hook while native dispatch is paused",
+            ))
+            .unwrap();
+        let early = match registered.recv_timeout(Duration::from_millis(100)) {
+            Ok(success) => {
+                assert!(success);
+                true
+            }
+            Err(RecvTimeoutError::Timeout) => false,
+            Err(e) => panic!("forget thread ended: {e}"),
+        };
+        transmit.send(()).unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while stub.requests() == 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(stub.requests(), 1);
+        let before_headers = early || registered.recv_timeout(Duration::from_secs(1)).unwrap();
+        let result = forget.join().unwrap().unwrap();
+        assert_eq!(result.0.records, 1);
+        assert_eq!(
+            stub.answered(),
+            0,
+            "the model response headers are still withheld"
+        );
+        drop(response);
+        assert!(matches!(sender.join().unwrap().0, Sent::Vectors(_)));
+        assert!(
+            !early,
+            "native forget committed after the send check but before transmission"
+        );
+        assert!(
+            before_headers,
+            "registration waited for the embedding response"
+        );
+    }
 
     /// A decided decision of `R` that quotes a new record (`quote`, whole), with its own `body`.
     fn claim(s: &mut Store, quote: &str, body: &str) -> String {
