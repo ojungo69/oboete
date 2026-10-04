@@ -786,8 +786,8 @@ const TEXT = {
   resident_unsupported: ['Resident mode is currently available on Linux and WSL. This system keeps the worker that exits when idle.', '常駐は現在 Linux と WSL に対応しています。この環境のワーカーは、処理がなくなった時に終了します。'],
   language: ['Language', '言語'],
   lead: [
-    'Choose the settings below. Edits stay on this page until you save them in config.toml. Recording and memory delivery read them at their next use; the background summarizer reads them before its next window, even while it stays running. This page cannot tell which values a running request has loaded. Opening this page or saving sends nothing to a provider.',
-    'ここで設定を選べます。変更は「保存」を押すまでこの画面だけに残ります。記録・記憶の受け渡しには次の利用時から反映されます。要約の設定は、次のまとまりを処理する前に読み直すので、処理が動き続けていても反映されます。現在実行中の呼び出しが読み込んでいる値は、この画面では確認できません。画面を開いたり保存したりしても、要約役への送信は始まりません。',
+    'Choose the settings below. Each save applies its own section; individual provider checkboxes and arrows save immediately. Recording and memory delivery read them at their next use; the background summarizer reads them before its next window, even while it stays running. This page cannot tell which values a running request has loaded. Opening this page or saving sends nothing to a provider.',
+    'ここで設定を選べます。それぞれの保存ボタンで対象の設定を反映します。要約役の個別のチェックと矢印はすぐに保存します。記録・記憶の受け渡しには次の利用時から反映されます。要約の設定は、次のまとまりを処理する前に読み直すので、処理が動き続けていても反映されます。現在実行中の呼び出しが読み込んでいる値は、この画面では確認できません。画面を開いたり保存したりしても、要約役への送信は始まりません。',
   ],
   summary_h: ['Summarizing recorded activity', '記録の要約'],
   summary_desc: [
@@ -867,10 +867,10 @@ const TEXT = {
   tool_output: ['Output of tools', 'ツールの出力'],
   tool_full: ['Keep it whole (the start and end when very long)', 'すべて残す(非常に長いときは先頭と末尾)'],
   tool_head_tail: ['Keep only the start and end', '先頭と末尾だけ残す'],
-  chain_h: ['Curators', '要約役'],
+  chain_h: ['Controls for every entry with the same name', '同じ名前のすべての要約役への設定'],
   chain_desc: [
-    'The curators are asked in this order. An empty field follows the curator\'s own value, shown in grey.',
-    '要約役は上から順に使われます。空欄の項目は、その要約役の既定の値(灰色で表示)に従います。',
+    'These controls apply to every entry with each name, including duplicates. This group order takes priority over the individual order above. An empty field follows the entry’s saved value, shown in grey.',
+    'ここでの設定は、同じ名前のすべての要約役に反映されます。この名前ごとの順番が、上の個別の順番より優先されます。空欄は、各要約役の保存済みの値(灰色で表示)に従います。',
   ],
   col_order: ['Order', '順番'],
   col_on: ['Use', '使う'],
@@ -889,10 +889,10 @@ const TEXT = {
   key_label: ['New key for {name}', '{name} の新しいキー'],
   key_placeholder: ['Paste a new key', '新しいキーを貼り付け'],
   key_save: ['Save key', 'キーを保存'],
-  key_saved: ['The key was saved in its file.', 'キーをファイルに保存しました。'],
+  key_saved: ['The key was registered in private storage. It has not been tested yet.', 'キーを専用の保存先に登録しました。接続はまだ確認していません。'],
   key_not_durable: [
-    'The key was saved in its file, but the disk did not confirm the write. If the computer loses power soon, check the key file.',
-    'キーをファイルに保存しましたが、ディスクへの書き込みを確認できませんでした。この後すぐに電源が切れた場合は、キーのファイルを確認してください。',
+    'The key was registered, but the disk did not confirm the write. After an unexpected shutdown, register it again if it is missing.',
+    'キーを登録しましたが、ディスクへの書き込みを確認できませんでした。予期しない終了の後、登録が失われていた場合は再登録してください。',
   ],
   key_by_hand: [
     'On this computer, set the key by editing its file.',
@@ -958,8 +958,8 @@ const TEXT = {
   ],
   no_cap: ['No cap', '上限なし'],
   model_fixed: [
-    'This curator has prices for its model, so its model is changed in [[providers]] together with its prices.',
-    'この要約役にはモデルの料金が設定されているため、モデルは [[providers]] で料金と一緒に変更してください。',
+    'This entry has model prices. Edit its model and prices in the individual provider above.',
+    'この要約役にはモデルの料金があります。上の個別設定で、モデルと料金を一緒に変更してください。',
   ],
   model_free: ['Only models whose names end in :free.', '名前が :free で終わるモデルだけ設定できます。'],
   model_unapplied: [
@@ -974,6 +974,91 @@ const TEXT = {
   differs_model: ['model', 'モデル'],
   differs_daily_budget: ['calls a day', '1 日の回数'],
   differs_timeout_s: ['timeout', '待ち時間'],
+  provider_entries_h: ['Individual providers', '要約役の個別設定'],
+  provider_entries_desc: ['Add an API or a local OpenAI-compatible server, or use an installed Claude/Codex CLI. Each Save provider changes only that entry. Other settings use Save settings below. Checkboxes and arrows save immediately. A save sends no test request.', 'API・ローカルの OpenAI 互換サーバー、またはインストール済みの Claude/Codex CLI を登録できます。「要約役を保存」はその項目だけを変更します。ほかの設定は下の「設定を保存」で反映します。個別のチェックと矢印はすぐに保存します。保存では接続テストを行いません。'],
+  provider_add: ['Add provider', '要約役を追加'],
+  provider_create: ['Create provider', '要約役を登録'],
+  provider_save: ['Save provider', '要約役を保存'],
+  provider_cancel: ['Cancel', 'キャンセル'],
+  provider_edit: ['Edit provider', '要約役を編集'],
+  provider_remove: ['Remove provider', '要約役を削除'],
+  provider_remove_confirm: ['Remove only “{name}” ({source} #{index})? Other entries with this name keep their settings. Removing the final Gemini entry also stops its automatic placement.', '「{name}」({source} #{index}) だけを削除しますか？ 同名のほかの項目の設定は維持されます。最後の Gemini を削除すると、自動追加も解除します。'],
+  provider_name: ['Name', '名前'],
+  provider_type: ['Connection type', '接続方法'],
+  provider_http: ['API / local OpenAI-compatible server', 'API / ローカルの OpenAI 互換サーバー'],
+  provider_cli_claude: ['Claude CLI (subscription)', 'Claude CLI (サブスクリプション)'],
+  provider_cli_codex: ['Codex CLI (subscription)', 'Codex CLI (サブスクリプション)'],
+  provider_endpoint: ['API base URL', 'API の接続先 URL'],
+  provider_endpoint_desc: ['Use HTTPS, or HTTP with a numeric loopback address such as 127.0.0.1. The server must support the OpenAI-compatible chat API. Redirects are not followed by tests.', 'HTTPS、または 127.0.0.1 など数値のループバックアドレスの HTTP を指定します。サーバーは OpenAI 互換のチャット API に対応している必要があります。接続テストではリダイレクトを追跡しません。'],
+  provider_enabled: ['Enable this entry', 'この要約役を有効にする'],
+  provider_subscription: ['Covered by a subscription', 'サブスクリプション内の利用'],
+  provider_subscription_desc: ['Subscription entries have no daily-call cap control. Existing legacy caps are preserved. Use API prices below for calls billed per token.', 'サブスクリプションには 1 日の回数を設定しません。既存の回数設定は維持します。トークン数で課金される API は下の料金を設定してください。'],
+  provider_cli_desc: ['Uses the fixed installed adapter. Complete the provider’s own login first. oboete does not collect subscription login credentials. Installation and a successful connection test are separate states.', '対応するインストール済みアダプターを使います。先にサービス側のログインを完了してください。oboete はサブスクリプションのログイン情報を収集しません。インストール状態と接続確認は別々に表示します。'],
+  provider_saved: ['Provider saved. It applies at the next eligible call; it has not been tested.', '要約役を保存しました。次の実行条件が整った呼び出しから反映されます。接続はまだ確認していません。'],
+  provider_removed: ['The selected provider was removed.', '選んだ要約役を削除しました。'],
+  provider_moved: ['Individual order saved. Name-group order may take priority.', '個別の順番を保存しました。名前ごとの順番が優先される場合があります。'],
+  provider_source_file: ['Saved entry', '保存した項目'],
+  provider_source_builtin: ['Built-in entry', '既定の項目'],
+  provider_source_gemini: ['Automatic Gemini entry', '自動追加の Gemini'],
+  provider_position: ['{source} #{index}', '{source} #{index}'],
+  provider_order_desc: ['Arrows save the original individual order, including disabled entries. The effective order below includes name-group overrides and automatic Gemini placement. Editing a built-in entry saves the native list.', '矢印は、無効な項目も含めた個別の元の順番を保存します。実際の順番には、名前ごとの設定と Gemini の自動追加が反映されます。既定の項目を編集すると、個別の一覧が保存されます。'],
+  provider_effective: ['Effective: {on}; order {order}; model {model}; timeout {timeout} s', '実際の設定: {on}、順番 {order}、モデル {model}、待ち時間 {timeout} 秒'],
+  provider_saved_native: ['Saved: {on}; model {model}; timeout {timeout} s', '個別の保存値: {on}、モデル {model}、待ち時間 {timeout} 秒'],
+  provider_default_model: ['Adapter default', 'アダプターの既定'],
+  provider_advanced: ['Limits and API prices', '使用量の上限と API の料金'],
+  provider_limits_desc: ['Blank token limits mean no native cap. API prices are USD per million tokens; enter your model’s prices for paid-call accounting. Zero prices count as free. The output cap is available only for API entries with a nonzero token price (new-entry default: 4,000). Normal free-API and CLI output bounds cannot be controlled here; their saved estimates are preserved.', '空欄のトークン数には個別の上限を設けません。API の料金は 100 万トークンあたりの米ドルです。有料利用の集計にはモデルの料金を入力してください。料金が 0 なら無料として数えます。出力の上限は、トークンの料金が 0 より大きい API でのみ設定できます(新しい項目の既定: 4,000)。無料 API・CLI の通常の出力上限はここでは制御できず、保存済みの見積もり値を維持します。'],
+  provider_max_request_tokens: ['Input tokens per request (optional)', '1 回に送るトークン数の上限(任意)'],
+  provider_daily_tokens: ['Total tokens a day (optional)', '1 日の合計トークン数の上限(任意)'],
+  provider_usd_per_mtok_in: ['Input price (USD / million tokens)', '入力料金(米ドル / 100 万トークン)'],
+  provider_usd_per_mtok_out: ['Output price (USD / million tokens)', '出力料金(米ドル / 100 万トークン)'],
+  provider_max_output_tokens: ['Maximum output tokens', '出力トークン数の上限'],
+  provider_key_manage: ['Register a key on the selected individual provider above.', 'キーは上の個別の要約役で登録してください。'],
+  provider_key_none: ['No key registered; a local server may not require one.', 'キーは未登録です。ローカルサーバーでは不要な場合があります。'],
+  provider_key_desc: ['Paste a provider-issued API key. oboete chooses private storage; the saved value is never shown. Registration sends no inference request.', 'サービスで発行した API キーを貼り付けます。専用の保存先は oboete が選び、保存した値は表示しません。登録では AI への送信を行いません。'],
+  provider_key_unsupported: ['Key registration is currently available on Linux and WSL. This platform’s managed storage is not available yet.', 'キーの登録は現在 Linux と WSL に対応しています。この環境の専用の保存先はまだ利用できません。'],
+  provider_storage_failed: ['A safe private key location could not be used. The previous key and configuration were preserved.', '安全な専用の保存先を利用できませんでした。以前のキーと設定は維持されています。'],
+  provider_unsupported_cli: ['This legacy CLI adapter is not supported here. You can disable or remove it; add Claude or Codex to use a supported adapter.', 'この既存の CLI アダプターには対応していません。無効化・削除できます。対応するアダプターを使うには Claude または Codex を追加してください。'],
+  provider_unsupported_endpoint: ['This saved destination is not supported by this UI and is not displayed. Set a supported API URL to repair the entry; tests remain unavailable until then.', '保存された接続先はこの画面の対応範囲外のため表示しません。対応する API の URL を設定して修正してください。それまでは接続テストを利用できません。'],
+  provider_preview: ['Preview connection test', '接続テストの内容を確認'],
+  provider_preview_desc: ['The test uses the saved entry, not pending edits. Preview sends nothing. Review the destination, fixed synthetic data and possible charge, then choose Run test separately.', '保存済みの要約役をテストします。編集中の値は使いません。内容の確認だけでは送信しません。接続先・固定のテスト用データ・費用の可能性を確認し、別途「テストを実行」を押してください。'],
+  provider_test_destination: ['Destination: {destination}', '接続先: {destination}'],
+  provider_test_model: ['Model: {model}', 'モデル: {model}'],
+  provider_test_fixture: ['Fixed test data', '固定のテスト用データ'],
+  provider_test_tokens: ['Estimated input: {tokens} tokens; output limit: {output}', '推定入力: {tokens} トークン、出力上限: {output}'],
+  provider_test_charge: ['This test may incur a charge. Estimated cost: {usd}; saved monthly cap: {cap}.', 'このテストには費用がかかる可能性があります。推定費用: {usd}、保存済みの月額上限: {cap}。'],
+  provider_test_no_charge: ['No per-token charge is expected. Subscription or local-server limits still apply. Saved monthly cap: {cap}.', 'トークンごとの料金は想定されていません。サブスクリプションやローカルサーバーの上限は適用されます。保存済みの月額上限: {cap}。'],
+  provider_test_unknown_cost: ['Not available', '算出できません'],
+  provider_test_run: ['Run test', 'テストを実行'],
+  provider_test_ok: ['Connection test succeeded ({ms} ms).', '接続テストに成功しました({ms} ミリ秒)。'],
+  provider_test_failed: ['Connection test failed ({ms} ms): {reason}', '接続テストに失敗しました({ms} ミリ秒): {reason}'],
+  provider_test_blocked: ['Connection test is blocked: {reason}', '接続テストを実行できません: {reason}'],
+  provider_test_billed: ['Recorded test cost: {usd}', '記録されたテストの費用: {usd}'],
+  provider_test_retry: ['Retry time: {time}. Preview again when ready; resuming a stopped provider remains a separate action.', '再試行可能な時刻: {time}。準備が整ったら内容を再確認してください。停止した要約役の再開は別の操作です。'],
+  provider_test_reason: ['The provider could not complete this test.', 'この要約役ではテストを完了できませんでした。'],
+  provider_test_budget: ['The saved spending or usage limit does not allow this test.', '保存済みの費用・使用量の上限により、このテストを実行できません。'],
+  provider_test_cooldown: ['This provider is waiting after a limit or failure.', '上限や失敗により、この要約役は待機しています。'],
+  provider_test_hold: ['This provider is stopped. Use again is a separate action below.', 'この要約役は停止しています。下の「再び使う」で別途再開してください。'],
+  provider_test_off: ['This entry or its name group is off.', 'この要約役、または同じ名前の設定が無効です。'],
+  provider_test_missing_key: ['Register an API key for this entry first.', '先にこの要約役の API キーを登録してください。'],
+  provider_test_unavailable: ['Connection testing is not available for this entry.', 'この要約役では接続テストを利用できません。'],
+  provider_test_gate: ['The data-sending safety gate refused this test.', 'データ送信の安全性の確認により、テストを拒否しました。'],
+  provider_test_auth: ['The provider refused authentication. Check the registered key or the provider’s own login.', '接続先が認証を拒否しました。登録したキー、またはサービス側のログインを確認してください。'],
+  provider_test_http: ['The provider returned an HTTP error.', '接続先が HTTP のエラーを返しました。'],
+  provider_test_http_status: ['HTTP status: {status}', 'HTTP ステータス: {status}'],
+  provider_test_size: ['The fixed test data exceeds this entry’s saved request limit.', '固定のテスト用データが、この要約役の保存済みの入力上限を超えています。'],
+  provider_test_invalid: ['The provider’s answer did not match the expected test response.', '接続先の応答が、テストで必要な形式と一致しませんでした。'],
+  provider_test_isolation: ['The required isolated test environment could not be prepared.', 'テストに必要な分離された実行環境を準備できませんでした。'],
+  provider_test_allowance: ['The available allowance for this entry could not be confirmed.', 'この要約役の利用可能な残量を確認できませんでした。'],
+  provider_test_confirmation: ['Review a ready preview and explicitly choose Run test.', '実行できるテスト内容を確認してから、明示的に「テストを実行」を選んでください。'],
+  provider_bad_model: ['Enter a model name of at most 200 characters without control characters. A CLI model cannot start with a dash.', '制御文字を含まない 200 文字以内のモデル名を入力してください。CLI のモデル名はハイフンで始めることはできません。'],
+  provider_key_not_applicable: ['API-key registration is for API entries. Complete a subscription provider’s own login instead.', 'API キーは API の要約役に登録します。サブスクリプションでは、サービス側のログインを完了してください。'],
+  provider_test_timeout: ['The provider did not answer within the saved timeout.', '保存済みの待ち時間内に応答がありませんでした。'],
+  provider_bad_name: ['Enter a name of 1 to 64 characters without control characters.', '制御文字を含まない 1〜64 文字の名前を入力してください。'],
+  provider_bad_endpoint: ['Enter an HTTPS API base URL, or numeric loopback HTTP URL, without credentials or a fragment.', '認証情報や # 以降の部分を含まない HTTPS の API URL、または数値のループバックアドレスの HTTP URL を入力してください。'],
+  provider_kind_error: ['An existing entry’s connection type cannot be changed. Add a new entry instead.', '登録済みの接続方法は変更できません。新しい要約役を追加してください。'],
+  provider_operation_refused: ['The provider operation was refused. The previous configuration was preserved.', '要約役の操作を拒否しました。以前の設定は維持されています。'],
+  provider_operation_failed: ['The provider operation could not be completed ({status}).', '要約役の操作を完了できませんでした({status})。'],
+  settings_save: ['Save settings', '設定を保存'],
   save: ['Save', '保存'],
   saved: ['Saved. Each setting takes effect at the time described beside it.', '保存しました。反映されるタイミングは各設定の説明をご確認ください。'],
   warnings_h: ['Notes on config.toml', 'config.toml についての注意'],
@@ -1145,6 +1230,8 @@ function formOf(s) {
       ...e,
       edit: { on: e.on, daily_budget: text(e.daily_budget), timeout_s: text(e.timeout_s), model: text(e.model) },
     })),
+    providers: (s.providers || []).map((p) => ({ ...p, edit: providerEdit(p.name, p.saved), editing: false })),
+    newProvider: null,
     warnings: s.warnings,
     ranges: s.ranges,
     keyInput: s.key_input,
@@ -1243,84 +1330,451 @@ async function resumeProvider(name, button) {
 }
 
 function keyState(r) {
-  const state = el('span', 'note', t(`key_${r.key.replaceAll('-', '_')}`));
-  if (!r.key_file) return [state];
-  return [state, note(t('key_file', { path: r.key_file })), form.keyInput ? keyField(r, state) : note(t('key_by_hand'))];
+  const state = note(t(`key_${r.key.replaceAll('-', '_')}`));
+  return [state, r.key_file ? note(t('provider_key_manage')) : null];
 }
 
-// A new key for the row's key file (#94 part 3). What is typed leaves the page only in the
-// request's body, and the field is emptied before the request goes. A text field masked by CSS,
-// not a password field: a browser offers to save a password field's typed value once the field
-// leaves the page after a request, and this page redraws. `autocomplete` off keeps the value out
-// of form history and saved page state.
-function keyField(r, state) {
+const LIMIT_FIELDS = ['max_request_tokens', 'daily_tokens', 'usd_per_mtok_in', 'usd_per_mtok_out', 'max_output_tokens'];
+
+function providerEdit(name = '', saved = {}) {
+  const text = (value) => value === null || value === undefined ? '' : String(value);
+  const defaults = { max_request_tokens: null, daily_tokens: null, usd_per_mtok_in: 0,
+    usd_per_mtok_out: 0, max_output_tokens: 4000 };
+  return { kind: saved.kind || 'openai', name, enabled: saved.enabled ?? true,
+    cli: saved.cli || 'claude', base_url: saved.base_url || '', model: saved.model || '',
+    timeout_s: text(saved.timeout_s ?? 60), subscription: saved.subscription ?? false,
+    daily_budget: text(saved.daily_budget),
+    limits: Object.fromEntries(LIMIT_FIELDS.map((key) => [key, text(saved.limits?.[key] ?? defaults[key])])),
+  };
+}
+
+function selectorKey(selector) {
+  return `${selector.source}:${selector.index}`;
+}
+
+// The native editor never serializes key paths, extras, headers, retry options or effective values.
+function providerBody(draft) {
+  const limits = Object.fromEntries(LIMIT_FIELDS.map((key) => {
+    const v = draft.limits[key].trim();
+    return [key, v === '' && ['max_request_tokens', 'daily_tokens'].includes(key) ? null : Number(v)];
+  }));
+  const entry = { kind: draft.kind, name: draft.name, enabled: draft.enabled,
+    model: draft.kind === 'cli' ? draft.model.trim() || null : draft.model.trim(),
+    timeout_s: Number(draft.timeout_s), limits };
+  if (draft.kind === 'cli') entry.cli = draft.cli;
+  else Object.assign(entry, { base_url: draft.base_url.trim(), subscription: draft.subscription,
+    daily_budget: draft.daily_budget.trim() === '' ? null : Number(draft.daily_budget) });
+  return entry;
+}
+
+function providerValidation(draft) {
+  if (!draft.name.trim() || [...draft.name].length > 64 || /[\x00-\x1f\x7f]/.test(draft.name)) return 'providers.name';
+  if (draft.kind === 'openai' && !draft.base_url.trim()) return 'providers.base_url';
+  if ((draft.kind === 'openai' && !draft.model.trim()) || [...draft.model].length > 200) return 'providers.model';
+  const [min, max] = form.ranges.timeout_s;
+  if (!/^\d+$/.test(draft.timeout_s) || Number(draft.timeout_s) < min || Number(draft.timeout_s) > max) return 'providers.timeout_s';
+  if (draft.kind === 'openai' && !draft.subscription && draft.daily_budget.trim()) {
+    const [least, most] = form.ranges.daily_budget;
+    if (!/^\d+$/.test(draft.daily_budget) || Number(draft.daily_budget) < least || Number(draft.daily_budget) > most) return 'providers.daily_budget';
+  }
+  for (const key of LIMIT_FIELDS) {
+    const value = draft.limits[key].trim();
+    const optional = ['max_request_tokens', 'daily_tokens'].includes(key);
+    if (optional && value === '') continue;
+    const number = Number(value);
+    const price = key.startsWith('usd_');
+    if (value === '' || !Number.isFinite(number) || number < (price ? 0 : 1)
+        || (!price && (!/^\d+$/.test(value) || !Number.isSafeInteger(number)
+          || (key !== 'daily_tokens' && number > 4294967295)))) return `providers.limits.${key}`;
+  }
+  return null;
+}
+
+// Config-changing entry/key writes replace the server baseline, while unrelated pending global
+// and name-group edits stay local. Physical selectors are remapped only by the operation's raw
+// index changes, never by the first entry with a matching name.
+function mergeProviderSettings(answer, mine, action) {
+  const next = formOf(answer);
+  if (!next) return next;
+  if (action.op !== 'settings') {
+    for (const key of ['worker', 'summary', 'paid_usd_per_month', 'inject', 'capture']) next[key] = mine[key];
+    next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
+    const groups = new Map(next.chain.map((r) => [r.name, r]));
+    next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {
+      const row = groups.get(r.name);
+      row.edit = { ...r.edit };
+      groups.delete(r.name);
+      return row;
+    }), ...groups.values()];
+  }
+  next.newProvider = action.op === 'create' ? null : mine.newProvider;
+  const materializesGemini = (action.selector?.source === 'gemini' && !['remove', 'move'].includes(action.op))
+    || (action.op === 'create' && action.entry.name === 'gemini' && mine.providers.some((p) => p.selector.source === 'gemini'));
+  let inserted = null;
+  if (materializesGemini) {
+    const native = mine.providers.filter((p) => p.selector.source !== 'gemini');
+    const firstCli = native.find((p) => p.saved.kind === 'cli');
+    inserted = mine.saved.gemini === 'before-subscriptions' && firstCli ? firstCli.selector.index : native.length;
+  }
+  for (const old of mine.providers) {
+    const selected = action.selector && selectorKey(old.selector) === selectorKey(action.selector);
+    if (selected && ['edit', 'remove'].includes(action.op)) continue;
+    const mapped = { ...old.selector };
+    if (mapped.source === 'gemini') {
+      if (inserted !== null) Object.assign(mapped, { source: 'file', index: inserted });
+    } else {
+      if (next.providers.some((p) => p.selector.source === 'file')) mapped.source = 'file';
+      if (inserted !== null) {
+        if (mapped.index >= inserted) mapped.index += 1;
+      } else if (action.selector && action.selector.source !== 'gemini') {
+        const at = action.selector.index;
+        if (action.op === 'remove' && mapped.index > at) mapped.index -= 1;
+        if (action.op === 'move') {
+          if (mapped.index === at) mapped.index = action.to;
+          else if (at < action.to && mapped.index > at && mapped.index <= action.to) mapped.index -= 1;
+          else if (at > action.to && mapped.index >= action.to && mapped.index < at) mapped.index += 1;
+        }
+      }
+    }
+    const row = next.providers.find((p) => selectorKey(p.selector) === selectorKey(mapped));
+    if (!row || row.name !== old.name) continue;
+    row.edit = old.edit;
+    row.edit.enabled = row.saved.enabled;
+    row.editing = old.editing;
+    row.advanced = old.advanced;
+  }
+  return next;
+}
+
+function providerReason(code, context = 'test') {
+  const codes = {
+    bad_endpoint: 'provider_bad_endpoint', provider_kind: 'provider_kind_error', bad_model: 'provider_bad_model',
+    unsupported_provider: 'provider_test_unavailable', unsupported_cli: 'provider_test_unavailable', unavailable: 'provider_test_unavailable',
+    budget: 'provider_test_budget', budget_exceeded: 'provider_test_budget', monthly_cap: 'provider_test_budget',
+    daily_cap: 'provider_test_budget', daily_budget: 'provider_test_budget', token_cap: 'provider_test_budget',
+    cooldown: 'provider_test_cooldown', rate_limit: 'provider_test_cooldown', owner_hold: 'provider_test_hold',
+    off: 'provider_test_off', disabled: 'provider_test_off', missing_key: 'provider_test_missing_key',
+    gate: 'provider_test_gate', egress: 'provider_test_gate', unsafe_headers: 'provider_test_gate', auth: 'provider_test_auth',
+    unauthorized_provider: 'provider_test_auth', timeout: 'provider_test_timeout',
+    unsupported: 'provider_key_unsupported', managed_storage: 'provider_storage_failed',
+    no_safe_storage: 'provider_storage_failed', protected: 'provider_storage_failed',
+    no_dir: 'provider_storage_failed', shared_folder: 'provider_storage_failed', not_private: 'provider_storage_failed',
+    not_absolute: 'provider_storage_failed', not_a_key_file: 'provider_storage_failed',
+    not_a_file: 'provider_storage_failed', not_utf8: 'provider_storage_failed', ambiguous: 'provider_storage_failed',
+    no_key_file: 'provider_key_not_applicable',
+    http: 'provider_test_http', invalid: 'provider_test_invalid', isolation: 'provider_test_isolation',
+    allowance: 'provider_test_allowance', confirmation: 'provider_test_confirmation',
+    too_big: context === 'key' ? 'provider_storage_failed' : 'provider_test_size',
+  };
+  return t(codes[code] || (Object.hasOwn(TEXT, code) ? code : context === 'test' ? 'provider_test_reason' : 'provider_operation_refused'));
+}
+
+async function providerRequest(path, body) {
+  const res = await fetch(`/api/providers${path}`, {
+    method: 'POST', headers: { 'X-Oboete-Token': token, 'Content-Type': 'application/json' },
+    body, referrerPolicy: 'same-origin', credentials: 'omit',
+  });
+  const answer = (res.headers.get('content-type') || '').startsWith('application/json') ? await res.json() : {};
+  return { res, answer, current: res.status === 409 ? await api('settings') : null };
+}
+
+async function providerOperation(action, button, body = null, path = '') {
+  const mine = form;
+  const fields = button.closest('.settings');
+  const scope = button.closest('.provider-entry');
+  button.disabled = true;
+  fields.inert = true;
+  try {
+    const { res, answer, current } = await providerRequest(path, body || JSON.stringify({ version: mine.version, action }));
+    if (view !== 'settings' || form !== mine) return;
+    if (current) {
+      form = formOf(current);
+      drawSettings();
+      setStatus(t('stale'), true, lang);
+    } else if (res.ok) {
+      form = mergeProviderSettings(answer, mine, action);
+      drawSettings();
+      const key = path === '/key' ? (answer.key_saved?.durable ? 'key_saved' : 'key_not_durable')
+        : action.op === 'remove' ? 'provider_removed' : action.op === 'move' ? 'provider_moved' : 'provider_saved';
+      setStatus(t(key), path === '/key' && !answer.key_saved?.durable, lang);
+    } else {
+      fields.inert = false;
+      if (answer.field) markInvalid(answer.field, scope || fields);
+      const known = answer.code || ({ 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' })[res.status];
+      setStatus(answer.field === 'providers.name' ? t('provider_bad_name')
+        : known ? providerReason(known, path === '/key' ? 'key' : 'operation') : t('provider_operation_failed', { status: res.status }), true, lang);
+      if (action.op === 'enabled') drawSettings();
+    }
+  } catch {
+    if (view === 'settings' && form === mine) {
+      if (action.op === 'enabled') drawSettings();
+      setStatus(t('network_failed'), true, lang);
+    }
+  } finally {
+    button.disabled = false;
+    fields.inert = false;
+  }
+}
+
+// Secrets belong only to the live field and the single outgoing body. They are not copied into
+// form state; redraws clear them and the selected field is emptied before fetch is called.
+function providerKeyField(provider) {
   const i = el('input');
   i.type = 'text';
   i.autocomplete = 'off';
   i.spellcheck = false;
   i.autocapitalize = 'off';
   i.placeholder = t('key_placeholder');
-  i.dataset.field = `chain.${r.name}.key`;
-  i.setAttribute('aria-label', t('key_label', { name: r.name }));
+  i.dataset.field = 'providers.key';
+  i.setAttribute('aria-label', t('key_label', { name: provider.name }));
   const save = el('button', 'small', t('key_save'));
   save.type = 'button';
   save.disabled = true;
-  i.addEventListener('input', () => {
-    i.classList.remove('invalid');
-    i.removeAttribute('aria-invalid');
-    save.disabled = i.value === '';
+  i.addEventListener('input', () => { save.disabled = !i.value; });
+  i.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); if (!save.disabled) save.click(); }
   });
-  // Enter saves the key, not the settings form around it.
-  i.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter') return;
-    e.preventDefault();
-    if (!save.disabled) save.click();
+  save.addEventListener('click', () => {
+    const body = JSON.stringify({ version: form.version, selector: provider.selector, key: i.value });
+    i.value = '';
+    void providerOperation({ op: 'key', selector: provider.selector }, save, body, '/key');
   });
-  save.addEventListener('click', () => void saveKey(r.name, i, save, state));
-  return el('span', 'key-input', i, save);
+  return el('div', 'key-input', i, save);
 }
 
-async function saveKey(name, field, button, state) {
-  const body = JSON.stringify({ entry: name, key: field.value, version: form.version });
-  field.value = '';
-  button.disabled = true;
+function usdValue(value) {
+  return value === null || value === undefined ? t('provider_test_unknown_cost')
+    : new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', maximumFractionDigits: 6 }).format(value);
+}
+
+async function previewProvider(provider, button, run = false) {
   const mine = form;
   const fields = button.closest('.settings');
+  const preview = provider.preview;
+  if (run && (!preview?.ready || preview.version !== mine.version
+      || selectorKey(preview.selector) !== selectorKey(provider.selector))) return;
+  const body = JSON.stringify({ version: mine.version, selector: provider.selector, ...(run ? { confirmed: true } : {}) });
   fields.inert = true;
+  button.disabled = true;
   try {
-    const res = await fetch('/api/key', {
-      method: 'POST',
-      headers: { 'X-Oboete-Token': token, 'Content-Type': 'application/json' },
-      body,
-      referrerPolicy: 'same-origin',
-      credentials: 'omit',
-    });
-    const answer = (res.headers.get('content-type') || '').startsWith('application/json') ? await res.json() : {};
-    const current = answer.code === 'stale' ? await api('settings') : null;
+    const { res, answer, current } = await providerRequest(run ? '/test' : '/test/preview', body);
     if (view !== 'settings' || form !== mine) return;
     if (current) {
       form = formOf(current);
       drawSettings();
       setStatus(t('stale'), true, lang);
-      return;
-    }
-    if (res.ok) {
-      // Only the row's key state changes, in place: what is typed elsewhere and not saved yet
-      // stays, a key in another row included.
-      for (const r of form.chain) if (r.name === answer.entry) r.key = answer.key;
-      state.textContent = t(`key_${answer.key}`);
-      setStatus(t(answer.durable ? 'key_saved' : 'key_not_durable'), !answer.durable, lang);
-      return;
-    }
-    const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
-    fields.inert = false;
-    if (answer.field) markInvalid(answer.field);
-    setStatus(t(answer.code || byStatus[res.status] || 'other', { status: res.status }), true, lang);
-  } catch (e) {
-    if (view === 'settings' && form === mine) setStatus(failureMessage(e), true, lang);
+    } else if (res.ok) {
+      if (run) { provider.result = answer; provider.preview = null; }
+      else {
+        if (answer.version !== mine.version || !answer.selector
+            || selectorKey(answer.selector) !== selectorKey(provider.selector)) {
+          setStatus(t('stale'), true, lang);
+          return;
+        }
+        provider.preview = answer;
+        provider.result = null;
+      }
+      drawSettings();
+      setStatus('');
+    } else setStatus(providerReason(answer.code || 'unavailable'), true, lang);
+  } catch {
+    if (view === 'settings' && form === mine) setStatus(t('network_failed'), true, lang);
   } finally {
     fields.inert = false;
+    button.disabled = false;
   }
+}
+
+function providerTest(provider) {
+  const button = el('button', 'quiet small', t('provider_preview'));
+  button.type = 'button';
+  button.addEventListener('click', () => void previewProvider(provider, button));
+  const nodes = [note(t('provider_preview_desc')), button];
+  const preview = provider.preview;
+  if (preview) {
+    const run = el('button', 'small', t('provider_test_run'));
+    run.type = 'button';
+    run.disabled = !preview.ready;
+    run.addEventListener('click', () => void previewProvider(provider, run, true));
+    nodes.push(el('div', 'test-preview',
+      el('p', null, t('provider_test_destination', { destination: preview.destination })),
+      el('p', null, t('provider_test_model', { model: preview.model ?? t('provider_default_model') })),
+      el('h4', null, t('provider_test_fixture')), el('pre', 'document-text', preview.fixture),
+      note(t('provider_test_tokens', { tokens: preview.estimated_input_tokens, output: preview.max_output_tokens ?? t('no_cap') })),
+      el('p', null, t(preview.possible_charge ? 'provider_test_charge' : 'provider_test_no_charge',
+        { usd: usdValue(preview.estimated_usd), cap: usdValue(preview.monthly_cap_usd) })),
+      !preview.ready ? el('p', 'test-result error', t('provider_test_blocked', { reason: providerReason(preview.code) })) : null,
+      run));
+  }
+  const result = provider.result;
+  if (result) nodes.push(el('div', 'test-result',
+    el('p', result.status === 'ok' ? null : 'error', t(`provider_test_${result.status === 'ok' ? 'ok' : result.status === 'blocked' ? 'blocked' : 'failed'}`,
+      { ms: result.latency_ms ?? 0, reason: providerReason(result.code) })),
+    result.http_status === null || result.http_status === undefined ? null : note(t('provider_test_http_status', { status: result.http_status })),
+    result.usd === null || result.usd === undefined ? null : note(t('provider_test_billed', { usd: usdValue(result.usd) })),
+    result.retry_at ? note(t('provider_test_retry', { time: new Date(result.retry_at).toLocaleString(lang) })) : null));
+  return el('div', 'provider-test', ...nodes);
+}
+
+function providerEditor(draft, provider, card) {
+  const unsupported = provider?.saved.kind === 'cli' && !['claude', 'codex'].includes(provider.saved.cli);
+  const field = (key, label, type = 'text', description = null) => {
+    const control = input(type, draft[key], '', `providers.${key}`, (value) => { draft[key] = value; });
+    control.disabled = Boolean(unsupported);
+    if (key === 'timeout_s') [control.min, control.max] = form.ranges.timeout_s;
+    if (key === 'name') control.maxLength = 64;
+    if (key === 'model') control.maxLength = 200;
+    return el('label', 'field', el('span', null, t(label)), control, description ? note(t(description)) : null);
+  };
+  const main = el('div', 'grid', field('name', 'provider_name'),
+    draft.kind === 'openai' ? field('base_url', 'provider_endpoint', 'text', 'provider_endpoint_desc') : null,
+    field('model', 'col_model'), field('timeout_s', 'col_timeout', 'number'));
+  const limits = el('details', 'provider-limits', el('summary', null, t('provider_advanced')));
+  limits.open = provider?.advanced ?? false;
+  if (provider) limits.addEventListener('toggle', () => { provider.advanced = limits.open; });
+  const grid = el('div', 'grid');
+  const outputField = el('label', 'field');
+  const syncOutput = () => {
+    // Normal dispatch enforces this maximum only for priced HTTP. Keep other entries' saved
+    // estimates in the typed draft without offering an ineffective generation-limit control.
+    const paidHttp = draft.kind === 'openai'
+      && (Number(draft.limits.usd_per_mtok_in) > 0 || Number(draft.limits.usd_per_mtok_out) > 0);
+    if (paidHttp) {
+      if (outputField.parentElement !== grid) grid.append(outputField);
+    } else outputField.remove();
+  };
+  for (const key of LIMIT_FIELDS) {
+    const control = input('number', draft.limits[key], '', `providers.limits.${key}`, (value) => {
+      draft.limits[key] = value;
+      if (key.startsWith('usd_')) syncOutput();
+    });
+    control.min = key.startsWith('usd_') ? 0 : 1;
+    if (!key.startsWith('usd_')) control.max = key === 'daily_tokens' ? Number.MAX_SAFE_INTEGER : 4294967295;
+    if (key.startsWith('usd_')) { control.step = 'any'; control.inputMode = 'decimal'; }
+    control.disabled = Boolean(unsupported) || (draft.kind === 'cli' && key.startsWith('usd_'));
+    const label = key === 'max_output_tokens' ? outputField : el('label', 'field');
+    label.append(el('span', null, t(`provider_${key}`)), control);
+    if (key !== 'max_output_tokens') grid.append(label);
+  }
+  syncOutput();
+  const daily = field('daily_budget', 'col_budget', 'number');
+  [daily.querySelector('input').min, daily.querySelector('input').max] = form.ranges.daily_budget;
+  daily.hidden = draft.kind === 'cli' || draft.subscription;
+  if (draft.kind === 'openai') grid.append(daily);
+  limits.append(note(t('provider_limits_desc')), grid);
+  const subscribe = checkbox(draft.subscription, (value) => {
+    draft.subscription = value;
+    if (value) {
+      draft.daily_budget = provider?.saved.daily_budget === null || provider?.saved.daily_budget === undefined ? '' : String(provider.saved.daily_budget);
+      daily.querySelector('input').value = draft.daily_budget;
+    }
+    daily.hidden = value;
+  });
+  const save = el('button', 'small', t(provider ? 'provider_save' : 'provider_create'));
+  save.type = 'button';
+  save.disabled = Boolean(unsupported);
+  save.addEventListener('click', () => {
+    const field = providerValidation(draft);
+    if (field) {
+      markInvalid(field, card);
+      setStatus(t(field === 'providers.base_url' ? 'provider_bad_endpoint' : field === 'providers.name' ? 'provider_bad_name' : 'range'), true, lang);
+      return;
+    }
+    void providerOperation({ op: provider ? 'edit' : 'create', ...(provider ? { selector: provider.selector } : {}), entry: providerBody(draft) }, save);
+  });
+  const cancel = el('button', 'quiet small', t('provider_cancel'));
+  cancel.type = 'button';
+  cancel.addEventListener('click', () => {
+    if (provider) { provider.edit = providerEdit(provider.name, provider.saved); provider.editing = false; }
+    else form.newProvider = null;
+    drawSettings();
+  });
+  return el('div', 'provider-editor', main,
+    !provider ? el('label', 'check', checkbox(draft.enabled, (value) => { draft.enabled = value; }), t('provider_enabled')) : null,
+    draft.kind === 'openai' ? el('label', 'check', subscribe, t('provider_subscription')) : note(t('provider_cli_desc')),
+    draft.kind === 'openai' ? note(t('provider_subscription_desc')) : null,
+    limits, el('div', 'actions', save, cancel));
+}
+
+function providerEntry(provider, nativeCount) {
+  const saved = provider.saved;
+  const unsupported = saved.kind === 'cli' && !['claude', 'codex'].includes(saved.cli);
+  const source = t(`provider_source_${provider.selector.source}`);
+  const position = t('provider_position', { source, index: provider.selector.index + 1 });
+  const card = el('article', 'provider-entry');
+  card.dataset.selector = selectorKey(provider.selector);
+  const enabled = checkbox(saved.enabled, (value) => void providerOperation({ op: 'enabled', selector: provider.selector, enabled: value }, enabled));
+  enabled.disabled = !saved.enabled && (unsupported || saved.endpoint_supported === false);
+  enabled.setAttribute('aria-label', `${t('provider_enabled')}: ${provider.name} (${position})`);
+  const arrows = [-1, 1].map((direction) => {
+    const button = el('button', 'quiet small', direction < 0 ? '↑' : '↓');
+    button.type = 'button';
+    button.title = t(direction < 0 ? 'up' : 'down');
+    button.setAttribute('aria-label', `${button.title}: ${provider.name} (${position})`);
+    const to = provider.selector.index + direction;
+    button.disabled = provider.selector.source === 'gemini' || to < 0 || to >= nativeCount;
+    button.addEventListener('click', () => void providerOperation({ op: 'move', selector: provider.selector, to }, button));
+    return button;
+  });
+  const remove = el('button', 'quiet small', t('provider_remove'));
+  remove.type = 'button';
+  remove.addEventListener('click', () => {
+    if (window.confirm(t('provider_remove_confirm', { name: provider.name, source, index: provider.selector.index + 1 }))) {
+      void providerOperation({ op: 'remove', selector: provider.selector }, remove);
+    }
+  });
+  const edit = el('details', 'provider-edit', el('summary', null, t('provider_edit')));
+  edit.open = provider.editing;
+  edit.addEventListener('toggle', () => { provider.editing = edit.open; });
+  edit.append(providerEditor(provider.edit, provider, card));
+  const model = (value) => value ?? t('provider_default_model');
+  const key = saved.key === 'none' && saved.kind === 'openai' ? 'provider_key_none' : `key_${saved.key.replaceAll('-', '_')}`;
+  card.append(...present([el('div', 'provider-header', el('h4', null, provider.name), note(position),
+      el('label', 'check', enabled, t('provider_enabled')), el('div', 'move', ...arrows), remove),
+    note(t('provider_saved_native', { on: t(saved.enabled ? 'value_on' : 'value_off'), model: model(saved.model), timeout: saved.timeout_s })),
+    note(t('provider_effective', { on: t(provider.effective.on ? 'value_on' : 'value_off'), order: provider.effective.order + 1,
+      model: model(provider.effective.model), timeout: provider.effective.timeout_s })),
+    saved.kind === 'openai' ? note(saved.base_url || t('provider_unsupported_endpoint')) : note(saved.cli),
+    unsupported ? note(t('provider_unsupported_cli')) : null,
+    note(t(key)),
+    saved.kind === 'openai' ? el('div', 'provider-key', note(t('provider_key_desc')),
+      form.keyInput ? providerKeyField(provider) : note(t('provider_key_unsupported'))) : null,
+    unsupported ? null : edit,
+    providerTest(provider)]));
+  return card;
+}
+
+function providersSection() {
+  const section = el('section', 'provider-entries', el('h3', null, t('provider_entries_h')),
+    el('p', 'desc', t('provider_entries_desc')), note(t('provider_order_desc')));
+  const nativeCount = form.providers.filter((p) => p.selector.source !== 'gemini').length;
+  section.append(...form.providers.map((provider) => providerEntry(provider, nativeCount)));
+  if (form.newProvider) {
+    const draft = form.newProvider;
+    const card = el('article', 'provider-entry new-provider', el('h4', null, t('provider_add')));
+    const options = { openai: 'provider_http', claude: 'provider_cli_claude', codex: 'provider_cli_codex' };
+    const type = el('select', null, ...Object.entries(options).map(([value, key]) => {
+      const option = el('option', null, t(key)); option.value = value; return option;
+    }));
+    type.value = draft.kind === 'openai' ? 'openai' : draft.cli;
+    type.addEventListener('change', () => {
+      draft.kind = type.value === 'openai' ? 'openai' : 'cli';
+      if (draft.kind === 'cli') {
+        draft.cli = type.value;
+        draft.limits.usd_per_mtok_in = '0';
+        draft.limits.usd_per_mtok_out = '0';
+      }
+      drawSettings();
+    });
+    card.append(el('label', 'field', el('span', null, t('provider_type')), type), providerEditor(draft, null, card));
+    section.append(card);
+  } else {
+    const add = el('button', 'quiet small', t('provider_add'));
+    add.type = 'button';
+    add.addEventListener('click', () => { form.newProvider = providerEdit(); drawSettings(); });
+    section.append(add);
+  }
+  return section;
 }
 
 function chainRow(r, i, redraw) {
@@ -1366,7 +1820,7 @@ function chainRow(r, i, redraw) {
     el('td', null, el('span', 'entry-name', r.name), ...keyState(r), r.entries > 1 ? note(t('entries', { n: r.entries })) : null,
       r.differs.length ? note(t('differs', { what: r.differs.map((d) => t(`differs_${d}`)).join(lang === 'ja' ? '、' : ', ') })) : null),
     el('td', null, model, modelNote ? note(modelNote) : null, r.model !== null && !r.model_applied ? note(t('model_unapplied')) : null),
-    el('td', null, budget, r.budget_from_key && !r.edit.daily_budget ? note(t('from_key', { n: r.effective_daily_budget })) : null),
+    el('td', null, r.subscription ? note(t('provider_subscription')) : budget, !r.subscription && r.budget_from_key && !r.edit.daily_budget ? note(t('from_key', { n: r.effective_daily_budget })) : null),
     el('td', null, timeout));
   return tr;
 }
@@ -1423,11 +1877,13 @@ function saveBody() {
   };
 }
 
-function markInvalid(field) {
-  const i = [...document.querySelectorAll('#panel input, #panel select, #panel textarea')].find((x) => x.dataset.field === field);
+function markInvalid(field, root = document) {
+  const controls = [...root.querySelectorAll('input, select, textarea')];
+  const i = controls.find((x) => x.dataset.field === field) || controls.find((x) => x.dataset.field?.startsWith(`${field}.`));
   if (!i) return;
   i.classList.add('invalid');
   i.setAttribute('aria-invalid', 'true');
+  for (let details = i.closest('details'); details; details = details.parentElement?.closest('details')) details.open = true;
   i.focus();
 }
 
@@ -1459,7 +1915,7 @@ async function saveSettings(button) {
     // Moved to another tab, or the values were loaded again, while saving: what is shown stays.
     if (view !== 'settings' || form !== mine) return;
     if (res.ok || current) {
-      form = formOf(current || answer);
+      form = current ? formOf(current) : mergeProviderSettings(answer, mine, { op: 'settings' });
       drawSettings();
       setStatus(t(current ? 'stale' : 'saved'), Boolean(current), lang);
       return;
@@ -1556,7 +2012,7 @@ function drawSettings() {
     th.scope = 'col';
     return th;
   }));
-  const save = el('button', 'save', t('save'));
+  const save = el('button', 'save', t('settings_save'));
   save.type = 'submit';
   const formEl = el('form', null,
     el('section', null,
@@ -1592,6 +2048,7 @@ function drawSettings() {
       el('p', 'desc', t('capture_desc')),
       el('label', 'check', checkbox(f.capture.store_prompts, (v) => { f.capture.store_prompts = v; }), t('store_prompts')),
       el('label', 'field', el('span', null, t('tool_output')), tool)),
+    providersSection(),
     el('section', null,
       el('h3', null, t('chain_h')),
       el('p', 'desc', t('chain_desc')),
@@ -1603,6 +2060,9 @@ function drawSettings() {
       : null,
     save);
   formEl.noValidate = true;
+  formEl.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && event.target.closest('.provider-entry') && event.target.tagName !== 'BUTTON' && event.target.tagName !== 'SUMMARY') event.preventDefault();
+  });
   formEl.addEventListener('submit', (e) => {
     e.preventDefault();
     void saveSettings(save);

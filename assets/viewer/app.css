@@ -262,6 +262,23 @@ input.invalid, select.invalid, textarea.invalid { border-color: var(--red); back
 .warnings ul { margin: 4px 0 0; padding-left: 18px; color: var(--yellow); }
 .settings .save { margin-top: 4px; }
 
+.provider-entry { border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin: 12px 0; overflow-wrap: anywhere; }
+.provider-header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.provider-entry h4 { font-size: 14px; margin: 0; }
+.provider-header .check { margin: 0; }
+.provider-header .move { display: inline-flex; gap: 4px; }
+.provider-editor input[type="text"] { width: 100%; min-width: 0; }
+.provider-key { margin: 10px 0; }
+.provider-key .key-input { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+/* A masked text field avoids browser password-save prompts; secrets never enter form state. */
+.provider-key input { -webkit-text-security: disc; max-width: 100%; min-width: 0; }
+.provider-test { margin-top: 10px; }
+.provider-test > button { margin-top: 6px; }
+.test-preview { border-left: 2px solid var(--line); padding-left: 12px; margin-top: 10px; }
+.test-preview p, .test-result p { margin: 6px 0; }
+.test-preview pre { max-height: 10rem; overflow: auto; }
+.provider-entry .error { color: var(--red); }
+
 .notice { margin: 24px; }
 
 /* Timeline: cards, session summaries and prompts share the existing theme. */

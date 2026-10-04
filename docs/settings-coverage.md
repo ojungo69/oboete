@@ -29,10 +29,10 @@ left with "—" there.
 | Setting or operation | Spec | Now | Backend | Takes effect | OS | Test | Slice |
 |---|---|---|---|---|---|---|---|
 | A provider's order, on/off, daily budget, timeout, model | 1.4, 1.5 | page | `[chain]` | the next window | all | `settings.rs` `a_save_writes_only_what_changes`, `a_refused_save_leaves_the_file`, `a_model_the_entry_cannot_price_is_refused`; `view.rs` `a_settings_save_passes_every_guard_first` | built |
-| A provider's key, write-only | 6.6 | page | `save_key` | the next call | Linux | `settings.rs` `a_key_saved_from_the_page_reaches_its_file_and_no_answer`, `no_key_is_shown_or_taken`; `view.rs` `a_key_save_answers_without_the_key` | built |
+| A provider's key, write-only | 6.6 | page; managed registration per entry | `save_key`, `save_provider_key` | the next call | Linux | `settings.rs` `a_key_saved_from_the_page_reaches_its_file_and_no_answer`, `no_key_is_shown_or_taken`; `settings/providers.rs` `managed_key_registration_binds_a_physical_entry_without_revealing_or_replacing_old_keys`, `a_failed_config_save_discards_only_the_new_managed_key`; `view.rs` `a_key_save_answers_without_the_key` | built; W2 |
 | A provider's key on macOS and Windows, in owner-only storage there | 6.6, spec-webui | refused (`a_key_save_waits_for_owner_only_files_off_linux`) | `save_key` | the next call | macOS, Windows | — | #281, after the switch, before #94 closes |
-| Add, edit and remove a provider entry of a supported type | 1.4 | — | `[[providers]]` | the next window | all | — | W2 |
-| Test a provider's connection, separately from a save | spec-webui | — | a typed probe | at once, nothing saved | all | — | W2 |
+| Add, edit, remove, order and disable a provider entry of a supported type | 1.4 | page, apart from name-group overlays | `[[providers]]`, `save_provider` | the next window | all | `settings.rs` `individual_provider_edits_keep_duplicates_unknowns_and_stale_config`; `settings/providers.rs` `provider_edits_keep_native_noops_inline_fields_and_legacy_subscription_caps`, `moving_native_tables_keeps_their_nested_fields_and_unrelated_comments`, `builtin_edits_materialize_the_native_base_without_losing_effective_overlays` | W2 |
+| Test a provider's connection, separately from a save | spec-webui | page, preview then explicit single-entry test | `preview_provider_test`, `test_provider` | at once; test result and spending only, no config save | all | `settings/providers.rs` `a_probe_preview_is_bound_to_saved_selection_and_makes_no_files_or_requests`, `a_probe_does_not_shrink_the_normal_fallback_for_legacy_unmetered_calls`; `provider.rs` `explicit_probe_sends_only_the_fixed_fixture_and_returns_no_provider_payload`, `explicit_probe_rejects_redirects_and_http_refusals_without_retry`; `budget.rs` `concurrent_reservations_share_daily_calls_tokens_and_the_curation_month`, `a_small_probe_cannot_shrink_a_previous_unmetered_curation_call`; `view.rs` `a_settings_save_passes_every_guard_first` | W2 |
 | Curation on or off | 3.1, 7.4 | page | `[summary] curate` | the next window | all | `settings.rs` `the_summary_shows_saved_values_and_the_parser_ranges`, `a_summary_save_is_lossless_and_stale_checked` | W1 |
 | Summary language, window size, idle wait | 3.1 | page | `[summary]` | the next window | all | `settings.rs` `a_summary_save_is_lossless_and_stale_checked`, `the_paid_cap_takes_finite_values_of_0_or_more_only` | W1 |
 | The monthly cap of paid calls, with the month's spend beside it | 1.4, parity 13 | page | `paid_usd_per_month`, providers.db | the next call | all | `settings.rs` `the_paid_cap_takes_finite_values_of_0_or_more_only`, `the_spend_and_the_owner_stops_are_read_without_a_write`, `a_top_level_setting_changed_keeps_the_comments_above_it` | W1 |
@@ -98,6 +98,9 @@ cloud starts from a page view or a save.
 - **W2, providers.** Add, edit and remove entries of the supported types, and an explicit connection
   test that names its destination, sends a small synthetic request and says what it may cost first.
   Security scope: endpoint and key handling follow the provider safety rules (`provider.rs`).
+  The saved native entry is separate from its effective name-group overlays; only priced HTTP
+  offers a normal output cap. [settings-providers.md](settings-providers.md) records the supported
+  fields, credential storage, probe and shared budget contract.
 - **W3, privacy and claims.** The terminal line at session start, exclusions, redaction rules and
   exceptions (validated as config.toml's are, with the rescan an added rule starts and its state),
   the backup location, correct, mute and unmute, the global preference; then capture exclusion and

@@ -169,7 +169,7 @@ pub struct Call<'a> {
     /// The uncalibrated estimate of what was sent (`budget::estimate`).
     pub est_tokens: Option<u32>,
     pub usage: Usage,
-    /// A paid entry's cost at its price then (`budget::cost`); None for any other entry.
+    /// A paid entry's cost at its price then; None for an unbilled or free entry.
     pub usd: Option<f64>,
 }
 
@@ -317,7 +317,7 @@ pub fn calls_in_a_day(conn: &Connection, provider: &str) -> Result<(u32, Option<
     Ok(conn.query_row(
         "SELECT COUNT(*), MIN(ts) FROM provider_calls WHERE provider=?1 AND ts>=?2
            AND outcome IN ('ok','error','invalid','wait','empty','prose','shape','over_cap','unanchored',
-                           'sent')",
+                           'sent','reserved')",
         params![provider, now_ms() - DAY_MS],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
@@ -359,13 +359,20 @@ pub fn last_calls(conn: &Connection, n: u32) -> Result<Vec<String>> {
     )?;
     let rows = stmt
         .query_map([n], |r| {
+            let outcome: String = r.get(2)?;
+            let detail: String = r.get(4)?;
+            let shown = if outcome == "reserved" {
+                "allowance reserved"
+            } else {
+                visible_detail(&detail)
+            };
             Ok(format!(
                 "{} {} {} {}ms {}",
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
+                outcome,
                 r.get::<_, i64>(3)?,
-                r.get::<_, String>(4)?
+                shown
             ))
         })?
         .collect::<Result<_, _>>()?;
@@ -373,6 +380,40 @@ pub fn last_calls(conn: &Connection, n: u32) -> Result<Vec<String>> {
 }
 
 pub const DAY_MS: i64 = 86_400_000;
+
+/// Curation requests admitted but not yet settled. Their numeric bounds are metadata, never
+/// reported usage: calibration and token reports must not learn from a hypothetical answer.
+#[derive(Default)]
+pub(crate) struct Reserved {
+    pub calls: u32,
+    pub tokens: f64,
+}
+
+pub(crate) fn reserved_since(conn: &Connection, provider: &str, since: i64) -> Result<Reserved> {
+    let mut statement = conn.prepare(
+        "SELECT detail FROM provider_calls WHERE provider=?1 AND ts>=?2
+         AND outcome='reserved' AND role NOT IN ('embed','query')",
+    )?;
+    let mut reserved = Reserved::default();
+    let rows = statement.query_map(params![provider, since], |r| r.get::<_, String>(0))?;
+    for row in rows {
+        let bounds = token_bounds(&row?)?;
+        reserved.calls = reserved.calls.saturating_add(1);
+        reserved.tokens += bounds[0] + bounds[1];
+    }
+    Ok(reserved)
+}
+
+/// The pending part of the curation month pool. A crash keeps it until the same bounded
+/// accounting window ends; elapsed request time alone never proves a safe refund.
+pub(crate) fn reserved_usd_this_month(conn: &Connection) -> Result<f64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(usd), 0) FROM provider_calls
+         WHERE ts>=?1 AND outcome='reserved' AND role NOT IN ('embed','query')",
+        [chrono_free_month_start(now_ms())],
+        |r| r.get(0),
+    )?)
+}
 
 /// When a call made at `ts` has left the rolling day that `calls_in_a_day` and `tokens_since`
 /// count (`ts >= now - DAY_MS`): one ms after it is exactly a day old.
@@ -385,6 +426,49 @@ pub fn out_of_the_day(ts: i64) -> i64 {
 const SENT_NOT_REFUSED: &str = "bytes_out > 0
     AND outcome IN ('ok','invalid','error','empty','prose','shape','over_cap','unanchored')
     AND COALESCE(detail, '') NOT GLOB 'http [0-9][0-9][0-9]*'";
+
+// Only settlement writes this frame on sent, non-refused, unmetered rows. HTTP refusals remain
+// plain, preserving the accounting predicate's prefix. An unframed legacy reason's lookalike
+// suffix is not metadata; inside a frame only the final owned suffix supplies its bounds.
+const BOUNDS_FRAME: &str = "\u{1e}oboete-call-v1:";
+const BOUNDS_MARKER: &str = "\u{1e}oboete-budget-v1:";
+
+fn token_bounds(text: &str) -> Result<[f64; 2]> {
+    let bounds: [f64; 2] =
+        serde_json::from_str(text).map_err(|_| anyhow::anyhow!("invalid stored token bounds"))?;
+    anyhow::ensure!(
+        bounds.iter().all(|n| n.is_finite() && *n >= 0.0),
+        "invalid stored token bounds"
+    );
+    Ok(bounds)
+}
+
+/// The human-readable reason without settlement's private allowance metadata. Diagnostic
+/// readers do not print a malformed suffix either; admission refuses its invalid bounds.
+pub(crate) fn visible_detail(detail: &str) -> &str {
+    let Some(framed) = detail.strip_prefix(BOUNDS_FRAME) else {
+        return detail;
+    };
+    framed
+        .rsplit_once(BOUNDS_MARKER)
+        .map_or("stored call detail unavailable", |(reason, _)| reason)
+}
+
+/// Called inside the settlement transaction, after its one reserved-row update. Retain only
+/// admission bounds on rows with missing usage, using the same sent/nonbilled predicate as reads.
+pub(crate) fn freeze_unmetered(conn: &Connection, id: i64, bounds: [f64; 2]) -> Result<()> {
+    let bounds = serde_json::to_string(&bounds)?;
+    token_bounds(&bounds)?;
+    conn.execute(
+        &format!(
+            "UPDATE provider_calls SET detail=?2 || COALESCE(detail,'') || ?3 || ?4
+          WHERE id=?1 AND {SENT_NOT_REFUSED}
+          AND (prompt_tokens IS NULL OR completion_tokens IS NULL)"
+        ),
+        params![id, BOUNDS_FRAME, BOUNDS_MARKER, bounds],
+    )?;
+    Ok(())
+}
 
 /// Tokens (prompt plus completion) `provider` reported since `since`, and when its oldest call
 /// since then that the token budget counts was made: one that reported tokens or was sent and not
@@ -458,19 +542,52 @@ pub fn next_month() -> i64 {
     chrono_free_month_start(chrono_free_month_start(now_ms()) + 32 * DAY_MS)
 }
 
-/// What `provider`'s calls since `start` that were sent and not refused may have used beyond the
-/// usage they reported: the estimate of each call with no prompt count, and the number of calls
-/// with no completion count.
-pub fn unmetered(conn: &Connection, provider: &str, start: i64) -> Result<(i64, i64)> {
-    Ok(conn.query_row(
-        &format!(
-            "SELECT COALESCE(SUM(CASE WHEN prompt_tokens IS NULL THEN est_tokens END), 0),
-                    COALESCE(SUM(completion_tokens IS NULL), 0)
-             FROM provider_calls WHERE provider=?1 AND ts>=?2 AND {SENT_NOT_REFUSED}"
-        ),
-        params![provider, start],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?)
+/// Missing usage of sent, non-refused calls, using each settled request's frozen bounds.
+/// Legacy rows have no recoverable admission-time bounds: retain their previous policy of the
+/// current factor/output fallback, rather than claiming to reconstruct historical settings.
+pub fn unmetered(
+    conn: &Connection,
+    provider: &str,
+    start: i64,
+    legacy_factor: f64,
+    legacy_output: u32,
+) -> Result<f64> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT est_tokens, prompt_tokens IS NULL, completion_tokens IS NULL, detail
+             FROM provider_calls WHERE provider=?1 AND ts>=?2 AND {SENT_NOT_REFUSED}
+             AND (prompt_tokens IS NULL OR completion_tokens IS NULL)"
+    ))?;
+    let rows = statement.query_map(params![provider, start], |r| {
+        Ok((
+            r.get::<_, Option<i64>>(0)?,
+            r.get::<_, bool>(1)?,
+            r.get::<_, bool>(2)?,
+            r.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut missing = 0.0;
+    for row in rows {
+        let (estimate, prompt_missing, completion_missing, detail) = row?;
+        let bounds = match detail.as_deref().and_then(|s| s.strip_prefix(BOUNDS_FRAME)) {
+            Some(framed) => {
+                let (_, encoded) = framed
+                    .rsplit_once(BOUNDS_MARKER)
+                    .ok_or_else(|| anyhow::anyhow!("invalid stored token bounds"))?;
+                token_bounds(encoded)?
+            }
+            None => [
+                estimate.unwrap_or(0) as f64 * legacy_factor,
+                f64::from(legacy_output),
+            ],
+        };
+        if prompt_missing {
+            missing += bounds[0];
+        }
+        if completion_missing {
+            missing += bounds[1];
+        }
+    }
+    Ok(missing)
 }
 
 /// Unix ms of 00:00 UTC on the first day of `ms`'s month (civil-from-days, H. Hinnant).
@@ -486,11 +603,12 @@ fn chrono_free_month_start(ms: i64) -> i64 {
     (days - day_of_month) * DAY_MS
 }
 
-/// `prompt_tokens / est_tokens` of `provider`'s newest `n` calls that recorded both.
+/// `prompt_tokens / est_tokens` of `provider`'s newest `n` curation calls that recorded both.
+/// A probe estimates its whole fixed envelope; normal curation estimates its prompt only.
 pub fn token_ratios(conn: &Connection, provider: &str, n: u32) -> Result<Vec<f64>> {
     let mut stmt = conn.prepare(
         "SELECT CAST(prompt_tokens AS REAL) / est_tokens FROM provider_calls
-         WHERE provider=?1 AND prompt_tokens > 0 AND est_tokens > 0 ORDER BY id DESC LIMIT ?2",
+         WHERE provider=?1 AND role != 'probe' AND prompt_tokens > 0 AND est_tokens > 0 ORDER BY id DESC LIMIT ?2",
     )?;
     let ratios = stmt
         .query_map(params![provider, n], |r| r.get(0))?
@@ -717,6 +835,44 @@ pub fn clear_turn_pending(conn: &Connection, device: &str, seq: i64) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probes_consume_limits_without_recalibrating_curation() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = open(home.path()).unwrap();
+        for (role, count, est, prompt, completion, usd) in [
+            ("curator", 5, 100, 200, 20, 0.02),
+            ("probe", 6, 200, 40, 1, 0.01),
+        ] {
+            for _ in 0..count {
+                record(
+                    &conn,
+                    &Call {
+                        provider: "p",
+                        role,
+                        span: "synthetic",
+                        outcome: "ok",
+                        ms: 1,
+                        detail: None,
+                        bytes_out: 30,
+                        est_tokens: Some(est),
+                        usage: Usage {
+                            prompt: Some(prompt),
+                            completion: Some(completion),
+                            ..Usage::default()
+                        },
+                        usd: Some(usd),
+                    },
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(crate::budget::factor(&conn, "p").unwrap(), 2.0);
+        assert_eq!(calls_in_a_day(&conn, "p").unwrap().0, 11);
+        assert_eq!(tokens_since(&conn, "p", 0).unwrap().0, 1346);
+        assert!((usd_this_month(&conn).unwrap() - 0.16).abs() < 1e-9);
+        assert_eq!(last_calls(&conn, 20).unwrap().len(), 11);
+    }
 
     #[test]
     fn an_inflight_curation_keeps_only_metadata_and_its_current_generation() {

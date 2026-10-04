@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{self, ChainOverlay, Provider, ToolOutput};
 
+mod providers;
+
 /// Why a save was refused: an HTTP status, a code the page puts in words, and the field it is
 /// about ("chain.groq.timeout_s"), empty when it is about the whole request.
 #[derive(Debug, PartialEq)]
@@ -108,9 +110,10 @@ pub fn show(home: &Path) -> Value {
             parsed(&path, t)?,
             alone(&path, &doc)?,
             config::parse_worker(t).ok()?,
+            provider_rows(&path, &doc)?,
         ))
     });
-    let Some(((cfg, capture, inject), alone, worker)) = read else {
+    let Some(((cfg, capture, inject), alone, worker, providers)) = read else {
         return json!({"version": version, "error": "file_invalid"});
     };
     let ledger = crate::providers_db::read_only(home);
@@ -176,6 +179,7 @@ pub fn show(home: &Path) -> Value {
             "tool_output": tool_output(capture.tool_output),
         },
         "chain": chain,
+        "providers": providers,
         // Where a key typed on the page can be written (#94 part 3; macOS and Windows: #281).
         "key_input": cfg!(target_os = "linux"),
         "warnings": cfg.warnings,
@@ -210,6 +214,117 @@ fn gemini_place(place: config::GeminiPlace) -> &'static str {
         config::GeminiPlace::BeforeSubscriptions => "before-subscriptions",
         config::GeminiPlace::AfterSubscriptions => "after-subscriptions",
     }
+}
+
+/// A configured endpoint is shown only if it cannot contain URL credentials or query secrets.
+/// HTTP is supported for numeric loopback hosts; other destinations require HTTPS.
+fn endpoint_supported(url: &str) -> bool {
+    crate::provider::endpoint_supported(url)
+}
+
+/// Raw array order is the editor's identity. The effective order may have been changed by
+/// name-group overlays; duplicates retain their relative order under that stable sort.
+fn provider_rows(path: &Path, doc: &toml_edit::DocumentMut) -> Option<Vec<Value>> {
+    let mut raw = doc.clone();
+    raw.remove("chain");
+    raw.remove("gemini");
+    let base = config::from_text(path, &raw.to_string()).ok()?;
+    let effective = config::from_text(path, &doc.to_string()).ok()?;
+    let source = if doc.contains_key("providers") {
+        "file"
+    } else {
+        "builtin"
+    };
+    let mut rows = Vec::new();
+    for (index, p) in base.providers.iter().enumerate() {
+        let occurrence = base.providers[..index]
+            .iter()
+            .filter(|other| other.name() == p.name())
+            .count();
+        let (order, applied) = effective
+            .providers
+            .iter()
+            .enumerate()
+            .filter(|(_, other)| other.name() == p.name())
+            .nth(occurrence)?;
+        rows.push(provider_row(
+            p,
+            applied,
+            &effective.chain,
+            source,
+            index,
+            order,
+        ));
+    }
+    if !base.providers.iter().any(|p| p.name() == "gemini")
+        && let Some((order, p)) = effective
+            .providers
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.name() == "gemini")
+    {
+        let before_overlay = alone(path, doc)?;
+        let own = before_overlay
+            .providers
+            .iter()
+            .find(|p| p.name() == "gemini")?;
+        rows.push(provider_row(own, p, &effective.chain, "gemini", 0, order));
+    }
+    Some(rows)
+}
+
+fn provider_row(
+    saved: &Provider,
+    effective: &Provider,
+    chain: &ChainOverlay,
+    source: &str,
+    index: usize,
+    order: usize,
+) -> Value {
+    let fields = |p: &Provider| match p {
+        Provider::Openai {
+            base_url,
+            key_file,
+            model,
+            daily_budget,
+            timeout_s,
+            retry_429,
+            subscription,
+            ..
+        } => json!({
+            "kind": "openai", "base_url": endpoint_supported(base_url).then_some(base_url),
+            "endpoint_supported": endpoint_supported(base_url), "model": model,
+            "daily_budget": daily_budget, "timeout_s": timeout_s, "retry_429": retry_429,
+            "subscription": subscription, "key_file": key_file,
+            "key": match key_file {
+                Some(f) if f.exists() => "ok", Some(_) => "missing", None => "none",
+            },
+        }),
+        Provider::Cli {
+            cli,
+            model,
+            timeout_s,
+            ..
+        } => json!({
+            "kind": "cli", "cli": cli, "model": model, "timeout_s": timeout_s,
+            "subscription": true, "key": if crate::setup::on_path(cli) {
+                "on-path"
+            } else { "not-on-path" },
+        }),
+    };
+    let limits = saved.limits();
+    let mut own = fields(saved);
+    own["enabled"] = json!(saved.enabled());
+    own["limits"] = json!({
+        "max_request_tokens": limits.max_request_tokens, "daily_tokens": limits.daily_tokens,
+        "usd_per_mtok_in": limits.usd_per_mtok_in, "usd_per_mtok_out": limits.usd_per_mtok_out,
+        "max_output_tokens": limits.max_output_tokens,
+    });
+    let mut applied = fields(effective);
+    applied["on"] = json!(effective.enabled() && !chain.turns_off(saved.name()));
+    applied["order"] = json!(order);
+    json!({"selector": {"source": source, "index": index}, "name": saved.name(),
+        "saved": own, "effective": applied})
 }
 
 /// One chain entry for the page. `key` is the key file's state as doctor words it; its path is
@@ -299,6 +414,7 @@ fn entry(
         "entries": same.len(),
         "differs": differs,
         "kind": kind,
+        "subscription": same.iter().any(|p| p.subscription()),
         "on": !chain.turns_off(name),
         "key": key,
         "key_file": key_file,
@@ -426,6 +542,7 @@ pub fn save_key(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, R
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _config = config_lock(home).map_err(|_| refused(500, "write_failed", ""))?;
     let path = home.join("config.toml");
     let was = bytes(home).map_err(|_| invalid())?;
     if version(was.as_deref()) != posted.version {
@@ -458,6 +575,25 @@ pub fn save_key(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, R
     let written = crate::keyfile::write(file, &posted.key, home)
         .map_err(|r| refused(r.status(), r.code(), field))?;
     Ok(json!({"entry": posted.entry, "key": "ok", "durable": written.durable}))
+}
+
+/// Changes one physical or virtual provider entry against the version the page read.
+pub fn save_provider(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
+    providers::save(home, saving, body)
+}
+
+pub fn save_provider_key(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
+    let owner = config::home_dir();
+    let data = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from);
+    providers::save_key_at(home, saving, body, &owner, data.as_deref())
+}
+
+pub fn preview_provider_test(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
+    providers::preview(home, body)
+}
+
+pub fn test_provider(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
+    providers::test(home, body)
 }
 
 /// The page's save: checks the request against the file it read (`version`), writes the page's
@@ -714,7 +850,7 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
     }
     // Turning off the last entry in use. A chain with none in use already (all off by hand, or no
     // entries) is not this save's doing, so the rest of the settings still save (cubic on #94).
-    let in_use = |p: &Provider| !now.chain.turns_off(p.name());
+    let in_use = |p: &Provider| p.enabled() && !now.chain.turns_off(p.name());
     if posted.chain.iter().all(|e| !e.on) && now.providers.iter().any(in_use) {
         return Err(refused(422, "chain_empty", "chain"));
     }
@@ -1982,6 +2118,100 @@ mod tests {
             })
             .collect();
         assert_eq!(timeouts, [60, 60]);
+    }
+
+    #[test]
+    fn provider_rows_keep_physical_selectors_and_hide_secret_fields() {
+        let text = "gemini = \"after-subscriptions\"\n\
+            [chain]\norder = [\"b\", \"a\"]\noff = [\"a\"]\n\
+            timeout_s = { a = 120 }\nmodel = { a = \"overlaid\" }\n\
+            [[providers]]\nkind = \"openai\"\nname = \"a\"\n\
+            base_url = \"https://example.invalid/v1\"\nmodel = \"first\"\n\
+            timeout_s = 60\nheaders = { authorization = \"header-canary\" }\n\
+            extra = { secret = \"extra-canary\" }\n\
+            [[providers]]\nkind = \"cli\"\nname = \"b\"\ncli = \"claude\"\n\
+            [[providers]]\nkind = \"openai\"\nname = \"a\"\n\
+            base_url = \"https://user:endpoint-canary@example.invalid/v1?token=query-canary\"\n\
+            model = \"second\"\ntimeout_s = 90\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        let rows = shown["providers"]
+            .as_array()
+            .expect("individual provider rows");
+        assert_eq!(rows.len(), 4);
+        for (i, model, order) in [(0, "first", 1), (2, "second", 2)] {
+            assert_eq!(rows[i]["selector"], json!({"source": "file", "index": i}));
+            assert_eq!(rows[i]["saved"]["model"], model);
+            assert_eq!(rows[i]["effective"]["model"], "overlaid");
+            assert_eq!(rows[i]["effective"]["timeout_s"], 120);
+            assert_eq!(rows[i]["effective"]["on"], false);
+            assert_eq!(rows[i]["effective"]["order"], order);
+        }
+        assert_eq!(rows[0]["saved"]["base_url"], "https://example.invalid/v1");
+        assert_eq!(rows[2]["saved"]["base_url"], Value::Null);
+        assert_eq!(rows[3]["selector"], json!({"source": "gemini", "index": 0}));
+        assert_eq!(shown["chain"].as_array().unwrap().len(), 3);
+        for canary in [
+            "header-canary",
+            "extra-canary",
+            "endpoint-canary",
+            "query-canary",
+        ] {
+            assert!(!shown.to_string().contains(canary));
+        }
+        assert_eq!(file(&home).as_deref(), Some(text));
+        assert!(!home.path().join("state").exists());
+        assert!(!home.path().join("providers.db").exists());
+
+        let empty = home_with(None);
+        let shown = show(empty.path());
+        let rows = shown["providers"].as_array().unwrap();
+        assert!(!rows.is_empty());
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(row["selector"], json!({"source": "builtin", "index": i}));
+        }
+        assert!(std::fs::read_dir(empty.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn individual_provider_edits_keep_duplicates_unknowns_and_stale_config() {
+        let text = "# config note\n[chain]\nmodel = { a = \"overlay\" } # group note\n\
+            [[providers]]\nkind = \"cli\"\nname = \"a\"\ncli = \"claude\"\n\
+            model = \"first\" # first note\ntimeout_s = 60\n\
+            [[providers]]\nkind = \"cli\"\nname = \"a\"\ncli = \"claude\"\n\
+            model = \"second\" # second note\ntimeout_s = 90\nfuture = \"kept\"\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        let body = serde_json::to_vec(&json!({"version": shown["version"],
+            "action": {"op": "edit", "selector": shown["providers"][1]["selector"],
+                "entry": {"kind": "cli", "name": "a", "cli": "claude", "model": "new",
+                    "enabled": false, "timeout_s": 120, "limits": {
+                        "max_request_tokens": null, "daily_tokens": null,
+                        "usd_per_mtok_in": 0.0, "usd_per_mtok_out": 0.0,
+                        "max_output_tokens": 4000}}}}))
+        .unwrap();
+        let saved = save_provider(home.path(), &Mutex::new(()), &body).expect("physical edit");
+        let cfg = config::load(home.path()).unwrap();
+        assert_eq!(cfg.providers.len(), 2);
+        assert_eq!(saved["providers"][0]["saved"]["model"], "first");
+        assert_eq!(saved["providers"][1]["saved"]["model"], "new");
+        assert_eq!(saved["providers"][1]["effective"]["model"], "overlay");
+        assert_eq!(saved["providers"][1]["effective"]["on"], false);
+        assert_eq!(config::load_chain(home.path()).unwrap().providers.len(), 1);
+        let after = file(&home).unwrap();
+        for kept in [
+            "# config note",
+            "# group note",
+            "# first note",
+            "# second note",
+            "future = \"kept\"",
+        ] {
+            assert!(after.contains(kept), "{kept}");
+        }
+        let refusal = save_provider(home.path(), &Mutex::new(()), &body).unwrap_err();
+        assert_eq!((refusal.status, refusal.code), (409, "stale"));
+        assert_eq!(file(&home).as_deref(), Some(after.as_str()));
+        assert!(!home.path().join("providers.db").exists());
     }
 
     /// A priced entry and a CLI entry of one name: one row with the stricter rule and `[chain]`'s
