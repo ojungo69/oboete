@@ -18,6 +18,7 @@ mod db;
 mod dispatch;
 mod embed;
 mod embed_phase;
+mod executable;
 mod failure;
 mod forget;
 mod gates;
@@ -343,6 +344,7 @@ enum Cmd {
 }
 
 fn main() {
+    executable::init();
     let cli = Cli::parse();
     let home = cli
         .home

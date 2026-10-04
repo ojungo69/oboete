@@ -430,6 +430,7 @@ struct Holding {
     lock: Option<Lock>,
     last: u64,
     home: FileId,
+    executable: crate::executable::Watch,
 }
 
 fn serve_until_done(
@@ -541,6 +542,7 @@ fn serve(
     crate::forget::reconcile_or_say(home, &mut raw)?;
     // The resident viewer is started where the backup deadline is looked at (R4). True means
     // the scheduled export first needs the stores reopened.
+    let (resident, yields) = (phases.resident, phases.yields);
     let mut due = |raw: &Raw, holding: &Holding, viewer: Option<&mut crate::view::Starter>| {
         if gone(home, holding) {
             return false;
@@ -553,11 +555,14 @@ fn serve(
             *next_backup = Instant::now() + crate::backup::EVERY;
         }
         if let Some(viewer) = viewer {
-            viewer.due(home);
+            if resident {
+                viewer.due(home);
+            } else {
+                viewer.reap();
+            }
         }
         false
     };
-    let (resident, yields) = (phases.resident, phases.yields);
     let mut config = config_stamp(home);
     // Whether a round ran since a resident worker's last idle step (R3).
     let mut ran;
@@ -583,6 +588,20 @@ fn serve(
         // An embedding call that is out is work in flight: its answer is settled before the
         // worker steps aside (R12) and before its outcome says all is well (R10).
         let calling = |phases: &Phases| phases.embed.as_ref().is_some_and(|e| e.busy());
+        if yields && !calling(phases) {
+            match holding.executable.change() {
+                crate::executable::Change::Replaced => {
+                    let _ = crate::executable::exec(
+                        phases
+                            .viewer
+                            .as_deref()
+                            .and_then(crate::view::Starter::child_id),
+                    );
+                }
+                crate::executable::Change::Missing => return Ok(false),
+                crate::executable::Change::Stay => {}
+            }
+        }
         // And once a command has asked, or the worker is to leave, no other call is sent, by the
         // embedding phase or by curation: a backlog would keep the command waiting for as long as
         // it lasts.
@@ -676,6 +695,24 @@ fn serve(
             let mut more = false;
             while Instant::now() < deadline {
                 std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
+                // R3 takes precedence over R9: exec must not recreate a removed/replaced home.
+                if gone(home, holding) {
+                    return Err(Gone.into());
+                }
+                if yields && !calling(phases) {
+                    match holding.executable.change() {
+                        crate::executable::Change::Replaced => {
+                            let _ = crate::executable::exec(
+                                phases
+                                    .viewer
+                                    .as_deref()
+                                    .and_then(crate::view::Starter::child_id),
+                            );
+                        }
+                        crate::executable::Change::Missing => return Ok(false),
+                        crate::executable::Change::Stay => {}
+                    }
+                }
                 if crate::backup::restore_requested(home) || replaced() {
                     return Ok(true);
                 }
@@ -800,7 +837,7 @@ fn run_as(home: &Path, idle_ms: u64, follow: bool) -> Result<()> {
         curation: Some(&mut *curation),
         yields: true,
         resident,
-        viewer: resident.then_some(&mut viewer),
+        viewer: Some(&mut viewer),
     };
     run_holding(home, idle_ms, consumers(home), || {}, Some(held), phases)
 }

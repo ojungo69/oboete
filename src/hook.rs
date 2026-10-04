@@ -2040,10 +2040,12 @@ pub(crate) fn spawn_detached(home: &Path, args: &[&str]) -> Option<std::process:
     if std::env::var_os("OBOETE_NO_SPAWN").is_some() {
         return None;
     }
-    let exe = std::env::current_exe().ok()?;
+    let exe = crate::executable::path()?;
     // It runs in the home, so the folder the agent ran in can go while it lives (resident.md R1).
     let home = std::path::absolute(home).ok()?;
     let mut cmd = std::process::Command::new(exe);
+    // Handoff belongs only to an exec of this process, never to a detached child.
+    cmd.env_remove(crate::executable::VIEWER_HANDOFF);
     cmd.arg("--home").arg(&home).args(args).current_dir(&home);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

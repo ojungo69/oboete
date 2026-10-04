@@ -337,6 +337,49 @@ fn say(home: &Path, what: &str) -> Result<()> {
 /// How a `Starter` starts the viewer: the child it reaps.
 type Spawn = Box<dyn FnMut(&Path) -> Option<std::process::Child>>;
 
+enum ViewerChild {
+    Owned(std::process::Child),
+    #[cfg(target_os = "linux")]
+    Inherited(u32),
+}
+
+impl ViewerChild {
+    fn id(&self) -> u32 {
+        match self {
+            Self::Owned(child) => child.id(),
+            #[cfg(target_os = "linux")]
+            Self::Inherited(pid) => *pid,
+        }
+    }
+
+    fn reaped(&mut self) -> bool {
+        match self {
+            Self::Owned(child) => match child.try_wait() {
+                Ok(Some(_)) => true,
+                #[cfg(target_os = "linux")]
+                Err(error) if error.raw_os_error() == Some(libc::ECHILD) => true,
+                _ => false,
+            },
+            #[cfg(target_os = "linux")]
+            Self::Inherited(pid) => {
+                let mut status = 0;
+                // SAFETY: a positive, known viewer PID inherited from this same process's old
+                // image. Specific nonblocking wait cannot reap another child.
+                let waited = unsafe {
+                    libc::waitpid(
+                        i32::try_from(*pid).expect("validated PID"),
+                        &mut status,
+                        libc::WNOHANG,
+                    )
+                };
+                waited > 0
+                    || waited == -1
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+            }
+        }
+    }
+}
+
 /// What starts the resident viewer for a resident worker (R4): at the worker's start and then at
 /// most once a minute, where the worker looks at its backup deadline, when the home's files can
 /// be its owner's and nothing holds `state/view.lock`; after "port in use", only every 10
@@ -345,17 +388,32 @@ pub struct Starter {
     every: Duration,
     after_busy: Duration,
     next: Instant,
-    child: Option<std::process::Child>,
+    child: Option<ViewerChild>,
     spawn: Spawn,
 }
 
 impl Starter {
     pub fn new() -> Self {
-        Self::with(
+        let starter = Self::with(
             MINUTE,
             AFTER_PORT_IN_USE,
             Box::new(|home| crate::hook::spawn_detached(home, &["view", "--resident"])),
-        )
+        );
+        #[cfg(target_os = "linux")]
+        let starter = {
+            let child = crate::executable::take_viewer().map(ViewerChild::Inherited);
+            let next = if child.is_some() {
+                Instant::now() + starter.every
+            } else {
+                starter.next
+            };
+            Self {
+                child,
+                next,
+                ..starter
+            }
+        };
+        starter
     }
 
     fn with(every: Duration, after_busy: Duration, spawn: Spawn) -> Self {
@@ -370,13 +428,7 @@ impl Starter {
 
     pub fn due(&mut self, home: &Path) {
         // Reaped as soon as it has left, so it is no zombie for a minute.
-        if self
-            .child
-            .as_mut()
-            .is_some_and(|c| !matches!(c.try_wait(), Ok(None)))
-        {
-            self.child = None;
-        }
+        self.reap();
         let now = Instant::now();
         if now < self.next || self.child.is_some() {
             return;
@@ -394,7 +446,17 @@ impl Starter {
             return;
         }
         forget_outcome(home);
-        self.child = (self.spawn)(home);
+        self.child = (self.spawn)(home).map(ViewerChild::Owned);
+    }
+
+    pub(crate) fn reap(&mut self) {
+        if self.child.as_mut().is_some_and(ViewerChild::reaped) {
+            self.child = None;
+        }
+    }
+
+    pub(crate) fn child_id(&self) -> Option<u32> {
+        self.child.as_ref().map(ViewerChild::id)
     }
 }
 
@@ -423,18 +485,31 @@ pub fn resident(home: &Path) -> Result<()> {
     let looking = Arc::clone(&viewer);
     std::thread::spawn(move || {
         let mut seen = looking.requests.load(Ordering::SeqCst);
+        let mut executable = crate::executable::Watch::default();
         loop {
             std::thread::sleep(MINUTE);
             let now = looking.requests.load(Ordering::SeqCst);
             let quiet = std::mem::replace(&mut seen, now) == now;
-            let Some(why) = looking.leaving(id, quiet) else {
-                continue;
-            };
-            if looking.may_leave() {
-                if !matches!(why, Leaving::Gone) {
-                    let _ = say(&looking.home, &format!("left: {}", why.text()));
+            if let Some(why) = looking.leaving(id, quiet) {
+                if looking.may_leave() {
+                    if !matches!(why, Leaving::Gone) {
+                        let _ = say(&looking.home, &format!("left: {}", why.text()));
+                    }
+                    std::process::exit(0);
                 }
-                std::process::exit(0);
+                continue;
+            }
+            match executable.change() {
+                crate::executable::Change::Replaced if looking.may_leave() => {
+                    let _ = crate::executable::exec(None);
+                    // A returned exec installed no image; retain the lock/listener and serving.
+                    looking.closing.store(false, Ordering::SeqCst);
+                }
+                crate::executable::Change::Missing if looking.may_leave() => {
+                    let _ = say(&looking.home, "left: executable missing");
+                    std::process::exit(0);
+                }
+                _ => {}
             }
         }
     });

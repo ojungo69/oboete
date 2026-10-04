@@ -29,13 +29,27 @@ owner's use, and what could be left out); what the review changed is listed at t
   its start and then at most once a minute where it looks at its backup deadline, when the home's
   files can be its owner's and nothing holds `state/view.lock`, every 10 minutes after "port in
   use", and reaps the one it started as soon as it has left. The viewer looks at its home once a
-  minute and leaves on R4's conditions (R9's binary waits for slice 4), writing `left: <why>` but
+  minute and leaves on R4's conditions, writing `left: <why>` but
   into a home that is gone. `oboete view` in a resident home brings up both and prints the address
   with the file's token, or says why and serves on its own address; `oboete view --new-token`
   replaces the token and, in a resident home, writes the next free port into `[view] port`.
   Tests 2, 3 (`--new-token`), 5, 13 (as the starter's restart of a viewer that left) and 14 (as
   the viewer's look). `OBOETE_NO_SPAWN`, the tests' switch for hooks, also keeps a worker from
   starting a viewer.
+- Slice 4 (R9): worker and viewer keep their startup executable path, loaded file identity and
+  original arguments. A renamed image is executed in place; detached starts use that same path.
+  The worker checks only its dedicated loop, outside transactions and after embedding replies
+  are joined and settled. The viewer checks on its minute tick, freezes admission only with no
+  request/save live, and restores admission when exec fails. A first missing-path observation
+  gives a complete minute; recovery or another metadata error cancels it. Only continued
+  NotFound ends the process. The exec boundary uses libc execve: a failed standard Command exec
+  changes SIGPIPE disposition on the installed Rust, which would end the old serving process.
+  A worker carries only its known viewer child PID across exec, in private ephemeral environment
+  metadata bound to the same process; detached children never inherit it. The new image waits
+  for that specific child, including one already exited, without a global child reaper or
+  SIGCHLD change. Tests use copied product binaries, private homes and real minute ticks;
+  same PID/arguments, locks, HTTP completion, exec failures, missing-path recovery and child
+  reaping are checked. Setup/settings and the R11 measurements remain slice 5.
 
 ## Before this unit (main 7f8de51)
 
