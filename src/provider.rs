@@ -1829,9 +1829,118 @@ pub(crate) fn kill_tree(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
+/// Own the input pipe until the last byte is handed off or the run ends. No detached writer
+/// may retain admission or resume sending a prompt after a timeout has returned.
+struct CliInput {
+    pipe: Option<std::process::ChildStdin>,
+    text: String,
+    written: usize,
+    admission: Option<crate::dispatch::Guard>,
+}
+
+impl CliInput {
+    fn new(
+        pipe: Option<std::process::ChildStdin>,
+        text: Option<String>,
+        admission: Option<crate::dispatch::Guard>,
+    ) -> std::io::Result<Self> {
+        let (pipe, text) = match pipe.zip(text) {
+            Some((pipe, text)) => (Some(pipe), text),
+            None => (None, String::new()),
+        };
+        let mut input = Self {
+            pipe,
+            text,
+            written: 0,
+            admission,
+        };
+        if let Some(pipe) = &input.pipe {
+            nonblocking_stdin(pipe)?;
+        }
+        if input.text.is_empty() {
+            input.close();
+        }
+        Ok(input)
+    }
+
+    fn pump(&mut self) {
+        use std::io::Write;
+        let Some(pipe) = &mut self.pipe else {
+            return;
+        };
+        let end = (self.written + 8192).min(self.text.len());
+        match pipe.write(&self.text.as_bytes()[self.written..end]) {
+            // Windows byte pipes in PIPE_NOWAIT can successfully write zero bytes when full.
+            Ok(n) => self.written += n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) => {}
+            // A child exiting without reading closes its pipe; preserve its exit reporting.
+            Err(_) => self.close(),
+        }
+        if self.written == self.text.len() {
+            self.close();
+        }
+    }
+
+    fn close(&mut self) {
+        // Close before releasing: a descendant can retain the read end after its parent dies.
+        drop(self.pipe.take());
+        if let Some(admission) = self.admission.take() {
+            admission.release();
+        }
+    }
+}
+
+impl Drop for CliInput {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+#[cfg(unix)]
+fn nonblocking_stdin(pipe: &std::process::ChildStdin) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the borrowed child pipe remains open, and these commands only read/set its flags.
+    let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+    if flags == -1
+        || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn nonblocking_stdin(pipe: &std::process::ChildStdin) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::{Win32::Foundation::HANDLE, core::BOOL};
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetNamedPipeHandleState(
+            pipe: HANDLE,
+            mode: *const u32,
+            max_collection_count: *const u32,
+            collect_data_timeout: *const u32,
+        ) -> BOOL;
+    }
+    // SetNamedPipeHandleState also supports anonymous CreatePipe handles. PIPE_NOWAIT (1)
+    // leaves byte read mode unchanged and makes writes return the bytes that fit immediately.
+    // SAFETY: the borrowed stdin write handle is live; all pointers are valid or null as allowed.
+    if unsafe {
+        SetNamedPipeHandleState(pipe.as_raw_handle(), &1, std::ptr::null(), std::ptr::null())
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Spawn `cmd`, feed it `stdin`, and return its stdout if it exits 0 within `timeout`.
-/// stdin, stdout and stderr each get a thread: a prompt larger than the pipe buffer, or an
-/// answer larger than it, must not deadlock against a child that has not read or exited yet.
+/// Nonblocking stdin is pumped while stdout/stderr drain on threads: a prompt larger than the
+/// pipe buffer, or an answer larger than it, must not deadlock against a child not reading yet.
 /// Also returns what the child wrote to stdout by then, whatever the outcome: claude reports its
 /// allowance before it answers, and a run that then fails or hangs must still rest it.
 fn run_cli(
@@ -1840,36 +1949,33 @@ fn run_cli(
     timeout: Duration,
     admission: Option<crate::dispatch::Guard>,
 ) -> (Vec<u8>, Result<(), CallError>) {
-    use std::io::{Read, Write};
+    use std::io::Read;
     use std::sync::{Arc, Mutex};
     let mut child = match own_group(&mut cmd).spawn() {
         Ok(c) => c,
         Err(e) => {
+            if let Some(admission) = admission {
+                admission.release();
+            }
             return (
                 Vec::new(),
                 Err(CallError::other(format!("spawn: {e}")).unsent()),
             );
         }
     };
-    let feeder = child.stdin.take().zip(stdin).map(|(mut w, text)| {
-        // A child that exits without reading just makes the write fail.
-        let admission = admission.clone();
-        std::thread::spawn(move || {
-            let sent = w.write_all(text.as_bytes()).ok();
-            drop(w);
-            if let Some(admission) = admission {
-                admission.release();
-            }
-            sent
-        })
-    });
-    // Prompt-file providers were handed their whole input by successful spawn. For stdin
-    // providers, the feeder owns the release until every prompt byte was handed over.
-    if feeder.is_none()
-        && let Some(admission) = &admission
-    {
-        admission.release();
-    }
+    // Prompt-file input is handed over by spawn. Stdin admission ends on its last write, and
+    // every early return closes the only writer before releasing it.
+    let mut input = match CliInput::new(child.stdin.take(), stdin, admission) {
+        Ok(input) => input,
+        Err(e) => {
+            kill_tree(&mut child);
+            child.wait().ok();
+            return (
+                Vec::new(),
+                Err(CallError::other(format!("stdin: {e}")).unsent()),
+            );
+        }
+    };
     // Read as it comes, into a buffer the caller can take without joining: on a timeout a
     // grandchild may still hold the pipe open.
     let drain = |r: Option<Box<dyn Read + Send>>| {
@@ -1896,6 +2002,7 @@ fn run_cli(
     // The child is waited for only once its pipes have closed: until then its process group is
     // still its own, and a descendant holding a pipe open is killed with it at the deadline.
     let status = loop {
+        input.pump();
         let drained = [&out_h, &err_h]
             .into_iter()
             .all(|h| h.as_ref().is_none_or(|h| h.is_finished()));
@@ -1903,10 +2010,16 @@ fn run_cli(
             match child.try_wait() {
                 Ok(Some(s)) => break s,
                 Ok(None) => {}
-                Err(e) => return (take(&out), Err(CallError::other(format!("wait: {e}")))),
+                Err(e) => {
+                    input.close();
+                    kill_tree(&mut child);
+                    child.wait().ok();
+                    return (take(&out), Err(CallError::other(format!("wait: {e}"))));
+                }
             }
         }
         if Instant::now() > deadline {
+            input.close();
             // Reap it before the scratch directory goes: a killed child still holds that
             // directory as its cwd until it is waited for (Windows refuses the removal).
             kill_tree(&mut child);
@@ -1920,11 +2033,13 @@ fn run_cli(
             let e = CallError::other(format!("timed out after {}s", timeout.as_secs()));
             return (take(&out), Err(e));
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(if input.pipe.is_some() {
+            1
+        } else {
+            100
+        }));
     };
-    if let Some(f) = feeder {
-        f.join().ok();
-    }
+    input.close();
     for h in [out_h, err_h].into_iter().flatten() {
         h.join().ok();
     }
@@ -2618,6 +2733,144 @@ mod tests {
         result.unwrap();
         assert_eq!(output, b"answered");
         assert!(acquired && waiting, "CLI admission lasted until its answer");
+    }
+
+    #[test]
+    fn a_cli_stops_input_before_releasing_dispatch_even_with_a_descendant() {
+        for mode in ["timeout", "failure"] {
+            let home = tempfile::tempdir().unwrap();
+            let admission = crate::dispatch::Admission::shared(home.path()).unwrap();
+            // A fixed synthetic Python child, not a provider or another test-executable mode.
+            // Its reader deliberately escapes the Unix group (Windows kills the parent only),
+            // keeps stdin after the timeout, and starts reading only after run_cli returns.
+            let mut command = Command::new(if cfg!(windows) { "python" } else { "python3" });
+            command
+                .args([
+                    "-u",
+                    "-c",
+                    r#"
+import os, pathlib, subprocess, sys, threading, time
+home = pathlib.Path(sys.argv[1])
+def watchdog():
+    time.sleep(8)
+    os._exit(99)
+threading.Thread(target=watchdog, daemon=True).start()
+reader = '''
+import os, pathlib, sys, threading, time
+home = pathlib.Path(sys.argv[1])
+def watchdog():
+    time.sleep(8)
+    os._exit(99)
+threading.Thread(target=watchdog, daemon=True).start()
+while not (home / "read-now").exists():
+    time.sleep(.002)
+body = sys.stdin.buffer.read()
+(home / "received").write_text(str(len(body)))
+'''
+child = subprocess.Popen([sys.executable, '-u', '-c', reader, str(home)],
+    stdin=sys.stdin, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    start_new_session=os.name == 'posix')
+(home / 'reader-pid').write_text(str(child.pid))
+if sys.argv[2] == 'failure':
+    sys.exit(7)
+child.wait()
+"#,
+                ])
+                .arg(home.path())
+                .arg(mode)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let text = "synthetic-stalled-prompt ".repeat(200_000);
+            let length = text.len();
+            let began = Instant::now();
+            let (_, result) = run_cli(
+                command,
+                Some(text),
+                Duration::from_secs(1),
+                Some(admission.clone()),
+            );
+            let error = result.unwrap_err();
+            assert!(
+                error.message.contains(if mode == "timeout" {
+                    "timed out"
+                } else {
+                    "exit"
+                }),
+                "{}",
+                error.message
+            );
+            assert!(began.elapsed() < Duration::from_secs(3));
+            assert!(
+                home.path().join("reader-pid").exists(),
+                "the descendant fixture was not running"
+            );
+            let registration = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(home.path().join("dispatch.lock"))
+                .unwrap();
+            let unlocked = registration.try_lock().is_ok();
+            // Give the escaped reader a chance to drain bytes already handed off. A detached
+            // blocking feeder would resume and write the rest only after run_cli returned.
+            std::fs::write(home.path().join("read-now"), "go").unwrap();
+            let until = Instant::now() + Duration::from_secs(5);
+            while !home.path().join("received").exists() {
+                assert!(
+                    Instant::now() < until,
+                    "the bounded descendant fixture did not finish"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let received = std::fs::read_to_string(home.path().join("received"))
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            eprintln!(
+                "{mode} input boundary: unlocked={unlocked}, received={received}, total={length}"
+            );
+            assert!(
+                unlocked,
+                "{mode} CLI input kept dispatch admission after return"
+            );
+            assert!(
+                received < length,
+                "stdin kept writing the remaining prompt after return"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cli_spawn_failure_releases_dispatch() {
+        let home = tempfile::tempdir().unwrap();
+        let admission = crate::dispatch::Admission::shared(home.path()).unwrap();
+        let command = Command::new(home.path().join("absent-synthetic-provider"));
+        let (_, result) = run_cli(
+            command,
+            Some("synthetic".into()),
+            Duration::from_secs(1),
+            Some(admission.clone()),
+        );
+        let error = result.unwrap_err();
+        assert!(!error.sent && error.message.starts_with("spawn:"));
+        let registration = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(home.path().join("dispatch.lock"))
+            .unwrap();
+        // Concurrent test children may briefly inherit a CLOEXEC descriptor before exec.
+        // A surviving admission clone would retain the lock beyond this bounded wait.
+        let until = Instant::now() + Duration::from_millis(500);
+        loop {
+            match registration.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    assert!(Instant::now() < until, "failed spawn kept admission");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(e) => panic!("dispatch fixture lock: {e}"),
+            }
+        }
     }
 
     #[test]
