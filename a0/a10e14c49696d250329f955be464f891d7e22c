@@ -1,0 +1,29 @@
+src/executable.rs
+  s_ce2b24784deac6::t_7f2b402b045af3 48-53,56,121-125,127,131,320-405,407
+  s_ce2b24784deac6::t_762b3772fdfd46 406,408-452
+src/view.rs
+  s_ce2b24784deac6::t_cf854a89a6ddaf 4223-4236,4243-4244,4248-4250,4257-4258
+  s_ce2b24784deac6::t_7f2b402b045af3 503-504,856-863,4200-4222,4237-4242,4245-4247,4251-4256,4260,4264-4265,4267
+  s_ce2b24784deac6::t_8043cfd0037382 4259,4261-4263,4266,4268-4275
+tests/resident.rs
+  s_ce2b24784deac6::t_cf854a89a6ddaf 821-823,826-827,830,838-840,846,849-851,856-858
+  s_ce2b24784deac6::t_72dce27553d94f 331,374-380,605,621-622
+  s_ce2b24784deac6::t_2f9029ffbf4fb4 623-624,824-825,828-829,831-837,841-845,847-848,852-855
+  s_ce2b24784deac6::t_a8f5ff920dbf3b 820
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a0a10e14c49696d250329f955be464f891d7e22c",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
