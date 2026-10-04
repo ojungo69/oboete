@@ -2812,7 +2812,17 @@ mod tests {
         let _worker = crate::worker::lock(&v.home).unwrap().unwrap();
         std::fs::write(v.home.join("knowledge.db.rebuilding-1"), b"leftover").unwrap();
         assert_eq!(get(&v, "/api/stats")["rebuilding"], false);
-        let rebuild = std::fs::File::create(v.home.join("state/rebuild.lock")).unwrap();
+        let rebuild = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(v.home.join("state/rebuild.lock"))
+            .unwrap();
+        // Concurrent status readers are not the operation which owns this marker.
+        rebuild.lock_shared().unwrap();
+        assert_eq!(get(&v, "/api/stats")["rebuilding"], false);
+        rebuild.unlock().unwrap();
         rebuild.lock().unwrap();
         assert_eq!(get(&v, "/api/stats")["rebuilding"], true);
         drop(rebuild);

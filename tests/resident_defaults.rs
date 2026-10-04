@@ -152,6 +152,7 @@ fn rebuild_owns_its_status_lock_and_releases_it_on_success_failure_and_kill() {
     run(h, &["rebuild"]);
     let open_status = || {
         std::fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .open(h.join("state/rebuild.lock"))
             .expect("rebuild has its own persistent status lock")
@@ -163,7 +164,7 @@ fn rebuild_owns_its_status_lock_and_releases_it_on_success_failure_and_kill() {
     // Status readers take this lock briefly. They must not abort a rebuild which already owns
     // the worker lock. Observe the native child waiting on that probe before releasing it.
     let probe = open_status();
-    probe.lock().unwrap();
+    probe.lock_shared().unwrap();
     let generation = std::fs::read_to_string(h.join("state/worker-gen")).unwrap();
     let mut rebuilding = Owned(command(h, &["rebuild"]).spawn().unwrap());
     let start = Instant::now();

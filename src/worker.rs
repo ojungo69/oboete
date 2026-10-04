@@ -1017,12 +1017,14 @@ pub fn running(home: &Path) -> bool {
     lock_held(&home.join("state").join("worker.lock"))
 }
 
-/// A status probe opens an existing lock only, without creating it or writing a generation.
+/// Status readers share an existing lock without writing a generation; only the exclusive
+/// producer prevents them from taking it.
 pub(crate) fn lock_held(path: &Path) -> bool {
     std::fs::OpenOptions::new()
+        .read(true)
         .write(true)
         .open(path)
-        .is_ok_and(|f| matches!(try_lock(&f), Err(std::fs::TryLockError::WouldBlock)))
+        .is_ok_and(|f| matches!(f.try_lock_shared(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
 /// `File::try_lock`, which under `cargo test` waits up to 200 ms for a lock just released: a
