@@ -62,7 +62,7 @@ fn setup_waits_for_the_shared_config_writer_before_reading_defaults() {
         }
         let waiting =
             std::fs::read_to_string(format!("/proc/{}/wchan", setup.0.id())).unwrap_or_default();
-        if waiting.contains("locks_") {
+        if waiting.contains("locks_") || waiting.contains("flock_") {
             break;
         }
         assert!(
@@ -161,31 +161,8 @@ fn rebuild_owns_its_status_lock_and_releases_it_on_success_failure_and_kill() {
     status.try_lock().unwrap();
     drop(status);
 
-    // Status readers take this lock briefly. They must not abort a rebuild which already owns
-    // the worker lock. Observe the native child waiting on that probe before releasing it.
-    let probe = open_status();
-    probe.lock_shared().unwrap();
-    let generation = std::fs::read_to_string(h.join("state/worker-gen")).unwrap();
-    let mut rebuilding = Owned(command(h, &["rebuild"]).spawn().unwrap());
-    let start = Instant::now();
-    loop {
-        assert!(
-            rebuilding.0.try_wait().unwrap().is_none(),
-            "a status reader aborted the rebuild"
-        );
-        let waiting = std::fs::read_to_string(format!("/proc/{}/wchan", rebuilding.0.id()))
-            .unwrap_or_default();
-        if std::fs::read_to_string(h.join("state/worker-gen")).unwrap() != generation
-            && waiting.contains("nanosleep")
-        {
-            break;
-        }
-        assert!(start.elapsed() < Duration::from_secs(5));
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    drop(probe);
-    assert!(rebuilding.0.wait().unwrap().success());
-
+    // A transient shared probe's retry is synchronized at genuine contention in worker's unit
+    // test. The native command keeps the bound and database-preservation proof below.
     // A holder which does not release must fail within a bound, before moving the database.
     let probe = open_status();
     probe.lock().unwrap();

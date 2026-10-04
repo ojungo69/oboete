@@ -50,7 +50,7 @@ fn bytes(home: &Path) -> std::io::Result<Option<Vec<u8>>> {
 }
 
 /// All oboete config writers share this hold; a resident worker's lock is unrelated.
-fn config_lock(home: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn config_lock(home: &Path) -> std::io::Result<std::fs::File> {
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
     let mut options = std::fs::OpenOptions::new();
@@ -1120,7 +1120,7 @@ mod tests {
                     std::fs::read_to_string(task.path().join("comm"))
                         .is_ok_and(|name| name.trim() == "r5-config-save")
                         && std::fs::read_to_string(task.path().join("wchan"))
-                            .is_ok_and(|wait| wait.contains("locks_"))
+                            .is_ok_and(|wait| wait.contains("locks_") || wait.contains("flock_"))
                 });
             if waiting {
                 break;

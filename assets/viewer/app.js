@@ -782,7 +782,7 @@ const TEXT = {
   resident_on: ['Keep oboete running between sessions', 'セッション間も oboete を起動したままにする'],
   resident_desc: ['The worker stays ready and keeps the memory page reachable. Turn this off to let the worker exit when idle.', 'ワーカーを待機させ、記憶の画面をいつでも開けるようにします。オフにすると、ワーカーは処理がなくなった時に終了します。'],
   resident_first: ['Recommended for a new home. Save applies the choice shown here.', '新しい保存先ではオンを推奨します。保存すると、ここで選んだ設定が反映されます。'],
-  resident_timing: ['The next agent hook or opening the page starts the resident processes. Turning this off applies when the worker is idle; the resident page stops once it has no requests.', '常駐を開始するのは次のエージェントのフックか、次に画面を開く操作です。オフはワーカーの待機時に反映され、常駐の画面はアクセスがなくなった後に終了します。'],
+  resident_timing: ['The next agent hook or running oboete view starts the resident processes. Turning this off applies when the worker is idle; the resident page stops once it has no requests.', '次のエージェントのフックか oboete view の実行で常駐プロセスが起動します。オフはワーカーの待機時に反映され、常駐の画面はアクセスがなくなった後に終了します。'],
   resident_unsupported: ['Resident mode is currently available on Linux and WSL. This system keeps the worker that exits when idle.', '常駐は現在 Linux と WSL に対応しています。この環境のワーカーは、処理がなくなった時に終了します。'],
   language: ['Language', '言語'],
   lead: [

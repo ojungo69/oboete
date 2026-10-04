@@ -60,14 +60,17 @@ owner's use, and what could be left out); what the review changed is listed at t
   view port, preserving explicit choices and comments; removing agent wiring changes neither.
   The settings page shows the saved mode, recommends on only for an absent config, and writes
   the visible choice only on Save. Reading settings starts nothing. Older request bodies which
-  omit the switch preserve the saved mode. The config writers share `state/config.lock`
-  and still refuse a stale save after a hand edit. Doctor reads existing locks and the exact
+  omit the switch preserve the saved mode. The config writers, including v1 settings import,
+  share `state/config.lock` and still refuse a stale save after a hand edit. Doctor reads existing
+  regular lock files without following a symlink or needing write access, and the exact
   configured-port outcome without creating a lock or changing its generation; not running is
   informational. Rebuild alone holds `state/rebuild.lock` until completion, failure or exit,
   and stats reads that lock rather than a resident worker or leftover rebuild file. Its producer
   allows a brief status probe to finish, with a bounded 200 ms wait under the worker lock.
   Native tests cover defaults, explicit off, comments, removal, concurrent config writers,
-  read-only status, and rebuild success/failure/kill. Browser checks cover the visible first-save
+  read-only status, and rebuild success/failure/kill. A unit test releases a transient status probe
+  at actual contention without depending on the parent observing a 200 ms window.
+  Browser checks cover the visible first-save
   recommendation, switching off and reload. The R11 measurements below pass on this WSL host;
   the terminal/shortcut and copied-real-home checks remain part of the owner's rehearsal.
 

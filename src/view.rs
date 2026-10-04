@@ -1671,6 +1671,40 @@ mod tests {
     use super::*;
     use crate::search::b::fixture::Store;
 
+    #[cfg(unix)]
+    #[test]
+    fn status_probe_does_not_report_up_from_a_symlink_and_stale_listening_outcome() {
+        let home = tempfile::tempdir().unwrap();
+        let state = home.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let target = home.path().join("unrelated-held-file");
+        std::fs::write(&target, "synthetic unrelated status canary").unwrap();
+        let held = std::fs::File::open(&target).unwrap();
+        held.lock().unwrap();
+        std::os::unix::fs::symlink(&target, state.join("view.lock")).unwrap();
+        std::fs::write(state.join("view-outcome"), "listening 17373").unwrap();
+        let line = resident_line(home.path(), 17373);
+        assert!(
+            line.contains("not running"),
+            "stale outcome plus a link reported the viewer up"
+        );
+        assert!(
+            std::fs::symlink_metadata(state.join("view.lock"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(target).unwrap(),
+            b"synthetic unrelated status canary"
+        );
+        assert_eq!(
+            std::fs::read(state.join("view-outcome")).unwrap(),
+            b"listening 17373"
+        );
+        assert!(!state.join("view-token").exists());
+    }
+
     /// A viewer over an empty home, for the guards and the saves.
     fn viewer(name: &str) -> (PathBuf, Viewer) {
         let dir = std::env::temp_dir().join(format!("oboete-view-{name}-{}", std::process::id()));

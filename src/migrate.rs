@@ -127,6 +127,7 @@ fn read_pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<(Stats, Fingerpr
 /// Spec 7.4, A106: v1's `config.toml` (beside its store) into a home that has none, unchanged; a
 /// home's own file is never edited. Then what the home's file leaves unanswered, one line each.
 pub fn settings(home: &Path, from: &Path) -> Result<Vec<String>> {
+    let _config = crate::settings::config_lock(home)?;
     let ours = home.join("config.toml");
     let theirs = from.with_file_name("config.toml");
     if !ours.exists() && theirs.exists() {
@@ -1412,6 +1413,76 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         let rerun = pass(home.path(), &mut raw, &v1.path).unwrap();
         assert_eq!((rerun.events, rerun.records, rerun.documents), (0, 0, 0));
         assert_eq!(rerun.seen, 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn migrated_settings_wait_for_the_config_writer_and_keep_its_choice() {
+        let home = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let ours = home.path().join("config.toml");
+        std::fs::write(
+            source.path().join("config.toml"),
+            "providers = []\n[worker]\nresident = true\n",
+        )
+        .unwrap();
+        std::fs::create_dir(home.path().join("state")).unwrap();
+        let h = home.path();
+        std::thread::scope(|scope| {
+            // Kept inside the scope so a failed assertion drops the fence before the join.
+            let fence = std::fs::File::create(home.path().join("state/config.lock")).unwrap();
+            fence.lock().unwrap();
+            let (send, receive) = std::sync::mpsc::channel();
+            let from = source.path().join("oboete.db");
+            let migration = std::thread::Builder::new()
+                .name("r5-migrate".into())
+                .spawn_scoped(scope, move || {
+                    send.send(settings(h, &from)).unwrap();
+                })
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    matches!(
+                        receive.try_recv(),
+                        Err(std::sync::mpsc::TryRecvError::Empty)
+                    ),
+                    "migration completed while another config writer held the lock"
+                );
+                assert!(
+                    !ours.exists(),
+                    "migration wrote through another config writer"
+                );
+                let waiting = std::fs::read_dir("/proc/self/task")
+                    .unwrap()
+                    .flatten()
+                    .any(|task| {
+                        std::fs::read_to_string(task.path().join("comm"))
+                            .is_ok_and(|name| name.trim() == "r5-migrate")
+                            && std::fs::read_to_string(task.path().join("wchan")).is_ok_and(
+                                |wait| wait.contains("locks_") || wait.contains("flock_"),
+                            )
+                    });
+                if waiting {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "migration never waited on config.lock"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let chosen =
+                "# The first writer's choice\nproviders = []\n[worker]\nresident = false\n";
+            std::fs::write(&ours, chosen).unwrap();
+            drop(fence);
+            receive
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            migration.join().unwrap();
+            assert_eq!(std::fs::read_to_string(&ours).unwrap(), chosen);
+        });
     }
 
     /// R05, A106: v1's config.toml goes unchanged into a home that has none, and loads under

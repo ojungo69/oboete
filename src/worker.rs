@@ -235,6 +235,8 @@ thread_local! {
     static AFTER_RAW_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
     /// A one-shot test seam: the pathname changes between the last check and the next round.
     static BEFORE_ROUND: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    /// A synchronous one-shot fixture action after a rebuild meets a shared status probe.
+    static REBUILD_STATUS_BLOCKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// How long a command waits for a worker to step aside.
@@ -1017,14 +1019,23 @@ pub fn running(home: &Path) -> bool {
     lock_held(&home.join("state").join("worker.lock"))
 }
 
-/// Status readers share an existing lock without writing a generation; only the exclusive
-/// producer prevents them from taking it.
+/// Read-only status readers share an existing regular lock; only the exclusive producer
+/// prevents them from taking it. Links and special files are never followed or waited on.
 pub(crate) fn lock_held(path: &Path) -> bool {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .is_ok_and(|f| matches!(f.try_lock_shared(), Err(std::fs::TryLockError::WouldBlock)))
+    if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
+    let mut file = std::fs::OpenOptions::new();
+    file.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut file, libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    file.open(path).is_ok_and(|file| {
+        file.metadata().is_ok_and(|metadata| metadata.is_file())
+            && matches!(
+                try_lock_with(&file, std::fs::File::try_lock_shared),
+                Err(std::fs::TryLockError::WouldBlock)
+            )
+    })
 }
 
 /// `File::try_lock`, which under `cargo test` waits up to 200 ms for a lock just released: a
@@ -1033,10 +1044,17 @@ pub(crate) fn lock_held(path: &Path) -> bool {
 /// contends for the lock on purpose (`contending`) gets its answer at once. No oboete process
 /// forks from another thread while it takes or releases the lock, so outside tests nothing waits.
 pub(crate) fn try_lock(f: &std::fs::File) -> Result<(), std::fs::TryLockError> {
+    try_lock_with(f, std::fs::File::try_lock)
+}
+
+fn try_lock_with(
+    f: &std::fs::File,
+    attempt: fn(&std::fs::File) -> Result<(), std::fs::TryLockError>,
+) -> Result<(), std::fs::TryLockError> {
     #[cfg(test)]
     if !CONTENDING.get() {
         for _ in 0..20 {
-            match f.try_lock() {
+            match attempt(f) {
                 Err(std::fs::TryLockError::WouldBlock) => {
                     std::thread::sleep(Duration::from_millis(10))
                 }
@@ -1044,7 +1062,7 @@ pub(crate) fn try_lock(f: &std::fs::File) -> Result<(), std::fs::TryLockError> {
             }
         }
     }
-    f.try_lock()
+    attempt(f)
 }
 
 #[cfg(test)]
@@ -1088,6 +1106,11 @@ pub fn rebuild(home: &Path) -> Result<()> {
             Err(std::fs::TryLockError::WouldBlock)
                 if start.elapsed() < Duration::from_millis(200) =>
             {
+                #[cfg(test)]
+                if let Some(release) = REBUILD_STATUS_BLOCKED.with(|hook| hook.borrow_mut().take())
+                {
+                    release();
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(std::fs::TryLockError::WouldBlock) => {
@@ -2423,6 +2446,132 @@ mod tests {
         let t = Instant::now();
         run(home.path(), 60_000).unwrap(); // returns at once: the lock is held
         assert!(t.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_probe_detects_an_exclusive_read_only_lock_without_changing_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("read-only.lock");
+        std::fs::write(&path, "synthetic read-only status canary").unwrap();
+        let producer = std::fs::File::open(&path).unwrap();
+        producer.lock().unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(
+            lock_held(&path),
+            "read-only exclusive holder was reported absent"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
+    }
+
+    #[test]
+    fn status_probe_does_not_create_missing_files_or_conflict_with_shared_readers() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("reader.lock");
+        assert!(!lock_held(&path));
+        assert!(!path.exists(), "status created a missing lock");
+        std::fs::write(&path, "synthetic shared status canary").unwrap();
+        let reader = std::fs::File::open(&path).unwrap();
+        reader.lock_shared().unwrap();
+        assert!(
+            !lock_held(&path),
+            "shared readers were mistaken for an exclusive producer"
+        );
+        let another = std::fs::File::open(&path).unwrap();
+        another.try_lock_shared().unwrap();
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            b"synthetic shared status canary"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_probe_rejects_links_and_non_regular_files() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("unrelated-held-file");
+        std::fs::write(&target, "synthetic unrelated canary").unwrap();
+        let held = std::fs::File::open(&target).unwrap();
+        held.lock().unwrap();
+        let link = home.path().join("linked.lock");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(
+            !lock_held(&link),
+            "status followed an unrelated held target"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"synthetic unrelated canary"
+        );
+        assert!(!lock_held(home.path()));
+        let fifo = home.path().join("fifo.lock");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: valid NUL-terminated path in a private synthetic directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(!lock_held(&fifo));
+        use std::os::unix::fs::FileTypeExt;
+        assert!(
+            std::fs::symlink_metadata(fifo)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+    }
+
+    #[test]
+    fn rebuild_retries_a_shared_status_probe_at_the_actual_blocked_attempt() {
+        struct ClearHook;
+        impl Drop for ClearHook {
+            fn drop(&mut self) {
+                REBUILD_STATUS_BLOCKED.with(|hook| {
+                    hook.borrow_mut().take();
+                });
+            }
+        }
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic rebuild status canary"))
+            .unwrap();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        let path = p.join("state/rebuild.lock");
+        std::fs::write(&path, "synthetic shared probe").unwrap();
+        let probe = std::fs::File::open(&path).unwrap();
+        probe.lock_shared().unwrap();
+        let called = std::rc::Rc::new(std::cell::Cell::new(0));
+        let count = called.clone();
+        let _clear = ClearHook;
+        REBUILD_STATUS_BLOCKED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                count.set(count.get() + 1);
+                drop(probe);
+            }));
+        });
+        assert!(
+            rebuild(p).is_ok(),
+            "rebuild did not retry after a transient shared probe"
+        );
+        assert_eq!(
+            called.get(),
+            1,
+            "the actual blocked attempt did not consume the callback once"
+        );
+        assert!(REBUILD_STATUS_BLOCKED.with(|hook| hook.borrow().is_none()));
+        assert!(p.join("knowledge.db").exists());
+        std::fs::File::open(path).unwrap().try_lock().unwrap();
     }
 
     /// A waiting worker wakes for a new op of its device as for a record (an owner's correction
