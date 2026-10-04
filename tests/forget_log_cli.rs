@@ -6,6 +6,11 @@ use std::process::{Command, Stdio};
 
 #[test]
 fn an_oversized_log_line_keeps_the_following_request_with_bounded_memory() {
+    let limiter = Command::new("prlimit")
+        .arg("--version")
+        .output()
+        .expect("Linux forget-log tests require util-linux prlimit on PATH; install util-linux before cargo test");
+    assert!(limiter.status.success(), "prlimit --version failed");
     let home = tempfile::tempdir().unwrap();
     let h = home.path();
     std::fs::write(h.join("config.toml"), "[summary]\ncurate = false\n").unwrap();

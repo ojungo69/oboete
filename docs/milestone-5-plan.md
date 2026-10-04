@@ -212,6 +212,8 @@ preview が変わる、復元後も get/import から戻らない、ログが失
 
 通常の必須チェックは `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、
 `cargo test`。privacy、削除、restore、viewer write は security review の対象。
+Linux の要求ログのメモリ上限試験には util-linux の `prlimit` が必要。試験の最初に
+利用可否を確認し、未導入なら導入してから `cargo test` を実行する。上限の試験は省略しない。
 CI/security gate は弱めない。slice ごとに PR を開き、repository の通常のレビュー経路を通す。
 
 - M4 の削除測定のローカル部分: 管理対象内で 0 hit。復元、再 index、再 import、crash、
