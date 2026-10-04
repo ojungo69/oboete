@@ -328,6 +328,7 @@ fn a_worker_keeps_serving_failed_images_and_temporary_absence_then_leaves_a_miss
     until("the copied resident worker", || {
         held(h, "worker.lock") && h.join("state/worker-outcome").exists()
     });
+    let generation = std::fs::read_to_string(h.join("state/worker-gen")).unwrap();
     let image = format!("/proc/{pid}/exe");
     let old = std::fs::metadata(&image).unwrap();
     let next = scratch.path().join("invalid.next");
@@ -370,7 +371,13 @@ fn a_worker_keeps_serving_failed_images_and_temporary_absence_then_leaves_a_miss
             (current.dev(), current.ino()) == (replacement.dev(), replacement.ino())
         })
     });
-    until("recovered ownership", || held(h, "worker.lock"));
+    // Kernel image visibility can precede main's startup-path capture. The new taking is
+    // written only after executable::init, so do not move that path again before it completes.
+    until("recovered ownership", || {
+        held(h, "worker.lock")
+            && std::fs::read_to_string(h.join("state/worker-gen"))
+                .is_ok_and(|current| current != generation)
+    });
     std::fs::rename(&executable, &missing).unwrap();
     let absent = Instant::now();
     until_within(
@@ -595,6 +602,7 @@ fn a_renamed_binary_replaces_the_worker_with_its_arguments_and_lock() {
     });
     let old = std::fs::metadata(&image).unwrap();
     let arguments = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+    let generation = std::fs::read_to_string(h.join("state/worker-gen")).unwrap();
     let next = scratch.path().join("oboete.next");
     std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
     let replacement = std::fs::metadata(&next).unwrap();
@@ -610,6 +618,10 @@ fn a_renamed_binary_replaces_the_worker_with_its_arguments_and_lock() {
     });
     until("the replacement worker holds its home lock", || {
         held(h, "worker.lock")
+            && std::fs::read_to_string(h.join("state/worker-gen"))
+                .is_ok_and(|current| current != generation)
+            && std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|arguments| !arguments.is_empty())
     });
     assert!(worker.0.try_wait().unwrap().is_none());
     assert_eq!(
@@ -803,6 +815,45 @@ fn viewer_exec_cannot_recreate_a_home_removed_before_the_new_image_starts() {
 #[test]
 fn viewer_exec_cannot_adopt_a_home_replaced_before_the_new_image_starts() {
     exec_keeps_the_original_home("viewer", true);
+}
+
+#[test]
+fn malformed_or_wrong_role_exec_metadata_refuses_before_creating_a_home() {
+    let scratch = tempfile::tempdir().unwrap();
+    for (index, tail) in ["unknown:2:3", "worker.lock:2:3:extra", "view.lock:2:3"]
+        .into_iter()
+        .enumerate()
+    {
+        let home = scratch.path().join(format!("refused-{index}"));
+        let environment =
+            copied_command(env!("CARGO_BIN_EXE_oboete").as_ref(), scratch.path(), &[]);
+        let result = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "export OBOETE_EXEC_HOME=\"$$:$1\"; exec \"$2\" --home \"$3\" worker --idle-ms 0",
+                "private-handoff-fixture",
+                tail,
+                env!("CARGO_BIN_EXE_oboete"),
+            ])
+            .arg(&home)
+            .current_dir(scratch.path())
+            .env_clear()
+            .envs(
+                environment
+                    .get_envs()
+                    .filter_map(|(key, value)| value.map(|value| (key, value))),
+            )
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        assert!(!home.exists(), "rejected metadata created the home");
+        let error = String::from_utf8(result.stderr).unwrap();
+        assert!(
+            error.contains("invalid resident exec home handoff")
+                || error.contains("resident exec changed its command")
+        );
+    }
 }
 
 #[test]

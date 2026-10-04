@@ -45,10 +45,15 @@ fn inherited_home() -> Result<Option<Home>, ()> {
     let Some(value) = std::env::var_os(HOME_HANDOFF) else {
         return Ok(None);
     };
-    let value = value.into_string().map_err(|_| ())?;
+    parse_home(&value, std::process::id())
+}
+
+#[cfg(target_os = "linux")]
+fn parse_home(value: &std::ffi::OsStr, process: u32) -> Result<Option<Home>, ()> {
+    let value = value.to_str().ok_or(())?;
     let mut fields = value.split(':');
     let pid = fields.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
-    if pid != std::process::id() {
+    if pid != process {
         return Ok(None);
     }
     let role = match fields.next() {
@@ -113,12 +118,17 @@ pub(crate) fn check_lock(
 #[cfg(target_os = "linux")]
 fn inherited_viewer() -> Option<u32> {
     let value = std::env::var(VIEWER_HANDOFF).ok()?;
+    parse_viewer(&value, std::process::id())
+}
+
+#[cfg(target_os = "linux")]
+fn parse_viewer(value: &str, process: u32) -> Option<u32> {
     let (parent, child) = value.split_once(':')?;
-    if parent.parse::<u32>().ok()? != std::process::id() {
+    if parent.parse::<u32>().ok()? != process {
         return None;
     }
     let child = child.parse::<u32>().ok()?;
-    (child > 0 && i32::try_from(child).is_ok() && child != std::process::id()).then_some(child)
+    (child > 0 && i32::try_from(child).is_ok() && child != process).then_some(child)
 }
 
 static BINARY: OnceLock<Option<Binary>> = OnceLock::new();
@@ -306,6 +316,139 @@ impl Binary {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn only_the_same_process_and_known_lock_roles_can_restore_a_home_handoff() {
+        use std::os::unix::ffi::OsStringExt;
+        for (value, role) in [
+            ("11:worker.lock:2:3", Role::Worker),
+            ("11:view.lock:2:3", Role::Viewer),
+        ] {
+            let home = parse_home(std::ffi::OsStr::new(value), 11)
+                .unwrap()
+                .unwrap();
+            assert!(home.role == role);
+            assert_eq!(home.identity, (2, 3));
+        }
+        assert!(
+            parse_home(std::ffi::OsStr::new("12:unknown"), 11)
+                .unwrap()
+                .is_none()
+        );
+        for value in [
+            "",
+            "not-a-pid:worker.lock:2:3",
+            "11:unknown:2:3",
+            "11:worker.lock:2",
+            "11:worker.lock:2:3:extra",
+            "11:worker.lock:-2:3",
+            "11:worker.lock:2:18446744073709551616",
+        ] {
+            assert!(parse_home(std::ffi::OsStr::new(value), 11).is_err());
+        }
+        let invalid = std::ffi::OsString::from_vec(b"11:worker.lock:\xff".to_vec());
+        assert!(parse_home(&invalid, 11).is_err());
+    }
+
+    #[test]
+    fn a_viewer_handoff_accepts_only_a_positive_specific_child_of_its_process() {
+        assert_eq!(parse_viewer("11:12", 11), Some(12));
+        for value in [
+            "12:13",
+            "11:11",
+            "11:0",
+            "11:2147483648",
+            "11:4294967296",
+            "11",
+            "x:12",
+            "11:x",
+        ] {
+            assert_eq!(parse_viewer(value, 11), None);
+        }
+    }
+
+    #[test]
+    fn rejected_exec_inputs_and_native_failure_keep_the_old_process_resources() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = tempfile::tempdir().unwrap();
+        let lock_path = scratch.path().join("worker.lock");
+        std::fs::write(&lock_path, "synthetic held lock").unwrap();
+        let lock = std::fs::File::open(&lock_path).unwrap();
+        lock.lock().unwrap();
+        let identity = crate::worker::file_id(lock.metadata());
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let image = scratch.path().join("invalid-image");
+        std::fs::write(&image, "synthetic invalid ELF image").unwrap();
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut binary = Binary {
+            path: image,
+            identity: None,
+            arguments: vec![
+                "original argv[0]".into(),
+                "--home".into(),
+                scratch.path().into(),
+            ],
+            viewer: std::sync::Mutex::new(None),
+        };
+        let absent = binary.exec(Role::Worker, None, None).unwrap_err();
+        assert_eq!(absent.kind(), std::io::ErrorKind::Other);
+        binary
+            .arguments
+            .push(std::ffi::OsString::from_vec(b"bad\0argument".to_vec()));
+        assert_eq!(
+            binary
+                .exec(Role::Worker, identity, None)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        binary.arguments.pop();
+        let path = binary.path.clone();
+        binary.path = std::path::PathBuf::from(std::ffi::OsString::from_vec(b"bad\0path".to_vec()));
+        assert_eq!(
+            binary
+                .exec(Role::Worker, identity, None)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        binary.path = path;
+        fn sigpipe() -> libc::sighandler_t {
+            let mut state = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+            // SAFETY: null new action only reads the disposition; initialized on success.
+            assert_eq!(
+                unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), state.as_mut_ptr()) },
+                0
+            );
+            unsafe { state.assume_init().sa_sigaction }
+        }
+        let signal = sigpipe();
+        // The optional child metadata stays private; this failed image never receives it.
+        assert_eq!(
+            binary
+                .exec(Role::Worker, identity, Some(12))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ENOEXEC)
+        );
+        assert_eq!(sigpipe(), signal);
+        assert_eq!(std::env::current_dir().unwrap(), cwd);
+        assert_eq!(crate::worker::file_id(lock.metadata()), identity);
+        assert!(matches!(
+            std::fs::File::open(lock_path).unwrap().try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        assert_eq!(
+            std::net::TcpListener::bind(address).unwrap_err().kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+        let connection = std::net::TcpStream::connect(address).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        drop((connection, accepted));
+    }
 
     #[test]
     fn missing_requires_the_next_minute_and_recovery_or_metadata_errors_keep_serving() {

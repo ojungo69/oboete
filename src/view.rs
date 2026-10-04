@@ -500,11 +500,8 @@ pub fn resident(home: &Path) -> Result<()> {
                 continue;
             }
             match executable.change() {
-                crate::executable::Change::Replaced if looking.may_leave() => {
-                    let _ = crate::executable::exec(crate::executable::Role::Viewer, id, None);
-                    // A returned exec installed no image; retain the lock/listener and serving.
-                    looking.closing.store(false, Ordering::SeqCst);
-                }
+                crate::executable::Change::Replaced => looking
+                    .replace(|| crate::executable::exec(crate::executable::Role::Viewer, id, None)),
                 crate::executable::Change::Missing if looking.may_leave() => {
                     let _ = say(&looking.home, "left: executable missing");
                     std::process::exit(0);
@@ -853,6 +850,14 @@ impl Viewer {
             live: AtomicUsize::new(0),
             requests: AtomicUsize::new(0),
             closing: AtomicBool::new(false),
+        }
+    }
+
+    fn replace(&self, exec: impl FnOnce() -> std::io::Result<()>) {
+        if self.may_leave() {
+            let _ = exec();
+            // A returned exec installed no image; retain the lock/listener and serving.
+            self.closing.store(false, Ordering::SeqCst);
         }
     }
 
@@ -4190,6 +4195,82 @@ mod tests {
         drop(open);
         assert!(v.may_leave());
         assert!(Slot::take(&v).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_replacement_reopens_admission_and_never_runs_during_a_request() {
+        let home = tempfile::tempdir().unwrap();
+        let viewer = Arc::new(resident_of(home.path(), 17373));
+        let request = Slot::take(&viewer).unwrap();
+        viewer.replace(|| panic!("replacement ran while a request/save was live"));
+        assert!(Slot::take(&viewer).is_some());
+        drop(request);
+        let mut called = false;
+        viewer.replace(|| {
+            called = true;
+            assert!(
+                Slot::take(&viewer).is_none(),
+                "exec attempt did not freeze admission"
+            );
+            Err(std::io::Error::other("synthetic exec failure"))
+        });
+        assert!(called);
+        assert!(
+            Slot::take(&viewer).is_some(),
+            "failed exec left admission closed"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_inherited_viewer_is_reaped_by_its_specific_pid_and_echild_ends_ownership() {
+        use std::io::Write;
+        struct Reap(ViewerChild);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                if let ViewerChild::Owned(child) = &mut self.0 {
+                    drop(child.stdin.take());
+                    match child.try_wait() {
+                        Ok(None) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        Err(error) if error.raw_os_error() != Some(libc::ECHILD) => {
+                            let _ = child.wait();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "read -r release; exit 0"])
+            .env_clear()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut original = Reap(ViewerChild::Owned(child));
+        let pid = original.0.id();
+        let mut inherited = ViewerChild::Inherited(pid);
+        assert_eq!(inherited.id(), pid);
+        assert!(!inherited.reaped());
+        if let ViewerChild::Owned(child) = &mut original.0 {
+            child.stdin.take().unwrap().write_all(b"go\n").unwrap();
+        }
+        let start = Instant::now();
+        while !inherited.reaped() {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(inherited.reaped(), "ECHILD did not end inherited ownership");
+        assert_eq!(original.0.id(), pid);
+        assert!(
+            original.0.reaped(),
+            "an already-reaped owned Child was retained"
+        );
     }
 
     /// Codex on #378: a move that cannot be made changes nothing, so the old bookmark keeps
