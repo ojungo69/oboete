@@ -51,11 +51,908 @@ fn free_port() -> u16 {
 }
 
 fn until(what: &str, mut done: impl FnMut() -> bool) {
+    until_within(what, Duration::from_secs(20), &mut done);
+}
+
+fn until_within(what: &str, within: Duration, mut done: impl FnMut() -> bool) {
     let t = Instant::now();
     while !done() {
-        assert!(t.elapsed() < Duration::from_secs(20), "never: {what}");
+        assert!(t.elapsed() < within, "never: {what}");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn copied_command(executable: &Path, home: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .arg("--home")
+        .arg(home)
+        .args(args)
+        .current_dir(home)
+        .env_clear()
+        .envs(std::env::vars_os().filter(|(key, _)| {
+            let key = key.to_string_lossy().to_ascii_uppercase();
+            !["KEY", "TOKEN", "SECRET", "PASSWORD"]
+                .iter()
+                .any(|word| key.contains(word))
+        }))
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("CODEX_HOME", home.join("codex"))
+        .env("CLAUDE_CONFIG_DIR", home.join("claude"))
+        .env("OBOETE_NO_SPAWN", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+fn copied_spawn(command: &mut Command) -> Child {
+    let start = Instant::now();
+    loop {
+        match command.spawn() {
+            Ok(child) => return child,
+            // Another test's fork can retain a copy's write FD until its exec closes it.
+            Err(error)
+                if error.raw_os_error() == Some(libc::ETXTBSY)
+                    && start.elapsed() < Duration::from_secs(20) =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("copied binary failed to start: {error}"),
+        }
+    }
+}
+
+fn repos_response(home: &Path, port: u16) -> String {
+    repos_response_on(
+        home,
+        port,
+        std::net::TcpStream::connect(("127.0.0.1", port)).unwrap(),
+    )
+}
+
+/// Startup and successful exec can hold the lock before binding; all other HTTP checks stay
+/// strict. Only connection refusal retries here, never a failed request or response.
+fn ready_repos_response(home: &Path, port: u16) -> String {
+    let start = Instant::now();
+    loop {
+        match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => return repos_response_on(home, port, stream),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ConnectionRefused
+                    && start.elapsed() < Duration::from_secs(20) =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("resident viewer did not bind: {error}"),
+        }
+    }
+}
+
+fn repos_response_on(home: &Path, port: u16, mut stream: std::net::TcpStream) -> String {
+    let token = std::fs::read_to_string(home.join("state/view-token")).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        stream,
+        "GET /api/repos HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Oboete-Token: {token}\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    std::io::Read::read_to_string(&mut stream, &mut response).unwrap();
+    response
+}
+
+fn copied_viewer(executable: &Path, home: &Path, mut port: u16) -> (Worker, u16) {
+    let start = Instant::now();
+    loop {
+        let mut viewer = Worker(copied_spawn(&mut copied_command(
+            executable,
+            home,
+            &["view", "--resident"],
+        )));
+        until_within(
+            "the copied viewer's initial bind result",
+            Duration::from_secs(20).saturating_sub(start.elapsed()),
+            || {
+                viewer.0.try_wait().unwrap().is_some()
+                    || std::fs::read_to_string(home.join("state/view-outcome"))
+                        .is_ok_and(|out| out.trim() == format!("listening {port}"))
+            },
+        );
+        let out = std::fs::read_to_string(home.join("state/view-outcome")).unwrap();
+        if out.trim() != "port in use" {
+            assert_eq!(out.trim(), format!("listening {port}"));
+            return (viewer, port);
+        }
+        // The native listener reported AddrInUse before any R9 measurement. Reap that failed
+        // start and change only this private fixture's port; never retry a later HTTP failure.
+        assert!(viewer.0.wait().unwrap().success());
+        assert!(start.elapsed() < Duration::from_secs(20));
+        let next = free_port();
+        let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let old = format!("\nport = {port}\n");
+        assert!(config.contains(&old));
+        std::fs::write(
+            home.join("config.toml"),
+            config.replace(&old, &format!("\nport = {next}\n")),
+        )
+        .unwrap();
+        port = next;
+    }
+}
+
+#[test]
+fn a_copied_viewer_retries_only_a_port_lost_before_initial_bind() {
+    let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let first = occupied.local_addr().unwrap().port();
+    let scratch = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("[worker]\nresident = true\n[summary]\ncurate = false\n[view]\nport = {first}\n"),
+    )
+    .unwrap();
+    let executable = scratch.path().join("oboete");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
+    let (_viewer, port) = copied_viewer(&executable, home.path(), first);
+    assert_ne!(port, first);
+    assert!(held(home.path(), "view.lock"));
+    assert!(repos_response(home.path(), port).starts_with("HTTP/1.1 200 OK\r\n"));
+}
+
+#[test]
+fn a_renamed_binary_replaces_the_viewer_at_its_minute_check_with_the_same_port() {
+    use std::os::unix::fs::MetadataExt;
+    let scratch = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    std::fs::write(
+        h.join("config.toml"),
+        format!("[worker]\nresident = true\n[summary]\ncurate = false\n[view]\nport = {port}\n"),
+    )
+    .unwrap();
+    let executable = scratch.path().join("oboete");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
+    let (mut viewer, port) = copied_viewer(&executable, h, port);
+    let pid = viewer.0.id();
+    assert!(held(h, "view.lock"));
+    assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    let arguments = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+    let next = scratch.path().join("oboete.next");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
+    let replacement = std::fs::metadata(&next).unwrap();
+    std::fs::rename(&next, &executable).unwrap();
+    until_within(
+        "the viewer executes the renamed binary",
+        Duration::from_secs(75),
+        || {
+            std::fs::metadata(format!("/proc/{pid}/exe")).is_ok_and(|current| {
+                (current.dev(), current.ino()) == (replacement.dev(), replacement.ino())
+            })
+        },
+    );
+    until("the replacement viewer holds its home", || {
+        held(h, "view.lock")
+    });
+    assert!(viewer.0.try_wait().unwrap().is_none());
+    assert_eq!(
+        std::fs::read(format!("/proc/{pid}/cmdline")).unwrap(),
+        arguments
+    );
+    assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+}
+
+#[test]
+fn a_replaced_worker_reaps_its_existing_viewer_child_without_starting_duplicates() {
+    use std::os::unix::fs::MetadataExt;
+    let scratch = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    std::fs::write(
+        h.join("config.toml"),
+        format!("[worker]\nresident = true\n[summary]\ncurate = false\n[view]\nport = {port}\n"),
+    )
+    .unwrap();
+    let executable = scratch.path().join("oboete");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
+    let _detached = Detached(h);
+    let mut worker = Worker(copied_spawn(
+        copied_command(&executable, h, &["worker"]).env_remove("OBOETE_NO_SPAWN"),
+    ));
+    let pid = worker.0.id();
+    until("the worker's viewer", || {
+        held(h, "worker.lock")
+            && held(h, "view.lock")
+            && std::fs::read_to_string(h.join("state/view-outcome"))
+                .is_ok_and(|out| out.trim() == format!("listening {port}"))
+    });
+    let viewers: Vec<_> = started(h)
+        .into_iter()
+        .filter(|child| *child != pid)
+        .collect();
+    assert_eq!(viewers.len(), 1, "the worker started duplicate viewers");
+    let child = viewers[0];
+    let next = scratch.path().join("oboete.next");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
+    let replacement = std::fs::metadata(&next).unwrap();
+    std::fs::rename(next, &executable).unwrap();
+    until("the worker's replacement image", || {
+        std::fs::metadata(format!("/proc/{pid}/exe")).is_ok_and(|current| {
+            (current.dev(), current.ino()) == (replacement.dev(), replacement.ino())
+        })
+    });
+    until("replacement ownership", || held(h, "worker.lock"));
+    assert!(worker.0.try_wait().unwrap().is_none());
+    assert_eq!(started(h).len(), 2, "exec duplicated the viewer");
+    assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    // SAFETY: this is the specific viewer PID created in this private home by our worker.
+    assert_eq!(
+        unsafe { libc::kill(i32::try_from(child).unwrap(), libc::SIGTERM) },
+        0
+    );
+    until("the replacement worker reaps its old viewer", || {
+        !Path::new(&format!("/proc/{child}")).exists()
+    });
+    assert_eq!(zombies(pid), 0);
+    assert_eq!(
+        started(h).len(),
+        1,
+        "the minute restart deadline was bypassed"
+    );
+}
+
+#[test]
+fn a_worker_keeps_serving_failed_images_and_temporary_absence_then_leaves_a_missing_path() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let scratch = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    std::fs::write(
+        h.join("config.toml"),
+        "[worker]\nresident = true\n[summary]\ncurate = false\n",
+    )
+    .unwrap();
+    let executable = scratch.path().join("oboete");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
+    let mut worker = Worker(copied_spawn(&mut copied_command(
+        &executable,
+        h,
+        &["worker"],
+    )));
+    let pid = worker.0.id();
+    until("the copied resident worker", || {
+        held(h, "worker.lock") && h.join("state/worker-outcome").exists()
+    });
+    let generation = std::fs::read_to_string(h.join("state/worker-gen")).unwrap();
+    let image = format!("/proc/{pid}/exe");
+    let old = std::fs::metadata(&image).unwrap();
+    let next = scratch.path().join("invalid.next");
+    std::fs::write(&next, "synthetic invalid executable image").unwrap();
+    std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::rename(&next, &executable).unwrap();
+    // Real signal delivery after failed replacement must retain Rust's SIGPIPE immunity.
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        unsafe { libc::kill(i32::try_from(pid).unwrap(), libc::SIGPIPE) },
+        0
+    );
+    assert!(worker.0.try_wait().unwrap().is_none());
+    assert!(held(h, "worker.lock"));
+    assert_eq!(
+        (
+            std::fs::metadata(&image).unwrap().dev(),
+            std::fs::metadata(&image).unwrap().ino()
+        ),
+        (old.dev(), old.ino())
+    );
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
+    std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::rename(&next, &executable).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        unsafe { libc::kill(i32::try_from(pid).unwrap(), libc::SIGPIPE) },
+        0
+    );
+    assert!(worker.0.try_wait().unwrap().is_none() && held(h, "worker.lock"));
+    let missing = scratch.path().join("temporarily-gone");
+    std::fs::rename(&executable, &missing).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(worker.0.try_wait().unwrap().is_none() && held(h, "worker.lock"));
+    std::fs::rename(&missing, &executable).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let replacement = std::fs::metadata(&executable).unwrap();
+    until("the executable's recovery", || {
+        std::fs::metadata(&image).is_ok_and(|current| {
+            (current.dev(), current.ino()) == (replacement.dev(), replacement.ino())
+        })
+    });
+    // Kernel image visibility can precede main's startup-path capture. The new taking is
+    // written only after executable::init, so do not move that path again before it completes.
+    until("recovered ownership", || {
+        held(h, "worker.lock")
+            && std::fs::read_to_string(h.join("state/worker-gen"))
+                .is_ok_and(|current| current != generation)
+    });
+    std::fs::rename(&executable, &missing).unwrap();
+    let absent = Instant::now();
+    until_within(
+        "a still-missing executable ends the worker",
+        Duration::from_secs(75),
+        || worker.0.try_wait().unwrap().is_some(),
+    );
+    assert!(absent.elapsed() >= Duration::from_secs(59));
+    assert!(worker.0.wait().unwrap().success());
+    assert!(!held(h, "worker.lock"));
+}
+
+#[test]
+fn viewer_replacement_waits_for_live_requests_and_answers_them_before_exec() {
+    use std::os::unix::fs::MetadataExt;
+    let scratch = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    std::fs::write(
+        h.join("config.toml"),
+        format!("[worker]\nresident = true\n[summary]\ncurate = false\n[view]\nport = {port}\n"),
+    )
+    .unwrap();
+    let executable = scratch.path().join("oboete");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
+    let (mut viewer, port) = copied_viewer(&executable, h, port);
+    let pid = viewer.0.id();
+    assert!(held(h, "view.lock"));
+    assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    let token = std::fs::read_to_string(h.join("state/view-token")).unwrap();
+    let image = format!("/proc/{pid}/exe");
+    let old = std::fs::metadata(&image).unwrap();
+    let next = scratch.path().join("oboete.next");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
+    let replacement = std::fs::metadata(&next).unwrap();
+    let mut pending = Vec::<(std::net::TcpStream, Instant)>::new();
+    let mut answered = 0;
+    let start = Instant::now();
+    // Overlap real partial HTTP heads, each completed within REQUEST_TIME, so at least one
+    // request remains live across the first actual minute tick without a runtime test switch.
+    while start.elapsed() < Duration::from_secs(65) {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            stream,
+            "GET /api/repos HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Oboete-Token: {token}\r\n"
+        )
+        .unwrap();
+        pending.push((stream, Instant::now()));
+        if start.elapsed() >= Duration::from_secs(1) && next.exists() {
+            std::fs::rename(&next, &executable).unwrap();
+        }
+        if pending[0].1.elapsed() >= Duration::from_secs(1) {
+            let (mut stream, _) = pending.remove(0);
+            stream.write_all(b"\r\n").unwrap();
+            let mut response = String::new();
+            std::io::Read::read_to_string(&mut stream, &mut response).unwrap();
+            assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+            answered += 1;
+        }
+        let current = std::fs::metadata(&image).unwrap();
+        assert_eq!(
+            (current.dev(), current.ino()),
+            (old.dev(), old.ino()),
+            "the viewer exec cut an in-flight request off"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    for (mut stream, _) in pending {
+        stream.write_all(b"\r\n").unwrap();
+        let mut response = String::new();
+        std::io::Read::read_to_string(&mut stream, &mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        answered += 1;
+    }
+    assert!(answered > 0);
+    until_within(
+        "the drained viewer executes at its next minute",
+        Duration::from_secs(75),
+        || {
+            std::fs::metadata(&image).is_ok_and(|current| {
+                (current.dev(), current.ino()) == (replacement.dev(), replacement.ino())
+            })
+        },
+    );
+    until("the replacement listens", || held(h, "view.lock"));
+    assert!(viewer.0.try_wait().unwrap().is_none());
+    assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+}
+
+fn viewer_failed_image_or_missing(mode: &str) {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let scratch = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    std::fs::write(
+        h.join("config.toml"),
+        format!("[worker]\nresident = true\n[summary]\ncurate = false\n[view]\nport = {port}\n"),
+    )
+    .unwrap();
+    let executable = scratch.path().join("oboete");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
+    let (mut viewer, port) = copied_viewer(&executable, h, port);
+    let pid = viewer.0.id();
+    assert!(held(h, "view.lock"));
+    assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    let image = format!("/proc/{pid}/exe");
+    let old = std::fs::metadata(&image).unwrap();
+    let next = scratch.path().join("candidate.next");
+    if mode == "missing" {
+        std::fs::rename(&executable, scratch.path().join("missing.copy")).unwrap();
+    } else {
+        if mode == "invalid" {
+            std::fs::write(&next, "synthetic invalid image").unwrap();
+        } else {
+            std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
+        }
+        std::fs::set_permissions(
+            &next,
+            std::fs::Permissions::from_mode(if mode == "invalid" { 0o700 } else { 0o600 }),
+        )
+        .unwrap();
+        std::fs::rename(&next, &executable).unwrap();
+    }
+    let first = Instant::now();
+    until_within(
+        "the first actual minute keeps the original viewer serving",
+        Duration::from_secs(75),
+        || {
+            assert!(
+                viewer.0.try_wait().unwrap().is_none(),
+                "{mode} ended the original viewer"
+            );
+            first.elapsed() >= Duration::from_secs(65)
+        },
+    );
+    let current = std::fs::metadata(&image).unwrap();
+    assert_eq!((current.dev(), current.ino()), (old.dev(), old.ino()));
+    assert!(held(h, "view.lock"));
+    // SAFETY: only this owned synthetic viewer receives the signal.
+    assert_eq!(
+        unsafe { libc::kill(i32::try_from(pid).unwrap(), libc::SIGPIPE) },
+        0
+    );
+    assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
+    std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let replacement = std::fs::metadata(&next).unwrap();
+    std::fs::rename(&next, &executable).unwrap();
+    until_within(
+        "the viewer recovers at its next minute",
+        Duration::from_secs(75),
+        || {
+            std::fs::metadata(&image).is_ok_and(|current| {
+                (current.dev(), current.ino()) == (replacement.dev(), replacement.ino())
+            })
+        },
+    );
+    until("recovered viewer ownership", || held(h, "view.lock"));
+    assert!(viewer.0.try_wait().unwrap().is_none());
+    assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    if mode == "missing" {
+        std::fs::rename(&executable, scratch.path().join("permanently-missing")).unwrap();
+        let absent = Instant::now();
+        until_within(
+            "the second absent minute ends the viewer",
+            Duration::from_secs(135),
+            || viewer.0.try_wait().unwrap().is_some(),
+        );
+        assert!(absent.elapsed() >= Duration::from_secs(115));
+        assert!(viewer.0.wait().unwrap().success());
+        assert!(!held(h, "view.lock"));
+    }
+}
+
+#[test]
+fn r9_viewer_invalid_image_keeps_http_and_sigpipe_immunity() {
+    viewer_failed_image_or_missing("invalid");
+}
+
+#[test]
+fn r9_viewer_unexecutable_image_keeps_http_and_sigpipe_immunity() {
+    viewer_failed_image_or_missing("unexecutable");
+}
+
+#[test]
+fn r9_viewer_recovers_short_absence_and_exits_continued_absence() {
+    viewer_failed_image_or_missing("missing");
+}
+
+/// R9/test 9: updating the installed path by rename replaces the resident worker
+/// in place, with its command line and ownership of the same home intact.
+#[test]
+fn a_renamed_binary_replaces_the_worker_with_its_arguments_and_lock() {
+    use std::os::unix::fs::MetadataExt;
+
+    let scratch = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    std::fs::write(
+        h.join("config.toml"),
+        "[worker]\nresident = true\n[summary]\ncurate = false\n",
+    )
+    .unwrap();
+    let executable = scratch.path().join("oboete");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
+    let mut worker = Worker(copied_spawn(&mut copied_command(
+        &executable,
+        h,
+        &["worker"],
+    )));
+    let pid = worker.0.id();
+    let image = format!("/proc/{pid}/exe");
+    until("the copied worker holds its home lock", || {
+        held(h, "worker.lock")
+            && std::fs::read_to_string(h.join("state/worker-outcome"))
+                .is_ok_and(|outcome| outcome.ends_with('\n'))
+    });
+    let old = std::fs::metadata(&image).unwrap();
+    let arguments = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+    let generation = std::fs::read_to_string(h.join("state/worker-gen")).unwrap();
+    let next = scratch.path().join("oboete.next");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
+    let replacement = std::fs::metadata(&next).unwrap();
+    assert_ne!(
+        (old.dev(), old.ino()),
+        (replacement.dev(), replacement.ino())
+    );
+    std::fs::rename(&next, &executable).unwrap();
+    until("the worker executes the renamed binary", || {
+        std::fs::metadata(&image).is_ok_and(|current| {
+            (current.dev(), current.ino()) == (replacement.dev(), replacement.ino())
+        })
+    });
+    until("the replacement worker holds its home lock", || {
+        held(h, "worker.lock")
+            && std::fs::read_to_string(h.join("state/worker-gen"))
+                .is_ok_and(|current| current != generation)
+            && std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|arguments| !arguments.is_empty())
+    });
+    assert!(worker.0.try_wait().unwrap().is_none());
+    assert_eq!(
+        std::fs::read(format!("/proc/{pid}/cmdline")).unwrap(),
+        arguments
+    );
+    assert_eq!(worker.0.id(), pid);
+}
+
+#[test]
+fn a_missing_home_ends_the_old_worker_before_it_executes_a_replacement() {
+    let scratch = tempfile::tempdir().unwrap();
+    let h = scratch.path().join("home");
+    std::fs::create_dir(&h).unwrap();
+    std::fs::write(
+        h.join("config.toml"),
+        "[worker]\nresident = true\n[summary]\ncurate = false\n",
+    )
+    .unwrap();
+    let executable = scratch.path().join("oboete");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
+    let mut worker = Worker(copied_spawn(&mut copied_command(
+        &executable,
+        &h,
+        &["worker"],
+    )));
+    let pid = i32::try_from(worker.0.id()).unwrap();
+    until("the copied worker sleeps in its settled wait", || {
+        std::fs::read_to_string(h.join("state/worker-outcome"))
+            .is_ok_and(|outcome| outcome.trim().parse::<u64>().is_ok())
+            && std::fs::read_to_string(format!("/proc/{pid}/wchan"))
+                .is_ok_and(|where_| where_.trim() == "hrtimer_nanosleep")
+    });
+    // Stop only our owned worker, then confirm the stop before replacing either pathname.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+    until("the owned worker is stopped", || {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG | libc::WUNTRACED) };
+        assert!(waited >= 0);
+        waited == pid && libc::WIFSTOPPED(status)
+    });
+    std::fs::rename(&h, scratch.path().join("old-home")).unwrap();
+    let next = scratch.path().join("oboete.next");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
+    std::fs::rename(next, executable).unwrap();
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
+    until("the old worker notices the removed home", || {
+        h.exists() || worker.0.try_wait().unwrap().is_some()
+    });
+    assert!(
+        !h.exists(),
+        "R9 exec recreated the removed home before the R3 gone check"
+    );
+    assert!(!worker.0.wait().unwrap().success());
+}
+
+fn private_files(home: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(home).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(private_files(&path));
+        } else {
+            files.push((path.clone(), std::fs::read(&path).unwrap()));
+        }
+    }
+    files.sort();
+    files
+}
+
+/// The old process has already passed gone/leaving and successfully execed the shim. Its
+/// same-PID shell waits outside the home, before initializing the replacement product image.
+fn exec_keeps_the_original_home(role: &str, remake: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = tempfile::tempdir().unwrap();
+    let h = scratch.path().join("home");
+    std::fs::create_dir(&h).unwrap();
+    let port = free_port();
+    let config =
+        format!("[worker]\nresident = true\n[summary]\ncurate = false\n[view]\nport = {port}\n");
+    std::fs::write(h.join("config.toml"), &config).unwrap();
+    let executable = scratch.path().join("oboete");
+    let next_image = scratch.path().join("replacement-product");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next_image).unwrap();
+    let (mut process, port) = if role == "worker" {
+        (
+            Worker(copied_spawn(&mut copied_command(
+                &executable,
+                &h,
+                &["worker"],
+            ))),
+            port,
+        )
+    } else {
+        copied_viewer(&executable, &h, port)
+    };
+    let pid = process.0.id();
+    let lock = if role == "worker" {
+        "worker.lock"
+    } else {
+        "view.lock"
+    };
+    until("the original resident holds its home", || held(&h, lock));
+    if role == "viewer" {
+        assert!(repos_response(&h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    }
+    let ready = scratch.path().join("replacement-ready");
+    let release = scratch.path().join("replacement-release");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&release)
+            .env_clear()
+            .status()
+            .unwrap()
+            .success()
+    );
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    let shim = scratch.path().join("replacement-shim");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > {}\nIFS= read -r release < {}\nexec {} \"$@\"\n",
+            quote(&ready),
+            quote(&release),
+            quote(&next_image),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::rename(shim, executable).unwrap();
+    until_within(
+        "the same-PID exec reaches its external barrier",
+        Duration::from_secs(75),
+        || std::fs::read_to_string(&ready).is_ok_and(|ready| ready.trim() == pid.to_string()),
+    );
+    assert_eq!(
+        std::fs::read_to_string(ready).unwrap().trim(),
+        pid.to_string()
+    );
+    std::fs::rename(&h, scratch.path().join("old-home")).unwrap();
+    let before = if remake {
+        std::fs::create_dir_all(h.join("state")).unwrap();
+        std::fs::write(h.join("config.toml"), config).unwrap();
+        std::fs::write(h.join("state").join(lock), "synthetic foreign home lock").unwrap();
+        std::fs::write(h.join("untouched"), "synthetic replacement home canary").unwrap();
+        private_files(&h)
+    } else {
+        Vec::new()
+    };
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(release)
+        .unwrap()
+        .write_all(b"go\n")
+        .unwrap();
+    until("the replacement rejects its changed home", || {
+        process.0.try_wait().unwrap().is_some()
+            || if remake {
+                private_files(&h) != before
+            } else {
+                h.exists()
+            }
+    });
+    assert!(
+        if remake {
+            private_files(&h) == before
+        } else {
+            !h.exists()
+        },
+        "the replacement image wrote into a home that the old resident never held"
+    );
+    assert!(!process.0.wait().unwrap().success());
+}
+
+#[test]
+fn worker_exec_cannot_recreate_a_home_removed_before_the_new_image_starts() {
+    exec_keeps_the_original_home("worker", false);
+}
+
+#[test]
+fn worker_exec_cannot_adopt_a_home_replaced_before_the_new_image_starts() {
+    exec_keeps_the_original_home("worker", true);
+}
+
+#[test]
+fn viewer_exec_cannot_recreate_a_home_removed_before_the_new_image_starts() {
+    exec_keeps_the_original_home("viewer", false);
+}
+
+#[test]
+fn viewer_exec_cannot_adopt_a_home_replaced_before_the_new_image_starts() {
+    exec_keeps_the_original_home("viewer", true);
+}
+
+#[test]
+fn malformed_or_wrong_role_exec_metadata_refuses_before_creating_a_home() {
+    let scratch = tempfile::tempdir().unwrap();
+    for (index, tail) in ["unknown:2:3", "worker.lock:2:3:extra", "view.lock:2:3"]
+        .into_iter()
+        .enumerate()
+    {
+        let home = scratch.path().join(format!("refused-{index}"));
+        let environment =
+            copied_command(env!("CARGO_BIN_EXE_oboete").as_ref(), scratch.path(), &[]);
+        let result = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "export OBOETE_EXEC_HOME=\"$$:$1\"; exec \"$2\" --home \"$3\" worker --idle-ms 0",
+                "private-handoff-fixture",
+                tail,
+                env!("CARGO_BIN_EXE_oboete"),
+            ])
+            .arg(&home)
+            .current_dir(scratch.path())
+            .env_clear()
+            .envs(
+                environment
+                    .get_envs()
+                    .filter_map(|(key, value)| value.map(|value| (key, value))),
+            )
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        assert!(!home.exists(), "rejected metadata created the home");
+        let error = String::from_utf8(result.stderr).unwrap();
+        assert!(
+            error.contains("invalid resident exec home handoff")
+                || error.contains("resident exec changed its command")
+        );
+    }
+}
+
+fn binary_update_waits_for_loadable_config(viewer: bool) {
+    use std::os::unix::fs::MetadataExt;
+    let scratch = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let port = free_port();
+    let config =
+        format!("[worker]\nresident = true\n[summary]\ncurate = false\n[view]\nport = {port}\n");
+    std::fs::write(h.join("config.toml"), &config).unwrap();
+    let executable = scratch.path().join("oboete");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
+    let (mut process, port) = if viewer {
+        copied_viewer(&executable, h, port)
+    } else {
+        (
+            Worker(copied_spawn(&mut copied_command(
+                &executable,
+                h,
+                &["worker"],
+            ))),
+            port,
+        )
+    };
+    let pid = process.0.id();
+    let lock = if viewer { "view.lock" } else { "worker.lock" };
+    until("the original resident holds its home", || held(h, lock));
+    if viewer {
+        assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    }
+    let image = format!("/proc/{pid}/exe");
+    let original = std::fs::metadata(&image).unwrap();
+    let generation =
+        (!viewer).then(|| std::fs::read_to_string(h.join("state/worker-gen")).unwrap());
+    let valid = std::fs::read_to_string(h.join("config.toml")).unwrap();
+    std::fs::write(h.join("config.toml"), "[worker\nresident = true\n").unwrap();
+    let next = scratch.path().join("oboete.next");
+    std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
+    let replacement = std::fs::metadata(&next).unwrap();
+    std::fs::rename(next, executable).unwrap();
+    let waiting = Instant::now();
+    let observation = if viewer {
+        Duration::from_secs(65)
+    } else {
+        Duration::from_secs(1)
+    };
+    until_within(
+        "the unloadable config keeps the old resident serving",
+        Duration::from_secs(75),
+        || {
+            assert!(
+                process.0.try_wait().unwrap().is_none(),
+                "replacement exited instead of keeping the old resident"
+            );
+            assert!(held(h, lock), "replacement released the old lock");
+            let current = std::fs::metadata(&image).unwrap();
+            assert_eq!(
+                (current.dev(), current.ino()),
+                (original.dev(), original.ino()),
+                "replacement ran with unloadable config"
+            );
+            waiting.elapsed() >= observation
+        },
+    );
+    if viewer {
+        assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    }
+    std::fs::write(h.join("config.toml"), valid).unwrap();
+    until_within(
+        "the repaired config allows the new image",
+        Duration::from_secs(75),
+        || {
+            std::fs::metadata(&image).is_ok_and(|current| {
+                (current.dev(), current.ino()) == (replacement.dev(), replacement.ino())
+            })
+        },
+    );
+    if viewer {
+        assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    } else {
+        until("the new worker finished initialization", || {
+            held(h, lock)
+                && std::fs::read_to_string(h.join("state/worker-gen"))
+                    .is_ok_and(|current| Some(&current) != generation.as_ref())
+        });
+    }
+    assert!(held(h, lock));
+    assert!(process.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn worker_update_defers_until_malformed_config_is_repaired() {
+    binary_update_waits_for_loadable_config(false);
+}
+
+#[test]
+fn viewer_update_defers_until_malformed_config_is_repaired() {
+    binary_update_waits_for_loadable_config(true);
 }
 
 #[test]
