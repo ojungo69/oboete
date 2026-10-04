@@ -2737,6 +2737,10 @@ mod tests {
 
     #[test]
     fn a_cli_stops_input_before_releasing_dispatch_even_with_a_descendant() {
+        // Starting two Python processes exceeded 1s on the Windows CI runner. Keep the actual
+        // blocked-input deadline bounded, with the fixture watchdog safely after that deadline.
+        let timeout = Duration::from_secs(if cfg!(windows) { 10 } else { 1 });
+        let watchdog = (timeout.as_secs() + 7).to_string();
         for mode in ["timeout", "failure"] {
             let home = tempfile::tempdir().unwrap();
             let admission = crate::dispatch::Admission::shared(home.path()).unwrap();
@@ -2751,23 +2755,26 @@ mod tests {
                     r#"
 import os, pathlib, subprocess, sys, threading, time
 home = pathlib.Path(sys.argv[1])
+watchdog_seconds = int(sys.argv[3])
 def watchdog():
-    time.sleep(8)
+    time.sleep(watchdog_seconds)
     os._exit(99)
 threading.Thread(target=watchdog, daemon=True).start()
 reader = '''
 import os, pathlib, sys, threading, time
 home = pathlib.Path(sys.argv[1])
+watchdog_seconds = int(sys.argv[2])
 def watchdog():
-    time.sleep(8)
+    time.sleep(watchdog_seconds)
     os._exit(99)
 threading.Thread(target=watchdog, daemon=True).start()
 while not (home / "read-now").exists():
     time.sleep(.002)
 body = sys.stdin.buffer.read()
-(home / "received").write_text(str(len(body)))
+(home / "received.tmp").write_text(str(len(body)))
+(home / "received.tmp").replace(home / "received")
 '''
-child = subprocess.Popen([sys.executable, '-u', '-c', reader, str(home)],
+child = subprocess.Popen([sys.executable, '-u', '-c', reader, str(home), str(watchdog_seconds)],
     stdin=sys.stdin, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     start_new_session=os.name == 'posix')
 (home / 'reader-pid').write_text(str(child.pid))
@@ -2778,18 +2785,14 @@ child.wait()
                 ])
                 .arg(home.path())
                 .arg(mode)
+                .arg(&watchdog)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             let text = "synthetic-stalled-prompt ".repeat(200_000);
             let length = text.len();
             let began = Instant::now();
-            let (_, result) = run_cli(
-                command,
-                Some(text),
-                Duration::from_secs(1),
-                Some(admission.clone()),
-            );
+            let (_, result) = run_cli(command, Some(text), timeout, Some(admission.clone()));
             let error = result.unwrap_err();
             assert!(
                 error.message.contains(if mode == "timeout" {
@@ -2800,7 +2803,7 @@ child.wait()
                 "{}",
                 error.message
             );
-            assert!(began.elapsed() < Duration::from_secs(3));
+            assert!(began.elapsed() < timeout + Duration::from_secs(2));
             assert!(
                 home.path().join("reader-pid").exists(),
                 "the descendant fixture was not running"
