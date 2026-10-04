@@ -778,10 +778,16 @@ const TEXT = {
   welcome_recall_h: ['Recall', '思い出す'],
   welcome_recall: ['Your agent asks oboete’s search, timeline and get to recall past work. The Records tab searches it here.', 'エージェントは oboete の search、timeline、get で過去の作業を探します。この画面では記録タブから検索できます。'],
   heading: ['Settings', '設定'],
+  resident_h: ['Between sessions', 'セッション間の常駐'],
+  resident_on: ['Keep oboete running between sessions', 'セッション間も oboete を起動したままにする'],
+  resident_desc: ['The worker stays ready and keeps the memory page reachable. Turn this off to let the worker exit when idle.', 'ワーカーを待機させ、記憶の画面をいつでも開けるようにします。オフにすると、ワーカーは処理がなくなった時に終了します。'],
+  resident_first: ['Recommended for a new home. Save applies the choice shown here.', '新しい保存先ではオンを推奨します。保存すると、ここで選んだ設定が反映されます。'],
+  resident_timing: ['The next agent hook or running oboete view starts the resident processes. Turning this off applies when the worker is idle; the resident page stops once it has no requests.', '次のエージェントのフックか oboete view の実行で常駐プロセスが起動します。オフはワーカーの待機時に反映され、常駐の画面はアクセスがなくなった後に終了します。'],
+  resident_unsupported: ['Resident mode is currently available on Linux and WSL. This system keeps the worker that exits when idle.', '常駐は現在 Linux と WSL に対応しています。この環境のワーカーは、処理がなくなった時に終了します。'],
   language: ['Language', '言語'],
   lead: [
-    'The controls start with saved values. Edits stay on this page until you save them in config.toml. Recording and memory delivery read them at their next use; the background summarizer reads them before its next window, even while it stays running. This page cannot tell which values a running request has loaded. Opening this page or saving sends nothing to a provider.',
-    '最初は保存済みの値を表示します。変更は「保存」を押すまでこの画面だけに残ります。記録・記憶の受け渡しには次の利用時から反映されます。要約の設定は、次のまとまりを処理する前に読み直すので、処理が動き続けていても反映されます。現在実行中の呼び出しが読み込んでいる値は、この画面では確認できません。画面を開いたり保存したりしても、要約役への送信は始まりません。',
+    'Choose the settings below. Edits stay on this page until you save them in config.toml. Recording and memory delivery read them at their next use; the background summarizer reads them before its next window, even while it stays running. This page cannot tell which values a running request has loaded. Opening this page or saving sends nothing to a provider.',
+    'ここで設定を選べます。変更は「保存」を押すまでこの画面だけに残ります。記録・記憶の受け渡しには次の利用時から反映されます。要約の設定は、次のまとまりを処理する前に読み直すので、処理が動き続けていても反映されます。現在実行中の呼び出しが読み込んでいる値は、この画面では確認できません。画面を開いたり保存したりしても、要約役への送信は始まりません。',
   ],
   summary_h: ['Summarizing recorded activity', '記録の要約'],
   summary_desc: [
@@ -969,7 +975,7 @@ const TEXT = {
   differs_daily_budget: ['calls a day', '1 日の回数'],
   differs_timeout_s: ['timeout', '待ち時間'],
   save: ['Save', '保存'],
-  saved: ['Saved. Summary and spending settings apply when the background summarizer next reads them, before its next window.', '保存しました。要約と利用額の設定は、次のまとまりを処理する前に読み直すと反映されます。'],
+  saved: ['Saved. Each setting takes effect at the time described beside it.', '保存しました。反映されるタイミングは各設定の説明をご確認ください。'],
   warnings_h: ['Notes on config.toml', 'config.toml についての注意'],
   file_error: [
     'config.toml has a mistake, so this page shows no settings. Run `oboete doctor` to see the line.',
@@ -1123,7 +1129,11 @@ function formOf(s) {
   const text = (v) => (v === null || v === undefined ? '' : String(v));
   return {
     version: s.version,
-    saved: { summary: { ...s.summary }, paid_usd_per_month: s.paid_usd_per_month, gemini: s.gemini },
+    saved: { summary: { ...s.summary }, paid_usd_per_month: s.paid_usd_per_month, gemini: s.gemini,
+      worker: { resident: s.worker?.resident ?? false } },
+    firstRun: s.first_run === true,
+    residentSupported: s.resident_supported === true,
+    worker: { resident: s.first_run && s.resident_supported ? true : s.worker?.resident ?? false },
     summary: { ...s.summary, window_tokens: String(s.summary.window_tokens), idle_minutes: String(s.summary.idle_minutes) },
     paid_usd_per_month: String(s.paid_usd_per_month),
     gemini: s.gemini ?? 'none',
@@ -1397,6 +1407,7 @@ function saveBody() {
   return {
     body: {
       version: form.version,
+      worker: { resident: form.worker.resident },
       summary,
       paid_usd_per_month: cap,
       gemini: form.gemini === 'none' ? null : form.gemini,
@@ -1490,6 +1501,9 @@ function drawSettings() {
   }
   const f = form;
   const saved = (value) => note(t('saved_value', { value }));
+  const resident = checkbox(f.worker.resident, (v) => { f.worker.resident = v; });
+  resident.dataset.field = 'worker.resident';
+  resident.disabled = !f.residentSupported;
   const summaryLanguage = input('textarea', f.summary.language, 'Japanese', 'summary.language', (v) => { f.summary.language = v; });
   summaryLanguage.className = 'summary-language';
   const summarySize = (key) => {
@@ -1545,6 +1559,12 @@ function drawSettings() {
   const save = el('button', 'save', t('save'));
   save.type = 'submit';
   const formEl = el('form', null,
+    el('section', null,
+      el('h3', null, t('resident_h')), el('p', 'desc', t('resident_desc')),
+      el('label', 'check', resident, t('resident_on')),
+      saved(t(f.saved.worker.resident ? 'value_on' : 'value_off')),
+      f.firstRun && f.residentSupported ? el('p', 'desc', t('resident_first')) : null,
+      el('p', 'desc', t(f.residentSupported ? 'resident_timing' : 'resident_unsupported'))),
     el('section', null,
       el('h3', null, t('summary_h')), el('p', 'desc', t('summary_desc')),
       el('label', 'check', checkbox(f.summary.curate, (v) => { f.summary.curate = v; }), t('curate_on')),

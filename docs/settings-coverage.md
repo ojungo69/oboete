@@ -16,7 +16,8 @@ their own that #94 waits for after the switch, not a reason to hold the switch.
 
 ## The matrix
 
-"Now" is main at c328d29. "Takes effect" is when a saved value is used: the worker reads its
+"Now" records the implemented coverage below, updated by each completed slice. "Takes effect"
+is when a saved value is used: the worker reads its
 settings again for each window it curates, a hook reads its own at each event, and a key file is
 read at each call. "OS" is where the row works; "all" is WSL/Linux, macOS and Windows, with the
 real-machine checks spec-webui.md asks for at the end. "Test" names the test that proves the row,
@@ -67,15 +68,16 @@ left with "—" there.
 
 | Setting or operation | Spec | Now | Backend | Takes effect | OS | Test | Slice |
 |---|---|---|---|---|---|---|---|
-| First run: an unconfigured home, recommended presets | spec-webui | — | settings | at once | all | — | W6 |
+| First run: an unconfigured home, recommended presets | spec-webui | resident preset on Linux/WSL; full wizard — | settings | explicit save | all; resident Linux/WSL | `settings.rs` `resident_settings_are_read_only_until_the_visible_choice_is_saved`; native browser first-save/off/reload | resident slice 5; remaining W6 |
 | Detect agents, wire and unwire their hooks | 7.2 | — | `oboete setup` | the agent's next session | all | — | W6 |
-| Readiness checks, as doctor reports them | 7.2 | — | `oboete doctor` | at once, read only | all | — | W6 |
+| Readiness checks, as doctor reports them | 7.2, R13 | resident status CLI; full page — | `oboete doctor` | at once, read only | all; resident Linux/WSL | `tests/resident_defaults.rs` `doctor_reads_resident_locks_and_outcomes_without_starting_or_renumbering_them` | resident slice 5; remaining W6 |
 | Import claude-mem's history, with its projects mapped to repositories | 7.4, parity N1 | — | `oboete import` | when confirmed | all | — | W5 after N1 |
 | Migrate v1's store; import transcripts | 7.4 | — | `oboete migrate`, `transcript` | when confirmed | all | — | W5 |
 | Recurate, with the list and estimate before the send | 1.7 | — | `oboete recurate` | when confirmed | all | — | W5 |
 | Rebuild, restore | 1.7, 2.6 | — | `oboete rebuild`, `restore` | when confirmed | all | — | W5 |
 | Update check and update | 7.3 | — | `oboete update` (milestone 7) | when confirmed | all | — | after the switch, with milestone 7; W5 shows it as not built |
-| The resident worker and viewer: on or off, a new page token | 1.8, 6.6 | — | `[worker]`, `[view]` | the worker when it next goes idle, the viewer at its next start; a new token at once | all; the token file Linux, macOS and Windows with #281 | — | W6 with resident.md slice 2 |
+| The resident worker and viewer: on or off | 1.8, A111 | page; setup fills absent defaults | `[worker] resident` | on: next hook or `oboete view`; off: worker idle, viewer minute tick without requests | Linux/WSL | `settings.rs` `resident_settings_are_read_only_until_the_visible_choice_is_saved`, `resident_saves_reject_wrong_types_stale_versions_and_invalid_runtime_settings`, `a_settings_save_waits_for_the_other_config_writer_then_refuses_its_stale_body`; `migrate.rs` `migrated_settings_wait_for_the_config_writer_and_keep_its_choice`; `tests/resident_defaults.rs`; native browser first-save/off/reload | resident slice 5 |
+| Resident page port and a new page token | 1.8, 6.6 | CLI; page — | `[view] port`, `oboete view --new-token` | port: viewer's next start; token: at once | Linux/WSL; other OS token storage waits for #281 | resident.md slice 3 CLI tests; page — | remaining W6 |
 
 ### Sync and devices (after the switch, milestone 6)
 

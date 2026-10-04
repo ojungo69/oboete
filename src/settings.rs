@@ -49,6 +49,19 @@ fn bytes(home: &Path) -> std::io::Result<Option<Vec<u8>>> {
     }
 }
 
+/// All oboete config writers share this hold; a resident worker's lock is unrelated.
+pub(crate) fn config_lock(home: &Path) -> std::io::Result<std::fs::File> {
+    let state = home.join("state");
+    std::fs::create_dir_all(&state)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(state.join("config.lock"))?;
+    file.lock()?;
+    Ok(file)
+}
+
 /// What a save names to replace the file: its bytes' SHA-256, "none" for no file.
 fn version(bytes: Option<&[u8]>) -> String {
     bytes.map_or_else(
@@ -73,6 +86,8 @@ fn parsed(path: &Path, text: &str) -> Option<(config::Config, config::Capture, c
     let capture = config::parse_capture(Some(text)).ok()?;
     crate::redact::Rules::new(&capture.redaction).ok()?;
     crate::backup::location(text).ok()?;
+    config::parse_worker(text).ok()?;
+    config::parse_view(text).ok()?;
     Some((
         config::from_text(path, text).ok()?,
         capture.capture,
@@ -89,9 +104,13 @@ pub fn show(home: &Path) -> Value {
     let version = version(bytes.as_deref());
     let read = utf8(bytes.as_deref()).and_then(|t| {
         let doc = t.parse::<toml_edit::DocumentMut>().ok()?;
-        Some((parsed(&path, t)?, alone(&path, &doc)?))
+        Some((
+            parsed(&path, t)?,
+            alone(&path, &doc)?,
+            config::parse_worker(t).ok()?,
+        ))
     });
-    let Some(((cfg, capture, inject), alone)) = read else {
+    let Some(((cfg, capture, inject), alone, worker)) = read else {
         return json!({"version": version, "error": "file_invalid"});
     };
     let ledger = crate::providers_db::read_only(home);
@@ -131,6 +150,9 @@ pub fn show(home: &Path) -> Value {
         .collect();
     json!({
         "version": version,
+        "first_run": bytes.is_none(),
+        "resident_supported": cfg!(target_os = "linux"),
+        "worker": {"resident": worker.resident},
         "summary": {
             "curate": cfg.summary.curate,
             "language": cfg.summary.language,
@@ -296,6 +318,8 @@ fn entry(
 #[serde(deny_unknown_fields)]
 struct Save {
     version: String,
+    /// An older page omitting this field keeps its saved mode.
+    worker: Option<WorkerIn>,
     summary: SummaryIn,
     paid_usd_per_month: f64,
     gemini: Option<config::GeminiPlace>,
@@ -303,6 +327,12 @@ struct Save {
     capture: CaptureIn,
     /// Every chain entry once, in the order the page wants.
     chain: Vec<EntryIn>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerIn {
+    resident: bool,
 }
 
 /// Only the summary fields the page edits; `shrink` stays as the file has it.
@@ -443,6 +473,7 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _config = config_lock(home).map_err(|_| refused(500, "write_failed", ""))?;
     let path = home.join("config.toml");
     let was = bytes(home).map_err(|_| invalid())?;
     if version(was.as_deref()) != posted.version {
@@ -455,6 +486,16 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
     let chain = checked(&posted, &base, &now)?;
     // The order changes when the chain's does, not when `order` would be spelled another way.
     let reordered = !(posted.chain.iter().map(|e| e.name.as_str())).eq(names(&now.providers));
+    if let Some(worker) = &posted.worker {
+        let saved = doc
+            .get("worker")
+            .and_then(|table| table.get("resident"))
+            .and_then(toml_edit::Item::as_bool);
+        if saved != Some(worker.resident) {
+            // An explicit first off choice is a real setting too, even though off was the default.
+            put(&mut doc, "worker", "resident", worker.resident.into());
+        }
+    }
     if posted.paid_usd_per_month != now.paid_usd_per_month {
         put_root(
             &mut doc,
@@ -537,8 +578,7 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
         crate::setup::stage(&path, &candidate).map_err(|_| refused(500, "write_failed", ""))?;
     // A hand edit or another viewer between the read and here is not overwritten (the temp file
     // goes when `staged` drops).
-    // ponytail: one landing between this check and the rename still is; a lock file shared with
-    // hand edits' tools cannot exist, so add one for two viewers if that is ever seen.
+    // A hand edit can still land between this check and rename; oboete's writers hold config.lock.
     if version(bytes(home).map_err(|_| invalid())?.as_deref()) != posted.version {
         return Err(refused(409, "stale", ""));
     }
@@ -551,6 +591,7 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
 /// `[view] port` set to `port`, the rest of config.toml as it was (`oboete view --new-token`,
 /// docs/resident.md R6); a file changed by hand between the read and the write is not overwritten.
 pub fn set_view_port(home: &Path, port: u16) -> anyhow::Result<()> {
+    let _config = config_lock(home)?;
     let path = home.join("config.toml");
     let was = bytes(home)?;
     let text = utf8(was.as_deref()).ok_or_else(|| anyhow::anyhow!("config.toml is not UTF-8"))?;
@@ -564,6 +605,45 @@ pub fn set_view_port(home: &Path, port: u16) -> anyhow::Result<()> {
         "config.toml changed while the port was written; try again"
     );
     staged.commit()
+}
+
+/// R2/A111: setup fills only absent values. Reading or removing agent wiring never does this.
+#[cfg(target_os = "linux")]
+pub fn resident_defaults(home: &Path) -> anyhow::Result<(config::Worker, config::View)> {
+    let _config = config_lock(home)?;
+    let path = home.join("config.toml");
+    let was = bytes(home)?;
+    let text = utf8(was.as_deref()).ok_or_else(|| anyhow::anyhow!("config.toml is not UTF-8"))?;
+    anyhow::ensure!(parsed(&path, text).is_some(), "config.toml is invalid");
+    let mut doc: toml_edit::DocumentMut = text.parse()?;
+    if doc.get("worker").and_then(|t| t.get("resident")).is_none() {
+        put(&mut doc, "worker", "resident", true.into());
+    }
+    if doc.get("view").and_then(|t| t.get("port")).is_none() {
+        put(
+            &mut doc,
+            "view",
+            "port",
+            i64::from(config::View::default().port.get()).into(),
+        );
+    }
+    let candidate = doc.to_string();
+    anyhow::ensure!(
+        parsed(&path, &candidate).is_some(),
+        "config.toml is invalid"
+    );
+    if candidate != text {
+        let staged = crate::setup::stage(&path, &candidate)?;
+        anyhow::ensure!(
+            version(bytes(home)?.as_deref()) == version(was.as_deref()),
+            "config.toml changed during setup; try again"
+        );
+        staged.commit()?;
+    }
+    Ok((
+        config::parse_worker(&candidate)?,
+        config::parse_view(&candidate)?,
+    ))
 }
 
 /// Each entry as it is without `[chain]`: what a value equal to its own is compared with, and
@@ -939,6 +1019,129 @@ mod tests {
 
     fn save_to(home: &tempfile::TempDir, body: &[u8]) -> Result<Value, Refusal> {
         save(home.path(), &Mutex::new(()), body)
+    }
+
+    #[test]
+    fn resident_settings_are_read_only_until_the_visible_choice_is_saved() {
+        let home = home_with(None);
+        let shown = show(home.path());
+        assert_eq!(shown["worker"]["resident"], false);
+        assert_eq!(shown["first_run"], true);
+        assert_eq!(shown["resident_supported"], cfg!(target_os = "linux"));
+        assert!(file(&home).is_none());
+
+        let body = posted(&shown, |v| v["worker"] = json!({"resident": true}));
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(saved["worker"]["resident"], true);
+        assert_eq!(saved["first_run"], false);
+        let parsed: toml::Value = toml::from_str(&file(&home).unwrap()).unwrap();
+        assert_eq!(parsed["worker"]["resident"].as_bool(), Some(true));
+
+        let body = posted(&saved, |v| v["worker"] = json!({"resident": false}));
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(saved["worker"]["resident"], false);
+        let before = file(&home);
+        // An older page omitting the new field keeps the owner's saved mode.
+        let saved = save_to(&home, &posted(&saved, |_| {})).unwrap();
+        assert_eq!(saved["worker"]["resident"], false);
+        assert_eq!(file(&home), before);
+
+        let off = home_with(None);
+        let body = posted(&show(off.path()), |v| {
+            v["worker"] = json!({"resident": false})
+        });
+        let saved = save_to(&off, &body).unwrap();
+        assert_eq!(saved["worker"]["resident"], false);
+        assert_eq!(
+            saved["first_run"], false,
+            "an explicit first off choice is saved too"
+        );
+        assert!(file(&off).unwrap().contains("resident = false"));
+    }
+
+    #[test]
+    fn resident_saves_reject_wrong_types_stale_versions_and_invalid_runtime_settings() {
+        let original =
+            "providers = []\n[worker]\nresident = false # chosen\n[view]\nport = 17374\n";
+        let home = home_with(Some(original));
+        let shown = show(home.path());
+        for worker in [
+            json!({}),
+            json!({"resident": null}),
+            json!({"resident": "yes"}),
+            json!({"resident": true, "command": "invented"}),
+        ] {
+            let body = posted(&shown, |v| v["worker"] = worker);
+            let error = save_to(&home, &body).unwrap_err();
+            assert_eq!((error.status, error.code), (422, "type"));
+            assert_eq!(file(&home).as_deref(), Some(original));
+        }
+        let body = posted(&shown, |v| v["worker"] = json!({"resident": true}));
+        let edited = format!("{original}# Edited by hand\n");
+        std::fs::write(home.path().join("config.toml"), &edited).unwrap();
+        let error = save_to(&home, &body).unwrap_err();
+        assert_eq!((error.status, error.code), (409, "stale"));
+        assert_eq!(file(&home).as_deref(), Some(edited.as_str()));
+        for invalid in ["[worker]\nresident = 'yes'\n", "[view]\nport = 0\n"] {
+            std::fs::write(home.path().join("config.toml"), invalid).unwrap();
+            assert_eq!(show(home.path())["error"], "file_invalid");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_settings_save_waits_for_the_other_config_writer_then_refuses_its_stale_body() {
+        let home = home_with(Some("providers = []\n[worker]\nresident = false\n"));
+        let original = file(&home).unwrap();
+        let body = posted(&show(home.path()), |v| {
+            v["worker"] = json!({"resident": true})
+        });
+        std::fs::create_dir(home.path().join("state")).unwrap();
+        let fence = std::fs::File::create(home.path().join("state/config.lock")).unwrap();
+        fence.lock().unwrap();
+        let path = home.path().to_owned();
+        let (send, receive) = std::sync::mpsc::channel();
+        let saving = std::thread::Builder::new()
+            .name("r5-config-save".into())
+            .spawn(move || {
+                send.send(save(&path, &Mutex::new(()), &body)).unwrap();
+            })
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            assert!(
+                receive.try_recv().is_err(),
+                "save completed while another writer held config.lock"
+            );
+            let waiting = std::fs::read_dir("/proc/self/task")
+                .unwrap()
+                .flatten()
+                .any(|task| {
+                    std::fs::read_to_string(task.path().join("comm"))
+                        .is_ok_and(|name| name.trim() == "r5-config-save")
+                        && std::fs::read_to_string(task.path().join("wchan"))
+                            .is_ok_and(|wait| wait.contains("locks_") || wait.contains("flock_"))
+                });
+            if waiting {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "save never waited for config.lock"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(file(&home).as_deref(), Some(original.as_str()));
+        let edited = format!("{original}# The first writer changed the version\n");
+        std::fs::write(home.path().join("config.toml"), &edited).unwrap();
+        drop(fence);
+        let error = receive
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap_err();
+        saving.join().unwrap();
+        assert_eq!((error.status, error.code), (409, "stale"));
+        assert_eq!(file(&home).as_deref(), Some(edited.as_str()));
     }
 
     #[test]

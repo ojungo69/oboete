@@ -314,6 +314,22 @@ fn outcome(home: &Path) -> Option<String> {
     std::fs::read_to_string(home.join("state").join("view-outcome")).ok()
 }
 
+/// R13: a read-only status, without starting a viewer, touching its token or creating a lock.
+pub(crate) fn resident_line(home: &Path, port: u16) -> String {
+    let outcome = outcome(home);
+    if crate::worker::lock_held(&home.join("state/view.lock"))
+        && outcome.as_deref().map(str::trim) == Some(format!("listening {port}").as_str())
+    {
+        return format!("page: http://127.0.0.1:{port} is up");
+    }
+    let why = match outcome.as_deref().map(str::trim) {
+        Some(PORT_IN_USE) => format!("another program or another oboete home holds port {port}"),
+        Some(why) if !why.is_empty() => why.to_owned(),
+        _ => "it has not started".to_owned(),
+    };
+    format!("page: not running: {why}; run `oboete view`")
+}
+
 /// Before a viewer is started: the outcome one that is gone left is not the new one's (Codex on
 /// #378). Called only while no viewer holds the lock, so a live viewer's outcome is never taken.
 fn forget_outcome(home: &Path) {
@@ -1559,15 +1575,8 @@ fn stats(home: &Path) -> Result<Value> {
     .into_iter()
     .map(|name| std::fs::metadata(home.join(name)).map_or(0, |m| m.len()))
     .sum();
-    // A leftover file alone is no rebuild: one stopped by a crash stays until the next.
-    let rebuilding = crate::worker::running(home)
-        && std::fs::read_dir(home).is_ok_and(|d| {
-            d.flatten().any(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("knowledge.db.rebuilding-")
-            })
-        });
+    // R13: a resident worker and a file left by a failed rebuild are not a live rebuild.
+    let rebuilding = crate::worker::lock_held(&home.join("state/rebuild.lock"));
     let (records, claims, skips) = match search::b::stores(home)? {
         None => (Vec::new(), Vec::new(), Vec::new()),
         Some((raw, k)) => {
@@ -1661,6 +1670,40 @@ fn params(query: &str) -> HashMap<String, String> {
 mod tests {
     use super::*;
     use crate::search::b::fixture::Store;
+
+    #[cfg(unix)]
+    #[test]
+    fn status_probe_does_not_report_up_from_a_symlink_and_stale_listening_outcome() {
+        let home = tempfile::tempdir().unwrap();
+        let state = home.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let target = home.path().join("unrelated-held-file");
+        std::fs::write(&target, "synthetic unrelated status canary").unwrap();
+        let held = std::fs::File::open(&target).unwrap();
+        held.lock().unwrap();
+        std::os::unix::fs::symlink(&target, state.join("view.lock")).unwrap();
+        std::fs::write(state.join("view-outcome"), "listening 17373").unwrap();
+        let line = resident_line(home.path(), 17373);
+        assert!(
+            line.contains("not running"),
+            "stale outcome plus a link reported the viewer up"
+        );
+        assert!(
+            std::fs::symlink_metadata(state.join("view.lock"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(target).unwrap(),
+            b"synthetic unrelated status canary"
+        );
+        assert_eq!(
+            std::fs::read(state.join("view-outcome")).unwrap(),
+            b"listening 17373"
+        );
+        assert!(!state.join("view-token").exists());
+    }
 
     /// A viewer over an empty home, for the guards and the saves.
     fn viewer(name: &str) -> (PathBuf, Viewer) {
@@ -2795,6 +2838,30 @@ mod tests {
         assert_eq!(st["rebuilding"], false);
         std::fs::write(v.home.join("knowledge.db.rebuilding-1"), b"").unwrap();
         assert_eq!(get(&v, "/api/stats")["rebuilding"], false);
+    }
+
+    #[test]
+    fn a_resident_worker_and_a_leftover_file_are_not_a_rebuild() {
+        let (_stores, v, _) = seeded();
+        let _worker = crate::worker::lock(&v.home).unwrap().unwrap();
+        std::fs::write(v.home.join("knowledge.db.rebuilding-1"), b"leftover").unwrap();
+        assert_eq!(get(&v, "/api/stats")["rebuilding"], false);
+        let rebuild = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(v.home.join("state/rebuild.lock"))
+            .unwrap();
+        // Concurrent status readers are not the operation which owns this marker.
+        rebuild.lock_shared().unwrap();
+        assert_eq!(get(&v, "/api/stats")["rebuilding"], false);
+        rebuild.unlock().unwrap();
+        rebuild.lock().unwrap();
+        assert_eq!(get(&v, "/api/stats")["rebuilding"], true);
+        drop(rebuild);
+        assert_eq!(get(&v, "/api/stats")["rebuilding"], false);
+        assert!(v.home.join("state/rebuild.lock").exists());
     }
 
     /// D11: no route opens the old store: a junk oboete.db is left as it was.

@@ -17,12 +17,11 @@ owner's use, and what could be left out); what the review changed is listed at t
 ## Built so far
 
 - Slice 1 (R2, R3, R10, R12): the worker stays, steps aside and exits on its three conditions.
-  `[worker] resident` is read, but nothing writes it yet (`oboete setup` does in slice 5), so a
-  home is resident only where its owner wrote the key by hand.
+  `[worker] resident` is read; slice 5 writes it through setup or an explicit settings save.
 - Slice 2 (R5, R6, R8): `oboete view --resident` (hidden) is the resident viewer: its lock,
   outcome, token file and fixed port, with no checkout; tests 3 (but `--new-token`), 4, 5 (its
-  outcome), 6, 7 and 8 (but the worker that starts it). Nothing starts it yet (slice 3), and it
-  serves until it is stopped: the once-a-minute tick that ends it is R4's, in slice 3. It runs on
+  outcome), 6, 7 and 8 (but the worker that starts it). Slice 3 starts it and adds R4's
+  once-a-minute tick. It runs on
   Linux only, where keyfile's filesystem check can tell that a mode keeps the token file its
   owner's; macOS and Windows wait for #281, and there `oboete view` stays as it is.
 - Slice 3 (R4, R7, R6's `--new-token`): a resident worker starts the viewer (`view::Starter`) at
@@ -56,7 +55,28 @@ owner's use, and what could be left out); what the review changed is listed at t
   for that specific child, including one already exited, without a global child reaper or
   SIGCHLD change. Tests use copied product binaries, private homes and real minute ticks;
   same PID/arguments, locks, HTTP completion, exec failures, missing-path recovery and child
-  reaping are checked. Setup/settings and the R11 measurements remain slice 5.
+  reaping are checked.
+- Slice 5 (A111, R5, R13): Linux/WSL setup fills absent `worker.resident = true` and the default
+  view port, preserving explicit choices and comments; removing agent wiring changes neither.
+  If defaults cannot be validated or written, setup still attempts the independent agent wiring,
+  reports the defaults failure once and exits nonzero with a summary; it never repairs an invalid
+  config by rewriting it. Native tests for invalid config and a failed config lock cover these
+  preflight paths, unchanged bytes and safe diagnostics; they do not test staged-write rollback.
+  The settings page shows the saved mode, recommends on only for an absent config, and writes
+  the visible choice only on Save. Reading settings starts nothing. Older request bodies which
+  omit the switch preserve the saved mode. The config writers, including v1 settings import,
+  share `state/config.lock` and still refuse a stale save after a hand edit. Doctor reads existing
+  regular lock files without following a symlink or needing write access, and the exact
+  configured-port outcome without creating a lock or changing its generation; not running is
+  informational. Rebuild alone holds `state/rebuild.lock` until completion, failure or exit,
+  and stats reads that lock rather than a resident worker or leftover rebuild file. Its producer
+  allows a brief status probe to finish, with a bounded 200 ms wait under the worker lock.
+  Native tests cover defaults, explicit off, comments, removal, concurrent config writers,
+  read-only status, and rebuild success/failure/kill. A unit test releases a transient status probe
+  at actual contention without depending on the parent observing a 200 ms window.
+  Browser checks cover the visible first-save
+  recommendation, switching off and reload. The R11 measurements below pass on this WSL host;
+  the terminal/shortcut and copied-real-home checks remain part of the owner's rehearsal.
 
 ## Before this unit (main 7f8de51)
 
@@ -200,6 +220,54 @@ R11. **What is measured before the PR is ready** (spec 1.8), on WSL with the own
   leaves them running. The result decides only the runbook's shortcut (below), not the code.
 - The 24-hour run on a copy of the owner's real home is a step of the cut-over runbook (no migrated
   home exists yet, and a copied config has live providers).
+
+### R11 readings, 2026-10-04
+
+Measured on this WSL host with a copied release binary from source tree
+`9d2ef9338e72c130984e2bf2d0f8f52833a1a0ef` (Linux x86-64, `cargo build --release --locked --offline`).
+Binary SHA-256: `375556ae3bbc42755a46af5d2ebc6e61de59edc31d582f513894f8e6083f18c1`.
+Two private synthetic homes were used: one for resources, one for correction latency. Provider
+calls and detached starts were disabled; no owner data or live-provider configuration was used.
+The harness reaped its worker and viewer before removing each home. These are the readings
+after the final status-probe/config-writer review corrections.
+The later standalone setup recovery/diagnostic changes and the complete-snapshot test fixture
+leave the measured production worker, viewer, hook and correction paths unchanged; these
+source-pinned readings were retained without repeating that fixture.
+
+The same worker received 1,000 new `UserPromptSubmit` records per cycle through the public hook,
+waited for the indexed prompt count, then idled for 61 seconds. RSS/HWM are KiB; WAL sizes are
+bytes. `P WAL` is `providers.db-wal`; zero means that file was absent.
+
+| Cycle | Indexed prompts | VmRSS | VmHWM | Threads | Open fds | raw.db WAL | knowledge.db WAL | P WAL |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1,000 | 17,972 | 18,628 | 1 | 12 | 4,128,272 | 4,255,992 | 0 |
+| 2 | 2,000 | 17,832 | 18,628 | 1 | 12 | 4,128,272 | 4,297,192 | 0 |
+| 3 | 3,000 | 17,908 | 18,628 | 1 | 12 | 4,128,272 | 4,297,192 | 0 |
+| 4 | 4,000 | 18,492 | 19,000 | 1 | 12 | 4,128,272 | 4,297,192 | 0 |
+| 5 | 5,000 | 19,104 | 19,584 | 1 | 12 | 4,128,272 | 4,297,192 | 0 |
+
+Each viewer load used the named page set above, including an actual settings save. The same
+viewer stayed up for both readings; the worker's final WAL sizes remained unchanged.
+
+| Page-set loads | VmRSS | VmHWM | Threads | Open fds | raw.db WAL | knowledge.db WAL | P WAL |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 17,284 | 17,284 | 2 | 5 | 4,128,272 | 4,297,192 | 0 |
+| 1,000 | 17,284 | 17,284 | 2 | 5 | 4,128,272 | 4,297,192 | 0 |
+
+Both resource checks pass: worker cycle 2 to 5 adds 1,272 KiB (below the 2,048 KiB allowance),
+and viewer load 100 to 1,000 adds 0 KiB. Threads and open fds stay equal in each comparison.
+These readings establish the bounded-growth check for this fixture, not a 24-hour result.
+
+During 600.000 seconds of idle time, `/proc/<pid>/stat` user plus system CPU time increased by
+0.42 seconds for the worker and 0.00 seconds for the viewer at the host's clock-tick resolution.
+
+For correction latency, a public `pref add` created a synthetic claim, then one resident worker
+took its lock and changed its generation. Each of 100 public `correct --body` commands changed
+that claim. Timing covers command start to return; a read-only query of the active claim view
+checked that the new body was visible at return, with the same worker and generation still up.
+All 100 checks pass. Latency in milliseconds: minimum 2,007.764; median 2,014.658;
+p95 2,022.081 (the 95th sorted sample); maximum 2,083.941; mean 2,015.95076.
+R11 sets no latency threshold; this records the observed roughly two-second command latency.
 
 R12. **Stepping aside for a command.** `oboete restore`, `oboete rebuild` and
 `oboete recurate --yes` that find the worker lock held each write a file of their own in
