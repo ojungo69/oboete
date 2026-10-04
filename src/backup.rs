@@ -387,7 +387,23 @@ fn held_requests(home: &Path) -> Result<Vec<crate::forget::Request>> {
     let mut out = Vec::new();
     for row in rows {
         let text = row.context("read live forget request row")?;
-        out.push(serde_json::from_str(&text).context("parse live forget request")?);
+        let request: crate::forget::Request =
+            serde_json::from_str(&text).context("parse live forget request")?;
+        request.check().context("validate live forget request")?;
+        out.push(request);
+    }
+    if !out.is_empty() {
+        let live_home: String = conn
+            .query_row("SELECT value FROM meta WHERE key='home_id'", [], |r| {
+                r.get(0)
+            })
+            .context("read live home identity for forget requests")?;
+        // A request corrupt in this live store must not be silently discarded as foreign
+        // when it is later compared with the backup's potentially different home.
+        anyhow::ensure!(
+            out.iter().all(|request| request.home == live_home),
+            "live forget request home does not match raw home identity"
+        );
     }
     Ok(out)
 }

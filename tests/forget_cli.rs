@@ -1560,6 +1560,17 @@ fn restore_keeps_a_same_home_live_forget_when_both_logs_are_lost() {
 /// named as this device's backups. The same source identity in another home stays visible.
 #[test]
 fn restoring_another_homes_segments_does_not_apply_the_live_homes_forget() {
+    restore_from_foreign_segments_with_live_request(false);
+}
+
+/// Invalid held requests must fail validation even when foreign backups would filter them
+/// out; a malformed live row must never be mistaken for a valid foreign request.
+#[test]
+fn restore_validates_a_live_requests_codec_before_foreign_backup_filtering() {
+    restore_from_foreign_segments_with_live_request(true);
+}
+
+fn restore_from_foreign_segments_with_live_request(invalid_version: bool) {
     let root = tempfile::tempdir().unwrap();
     let a = root.path().join("home-a");
     let b = root.path().join("home-b");
@@ -1591,6 +1602,11 @@ fn restoring_another_homes_segments_does_not_apply_the_live_homes_forget() {
     assert_ne!(a_home, b_home);
     assert_eq!(a_origin, b_origin);
     ok(run(&a, &["forget", "--record", &a_id, "--yes"], ""));
+    // Restore's CLI drains existing work even after a failure. Settle this valid request
+    // before corrupting it, so the preservation assertion excludes pending cache updates.
+    if invalid_version {
+        ok(run(&a, &["worker", "--idle-ms", "0"], ""));
+    }
     let (a_device, _) = a_id.split_once(':').unwrap();
     let (b_device, _) = b_id.split_once(':').unwrap();
     // Keep A's bodyless logs, but replace its segments and checksums with B's. Only the
@@ -1623,6 +1639,38 @@ fn restoring_another_homes_segments_does_not_apply_the_live_homes_forget() {
         copied += 1;
     }
     assert!(copied > 0);
+    if invalid_version {
+        let db = rusqlite::Connection::open(a.join("raw.db")).unwrap();
+        let text: String = db
+            .query_row("SELECT request FROM forget_jobs", [], |r| r.get(0))
+            .unwrap();
+        let mut request: serde_json::Value = serde_json::from_str(&text).unwrap();
+        request["v"] = serde_json::json!(2);
+        db.execute("UPDATE forget_jobs SET request=?1", [request.to_string()])
+            .unwrap();
+        drop(db);
+        std::fs::remove_file(a.join("forget.log")).unwrap();
+        std::fs::remove_file(a.join("backups/forget.log")).unwrap();
+        let raw_before = std::fs::read(a.join("raw.db")).unwrap();
+        let knowledge_before = std::fs::read(a.join("knowledge.db")).unwrap();
+        let result = run(&a, &["restore"], "");
+        assert!(
+            !result.status.success(),
+            "invalid held request was filtered out: {result:?}"
+        );
+        assert!(String::from_utf8_lossy(&result.stderr).contains("validate live forget request"));
+        assert!(
+            std::fs::read(a.join("raw.db")).unwrap() == raw_before,
+            "live raw changed after refusal"
+        );
+        assert!(
+            std::fs::read(a.join("knowledge.db")).unwrap() == knowledge_before,
+            "live knowledge changed after refusal"
+        );
+        assert!(!a.join("raw.db.restoring").exists());
+        assert!(!a.join("state/restored").exists());
+        return;
+    }
     let restored = ok(run(&a, &["restore"], ""));
     assert!(
         restored.contains("a request of another home, skipped"),
@@ -1648,6 +1696,80 @@ fn restoring_another_homes_segments_does_not_apply_the_live_homes_forget() {
 
 /// D1 rule 14: an invalid live request must not discard a valid earlier request or swap away
 /// undamaged live data, even when neither request log survives.
+#[test]
+fn restore_refuses_a_live_requests_wrong_home_before_replacing_the_stores() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    std::fs::write(
+        projects.join("held-request.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type":"user", "sessionId":"held-request-native-session", "cwd":"/synthetic",
+                "timestamp":"2026-09-01T00:00:00Z", "message":{"role":"user", "content":CANARY}
+            })
+        ),
+    )
+    .unwrap();
+    ok(run(
+        &home,
+        &["import", "transcripts", "--agent", "claude", "--yes"],
+        "",
+    ));
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    let hits = ok(run(
+        &home,
+        &["search", "--all", "--raw", "only", "--", CANARY],
+        "",
+    ));
+    let id = hits.split_whitespace().next().unwrap();
+    let old_backup = root.path().join("before-forget");
+    copy_backup(&home.join("backups"), &old_backup);
+    ok(run(&home, &["forget", "--record", id, "--yes"], ""));
+    let keep = hook_record(&home, "unrelated-live-request-home-record-762");
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let text: String = db
+        .query_row("SELECT request FROM forget_jobs", [], |r| r.get(0))
+        .unwrap();
+    let mut request: serde_json::Value = serde_json::from_str(&text).unwrap();
+    // Valid JSON and valid request fields; only its claimed home is corrupt.
+    request["home"] = serde_json::json!(format!("{}foreign", request["home"].as_str().unwrap()));
+    db.execute("UPDATE forget_jobs SET request=?1", [request.to_string()])
+        .unwrap();
+    drop(db);
+    std::fs::remove_file(home.join("forget.log")).unwrap();
+    std::fs::remove_dir_all(home.join("backups")).unwrap();
+    copy_backup(&old_backup, &home.join("backups"));
+    let raw_before = std::fs::read(home.join("raw.db")).unwrap();
+    let knowledge_before = std::fs::read(home.join("knowledge.db")).unwrap();
+    let restored = run(&home, &["restore"], "");
+    assert!(
+        !restored.status.success(),
+        "restore discarded a corrupt live request home: {restored:?}"
+    );
+    assert!(String::from_utf8_lossy(&restored.stderr).contains("live forget request home"));
+    assert_eq!(std::fs::read(home.join("raw.db")).unwrap(), raw_before);
+    assert_eq!(
+        std::fs::read(home.join("knowledge.db")).unwrap(),
+        knowledge_before
+    );
+    assert!(!home.join("raw.db.restoring").exists());
+    assert!(!home.join("state/restored").exists());
+    assert!(!std::fs::read_dir(&home).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("quarantined")
+    }));
+    assert!(!String::from_utf8_lossy(&run(&home, &["get", id], "").stdout).contains(CANARY));
+    assert!(ok(run(&home, &["get", &keep], "")).contains("unrelated-live-request-home-record-762"));
+}
+
 #[test]
 fn restore_refuses_a_malformed_live_request_before_replacing_the_stores() {
     for malformed in [
@@ -2067,38 +2189,19 @@ impl Drop for FinishChild<'_> {
 
 /// Real owned children emit a wrong prompt and stall or close their output. A failure must
 /// report both pipes and reap them; a panic after the expected prompt must reap them too.
+#[cfg(any(unix, windows))]
 #[test]
 fn finish_prompt_wait_cleans_up_wrong_or_stalled_owned_children() {
     use std::time::Duration;
-    const FIXTURE: &str = "OBOETE_TEST_FINISH_CHILD";
     const PROMPT: &[u8] = b"synthetic expected confirmation: ";
-    if let Ok(mode) = std::env::var(FIXTURE) {
-        use std::io::Write;
-        std::io::stdout()
-            .write_all(if mode == "panic" {
-                PROMPT
-            } else {
-                b"synthetic wrong prompt: "
-            })
-            .unwrap();
-        std::io::stdout().flush().unwrap();
-        eprintln!("synthetic child stderr");
-        if mode != "eof" {
-            loop {
-                std::thread::park();
-            }
-        }
-        return;
-    }
+    let timeout = if cfg!(windows) {
+        Duration::from_secs(20)
+    } else {
+        Duration::from_secs(2)
+    };
     for mode in ["stall", "eof", "panic"] {
         let home = tempfile::tempdir().unwrap();
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "finish_prompt_wait_cleans_up_wrong_or_stalled_owned_children",
-                "--nocapture",
-            ])
-            .env(FIXTURE, mode)
+        let mut child = finish_fixture_command(mode)
             .env("HOME", home.path())
             .env("USERPROFILE", home.path())
             .env("CODEX_HOME", home.path().join("codex"))
@@ -2112,7 +2215,7 @@ fn finish_prompt_wait_cleans_up_wrong_or_stalled_owned_children() {
         if mode == "panic" {
             let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut held = FinishChild::new(&mut child, PROMPT);
-                held.wait_for_prompt(Duration::from_secs(2)).unwrap();
+                held.wait_for_prompt(timeout).unwrap();
                 panic!("synthetic failure while holding the finish child");
             }));
             let failed = failed.expect_err("the synthetic panic did not run");
@@ -2122,7 +2225,7 @@ fn finish_prompt_wait_cleans_up_wrong_or_stalled_owned_children() {
             );
         } else {
             let mut held = FinishChild::new(&mut child, PROMPT);
-            let failed = held.wait_for_prompt(Duration::from_secs(2)).unwrap_err();
+            let failed = held.wait_for_prompt(timeout).unwrap_err();
             assert!(failed.contains("synthetic wrong prompt"), "{failed}");
             assert!(failed.contains("synthetic child stderr"), "{failed}");
             assert!(held.stdout.is_none() && held.stderr.is_none());
@@ -2132,6 +2235,54 @@ fn finish_prompt_wait_cleans_up_wrong_or_stalled_owned_children() {
             "{mode} child was not reaped"
         );
     }
+}
+
+/// Fixed native builtins own the pipes: no test-binary lookup, environment fixture flag,
+/// shell descendants, or owner profile is needed to keep a child waiting on piped stdin.
+#[cfg(unix)]
+fn finish_fixture_command(mode: &str) -> Command {
+    let script = match mode {
+        "panic" => {
+            "printf '%s' 'synthetic expected confirmation: '; printf '%s\\n' 'synthetic child stderr' >&2; IFS= read -r answer"
+        }
+        "eof" => {
+            "printf '%s' 'synthetic wrong prompt: '; printf '%s\\n' 'synthetic child stderr' >&2"
+        }
+        "stall" => {
+            "printf '%s' 'synthetic wrong prompt: '; printf '%s\\n' 'synthetic child stderr' >&2; IFS= read -r answer"
+        }
+        _ => panic!("unknown synthetic child mode"),
+    };
+    let mut command = Command::new("/bin/sh");
+    command.env_clear().args(["-c", script]);
+    command
+}
+
+#[cfg(windows)]
+fn finish_fixture_command(mode: &str) -> Command {
+    let script = match mode {
+        "panic" => {
+            "[Console]::Out.Write('synthetic expected confirmation: '); [Console]::Error.WriteLine('synthetic child stderr'); [void][Console]::In.ReadLine()"
+        }
+        "eof" => {
+            "[Console]::Out.Write('synthetic wrong prompt: '); [Console]::Error.WriteLine('synthetic child stderr')"
+        }
+        "stall" => {
+            "[Console]::Out.Write('synthetic wrong prompt: '); [Console]::Error.WriteLine('synthetic child stderr'); [void][Console]::In.ReadLine()"
+        }
+        _ => panic!("unknown synthetic child mode"),
+    };
+    let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot");
+    let executable = std::path::PathBuf::from(&system_root)
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let mut command = Command::new(executable);
+    command.env_clear().env("SystemRoot", system_root).args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        script,
+    ]);
+    command
 }
 
 /// F1 after F2: record backups carry the same home's identity after its appending device
