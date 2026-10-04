@@ -2,7 +2,6 @@
 #![cfg(target_os = "linux")]
 
 use std::io::{Seek, Write};
-use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 #[test]
@@ -20,7 +19,14 @@ fn an_oversized_log_line_keeps_the_following_request_with_bounded_memory() {
     });
     std::fs::write(projects.join("source.jsonl"), format!("{event}\n")).unwrap();
     let run = |args: &[&str], limited: bool| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_oboete"));
+        let mut command = if limited {
+            // util-linux limits only this synthetic child, before it opens the log.
+            let mut command = Command::new("prlimit");
+            command.args(["--as=134217728", "--", env!("CARGO_BIN_EXE_oboete")]);
+            command
+        } else {
+            Command::new(env!("CARGO_BIN_EXE_oboete"))
+        };
         command
             .arg("--home")
             .arg(h)
@@ -34,23 +40,6 @@ fn an_oversized_log_line_keeps_the_following_request_with_bounded_memory() {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if limited {
-            // Lower only this synthetic child's address space. The sparse malformed line is
-            // larger than the entire budget, so reading it wholesale cannot pass the test.
-            unsafe {
-                command.pre_exec(|| {
-                    let limit = libc::rlimit {
-                        rlim_cur: 128 << 20,
-                        rlim_max: 128 << 20,
-                    };
-                    if libc::setrlimit(libc::RLIMIT_AS, &limit) == 0 {
-                        Ok(())
-                    } else {
-                        Err(std::io::Error::last_os_error())
-                    }
-                });
-            }
-        }
         command.output().unwrap()
     };
     let imported = run(
