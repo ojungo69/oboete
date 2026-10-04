@@ -212,6 +212,8 @@ pub struct Chain<'a> {
     forced_fail: Option<String>,
     check: Option<&'a AnswerCheck<'a>>,
     gate: Option<&'a Gate<'a>>,
+    #[cfg(test)]
+    isolation: Option<&'a dyn Fn() -> Result<crate::isolation::Gate>>,
 }
 
 impl<'a> Chain<'a> {
@@ -223,6 +225,8 @@ impl<'a> Chain<'a> {
             forced_fail: std::env::var("OBOETE_FAIL_PROVIDER").ok(),
             check: None,
             gate: None,
+            #[cfg(test)]
+            isolation: None,
         }
     }
 
@@ -336,6 +340,11 @@ impl<'a> Chain<'a> {
             // the budget: the probe takes seconds, and a call the budget refuses needs none.
             if let Provider::Cli { cli, .. } = p {
                 let started = Instant::now();
+                #[cfg(test)]
+                let gate = self
+                    .isolation
+                    .map_or_else(|| crate::isolation::gate(conn, cli), |probe| probe())?;
+                #[cfg(not(test))]
                 let gate = crate::isolation::gate(conn, cli)?;
                 if gate != crate::isolation::Gate::Passed {
                     let ms = started.elapsed().as_millis() as i64;
@@ -344,15 +353,26 @@ impl<'a> Chain<'a> {
                     continue;
                 }
             }
-            let admission = self.gate.map(|gate| gate()).transpose()?.flatten();
-            let (used, _) = providers_db::calls_in_a_day(conn, &name)?;
             let started = Instant::now();
             let forced = forced_fail.as_deref() == Some(name.as_str());
+            // Allowance discovery sends no prompt and must not hold dispatch admission.
+            // Forced failures preserve their previous behavior: no allowance read at all.
+            let ready = if !forced && let Provider::Cli { cli, .. } = p {
+                cli_preflight(cli)
+            } else {
+                Ok(())
+            };
+            let admission = if ready.is_ok() {
+                self.gate.map(|gate| gate()).transpose()?.flatten()
+            } else {
+                None
+            };
+            let (used, _) = providers_db::calls_in_a_day(conn, &name)?;
             let mut result = if forced {
                 drop(admission);
                 Err(CallError::other("forced failure (OBOETE_FAIL_PROVIDER)"))
             } else {
-                call(p, prompt, schema, admission)
+                ready.and_then(|()| call(p, prompt, schema, admission))
             };
             // The retry is a second request: only when the daily budget has room for it.
             if let Err(e) = &result
@@ -563,6 +583,10 @@ fn call(
     schema: &Value,
     admission: Option<crate::dispatch::Guard>,
 ) -> Result<Answer, CallError> {
+    #[cfg(test)]
+    if let Some(error) = OFFLINE_CALL_TEST.with(|call| call.borrow_mut().take()) {
+        return Err(error);
+    }
     match p {
         Provider::Openai {
             base_url,
@@ -1572,15 +1596,8 @@ fn claude_rest(stdout: &str) -> Option<i64> {
         .max()
 }
 
-/// Run a subscription CLI headless (see `headless_command`) and return its structured answer.
-fn cli_headless(
-    cli: &str,
-    model: Option<&str>,
-    timeout_s: u64,
-    prompt: &str,
-    schema: &Value,
-    admission: Option<crate::dispatch::Guard>,
-) -> Result<Answer, CallError> {
+/// Read a subscription's allowance before the final raw check and dispatch admission.
+fn cli_preflight(cli: &str) -> Result<(), CallError> {
     // codex's answer says nothing of its allowance (`codex exec --json`): its app server is asked
     // before the call, and a window at its line rests codex with nothing sent (issue #166).
     if cli == "codex"
@@ -1589,6 +1606,18 @@ fn cli_headless(
         let e = CallError::other("codex is at its plan's usage line");
         return Err(e.unsent().resting(Some(until)));
     }
+    Ok(())
+}
+
+/// Run a subscription CLI after its allowance preflight (see `headless_command`).
+fn cli_headless(
+    cli: &str,
+    model: Option<&str>,
+    timeout_s: u64,
+    prompt: &str,
+    schema: &Value,
+    admission: Option<crate::dispatch::Guard>,
+) -> Result<Answer, CallError> {
     let scratch = scratch_dir()?;
     let last = scratch.0.join("last.json");
     let (mut cmd, stdin) = headless_command(cli, model, &scratch.0, prompt, &schema.to_string())?;
@@ -1670,10 +1699,35 @@ const CODEX_LIMITS_EVERY_MS: i64 = 10 * 60_000;
 /// How long codex's app server may take to answer the read (0.7 s on the owner's machine).
 const CODEX_LIMITS_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[cfg(test)]
+type AllowanceRead = Box<dyn FnMut() -> Option<i64>>;
+#[cfg(test)]
+type FixtureReady = Box<dyn FnOnce() -> std::io::Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static CODEX_REST_TEST: std::cell::RefCell<Option<AllowanceRead>> = const {
+        std::cell::RefCell::new(None)
+    };
+    static CLI_READY_TEST: std::cell::RefCell<Option<FixtureReady>> = const {
+        std::cell::RefCell::new(None)
+    };
+    // A broken egress guard in a mutation must still never run a real subscription CLI.
+    static OFFLINE_CALL_TEST: std::cell::RefCell<Option<CallError>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 /// Until when codex should rest before this call (issue #166). A reading under the lines is kept
 /// for `CODEX_LIMITS_EVERY_MS`; one at a line becomes the chain's cooldown, so codex is not asked
 /// again before its reset. None when the read fails: the call goes ahead.
 fn codex_rest_now() -> Option<i64> {
+    #[cfg(test)]
+    if let Some(rest) =
+        CODEX_REST_TEST.with(|probe| probe.borrow_mut().as_mut().map(|probe| probe()))
+    {
+        return rest;
+    }
     use std::sync::atomic::{AtomicI64, Ordering};
     static UNDER_UNTIL: AtomicI64 = AtomicI64::new(0);
     let now = db::now_ms();
@@ -1939,6 +1993,11 @@ fn nonblocking_stdin(pipe: &std::process::ChildStdin) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+fn cli_fixture_ready() -> std::io::Result<()> {
+    CLI_READY_TEST.with(|ready| ready.borrow_mut().take().map_or(Ok(()), |ready| ready()))
+}
+
 /// Spawn `cmd`, feed it `stdin`, and return its stdout if it exits 0 within `timeout`.
 /// Nonblocking stdin is pumped while stdout/stderr drain on threads: a prompt larger than the
 /// pipe buffer, or an answer larger than it, must not deadlock against a child not reading yet.
@@ -1999,6 +2058,16 @@ fn run_cli(
     let (err_h, err) = drain(child.stderr.take().map(|r| Box::new(r) as _));
     let take =
         |b: &Arc<Mutex<Vec<u8>>>| std::mem::take(&mut *b.lock().unwrap_or_else(|p| p.into_inner()));
+    #[cfg(test)]
+    if let Err(e) = cli_fixture_ready() {
+        input.close();
+        kill_tree(&mut child);
+        child.wait().ok();
+        return (
+            take(&out),
+            Err(CallError::other(format!("fixture startup: {e}")).unsent()),
+        );
+    }
     let deadline = Instant::now() + timeout;
     // The child is waited for only once its pipes have closed: until then its process group is
     // still its own, and a descendant holding a pipe open is killed with it at the deadline.
@@ -2401,6 +2470,254 @@ mod tests {
         assert_eq!((s.down_until, s.fails), (soon, 1));
     }
 
+    /// Allowance reads carry no prompt. They must leave registration free, and a rest must
+    /// preserve the unsent accounting without asking the final raw egress gate.
+    #[test]
+    fn codex_allowance_preflight_leaves_registration_free_preserving_rest_accounting() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let until = db::now_ms() + 60_000;
+        let was = providers_db::State {
+            fails: 1,
+            backoff: 2,
+            ..Default::default()
+        };
+        providers_db::set_state(&conn, "codex", was).unwrap();
+        let free = Rc::new(Cell::new(false));
+        let reads = Rc::new(Cell::new(0));
+        let path = home.path().join("dispatch.lock");
+        let observed = Rc::clone(&free);
+        let observed_reads = Rc::clone(&reads);
+        CODEX_REST_TEST.with(|probe| {
+            *probe.borrow_mut() = Some(Box::new(move || {
+                observed_reads.set(observed_reads.get() + 1);
+                let registration = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .unwrap();
+                observed.set(registration.try_lock().is_ok());
+                Some(until)
+            }))
+        });
+        let providers = [Provider::Cli {
+            name: "codex".into(),
+            cli: "codex".into(),
+            model: None,
+            daily_budget: 10,
+            timeout_s: 1,
+            limits: Default::default(),
+        }];
+        let gates = Cell::new(0);
+        let gate = || {
+            gates.set(gates.get() + 1);
+            Ok(Some(crate::dispatch::Admission::shared(home.path())?))
+        };
+        let isolation = || Ok(crate::isolation::Gate::Passed);
+        let mut chain = Chain::new(&providers, &conn).gate(&gate);
+        chain.isolation = Some(&isolation);
+        chain.forced_fail = None;
+        OFFLINE_CALL_TEST.with(|call| {
+            *call.borrow_mut() =
+                Some(CallError::other("synthetic offline dispatch refusal").unsent())
+        });
+        let result = chain.run("curator", "preflight", "synthetic prompt", &json!({}));
+        CODEX_REST_TEST.with(|probe| probe.borrow_mut().take());
+        let not_called = OFFLINE_CALL_TEST.with(|call| call.borrow_mut().take().is_some());
+        let error = result.unwrap_err();
+        let failed = error.downcast_ref::<ChainFailed>().unwrap();
+        assert_eq!(failed.0[0].skip, Skip::Wait(until));
+        assert_eq!(
+            providers_db::state(&conn, "codex").unwrap(),
+            providers_db::State {
+                down_until: until,
+                ..was
+            }
+        );
+        // Existing error accounting counts the unsent attempt, even with no prompt bytes.
+        assert_eq!(providers_db::calls_in_a_day(&conn, "codex").unwrap().0, 1);
+        let sent: i64 = conn
+            .query_row("SELECT bytes_out FROM provider_calls", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(sent, 0);
+        assert_eq!(outcomes(&conn), ["error"]);
+        assert_eq!(reads.get(), 1);
+        assert!(not_called, "an allowance rest attempted prompt dispatch");
+        eprintln!(
+            "allowance boundary: exclusive_free={}, dispatch_gates={}, reads={}, attempts=1, bytes_out={sent}, skip={:?}, state={:?}",
+            free.get(),
+            gates.get(),
+            reads.get(),
+            failed.0[0].skip,
+            providers_db::state(&conn, "codex").unwrap()
+        );
+        assert!(
+            free.get(),
+            "an allowance read held shared dispatch admission and blocked registration"
+        );
+        assert_eq!(
+            gates.get(),
+            0,
+            "an unsent allowance rest acquired the dispatch gate"
+        );
+    }
+
+    #[test]
+    fn codex_allowance_preflight_forget_is_seen_by_the_fresh_dispatch_gate() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[summary]\ncurate = false\n",
+        )
+        .unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let mut event = crate::raw::test_event(r#"{"prompt":"synthetic-preflight-forget-971"}"#);
+        event.source = "transcript".into();
+        let identity = crate::raw::ImportIdentity {
+            origin: crate::forget::origin("synthetic-preflight", "971"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let seq = raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                }],
+                &[identity],
+                "",
+                None,
+            )
+            .unwrap()[0];
+        let preview = crate::forget::preview(
+            home.path(),
+            crate::forget::Target::Record {
+                device: raw.device().into(),
+                seq,
+            },
+        )
+        .unwrap();
+        let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live).unwrap();
+        let registered = Rc::new(Cell::new(false));
+        let observed = Rc::clone(&registered);
+        let path = home.path().to_owned();
+        CODEX_REST_TEST.with(|probe| {
+            *probe.borrow_mut() = Some(Box::new(move || {
+                let (status, _) = crate::forget::start(&path, &preview).unwrap();
+                observed.set(status.records == 1);
+                None
+            }))
+        });
+        let conn = providers_db::open(home.path()).unwrap();
+        let providers = [Provider::Cli {
+            name: "codex".into(),
+            cli: "codex".into(),
+            model: None,
+            daily_budget: 10,
+            timeout_s: 1,
+            limits: Default::default(),
+        }];
+        let gates = Cell::new(0);
+        let gate = || {
+            gates.set(gates.get() + 1);
+            let admission = raw.dispatch()?;
+            reading.still(&raw)?;
+            Ok(Some(admission))
+        };
+        let isolation = || Ok(crate::isolation::Gate::Passed);
+        let mut chain = Chain::new(&providers, &conn).gate(&gate);
+        chain.isolation = Some(&isolation);
+        chain.forced_fail = None;
+        OFFLINE_CALL_TEST.with(|call| {
+            *call.borrow_mut() =
+                Some(CallError::other("synthetic offline dispatch refusal").unsent())
+        });
+        let result = chain.run("curator", "preflight", "synthetic prompt", &json!({}));
+        CODEX_REST_TEST.with(|probe| probe.borrow_mut().take());
+        let not_called = OFFLINE_CALL_TEST.with(|call| call.borrow_mut().take().is_some());
+        assert!(
+            registered.get(),
+            "forget could not commit during allowance discovery"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<crate::curate::ListChanged>()
+                .is_some()
+        );
+        assert_eq!(gates.get(), 1);
+        assert!(not_called, "the stale prompt passed its dispatch gate");
+        assert!(
+            outcomes(&conn).is_empty(),
+            "a stale prompt attempted a provider call"
+        );
+    }
+
+    #[test]
+    fn a_forced_codex_failure_does_not_read_its_allowance() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let was = providers_db::State {
+            fails: 1,
+            backoff: 2,
+            ..Default::default()
+        };
+        providers_db::set_state(&conn, "codex", was).unwrap();
+        let reads = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&reads);
+        CODEX_REST_TEST.with(|probe| {
+            *probe.borrow_mut() = Some(Box::new(move || {
+                observed.set(observed.get() + 1);
+                Some(db::now_ms() + 60_000)
+            }))
+        });
+        let providers = [Provider::Cli {
+            name: "codex".into(),
+            cli: "codex".into(),
+            model: None,
+            daily_budget: 10,
+            timeout_s: 1,
+            limits: Default::default(),
+        }];
+        let gates = Cell::new(0);
+        let gate = || {
+            gates.set(gates.get() + 1);
+            Ok(None)
+        };
+        let isolation = || Ok(crate::isolation::Gate::Passed);
+        let mut chain = Chain::new(&providers, &conn).gate(&gate);
+        chain.isolation = Some(&isolation);
+        chain.forced_fail = Some("codex".into());
+        OFFLINE_CALL_TEST.with(|call| {
+            *call.borrow_mut() =
+                Some(CallError::other("synthetic offline dispatch refusal").unsent())
+        });
+        let result = chain.run("curator", "forced", "synthetic prompt", &json!({}));
+        CODEX_REST_TEST.with(|probe| probe.borrow_mut().take());
+        let not_called = OFFLINE_CALL_TEST.with(|call| call.borrow_mut().take().is_some());
+        assert_eq!(
+            result.unwrap_err().downcast_ref::<ChainFailed>().unwrap().0[0].skip,
+            Skip::Failed
+        );
+        assert_eq!(reads.get(), 0);
+        assert!(not_called, "a forced failure dispatched a prompt");
+        assert_eq!(gates.get(), 1);
+        assert_eq!(providers_db::state(&conn, "codex").unwrap(), was);
+        let sent: i64 = conn
+            .query_row("SELECT bytes_out FROM provider_calls", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(sent, 0);
+    }
+
     /// The app server answers only while its stdin is open: the read keeps it open until the
     /// answer, and a server that never answers is given up on and killed.
     #[cfg(unix)]
@@ -2603,6 +2920,7 @@ mod tests {
             [user] fix the date parser in src/ingest/csv_reader.py\n\
             [assistant] added %d.%m.%Y; 21 tests pass\n--- END ---";
         for (cli, model) in [("claude", "haiku"), ("codex", "gpt-6-luna")] {
+            cli_preflight(cli).unwrap_or_else(|e| panic!("{cli}: {}", e.message));
             let a = cli_headless(cli, Some(model), 180, prompt, &schema, None)
                 .unwrap_or_else(|e| panic!("{cli}: {}", e.message));
             assert!(a.value["summary"].is_string(), "{cli}: {}", a.value);
@@ -2738,10 +3056,13 @@ mod tests {
 
     #[test]
     fn a_cli_stops_input_before_releasing_dispatch_even_with_a_descendant() {
-        // Starting two Python processes exceeded 1s on the Windows CI runner. Keep the actual
-        // blocked-input deadline bounded, with the fixture watchdog safely after that deadline.
+        use std::cell::Cell;
+        use std::rc::Rc;
+        // The owned loop's deadline tests blocked input after both real fixture processes are
+        // ready; starting an interpreter is a separately bounded setup operation.
         let timeout = Duration::from_secs(if cfg!(windows) { 10 } else { 1 });
-        let watchdog = (timeout.as_secs() + 7).to_string();
+        let startup = Duration::from_secs(20);
+        let watchdog = (startup.as_secs() + timeout.as_secs() + 7).to_string();
         for mode in ["timeout", "failure"] {
             let home = tempfile::tempdir().unwrap();
             let admission = crate::dispatch::Admission::shared(home.path()).unwrap();
@@ -2761,6 +3082,8 @@ def watchdog():
     time.sleep(watchdog_seconds)
     os._exit(99)
 threading.Thread(target=watchdog, daemon=True).start()
+while not (home / 'start-reader').exists():
+    time.sleep(.002)
 reader = '''
 import os, pathlib, sys, threading, time
 home = pathlib.Path(sys.argv[1])
@@ -2769,6 +3092,7 @@ def watchdog():
     time.sleep(watchdog_seconds)
     os._exit(99)
 threading.Thread(target=watchdog, daemon=True).start()
+(home / "reader-ready").write_text("ready")
 while not (home / "read-now").exists():
     time.sleep(.002)
 body = sys.stdin.buffer.read()
@@ -2779,6 +3103,9 @@ child = subprocess.Popen([sys.executable, '-u', '-c', reader, str(home), str(wat
     stdin=sys.stdin, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     start_new_session=os.name == 'posix')
 (home / 'reader-pid').write_text(str(child.pid))
+while not (home / 'reader-ready').exists():
+    time.sleep(.002)
+(home / 'fixture-ready').write_text('ready')
 if sys.argv[2] == 'failure':
     sys.exit(7)
 child.wait()
@@ -2793,7 +3120,28 @@ child.wait()
             let text = "synthetic-stalled-prompt ".repeat(200_000);
             let length = text.len();
             let began = Instant::now();
+            let running = Rc::new(Cell::new(None));
+            let observed = Rc::clone(&running);
+            let path = home.path().to_owned();
+            CLI_READY_TEST.with(|ready| {
+                *ready.borrow_mut() = Some(Box::new(move || {
+                    std::fs::write(path.join("start-reader"), "go")?;
+                    let until = Instant::now() + startup;
+                    while !path.join("fixture-ready").exists() {
+                        if Instant::now() >= until {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "the synthetic CLI did not become ready",
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    observed.set(Some(Instant::now()));
+                    Ok(())
+                }))
+            });
             let (_, result) = run_cli(command, Some(text), timeout, Some(admission.clone()));
+            CLI_READY_TEST.with(|ready| ready.borrow_mut().take());
             let error = result.unwrap_err();
             assert!(
                 error.message.contains(if mode == "timeout" {
@@ -2804,7 +3152,8 @@ child.wait()
                 "{}",
                 error.message
             );
-            assert!(began.elapsed() < timeout + Duration::from_secs(2));
+            assert!(running.get().unwrap_or(began).elapsed() < timeout + Duration::from_secs(2));
+            assert!(began.elapsed() < startup + timeout + Duration::from_secs(2));
             assert!(
                 home.path().join("reader-pid").exists(),
                 "the descendant fixture was not running"
