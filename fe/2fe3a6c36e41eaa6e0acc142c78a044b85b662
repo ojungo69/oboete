@@ -1,0 +1,43 @@
+tests/resident_defaults.rs
+  s_ce2b24784deac6::t_26727f17ac7861 164-165
+  s_ce2b24784deac6::t_a8069b90ebcf8c 65
+src/migrate.rs
+  s_ce2b24784deac6::t_a8069b90ebcf8c 1418-1429,1431-1438,1441-1473,1477
+  s_ce2b24784deac6::t_4340ea7864874c 130
+  s_ce2b24784deac6::t_48cc5f9f1e09dc 1430,1439-1440
+  s_ce2b24784deac6::t_3b4c7a9675e36b 1474-1476,1478-1487
+src/worker.rs
+  s_ce2b24784deac6::t_58e84e3abbf3a5 238-239,2502-2533,2538,2540
+  s_ce2b24784deac6::t_f596a40e056e66 2451-2501,2534-2535
+  s_ce2b24784deac6::t_c77eac973ce0df 1022-1023,1025-1033,1038
+  s_ce2b24784deac6::t_de40fb900f87ed 1034-1037,1047-1053,1057,1065,1109-1112,2558
+  s_ce2b24784deac6::t_9e81f6bb48fc4f 1113,2536-2537,2539,2541-2557,2559-2576
+docs/settings-coverage.md
+  s_ce2b24784deac6::t_64d343a973b4f5 79
+docs/resident.md
+  s_ce2b24784deac6::t_64d343a973b4f5 63-65,71-73
+assets/viewer/app.js
+  s_ce2b24784deac6::t_a8069b90ebcf8c 785
+src/view.rs
+  s_ce2b24784deac6::t_f596a40e056e66 1674-1693,1700
+  s_ce2b24784deac6::t_f221481707bd73 1694-1699,1701-1707
+src/settings.rs
+  s_ce2b24784deac6::t_a8069b90ebcf8c 1123
+  s_ce2b24784deac6::t_4340ea7864874c 53
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fe2fe3a6c36e41eaa6e0acc142c78a044b85b662",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
