@@ -636,7 +636,7 @@ connection.close()
                         }
                     };
                     socket
-                        .set_read_timeout(Some(Duration::from_millis(200)))
+                        .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();
                     let mut head = Vec::new();
                     while !head.ends_with(b"\r\n\r\n") {
@@ -644,6 +644,10 @@ connection.close()
                         assert_eq!(socket.read(&mut byte).unwrap(), 1);
                         head.push(byte[0]);
                     }
+                    // The short probe detects a consumed redirect body, after headers arrive.
+                    socket
+                        .set_read_timeout(Some(Duration::from_millis(200)))
+                        .unwrap();
                     let header = String::from_utf8(head).unwrap();
                     let method = header.split_whitespace().next().unwrap().to_owned();
                     let length = header
