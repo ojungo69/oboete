@@ -74,6 +74,16 @@ open が失敗して記録が止まり、戻すには手でファイルを消す
   切り直す（`append_ops_fenced`）。knowledge.db が raw の tombstone に遅れている間（Anchors の
   checkpoint より後に tombstone がある間）、window・turn・embedding の各 phase は待つ。preview
   token も同じ件数を含む。
+- **登録と送信を順序付ける。** provider は最後の raw の確認より前に home ごとの共有ロックを取り、
+  forget は raw の書込 transaction より前に同じロックを排他で取る。`dispatch.lock` は順序付け用で、
+  削除状態を持たない。ロック下で、保持している raw の接続が現在のファイルを指すことも確認する。
+  同一性を確認できなければ送信・登録を拒否し、古い接続の deny 件数を権威にしない。
+  hook の open・append はこのロックを取らない。HTTP は実際の TCP への
+  本文送信が終わってから解放し、モデルの応答待ちは登録を止めない。TLS・CONNECT の handshake や
+  body reader の読み終わりだけでは解放しない。CLI は stdin の引き渡し完了、または prompt file を
+  渡したプロセスの起動後に解放する。送信失敗もロックを残さず、retry と fallback は改めて確認する。
+  新しい shortlist query の embedding も knowledge.db の追随を待つ。送信済みの結果の回収と
+  本文検索は続ける。
 - **第一 slice で忘れられるのは import origin のある record だけ。** live と回復した record に
   native identity を与えるのは slice 3a。
 
@@ -155,7 +165,7 @@ hub が未設定なら `hub=not_configured` とし、ローカル完了を妨げ
 
 | Slice | 対象と再利用する処理 | 完了条件 |
 |---|---|---|
-| 1 削除要求 | `forget.rs`, `raw.rs`, `backup.rs`, `worker.rs`, `main.rs`, `migrate.rs`, `transcript.rs`, `curate.rs`, `turns.rs`, `embed_phase.rs`, `claims.rs`。既存 SQLite transaction、raw.lock、import checkpoint。 | import origin のある record/device span（1 要求 500 件まで）の preview/start/status、raw.db の deny と本文なしの要求ログ 2 部、古い backup の restore・raw.db の巻き戻し・再 import による復活防止、派生書込の fence。物理 purge は未完了と表示する。native identity のない raw、uid/session/repo/time の start は後続まで拒否する。 |
+| 1 削除要求 | `forget.rs`, `raw.rs`, `backup.rs`, `worker.rs`, `main.rs`, `migrate.rs`, `transcript.rs`, `curate.rs`, `turns.rs`, `provider.rs`, `dispatch.rs`, `embed.rs`, `embed_phase.rs`, `shortlist.rs`, `claims.rs`。既存 SQLite transaction、raw.lock、import checkpoint。 | import origin のある record/device span（1 要求 500 件まで）の preview/start/status、raw.db の deny と本文なしの要求ログ 2 部、古い backup の restore・raw.db の巻き戻し・再 import による復活防止、派生書込と送信の fence。物理 purge は未完了と表示する。native identity のない raw、uid/session/repo/time の start は後続まで拒否する。 |
 | 2 uid の完全削除 | Slice 1 に `claims.rs`, `consumer/*`, `embed_phase.rs`, `search/b.rs`。既存 no-AI rebuild を内部で共有。 | claim/document uid の read backstop、raw op 本文・全 derivation・correction・digest・FTS・vector cache と backup の purge、失敗から再開。claim-only は raw 0 件。 |
 | 3 raw scope の完全削除 | 同じ pipeline を session/repo/time/range に拡張。live/legacy provenance bridge、大きい selection のページ処理、`Span::minus`, recurate queue。 | 第一 slice の provenance/500件制限を解消する。重なる window summary と派生物も消える。実行中の curator/digest/embed の返答は commit しない。#167 の支援 evidence を持ち、失われた場合は proposed に戻る。#186 の preference はマスク済み raw から deterministic に再導出する。 |
 | 4 可逆な管理 | `CorrectionOp`, `Pending`, 既存 exclusion op/clock、capture 共通経路。 | mute/unmute、capture exclusion、withdraw、訂正。#157 anchor 継承、#162 clock 後退、#160 restore 後の失敗報告を含む。 |
