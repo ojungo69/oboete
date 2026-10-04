@@ -321,22 +321,27 @@ pub struct Reading {
     /// Each as `agent` NUL `session`, a window line's key.
     pub excluded: std::sync::Arc<std::collections::HashSet<String>>,
     pub reads: Reads,
+    /// How many records forget denied, read before the window's inputs (milestone 5 D1 rule
+    /// 12): every derived writer compares it inside its write.
+    pub denied: i64,
 }
 
 impl Reading {
-    /// With the exclusion list as raw holds it now.
+    /// With the exclusion list and the deny-list as raw holds them now.
     pub fn now(raw: &Raw, reads: Reads) -> Result<Self> {
+        let denied = raw.denied_count()?;
         let exclusions = raw.exclusions()?;
         let excluded = raw.sessions_in(&exclusions)?;
         Ok(Self {
             exclusions: exclusions.into(),
             excluded: excluded.into(),
             reads,
+            denied,
         })
     }
 
-    /// The egress gate before a call (spec 5.5): the list and the sessions it excludes as they
-    /// were, or `ListChanged`, and nothing is sent.
+    /// The egress gate before a call (spec 5.5): the list, the sessions it excludes and the
+    /// deny-list as they were, or `ListChanged`, and nothing is sent.
     pub fn still(&self, raw: &Raw) -> Result<()> {
         if Self::now(raw, self.reads.clone())? != *self {
             return Err(ListChanged.into());
@@ -345,14 +350,27 @@ impl Reading {
     }
 }
 
-/// The exclusion list, or the sessions it excludes, changed after a window was cut: the window
-/// is cut again before anything more is sent.
+/// Whether knowledge.db lags raw's tombstones (milestone 5 D1 rule 12): a claim or card it
+/// shows may still hold what a forget took, so a phase sends nothing until the consumers reach
+/// them.
+pub(crate) fn lagging(raw: &Raw, k: &Connection) -> Result<bool> {
+    // A knowledge.db no consumer has run on holds nothing a forget took.
+    Ok(
+        crate::consumer::manifest::exists(k, "table", "checkpoints")?
+            && crate::claims::Pending::read(raw, k)?.removes(),
+    )
+}
+
+/// The exclusion list, the sessions it excludes, or what forget denies changed after a window
+/// was cut: the window is cut again before anything more is sent or written.
 #[derive(Debug)]
 pub struct ListChanged;
 
 impl std::fmt::Display for ListChanged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the exclusion list changed since the windows were cut")
+        f.write_str(
+            "the exclusion list changed since the windows were cut, or a forget was registered",
+        )
     }
 }
 
@@ -1374,6 +1392,12 @@ pub fn run_phase(
     let device = raw.device().to_owned();
     // The exclusion list as it is now (spec 5.5, D13); each call holds to it.
     let reading = Reading::now(raw, Reads::Live)?;
+    if lagging(raw, k)? {
+        return Ok(Phase::Waiting {
+            until: crate::db::now_ms(),
+            up: true,
+        });
+    }
     let at = raw.curation_checkpoint(&device)?;
     let Some(w) = window_at(raw, &device, at, None, summary.cut(), rules, &reading)? else {
         providers_db::clear_pending(db, &device)?;
@@ -1605,7 +1629,9 @@ fn answered(
         &sha256_hex(&req.prompt),
     )?;
     let answer = curator(&span, &req.prompt, &|v| check(w, v), &|| {
-        w.reading.still(raw)
+        let dispatch = raw.dispatch()?;
+        w.reading.still(raw)?;
+        Ok(Some(dispatch))
     });
     drop(in_flight);
     Ok(match answer {
@@ -2096,6 +2122,10 @@ pub fn send_plan(
                 to,
                 to_offset,
             };
+            // Milestone 5 D1 rule 12: a forget since the last drain is read in first.
+            if lagging(raw, k)? {
+                crate::worker::drain(raw, k, consumers)?;
+            }
             match recurate_window(raw, k, db, rules, summary, curator, w, Some(&through)) {
                 Err(e) if e.is::<ListChanged>() => {
                     changed(&mut sent, e);
@@ -2386,7 +2416,8 @@ pub fn recurate_window(
             .chain(retracted)
             .map(|c| (OpKind::Claim, c)),
     );
-    raw.append_ops(&ops)?;
+    // Milestone 5 D1 rule 12: `ListChanged` after a forget since the window was cut.
+    raw.append_ops_fenced(&ops, w.reading.denied)?;
     Ok(Ok(counts))
 }
 
@@ -2762,7 +2793,17 @@ fn cover(
     if STOP_BEFORE_APPEND.with(std::cell::Cell::get) {
         anyhow::bail!("stopped before the append (test seam)");
     }
-    raw.append_ops(&ops)?;
+    match raw.append_ops_fenced(&ops, w.reading.denied) {
+        // A forget since the window was cut: nothing of it is kept, and the next pass cuts it
+        // again (milestone 5 D1 rule 12).
+        Err(e) if e.is::<ListChanged>() => {
+            return Ok(Phase::Waiting {
+                until: crate::db::now_ms(),
+                up: true,
+            });
+        }
+        r => r?,
+    };
     providers_db::clear_pending(db, &w.device)?;
     Ok(Phase::Covered)
 }
@@ -4846,6 +4887,118 @@ mod tests {
     fn open(home: &std::path::Path) -> (Raw, Connection) {
         let raw = crate::raw::open(home).unwrap();
         (raw, providers_db::open(home).unwrap())
+    }
+
+    /// F2: an explicitly recurated native transcript window cannot use a replaced authority
+    /// at its final provider gate, after the current device registered that origin's forget.
+    #[cfg(unix)]
+    #[test]
+    fn a_native_recuration_gate_refuses_an_old_raw_handle_after_replacement_and_forget() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let (mut raw, db) = open(h);
+        let path = h.join("raw.db");
+        let checkpoint = || {
+            Connection::open(&path)
+                .unwrap()
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
+        };
+        checkpoint();
+        let snapshot = h.join("before-native.db");
+        std::fs::copy(&path, &snapshot).unwrap();
+        let mut event =
+            crate::raw::test_event(r#"{"prompt":"native-recuration-authority-canary-904"}"#);
+        event.source = "transcript".into();
+        let captured = crate::capture::Captured {
+            event: event.clone(),
+            ledger: Vec::new(),
+        };
+        let identity = crate::raw::ImportIdentity {
+            origin: crate::forget::origin("synthetic-dispatch", "authority-904"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        raw.append_imported_origins(
+            std::slice::from_ref(&captured),
+            std::slice::from_ref(&identity),
+            "",
+            None,
+        )
+        .unwrap();
+        let reading = Reading::now(&raw, Reads::Source("transcript".into())).unwrap();
+        let summary = curating(WINDOW_TOKENS);
+        let rules = Rules::default();
+        let window = window_at(
+            &raw,
+            raw.device(),
+            (0, None),
+            None,
+            summary.cut(),
+            &rules,
+            &reading,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(window.aside.is_none());
+        assert!(
+            window
+                .text
+                .contains("native-recuration-authority-canary-904")
+        );
+        checkpoint();
+        for sidecar in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(h.join(sidecar));
+        }
+        let stage = h.join("replacement.db");
+        std::fs::copy(snapshot, &stage).unwrap();
+        std::fs::rename(stage, &path).unwrap();
+        let mut current = crate::raw::open(h).unwrap();
+        let seq = current
+            .append_imported_origins(&[captured], &[identity], "", None)
+            .unwrap()[0];
+        let preview = crate::forget::preview(
+            h,
+            crate::forget::Target::Record {
+                device: current.device().into(),
+                seq,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            preview.count(),
+            1,
+            "the current native alias must actually be eligible"
+        );
+        assert_eq!(crate::forget::start(h, &preview).unwrap().0.records, 1);
+        assert_eq!(current.denied_count().unwrap(), 1);
+        assert_eq!(raw.denied_count().unwrap(), 0);
+        let called = std::cell::Cell::new(false);
+        let mut curator = |_: &str, prompt: &str, _: &AnswerCheck, gate: &Gate| {
+            let _admission = gate()?;
+            assert!(prompt.contains("native-recuration-authority-canary-904"));
+            called.set(true);
+            Ok(answered("synthetic"))
+        };
+        let result = recurate_window(
+            &mut raw,
+            &kn(),
+            &db,
+            &rules,
+            &summary,
+            &mut curator,
+            &window,
+            None,
+        );
+        assert!(
+            !called.get(),
+            "a native recuration provider gate accepted a replaced raw authority"
+        );
+        assert!(
+            result.is_err(),
+            "a replaced authority was admitted for recuration"
+        );
     }
 
     #[test]
@@ -9711,6 +9864,56 @@ mod tests {
                 first.kind
             );
         }
+    }
+
+    /// Milestone 5 D1 rule 12: a forget while a recuration's call is out (here a deny row written
+    /// during the call) cuts the answer again: nothing of it is written.
+    #[test]
+    fn a_forget_while_a_recuration_is_out_writes_nothing_of_its_answer() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&said(
+            "Old secret.",
+            "v1",
+            "github.com/o/secret",
+            "oboete-v1",
+        ))
+        .unwrap();
+        curate_all(&mut raw, &db);
+        let span = Span::records(1, 1);
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let reading = Reading::now(&raw, Reads::Source("oboete-v1".into())).unwrap();
+        let windows = span_windows(&raw, &span, WINDOW_TOKENS, &rules, &reading).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        let mut consumers = crate::worker::consumers(home.path());
+        let path = home.path().join("raw.db");
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| {
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .execute(
+                    "INSERT INTO denied_records(origin, device, seq, ts, session, job)
+                     VALUES('v1:x', 'd', 1, NULL, 'v1:y', 'j')",
+                    [],
+                )
+                .unwrap();
+            Ok(answered("fake"))
+        };
+        let device = raw.device().to_owned();
+        let before = raw.max_op_seq_of(&device).unwrap();
+        let plan = [(span.clone(), windows)];
+        let sent = send_plan(
+            &mut raw,
+            &mut k,
+            &db,
+            &mut consumers,
+            &rules,
+            &summary,
+            &mut chain,
+            &plan,
+        )
+        .unwrap();
+        assert_eq!(sent.windows, 0);
+        assert_eq!(raw.max_op_seq_of(&device).unwrap(), before);
     }
 
     /// Codex on #304: `recurate --source` leaves a window of excluded sessions alone as it was, so

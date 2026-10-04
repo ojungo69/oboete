@@ -91,6 +91,15 @@ impl Embedder {
         texts: &[&str],
         timeout: Duration,
     ) -> std::result::Result<Vec<Vec<f32>>, Failure> {
+        self.run_admitted(texts, timeout, None)
+    }
+
+    pub(crate) fn run_admitted(
+        &self,
+        texts: &[&str],
+        timeout: Duration,
+        admission: Option<crate::dispatch::Guard>,
+    ) -> std::result::Result<Vec<Vec<f32>>, Failure> {
         let failed = |status, retry_after_s, message: String| Failure {
             status,
             retry_after_s,
@@ -99,14 +108,18 @@ impl Embedder {
         };
         // A loopback url (a stub) is never reached through the environment's proxy, which would
         // get the key and the texts; no redirect is followed.
-        let mut resp = crate::provider::agent(&self.url, timeout, 0)
+        let request = crate::provider::admitted_agent(&self.url, timeout, 0, admission.as_ref())
             .post(&self.url)
-            .header("Authorization", &format!("Bearer {}", self.key))
-            .send_json(json!({"text": texts, "truncate_inputs": true}))
-            .map_err(|e| {
-                let why = crate::provider::transport(&e);
-                failed(None, None, format!("workers ai: {why}"))
-            })?;
+            .header("Authorization", &format!("Bearer {}", self.key));
+        let body = json!({"text": texts, "truncate_inputs": true});
+        let mut resp = match &admission {
+            Some(admission) => crate::dispatch::json(request, &body, admission),
+            None => request.send_json(&body),
+        }
+        .map_err(|e| {
+            let why = crate::provider::transport(&e);
+            failed(None, None, format!("workers ai: {why}"))
+        })?;
         let status = resp.status().as_u16();
         let retry_after_s = resp
             .headers()

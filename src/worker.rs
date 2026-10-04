@@ -4,7 +4,7 @@
 use crate::curate::Phase;
 use crate::knowledge::checkpoint;
 use crate::raw::Raw;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -226,6 +226,10 @@ thread_local! {
     static AFTER_BACKUP: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
     /// A test seam: what happens once the lock file is open and locked, as a home replaced.
     static AFTER_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    /// A one-shot test seam: the pathname changes after SQLite opened raw.db.
+    static AFTER_RAW_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    /// A one-shot test seam: the pathname changes between the last check and the next round.
+    static BEFORE_ROUND: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
 /// How long a command waits for a worker to step aside.
@@ -499,27 +503,59 @@ fn serve(
     // back when the open fails (no segment, a reader holding raw.lock), for the next worker,
     // which the next hook starts.
     let asked = crate::backup::take_restore_request(home);
+    let before = file_id(std::fs::metadata(home.join("raw.db")));
     // Task 8: a damaged raw.db is restored from the backups, a damaged knowledge.db rebuilt.
     let mut raw = crate::backup::open_raw(home).inspect_err(|_| {
         if asked {
             crate::backup::request_restore(home);
         }
     })?;
+    #[cfg(test)]
+    if let Some(after) = AFTER_RAW_OPEN.take() {
+        after(home);
+    }
+    if gone(home, holding) {
+        return Err(Gone.into());
+    }
+    // Milestone 5: the raw.db this run holds. Another file in its place (an old copy put back by
+    // hand, docs/milestone-5-plan.md F2) is opened again at the next check, as a restore is, so
+    // the forget logs are reconciled into it and its new records are read.
+    let held = file_id(Ok(
+        std::fs::metadata(home.join("raw.db")).context("inspect raw.db after opening")?
+    ));
+    // A replacement during open cannot become the old connection's held identity. A fresh
+    // None -> Some open is verified by opening it again once the pathname has an identity.
+    // Where FileId is unavailable, both observations remain None as before.
+    if before != held {
+        return Ok(true);
+    }
+    let replaced = || {
+        let now = file_id(std::fs::metadata(home.join("raw.db")));
+        held.is_some() && now.is_some() && now != held
+    };
     let mut k = crate::backup::open_knowledge(home)?;
     checkpoint::rewind(&raw, &k, consumers)?;
     crate::backup::check(home, &raw);
-    // The resident viewer is started where the backup deadline is looked at (R4).
+    // Milestone 5 D1 rule 7: the forget request logs after the segments are checked, before any
+    // consumer runs and before the export.
+    crate::forget::reconcile_or_say(home, &mut raw)?;
+    // The resident viewer is started where the backup deadline is looked at (R4). True means
+    // the scheduled export first needs the stores reopened.
     let mut due = |raw: &Raw, holding: &Holding, viewer: Option<&mut crate::view::Starter>| {
         if gone(home, holding) {
-            return;
+            return false;
         }
         if Instant::now() >= *next_backup {
+            if replaced() {
+                return true;
+            }
             crate::backup::run(home, raw);
             *next_backup = Instant::now() + crate::backup::EVERY;
         }
         if let Some(viewer) = viewer {
             viewer.due(home);
         }
+        false
     };
     let (resident, yields) = (phases.resident, phases.yields);
     let mut config = config_stamp(home);
@@ -532,8 +568,17 @@ fn serve(
     // in between (Codex on #359).
     let mut departing = false;
     loop {
+        #[cfg(test)]
+        if let Some(before) = BEFORE_ROUND.take() {
+            before(home);
+        }
         if gone(home, holding) {
             return Err(Gone.into());
+        }
+        // The next phase round uses the pathname's current store. An end-of-round check
+        // cannot cover a replacement that happened after it and before this first pass.
+        if crate::backup::restore_requested(home) || replaced() {
+            return Ok(true);
         }
         // An embedding call that is out is work in flight: its answer is settled before the
         // worker steps aside (R12) and before its outcome says all is well (R10).
@@ -561,9 +606,13 @@ fn serve(
             if gone(home, holding) {
                 return Err(Gone.into());
             }
-            due(&raw, holding, phases.viewer.as_deref_mut());
+            if due(&raw, holding, phases.viewer.as_deref_mut()) {
+                return Ok(true);
+            }
         }
-        due(&raw, holding, phases.viewer.as_deref_mut());
+        if due(&raw, holding, phases.viewer.as_deref_mut()) {
+            return Ok(true);
+        }
         // D3 and milestone 4's D8 and D9: once the consumers have drained, the embedding phase, the
         // shortlists, then one window. A call in flight, or a window that waits only on time
         // within D10's 30 minutes, keeps the worker up until then; a phase's progress starts the
@@ -588,13 +637,17 @@ fn serve(
         }
         if !hold && let Some(phase) = phases.curation.as_mut() {
             match phase(&mut raw, &k)? {
-                Phase::Covered if crate::backup::restore_requested(home) => return Ok(true),
                 Phase::Covered => again = true,
                 Phase::Waiting { until, up } if up || resident => {
                     stay = Some(stay.map_or(until, |s: i64| s.min(until)));
                 }
                 Phase::Waiting { .. } | Phase::Idle => {}
             }
+        }
+        // Every phase can start another round. A progressed embed or shortlist must not keep
+        // the old raw handle while curation is idle or waiting (M5 F2).
+        if crate::backup::restore_requested(home) || replaced() {
+            return Ok(true);
         }
         if again {
             continue;
@@ -623,7 +676,7 @@ fn serve(
             let mut more = false;
             while Instant::now() < deadline {
                 std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
-                if crate::backup::restore_requested(home) {
+                if crate::backup::restore_requested(home) || replaced() {
                     return Ok(true);
                 }
                 if yields && !calling(phases) && steps_aside(home, &raw, holding) {
@@ -639,7 +692,9 @@ fn serve(
                     more = true;
                     break;
                 }
-                due(&raw, holding, phases.viewer.as_deref_mut());
+                if due(&raw, holding, phases.viewer.as_deref_mut()) {
+                    return Ok(true);
+                }
             }
             if more || phase == Some(wait) {
                 break false;
@@ -674,6 +729,11 @@ fn serve(
         if !leaving {
             continue;
         }
+        // A zero-length wait has no polling check, and the file may have changed since the
+        // last tick of a longer one. Reopen before backing up through the old connection.
+        if replaced() {
+            return Ok(true);
+        }
         // Under the lock: a worker started after the release cannot export the same seqs.
         crate::backup::run(home, &raw);
         crate::hookstate::prune(home, crate::hookstate::KEEP);
@@ -684,7 +744,7 @@ fn serve(
             return Err(Gone.into());
         }
         // A hook that asked before the release saw the lock held and started nothing.
-        let wanted = crate::backup::restore_requested(home);
+        let wanted = crate::backup::restore_requested(home) || replaced();
         if !wanted && !behind(&raw, &k, consumers)? {
             return Ok(false);
         }
@@ -1701,6 +1761,416 @@ mod tests {
         assert_eq!(checkpoint::get(&k, "seen", &device).unwrap(), 2);
     }
 
+    /// Milestone 5 F2: the zero-length idle wait still checks which raw.db it holds before
+    /// exporting it, and opens the replacement to reconcile forgets and drain new records.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_nonresident_worker_reopens_a_replacement_before_its_final_backup() {
+        replacement_at_idle_exit(true);
+    }
+
+    /// The same check is needed after releasing the lock: a replacement in the exit seam has
+    /// no new records in the old connection to wake the worker through `behind`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_nonresident_worker_reopens_a_replacement_while_it_decides_to_exit() {
+        replacement_at_idle_exit(false);
+    }
+
+    /// The held file must not become the replacement pathname while SQLite still holds the
+    /// file it opened: its new input must be consumed and its forget logs reconciled.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_replacement_after_sqlite_open_is_not_adopted_as_the_held_file() {
+        replacement_after_open(false);
+    }
+
+    /// An absent path creates a store, but a replacement before its first identity capture
+    /// must still be opened rather than leave its new input unconsumed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fresh_raw_replaced_after_open_is_read_before_the_worker_exits() {
+        replacement_after_open(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn pending_forget_copy(p: &Path) -> (String, i64) {
+        let mut raw = raw::open(p).unwrap();
+        let mut event = raw::test_event("opened-file-forget-canary-8351");
+        event.source = "transcript".into();
+        let identity = raw::ImportIdentity {
+            origin: crate::forget::origin("synthetic", "opened-file-import"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let seq = raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                }],
+                &[identity],
+                "",
+                None,
+            )
+            .unwrap()[0];
+        let device = raw.device().to_owned();
+        drop(raw);
+        std::fs::copy(p.join("raw.db"), p.join("raw-before-forget.db")).unwrap();
+        let preview = crate::forget::preview(
+            p,
+            crate::forget::Target::Record {
+                device: device.clone(),
+                seq,
+            },
+        )
+        .unwrap();
+        crate::forget::start(p, &preview).unwrap();
+        (device, seq)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn replace_raw_at_boundary(p: &Path) {
+        let old = p.join("raw-before-forget.db");
+        if !old.exists() {
+            // The fresh-open case copies the just-created schema, including its WAL commits.
+            Connection::open(p.join("raw.db"))
+                .unwrap()
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
+            std::fs::copy(p.join("raw.db"), &old).unwrap();
+        }
+        let staged = p.join("raw.db.copy");
+        std::fs::copy(old, &staged).unwrap();
+        for file in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(p.join(file));
+        }
+        std::fs::rename(staged, p.join("raw.db")).unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("opened-file-new-input-8352"))
+            .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn replacement_after_open(fresh: bool) {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let forgotten = (!fresh).then(|| pending_forget_copy(p));
+        AFTER_RAW_OPEN.set(Some(replace_raw_at_boundary));
+        run_with(p, 0, vec![Box::new(Seen)], || {}).unwrap();
+        let raw = raw::open(p).unwrap();
+        let k = knowledge::open(p).unwrap();
+        assert_eq!(
+            k.query_row(
+                "SELECT COUNT(*) FROM seen WHERE device=?1 AND seq=1",
+                [raw.device()],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "the replacement was adopted as held while its new input was never read"
+        );
+        if let Some((device, seq)) = forgotten {
+            assert!(matches!(
+                raw.after(&device, seq - 1, 1).unwrap()[0].item,
+                raw::Item::Removed
+            ));
+        }
+    }
+
+    /// A copy put back after the previous round's final check must be reconciled before the
+    /// next consumer sees a raw handle, even when another phase immediately starts that round.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_replacement_at_round_entry_is_opened_before_the_first_consumer() {
+        struct CurrentFile(std::path::PathBuf);
+        impl Consumer for CurrentFile {
+            fn name(&self) -> &'static str {
+                "current-file"
+            }
+            fn step(&mut self, raw: &Raw, _: &Connection, _: &str, _: i64) -> Result<i64> {
+                assert_eq!(
+                    raw.device(),
+                    raw::open(&self.0)?.device(),
+                    "a new round sent the replaced file's old handle to a consumer"
+                );
+                raw.max_seq()
+            }
+            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+                Ok(())
+            }
+        }
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let (device, seq) = pending_forget_copy(p);
+        let mut first = true;
+        let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+            if std::mem::take(&mut first) {
+                BEFORE_ROUND.set(Some(replace_raw_at_boundary));
+                Ok(Phase::Covered)
+            } else {
+                Ok(Phase::Idle)
+            }
+        };
+        run_holding(
+            p,
+            0,
+            vec![Box::new(CurrentFile(p.into()))],
+            || {},
+            None,
+            curating(&mut phase),
+        )
+        .unwrap();
+        assert!(matches!(
+            raw::open(p).unwrap().after(&device, seq - 1, 1).unwrap()[0].item,
+            raw::Item::Removed
+        ));
+    }
+
+    /// A replacement during a batch cannot be exported through that batch's old connection
+    /// at the scheduled backup boundary. The deadline is injected, never waited for.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_scheduled_backup_reopens_a_replacement_instead_of_exporting_the_old_file() {
+        struct ReplacingBatch(std::path::PathBuf, bool);
+        impl Consumer for ReplacingBatch {
+            fn name(&self) -> &'static str {
+                "replacing-batch"
+            }
+            fn step(&mut self, raw: &Raw, _: &Connection, _: &str, _: i64) -> Result<i64> {
+                let through = raw.max_seq()?;
+                if std::mem::take(&mut self.1) {
+                    replace_raw_at_boundary(&self.0);
+                }
+                Ok(through)
+            }
+            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+                Ok(())
+            }
+        }
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let (device, _) = pending_forget_copy(p);
+        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(ReplacingBatch(p.into(), true))];
+        let mut holding = Holding::default();
+        let mut deadline = Instant::now();
+        assert!(
+            serve(
+                p,
+                0,
+                &mut consumers,
+                &mut holding,
+                &mut deadline,
+                &mut || {},
+                &mut Phases::default(),
+            )
+            .unwrap()
+        );
+        let stale = std::fs::read_dir(p.join("backups"))
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with(&device) && name.ends_with(".seg.zst")
+            })
+            .count();
+        assert_eq!(stale, 0, "the scheduled backup exported the replaced file");
+    }
+
+    /// M5 F2: an embedding reply starts another round even when curation is idle. The next
+    /// round must reconcile the replacement before a consumer or provider sees it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn embedding_progress_does_not_skip_reopening_raw_while_curation_is_idle() {
+        let _contending = contending();
+        let mut s = crate::search::b::fixture::Store::new();
+        s.decided(
+            "github.com/example/replacement",
+            1_000,
+            "The parser reads one line at a time.",
+            &[],
+        );
+        s.run();
+        let stub = crate::embed::stub::Stub::start();
+        crate::embed_phase::fixture::config(&s, &stub);
+        let p = s.home.path();
+        let mut event = raw::test_event("embedding-reopen-forget-canary-6831");
+        event.source = "transcript".into();
+        let identity = raw::ImportIdentity {
+            origin: crate::forget::origin("synthetic", "embedding-reopen-import"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let seq = s
+            .raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                }],
+                std::slice::from_ref(&identity),
+                "",
+                None,
+            )
+            .unwrap()[0];
+        let device = s.raw.device().to_owned();
+        let request = crate::forget::previous_transcript_request(&s.raw, seq, &identity);
+        drop(s.raw);
+        let old = p.join("raw-before-forget.db");
+        std::fs::copy(p.join("raw.db"), &old).unwrap();
+        let mut replay = raw::open(p).unwrap();
+        assert_eq!(replay.forget_apply(&[request]).unwrap(), 1);
+        crate::forget::reconcile(p, &mut replay).unwrap();
+        let raw = raw::open(p).unwrap();
+        let mut k = knowledge::open(p).unwrap();
+        drain(&raw, &mut k, &mut consumers(p)).unwrap();
+        let mut embed = crate::embed_phase::Phase::new(p);
+        assert!(matches!(
+            embed.poll(&raw, &k).unwrap(),
+            Phase::Waiting { .. }
+        ));
+        until("the stub embedding reply", || embed.done());
+        drop((raw, k));
+        let mut calls = 0;
+        let mut phase = |raw: &mut Raw, _: &Connection| -> Result<Phase> {
+            calls += 1;
+            if calls == 1 {
+                for file in ["raw.db-wal", "raw.db-shm"] {
+                    let _ = std::fs::remove_file(p.join(file));
+                }
+                let staged = p.join("raw.db.copy");
+                std::fs::copy(&old, &staged).unwrap();
+                std::fs::rename(staged, p.join("raw.db")).unwrap();
+                std::fs::write(p.join("config.toml"), "[embedding]\nprovider = 'none'\n").unwrap();
+            } else {
+                assert_ne!(
+                    raw.device(),
+                    device,
+                    "embedding progress started another round over the old raw.db"
+                );
+                assert!(matches!(
+                    raw.after(&device, seq - 1, 1).unwrap()[0].item,
+                    raw::Item::Removed
+                ));
+            }
+            Ok(Phase::Idle)
+        };
+        let phases = Phases {
+            embed: Some(&mut embed),
+            curation: Some(&mut phase),
+            ..Phases::default()
+        };
+        run_holding(p, 0, consumers(p), || {}, None, phases).unwrap();
+        assert_eq!(calls, 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn replacement_at_idle_exit(before_release: bool) {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let mut event = raw::test_event("idle-exit-forget-canary-5821");
+        event.source = "transcript".into();
+        let identity = raw::ImportIdentity {
+            origin: crate::forget::origin("synthetic", "idle-exit-import"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let seq = raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                }],
+                &[identity],
+                "",
+                None,
+            )
+            .unwrap()[0];
+        let device = raw.device().to_owned();
+        drop(raw);
+        let old = p.join("raw-before-forget.db");
+        std::fs::copy(p.join("raw.db"), &old).unwrap();
+        let preview = crate::forget::preview(
+            p,
+            crate::forget::Target::Record {
+                device: device.clone(),
+                seq,
+            },
+        )
+        .unwrap();
+        crate::forget::start(p, &preview).unwrap();
+        // Both existing seams run synchronously: no timing or scheduling decides when the
+        // replacement happens, and it happens only once even after the worker opens it again.
+        let copied = std::cell::RefCell::new(None);
+        let replace = || {
+            if copied.borrow().is_some() {
+                return;
+            }
+            for file in ["raw.db-wal", "raw.db-shm"] {
+                let _ = std::fs::remove_file(p.join(file));
+            }
+            let staged = p.join("raw.db.copy");
+            std::fs::copy(&old, &staged).unwrap();
+            std::fs::rename(staged, p.join("raw.db")).unwrap();
+            let mut raw = raw::open(p).unwrap();
+            let fresh = raw
+                .append(&raw::test_event("idle-exit-new-record-5822"))
+                .unwrap();
+            copied.replace(Some((raw.device().to_owned(), fresh)));
+        };
+        let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+            if before_release {
+                replace();
+            }
+            Ok(Phase::Idle)
+        };
+        run_holding(
+            p,
+            0,
+            vec![Box::new(Seen)],
+            || {
+                if before_release {
+                    let stale = std::fs::read_dir(p.join("backups"))
+                        .unwrap()
+                        .flatten()
+                        .any(|e| {
+                            let name = e.file_name().to_string_lossy().into_owned();
+                            name.starts_with(&device) && name.ends_with(".seg.zst")
+                        });
+                    assert!(!stale, "the replaced raw.db was exported before reopening");
+                } else {
+                    replace();
+                }
+            },
+            None,
+            curating(&mut phase),
+        )
+        .unwrap();
+        let (copy, fresh) = copied.into_inner().unwrap();
+        let k = knowledge::open(p).unwrap();
+        assert_eq!(
+            k.query_row(
+                "SELECT COUNT(*) FROM seen WHERE device = ?1 AND seq = ?2",
+                (&copy, fresh),
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "the replacement's new record was skipped at idle exit"
+        );
+        let raw = raw::open(p).unwrap();
+        assert!(matches!(
+            raw.after(&device, seq - 1, 1).unwrap()[0].item,
+            raw::Item::Removed
+        ));
+        assert!(lock(p).unwrap().is_some());
+    }
+
     #[test]
     fn a_restore_asked_for_while_the_worker_waits_opens_the_stores_again() {
         let home = tempfile::tempdir().unwrap();
@@ -1961,6 +2431,58 @@ mod tests {
         let dir = std::fs::File::open(&old).unwrap();
         dir.set_modified(long_ago).unwrap();
         old
+    }
+
+    /// Milestone 5 (docs/milestone-5-plan.md): raw.db put back to an old copy under a resident
+    /// worker is opened again at its next check, so it reads the file hooks now write (and the
+    /// forget logs are reconciled into it), not the one it held.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_worker_opens_raw_db_again_when_another_file_takes_its_place() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("first")).unwrap();
+        let device = raw.device().to_owned();
+        drop(raw);
+        // The copy holds the record: what the WAL kept is written into the file first.
+        rusqlite::Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let old = p.join("raw-old.db");
+        std::fs::copy(p.join("raw.db"), &old).unwrap();
+        let worker = resident(p, 100);
+        let seen = |device: &str, n: i64| {
+            knowledge::open(p)
+                .ok()
+                .and_then(|k| checkpoint::get(&k, "seen", device).ok())
+                == Some(n)
+        };
+        until("the first record read", || seen(&device, 1));
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("second"))
+            .unwrap();
+        until("the second record read", || seen(&device, 2));
+        // The old copy takes raw.db's place, as a restore by hand would put it.
+        for f in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(p.join(f));
+        }
+        let staged = p.join("raw.db.copy");
+        std::fs::copy(&old, &staged).unwrap();
+        std::fs::rename(&staged, p.join("raw.db")).unwrap();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("after the copy")).unwrap();
+        raw.append(&raw::test_event("and one more")).unwrap();
+        // A file put in raw.db's place is another device's (docs/cards.md S3).
+        let copy = raw.device().to_owned();
+        let last = raw.max_seq().unwrap();
+        drop(raw);
+        until("the replaced file read", || seen(&copy, last));
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+        worker.join().unwrap().unwrap();
     }
 
     /// R3: at its idle time a resident worker backs up and prunes as a worker does before it

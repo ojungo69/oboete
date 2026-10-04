@@ -356,9 +356,63 @@ fn device_of(home: &Path, segs: &[Segment]) -> Result<String> {
 /// that verify, in seq order. Returns what was done, for stderr and doctor
 /// (`<home>/state/restored`).
 pub fn restore(home: &Path) -> Result<String> {
+    // Milestone 5 D1: the forget request logs are read before raw's swap lock, and written after
+    // it from the restored raw.db; no log I/O under the lock.
+    let (logged, mut report) = crate::forget::logged(home);
+    let mut note = restore_locked(home, logged)?;
+    match raw::open(home).and_then(|mut raw| crate::forget::reconcile(home, &mut raw)) {
+        Ok(r) => report.problems.extend(r.problems),
+        Err(e) => report.problems.push(format!("{e:#}")),
+    }
+    for p in &report.problems {
+        note.push_str(&format!("; forget request log: {p}"));
+    }
+    Ok(note)
+}
+
+/// The forget requests a raw.db that still reads holds (D1 rule 14), read under the swap lock
+/// without opening it as a store. A lost database or unreadable table has none (F1); once the
+/// table opens, a bad row must stop the restore rather than discard other live requests.
+fn held_requests(home: &Path) -> Result<Vec<crate::forget::Request>> {
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        home.join("raw.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) else {
+        return Ok(Vec::new());
+    };
+    let Ok(mut st) = conn.prepare("SELECT request FROM forget_jobs") else {
+        return Ok(Vec::new());
+    };
+    let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let text = row.context("read live forget request row")?;
+        let request: crate::forget::Request =
+            serde_json::from_str(&text).context("parse live forget request")?;
+        request.check().context("validate live forget request")?;
+        out.push(request);
+    }
+    if !out.is_empty() {
+        let live_home: String = conn
+            .query_row("SELECT value FROM meta WHERE key='home_id'", [], |r| {
+                r.get(0)
+            })
+            .context("read live home identity for forget requests")?;
+        // A request corrupt in this live store must not be silently discarded as foreign
+        // when it is later compared with the backup's potentially different home.
+        anyhow::ensure!(
+            out.iter().all(|request| request.home == live_home),
+            "live forget request home does not match raw home identity"
+        );
+    }
+    Ok(out)
+}
+
+fn restore_locked(home: &Path, logged: Vec<crate::forget::Request>) -> Result<String> {
     // No store is open while the file is read, rebuilt and swapped; a hook waits (or fails with
     // MUST-M16's marker) instead of writing into the file that is moved aside.
     let _swap = raw::lock_for_swap(home)?;
+    let held = held_requests(home)?;
     let dir = dir(home)?;
     let all = segments(&dir, Kind::Records)?;
     let device = device_of(home, &all)?;
@@ -412,12 +466,25 @@ pub fn restore(home: &Path) -> Result<String> {
             ops += 1;
         }
     }
+    // Rule 14: what the live raw.db and the logs hold of this home's forgets, before the swap.
+    // A copied store may append as a new device while keeping the same home lineage.
+    let home_id = rebuild.home_id()?;
+    let mut forget: Vec<_> = held.into_iter().filter(|r| r.home == home_id).collect();
+    for r in logged.into_iter().filter(|r| r.home == home_id) {
+        if !forget.iter().any(|f| f.job == r.job) {
+            forget.push(r);
+        }
+    }
+    rebuild.forget(forget);
     let dropped = rebuild.finish()?;
     let whole = home.join("raw.db.restored");
     std::fs::rename(&tmp, &whole)?;
     // Durable before the damaged file goes: an open that finds neither would make an empty store.
     #[cfg(unix)]
     std::fs::File::open(home)?.sync_all()?;
+    // Reconstruction was isolated. Its denials become live at the swap: order that moment
+    // after any sender's actual transmission, outside every raw SQLite transaction.
+    let _dispatch = crate::dispatch::exclusive(home)?;
     // Everything that must not outlive the old raw.db goes before the swap, so a restore that
     // stops at any point is either redone (raw.db still damaged) or complete.
     // Derived data is rebuilt from what was restored: a skipped segment leaves a gap below raw's
