@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::{IsTerminal, Read, Seek, Write};
+use std::io::{BufRead, IsTerminal, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 /// One request's records; a larger selection is several requests (rule 9).
@@ -275,8 +275,8 @@ fn logs(home: &Path, report: &mut Report) -> Vec<PathBuf> {
 /// One log copy's requests of this home, oldest first; damaged lines and lines of another home
 /// are reported and skipped (rules 9, "a line names its home").
 fn read_log(path: &Path, device: Option<&str>, report: &mut Report) -> Option<Vec<Request>> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
         Err(e) => {
             report
@@ -285,25 +285,86 @@ fn read_log(path: &Path, device: Option<&str>, report: &mut Report) -> Option<Ve
             return None;
         }
     };
-    // Bytes that are not text spoil only their own line.
-    let text = String::from_utf8_lossy(&bytes);
-    let mut out = Vec::new();
-    for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.is_empty()) {
-        match Request::parse(line) {
-            Ok(r) if device.is_none_or(|d| r.home == d) => out.push(r),
-            Ok(_) => report.problems.push(format!(
-                "{} line {}: a request of another home, skipped",
-                path.display(),
-                n + 1
-            )),
-            Err(e) => {
-                report
-                    .problems
-                    .push(format!("{} line {}: {e:#}, skipped", path.display(), n + 1))
-            }
+    match read_lines(std::io::BufReader::new(file), path, device, report) {
+        Ok(requests) => Some(requests),
+        Err(e) => {
+            report
+                .problems
+                .push(format!("{} could not be read: {e}", path.display()));
+            None
         }
     }
-    Some(out)
+}
+
+/// Buffer at most one capped line, including its optional CRLF. Drain an oversized line
+/// through the reader's fixed buffer, then continue with the next request.
+fn read_lines(
+    mut reader: impl BufRead,
+    path: &Path,
+    device: Option<&str>,
+    report: &mut Report,
+) -> std::io::Result<Vec<Request>> {
+    let mut bytes = Vec::with_capacity(MAX_LINE + 2);
+    let mut out = Vec::new();
+    let mut n = 0_usize;
+    loop {
+        bytes.clear();
+        if (&mut reader)
+            .take((MAX_LINE + 2) as u64)
+            .read_until(b'\n', &mut bytes)?
+            == 0
+        {
+            break;
+        }
+        n += 1;
+        let ended = bytes.last() == Some(&b'\n');
+        if ended {
+            bytes.pop();
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+        }
+        if bytes.len() > MAX_LINE {
+            if !ended {
+                skip_line(&mut reader)?;
+            }
+            report.problems.push(format!(
+                "{} line {n}: a line over its cap, skipped",
+                path.display()
+            ));
+            continue;
+        }
+        if bytes.is_empty() {
+            continue;
+        }
+        // Invalid UTF-8 spoils only this bounded line, as before.
+        match Request::parse(&String::from_utf8_lossy(&bytes)) {
+            Ok(r) if device.is_none_or(|d| r.home == d) => out.push(r),
+            Ok(_) => report.problems.push(format!(
+                "{} line {n}: a request of another home, skipped",
+                path.display()
+            )),
+            Err(e) => report
+                .problems
+                .push(format!("{} line {n}: {e:#}, skipped", path.display())),
+        }
+    }
+    Ok(out)
+}
+
+fn skip_line(reader: &mut impl BufRead) -> std::io::Result<()> {
+    loop {
+        let bytes = reader.fill_buf()?;
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let newline = bytes.iter().position(|b| *b == b'\n');
+        let consumed = newline.map_or(bytes.len(), |at| at + 1);
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(());
+        }
+    }
 }
 
 /// Appends `requests` to the log at `path`, one at a time under an exclusive lock on the file: a
@@ -553,6 +614,47 @@ pub(crate) fn check_identity(s: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::raw::{self, Item};
+
+    #[test]
+    fn bounded_log_lines_keep_crlf_the_cap_and_a_final_request() {
+        let request = Request {
+            v: 1,
+            home: "synthetic".into(),
+            job: "a".repeat(32),
+            started: 0,
+            target: Target::Record {
+                device: "synthetic".into(),
+                seq: 1,
+            },
+            records: vec![Record {
+                device: "synthetic".into(),
+                seq: 1,
+                origin: origin("synthetic", "bounded-record"),
+                session: session("claude", "bounded-session"),
+                ts: None,
+            }],
+        };
+        let line = request.line().unwrap();
+        let mut input = vec![b'\n'];
+        input.extend(std::iter::repeat_n(b' ', MAX_LINE - line.len()));
+        input.extend(line.as_bytes());
+        input.extend(b"\r\n");
+        input.extend(std::iter::repeat_n(b'x', MAX_LINE + 1));
+        input.extend(b"\n\xff\n");
+        input.extend(line.as_bytes());
+        let mut report = Report::default();
+        let read = read_lines(
+            std::io::Cursor::new(input),
+            Path::new("synthetic.log"),
+            Some("synthetic"),
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(read, vec![request.clone(), request]);
+        assert_eq!(report.problems.len(), 2);
+        assert!(report.problems[0].contains("line 3") && report.problems[0].contains("cap"));
+        assert!(report.problems[1].contains("line 4"));
+    }
 
     /// An imported record of origin `id`, as an importer appends it.
     fn native(raw: &mut raw::Raw, id: &str, body: &str) -> i64 {

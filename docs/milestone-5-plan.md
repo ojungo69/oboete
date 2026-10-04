@@ -43,6 +43,8 @@ open が失敗して記録が止まり、戻すには手でファイルを消す
   排他ロック下で 1 回ずつ、末尾が改行でなければ先に改行を書き、
   `fsync` し、作ったときはディレクトリも同期する。各行に payload の checksum を付け、checksum
   や形が合わない行、他 home の行は、その行だけ飛ばして報告する。
+  読込みも 1 行の上限で区切り、過大な行は固定サイズの buffer で末尾まで読み捨てる。
+  壊れた行全体をメモリへ載せず、後続の有効な要求を読む。
   新規 home の id は最初の device id とし、この schema が raw を最初から作ったことの proof、
   device id、file identity と共に、最初の schema transaction で raw の metadata に保存する。ファイルのコピーで
   将来の記録用の device id が変わっても保持し、record の backup にも運ぶ。別の権威は作らない。
