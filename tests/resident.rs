@@ -87,9 +87,51 @@ fn copied_command(executable: &Path, home: &Path, args: &[&str]) -> Command {
     command
 }
 
+fn copied_spawn(command: &mut Command) -> Child {
+    let start = Instant::now();
+    loop {
+        match command.spawn() {
+            Ok(child) => return child,
+            // Another test's fork can retain a copy's write FD until its exec closes it.
+            Err(error)
+                if error.raw_os_error() == Some(libc::ETXTBSY)
+                    && start.elapsed() < Duration::from_secs(20) =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("copied binary failed to start: {error}"),
+        }
+    }
+}
+
 fn repos_response(home: &Path, port: u16) -> String {
+    repos_response_on(
+        home,
+        port,
+        std::net::TcpStream::connect(("127.0.0.1", port)).unwrap(),
+    )
+}
+
+/// Startup and successful exec can hold the lock before binding; all other HTTP checks stay
+/// strict. Only connection refusal retries here, never a failed request or response.
+fn ready_repos_response(home: &Path, port: u16) -> String {
+    let start = Instant::now();
+    loop {
+        match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => return repos_response_on(home, port, stream),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ConnectionRefused
+                    && start.elapsed() < Duration::from_secs(20) =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("resident viewer did not bind: {error}"),
+        }
+    }
+}
+
+fn repos_response_on(home: &Path, port: u16, mut stream: std::net::TcpStream) -> String {
     let token = std::fs::read_to_string(home.join("state/view-token")).unwrap();
-    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -117,18 +159,18 @@ fn a_renamed_binary_replaces_the_viewer_at_its_minute_check_with_the_same_port()
     .unwrap();
     let executable = scratch.path().join("oboete");
     std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
-    let mut viewer = Worker(
-        copied_command(&executable, h, &["view", "--resident"])
-            .spawn()
-            .unwrap(),
-    );
+    let mut viewer = Worker(copied_spawn(&mut copied_command(
+        &executable,
+        h,
+        &["view", "--resident"],
+    )));
     let pid = viewer.0.id();
     until("the copied viewer listens", || {
         held(h, "view.lock")
             && std::fs::read_to_string(h.join("state/view-outcome"))
                 .is_ok_and(|out| out.trim() == format!("listening {port}"))
     });
-    assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
     let arguments = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap();
     let next = scratch.path().join("oboete.next");
     std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
@@ -151,7 +193,7 @@ fn a_renamed_binary_replaces_the_viewer_at_its_minute_check_with_the_same_port()
         std::fs::read(format!("/proc/{pid}/cmdline")).unwrap(),
         arguments
     );
-    assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
 }
 
 #[test]
@@ -169,12 +211,9 @@ fn a_replaced_worker_reaps_its_existing_viewer_child_without_starting_duplicates
     let executable = scratch.path().join("oboete");
     std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
     let _detached = Detached(h);
-    let mut worker = Worker(
-        copied_command(&executable, h, &["worker"])
-            .env_remove("OBOETE_NO_SPAWN")
-            .spawn()
-            .unwrap(),
-    );
+    let mut worker = Worker(copied_spawn(
+        copied_command(&executable, h, &["worker"]).env_remove("OBOETE_NO_SPAWN"),
+    ));
     let pid = worker.0.id();
     until("the worker's viewer", || {
         held(h, "worker.lock")
@@ -230,7 +269,11 @@ fn a_worker_keeps_serving_failed_images_and_temporary_absence_then_leaves_a_miss
     .unwrap();
     let executable = scratch.path().join("oboete");
     std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
-    let mut worker = Worker(copied_command(&executable, h, &["worker"]).spawn().unwrap());
+    let mut worker = Worker(copied_spawn(&mut copied_command(
+        &executable,
+        h,
+        &["worker"],
+    )));
     let pid = worker.0.id();
     until("the copied resident worker", || {
         held(h, "worker.lock") && h.join("state/worker-outcome").exists()
@@ -304,15 +347,16 @@ fn viewer_replacement_waits_for_live_requests_and_answers_them_before_exec() {
     .unwrap();
     let executable = scratch.path().join("oboete");
     std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
-    let mut viewer = Worker(
-        copied_command(&executable, h, &["view", "--resident"])
-            .spawn()
-            .unwrap(),
-    );
+    let mut viewer = Worker(copied_spawn(&mut copied_command(
+        &executable,
+        h,
+        &["view", "--resident"],
+    )));
     let pid = viewer.0.id();
     until("the copied viewer", || {
         held(h, "view.lock") && h.join("state/view-token").exists()
     });
+    assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
     let token = std::fs::read_to_string(h.join("state/view-token")).unwrap();
     let image = format!("/proc/{pid}/exe");
     let old = std::fs::metadata(&image).unwrap();
@@ -373,7 +417,7 @@ fn viewer_replacement_waits_for_live_requests_and_answers_them_before_exec() {
     );
     until("the replacement listens", || held(h, "view.lock"));
     assert!(viewer.0.try_wait().unwrap().is_none());
-    assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
 }
 
 fn viewer_failed_image_or_missing(mode: &str) {
@@ -389,15 +433,16 @@ fn viewer_failed_image_or_missing(mode: &str) {
     .unwrap();
     let executable = scratch.path().join("oboete");
     std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
-    let mut viewer = Worker(
-        copied_command(&executable, h, &["view", "--resident"])
-            .spawn()
-            .unwrap(),
-    );
+    let mut viewer = Worker(copied_spawn(&mut copied_command(
+        &executable,
+        h,
+        &["view", "--resident"],
+    )));
     let pid = viewer.0.id();
     until("the copied viewer", || {
         held(h, "view.lock") && h.join("state/view-token").exists()
     });
+    assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
     let image = format!("/proc/{pid}/exe");
     let old = std::fs::metadata(&image).unwrap();
     let next = scratch.path().join("candidate.next");
@@ -452,7 +497,7 @@ fn viewer_failed_image_or_missing(mode: &str) {
     );
     until("recovered viewer ownership", || held(h, "view.lock"));
     assert!(viewer.0.try_wait().unwrap().is_none());
-    assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
     if mode == "missing" {
         std::fs::rename(&executable, scratch.path().join("permanently-missing")).unwrap();
         let absent = Instant::now();
@@ -498,18 +543,11 @@ fn a_renamed_binary_replaces_the_worker_with_its_arguments_and_lock() {
     .unwrap();
     let executable = scratch.path().join("oboete");
     std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
-    let mut worker = Worker(
-        Command::new(&executable)
-            .arg("--home")
-            .arg(h)
-            .arg("worker")
-            .env("OBOETE_NO_SPAWN", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut worker = Worker(copied_spawn(&mut copied_command(
+        &executable,
+        h,
+        &["worker"],
+    )));
     let pid = worker.0.id();
     let image = format!("/proc/{pid}/exe");
     until("the copied worker holds its home lock", || {
@@ -555,11 +593,11 @@ fn a_missing_home_ends_the_old_worker_before_it_executes_a_replacement() {
     .unwrap();
     let executable = scratch.path().join("oboete");
     std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &executable).unwrap();
-    let mut worker = Worker(
-        copied_command(&executable, &h, &["worker"])
-            .spawn()
-            .unwrap(),
-    );
+    let mut worker = Worker(copied_spawn(&mut copied_command(
+        &executable,
+        &h,
+        &["worker"],
+    )));
     let pid = i32::try_from(worker.0.id()).unwrap();
     until("the copied worker sleeps in its settled wait", || {
         std::fs::read_to_string(h.join("state/worker-outcome"))
