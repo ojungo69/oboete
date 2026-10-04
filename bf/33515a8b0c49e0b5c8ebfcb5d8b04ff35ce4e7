@@ -1,0 +1,39 @@
+src/worker.rs
+  s_ce2b24784deac6::t_3b674b25611bfe 143,153-156,378-381,603-604,716-717
+src/view.rs
+  s_ce2b24784deac6::t_3b674b25611bfe 504,576,588-591
+docs/resident.md
+  s_ce2b24784deac6::t_1919056ccfda44 47-50
+src/executable.rs
+  s_ce2b24784deac6::t_3b674b25611bfe 17-75,77-90,92-111,143,220-224,227,230,239-244,257-258,265,272-274
+  s_ce2b24784deac6::t_aca9fda18dae18 76,91
+  s_ce2b24784deac6::t_c7b1bc6ce8ab64 275-279
+tests/resident.rs
+  s_ce2b24784deac6::t_bc8b4aa9f7faba 669-698,704,706-714,716-741,743-798,800
+  s_ce2b24784deac6::t_c31e29d9b64eee 222-223,402-403,482-483,715
+  s_ce2b24784deac6::t_05d4db39fa45fd 148-184,220,400,480
+  s_ce2b24784deac6::t_9555b9ef0b2bd2 699-703,705
+  s_ce2b24784deac6::t_181a09b3304093 185-205,802
+  s_ce2b24784deac6::t_cd8076fa6949b4 742
+  s_ce2b24784deac6::t_0d8e93d688f039 799,801,803-807
+src/main.rs
+  s_ce2b24784deac6::t_3b674b25611bfe 388-396
+src/hook.rs
+  s_ce2b24784deac6::t_3b674b25611bfe 2049
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bf33515a8b0c49e0b5c8ebfcb5d8b04ff35ce4e7",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
