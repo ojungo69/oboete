@@ -1873,7 +1873,6 @@ fn replacing_raw_db_twice_keeps_both_forgets_and_blocks_reimport() {
 /// request logs before that commit, not wait for a worker to hide the new native alias later.
 #[test]
 fn migrate_finish_reconciles_surviving_logs_before_committing_native_records() {
-    use std::io::Read;
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
@@ -1891,15 +1890,13 @@ fn migrate_finish_reconciles_surviving_logs_before_committing_native_records() {
     std::fs::copy(snapshot, &staged).unwrap();
     std::fs::rename(staged, home.join("raw.db")).unwrap();
     let mut child = command(&home, &["migrate", "--finish"]).spawn().unwrap();
-    let mut stdout = child.stdout.take().unwrap();
-    let mut said = Vec::new();
-    let mut byte = [0u8];
     let prompt = b"Delete these files? Type yes to delete them: ";
+    let mut child = FinishChild::new(&mut child, prompt);
     // finish flushes this prompt after read_pass has committed, then blocks on our answer.
     // Inspect that exact public CLI boundary before allowing any end-of-command work.
-    while !said.ends_with(prompt) && stdout.read(&mut byte).unwrap() != 0 {
-        said.push(byte[0]);
-    }
+    let said = child
+        .wait_for_prompt(std::time::Duration::from_secs(20))
+        .unwrap();
     let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
     let committed: i64 = db.query_row(
         "SELECT COUNT(*) FROM records WHERE type='event' AND source='oboete-v1' AND kind='prompt'",
@@ -1908,8 +1905,16 @@ fn migrate_finish_reconciles_surviving_logs_before_committing_native_records() {
         .query_row("SELECT COUNT(*) FROM denied_records", [], |r| r.get(0))
         .unwrap();
     drop(db);
-    child.stdin.take().unwrap().write_all(b"no\n").unwrap();
-    let result = child.wait_with_output().unwrap();
+    child
+        .child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"no\n")
+        .unwrap();
+    let result = child
+        .wait_for_exit(std::time::Duration::from_secs(20))
+        .unwrap();
     assert!(
         result.status.success(),
         "{}",
@@ -1945,6 +1950,188 @@ fn migrate_finish_reconciles_surviving_logs_before_committing_native_records() {
         ok(run(&home, &["forget", "--status"], "")).lines().count(),
         1
     );
+}
+
+/// Only the finish confirmation test needs a live child while it inspects the committed DB.
+/// Drain both pipes, bound its waits, and reap/join on every failure, including unwinding.
+struct FinishChild<'a> {
+    child: &'a mut std::process::Child,
+    stdout: Option<std::thread::JoinHandle<Vec<u8>>>,
+    stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
+    signal: std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+}
+
+impl<'a> FinishChild<'a> {
+    fn new(child: &'a mut std::process::Child, prompt: &[u8]) -> Self {
+        use std::io::Read;
+        let (send, signal) = std::sync::mpsc::channel();
+        let mut held = Self {
+            child,
+            stdout: None,
+            stderr: None,
+            signal,
+        };
+        let mut stdout = held.child.stdout.take().expect("piped stdout");
+        let prompt = prompt.to_vec();
+        held.stdout = Some(std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let mut byte = [0];
+            let mut found = false;
+            loop {
+                match stdout.read(&mut byte) {
+                    Ok(0) => {
+                        let _ = send.send(Err("stdout closed before confirmation".into()));
+                        break;
+                    }
+                    Ok(_) => {
+                        out.push(byte[0]);
+                        if !found && out.ends_with(&prompt) {
+                            found = true;
+                            let _ = send.send(Ok(out.clone()));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send.send(Err(format!("stdout read failed: {e}")));
+                        break;
+                    }
+                }
+            }
+            out
+        }));
+        let mut stderr = held.child.stderr.take().expect("piped stderr");
+        held.stderr = Some(std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let _ = stderr.read_to_end(&mut out);
+            out
+        }));
+        held
+    }
+
+    fn wait_for_prompt(&mut self, timeout: std::time::Duration) -> Result<Vec<u8>, String> {
+        match self.signal.recv_timeout(timeout) {
+            Ok(Ok(out)) => Ok(out),
+            Ok(Err(why)) => Err(self.failure(&why)),
+            Err(why) => Err(self.failure(&format!("confirmation wait failed: {why}"))),
+        }
+    }
+
+    fn wait_for_exit(&mut self, timeout: std::time::Duration) -> Result<Output, String> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    let (stdout, stderr) = self.join_readers();
+                    return Ok(Output {
+                        status,
+                        stdout,
+                        stderr,
+                    });
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Ok(None) => return Err(self.failure("child did not exit after its answer")),
+                Err(e) => return Err(self.failure(&format!("child wait failed: {e}"))),
+            }
+        }
+    }
+
+    fn join_readers(&mut self) -> (Vec<u8>, Vec<u8>) {
+        let join = |reader: Option<std::thread::JoinHandle<Vec<u8>>>| {
+            reader
+                .and_then(|reader| reader.join().ok())
+                .unwrap_or_default()
+        };
+        (join(self.stdout.take()), join(self.stderr.take()))
+    }
+
+    fn failure(&mut self, why: &str) -> String {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let (stdout, stderr) = self.join_readers();
+        format!(
+            "{why}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        )
+    }
+}
+
+impl Drop for FinishChild<'_> {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.join_readers();
+    }
+}
+
+/// Real owned children emit a wrong prompt and stall or close their output. A failure must
+/// report both pipes and reap them; a panic after the expected prompt must reap them too.
+#[test]
+fn finish_prompt_wait_cleans_up_wrong_or_stalled_owned_children() {
+    use std::time::Duration;
+    const FIXTURE: &str = "OBOETE_TEST_FINISH_CHILD";
+    const PROMPT: &[u8] = b"synthetic expected confirmation: ";
+    if let Ok(mode) = std::env::var(FIXTURE) {
+        use std::io::Write;
+        std::io::stdout()
+            .write_all(if mode == "panic" {
+                PROMPT
+            } else {
+                b"synthetic wrong prompt: "
+            })
+            .unwrap();
+        std::io::stdout().flush().unwrap();
+        eprintln!("synthetic child stderr");
+        if mode != "eof" {
+            loop {
+                std::thread::park();
+            }
+        }
+        return;
+    }
+    for mode in ["stall", "eof", "panic"] {
+        let home = tempfile::tempdir().unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "finish_prompt_wait_cleans_up_wrong_or_stalled_owned_children",
+                "--nocapture",
+            ])
+            .env(FIXTURE, mode)
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("CODEX_HOME", home.path().join("codex"))
+            .env("CLAUDE_CONFIG_DIR", home.path().join("claude"))
+            .current_dir(home.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if mode == "panic" {
+            let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut held = FinishChild::new(&mut child, PROMPT);
+                held.wait_for_prompt(Duration::from_secs(2)).unwrap();
+                panic!("synthetic failure while holding the finish child");
+            }));
+            let failed = failed.expect_err("the synthetic panic did not run");
+            assert_eq!(
+                failed.downcast_ref::<&str>(),
+                Some(&"synthetic failure while holding the finish child")
+            );
+        } else {
+            let mut held = FinishChild::new(&mut child, PROMPT);
+            let failed = held.wait_for_prompt(Duration::from_secs(2)).unwrap_err();
+            assert!(failed.contains("synthetic wrong prompt"), "{failed}");
+            assert!(failed.contains("synthetic child stderr"), "{failed}");
+            assert!(held.stdout.is_none() && held.stderr.is_none());
+        }
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "{mode} child was not reaped"
+        );
+    }
 }
 
 /// F1 after F2: record backups carry the same home's identity after its appending device
