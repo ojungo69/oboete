@@ -17,12 +17,11 @@ owner's use, and what could be left out); what the review changed is listed at t
 ## Built so far
 
 - Slice 1 (R2, R3, R10, R12): the worker stays, steps aside and exits on its three conditions.
-  `[worker] resident` is read, but nothing writes it yet (`oboete setup` does in slice 5), so a
-  home is resident only where its owner wrote the key by hand.
+  `[worker] resident` is read; slice 5 writes it through setup or an explicit settings save.
 - Slice 2 (R5, R6, R8): `oboete view --resident` (hidden) is the resident viewer: its lock,
   outcome, token file and fixed port, with no checkout; tests 3 (but `--new-token`), 4, 5 (its
-  outcome), 6, 7 and 8 (but the worker that starts it). Nothing starts it yet (slice 3), and it
-  serves until it is stopped: the once-a-minute tick that ends it is R4's, in slice 3. It runs on
+  outcome), 6, 7 and 8 (but the worker that starts it). Slice 3 starts it and adds R4's
+  once-a-minute tick. It runs on
   Linux only, where keyfile's filesystem check can tell that a mode keeps the token file its
   owner's; macOS and Windows wait for #281, and there `oboete view` stays as it is.
 - Slice 3 (R4, R7, R6's `--new-token`): a resident worker starts the viewer (`view::Starter`) at
@@ -56,7 +55,20 @@ owner's use, and what could be left out); what the review changed is listed at t
   for that specific child, including one already exited, without a global child reaper or
   SIGCHLD change. Tests use copied product binaries, private homes and real minute ticks;
   same PID/arguments, locks, HTTP completion, exec failures, missing-path recovery and child
-  reaping are checked. Setup/settings and the R11 measurements remain slice 5.
+  reaping are checked.
+- Slice 5 (A111, R5, R13): Linux/WSL setup fills absent `worker.resident = true` and the default
+  view port, preserving explicit choices and comments; removing agent wiring changes neither.
+  The settings page shows the saved mode, recommends on only for an absent config, and writes
+  the visible choice only on Save. Reading settings starts nothing. Older request bodies which
+  omit the switch preserve the saved mode. The config writers share `state/config.lock`
+  and still refuse a stale save after a hand edit. Doctor reads existing locks and the exact
+  configured-port outcome without creating a lock or changing its generation; not running is
+  informational. Rebuild alone holds `state/rebuild.lock` until completion, failure or exit,
+  and stats reads that lock rather than a resident worker or leftover rebuild file. Its producer
+  allows a brief status probe to finish, with a bounded 200 ms wait under the worker lock.
+  Native tests cover defaults, explicit off, comments, removal, concurrent config writers,
+  read-only status, and rebuild success/failure/kill. Browser checks cover the visible first-save
+  recommendation, switching off and reload. R11 readings are recorded below before readiness.
 
 ## Before this unit (main 7f8de51)
 

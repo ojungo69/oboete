@@ -181,6 +181,19 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
             "unknown agent {agent}: use claude | codex | grok | agy | opencode | pi | cursor | all"
         ));
     };
+    #[cfg(target_os = "linux")]
+    if !remove {
+        let (worker, view) = crate::settings::resident_defaults(home)?;
+        println!(
+            "worker: {}; resident page address: http://127.0.0.1:{}; run `oboete view` to open memory",
+            if worker.resident {
+                "resident"
+            } else {
+                "exits when idle"
+            },
+            view.port
+        );
+    }
     let cmd = HookCommand::current(home)?;
     let (wired, failed) = wire_each(&agents, |a| wire(a, &cmd, remove));
     if !remove && !wired.is_empty() {
@@ -1844,6 +1857,30 @@ pub fn doctor(home: &Path) -> Result<()> {
     if let Some(why) = crate::worker::last_failure(home) {
         println!("  the last worker run failed: {}", why.trim_end());
         unhealthy.push("the worker stopped with an error (see above)");
+    }
+    match (config::worker(home), config::view(home)) {
+        (Ok(worker), Ok(view)) if worker.resident => {
+            if cfg!(target_os = "linux") {
+                println!(
+                    "  worker: resident, {}",
+                    if crate::worker::running(home) {
+                        "running"
+                    } else {
+                        "not running now (the next hook starts it)"
+                    }
+                );
+                println!("  {}", crate::view::resident_line(home, view.port.get()));
+            } else {
+                println!(
+                    "  worker: resident is configured but not supported here; it exits when idle"
+                );
+            }
+        }
+        (Err(error), _) | (_, Err(error)) => {
+            println!("  cannot read resident settings: {error:#}");
+            unhealthy.push("resident settings cannot be read (see above)");
+        }
+        _ => {}
     }
     if db_path.exists() {
         section(

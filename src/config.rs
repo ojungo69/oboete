@@ -981,20 +981,24 @@ pub struct Worker {
 /// `home`'s `[worker]`, by its own parse as `inject`'s. An error is not "off": a worker that
 /// stays keeps staying while the owner's edit does not load (R3).
 pub fn worker(home: &Path) -> Result<Worker> {
+    let path = home.join("config.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_worker(&text).with_context(|| format!("parse {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Worker::default()),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// The same bytes that a settings save versions; never a second read of a changing file.
+pub fn parse_worker(text: &str) -> Result<Worker> {
     #[derive(Deserialize)]
     struct File {
         #[serde(default)]
         worker: Worker,
     }
-    let path = home.join("config.toml");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => Ok(toml::from_str::<File>(&text)
-            .map_err(|e| toml_error(&text, &e))
-            .with_context(|| format!("parse {}", path.display()))?
-            .worker),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Worker::default()),
-        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
-    }
+    Ok(toml::from_str::<File>(text)
+        .map_err(|e| toml_error(text, &e))?
+        .worker)
 }
 
 /// `[view]` (docs/resident.md R5): the port of the viewer a resident home keeps up, one address a
@@ -1015,20 +1019,23 @@ impl Default for View {
 
 /// `home`'s `[view]`, by its own parse as `worker`'s.
 pub fn view(home: &Path) -> Result<View> {
+    let path = home.join("config.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_view(&text).with_context(|| format!("parse {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(View::default()),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+pub fn parse_view(text: &str) -> Result<View> {
     #[derive(Deserialize)]
     struct File {
         #[serde(default)]
         view: View,
     }
-    let path = home.join("config.toml");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => Ok(toml::from_str::<File>(&text)
-            .map_err(|e| toml_error(&text, &e))
-            .with_context(|| format!("parse {}", path.display()))?
-            .view),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(View::default()),
-        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
-    }
+    Ok(toml::from_str::<File>(text)
+        .map_err(|e| toml_error(text, &e))?
+        .view)
 }
 
 /// `[redaction]` (spec 1.5, 6.4): rules the user adds to the built-in ones, which cannot be

@@ -1014,9 +1014,14 @@ pub fn last_failure(home: &Path) -> Option<String> {
 
 /// Whether a process holds the worker lock now. It takes no number: this runs nothing.
 pub fn running(home: &Path) -> bool {
+    lock_held(&home.join("state").join("worker.lock"))
+}
+
+/// A status probe opens an existing lock only, without creating it or writing a generation.
+pub(crate) fn lock_held(path: &Path) -> bool {
     std::fs::OpenOptions::new()
         .write(true)
-        .open(home.join("state").join("worker.lock"))
+        .open(path)
         .is_ok_and(|f| matches!(try_lock(&f), Err(std::fs::TryLockError::WouldBlock)))
 }
 
@@ -1066,6 +1071,29 @@ pub(crate) fn contending() -> impl Drop {
 pub fn rebuild(home: &Path) -> Result<()> {
     use anyhow::Context;
     let held = lock_asking(home)?;
+    // R13: only this operation owns rebuilding status, including failure and old-file cleanup.
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let _rebuilding = options.open(home.join("state/rebuild.lock"))?;
+    // Stats probes acquire and immediately drop this lock. Under the worker lock no other
+    // rebuild can run; allow a transient probe to finish, without waiting forever on a holder.
+    let start = Instant::now();
+    loop {
+        match _rebuilding.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock)
+                if start.elapsed() < Duration::from_millis(200) =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                anyhow::bail!("the rebuild status lock is in use")
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
     let name = format!("knowledge.db.rebuilding-{}", crate::db::now_ms());
     set_aside(home, &name)?;
     let kept = home.join(&name);
