@@ -1,0 +1,20 @@
+tests/resident.rs
+  s_ce2b24784deac6::t_ebb6f49a970bc2 90-106,108-133,162-166,173,196,214-216,272-276,350-354,359,420,436-437
+  s_ce2b24784deac6::t_0a83df1cf44443 438-440,445,500,546-550,596-600
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7defe9811a506f2bafef1aac7c90f15f4f21dc3a",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
