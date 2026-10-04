@@ -59,7 +59,9 @@ owner's use, and what could be left out); what the review changed is listed at t
 - Slice 5 (A111, R5, R13): Linux/WSL setup fills absent `worker.resident = true` and the default
   view port, preserving explicit choices and comments; removing agent wiring changes neither.
   If defaults cannot be validated or written, setup still attempts the independent agent wiring,
-  reports the defaults failure and exits nonzero; it never repairs an invalid config by rewriting it.
+  reports the defaults failure once and exits nonzero with a summary; it never repairs an invalid
+  config by rewriting it. Native tests for invalid config and a failed config lock cover these
+  preflight paths, unchanged bytes and safe diagnostics; they do not test staged-write rollback.
   The settings page shows the saved mode, recommends on only for an absent config, and writes
   the visible choice only on Save. Reading settings starts nothing. Older request bodies which
   omit the switch preserve the saved mode. The config writers, including v1 settings import,
@@ -228,8 +230,9 @@ Two private synthetic homes were used: one for resources, one for correction lat
 calls and detached starts were disabled; no owner data or live-provider configuration was used.
 The harness reaped its worker and viewer before removing each home. These are the readings
 after the final status-probe/config-writer review corrections.
-The later standalone setup recovery change leaves the measured worker, viewer, hook and correction
-paths unchanged; these source-pinned readings were retained without repeating that fixture.
+The later standalone setup recovery/diagnostic changes and the complete-snapshot test fixture
+leave the measured production worker, viewer, hook and correction paths unchanged; these
+source-pinned readings were retained without repeating that fixture.
 
 The same worker received 1,000 new `UserPromptSubmit` records per cycle through the public hook,
 waited for the indexed prompt count, then idled for 61 seconds. RSS/HWM are KiB; WAL sizes are

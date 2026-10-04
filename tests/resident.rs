@@ -112,22 +112,71 @@ fn repos_response(home: &Path, port: u16) -> String {
     )
 }
 
-/// Startup and successful exec can hold the lock before binding; all other HTTP checks stay
-/// strict. Only connection refusal retries here, never a failed request or response.
-fn ready_repos_response(home: &Path, port: u16) -> String {
-    let start = Instant::now();
-    loop {
-        match std::net::TcpStream::connect(("127.0.0.1", port)) {
-            Ok(stream) => return repos_response_on(home, port, stream),
-            Err(error)
-                if error.kind() == std::io::ErrorKind::ConnectionRefused
-                    && start.elapsed() < Duration::from_secs(20) =>
-            {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(error) => panic!("resident viewer did not bind: {error}"),
-        }
+/// Wait within the existing startup budget for this replacement's actual listener, then send
+/// one strict request. Image visibility and an inherited lock alone do not establish readiness.
+fn ready_repos_response(
+    home: &Path,
+    port: u16,
+    previous: &std::fs::File,
+    process: &mut Child,
+) -> String {
+    until("the new viewer republishes its bound listener", || {
+        assert!(
+            process.try_wait().unwrap().is_none(),
+            "the replacement viewer exited before binding"
+        );
+        fresh_viewer_listener(home, port, previous)
+    });
+    repos_response(home, port)
+}
+
+/// An image can change before the new viewer has republished its bound listener.
+fn fresh_viewer_listener(home: &Path, port: u16, previous: &std::fs::File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(mut outcome) = std::fs::File::open(home.join("state/view-outcome")) else {
+        return false;
+    };
+    let (Ok(old), Ok(current)) = (previous.metadata(), outcome.metadata()) else {
+        return false;
+    };
+    if (old.dev(), old.ino()) == (current.dev(), current.ino()) || !held(home, "view.lock") {
+        return false;
     }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut outcome, &mut text).is_ok()
+        && text.trim() == format!("listening {port}")
+}
+
+#[test]
+fn post_exec_viewer_readiness_requires_a_fresh_listening_outcome() {
+    let home = tempfile::tempdir().unwrap();
+    let state = home.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let lock = std::fs::File::create(state.join("view.lock")).unwrap();
+    lock.lock().unwrap();
+    let outcome = state.join("view-outcome");
+    std::fs::write(&outcome, "listening 12345").unwrap();
+    // Keep the old inode allocated across the staged renames, as the copied-binary fixture does.
+    let previous = std::fs::File::open(&outcome).unwrap();
+    assert!(
+        !fresh_viewer_listener(home.path(), 12345, &previous),
+        "the previous image's listening outcome counted as a new listener"
+    );
+    let publish = |text: &str| {
+        let next = state.join("view-outcome.next");
+        std::fs::write(&next, text).unwrap();
+        std::fs::rename(next, &outcome).unwrap();
+    };
+    publish("starting");
+    assert!(!fresh_viewer_listener(home.path(), 12345, &previous));
+    publish("port in use");
+    assert!(!fresh_viewer_listener(home.path(), 12345, &previous));
+    publish("listening 12346");
+    assert!(!fresh_viewer_listener(home.path(), 12345, &previous));
+    publish("listening 12345");
+    assert!(fresh_viewer_listener(home.path(), 12345, &previous));
+    lock.unlock().unwrap();
+    assert!(!fresh_viewer_listener(home.path(), 12345, &previous));
 }
 
 fn repos_response_on(home: &Path, port: u16, mut stream: std::net::TcpStream) -> String {
@@ -222,6 +271,7 @@ fn a_renamed_binary_replaces_the_viewer_at_its_minute_check_with_the_same_port()
     assert!(held(h, "view.lock"));
     assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
     let arguments = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+    let previous_outcome = std::fs::File::open(h.join("state/view-outcome")).unwrap();
     let next = scratch.path().join("oboete.next");
     std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
     let replacement = std::fs::metadata(&next).unwrap();
@@ -239,11 +289,14 @@ fn a_renamed_binary_replaces_the_viewer_at_its_minute_check_with_the_same_port()
         held(h, "view.lock")
     });
     assert!(viewer.0.try_wait().unwrap().is_none());
+    assert!(
+        ready_repos_response(h, port, &previous_outcome, &mut viewer.0)
+            .starts_with("HTTP/1.1 200 OK\r\n")
+    );
     assert_eq!(
         std::fs::read(format!("/proc/{pid}/cmdline")).unwrap(),
         arguments
     );
-    assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
 }
 
 #[test]
@@ -408,6 +461,7 @@ fn viewer_replacement_waits_for_live_requests_and_answers_them_before_exec() {
     let pid = viewer.0.id();
     assert!(held(h, "view.lock"));
     assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    let previous_outcome = std::fs::File::open(h.join("state/view-outcome")).unwrap();
     let token = std::fs::read_to_string(h.join("state/view-token")).unwrap();
     let image = format!("/proc/{pid}/exe");
     let old = std::fs::metadata(&image).unwrap();
@@ -468,7 +522,10 @@ fn viewer_replacement_waits_for_live_requests_and_answers_them_before_exec() {
     );
     until("the replacement listens", || held(h, "view.lock"));
     assert!(viewer.0.try_wait().unwrap().is_none());
-    assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(
+        ready_repos_response(h, port, &previous_outcome, &mut viewer.0)
+            .starts_with("HTTP/1.1 200 OK\r\n")
+    );
 }
 
 fn viewer_failed_image_or_missing(mode: &str) {
@@ -488,6 +545,7 @@ fn viewer_failed_image_or_missing(mode: &str) {
     let pid = viewer.0.id();
     assert!(held(h, "view.lock"));
     assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    let previous_outcome = std::fs::File::open(h.join("state/view-outcome")).unwrap();
     let image = format!("/proc/{pid}/exe");
     let old = std::fs::metadata(&image).unwrap();
     let next = scratch.path().join("candidate.next");
@@ -542,7 +600,10 @@ fn viewer_failed_image_or_missing(mode: &str) {
     );
     until("recovered viewer ownership", || held(h, "view.lock"));
     assert!(viewer.0.try_wait().unwrap().is_none());
-    assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(
+        ready_repos_response(h, port, &previous_outcome, &mut viewer.0)
+            .starts_with("HTTP/1.1 200 OK\r\n")
+    );
     if mode == "missing" {
         std::fs::rename(&executable, scratch.path().join("permanently-missing")).unwrap();
         let absent = Instant::now();
@@ -889,6 +950,9 @@ fn binary_update_waits_for_loadable_config(viewer: bool) {
     let original = std::fs::metadata(&image).unwrap();
     let generation =
         (!viewer).then(|| std::fs::read_to_string(h.join("state/worker-gen")).unwrap());
+    // Pin the old marker: /proc/exe can change before the new listener is initialized.
+    let previous_outcome =
+        viewer.then(|| std::fs::File::open(h.join("state/view-outcome")).unwrap());
     let valid = std::fs::read_to_string(h.join("config.toml")).unwrap();
     std::fs::write(h.join("config.toml"), "[worker\nresident = true\n").unwrap();
     let next = scratch.path().join("oboete.next");
@@ -933,7 +997,10 @@ fn binary_update_waits_for_loadable_config(viewer: bool) {
         },
     );
     if viewer {
-        assert!(ready_repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(
+            ready_repos_response(h, port, previous_outcome.as_ref().unwrap(), &mut process.0)
+                .starts_with("HTTP/1.1 200 OK\r\n")
+        );
     } else {
         until("the new worker finished initialization", || {
             held(h, lock)

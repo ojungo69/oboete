@@ -219,9 +219,10 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         failed.join(", ")
     );
     #[cfg(target_os = "linux")]
-    if let Some(error) = defaults_error {
-        return Err(error.context("agent wiring finished, but resident defaults were not written"));
-    }
+    anyhow::ensure!(
+        defaults_error.is_none(),
+        "agent wiring finished, but resident defaults were not written (see above)"
+    );
     Ok(())
 }
 

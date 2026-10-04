@@ -2822,7 +2822,13 @@ mod tests {
         let _contending = contending();
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
-        let config = |text: &str| std::fs::write(p.join("config.toml"), text).unwrap();
+        let config = |text: &str| {
+            // The fixture publishes a complete snapshot. In-place truncation briefly exposes
+            // an empty valid config (resident=false), rather than the intended malformed one.
+            let staged = p.join("config.toml.next");
+            std::fs::write(&staged, text).unwrap();
+            std::fs::rename(staged, p.join("config.toml")).unwrap();
+        };
         let hooks = |p: &Path| {
             let p = p.to_path_buf();
             std::thread::spawn(move || run_as(&p, 100, true))

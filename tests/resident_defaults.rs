@@ -234,6 +234,8 @@ fn broken_corpus_settings_do_not_prevent_agent_wiring_but_keep_setup_failed() {
     for invalid_config in [true, false] {
         let home = tempfile::tempdir().unwrap();
         let h = home.path();
+        // Both failures precede staging. These guards cover preflight preservation and
+        // safe diagnostics; staged writes and stale-byte checks have their own tests.
         let original = if invalid_config {
             "[redaction]\nrules = 'synthetic-private-config-canary'\n"
         } else {
@@ -255,7 +257,8 @@ fn broken_corpus_settings_do_not_prevent_agent_wiring_but_keep_setup_failed() {
         );
         assert_eq!(
             std::fs::read_to_string(h.join("config.toml")).unwrap(),
-            original
+            original,
+            "a defaults preflight failure changed the existing configuration"
         );
         let diagnostics = format!(
             "{}{}",
@@ -269,6 +272,15 @@ fn broken_corpus_settings_do_not_prevent_agent_wiring_but_keep_setup_failed() {
         assert!(
             diagnostics.contains("resident defaults not written"),
             "{diagnostics}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stderr)
+                .lines()
+                .find(|line| line.starts_with("oboete: ")),
+            Some(
+                "oboete: agent wiring finished, but resident defaults were not written (see above)"
+            ),
+            "the final error should refer to the diagnostic already printed"
         );
         assert!(!diagnostics.contains("synthetic-private-config-canary"));
         assert!(!h.join("state/worker.lock").exists());
