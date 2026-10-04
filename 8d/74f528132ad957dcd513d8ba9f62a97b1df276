@@ -1,0 +1,56 @@
+src/settings.rs
+  s_ce2b24784deac6::t_59291195111a1f 1024-1049,1053-1054,1059,1119-1121,1123
+  s_ce2b24784deac6::t_63ee67c62c1bbf 89-90,610-612,614-630,635-642
+  s_ce2b24784deac6::t_f273868793a3a9 52-64,476,581,594,613
+  s_ce2b24784deac6::t_601483c93fa59f 113,153-155,321-322,332-337,489-498,647
+  s_ce2b24784deac6::t_a4135a31860843 107-111,631-634,643-646,1050-1052,1055-1058,1060-1118,1124-1125,1129-1130,1133-1134,1137,1144
+  s_ce2b24784deac6::t_5aaf2f55d56233 648,1122,1126-1128,1131-1132,1135-1136,1138-1143,1145-1146
+src/setup.rs
+  s_ce2b24784deac6::t_b574d1cbaed60c 1861-1878
+  s_ce2b24784deac6::t_63ee67c62c1bbf 184-192
+  s_ce2b24784deac6::t_8f24c3a2623a76 193-196,1879-1884
+docs/resident.md
+  s_ce2b24784deac6::t_106209513aaf77 20,23-24,55-59,61-68
+  s_ce2b24784deac6::t_adc0fbec71f924 60
+assets/viewer/app.js
+  s_ce2b24784deac6::t_c8d1642b2453ee 789-790,978
+  s_ce2b24784deac6::t_987bb6d35c0fe2 781-786,1132-1136,1410,1504-1506,1562-1567
+src/worker.rs
+  s_ce2b24784deac6::t_c8d1642b2453ee 1072-1077,1094
+  s_ce2b24784deac6::t_f102d1444d434a 1078-1093
+  s_ce2b24784deac6::t_b574d1cbaed60c 1015-1019,1022
+tests/resident_defaults.rs
+  s_ce2b24784deac6::t_37516c312868df 140-142,152-162,213-220,225-229,233-234,243-251
+  s_ce2b24784deac6::t_f459a9669011a2 1-6,8-38,88-90,252-257,259-274
+  s_ce2b24784deac6::t_adc0fbec71f924 188-212
+  s_ce2b24784deac6::t_5b7faa29c11deb 7,39-62,65-67,72-73,78-83
+  s_ce2b24784deac6::t_f909e16f020c27 258
+  s_ce2b24784deac6::t_c115cdfff8ea1f 63-64,68-71,74-77,84-87,97-100,114-117,123-127,132-135,143-151,163-187,221-224,230-232,235-242
+  s_ce2b24784deac6::t_754b52374e8749 91-96,101-113,118-122,128-131,136-139
+  s_ce2b24784deac6::t_5d21848c65775d 275-277
+src/view.rs
+  s_ce2b24784deac6::t_b574d1cbaed60c 317-332
+  s_ce2b24784deac6::t_a8c6c616acdd53 2804-2817
+  s_ce2b24784deac6::t_c8d1642b2453ee 1573-1574
+docs/settings-coverage.md
+  s_ce2b24784deac6::t_106209513aaf77 19-20,71,79-80
+src/config.rs
+  s_ce2b24784deac6::t_63ee67c62c1bbf 986,992-1003,1024,1030-1038
+  s_ce2b24784deac6::t_47244886a44366 1039-1040
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8d74f528132ad957dcd513d8ba9f62a97b1df276",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
