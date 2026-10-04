@@ -70,7 +70,7 @@ left with "—" there.
 |---|---|---|---|---|---|---|---|
 | First run: an unconfigured home, recommended presets | spec-webui | resident preset on Linux/WSL; full wizard — | settings | explicit save | all; resident Linux/WSL | `settings.rs` `resident_settings_are_read_only_until_the_visible_choice_is_saved`; native browser first-save/off/reload | resident slice 5; remaining W6 |
 | Detect agents, wire and unwire their hooks | 7.2 | — | `oboete setup` | the agent's next session | all | — | W6 |
-| Readiness checks, as doctor reports them | 7.2 | — | `oboete doctor` | at once, read only | all | — | W6 |
+| Readiness checks, as doctor reports them | 7.2, R13 | resident status CLI; full page — | `oboete doctor` | at once, read only | all; resident Linux/WSL | `tests/resident_defaults.rs` `doctor_reads_resident_locks_and_outcomes_without_starting_or_renumbering_them` | resident slice 5; remaining W6 |
 | Import claude-mem's history, with its projects mapped to repositories | 7.4, parity N1 | — | `oboete import` | when confirmed | all | — | W5 after N1 |
 | Migrate v1's store; import transcripts | 7.4 | — | `oboete migrate`, `transcript` | when confirmed | all | — | W5 |
 | Recurate, with the list and estimate before the send | 1.7 | — | `oboete recurate` | when confirmed | all | — | W5 |

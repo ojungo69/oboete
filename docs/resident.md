@@ -68,7 +68,8 @@ owner's use, and what could be left out); what the review changed is listed at t
   allows a brief status probe to finish, with a bounded 200 ms wait under the worker lock.
   Native tests cover defaults, explicit off, comments, removal, concurrent config writers,
   read-only status, and rebuild success/failure/kill. Browser checks cover the visible first-save
-  recommendation, switching off and reload. R11 readings are recorded below before readiness.
+  recommendation, switching off and reload. The R11 measurements below pass on this WSL host;
+  the terminal/shortcut and copied-real-home checks remain part of the owner's rehearsal.
 
 ## Before this unit (main 7f8de51)
 
@@ -212,6 +213,50 @@ R11. **What is measured before the PR is ready** (spec 1.8), on WSL with the own
   leaves them running. The result decides only the runbook's shortcut (below), not the code.
 - The 24-hour run on a copy of the owner's real home is a step of the cut-over runbook (no migrated
   home exists yet, and a copied config has live providers).
+
+### R11 readings, 2026-10-04
+
+Measured on this WSL host with a copied release binary from source tree
+`c063dda3001dab83ae5c5c005777ccf81b7ad3b0` (Linux x86-64, `cargo build --release --locked`).
+Binary SHA-256: `fb0e8e6e047b6088b03b719c63a69591c50f0066ac85f6d204636461bb828a35`.
+Two private synthetic homes were used: one for resources, one for correction latency. Provider
+calls and detached starts were disabled; no owner data or live-provider configuration was used.
+The harness reaped its worker and viewer before removing each home.
+
+The same worker received 1,000 new `UserPromptSubmit` records per cycle through the public hook,
+waited for the indexed prompt count, then idled for 61 seconds. RSS/HWM are KiB; WAL sizes are
+bytes. `P WAL` is `providers.db-wal`; zero means that file was absent.
+
+| Cycle | Indexed prompts | VmRSS | VmHWM | Threads | Open fds | raw.db WAL | knowledge.db WAL | P WAL |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1,000 | 17,356 | 17,964 | 1 | 12 | 4,128,272 | 4,144,752 | 0 |
+| 2 | 2,000 | 17,340 | 18,000 | 1 | 12 | 4,128,272 | 4,144,752 | 0 |
+| 3 | 3,000 | 17,376 | 18,164 | 1 | 12 | 4,128,272 | 4,161,232 | 0 |
+| 4 | 4,000 | 18,008 | 18,712 | 1 | 12 | 4,128,272 | 4,313,672 | 0 |
+| 5 | 5,000 | 18,640 | 19,344 | 1 | 12 | 4,128,272 | 4,313,672 | 0 |
+
+Each viewer load used the named page set above, including an actual settings save. The same
+viewer stayed up for both readings; the worker's final WAL sizes remained unchanged.
+
+| Page-set loads | VmRSS | VmHWM | Threads | Open fds | raw.db WAL | knowledge.db WAL | P WAL |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 16,392 | 16,392 | 2 | 5 | 4,128,272 | 4,313,672 | 0 |
+| 1,000 | 16,400 | 16,400 | 2 | 5 | 4,128,272 | 4,313,672 | 0 |
+
+Both resource checks pass: worker cycle 2 to 5 adds 1,300 KiB (below the 2,048 KiB allowance),
+and viewer load 100 to 1,000 adds 8 KiB. Threads and open fds stay equal in each comparison.
+These readings establish the bounded-growth check for this fixture, not a 24-hour result.
+
+During 600.000 seconds of idle time, `/proc/<pid>/stat` user plus system CPU time increased by
+0.44 seconds for the worker and 0.00 seconds for the viewer at the host's clock-tick resolution.
+
+For correction latency, a public `pref add` created a synthetic claim, then one resident worker
+took its lock and changed its generation. Each of 100 public `correct --body` commands changed
+that claim. Timing covers command start to return; a read-only query of the active claim view
+checked that the new body was visible at return, with the same worker and generation still up.
+All 100 checks pass. Latency in milliseconds: minimum 2,007.601; median 2,015.1885;
+p95 2,018.169 (the 95th sorted sample); maximum 2,020.155; mean 2,014.41374.
+R11 sets no latency threshold; this records the observed roughly two-second command latency.
 
 R12. **Stepping aside for a command.** `oboete restore`, `oboete rebuild` and
 `oboete recurate --yes` that find the worker lock held each write a file of their own in
