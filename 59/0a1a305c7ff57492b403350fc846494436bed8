@@ -1,0 +1,23 @@
+docs/resident.md
+  s_ce2b24784deac6::t_1870383332e41d 71-72,217-256,259
+  s_ce2b24784deac6::t_1d02ab206ade2e 257-258
+  s_ce2b24784deac6::t_004b483b4a0ff1 260
+docs/settings-coverage.md
+  s_ce2b24784deac6::t_1870383332e41d 73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "590a1a305c7ff57492b403350fc846494436bed8",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
