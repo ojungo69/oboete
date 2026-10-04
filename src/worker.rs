@@ -140,6 +140,7 @@ pub(crate) fn file_id(file: std::io::Result<std::fs::Metadata>) -> FileId {
 /// The lock, or `None` when another process holds it. Hooks try it too, and start a worker only
 /// when they get it (dropping it at once).
 pub fn lock(home: &Path) -> Result<Option<Lock>> {
+    crate::executable::check_home(home, Some(crate::executable::Role::Worker))?;
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
     let f = std::fs::OpenOptions::new()
@@ -149,6 +150,10 @@ pub fn lock(home: &Path) -> Result<Option<Lock>> {
         .open(state.join("worker.lock"))?;
     match try_lock(&f) {
         Ok(()) => {
+            crate::executable::check_lock(
+                Some(crate::executable::Role::Worker),
+                file_id(f.metadata()),
+            )?;
             #[cfg(test)]
             if let Some(after) = AFTER_OPEN.get() {
                 after(home);
@@ -370,7 +375,10 @@ pub(crate) fn run_holding(
     taken: Option<Lock>,
     mut phases: Phases,
 ) -> Result<()> {
-    let mut holding = Holding::default();
+    let mut holding = Holding {
+        home: crate::executable::expected(Some(crate::executable::Role::Worker))?,
+        ..Holding::default()
+    };
     if let Some(l) = taken {
         take(home, l, &mut holding);
     }
@@ -592,6 +600,8 @@ fn serve(
             match holding.executable.change() {
                 crate::executable::Change::Replaced => {
                     let _ = crate::executable::exec(
+                        crate::executable::Role::Worker,
+                        holding.home,
                         phases
                             .viewer
                             .as_deref()
@@ -703,6 +713,8 @@ fn serve(
                     match holding.executable.change() {
                         crate::executable::Change::Replaced => {
                             let _ = crate::executable::exec(
+                                crate::executable::Role::Worker,
+                                holding.home,
                                 phases
                                     .viewer
                                     .as_deref()

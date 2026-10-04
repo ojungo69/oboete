@@ -14,6 +14,101 @@ struct Binary {
 }
 
 pub(crate) const VIEWER_HANDOFF: &str = "OBOETE_EXEC_VIEWER";
+pub(crate) const HOME_HANDOFF: &str = "OBOETE_EXEC_HOME";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Role {
+    Worker,
+    Viewer,
+}
+
+impl Role {
+    fn lock(self) -> &'static str {
+        match self {
+            Self::Worker => "worker.lock",
+            Self::Viewer => "view.lock",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Home {
+    role: Role,
+    identity: (u64, u64),
+}
+
+#[cfg(target_os = "linux")]
+static HOME: OnceLock<Result<Option<Home>, ()>> = OnceLock::new();
+
+#[cfg(target_os = "linux")]
+fn inherited_home() -> Result<Option<Home>, ()> {
+    let Some(value) = std::env::var_os(HOME_HANDOFF) else {
+        return Ok(None);
+    };
+    let value = value.into_string().map_err(|_| ())?;
+    let mut fields = value.split(':');
+    let pid = fields.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
+    if pid != std::process::id() {
+        return Ok(None);
+    }
+    let role = match fields.next() {
+        Some("worker.lock") => Role::Worker,
+        Some("view.lock") => Role::Viewer,
+        _ => return Err(()),
+    };
+    let device = fields.next().ok_or(())?.parse::<u64>().map_err(|_| ())?;
+    let inode = fields.next().ok_or(())?.parse::<u64>().map_err(|_| ())?;
+    if fields.next().is_some() {
+        return Err(());
+    }
+    Ok(Some(Home {
+        role,
+        identity: (device, inode),
+    }))
+}
+
+fn resumed() -> std::io::Result<Option<Home>> {
+    #[cfg(target_os = "linux")]
+    return HOME
+        .get_or_init(inherited_home)
+        .as_ref()
+        .copied()
+        .map_err(|_| std::io::Error::other("invalid resident exec home handoff"));
+    #[cfg(not(target_os = "linux"))]
+    Ok(None)
+}
+
+/// The previous image's home remains the authority, including after the new lock is opened.
+pub(crate) fn expected(role: Option<Role>) -> std::io::Result<crate::worker::FileId> {
+    match resumed()? {
+        Some(home) if role == Some(home.role) => Ok(Some(home.identity)),
+        Some(_) => Err(std::io::Error::other("resident exec changed its command")),
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn check_home(home: &Path, role: Option<Role>) -> std::io::Result<()> {
+    if expected(role)?.is_some() {
+        let lock = role.expect("validated resident role").lock();
+        check_lock(
+            role,
+            crate::worker::file_id(std::fs::metadata(home.join("state").join(lock))),
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn check_lock(
+    role: Option<Role>,
+    identity: crate::worker::FileId,
+) -> std::io::Result<()> {
+    if expected(role)?.is_some_and(|expected| Some(expected) != identity) {
+        return Err(std::io::Error::other(
+            "the resident home changed across binary exec",
+        ));
+    }
+    Ok(())
+}
 
 #[cfg(target_os = "linux")]
 fn inherited_viewer() -> Option<u32> {
@@ -45,6 +140,7 @@ fn binary() -> Option<&'static Binary> {
 }
 
 pub(crate) fn init() {
+    let _ = resumed();
     let _ = binary();
 }
 
@@ -121,13 +217,17 @@ pub(crate) fn take_viewer() -> Option<u32> {
     None
 }
 
-pub(crate) fn exec(viewer: Option<u32>) -> std::io::Result<()> {
+pub(crate) fn exec(
+    role: Role,
+    home: crate::worker::FileId,
+    viewer: Option<u32>,
+) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     if let Some(binary) = binary() {
-        return binary.exec(viewer);
+        return binary.exec(role, home, viewer);
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = viewer;
+    let _ = (role, home, viewer);
     Err(std::io::Error::new(
         std::io::ErrorKind::NotFound,
         "startup executable unavailable",
@@ -136,7 +236,12 @@ pub(crate) fn exec(viewer: Option<u32>) -> std::io::Result<()> {
 
 #[cfg(target_os = "linux")]
 impl Binary {
-    fn exec(&self, viewer: Option<u32>) -> std::io::Result<()> {
+    fn exec(
+        &self,
+        role: Role,
+        home: crate::worker::FileId,
+        viewer: Option<u32>,
+    ) -> std::io::Result<()> {
         use std::ffi::{CString, OsStr};
         use std::os::unix::ffi::OsStrExt;
 
@@ -149,19 +254,29 @@ impl Binary {
             })
         }
         let path = string(self.path.as_os_str(), "executable path")?;
+        let (device, inode) = home
+            .ok_or_else(|| std::io::Error::other("resident lock identity unavailable for exec"))?;
         let arguments: Vec<_> = self
             .arguments
             .iter()
             .map(|argument| string(argument, "argument"))
             .collect::<std::io::Result<_>>()?;
         let mut environment: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| key != VIEWER_HANDOFF)
+            .filter(|(key, _)| key != VIEWER_HANDOFF && key != HOME_HANDOFF)
             .map(|(mut key, value)| {
                 key.push("=");
                 key.push(value);
                 string(&key, "environment")
             })
             .collect::<std::io::Result<_>>()?;
+        environment.push(
+            CString::new(format!(
+                "{HOME_HANDOFF}={}:{}:{device}:{inode}",
+                std::process::id(),
+                role.lock(),
+            ))
+            .expect("numeric home handoff contains no NUL"),
+        );
         if let Some(viewer) = viewer {
             environment.push(
                 CString::new(format!("{VIEWER_HANDOFF}={}:{viewer}", std::process::id()))

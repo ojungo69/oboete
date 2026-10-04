@@ -501,7 +501,7 @@ pub fn resident(home: &Path) -> Result<()> {
             }
             match executable.change() {
                 crate::executable::Change::Replaced if looking.may_leave() => {
-                    let _ = crate::executable::exec(None);
+                    let _ = crate::executable::exec(crate::executable::Role::Viewer, id, None);
                     // A returned exec installed no image; retain the lock/listener and serving.
                     looking.closing.store(false, Ordering::SeqCst);
                 }
@@ -573,6 +573,7 @@ impl Leaving {
 /// The resident viewer's start: the lock first, then `starting`, the filesystem check, the token
 /// file, the port, and `listening <port>`; a start that fails says why instead.
 fn listen(home: &Path) -> Result<Option<Resident>> {
+    crate::executable::check_home(home, Some(crate::executable::Role::Viewer))?;
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
     // A `state` folder another user could change is not written into at all (CodeRabbit on #376).
@@ -584,6 +585,10 @@ fn listen(home: &Path) -> Result<Option<Resident>> {
         return Ok(None);
     }
     let lock = view_lock(&state)?;
+    crate::executable::check_lock(
+        Some(crate::executable::Role::Viewer),
+        crate::worker::file_id(lock.metadata()),
+    )?;
     match crate::worker::try_lock(&lock) {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => return Ok(None),

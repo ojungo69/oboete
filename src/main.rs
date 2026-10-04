@@ -385,6 +385,15 @@ fn emit(text: &str) -> Result<()> {
 }
 
 fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
+    // R9's new image must validate the previous resident's home before even creating it.
+    executable::check_home(
+        &home,
+        match &cmd {
+            Cmd::Worker { .. } => Some(executable::Role::Worker),
+            Cmd::View { resident: true, .. } => Some(executable::Role::Viewer),
+            _ => None,
+        },
+    )?;
     // Hooks create storage after the skip guards; transcript preview creates nothing.
     let preview = matches!(&cmd, Cmd::Import { source, yes: false, .. } if source == "transcripts");
     if !matches!(&cmd, Cmd::Hook { .. }) && !preview {

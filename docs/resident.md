@@ -44,6 +44,10 @@ owner's use, and what could be left out); what the review changed is listed at t
   gives a complete minute; recovery or another metadata error cancels it. Only continued
   NotFound ends the process. The exec boundary uses libc execve: a failed standard Command exec
   changes SIGPIPE disposition on the installed Rust, which would end the old serving process.
+  A successful exec closes the old lock/listener and the new image reacquires them; the brief
+  update gap described under Limits remains. Private same-PID metadata carries the old worker
+  or viewer lock identity. The new image checks it before any home creation, config read or
+  store write, checks the opened lock too, and keeps that identity for subsequent home checks.
   A worker carries only its known viewer child PID across exec, in private ephemeral environment
   metadata bound to the same process; detached children never inherit it. The new image waits
   for that specific child, including one already exited, without a global child reaper or

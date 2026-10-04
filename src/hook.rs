@@ -2046,6 +2046,7 @@ pub(crate) fn spawn_detached(home: &Path, args: &[&str]) -> Option<std::process:
     let mut cmd = std::process::Command::new(exe);
     // Handoff belongs only to an exec of this process, never to a detached child.
     cmd.env_remove(crate::executable::VIEWER_HANDOFF);
+    cmd.env_remove(crate::executable::HOME_HANDOFF);
     cmd.arg("--home").arg(&home).args(args).current_dir(&home);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
