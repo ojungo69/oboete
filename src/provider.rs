@@ -1888,6 +1888,7 @@ impl CliInput {
     fn close(&mut self) {
         // Close before releasing: a descendant can retain the read end after its parent dies.
         drop(self.pipe.take());
+        self.text = String::new();
         if let Some(admission) = self.admission.take() {
             admission.release();
         }
