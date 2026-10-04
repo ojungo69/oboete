@@ -123,30 +123,34 @@ fn a_legacy_copied_home_refuses_a_new_native_records_forget_before_registration(
 }
 
 fn record(home: &Path, body: &str) -> String {
-    let source = home.join("native-source.db");
-    let db = rusqlite::Connection::open(&source).unwrap();
-    db.execute_batch("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-        INSERT OR IGNORE INTO meta VALUES('device_id','nativefixture');
-        CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,agent TEXT,repo TEXT,cwd TEXT,started_at INTEGER,last_event_at INTEGER);
-        CREATE TABLE IF NOT EXISTS session_repos(session_id TEXT,repo TEXT);
-        CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,session_id TEXT,event TEXT,ts INTEGER,payload TEXT);
-        CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY,uid TEXT,session_id TEXT,repo TEXT,ts INTEGER,kind TEXT,title TEXT,body TEXT);
-        CREATE TABLE IF NOT EXISTS summaries(id INTEGER PRIMARY KEY,uid TEXT,session_id TEXT,repo TEXT,ts INTEGER,body TEXT);
-        CREATE TABLE IF NOT EXISTS prompts(id INTEGER PRIMARY KEY,uid TEXT,session_id TEXT,repo TEXT,ts INTEGER,body TEXT);
-        INSERT OR IGNORE INTO sessions VALUES('native-session','claude','github.com/test/privacy','/synthetic',100,110);").unwrap();
-    let next: i64 = db
-        .query_row("SELECT COALESCE(MAX(id),0)+1 FROM events", [], |r| r.get(0))
-        .unwrap();
-    db.execute(
-        "INSERT INTO events VALUES(?1,'native-session','UserPromptSubmit',?2,?3)",
-        rusqlite::params![
-            next,
-            100 + next,
-            serde_json::json!({"prompt":body}).to_string()
-        ],
-    )
-    .unwrap();
-    drop(db);
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    let path = projects.join("fixture-session.jsonl");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let time = format!("1970-01-01T00:00:00.{:03}Z", 101 + existing.lines().count());
+    let line = serde_json::json!({"type":"user", "sessionId":"fixture-native-session",
+        "cwd":"/synthetic", "timestamp":time, "message":{"role":"user", "content":body}});
+    std::fs::write(path, format!("{existing}{line}\n")).unwrap();
+    ok(run(
+        home,
+        &["import", "transcripts", "--agent", "claude", "--yes"],
+        "",
+    ));
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    let hits = ok(run(
+        home,
+        &["search", "--all", "--raw", "only", "--", body],
+        "",
+    ));
+    hits.split_whitespace().next().unwrap().to_owned()
+}
+
+fn v1_record(home: &Path, body: &str) -> String {
+    v1_record_in_session(home, body, "native-session")
+}
+
+fn v1_record_in_session(home: &Path, body: &str, sid: &str) -> String {
+    let source = v1_source_event(home, body, sid);
     ok(run(
         home,
         &["migrate", "--from", source.to_str().unwrap()],
@@ -159,6 +163,460 @@ fn record(home: &Path, body: &str) -> String {
         "",
     ));
     hits.split_whitespace().next().unwrap().to_owned()
+}
+
+fn v1_source_event(home: &Path, body: &str, sid: &str) -> std::path::PathBuf {
+    let source = home.join("native-source.db");
+    let db = rusqlite::Connection::open(&source).unwrap();
+    db.execute_batch("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+        INSERT OR IGNORE INTO meta VALUES('device_id','nativefixture');
+        CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,agent TEXT,repo TEXT,cwd TEXT,started_at INTEGER,last_event_at INTEGER);
+        CREATE TABLE IF NOT EXISTS session_repos(session_id TEXT,repo TEXT);
+        CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,session_id TEXT,event TEXT,ts INTEGER,payload TEXT);
+        CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY,uid TEXT,session_id TEXT,repo TEXT,ts INTEGER,kind TEXT,title TEXT,body TEXT);
+        CREATE TABLE IF NOT EXISTS summaries(id INTEGER PRIMARY KEY,uid TEXT,session_id TEXT,repo TEXT,ts INTEGER,body TEXT);
+        CREATE TABLE IF NOT EXISTS prompts(id INTEGER PRIMARY KEY,uid TEXT,session_id TEXT,repo TEXT,ts INTEGER,body TEXT);").unwrap();
+    db.execute("INSERT OR IGNORE INTO sessions VALUES(?1,'claude','github.com/test/privacy','/synthetic',100,110)", [sid]).unwrap();
+    let next: i64 = db
+        .query_row("SELECT COALESCE(MAX(id),0)+1 FROM events", [], |r| r.get(0))
+        .unwrap();
+    db.execute(
+        "INSERT INTO events VALUES(?1,?2,'UserPromptSubmit',?3,?4)",
+        rusqlite::params![
+            next,
+            sid,
+            100 + next,
+            serde_json::json!({"prompt":body}).to_string()
+        ],
+    )
+    .unwrap();
+    drop(db);
+    source
+}
+
+/// Historical v1 requests use the published bodyless Request/log schema. Read only native
+/// hashes and coordinates from the selected imported record; never guess an origin by text.
+fn historical_v1_forget(home: &Path, id: &str) {
+    use sha2::{Digest, Sha256};
+    let (device, seq) = id.split_once(':').unwrap();
+    let seq: i64 = seq.parse().unwrap();
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let home_id: String = db
+        .query_row("SELECT value FROM meta WHERE key='home_id'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let (origin, session, ts): (String, String, i64) = db
+        .query_row(
+            "SELECT o.origin, o.native_session, r.ts FROM import_origins o
+         JOIN records r ON r.device=o.device AND r.seq=o.seq
+         WHERE o.device=?1 AND o.seq=?2 AND r.source='oboete-v1'",
+            rusqlite::params![device, seq],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    drop(db);
+    // Field order matches Request/Record serialization, which the log checksum authenticates.
+    let request = serde_json::json!({
+        "v":1, "home":home_id, "job":format!("aaaaaaaaaaaaaaaa{seq:016x}"), "started":1234,
+        "target":{"kind":"record", "device":device, "seq":seq},
+        "records":[{"device":device, "seq":seq, "origin":origin, "session":session, "ts":ts}]
+    });
+    let serialized = request.to_string();
+    let line = format!(
+        "{{\"sum\":\"{:x}\",\"request\":{serialized}}}\n",
+        Sha256::digest(serialized.as_bytes())
+    );
+    assert!(!line.contains(CANARY));
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(home.join("forget.log"))
+        .unwrap();
+    file.write_all(line.as_bytes()).unwrap();
+    drop(file);
+    assert!(ok(run(home, &["forget", "--status"], "")).contains("physical purge pending"));
+}
+
+fn assert_no_registration(home: &Path) {
+    assert!(!home.join("forget.log").exists());
+    assert!(!home.join("backups/forget.log").exists());
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let writes: i64 = db
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM forget_jobs)+
+        (SELECT COUNT(*) FROM denied_records)+(SELECT COUNT(*) FROM records WHERE source='forget')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(writes, 0, "refusal wrote forget state");
+}
+
+fn mixed_transcript_record(home: &Path, sid: &str, ts: i64, body: &str) -> String {
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    let time = chrono::DateTime::from_timestamp_millis(ts)
+        .unwrap()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    std::fs::write(
+        projects.join("mixed-source.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type":"user", "sessionId":sid, "cwd":"/synthetic", "timestamp":time,
+                "message":{"role":"user", "content":body}
+            })
+        ),
+    )
+    .unwrap();
+    ok(run(
+        home,
+        &["import", "transcripts", "--agent", "claude", "--yes"],
+        "",
+    ));
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let (device, seq): (String, i64) = db.query_row(
+        "SELECT device,seq FROM records WHERE source='transcript' AND kind='prompt' ORDER BY seq DESC LIMIT 1",
+        [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    format!("{device}:{seq}")
+}
+
+#[test]
+fn transcript_forget_blocks_cross_source_v1_migration_before_commit_or_checkpoint() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let id = record(home, CANARY);
+    ok(run(home, &["forget", "--record", &id, "--yes"], ""));
+    let source = v1_source_event(home, CANARY, "fixture-native-session");
+    let imported = run(home, &["migrate", "--from", source.to_str().unwrap()], "");
+    assert!(
+        !imported.status.success(),
+        "v1 revived a denied transcript: {imported:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&imported.stderr).contains(
+            "this import overlaps a forget without a verified cross-source event identity"
+        )
+    );
+    assert!(String::from_utf8_lossy(&imported.stderr).contains("this batch was not imported"));
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let committed: i64 = db.query_row("SELECT (SELECT COUNT(*) FROM records WHERE source='oboete-v1')+
+        (SELECT COUNT(*) FROM ops WHERE type='migration' AND json_extract(body,'$.key') LIKE 'oboete-v1:%')",
+        [], |r| r.get(0)).unwrap();
+    assert_eq!(
+        committed, 0,
+        "cross-source refusal committed rows or a checkpoint"
+    );
+    drop(db);
+    assert!(
+        !ok(run(
+            home,
+            &["search", "--all", "--raw", "only", "--", CANARY],
+            ""
+        ))
+        .contains(CANARY)
+    );
+    let later = record(home, "distinct-transcript-event-after-refused-v1-785");
+    assert!(
+        ok(run(home, &["get", &later], ""))
+            .contains("distinct-transcript-event-after-refused-v1-785")
+    );
+}
+
+#[test]
+fn a_transcript_with_a_same_session_v1_copy_cannot_register_a_cross_source_forget() {
+    mixed_v1_copy_registration(false);
+}
+
+#[test]
+fn a_known_different_native_v1_session_does_not_block_transcript_forget() {
+    mixed_v1_copy_registration(true);
+}
+
+fn mixed_v1_copy_registration(distinct: bool) {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let v1 = v1_record(home, CANARY); //101ms
+    let sid = if distinct {
+        "verified-other-session"
+    } else {
+        "native-session"
+    };
+    let transcript = mixed_transcript_record(home, sid, 100, CANARY);
+    let result = run(home, &["forget", "--record", &transcript, "--yes"], "");
+    if distinct {
+        ok(result);
+        assert!(
+            !String::from_utf8_lossy(&run(home, &["get", &transcript], "").stdout).contains(CANARY)
+        );
+    } else {
+        assert!(
+            !result.status.success(),
+            "mixed native copies were accepted: {result:?}"
+        );
+        assert!(String::from_utf8_lossy(&result.stderr).contains("unverified native copies"));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("nothing was registered"));
+        assert!(ok(run(home, &["get", &transcript], "")).contains(CANARY));
+        assert_no_registration(home);
+    }
+    assert!(ok(run(home, &["get", &v1], "")).contains(CANARY));
+}
+
+#[test]
+fn a_transcript_with_a_masked_live_hook_copy_cannot_register_a_cross_source_forget() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"),"[summary]\ncurate = false\n[redaction]\nextra_rules=[{id='live-sid',regex='forget-session'}]\n").unwrap();
+    let live = hook_record(home, CANARY);
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let (ts, masked): (i64, String) = db
+        .query_row(
+            "SELECT ts,session FROM records WHERE source='hook' AND kind='prompt'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_ne!(masked, "forget-session");
+    drop(db);
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let transcript = mixed_transcript_record(home, "forget-session", ts - 1, CANARY);
+    let result = run(home, &["forget", "--record", &transcript, "--yes"], "");
+    assert!(
+        !result.status.success(),
+        "an unverified live alias was accepted: {result:?}"
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("unverified native copies"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("nothing was registered"));
+    assert_no_registration(home);
+    assert!(ok(run(home, &["get", &live], "")).contains(CANARY));
+    assert!(ok(run(home, &["get", &transcript], "")).contains(CANARY));
+}
+
+#[test]
+fn a_v1_record_without_cross_source_identity_is_refused_before_preview_and_registration() {
+    v1_registration_is_refused(false);
+}
+
+#[test]
+fn a_v1_record_without_cross_source_identity_cannot_start_with_yes() {
+    v1_registration_is_refused(true);
+}
+
+fn v1_registration_is_refused(yes: bool) {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let id = v1_record(home, CANARY);
+    let args = if yes {
+        vec!["forget", "--record", &id, "--yes"]
+    } else {
+        vec!["forget", "--record", &id]
+    };
+    let result = run(home, &args, "");
+    assert!(
+        !result.status.success(),
+        "v1 forget was accepted: {result:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("no verified cross-source event identity"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("nothing was registered"));
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("Raw records:"));
+    assert!(!String::from_utf8_lossy(&result.stdout).contains(CANARY));
+    assert!(ok(run(home, &["get", &id], "")).contains(CANARY));
+    assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
+    assert!(!home.join("forget.log").exists());
+    assert!(!home.join("backups/forget.log").exists());
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let writes: i64 = db
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM forget_jobs)+(SELECT COUNT(*) FROM denied_records)+
+             (SELECT COUNT(*) FROM records WHERE type='tombstone')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(writes, 0, "v1 refusal wrote partial state");
+}
+
+/// A historical v1 denial has no common event ID in transcripts. A 1ms earlier alias must
+/// cause explicit refusal, not timestamp guessing, while prior history and other sessions stay.
+#[test]
+fn historical_v1_denials_refuse_cross_source_skew_across_recovery_boundaries() {
+    cross_source_skew_is_refused("live");
+}
+
+#[test]
+fn historical_v1_denials_refuse_cross_source_skew_after_old_restore_and_redaction() {
+    cross_source_skew_is_refused("older-backup-masked");
+}
+
+#[test]
+fn historical_v1_denials_refuse_cross_source_skew_after_control_only_restore() {
+    cross_source_skew_is_refused("control-only");
+}
+
+fn cross_source_skew_is_refused(boundary: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let id = v1_record(&home, CANARY); // the v1 event is at 101ms
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    let line = |sid: &str, time: &str, prompt: &str| {
+        serde_json::json!({
+            "type":"user", "sessionId":sid, "cwd":"/synthetic", "timestamp":time,
+            "message":{"role":"user", "content":prompt}
+        })
+        .to_string()
+    };
+    let earlier = line(
+        "native-session",
+        "1970-01-01T00:00:00.099Z",
+        "earlier-cross-source-history-781",
+    );
+    let path = projects.join("denied-session.jsonl");
+    std::fs::write(&path, format!("{earlier}\n")).unwrap();
+    ok(run(
+        &home,
+        &["import", "transcripts", "--agent", "claude", "--yes"],
+        "",
+    ));
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    let old_backup = root.path().join("before-denial");
+    copy_backup(&home.join("backups"), &old_backup);
+    if boundary == "control-only" {
+        let copied = home.join("raw.db.copy");
+        std::fs::copy(home.join("raw.db"), &copied).unwrap();
+        for file in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(file));
+        }
+        std::fs::rename(copied, home.join("raw.db")).unwrap();
+        ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+        let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        db.execute("DELETE FROM ops WHERE type='migration' AND json_extract(body,'$.key') LIKE 'transcript:%'", []).unwrap();
+        drop(db);
+        // Import earlier history on the new device before the legacy denial is replayed.
+        ok(run(
+            &home,
+            &["import", "transcripts", "--agent", "claude", "--yes"],
+            "",
+        ));
+        std::fs::write(
+            home.join("config.toml"),
+            "[summary]\ncurate = false\n[backup]\ndir = 'control-only'\n",
+        )
+        .unwrap();
+    }
+    historical_v1_forget(&home, &id);
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    if boundary == "older-backup-masked" {
+        std::fs::remove_dir_all(home.join("backups")).unwrap();
+        copy_backup(&old_backup, &home.join("backups"));
+        ok(run(&home, &["restore"], ""));
+        std::fs::write(home.join("config.toml"),
+                "[summary]\ncurate = false\n[redaction]\nextra_rules = [{id='sid-mask',regex='native-session'}]\n").unwrap();
+    } else if boundary == "control-only" {
+        lose_raw_and_request_logs(&home, "control-only");
+        std::fs::remove_dir_all(home.join("backups")).unwrap();
+        ok(run(&home, &["restore"], ""));
+        let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let originals: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM records WHERE source='oboete-v1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            originals, 0,
+            "control-only restore retained the v1 original"
+        );
+        assert!(!home.join("forget.log").exists());
+    }
+    let alias = line("native-session", "1970-01-01T00:00:00.100Z", CANARY);
+    std::fs::write(&path, format!("{earlier}\n{alias}\n")).unwrap();
+    std::fs::write(
+        projects.join("unrelated-session.jsonl"),
+        format!(
+            "{}\n",
+            line(
+                "unrelated-session",
+                "1970-01-01T00:00:00.100Z",
+                "unrelated-cross-source-record-782"
+            )
+        ),
+    )
+    .unwrap();
+    let imported = run(
+        &home,
+        &["import", "transcripts", "--agent", "claude", "--yes"],
+        "",
+    );
+    assert!(
+        !imported.status.success(),
+        "{boundary}: skewed same-session batch was accepted: {imported:?}"
+    );
+    let messages = format!(
+        "{}{}",
+        String::from_utf8_lossy(&imported.stdout),
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    assert!(
+        messages.contains(
+            "this import overlaps a forget without a verified cross-source event identity"
+        ),
+        "{boundary}: {messages}"
+    );
+    assert!(
+        messages.contains("this batch was not imported"),
+        "{boundary}: {messages}"
+    );
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    assert!(
+        !ok(run(
+            &home,
+            &["search", "--all", "--raw", "only", "--", CANARY],
+            ""
+        ))
+        .contains(CANARY)
+    );
+    assert!(
+        ok(run(
+            &home,
+            &[
+                "search",
+                "--all",
+                "--raw",
+                "only",
+                "--",
+                "earlier-cross-source-history-781"
+            ],
+            ""
+        ))
+        .contains("earlier-cross-source-history-781")
+    );
+    assert!(
+        ok(run(
+            &home,
+            &[
+                "search",
+                "--all",
+                "--raw",
+                "only",
+                "--",
+                "unrelated-cross-source-record-782"
+            ],
+            ""
+        ))
+        .contains("unrelated-cross-source-record-782")
+    );
 }
 
 /// D1 rules 1 to 3: the request is registered in raw.db, the record hidden, and both log copies
@@ -176,7 +634,7 @@ fn forgetting_a_record_hides_it_logs_it_without_text_and_says_what_it_cannot_rea
     let said = String::from_utf8_lossy(&piped.stdout);
     assert!(said.contains("Raw records: 1"), "{said}");
     assert!(said.contains("Physical purge is not built yet"), "{said}");
-    assert!(said.contains("the old oboete v1 store"), "{said}");
+    assert!(said.contains("the agent's own transcript files"), "{said}");
     assert!(String::from_utf8_lossy(&piped.stderr).contains("needs a terminal"));
     assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
     assert!(ok(run(home, &["get", &id], "")).contains(CANARY));
@@ -203,7 +661,7 @@ fn an_already_tombstoned_native_record_can_register_a_forget_and_survives_reimpo
     let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
     let (device, seq): (String, i64) = db
         .query_row(
-            "SELECT device, seq FROM records WHERE source='oboete-v1' AND kind='prompt'",
+            "SELECT device, seq FROM records WHERE source='transcript' AND kind='prompt'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -228,10 +686,9 @@ fn an_already_tombstoned_native_record_can_register_a_forget_and_survives_reimpo
     db.execute("DELETE FROM ops WHERE type='migration'", [])
         .unwrap();
     drop(db);
-    let source = home.join("native-source.db");
     ok(run(
         home,
-        &["migrate", "--from", source.to_str().unwrap()],
+        &["import", "transcripts", "--agent", "claude", "--yes"],
         "",
     ));
     ok(run(home, &["worker", "--idle-ms", "0"], ""));
@@ -271,7 +728,7 @@ fn a_restored_rescan_hidden_native_record_can_be_forgotten_without_its_body() {
     let home = home.path();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
     let id = record(home, CANARY);
-    let keep = hook_record(home, "unrelated-restored-rescan-record-741");
+    let keep = record(home, "unrelated-restored-rescan-record-741");
     rescan_and_backup_native_record(home, &id);
     lose_raw_and_request_logs(home, "rescanned");
     ok(run(home, &["restore"], ""));
@@ -347,70 +804,25 @@ fn a_restored_rescan_hidden_native_record_can_be_forgotten_without_its_body() {
     db.execute("DELETE FROM ops WHERE type='migration'", [])
         .unwrap();
     drop(db);
-    let source = home.join("native-source.db");
     let imported = ok(run(
-        home,
-        &["migrate", "--from", source.to_str().unwrap()],
-        "",
-    ));
-    assert!(
-        imported.contains("\"records\":0"),
-        "restored origin denial was lost: {imported}"
-    );
-    let projects = home.join("claude/projects/synthetic");
-    std::fs::create_dir_all(&projects).unwrap();
-    let line = |time: &str, prompt: &str| {
-        serde_json::json!({
-            "type":"user", "sessionId":"native-session", "cwd":"/synthetic",
-            "timestamp":time, "message":{"role":"user", "content":prompt}
-        })
-    };
-    std::fs::write(
-        projects.join("restored-rescan-cut.jsonl"),
-        format!(
-            "{}\n{}\n{}\n",
-            line(
-                "1970-01-01T00:00:00.100Z",
-                "earlier-restored-rescan-record-742"
-            ),
-            line("1970-01-01T00:00:00.101Z", CANARY),
-            line(
-                "1970-01-01T00:00:00.102Z",
-                "later-restored-rescan-record-743"
-            )
-        ),
-    )
-    .unwrap();
-    ok(run(
         home,
         &["import", "transcripts", "--agent", "claude", "--yes"],
         "",
     ));
-    ok(run(home, &["worker", "--idle-ms", "0"], ""));
-    for body in [CANARY, "later-restored-rescan-record-743"] {
-        assert!(
-            !ok(run(
-                home,
-                &["search", "--all", "--raw", "only", "--", body],
-                ""
-            ))
-            .contains(body)
-        );
-    }
     assert!(
-        ok(run(
+        imported.contains("\"seen\":0"),
+        "restored origin denial was lost: {imported}"
+    );
+    // Transcript-only denial is exact-origin: another event of this session still imports.
+    let later = record(home, "later-distinct-transcript-event-783");
+    assert!(ok(run(home, &["get", &later], "")).contains("later-distinct-transcript-event-783"));
+    assert!(
+        !ok(run(
             home,
-            &[
-                "search",
-                "--all",
-                "--raw",
-                "only",
-                "--",
-                "earlier-restored-rescan-record-742"
-            ],
+            &["search", "--all", "--raw", "only", "--", CANARY],
             ""
         ))
-        .contains("earlier-restored-rescan-record-742")
+        .contains(CANARY)
     );
     assert!(ok(run(home, &["get", &keep], "")).contains("unrelated-restored-rescan-record-741"));
 }
@@ -519,14 +931,14 @@ fn restored_removed_records_with_missing_or_unverifiable_metadata_are_refused() 
 }
 
 /// The request logs are unavailable: each restored store's next backup must carry the same
-/// native denial and session cutoff, without giving a removed record its body back.
+/// native transcript denial without giving a removed record its body back.
 #[test]
 fn repeated_backups_of_a_restored_forget_keep_its_denial_without_request_logs() {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
     let id = record(home, CANARY);
-    let keep = hook_record(home, "unrelated-backup-generation-record-711");
+    let keep = record(home, "unrelated-backup-generation-record-711");
     ok(run(home, &["forget", "--record", &id, "--yes"], ""));
     ok(run(home, &["worker", "--idle-ms", "0"], ""));
     lose_raw_and_request_logs(home, "backups");
@@ -555,39 +967,18 @@ fn repeated_backups_of_a_restored_forget_keep_its_denial_without_request_logs() 
     db.execute("DELETE FROM ops WHERE type='migration'", [])
         .unwrap();
     drop(db);
-    let source = home.join("native-source.db");
     let retried = ok(run(
-        home,
-        &["migrate", "--from", source.to_str().unwrap()],
-        "",
-    ));
-    assert!(
-        retried.contains("\"records\":0"),
-        "the native denial was lost: {retried}"
-    );
-    let projects = home.join("claude/projects/synthetic");
-    std::fs::create_dir_all(&projects).unwrap();
-    let line = |time: &str, prompt: &str| {
-        serde_json::json!({
-            "type":"user", "sessionId":"native-session", "cwd":"/synthetic",
-            "timestamp":time, "message":{"role":"user", "content":prompt}
-        })
-    };
-    std::fs::write(
-        projects.join("denied-cut.jsonl"),
-        format!(
-            "{}\n{}\n",
-            line("1970-01-01T00:00:00.100Z", "earlier-backup-cut-record-712"),
-            line("1970-01-01T00:00:00.101Z", CANARY)
-        ),
-    )
-    .unwrap();
-    ok(run(
         home,
         &["import", "transcripts", "--agent", "claude", "--yes"],
         "",
     ));
-    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    assert!(
+        retried.contains("\"seen\":0"),
+        "the native denial was lost: {retried}"
+    );
+    // Transcript-only denial is exact-origin: another event of this session still imports.
+    let later = record(home, "later-distinct-transcript-event-784");
+    assert!(ok(run(home, &["get", &later], "")).contains("later-distinct-transcript-event-784"));
     assert!(
         !ok(run(
             home,
@@ -595,21 +986,6 @@ fn repeated_backups_of_a_restored_forget_keep_its_denial_without_request_logs() 
             ""
         ))
         .contains(CANARY)
-    );
-    assert!(
-        ok(run(
-            home,
-            &[
-                "search",
-                "--all",
-                "--raw",
-                "only",
-                "--",
-                "earlier-backup-cut-record-712"
-            ],
-            ""
-        ))
-        .contains("earlier-backup-cut-record-712")
     );
     assert!(ok(run(home, &["get", &keep], "")).contains("unrelated-backup-generation-record-711"));
 }
@@ -633,7 +1009,7 @@ fn cross_device_denial_survives_backups(alias: bool) {
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
-    let first = record(&home, CANARY);
+    let first = v1_record(&home, CANARY);
     let (original_device, original_seq) = first.split_once(':').unwrap();
     let snapshot = root.path().join("raw-before-forget.db");
     std::fs::copy(home.join("raw.db"), &snapshot).unwrap();
@@ -666,7 +1042,7 @@ fn cross_device_denial_survives_backups(alias: bool) {
     } else {
         first.clone()
     };
-    ok(run(&home, &["forget", "--record", &selected, "--yes"], ""));
+    historical_v1_forget(&home, &selected);
     let request_log = std::fs::read(home.join("forget.log")).unwrap();
     let request: serde_json::Value = serde_json::from_slice(&request_log).unwrap();
     assert_eq!(
@@ -797,11 +1173,26 @@ fn cross_device_denial_survives_backups(alias: bool) {
         ),
     )
     .unwrap();
-    ok(run(
+    let refused = run(
         &home,
         &["import", "transcripts", "--agent", "claude", "--yes"],
         "",
-    ));
+    );
+    assert!(
+        !refused.status.success(),
+        "a restored historical v1 denial accepted a transcript batch"
+    );
+    let messages = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        messages.contains(
+            "this import overlaps a forget without a verified cross-source event identity"
+        )
+    );
+    assert!(messages.contains("this batch was not imported"));
     ok(run(&home, &["worker", "--idle-ms", "0"], ""));
     assert!(
         !ok(run(
@@ -812,7 +1203,7 @@ fn cross_device_denial_survives_backups(alias: bool) {
         .contains(CANARY)
     );
     assert!(
-        ok(run(
+        !ok(run(
             &home,
             &[
                 "search",
@@ -824,7 +1215,8 @@ fn cross_device_denial_survives_backups(alias: bool) {
             ],
             ""
         ))
-        .contains("earlier-target-free-cut-record-722")
+        .contains("earlier-target-free-cut-record-722"),
+        "the refused same-session batch committed a partial record"
     );
     assert!(
         ok(run(&home, &["get", &keep], "")).contains("unrelated-current-device-backup-record-721")
@@ -845,7 +1237,7 @@ fn a_backed_up_rescan_still_gets_a_current_device_forget_control() {
         let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
         let (device, seq): (String, i64) = db
             .query_row(
-                "SELECT device, seq FROM records WHERE source='oboete-v1' AND kind='prompt'",
+                "SELECT device, seq FROM records WHERE source='transcript' AND kind='prompt'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -899,14 +1291,13 @@ fn a_backed_up_rescan_still_gets_a_current_device_forget_control() {
         db.execute("DELETE FROM ops WHERE type='migration'", [])
             .unwrap();
         drop(db);
-        let source = home.join("native-source.db");
         let imported = ok(run(
             home,
-            &["migrate", "--from", source.to_str().unwrap()],
+            &["import", "transcripts", "--agent", "claude", "--yes"],
             "",
         ));
         assert!(
-            imported.contains("\"records\":0"),
+            imported.contains("\"seen\":0"),
             "the sealed rescan lost the denial: {imported}"
         );
         ok(run(home, &["worker", "--idle-ms", "0"], ""));
@@ -1046,7 +1437,7 @@ fn a_fresh_homes_backup_keeps_its_authority_to_register_a_forget() {
 }
 
 #[test]
-fn concurrent_first_hooks_keep_a_fresh_homes_forget_authority() {
+fn concurrent_first_hooks_keep_records_and_refuse_unverified_forget() {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
@@ -1083,8 +1474,11 @@ fn concurrent_first_hooks_keep_a_fresh_homes_forget_authority() {
             "a concurrent hook's record was lost: {found}"
         );
     }
-    ok(run(home, &["forget", "--record", &id, "--yes"], ""));
-    assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
+    let rejected = run(home, &["forget", "--record", &id, "--yes"], "");
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("unverified native copies"));
+    assert!(ok(run(home, &["get", &id], "")).contains(CANARY));
+    assert_no_registration(home);
 }
 
 #[test]
@@ -1124,7 +1518,7 @@ fn an_old_backup_and_changed_capture_rules_do_not_reimport_a_forgotten_v1_event(
         "",
     ));
     let id = found.split_whitespace().next().unwrap();
-    ok(run(&home, &["forget", "--record", id, "--yes"], ""));
+    historical_v1_forget(&home, id);
     std::fs::remove_dir_all(home.join("backups")).unwrap();
     copy_backup(&old_backup, &home.join("backups"));
     ok(run(&home, &["restore"], ""));
@@ -1139,59 +1533,24 @@ fn an_old_backup_and_changed_capture_rules_do_not_reimport_a_forgotten_v1_event(
     assert!(ok(run(&home, &["forget", "--status"], "")).contains("physical purge pending"));
 }
 
-/// A v1 record's transcript boundary survives in the bodyless request when a restore loses the
-/// record itself. Earlier transcript history stays importable; the forgotten prompt does not.
+/// Historical accepted v1 requests survive older backups, while their unverifiable
+/// transcript namespace is refused without deleting history imported before the request.
 #[test]
-fn an_old_restore_keeps_the_forgotten_v1_sessions_transcript_cut() {
-    restored_v1_session_cut(false);
+fn an_old_restore_keeps_the_forgotten_v1_sessions_transcript_refusal() {
+    restored_v1_session_refusal(false);
 }
 
 #[test]
-fn an_old_restore_keeps_the_native_cut_when_session_redaction_changes() {
-    restored_v1_session_cut(true);
+fn an_old_restore_keeps_native_refusal_when_session_redaction_changes() {
+    restored_v1_session_refusal(true);
 }
 
-fn restored_v1_session_cut(mask_session: bool) {
+fn restored_v1_session_refusal(mask_session: bool) {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
-    record(&home, "unrelated-session-before-the-forgotten-one-401");
-    let old_backup = root.path().join("before-session");
-    copy_backup(&home.join("backups"), &old_backup);
-    let source = home.join("native-source.db");
-    let db = rusqlite::Connection::open(&source).unwrap();
-    db.execute_batch(
-        "INSERT INTO sessions VALUES('forgotten-cut-session','claude','github.com/test/privacy',
-         '/synthetic',1788220800000,1788220800000);",
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO events VALUES(2,'forgotten-cut-session','UserPromptSubmit',1788220800000,?1)",
-        [serde_json::json!({"prompt":CANARY}).to_string()],
-    )
-    .unwrap();
-    drop(db);
-    if mask_session {
-        std::fs::write(
-            home.join("config.toml"),
-            "[summary]\ncurate = false\n[redaction]\nextra_rules = [{id='session-mask', regex='forgotten-cut-session'}]\n",
-        )
-        .unwrap();
-    }
-    ok(run(
-        &home,
-        &["migrate", "--from", source.to_str().unwrap()],
-        "",
-    ));
-    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
-    let found = ok(run(
-        &home,
-        &["search", "--all", "--raw", "only", "--", CANARY],
-        "",
-    ));
-    let id = found.split_whitespace().next().unwrap();
-    ok(run(&home, &["forget", "--record", id, "--yes"], ""));
+    v1_record(&home, "unrelated-session-before-the-forgotten-one-401");
     let projects = home.join("claude/projects/synthetic");
     std::fs::create_dir_all(&projects).unwrap();
     let line = |time: &str, prompt: &str| {
@@ -1201,52 +1560,100 @@ fn restored_v1_session_cut(mask_session: bool) {
         })
         .to_string()
     };
-    std::fs::write(
-        projects.join("source.jsonl"),
-        format!(
-            "{}\n{}\n",
-            line(
-                "2026-08-31T23:59:59.000Z",
-                "earlier-transcript-record-to-keep-402"
-            ),
-            line("2026-09-01T00:00:00.000Z", CANARY)
-        ),
-    )
-    .unwrap();
-    std::fs::remove_dir_all(home.join("backups")).unwrap();
-    copy_backup(&old_backup, &home.join("backups"));
-    ok(run(&home, &["restore"], ""));
-    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let earlier = line(
+        "2026-08-31T23:59:59.000Z",
+        "earlier-transcript-record-to-keep-402",
+    );
+    let path = projects.join("source.jsonl");
+    std::fs::write(&path, format!("{earlier}\n")).unwrap();
     ok(run(
         &home,
         &["import", "transcripts", "--agent", "claude", "--yes"],
         "",
     ));
     ok(run(&home, &["worker", "--idle-ms", "0"], ""));
-    let found = ok(run(
+    let old_backup = root.path().join("before-session");
+    copy_backup(&home.join("backups"), &old_backup);
+    let source = home.join("native-source.db");
+    let db = rusqlite::Connection::open(&source).unwrap();
+    db.execute_batch(
+        "INSERT INTO sessions VALUES('forgotten-cut-session','claude','github.com/test/privacy',
+        '/synthetic',1788220800000,1788220800000);",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO events VALUES(2,'forgotten-cut-session','UserPromptSubmit',1788220800000,?1)",
+        [serde_json::json!({"prompt":CANARY}).to_string()],
+    )
+    .unwrap();
+    drop(db);
+    if mask_session {
+        std::fs::write(home.join("config.toml"),
+            "[summary]\ncurate = false\n[redaction]\nextra_rules = [{id='session-mask',regex='forgotten-cut-session'}]\n").unwrap();
+    }
+    ok(run(
+        &home,
+        &["migrate", "--from", source.to_str().unwrap()],
+        "",
+    ));
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    let hits = ok(run(
         &home,
         &["search", "--all", "--raw", "only", "--", CANARY],
         "",
     ));
-    assert!(
-        !found.contains(CANARY),
-        "the transcript brought the forgotten prompt back: {found}"
-    );
-    let earlier = ok(run(
+    historical_v1_forget(&home, hits.split_whitespace().next().unwrap());
+    std::fs::write(
+        &path,
+        format!("{earlier}\n{}\n", line("2026-08-31T23:59:59.999Z", CANARY)),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(home.join("backups")).unwrap();
+    copy_backup(&old_backup, &home.join("backups"));
+    ok(run(&home, &["restore"], ""));
+    let refused = run(
         &home,
-        &[
-            "search",
-            "--all",
-            "--raw",
-            "only",
-            "--",
-            "earlier-transcript-record-to-keep-402",
-        ],
+        &["import", "transcripts", "--agent", "claude", "--yes"],
         "",
-    ));
+    );
     assert!(
-        earlier.contains("earlier-transcript-record-to-keep-402"),
-        "{earlier}"
+        !refused.status.success(),
+        "historical native v1 deny was not refused"
+    );
+    let messages = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        messages.contains(
+            "this import overlaps a forget without a verified cross-source event identity"
+        )
+    );
+    assert!(messages.contains("this batch was not imported"));
+    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    assert!(
+        !ok(run(
+            &home,
+            &["search", "--all", "--raw", "only", "--", CANARY],
+            ""
+        ))
+        .contains(CANARY)
+    );
+    assert!(
+        ok(run(
+            &home,
+            &[
+                "search",
+                "--all",
+                "--raw",
+                "only",
+                "--",
+                "earlier-transcript-record-to-keep-402"
+            ],
+            ""
+        ))
+        .contains("earlier-transcript-record-to-keep-402")
     );
 }
 
@@ -1873,10 +2280,10 @@ fn raw_db_gone_back_keeps_the_new_record_and_not_the_forgotten_one() {
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
-    let id = record(&home, CANARY);
+    let id = v1_record(&home, CANARY);
     let old = root.path().join("raw-before.db");
     std::fs::copy(home.join("raw.db"), &old).unwrap();
-    ok(run(&home, &["forget", "--record", &id, "--yes"], ""));
+    historical_v1_forget(&home, &id);
     for f in ["raw.db-wal", "raw.db-shm"] {
         let _ = std::fs::remove_file(home.join(f));
     }
@@ -1902,10 +2309,10 @@ fn an_import_stops_when_a_surviving_forget_request_cannot_be_applied() {
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
-    let id = record(&home, CANARY);
+    let id = v1_record(&home, CANARY);
     let old = root.path().join("before-forget.db");
     std::fs::copy(home.join("raw.db"), &old).unwrap();
-    ok(run(&home, &["forget", "--record", &id, "--yes"], ""));
+    historical_v1_forget(&home, &id);
     for f in ["raw.db-wal", "raw.db-shm"] {
         let _ = std::fs::remove_file(home.join(f));
     }
@@ -1944,7 +2351,7 @@ fn replacing_raw_db_twice_keeps_both_forgets_and_blocks_reimport() {
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
-    let first = record(&home, CANARY);
+    let first = v1_record(&home, CANARY);
     let old = root.path().join("raw-before.db");
     std::fs::copy(home.join("raw.db"), &old).unwrap();
     let replace = || {
@@ -1956,14 +2363,18 @@ fn replacing_raw_db_twice_keeps_both_forgets_and_blocks_reimport() {
         std::fs::rename(&staged, home.join("raw.db")).unwrap();
         ok(run(&home, &["worker", "--idle-ms", "0"], ""));
     };
-    ok(run(&home, &["forget", "--record", &first, "--yes"], ""));
+    historical_v1_forget(&home, &first);
     replace();
     assert!(
         !String::from_utf8_lossy(&run(&home, &["get", &first], "").stdout).contains(CANARY),
         "the worker brought the first forgotten record back after a file replacement"
     );
-    let second = record(&home, "forget-canary-topaz-after-replacement-381");
-    ok(run(&home, &["forget", "--record", &second, "--yes"], ""));
+    let second = v1_record_in_session(
+        &home,
+        "forget-canary-topaz-after-replacement-381",
+        "second-native-session",
+    );
+    historical_v1_forget(&home, &second);
     replace();
     let source = home.join("native-source.db");
     let imported = ok(run(
@@ -2002,9 +2413,9 @@ fn migrate_finish_reconciles_surviving_logs_before_committing_native_records() {
     let keep = hook_record(&home, "unrelated-before-finish-record-751");
     let snapshot = root.path().join("raw-before-native-import.db");
     std::fs::copy(home.join("raw.db"), &snapshot).unwrap();
-    let id = record(&home, CANARY);
+    let id = v1_record(&home, CANARY);
     std::fs::copy(home.join("native-source.db"), home.join("oboete.db")).unwrap();
-    ok(run(&home, &["forget", "--record", &id, "--yes"], ""));
+    historical_v1_forget(&home, &id);
     for file in ["raw.db-wal", "raw.db-shm"] {
         let _ = std::fs::remove_file(home.join(file));
     }
@@ -2293,7 +2704,7 @@ fn restoring_a_copied_stores_backup_keeps_its_forget_log() {
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
-    record(&home, "unrelated-record-before-the-copy-391");
+    v1_record(&home, "unrelated-record-before-the-copy-391");
     let staged = home.join("raw.db.copy");
     std::fs::copy(home.join("raw.db"), &staged).unwrap();
     for f in ["raw.db-wal", "raw.db-shm"] {
@@ -2305,10 +2716,10 @@ fn restoring_a_copied_stores_backup_keeps_its_forget_log() {
         "[summary]\ncurate = false\n[backup]\ndir = 'new-backups'\n",
     )
     .unwrap();
-    let id = record(&home, CANARY);
+    let id = v1_record(&home, CANARY);
     let old_backup = root.path().join("before-forget");
     copy_backup(&home.join("new-backups"), &old_backup);
-    ok(run(&home, &["forget", "--record", &id, "--yes"], ""));
+    historical_v1_forget(&home, &id);
     std::fs::remove_dir_all(home.join("new-backups")).unwrap();
     copy_backup(&old_backup, &home.join("new-backups"));
     for f in ["raw.db", "raw.db-wal", "raw.db-shm"] {

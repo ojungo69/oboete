@@ -341,12 +341,20 @@ fn denied(conn: &Connection, origin: Option<&str>, text: &str) -> Result<bool> {
     Ok(denied || cfg!(test) && text.contains(DENIED_IN_TESTS))
 }
 
-fn forgotten_cut(conn: &Connection, session: &str) -> Result<Option<i64>> {
-    Ok(conn.query_row(
-        "SELECT MIN(ts) FROM denied_records WHERE session=?1",
-        [session],
+/// Opposite import sources do not share event identifiers. Keep exact-origin denials, but
+/// refuse an import that could reintroduce their copy from the other source.
+fn check_cross_source_forget(conn: &Connection, session: &str, source: &str) -> Result<()> {
+    let unverified: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM denied_records
+         WHERE session=?1 AND (?2 <> 'transcript' OR ts IS NOT NULL))",
+        params![session, source],
         |r| r.get(0),
-    )?)
+    )?;
+    anyhow::ensure!(
+        !unverified,
+        "this import overlaps a forget without a verified cross-source event identity: this batch was not imported"
+    );
+    Ok(())
 }
 
 /// What `denied` refuses in tests.
@@ -742,6 +750,11 @@ impl Raw {
                         .with_context(|| format!("record {device}:{} has no original import metadata: nothing was registered", r.seq))?,
                     _ => continue,
                 };
+                anyhow::ensure!(
+                    source != "oboete-v1",
+                    "record {device}:{} has no verified cross-source event identity: first-slice v1 forget was not registered; nothing was registered",
+                    r.seq
+                );
                 if !sources.contains(&source) {
                     sources.push(source.clone());
                 }
@@ -760,6 +773,28 @@ impl Raw {
                 );
             }
             at = last;
+        }
+        if !records.is_empty() {
+            // Native records without provenance cannot be proved to belong to another
+            // namespace. Never infer identity from a redacted live session label.
+            let placeholders = vec!["?"; records.len()].join(",");
+            let sql = format!(
+                "SELECT EXISTS(SELECT 1 FROM records r LEFT JOIN import_origins o
+                   ON o.device=r.device AND o.seq=r.seq
+                 WHERE r.type IN ('event','removed')
+                   AND (r.source IS NULL OR r.source <> 'transcript')
+                   AND COALESCE(r.kind,'') <> 'touch'
+                   AND (o.native_session IS NULL OR o.native_session IN ({placeholders})))"
+            );
+            let unverified: bool = self.conn.query_row(
+                &sql,
+                rusqlite::params_from_iter(records.iter().map(|r| &r.session)),
+                |r| r.get(0),
+            )?;
+            anyhow::ensure!(
+                !unverified,
+                "this selection may have unverified native copies: first-slice forget was not registered; nothing was registered"
+            );
         }
         Ok(crate::forget::Preview {
             target,
@@ -969,27 +1004,29 @@ impl Raw {
                     [group],
                 )?;
             }
-            // A transcript batch may have been prepared before a concurrent forget. Keep the
-            // native session's cut inside this transaction as well as at the importer's read.
-            let past_cut = c.event.source == "transcript"
-                && forgotten_cut(
+            // A batch prepared before request replay must also prove its correspondence under
+            // the write transaction. A timestamp cut cannot identify a native event's copy.
+            if denied(&tx, origin, &c.event.body)? {
+                continue;
+            }
+            if c.event.kind != "touch" {
+                check_cross_source_forget(
                     &tx,
                     &identity.map_or_else(
                         || crate::forget::session(&c.event.agent, &c.event.session),
                         |i| i.session.clone(),
                     ),
-                )?
-                .is_some_and(|cut| c.event.ts >= cut);
-            if !past_cut && !denied(&tx, origin, &c.event.body)? {
-                let seq = insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
-                if let Some(identity) = identity {
-                    tx.execute(
-                        "INSERT INTO import_origins(device, seq, origin, native_session, ambiguous) VALUES(?1, ?2, ?3, ?4, ?5)",
-                        params![self.device, seq, identity.origin, identity.session, i64::from(identity.ambiguous.is_some() || identity.unverified)],
-                    )?;
-                }
-                seqs.push(seq);
+                    &c.event.source,
+                )?;
             }
+            let seq = insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
+            if let Some(identity) = identity {
+                tx.execute(
+                    "INSERT INTO import_origins(device, seq, origin, native_session, ambiguous) VALUES(?1, ?2, ?3, ?4, ?5)",
+                    params![self.device, seq, identity.origin, identity.session, i64::from(identity.ambiguous.is_some() || identity.unverified)],
+                )?;
+            }
+            seqs.push(seq);
         }
         if let Some(checkpoint) = checkpoint {
             let mut body = serde_json::to_value(checkpoint)?;
@@ -2016,17 +2053,20 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The time cut also kept by forgotten native records: a restore may keep their requests
-    /// but lose their events. Transcript-only forgets have no cut time, so do not hide earlier
-    /// unrelated history or the rest of a transcript session.
+    /// Ordinary capture still defines the import time cut. A surviving native forget without
+    /// a cross-source event identity instead refuses the batch; its receipt time is no proof.
     pub(crate) fn transcript_cut(
         &self,
         agent: &str,
         session: &str,
         recorded: Option<i64>,
     ) -> Result<Option<i64>> {
-        let denied = forgotten_cut(&self.conn, &crate::forget::session(agent, session))?;
-        Ok(recorded.into_iter().chain(denied).min())
+        check_cross_source_forget(
+            &self.conn,
+            &crate::forget::session(agent, session),
+            "transcript",
+        )?;
+        Ok(recorded)
     }
 
     /// `docs` as this device's `import` ops (D5), in appends of at most `IMPORT_BATCH` documents
@@ -3069,15 +3109,15 @@ mod tests {
         );
     }
 
-    /// A rescan's whole tombstone hides the sample, but forget must still deny the native
-    /// import identity in a record or span target and retain its transcript cutoff.
+    /// A rescan's whole tombstone hides the sample, but forget must still deny a verified
+    /// transcript import in a record or span target and retain its original metadata.
     #[test]
     fn a_tombstoned_import_can_be_forgotten_without_a_sample_and_cannot_be_reimported() {
         for span in [false, true] {
             let home = tempfile::tempdir().unwrap();
             let mut raw = open(home.path()).unwrap();
             let mut event = test_event(r#"{"prompt":"tombstoned-native-canary-691"}"#);
-            event.source = "oboete-v1".into();
+            event.source = "transcript".into();
             event.ts = 1_000;
             let captured = || crate::capture::Captured {
                 event: event.clone(),
@@ -3114,8 +3154,8 @@ mod tests {
             let preview = raw.forget_preview(target).unwrap();
             assert_eq!(preview.count(), 1, "the tombstone hid the import identity");
             assert!(preview.sample.is_none(), "a removed sample was shown");
-            assert_eq!(preview.records[0].ts, Some(event.ts));
-            assert_eq!(preview.sources, ["oboete-v1"]);
+            assert_eq!(preview.records[0].ts, None);
+            assert_eq!(preview.sources, ["transcript"]);
             crate::forget::start(home.path(), &preview).unwrap();
             assert!(
                 raw.append_imported_origins(
@@ -3128,10 +3168,7 @@ mod tests {
                 .is_empty(),
                 "the already tombstoned import was not denied"
             );
-            assert_eq!(
-                raw.transcript_cut("claude", "s", None).unwrap(),
-                Some(1_000)
-            );
+            assert_eq!(raw.transcript_cut("claude", "s", None).unwrap(), None);
         }
     }
 
@@ -3153,7 +3190,7 @@ mod tests {
         std::fs::copy(&path, &old).unwrap();
         let mut raw = open(home.path()).unwrap();
         let mut event = test_event(r#"{"prompt":"first-schema-forget-canary-671"}"#);
-        event.source = "oboete-v1".into();
+        event.source = "transcript".into();
         let captured = || crate::capture::Captured {
             event: event.clone(),
             ledger: Vec::new(),

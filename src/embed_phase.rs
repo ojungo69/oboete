@@ -1780,7 +1780,7 @@ mod tests {
                     event,
                     ledger: Vec::new(),
                 }],
-                &[identity],
+                std::slice::from_ref(&identity),
                 "",
                 None,
             )
@@ -1803,6 +1803,7 @@ mod tests {
             1,
             "the fixture is a genuinely eligible native record"
         );
+        let request = crate::forget::previous_transcript_request(&s.raw, seq, &identity);
         let k = crate::knowledge::open(&home).unwrap();
         let loaded = crate::config::load(&home).unwrap();
         let embedder = Embedder::from_config(&loaded.embedding).unwrap().unwrap();
@@ -1830,7 +1831,8 @@ mod tests {
         let registering_home = home.clone();
         let forget = std::thread::spawn(move || {
             started_at.send(()).unwrap();
-            let result = crate::forget::start(&registering_home, &preview);
+            let result = crate::raw::open(&registering_home)
+                .and_then(|mut raw| raw.forget_apply(&[request]));
             registered_at.send(result.is_ok()).unwrap();
             result
         });
@@ -1858,7 +1860,7 @@ mod tests {
         assert_eq!(stub.requests(), 1);
         let before_headers = early || registered.recv_timeout(Duration::from_secs(1)).unwrap();
         let result = forget.join().unwrap().unwrap();
-        assert_eq!(result.0.records, 1);
+        assert_eq!(result, 1);
         assert_eq!(
             stub.answered(),
             0,

@@ -142,6 +142,33 @@ pub(crate) struct Request {
     pub records: Vec<Record>,
 }
 
+/// A transcript request accepted before mixed native provenance made registration unsafe.
+/// These fixtures must still exercise replay, dispatch and worker recovery with native data.
+#[cfg(test)]
+pub(crate) fn previous_transcript_request(
+    raw: &crate::raw::Raw,
+    seq: i64,
+    identity: &crate::raw::ImportIdentity,
+) -> Request {
+    Request {
+        v: 1,
+        home: raw.home_id().into(),
+        job: "f1000000000000000000000000000001".into(),
+        started: 1_000,
+        target: Target::Record {
+            device: raw.device().into(),
+            seq,
+        },
+        records: vec![Record {
+            device: raw.device().into(),
+            seq,
+            origin: identity.origin.clone(),
+            session: identity.session.clone(),
+            ts: None,
+        }],
+    }
+}
+
 impl Request {
     pub(crate) fn check(&self) -> Result<()> {
         anyhow::ensure!(self.v == 1, "unknown request version {}", self.v);
@@ -659,7 +686,7 @@ mod tests {
     /// An imported record of origin `id`, as an importer appends it.
     fn native(raw: &mut raw::Raw, id: &str, body: &str) -> i64 {
         let mut event = raw::test_event(body);
-        event.source = "oboete-v1".into();
+        event.source = "transcript".into();
         let identity = raw::ImportIdentity {
             origin: origin("synthetic", id),
             session: session(&event.agent, &event.session),
@@ -848,21 +875,54 @@ mod tests {
     /// The importer may have prepared a transcript batch before forget registered its cut.
     /// The append's transaction checks the current request, even with another source origin.
     #[test]
-    fn a_prepared_transcript_batch_cannot_cross_a_new_forget_cut() {
+    fn a_prepared_transcript_batch_overlapping_a_legacy_forget_is_refused_before_the_cut() {
         let home = tempfile::tempdir().unwrap();
         let mut raw = raw::open(home.path()).unwrap();
-        let seq = native(
-            &mut raw,
-            "native-cut",
-            r#"{"prompt":"a synthetic forgotten prompt"}"#,
-        );
-        let Item::Event(event) = raw.after(raw.device(), seq - 1, 1).unwrap().remove(0).item else {
-            panic!("the imported record was not an event");
+        let mut event = raw::test_event(r#"{"prompt":"a synthetic forgotten prompt"}"#);
+        event.source = "oboete-v1".into();
+        event.ts = 1_001;
+        let identity = raw::ImportIdentity {
+            origin: origin("synthetic", "native-cut"),
+            session: session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
         };
-        let mut event = *event;
+        let seq = raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event: event.clone(),
+                    ledger: Vec::new(),
+                }],
+                &[identity],
+                "",
+                None,
+            )
+            .unwrap()[0];
         event.source = "transcript".into();
-        let p = raw.forget_preview(record(&raw, seq)).unwrap();
-        start(home.path(), &p).unwrap();
+        event.ts -= 1;
+        assert_eq!(
+            raw.transcript_cut(&event.agent, &event.session, None)
+                .unwrap(),
+            None
+        );
+        // A request accepted before the cross-source check: replay must retain it, including
+        // when this transcript batch was prepared before the request reached raw authority.
+        let request = Request {
+            v: 1,
+            home: raw.home_id().to_owned(),
+            job: "b1000000000000000000000000000001".into(),
+            started: 1_000,
+            target: record(&raw, seq),
+            records: vec![Record {
+                device: raw.device().into(),
+                seq,
+                origin: origin("synthetic", "native-cut"),
+                session: session(&event.agent, &event.session),
+                ts: Some(event.ts + 1),
+            }],
+        };
+        assert_eq!(raw.forget_apply(&[request]).unwrap(), 1);
+        let before = raw.after(raw.device(), 0, 100).unwrap().len();
         let append = |raw: &mut raw::Raw, event: raw::Event, id: &str| {
             let identity = raw::ImportIdentity {
                 origin: origin("synthetic-transcript", id),
@@ -879,12 +939,17 @@ mod tests {
                 "",
                 None,
             )
-            .unwrap()
         };
-        assert!(append(&mut raw, event.clone(), "late").is_empty());
-        event.ts -= 1;
-        event.body = r#"{"prompt":"earlier unrelated history"}"#.into();
-        let kept = append(&mut raw, event, "earlier");
+        let refused = append(&mut raw, event.clone(), "skewed");
+        assert!(
+            refused.is_err(),
+            "a prepared transcript batch restored an earlier-stamped copy: {refused:?}"
+        );
+        assert!(format!("{:#}", refused.unwrap_err()).contains("cross-source event identity"));
+        assert_eq!(raw.after(raw.device(), 0, 100).unwrap().len(), before);
+        event.session = "unrelated-native-session".into();
+        event.body = r#"{"prompt":"unrelated history"}"#.into();
+        let kept = append(&mut raw, event, "unrelated").unwrap();
         assert_eq!(kept.len(), 1);
         assert!(shown(&raw, kept[0]));
     }

@@ -1172,7 +1172,7 @@ mod tests {
         assert_eq!(queries(&s), 2);
     }
 
-    /// D1 holds only new asks while a real native record's forget is ahead of consumers.
+    /// D1 holds only new asks while a replayed native request is ahead of consumers.
     #[test]
     fn a_native_forget_holds_new_query_asks_until_the_consumers_drain() {
         let stub = Stub::start();
@@ -1201,7 +1201,7 @@ mod tests {
                     event,
                     ledger: Vec::new(),
                 }],
-                &[identity],
+                std::slice::from_ref(&identity),
                 "",
                 None,
             )
@@ -1209,15 +1209,10 @@ mod tests {
         s.run();
         embedded(&s, &stub);
         let home = s.home.path();
-        let preview = crate::forget::preview(
-            home,
-            crate::forget::Target::Record {
-                device: s.raw.device().into(),
-                seq,
-            },
-        )
-        .unwrap();
-        crate::forget::start(home, &preview).unwrap();
+        let request = crate::forget::previous_transcript_request(&s.raw, seq, &identity);
+        let mut replay = crate::raw::open(home).unwrap();
+        assert_eq!(replay.forget_apply(&[request]).unwrap(), 1);
+        crate::forget::reconcile(home, &mut replay).unwrap();
         let mut k = crate::knowledge::open(home).unwrap();
         assert!(crate::curate::lagging(&s.raw, &k).unwrap());
         let mut phase = crate::embed_phase::Phase::new(home);

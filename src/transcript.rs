@@ -710,7 +710,7 @@ pub struct AgentStats {
     /// Sessions whose identifier the redaction gate masks or clips: never imported.
     pub masked: u64,
     pub waiting: u64,
-    /// Files whose stored import prefix no longer matches or cannot be verified.
+    /// Files whose stored prefix or cross-source forget correspondence cannot be verified.
     pub refused: u64,
     /// Bytes of captured bodies selected for import, before the store's deny-list check.
     pub bytes: u64,
@@ -785,6 +785,25 @@ pub fn import(
                 stats.housekeeping += u64::from(new_session);
                 continue;
             }
+            let recorded = cut.get(&((*agent).to_owned(), session.clone())).copied();
+            let earliest = match raw.as_ref() {
+                Some(raw) => match raw.transcript_cut(agent, session, recorded) {
+                    Ok(cut) => cut,
+                    Err(e) => {
+                        stats.refused += 1;
+                        writeln!(
+                            out,
+                            "refused {}: {e:#}",
+                            crate::redact::outbound_with(
+                                &path.display().to_string(),
+                                &settings.rules
+                            )
+                        )?;
+                        continue;
+                    }
+                },
+                None => recorded,
+            };
             // Masked or clipped identifiers cannot serve as checkpoints without collisions,
             // and keeping the original would bypass both the redaction gate and the time cut:
             // such a session is left out, counted. A touch always gives one record to look at.
@@ -816,11 +835,6 @@ pub fn import(
                     continue;
                 }
             }
-            let recorded = cut.get(&((*agent).to_owned(), session.clone())).copied();
-            let earliest = match raw.as_ref() {
-                Some(raw) => raw.transcript_cut(agent, session, recorded)?,
-                None => recorded,
-            };
             let mut checkpoint = Checkpoint {
                 key: key.clone(),
                 through: seen,
@@ -911,8 +925,8 @@ pub fn import(
     let refused: u64 = stats.agents.values().map(|agent| agent.refused).sum();
     anyhow::ensure!(
         refused == 0,
-        "{refused} transcript file(s) refused: imported prefixes changed or cannot be verified; \
-         use a fresh --home to reimport them"
+        "{refused} transcript file(s) refused: imported prefixes or cross-source forget identities cannot be verified; \
+         review the refusal reasons above; those files were not imported"
     );
     Ok(stats)
 }

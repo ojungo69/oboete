@@ -1797,7 +1797,7 @@ mod tests {
     fn pending_forget_copy(p: &Path) -> (String, i64) {
         let mut raw = raw::open(p).unwrap();
         let mut event = raw::test_event("opened-file-forget-canary-8351");
-        event.source = "oboete-v1".into();
+        event.source = "transcript".into();
         let identity = raw::ImportIdentity {
             origin: crate::forget::origin("synthetic", "opened-file-import"),
             session: crate::forget::session(&event.agent, &event.session),
@@ -1997,7 +1997,7 @@ mod tests {
         crate::embed_phase::fixture::config(&s, &stub);
         let p = s.home.path();
         let mut event = raw::test_event("embedding-reopen-forget-canary-6831");
-        event.source = "oboete-v1".into();
+        event.source = "transcript".into();
         let identity = raw::ImportIdentity {
             origin: crate::forget::origin("synthetic", "embedding-reopen-import"),
             session: crate::forget::session(&event.agent, &event.session),
@@ -2011,24 +2011,19 @@ mod tests {
                     event,
                     ledger: Vec::new(),
                 }],
-                &[identity],
+                std::slice::from_ref(&identity),
                 "",
                 None,
             )
             .unwrap()[0];
         let device = s.raw.device().to_owned();
+        let request = crate::forget::previous_transcript_request(&s.raw, seq, &identity);
         drop(s.raw);
         let old = p.join("raw-before-forget.db");
         std::fs::copy(p.join("raw.db"), &old).unwrap();
-        let preview = crate::forget::preview(
-            p,
-            crate::forget::Target::Record {
-                device: device.clone(),
-                seq,
-            },
-        )
-        .unwrap();
-        crate::forget::start(p, &preview).unwrap();
+        let mut replay = raw::open(p).unwrap();
+        assert_eq!(replay.forget_apply(&[request]).unwrap(), 1);
+        crate::forget::reconcile(p, &mut replay).unwrap();
         let raw = raw::open(p).unwrap();
         let mut k = knowledge::open(p).unwrap();
         drain(&raw, &mut k, &mut consumers(p)).unwrap();
@@ -2078,7 +2073,7 @@ mod tests {
         let p = home.path();
         let mut raw = raw::open(p).unwrap();
         let mut event = raw::test_event("idle-exit-forget-canary-5821");
-        event.source = "oboete-v1".into();
+        event.source = "transcript".into();
         let identity = raw::ImportIdentity {
             origin: crate::forget::origin("synthetic", "idle-exit-import"),
             session: crate::forget::session(&event.agent, &event.session),

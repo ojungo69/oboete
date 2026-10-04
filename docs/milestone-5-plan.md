@@ -122,6 +122,17 @@ event と、native session id のない event は検索用に取り込むが、�
 native identity がある import はその identity を比較し、同じ文字列の別 event まで消さない。
 importer は capture 前の agent/session から session hash を作り、origin と同じ transaction で
 保存する。伏せ字後の label からは作らず、本文を持たない要求と record backup にも運ぶ。
+旧 v1 の hook 時刻は transcript の同じ出来事より遅れうる。保存された provenance に共通の
+event id がないため、第一 slice は `oboete-v1` の record を、Removed の元 metadata も含め
+登録前に具体的な理由付きで拒否する。既に受理した v1 の要求と deny は回復時にも保持し、
+同じ native session の切れ目を持つ deny に重なる transcript batch は、checkpoint を進めず
+明示的に拒否する。準備済みの batch も追記 transaction 内で再検証する。既存の先行 raw は
+消さず、時刻の前倒し・本文照合・session 全体の tombstone で対応を推測しない。
+逆方向も、同じ native session に deny がある状態で未対応の v1 本文を取り込むことは拒否する。
+exact origin が既に deny された record は従来どおり取り込まない。transcript の新規 forget も、
+同じ native hash の v1 等、または native hash のない live/legacy record がある home では
+対応を証明できないため登録前に拒否する。異なる native hash は別の namespace として残す。
+live の表示用 session label を照合キーにしない。この暫定制限でも hook・search は継続する。
 その hash がない旧 record の forget は、対応を推測せず登録前に拒否する。
 whole-record tombstone で隠れた import も、残る native identity で選ぶ。隠れた record の本文
 サンプルは返さず、元の source・kind・時刻だけを読み transcript の切れ目を判断する。
@@ -248,12 +259,14 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
 
 引き継ぎレビューで確認した 2 件の復活経路を修正した。
 raw.db を別ファイルに置き換えても home の id を保持し、古いコピーへの再置換やコピー後の backup
-からの復元で削除要求を適用する。忘れた v1 record の session hash と時刻から transcript の
-取り込み境界も回復し、準備済みの batch は追記 transaction 内でもその境界を確認する。
-伏せ字ルールを外した後も取り込み境界が一致し、raw への要求適用がロックで失敗した import は
+からの復元で削除要求を適用する。v1 と transcript の共通 event id がない記録の登録を拒否し、
+既存 v1 deny に重なる transcript は、restore 後と準備済み batch の追記時も明示拒否する。
+逆方向の v1 import と、対応不能な native copy がある home の transcript 登録も拒否する。
+伏せ字ルールを外しても元の session hash を使い、raw への要求適用がロックで失敗した import は
 続行しない。前の行の追加、同じ event の重複、native session id のない記録も合成データで試験した。
 CLI と、準備後の忘却が追記を止める型付き API の試験で、先に失敗することと
-修正後の通過を確認した。削除対象より前の transcript と無関係な新規記録は残る。
+修正後の通過を確認した。保存済みの先行 raw と無関係な新規記録は残る。既存 v1 deny と
+対応を証明できない未取り込み transcript は、bridge ができる後続 slice まで保留する。
 
 残り: 独立レビュー。この結果は全 M5 の削除 canary 成功ではない。物理
 purge、live/legacy identity、大量 selection、uid/session/repo/time、可逆な管理、WebUI、各 OS の
