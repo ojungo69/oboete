@@ -182,18 +182,28 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         ));
     };
     #[cfg(target_os = "linux")]
-    if !remove {
-        let (worker, view) = crate::settings::resident_defaults(home)?;
-        println!(
-            "worker: {}; resident page address: http://127.0.0.1:{}; run `oboete view` to open memory",
-            if worker.resident {
-                "resident"
-            } else {
-                "exits when idle"
-            },
-            view.port
-        );
-    }
+    let defaults_error = if remove {
+        None
+    } else {
+        match crate::settings::resident_defaults(home) {
+            Ok((worker, view)) => {
+                println!(
+                    "worker: {}; resident page address: http://127.0.0.1:{}; run `oboete view` to open memory",
+                    if worker.resident {
+                        "resident"
+                    } else {
+                        "exits when idle"
+                    },
+                    view.port
+                );
+                None
+            }
+            Err(error) => {
+                eprintln!("resident defaults not written: {error:#}");
+                Some(error)
+            }
+        }
+    };
     let cmd = HookCommand::current(home)?;
     let (wired, failed) = wire_each(&agents, |a| wire(a, &cmd, remove));
     if !remove && !wired.is_empty() {
@@ -208,6 +218,10 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         if remove { "removal" } else { "setup" },
         failed.join(", ")
     );
+    #[cfg(target_os = "linux")]
+    if let Some(error) = defaults_error {
+        return Err(error.context("agent wiring finished, but resident defaults were not written"));
+    }
     Ok(())
 }
 

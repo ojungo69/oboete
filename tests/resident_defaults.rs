@@ -230,6 +230,53 @@ fn rebuild_owns_its_status_lock_and_releases_it_on_success_failure_and_kill() {
 }
 
 #[test]
+fn broken_corpus_settings_do_not_prevent_agent_wiring_but_keep_setup_failed() {
+    for invalid_config in [true, false] {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let original = if invalid_config {
+            "[redaction]\nrules = 'synthetic-private-config-canary'\n"
+        } else {
+            "providers = []\n[worker]\nresident = false\n"
+        };
+        std::fs::write(h.join("config.toml"), original).unwrap();
+        if !invalid_config {
+            // A write/lock failure is deterministic even when tests run as root.
+            std::fs::create_dir_all(h.join("state/config.lock")).unwrap();
+        }
+        let result = command(h, &["setup", "claude"]).output().unwrap();
+        assert!(
+            !result.status.success(),
+            "defaults failure was reported as success"
+        );
+        assert!(
+            h.join("claude/settings.json").is_file(),
+            "a corpus settings failure prevented independent agent wiring"
+        );
+        assert_eq!(
+            std::fs::read_to_string(h.join("config.toml")).unwrap(),
+            original
+        );
+        let diagnostics = format!(
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            diagnostics.contains("claude: hooks written to"),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("resident defaults not written"),
+            "{diagnostics}"
+        );
+        assert!(!diagnostics.contains("synthetic-private-config-canary"));
+        assert!(!h.join("state/worker.lock").exists());
+        assert!(!h.join("state/view.lock").exists());
+    }
+}
+
+#[test]
 fn setup_fills_resident_defaults_without_overwriting_an_explicit_choice() {
     let home = tempfile::tempdir().unwrap();
     let h = home.path();
