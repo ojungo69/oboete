@@ -1833,6 +1833,9 @@ mod tests {
     use crate::knowledge;
     use crate::raw;
 
+    // This R3/R9 proof needs Unix device/inode identity and renaming a home with open locks.
+    // Windows rejects that fixture's rename before the rollback guard is reached.
+    #[cfg(unix)]
     #[test]
     fn w5b_a_replaced_home_is_not_touched_by_a_failed_carry_put_back() {
         let root = tempfile::tempdir().unwrap();

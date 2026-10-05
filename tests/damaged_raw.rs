@@ -159,3 +159,92 @@ fn a_hook_that_finds_raw_db_damaged_starts_the_restore() {
     second_prompt(home.path());
     restored(home.path());
 }
+
+#[test]
+fn w5b_restore_with_a_temporary_directory_inside_home_uses_the_complete_native_cli() {
+    let home = tempfile::tempdir().unwrap();
+    let owner = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let temporary = h.join("tmp");
+    std::fs::create_dir(&temporary).unwrap();
+    std::fs::write(
+        h.join("config.toml"),
+        "providers = []\n[summary]\ncurate = false\n[embedding]\nprovider = 'none'\n[worker]\nresident = false\n",
+    )
+    .unwrap();
+    let run = |args: &[&str], input: &str| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_oboete"));
+        command
+            .env_clear()
+            .envs(std::env::vars_os().filter(|(key, _)| {
+                !["KEY", "TOKEN", "SECRET", "PASSWORD"]
+                    .iter()
+                    .any(|part| key.to_string_lossy().to_ascii_uppercase().contains(part))
+            }))
+            .env("HOME", owner.path())
+            .env("USERPROFILE", owner.path())
+            .env("CODEX_HOME", owner.path().join("codex"))
+            .env("CLAUDE_CONFIG_DIR", owner.path().join("claude"))
+            .env("XDG_CONFIG_HOME", owner.path().join("config"))
+            .env("OBOETE_NO_SPAWN", "1")
+            .env("TMPDIR", &temporary)
+            .env("TEMP", &temporary)
+            .env("TMP", &temporary)
+            .current_dir(owner.path())
+            .arg("--home")
+            .arg(h)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    for i in 0..3 {
+        let payload =
+            serde_json::json!({"session_id":format!("s{i}"),"prompt":"zebra crossing notes"});
+        run(
+            &["hook", "claude", "UserPromptSubmit"],
+            &payload.to_string(),
+        );
+    }
+    run(&["worker", "--idle-ms", "0"], "");
+    assert!(h.join("backups").is_dir());
+    let restored = run(&["restore"], "");
+    assert!(String::from_utf8_lossy(&restored.stdout).contains("3 record(s)"));
+    assert!(h.join("state/restored").is_file());
+    let raw = rusqlite::Connection::open(h.join("raw.db")).unwrap();
+    let records: i64 = raw
+        .query_row("SELECT COUNT(*) FROM records WHERE type='event'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(records, 3);
+    drop(raw);
+    assert!(h.join("knowledge.db").is_file());
+    let knowledge = rusqlite::Connection::open_with_flags(
+        h.join("knowledge.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let indexed: i64 = knowledge
+        .query_row("SELECT COUNT(*) FROM raw_fts_docsize", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(indexed, 3);
+    let searched = run(&["search", "zebra"], "");
+    assert!(String::from_utf8_lossy(&searched.stdout).contains("zebra crossing"));
+    assert!(!h.join("providers.db").exists());
+}

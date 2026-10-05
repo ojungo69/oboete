@@ -1575,50 +1575,6 @@ mod tests {
     use super::*;
     use crate::raw::{Item, Target};
 
-    #[test]
-    fn w5b_native_temporary_directory_probe() {
-        let Some(home) = std::env::var_os("OBOETE_TEST_NATIVE_RESTORE_HOME") else {
-            return;
-        };
-        let home = PathBuf::from(home);
-        restore(&home).unwrap();
-        assert_eq!(raw::open(&home).unwrap().max_seq().unwrap(), 3);
-    }
-
-    #[test]
-    fn w5b_native_restore_does_not_inherit_the_preview_temporary_directory_refusal() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        segmented(p, 3, 3);
-        let temporary = p.join("tmp");
-        std::fs::create_dir(&temporary).unwrap();
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command
-            .args([
-                "--exact",
-                "backup::tests::w5b_native_temporary_directory_probe",
-                "--nocapture",
-            ])
-            .env("OBOETE_TEST_NATIVE_RESTORE_HOME", p)
-            .env("TMPDIR", temporary)
-            .stdin(std::process::Stdio::null());
-        for (key, _) in std::env::vars_os() {
-            if ["KEY", "TOKEN", "SECRET", "PASSWORD"]
-                .iter()
-                .any(|part| key.to_string_lossy().to_ascii_uppercase().contains(part))
-            {
-                command.env_remove(key);
-            }
-        }
-        let output = command.output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
     fn w5b_files(root: &Path) -> Vec<(PathBuf, String)> {
         fn walk(root: &Path, path: &Path, files: &mut Vec<(PathBuf, String)>) {
             for entry in std::fs::read_dir(path).unwrap() {
