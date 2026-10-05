@@ -294,6 +294,13 @@ pub(crate) enum OwnerRefusalCode {
 }
 
 impl OwnerRefusal {
+    fn missing(uid: &str) -> Self {
+        Self {
+            code: OwnerRefusalCode::ClaimMissing,
+            cause: anyhow::anyhow!("no claim has the uid {uid}"),
+        }
+    }
+
     fn unavailable(cause: impl Into<anyhow::Error>) -> Self {
         Self {
             code: OwnerRefusalCode::Unavailable,
@@ -376,6 +383,69 @@ pub(crate) fn correct_recorded(
     correction_recorded(home, uid, status, body, None)
 }
 
+fn correction_anchor(k: &Connection, uid: &str) -> Result<Option<Anchor>> {
+    use rusqlite::OptionalExtension;
+    Ok(k.query_row(
+        "SELECT anchor_device, anchor_seq FROM active WHERE uid = ?1",
+        [uid],
+        |r| {
+            Ok(Anchor {
+                device: r.get(0)?,
+                seq: r.get(1)?,
+            })
+        },
+    )
+    .optional()?)
+}
+
+/// A regular SQLite file may still be empty or only partly rebuilt. Resolve the target through
+/// existing core tables before any schema writer can turn that state into a missing claim.
+/// These columns predate mute and `claim_at`, so a usable older schema can still be upgraded.
+fn correction_target_exists(
+    home: &std::path::Path,
+    raw: &crate::raw::ReadOnly,
+    uid: &str,
+) -> Result<bool> {
+    raw.conn.prepare(
+        "SELECT r.device, r.seq, o.device, o.op_seq, o.type, o.ts, o.body, o.batch, m.key, m.value
+         FROM records r, ops o, meta m LIMIT 0",
+    )?;
+    let path = home.join("knowledge.db");
+    let identity = crate::db::store_file(&path);
+    let sqlite_path = home.canonicalize()?.join("knowledge.db");
+    let current = || -> Result<()> {
+        let regular = |path: &std::path::Path| {
+            std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+        };
+        anyhow::ensure!(
+            !identity.is_empty()
+                && regular(&path)
+                && regular(&sqlite_path)
+                && crate::db::store_file(&path) == identity
+                && crate::db::store_file(&sqlite_path) == identity,
+            "knowledge changed during an owner lookup"
+        );
+        Ok(())
+    };
+    current()?;
+    let k = Connection::open_with_flags(
+        &sqlite_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    k.busy_timeout(std::time::Duration::from_secs(2))?;
+    k.prepare(
+        "SELECT c.uid, c.op_device, c.op_seq, d.uid, d.anchor_device, d.anchor_seq,
+                x.uid, x.status, x.body, x.op_device, x.op_seq, x.ts
+         FROM claims c, derivations d, corrections x LIMIT 0",
+    )?;
+    let found = correction_anchor(&k, uid)?.is_some();
+    raw.current()?;
+    current()?;
+    Ok(found)
+}
+
 fn correction_recorded(
     home: &std::path::Path,
     uid: &str,
@@ -383,31 +453,36 @@ fn correction_recorded(
     body: Option<&str>,
     muted: Option<bool>,
 ) -> std::result::Result<OwnerReceipt, OwnerRefusal> {
-    use rusqlite::OptionalExtension;
     let rules = crate::capture::Settings::load(home)
         .map_err(OwnerRefusal::unavailable)?
         .rules;
+    // An unknown uid must not initialize a fresh home. Keep existing raw's swap admission
+    // while distinguishing an absent store from unreadable or not-yet-rebuilt knowledge.
+    let existing = crate::raw::read_only(home).map_err(OwnerRefusal::unavailable)?;
+    let knowledge = std::fs::symlink_metadata(home.join("knowledge.db"));
+    let mut existing = match (existing, knowledge) {
+        (None, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(OwnerRefusal::missing(uid));
+        }
+        (Some(raw), Ok(knowledge)) if knowledge.is_file() => raw,
+        (_, Err(e)) => return Err(OwnerRefusal::unavailable(e)),
+        _ => {
+            return Err(OwnerRefusal::unavailable(anyhow::anyhow!(
+                "claim stores are unavailable"
+            )));
+        }
+    };
+    if !correction_target_exists(home, &existing, uid).map_err(OwnerRefusal::unavailable)? {
+        return Err(OwnerRefusal::missing(uid));
+    }
     // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
     let mut raw = crate::raw::open(home).map_err(OwnerRefusal::unavailable)?;
+    existing.after_open().map_err(OwnerRefusal::unavailable)?;
     let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
     schema(&k).map_err(OwnerRefusal::unavailable)?;
-    let anchor = k
-        .query_row(
-            "SELECT anchor_device, anchor_seq FROM active WHERE uid = ?1",
-            [uid],
-            |r| {
-                Ok(Anchor {
-                    device: r.get(0)?,
-                    seq: r.get(1)?,
-                })
-            },
-        )
-        .optional()
+    let anchor = correction_anchor(&k, uid)
         .map_err(OwnerRefusal::unavailable)?
-        .ok_or_else(|| OwnerRefusal {
-            code: OwnerRefusalCode::ClaimMissing,
-            cause: anyhow::anyhow!("no claim has the uid {uid}"),
-        })?;
+        .ok_or_else(|| OwnerRefusal::missing(uid))?;
     let op = CorrectionOp {
         uid: uid.to_owned(),
         anchor,
@@ -429,6 +504,7 @@ fn correction_recorded(
         .map_err(OwnerRefusal::unavailable)?;
     let device = raw.device().to_owned();
     drop(raw);
+    drop(existing);
     // A search or a SessionStart right after never shows the old claim.
     if let Err(cause) = applied(home, &k, &device, &seqs, "correction") {
         return Ok(OwnerReceipt::Pending {

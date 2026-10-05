@@ -125,6 +125,25 @@ mod tests {
         (store, uid)
     }
 
+    fn durable_store_files(home: &Path) -> std::collections::BTreeMap<std::ffi::OsString, String> {
+        use sha2::{Digest, Sha256};
+        std::fs::read_dir(home)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().unwrap().is_file())
+            .filter_map(|entry| {
+                let bytes = std::fs::read(entry.path()).unwrap();
+                let name = entry.file_name();
+                let filename = name.to_string_lossy();
+                // SQLite readers may create empty WALs and update the volatile shared index.
+                if filename.ends_with("-shm") || (filename.ends_with("-wal") && bytes.is_empty()) {
+                    return None;
+                }
+                Some((name, format!("{:x}", Sha256::digest(bytes))))
+            })
+            .collect()
+    }
+
     #[test]
     fn w3_correct_applies_the_gated_owner_body_and_status() {
         let mut store = Store::new();
@@ -357,6 +376,353 @@ mod tests {
             .unwrap(),
             store.raw.max_op_seq().unwrap()
         );
+    }
+
+    #[test]
+    fn w3_unknown_claim_refusals_leave_fresh_and_empty_homes_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let saving = Mutex::new(());
+        let uid = "a".repeat(64);
+        for empty in [true, false] {
+            let home = dir.path().join(if empty { "empty" } else { "absent" });
+            if empty {
+                std::fs::create_dir(&home).unwrap();
+            }
+            let expected = refused(404, "claim_not_found", "uid");
+            assert_eq!(
+                correct(
+                    &home,
+                    &saving,
+                    &serde_json::to_vec(&json!({"uid": uid, "body": "Use spaces."})).unwrap()
+                )
+                .unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                mute(
+                    &home,
+                    &saving,
+                    &serde_json::to_vec(&json!({"uid": uid, "muted": true})).unwrap()
+                )
+                .unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                crate::claims::correct(&home, &uid, Some("decided"), None)
+                    .unwrap_err()
+                    .to_string(),
+                format!("no claim has the uid {uid}")
+            );
+            assert_eq!(
+                crate::claims::mute(&home, &uid, false)
+                    .unwrap_err()
+                    .to_string(),
+                format!("no claim has the uid {uid}")
+            );
+            if empty {
+                assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+            } else {
+                assert!(
+                    !home.exists(),
+                    "an unknown claim must not initialize its home"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn w3_incomplete_claim_schemas_are_refused_without_initialization() {
+        let uid = "a".repeat(64);
+        for missing in ["base_only", "active", "derivations", "corrections"] {
+            let home = tempfile::tempdir().unwrap();
+            drop(crate::raw::open(home.path()).unwrap());
+            let k = crate::knowledge::open(home.path()).unwrap();
+            if missing != "base_only" {
+                crate::claims::schema(&k).unwrap();
+                let object = if missing == "active" { "VIEW" } else { "TABLE" };
+                k.execute_batch(&format!("DROP {object} {missing}"))
+                    .unwrap();
+            }
+            drop(k);
+            let before = durable_store_files(home.path());
+            for is_mute in [false, true] {
+                let action = if is_mute { mute } else { correct };
+                let body = if is_mute {
+                    json!({"uid": uid, "muted": true})
+                } else {
+                    json!({"uid": uid, "body": "Use spaces."})
+                };
+                let refusal = action(
+                    home.path(),
+                    &Mutex::new(()),
+                    &serde_json::to_vec(&body).unwrap(),
+                )
+                .unwrap_err();
+                assert_eq!(refusal, refused(503, "claim_unavailable", ""), "{missing}");
+                assert_eq!(durable_store_files(home.path()), before, "{missing}");
+            }
+        }
+    }
+
+    #[test]
+    fn w3_incomplete_live_wal_claim_state_is_refused_without_changing_durable_data() {
+        let (store, uid) = owner_claim();
+        let k = crate::knowledge::open(store.home.path()).unwrap();
+        k.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); DROP VIEW active;")
+            .unwrap();
+        assert!(
+            std::fs::metadata(store.home.path().join("knowledge.db-wal"))
+                .unwrap()
+                .len()
+                > 0
+        );
+        let before = durable_store_files(store.home.path());
+        for is_mute in [false, true] {
+            let action = if is_mute { mute } else { correct };
+            let body = if is_mute {
+                json!({"uid": uid, "muted": true})
+            } else {
+                json!({"uid": uid, "body": "Use spaces."})
+            };
+            assert_eq!(
+                action(
+                    store.home.path(),
+                    &Mutex::new(()),
+                    &serde_json::to_vec(&body).unwrap()
+                )
+                .unwrap_err(),
+                refused(503, "claim_unavailable", "")
+            );
+            assert_eq!(durable_store_files(store.home.path()), before);
+        }
+    }
+
+    #[test]
+    fn w3_zero_length_claim_stores_keep_their_durable_files() {
+        for empty in ["both", "raw.db", "knowledge.db"] {
+            let (store, uid) = owner_claim();
+            let Store { home, raw } = store;
+            drop(raw);
+            for file in ["raw.db", "knowledge.db"] {
+                if empty == "both" || empty == file {
+                    std::fs::write(home.path().join(file), []).unwrap();
+                }
+            }
+            let before = durable_store_files(home.path());
+            for is_mute in [false, true] {
+                let action = if is_mute { mute } else { correct };
+                let body = if is_mute {
+                    json!({"uid": uid, "muted": true})
+                } else {
+                    json!({"uid": uid, "body": "Use spaces."})
+                };
+                let refusal = action(
+                    home.path(),
+                    &Mutex::new(()),
+                    &serde_json::to_vec(&body).unwrap(),
+                )
+                .unwrap_err();
+                assert_eq!(durable_store_files(home.path()), before, "{empty}");
+                assert_eq!(refusal, refused(503, "claim_unavailable", ""), "{empty}");
+            }
+        }
+    }
+
+    #[test]
+    fn w3_existing_older_claim_state_migrates_only_for_a_valid_target() {
+        let (store, uid) = owner_claim();
+        let k = crate::knowledge::open(store.home.path()).unwrap();
+        k.execute_batch(
+            "DROP VIEW active;
+             ALTER TABLE corrections DROP COLUMN muted;
+             ALTER TABLE evidence DROP COLUMN claim_at;
+             CREATE VIEW active AS
+               SELECT c.uid, d.kind, d.speaker, d.scope, d.repo, d.valid_from,
+                 d.anchor_device, d.anchor_seq,
+                 COALESCE((SELECT x.status FROM corrections x WHERE x.uid = c.uid
+                           AND x.status IS NOT NULL
+                           ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1),
+                          d.status) AS status,
+                 COALESCE((SELECT x.body FROM corrections x WHERE x.uid = c.uid
+                           AND x.body IS NOT NULL
+                           ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1),
+                          d.body) AS body
+               FROM claims c JOIN derivations d
+                 ON d.op_device = c.op_device AND d.op_seq = c.op_seq;",
+        )
+        .unwrap();
+        let before = durable_store_files(store.home.path());
+        let saving = Mutex::new(());
+        assert_eq!(
+            mute(
+                store.home.path(),
+                &saving,
+                &serde_json::to_vec(&json!({"uid": "0".repeat(64), "muted": true})).unwrap()
+            )
+            .unwrap_err(),
+            refused(404, "claim_not_found", "uid")
+        );
+        assert_eq!(durable_store_files(store.home.path()), before);
+        assert_eq!(
+            correct(
+                store.home.path(),
+                &saving,
+                &serde_json::to_vec(&json!({"uid": uid, "body": "Use spaces."})).unwrap()
+            )
+            .unwrap(),
+            json!({"state": "applied", "uid": uid})
+        );
+        assert_eq!(
+            mute(
+                store.home.path(),
+                &saving,
+                &serde_json::to_vec(&json!({"uid": uid, "muted": true})).unwrap()
+            )
+            .unwrap(),
+            json!({"state": "applied", "uid": uid})
+        );
+        let claim = crate::search::b::claim(store.home.path(), &uid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.text, "Use spaces.");
+        assert!(claim.muted);
+        assert!(!store.home.path().join("providers.db").exists());
+    }
+
+    #[test]
+    fn w3_incomplete_or_corrupt_claim_stores_stay_unavailable() {
+        let saving = Mutex::new(());
+        let uid = "a".repeat(64);
+        for state in [
+            "raw_only",
+            "knowledge_only",
+            "corrupt_knowledge",
+            "corrupt_raw",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            if state != "knowledge_only" {
+                drop(crate::raw::open(home.path()).unwrap());
+            }
+            if state != "raw_only" {
+                drop(crate::knowledge::open(home.path()).unwrap());
+            }
+            let corrupt = match state {
+                "corrupt_knowledge" => Some(home.path().join("knowledge.db")),
+                "corrupt_raw" => Some(home.path().join("raw.db")),
+                _ => None,
+            };
+            if let Some(path) = &corrupt {
+                std::fs::write(path, "synthetic damaged store").unwrap();
+            }
+            assert_eq!(
+                correct(
+                    home.path(),
+                    &saving,
+                    &serde_json::to_vec(&json!({"uid": uid, "body": "Use spaces."})).unwrap()
+                )
+                .unwrap_err(),
+                refused(503, "claim_unavailable", ""),
+                "{state}"
+            );
+            assert_eq!(
+                mute(
+                    home.path(),
+                    &saving,
+                    &serde_json::to_vec(&json!({"uid": uid, "muted": true})).unwrap()
+                )
+                .unwrap_err(),
+                refused(503, "claim_unavailable", ""),
+                "{state}"
+            );
+            if state == "raw_only" {
+                assert!(!home.path().join("knowledge.db").exists());
+            } else if state == "knowledge_only" {
+                assert!(!home.path().join("raw.db").exists());
+                assert!(!home.path().join("raw.lock").exists());
+            }
+            if let Some(path) = corrupt {
+                assert_eq!(std::fs::read(path).unwrap(), b"synthetic damaged store");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn w3_an_unresolvable_claim_store_is_unavailable_not_missing() {
+        let home = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("raw.db", home.path().join("raw.db")).unwrap();
+        let refusal = mute(
+            home.path(),
+            &Mutex::new(()),
+            &serde_json::to_vec(&json!({"uid": "a".repeat(64), "muted": true})).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(refusal, refused(503, "claim_unavailable", ""));
+        assert!(!home.path().join("knowledge.db").exists());
+        assert!(!home.path().join("raw.lock").exists());
+    }
+
+    #[test]
+    fn w3_restoring_claim_stores_are_not_recreated_by_a_refusal() {
+        let (store, uid) = owner_claim();
+        let Store { home, raw } = store;
+        drop(raw);
+        let held = crate::raw::lock_for_swap(home.path()).unwrap();
+        for file in ["raw.db", "knowledge.db"] {
+            std::fs::rename(
+                home.path().join(file),
+                home.path().join(format!("{file}.held")),
+            )
+            .unwrap();
+        }
+        let refusal = mute(
+            home.path(),
+            &Mutex::new(()),
+            &serde_json::to_vec(&json!({"uid": uid, "muted": true})).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(refusal, refused(503, "claim_unavailable", ""));
+        assert!(!home.path().join("raw.db").exists());
+        assert!(!home.path().join("knowledge.db").exists());
+        drop(held);
+    }
+
+    #[test]
+    fn w3_claim_actions_resume_the_same_store_after_a_stopped_restore() {
+        let (store, uid) = owner_claim();
+        let Store { home, raw } = store;
+        drop(raw);
+        let saving = Mutex::new(());
+        std::fs::rename(
+            home.path().join("raw.db"),
+            home.path().join("raw.db.restored"),
+        )
+        .unwrap();
+        let corrected = correct(
+            home.path(),
+            &saving,
+            &serde_json::to_vec(&json!({"uid": uid, "body": "Use spaces."})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(corrected, json!({"state": "applied", "uid": uid}));
+        std::fs::rename(
+            home.path().join("raw.db"),
+            home.path().join("raw.db.restored"),
+        )
+        .unwrap();
+        let muted = mute(
+            home.path(),
+            &saving,
+            &serde_json::to_vec(&json!({"uid": uid, "muted": true})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(muted, json!({"state": "applied", "uid": uid}));
+        assert!(home.path().join("raw.db").exists());
+        assert!(!home.path().join("raw.db.restored").exists());
+        let claim = crate::search::b::claim(home.path(), &uid).unwrap().unwrap();
+        assert_eq!(claim.text, "Use spaces.");
+        assert!(claim.muted);
+        assert!(!home.path().join("providers.db").exists());
     }
 
     #[test]

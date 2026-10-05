@@ -21,6 +21,8 @@ the bundled rules remain enabled. Invalid patterns, duplicate names, invalid
 capture groups or invalid exception hashes leave the previous file unchanged.
 Errors contain vetted codes rather than patterns or values. An older request
 that omits these fields preserves their saved values, comments and defaults.
+Clearing an optional rule field retains its comments without retaining the old
+setting value. An unchanged repeated save preserves the resulting file bytes.
 
 The exact-value exception control hashes UTF-8 in the browser, clears the live
 input and sends only SHA-256 hashes with the configuration save. It preserves
@@ -50,6 +52,12 @@ raw store is empty; an unreadable store or a restore in progress is unavailable.
 Reads initialize no store or schema. This status does not claim coverage of other
 devices, backup purging or physical erasure.
 
+Parent-directory aliases are resolved before SQLite opens while the database
+leaf still refuses symlinks. Original and opened paths retain the same file
+identity under the raw swap hold. An explicit exclusion write may finish a
+stopped restore's rename from `raw.db.restored` to `raw.db`; the reader accepts
+that same file rather than accepting a replacement store or new identity.
+
 ## Owner claims
 
 Claim details accept a correction and status change, mute or unmute. A muted
@@ -64,11 +72,23 @@ awaiting application and an applied operation. Application requires actual
 consumer output, including the retained correction or preference derivation.
 Checkpoint passage by itself is insufficient.
 
+A correction or mute of an unknown UID in an empty or absent home creates no
+store and returns not found. Incomplete, unreadable or corrupt claim stores are
+unavailable; these cases are not treated as an empty home.
+
 A preference records an owner instruction before its claim operation. Failure
 between these writes returns `directive_only` without a claim UID. The page also
 treats a lost response as an unknown result: either may already be recorded.
 It does not retry automatically and offers inspection before another preference.
 Corrections, mute and preferences persist through rebuild.
+
+During the current page session, preference drafts and sending/receipt state
+survive tab changes and settings reloads. An applied preference clears its text;
+pending, partial or unknown outcomes require explicit inspection or another
+preference. A known pre-append refusal remains retryable. A recorded pending
+claim correction or mute permits a further explicit owner change; an unknown
+answer remains blocked. A send-exclusion acknowledgement followed by a failed
+status read reports both the recorded write and the unavailable readback.
 
 ## Local API boundary
 

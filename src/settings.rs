@@ -640,48 +640,7 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| invalid())?;
     let base = alone(&path, &doc).ok_or_else(invalid)?;
     let chain = checked(&posted, &base, &now)?;
-    if let Some(backup) = &posted.backup {
-        let old = crate::backup::location(text).map_err(|_| invalid())?;
-        if backup.dir.as_deref().map(Path::new) != old.as_deref() {
-            match &backup.dir {
-                Some(dir) => put(&mut doc, "backup", "dir", dir.as_str().into()),
-                None => {
-                    let comments = doc
-                        .get("backup")
-                        .and_then(toml_edit::Item::as_table)
-                        .map(|table| key_comments(table, "dir"))
-                        .unwrap_or_default();
-                    if let Some(table) = doc
-                        .get_mut("backup")
-                        .and_then(toml_edit::Item::as_table_like_mut)
-                    {
-                        table.remove("dir");
-                    }
-                    keep_comments(&mut doc, &comments);
-                }
-            }
-        }
-    }
-    if let Some(redaction) = &posted.redaction {
-        crate::redact::Rules::new(redaction)
-            .map_err(|_| refused(422, "redaction_invalid", "redaction"))?;
-        let old = config::parse_capture(Some(text))
-            .map_err(|_| invalid())?
-            .redaction;
-        if serde_json::to_value(&redaction.extra_rules).expect("rules serialize")
-            != serde_json::to_value(&old.extra_rules).expect("rules serialize")
-        {
-            write_extra_rules(&mut doc, &old.extra_rules, &redaction.extra_rules);
-        }
-        if redaction.allowlist != old.allowlist {
-            put(
-                &mut doc,
-                "redaction",
-                "allowlist",
-                toml_edit::Value::Array(redaction.allowlist.iter().map(String::as_str).collect()),
-            );
-        }
-    }
+    write_privacy_config(&mut doc, text, &posted)?;
     // The order changes when the chain's does, not when `order` would be spelled another way.
     let reordered = !(posted.chain.iter().map(|e| e.name.as_str())).eq(names(&now.providers));
     if let Some(worker) = &posted.worker {
@@ -1046,23 +1005,19 @@ fn put_root(doc: &mut toml_edit::DocumentMut, key: &str, value: Option<toml_edit
     }
 }
 
-fn key_comments(table: &toml_edit::Table, key: &str) -> String {
-    table
-        .get_key_value(key)
-        .map(|(name, item)| {
-            let prefix = name
-                .leaf_decor()
-                .prefix()
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
-            let suffix = item
-                .as_value()
-                .and_then(|v| v.decor().suffix())
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
-            format!("{prefix}{suffix}")
-        })
-        .unwrap_or_default()
+fn key_comments(table: &dyn toml_edit::TableLike, key: &str) -> String {
+    let prefix = table
+        .key(key)
+        .and_then(|name| name.leaf_decor().prefix())
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    let suffix = table
+        .get(key)
+        .and_then(toml_edit::Item::as_value)
+        .and_then(|v| v.decor().suffix())
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    format!("{prefix}{suffix}")
 }
 
 fn keep_comments(doc: &mut toml_edit::DocumentMut, comments: &str) {
@@ -1086,6 +1041,57 @@ fn put(doc: &mut toml_edit::DocumentMut, table: &str, key: &str, mut value: toml
     doc[table][key] = toml_edit::Item::Value(value);
 }
 
+/// Write the optional backup and redaction choices using the existing preservation rules.
+fn write_privacy_config(
+    doc: &mut toml_edit::DocumentMut,
+    text: &str,
+    posted: &Save,
+) -> Result<(), Refusal> {
+    if let Some(backup) = &posted.backup {
+        let old = crate::backup::location(text).map_err(|_| invalid())?;
+        if backup.dir.as_deref().map(Path::new) != old.as_deref() {
+            match &backup.dir {
+                Some(dir) => put(doc, "backup", "dir", dir.as_str().into()),
+                None => {
+                    let comments = doc
+                        .get("backup")
+                        .and_then(toml_edit::Item::as_table)
+                        .map(|table| key_comments(table, "dir"))
+                        .unwrap_or_default();
+                    if let Some(table) = doc
+                        .get_mut("backup")
+                        .and_then(toml_edit::Item::as_table_like_mut)
+                    {
+                        table.remove("dir");
+                    }
+                    keep_comments(doc, &comments);
+                }
+            }
+        }
+    }
+    if let Some(redaction) = &posted.redaction {
+        crate::redact::Rules::new(redaction)
+            .map_err(|_| refused(422, "redaction_invalid", "redaction"))?;
+        let old = config::parse_capture(Some(text))
+            .map_err(|_| invalid())?
+            .redaction;
+        if serde_json::to_value(&redaction.extra_rules).expect("rules serialize")
+            != serde_json::to_value(&old.extra_rules).expect("rules serialize")
+        {
+            write_extra_rules(doc, &old.extra_rules, &redaction.extra_rules);
+        }
+        if redaction.allowlist != old.allowlist {
+            put(
+                doc,
+                "redaction",
+                "allowlist",
+                toml_edit::Value::Array(redaction.allowlist.iter().map(String::as_str).collect()),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Reuse each rule's saved table by id, including comments and omitted defaults. Both TOML
 /// spellings accepted by capture (inline arrays and arrays of tables) keep their spelling.
 fn write_extra_rules(
@@ -1093,6 +1099,7 @@ fn write_extra_rules(
     old: &[config::ExtraRule],
     rules: &[config::ExtraRule],
 ) {
+    let mut comments = String::new();
     let saved = doc
         .get("redaction")
         .and_then(|r| r.get("extra_rules"))
@@ -1105,7 +1112,11 @@ fn write_extra_rules(
                 .find(|t| t.get("id").and_then(toml_edit::Item::as_str) == Some(&rule.id))
                 .cloned()
                 .unwrap_or_default();
-            write_rule(&mut table, old.iter().find(|r| r.id == rule.id), rule);
+            comments.push_str(&write_rule(
+                &mut table,
+                old.iter().find(|r| r.id == rule.id),
+                rule,
+            ));
             next.push(table);
         }
         doc["redaction"]["extra_rules"] = toml_edit::Item::ArrayOfTables(next);
@@ -1124,7 +1135,11 @@ fn write_extra_rules(
                 })
                 .cloned()
                 .unwrap_or_default();
-            write_rule(&mut table, old.iter().find(|r| r.id == rule.id), rule);
+            comments.push_str(&write_rule(
+                &mut table,
+                old.iter().find(|r| r.id == rule.id),
+                rule,
+            ));
             next.push_formatted(toml_edit::Value::InlineTable(table));
         }
         put(
@@ -1134,13 +1149,15 @@ fn write_extra_rules(
             toml_edit::Value::Array(next),
         );
     }
+    keep_comments(doc, &comments);
 }
 
 fn write_rule(
     table: &mut dyn toml_edit::TableLike,
     old: Option<&config::ExtraRule>,
     rule: &config::ExtraRule,
-) {
+) -> String {
+    let mut comments = String::new();
     let values = [
         (
             "id",
@@ -1180,9 +1197,12 @@ fn write_rule(
             }
             table.insert(key, toml_edit::Item::Value(value));
         } else {
+            comments.push_str(&key_comments(table, key));
+            comments.push('\n');
             table.remove(key);
         }
     }
+    comments
 }
 
 /// Writes each `[chain]` key whose value changes from what the file has now (`now`; the order
@@ -1564,6 +1584,52 @@ mod tests {
         );
         assert!(file(&home).unwrap().contains("# memory home"));
         assert!(!home.path().join("backups").exists());
+    }
+
+    #[test]
+    fn clearing_optional_rule_fields_keeps_their_comments() {
+        let original = "providers = []\n[redaction]\n\
+            [[redaction.extra_rules]]\nid = 'one' # keep rule\nregex = '(abc)'\n\
+            # keyword guidance\nkeywords = ['abc'] # keyword note\n\
+            entropy = 0.1 # entropy note\nsecret_group = 1 # group note\n\
+            [backup]\ndir = 'retained' # other setting\n";
+        let home = home_with(Some(original));
+        let shown = show(home.path());
+        let body = posted(&shown, |v| {
+            v["redaction"] = shown["redaction"].clone();
+            v["redaction"]["extra_rules"][0]["keywords"] = json!([]);
+            v["redaction"]["extra_rules"][0]["entropy"] = Value::Null;
+            v["redaction"]["extra_rules"][0]["secret_group"] = Value::Null;
+        });
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(saved["redaction"]["extra_rules"][0]["keywords"], json!([]));
+        assert_eq!(saved["redaction"]["extra_rules"][0]["entropy"], Value::Null);
+        assert_eq!(
+            saved["redaction"]["extra_rules"][0]["secret_group"],
+            Value::Null
+        );
+        let text = file(&home).unwrap();
+        for note in [
+            "# keep rule",
+            "# keyword guidance",
+            "# keyword note",
+            "# entropy note",
+            "# group note",
+            "# other setting",
+        ] {
+            assert_eq!(
+                text.matches(note).count(),
+                1,
+                "comment lost or repeated: {note}"
+            );
+        }
+        let same = posted(&saved, |v| v["redaction"] = saved["redaction"].clone());
+        save_to(&home, &same).unwrap();
+        assert_eq!(
+            file(&home).unwrap(),
+            text,
+            "a repeated save rewrote retained comments"
+        );
     }
 
     #[test]

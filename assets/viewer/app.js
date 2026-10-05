@@ -235,12 +235,12 @@ function claimOwnerControls(c, panel) {
   });
   const submit = async (path, posted) => {
     fields.inert = true;
-    let recorded = false;
+    let hold = false;
     try {
       const { res, answer } = await memoryWrite(path, posted);
       if (!panel.isConnected) return;
       if (!res.ok) { result.textContent = memoryFailure(res, answer); return; }
-      recorded = true;
+      hold = answer.state !== 'pending' || !['claim_pending', 'claim_not_applied'].includes(answer.code);
       result.textContent = claimReceipt(answer);
       if (answer.state === 'applied') {
         try {
@@ -251,9 +251,9 @@ function claimOwnerControls(c, panel) {
         } catch { result.textContent += ` ${t('claim_refresh_hint')}`; }
       }
     } catch {
-      recorded = true; // A dropped answer cannot prove that append did not happen.
+      hold = true; // A dropped answer cannot prove that append did not happen.
       if (panel.isConnected) result.textContent = t('memory_result_unknown');
-    } finally { if (!recorded) fields.inert = false; }
+    } finally { if (!hold) fields.inert = false; }
   };
   correction.addEventListener('submit', (event) => {
     event.preventDefault();
@@ -971,6 +971,7 @@ const TEXT = {
   privacy_undo: ['Undo exclusion; allow future sends', '除外を解除し、今後の送信を許可'],
   privacy_recorded: ['The send exclusion was recorded.', '送信除外を記録しました。'],
   privacy_undone: ['The exclusion was undone. Future sends may resume.', '除外を解除しました。今後の送信を再開できる状態です。'],
+  privacy_readback_failed: ['{receipt} The updated privacy state could not be read. Refresh privacy state to confirm it; do not repeat the write.', '{receipt} 更新後のプライバシー状態を読み込めませんでした。書き込みは繰り返さず、「プライバシーの状態を更新」で確認してください。'],
   privacy_unavailable: ['Privacy state could not be read or changed. Nothing is reported as complete.', 'プライバシーの状態を読み込み・変更できませんでした。完了したとは判定していません。'],
   privacy_selector: ['This repository selection is invalid. Reload its state.', 'リポジトリの選択が無効です。状態を再読み込みしてください。'],
   repo_not_found: ['This repository is no longer in the stored list. Reload its state.', 'このリポジトリは保存済み一覧にありません。状態を再読み込みしてください。'],
@@ -1354,6 +1355,8 @@ function welcomeKey(event) {
 
 // The form's values between redraws: a language switch or a move keeps what is not saved yet.
 let form = null;
+// Preferences are separate append operations: retain their draft/receipt for this page only.
+let preferenceDraft = { text: '', confirmed: false, result: null };
 // `[inject]`'s sizes, each checked against the range the server states for it.
 const SIZES = ['session_start_chars', 'per_prompt_chars', 'correction_chars'];
 
@@ -1377,7 +1380,7 @@ function formOf(s) {
     backup: { dir: s.backup?.dir ?? null, edit: text(s.backup?.dir), reset: false },
     redaction: { rules: (s.redaction?.extra_rules || []).map(redactionEdit), hashes: (s.redaction?.allowlist || []).join('\n') },
     privacy: s.privacy || privacyUnavailable(),
-    preference: { text: '', confirmed: false, result: null },
+    preference: preferenceDraft,
     chain: s.chain.map((e) => ({
       ...e,
       edit: { on: e.on, daily_budget: text(e.daily_budget), timeout_s: text(e.timeout_s), model: text(e.model) },
@@ -1396,19 +1399,25 @@ function redactionEdit(rule = {}) {
     secret_group: rule.secret_group === null || rule.secret_group === undefined ? '' : String(rule.secret_group) };
 }
 
+function redactionRuleBody(edit, field) {
+  let keywords;
+  try { keywords = JSON.parse(edit.keywords); } catch { return { field: `${field}.keywords` }; }
+  if (!Array.isArray(keywords) || keywords.some((v) => typeof v !== 'string')) return { field: `${field}.keywords` };
+  const entropy = edit.entropy.trim() === '' ? null : Number(edit.entropy);
+  if (entropy !== null && !Number.isFinite(entropy)) return { field: `${field}.entropy` };
+  const group = edit.secret_group.trim();
+  let secret_group = null;
+  if (group !== '') secret_group = /^\d+$/.test(group) && Number.isSafeInteger(Number(group)) ? Number(group) : Number.NaN;
+  if (Number.isNaN(secret_group)) return { field: `${field}.secret_group` };
+  return { value: { id: edit.id, regex: edit.regex, keywords, entropy, secret_group } };
+}
+
 function redactionBody() {
   const extra_rules = [];
   for (const [index, edit] of form.redaction.rules.entries()) {
-    const field = `redaction.extra_rules.${index}`;
-    let keywords;
-    try { keywords = JSON.parse(edit.keywords); } catch { return { field: `${field}.keywords` }; }
-    if (!Array.isArray(keywords) || keywords.some((v) => typeof v !== 'string')) return { field: `${field}.keywords` };
-    const entropy = edit.entropy.trim() === '' ? null : Number(edit.entropy);
-    if (entropy !== null && !Number.isFinite(entropy)) return { field: `${field}.entropy` };
-    const group = edit.secret_group.trim();
-    const secret_group = group === '' ? null : /^\d+$/.test(group) && Number.isSafeInteger(Number(group)) ? Number(group) : Number.NaN;
-    if (Number.isNaN(secret_group)) return { field: `${field}.secret_group` };
-    extra_rules.push({ id: edit.id, regex: edit.regex, keywords, entropy, secret_group });
+    const { value, field } = redactionRuleBody(edit, `redaction.extra_rules.${index}`);
+    if (field) return { field };
+    extra_rules.push(value);
   }
   const allowlist = form.redaction.hashes.split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
   if (allowlist.some((v) => !/^[0-9a-fA-F]{64}$/.test(v))) return { field: 'redaction.allowlist' };
@@ -1503,12 +1512,13 @@ function memoryFailure(res, answer) {
 }
 
 async function refreshPrivacy(f) {
-  if (!f) return;
+  if (!f) return false;
   const mine = f.privacyRead = (f.privacyRead || 0) + 1;
   const state = await api('privacy').catch(privacyUnavailable);
-  if (!currentSettings(f) || f.privacyRead !== mine) return;
+  if (!currentSettings(f) || f.privacyRead !== mine) return false;
   f.privacy = state;
   if (!f.hashing) drawSettings();
+  return state.available === true;
 }
 
 function privacySection(f) {
@@ -1517,7 +1527,7 @@ function privacySection(f) {
   refresh.type = 'button';
   refresh.addEventListener('click', async () => {
     refresh.disabled = true;
-    try { await refreshPrivacy(f); } finally { refresh.disabled = false; }
+    try { if (await refreshPrivacy(f)) setStatus(''); } finally { refresh.disabled = false; }
   });
   const rows = (state.repositories || []).map((repo) => {
     const action = el('button', 'quiet small', t(repo.excluded ? 'privacy_undo' : 'privacy_exclude'));
@@ -1531,8 +1541,11 @@ function privacySection(f) {
         const { res, answer } = await memoryWrite('privacy/exclude', { selector: repo.selector, undo: repo.excluded });
         if (!currentSettings(f)) return;
         if (!res.ok) { setStatus(memoryFailure(res, answer), true, lang); return; }
-        await refreshPrivacy(f);
-        if (currentSettings(f)) setStatus(t(repo.excluded ? 'privacy_undone' : 'privacy_recorded'), false, lang);
+        const refreshed = await refreshPrivacy(f);
+        if (currentSettings(f)) {
+          const receipt = t(repo.excluded ? 'privacy_undone' : 'privacy_recorded');
+          setStatus(refreshed ? receipt : t('privacy_readback_failed', { receipt }), !refreshed, lang);
+        }
       } catch {
         if (currentSettings(f)) setStatus(t('memory_result_unknown'), true, lang);
       } finally { fields.inert = false; action.disabled = false; }
@@ -1541,8 +1554,10 @@ function privacySection(f) {
   });
   const scan = state.rescan;
   const scanKey = `rescan_${scan.state}`;
+  let listing = el('p', 'desc', t('privacy_unavailable'));
+  if (state.available) listing = rows.length ? el('ul', null, ...rows) : el('p', 'desc', t('privacy_none'));
   return el('section', null, el('h3', null, t('privacy_h')), el('p', 'desc', t('privacy_desc')),
-    state.available ? rows.length ? el('ul', null, ...rows) : el('p', 'desc', t('privacy_none')) : el('p', 'desc', t('privacy_unavailable')),
+    listing,
     el('h4', null, t('rescan_h')), el('p', 'desc', t(Object.hasOwn(TEXT, scanKey) ? scanKey : 'rescan_unavailable')),
     scan.processed !== null && scan.total !== null ? el('p', 'desc', t('rescan_progress', scan)) : null, refresh);
 }
@@ -1554,6 +1569,32 @@ function claimReceipt(answer) {
     ? t(code) : t('memory_result_unknown');
 }
 
+function preferenceValidation(draft) {
+  if (!draft.text.trim()) return 'preference_empty';
+  if ([...draft.text.trim()].length > 1000) return 'preference_too_long';
+  if (!draft.confirmed) return 'preference_confirmation';
+  return null;
+}
+
+function preferenceBlocked(draft) {
+  return Boolean(draft.sending || (draft.result && draft.result.state !== 'applied'));
+}
+
+function preferenceRefused(res, answer) {
+  if (res.ok || answer.state) return false;
+  const code = answer.code || PROVIDER_HTTP_ERRORS[res.status];
+  return ['bad_request', 'unauthorized', 'forbidden', 'too_large', 'preference_confirmation',
+    'preference_empty', 'preference_too_long', 'claim_unavailable'].includes(code);
+}
+
+function renderPreference(draft) {
+  if (view !== 'settings' || form?.preference !== draft) return false;
+  // Update only this independent action, preserving another settings write or exact-value digest.
+  const section = $('panel').querySelector('.preference');
+  if (section) section.replaceChildren(...preferenceSection(form).childNodes);
+  return true;
+}
+
 function preferenceSection(f) {
   const draft = f.preference;
   const field = input('textarea', draft.text, '', 'preference.text', (v) => { draft.text = v; });
@@ -1561,47 +1602,50 @@ function preferenceSection(f) {
   confirm.dataset.field = 'preference.apply_to_all_repos';
   const save = el('button', 'quiet small', t('preference_save'));
   save.type = 'submit';
-  save.disabled = Boolean(draft.result && draft.result.state !== 'applied');
+  save.disabled = preferenceBlocked(draft);
   const action = el('form', null,
     el('label', 'field', el('span', null, t('preference_text')), field),
     el('label', 'check', confirm, t('preference_confirm')), save);
   action.noValidate = true;
+  action.inert = Boolean(draft.sending);
   action.addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (save.disabled) return;
-    const code = !draft.text.trim() ? 'preference_empty' : [...draft.text.trim()].length > 1000 ? 'preference_too_long'
-      : !draft.confirmed ? 'preference_confirmation' : null;
+    if (save.disabled || preferenceBlocked(draft)) return;
+    const code = preferenceValidation(draft);
     if (code) { setStatus(t(code), true, lang); return; }
     const fields = action.closest('.settings');
+    draft.sending = true;
+    draft.result = null;
     fields.inert = true;
     save.disabled = true;
     try {
       const { res, answer } = await memoryWrite('preferences', { text: draft.text, apply_to_all_repos: true });
-      if (!currentSettings(f)) return;
-      if (!res.ok) { setStatus(memoryFailure(res, answer), true, lang); return; }
-      draft.result = answer;
-      draft.confirmed = false;
-      if (answer.state === 'applied') draft.text = '';
-      drawSettings();
-      setStatus(claimReceipt(answer), answer.state !== 'applied', lang);
-    } catch {
-      if (currentSettings(f)) {
-        draft.result = { state: 'unknown' };
-        draft.confirmed = false;
-        drawSettings();
-        setStatus(t('memory_result_unknown'), true, lang);
+      draft.sending = false;
+      if (preferenceRefused(res, answer)) {
+        if (renderPreference(draft)) setStatus(memoryFailure(res, answer), true, lang);
+        return;
       }
-    } finally { fields.inert = false; save.disabled = false; }
+      draft.result = res.ok || ['pending', 'directive_only'].includes(answer.state) ? answer : { state: 'unknown' };
+      draft.confirmed = false;
+      if (draft.result.state === 'applied') draft.text = '';
+      if (renderPreference(draft)) setStatus(claimReceipt(draft.result), draft.result.state !== 'applied', lang);
+    } catch {
+      draft.sending = false;
+      draft.result = { state: 'unknown' };
+      draft.confirmed = false;
+      if (renderPreference(draft)) setStatus(t('memory_result_unknown'), true, lang);
+    } finally { draft.sending = false; fields.inert = false; save.disabled = preferenceBlocked(draft); }
   });
   const next = el('button', 'quiet small', t('preference_new'));
   next.type = 'button';
   next.addEventListener('click', () => {
-    f.preference = { text: '', confirmed: false, result: null };
-    drawSettings();
+    preferenceDraft = { text: '', confirmed: false, result: null };
+    f.preference = preferenceDraft;
+    renderPreference(preferenceDraft);
     document.querySelector('[data-field="preference.text"]')?.focus();
   });
-  return el('section', null, el('h3', null, t('preference_h')), el('p', 'desc', t('preference_desc')),
-    action, draft.result ? el('p', 'desc', claimReceipt(draft.result)) : null,
+  return el('section', 'preference', el('h3', null, t('preference_h')), el('p', 'desc', t('preference_desc')),
+    action, draft.sending ? el('p', 'desc', t('loading')) : null, draft.result ? el('p', 'desc', claimReceipt(draft.result)) : null,
     draft.result?.uid ? claimLink(draft.result.uid) : null, draft.result && draft.result.state !== 'applied' ? next : null);
 }
 
@@ -2350,6 +2394,14 @@ function markInvalid(field, root = document) {
   i.focus();
 }
 
+function applySavedSettings(answer, mine, current) {
+  form = current ? formOf(current) : mergeProviderSettings(answer, mine, { op: 'settings' });
+  if (form) form.privacy = privacyUnavailable();
+  drawSettings();
+  setStatus(t(current ? 'stale' : 'saved'), Boolean(current), lang);
+  if (form) void refreshPrivacy(form);
+}
+
 async function saveSettings(button) {
   const { body, field } = saveBody();
   if (!body) {
@@ -2378,11 +2430,7 @@ async function saveSettings(button) {
     // Moved to another tab, or the values were loaded again, while saving: what is shown stays.
     if (view !== 'settings' || form !== mine) return;
     if (res.ok || current) {
-      form = current ? formOf(current) : mergeProviderSettings(answer, mine, { op: 'settings' });
-      if (form) form.privacy = privacyUnavailable();
-      drawSettings();
-      setStatus(t(current ? 'stale' : 'saved'), Boolean(current), lang);
-      if (form) void refreshPrivacy(form);
+      applySavedSettings(answer, mine, current);
       return;
     }
     const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };

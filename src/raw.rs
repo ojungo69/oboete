@@ -467,6 +467,7 @@ pub fn exists(home: &Path) -> bool {
 /// while a privacy reader compares them.
 pub(crate) struct ReadOnly {
     pub(crate) conn: Connection,
+    pub(crate) sqlite_path: std::path::PathBuf,
     path: std::path::PathBuf,
     identity: String,
     lock_path: std::path::PathBuf,
@@ -474,11 +475,26 @@ pub(crate) struct ReadOnly {
 }
 
 impl ReadOnly {
+    /// `open` can finish a stopped restore by renaming the same file into raw.db. Keep the
+    /// pinned identity and swap hold; this never accepts a replacement store or new identity.
+    pub(crate) fn after_open(&mut self) -> Result<()> {
+        if self.path.file_name() == Some(std::ffi::OsStr::new("raw.db.restored")) {
+            self.path.set_file_name("raw.db");
+            self.sqlite_path.set_file_name("raw.db");
+        }
+        self.current()
+    }
+
     /// A home removed or replaced while a read was waiting must not answer from the old file.
     pub(crate) fn current(&self) -> Result<()> {
+        let regular = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file());
         anyhow::ensure!(
             !self.identity.is_empty()
+                && regular(&self.path)
+                && regular(&self.sqlite_path)
+                && regular(&self.lock_path)
                 && crate::db::store_file(&self.path) == self.identity
+                && crate::db::store_file(&self.sqlite_path) == self.identity
                 && crate::worker::file_id(std::fs::metadata(&self.lock_path))
                     == crate::worker::file_id(self._swap.metadata()),
             "raw store changed during a read"
@@ -537,8 +553,17 @@ pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
         return Ok(None);
     };
     let identity = crate::db::store_file(&path);
+    // SQLite NOFOLLOW rejects ancestor aliases too. Resolve only the
+    // home, retaining the leaf check and the original path's identity for later validation.
+    let sqlite_path = home
+        .canonicalize()?
+        .join(path.file_name().context("raw filename")?);
+    anyhow::ensure!(
+        !identity.is_empty() && crate::db::store_file(&sqlite_path) == identity,
+        "raw store changed before a read"
+    );
     let conn = Connection::open_with_flags(
-        &path,
+        &sqlite_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
             | rusqlite::OpenFlags::SQLITE_OPEN_URI
             | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -546,6 +571,7 @@ pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
     conn.busy_timeout(OPEN_WAIT)?;
     let read = ReadOnly {
         conn,
+        sqlite_path,
         path,
         identity,
         lock_path,

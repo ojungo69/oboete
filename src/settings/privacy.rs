@@ -86,7 +86,7 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
     let settings = crate::capture::Settings::load(home)?;
     let excluded = crate::raw::exclusions_in(&raw.conn)?;
     let (labels, rescan) = if let Some((mut k, identity)) = knowledge(home)? {
-        let path = crate::raw::path(home);
+        let path = &raw.sqlite_path;
         let uri = format!(
             "file:{}?mode=ro",
             percent_encoding::percent_encode(
@@ -98,11 +98,12 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
         // READ_ONLY | URI applies to both opens; neither can create a missing database.
         k.execute("ATTACH DATABASE ?1 AS privacy_raw", [uri])?;
         let tx = k.transaction()?;
-        let state = rescan_in(&tx, settings.rules.version(), &crate::db::store_file(&path))?;
+        let state = rescan_in(&tx, settings.rules.version(), &crate::db::store_file(path))?;
         let labels = labels(Some(&tx), &excluded)?;
         tx.commit()?;
         anyhow::ensure!(
-            crate::db::store_file(&home.join("knowledge.db")) == identity,
+            std::fs::symlink_metadata(home.join("knowledge.db")).is_ok_and(|m| m.is_file())
+                && crate::db::store_file(&home.join("knowledge.db")) == identity,
             "knowledge changed during a read"
         );
         (labels, state)
@@ -196,15 +197,22 @@ fn knowledge(home: &Path) -> anyhow::Result<Option<(Connection, String)>> {
         Err(e) => return Err(e).context("read privacy knowledge"),
     }
     let identity = crate::db::store_file(&path);
+    let sqlite_path = home.canonicalize()?.join("knowledge.db");
+    anyhow::ensure!(
+        !identity.is_empty() && crate::db::store_file(&sqlite_path) == identity,
+        "knowledge changed before a read"
+    );
     let conn = Connection::open_with_flags(
-        &path,
+        &sqlite_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     conn.busy_timeout(std::time::Duration::from_secs(2))?;
     anyhow::ensure!(
-        !identity.is_empty() && crate::db::store_file(&path) == identity,
+        std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file())
+            && crate::db::store_file(&path) == identity
+            && crate::db::store_file(&sqlite_path) == identity,
         "knowledge changed during a read"
     );
     Ok(Some((conn, identity)))
@@ -250,7 +258,7 @@ pub fn exclude(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let unavailable = || refused(503, "privacy_unavailable", "");
-    let raw = crate::raw::read_only(home)
+    let mut raw = crate::raw::read_only(home)
         .map_err(|_| unavailable())?
         .ok_or_else(|| refused(404, "repo_not_found", "selector"))?;
     let excluded = crate::raw::exclusions_in(&raw.conn).map_err(|_| unavailable())?;
@@ -267,7 +275,7 @@ pub fn exclude(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
     }
     raw.current().map_err(|_| unavailable())?;
     let mut writer = crate::raw::open(home).map_err(|_| unavailable())?;
-    raw.current().map_err(|_| unavailable())?;
+    raw.after_open().map_err(|_| unavailable())?;
     let op_seq = writer
         .exclude(label, posted.undo)
         .map_err(|_| unavailable())?;
@@ -299,6 +307,111 @@ mod tests {
         );
         assert!(!home.exists(), "a GET initialized the absent home");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_home_reads_the_same_privacy_state_without_rebinding_the_store() {
+        let mut store = Store::new();
+        store.said("s", "repo", 1_000, "A privacy read through a home alias.");
+        store.run();
+        let links = tempfile::tempdir().unwrap();
+        let alias = links.path().join("home");
+        std::os::unix::fs::symlink(store.home.path(), &alias).unwrap();
+        let conn = Connection::open_with_flags(
+            store.home.path().join("raw.db"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let before: Vec<(String, String)> = conn
+            .prepare("SELECT key, value FROM meta ORDER BY key")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let expected = show(store.home.path());
+        assert_eq!(expected["rescan"]["state"], "complete");
+        assert_eq!(
+            show(&alias),
+            expected,
+            "an ancestor alias is not a symlinked store file"
+        );
+        let after: Vec<(String, String)> = conn
+            .prepare("SELECT key, value FROM meta ORDER BY key")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(after, before, "a read changed store identity or metadata");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn privacy_reads_reject_leaf_symlinks_even_when_they_name_the_same_store() {
+        let mut store = Store::new();
+        store.said("s", "repo", 1_000, "A private leaf-symlink control.");
+        store.run();
+        let home = store.home.path();
+        for name in ["raw.db", "knowledge.db", "raw.lock"] {
+            let path = home.join(name);
+            let moved = home.join(format!("{name}.control"));
+            std::fs::rename(&path, &moved).unwrap();
+            std::os::unix::fs::symlink(&moved, &path).unwrap();
+            assert_eq!(show(home)["available"], false, "{name} symlink accepted");
+            std::fs::remove_file(&path).unwrap();
+            std::fs::rename(&moved, &path).unwrap();
+            assert_eq!(show(home)["rescan"]["state"], "complete");
+        }
+        let opened = crate::raw::read_only(home).unwrap().unwrap();
+        let path = home.join("raw.db");
+        let moved = home.join("raw.db.control");
+        std::fs::rename(&path, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &path).unwrap();
+        assert!(
+            opened.current().is_err(),
+            "a late leaf symlink was accepted"
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&moved, &path).unwrap();
+        opened.current().unwrap();
+    }
+
+    #[test]
+    fn an_exclusion_can_be_undone_after_open_recovers_the_same_restored_file() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        raw.exclude("repo-without-history", false).unwrap();
+        crate::worker::run_once(home.path()).unwrap();
+        drop(raw);
+        std::fs::rename(
+            home.path().join("raw.db"),
+            home.path().join("raw.db.restored"),
+        )
+        .unwrap();
+        let shown = show(home.path());
+        assert_eq!(shown["available"], true);
+        let selected = shown["repositories"][0]["selector"].as_str().unwrap();
+        let result = exclude(
+            home.path(),
+            &Mutex::new(()),
+            &serde_json::to_vec(&json!({"selector": selected, "undo": true})).unwrap(),
+        );
+        assert!(
+            result.is_ok(),
+            "same-file recovery refused exclusion: {result:?}"
+        );
+        assert_eq!(result.unwrap()["excluded"], false);
+        assert!(home.path().join("raw.db").is_file());
+        assert!(!home.path().join("raw.db.restored").exists());
+        assert!(
+            crate::raw::open(home.path())
+                .unwrap()
+                .exclusions()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -483,10 +596,13 @@ mod tests {
 
     #[test]
     fn missing_scan_rows_stay_pending_and_corrupt_stores_are_unavailable_without_initialization() {
-        let home = tempfile::Builder::new()
-            .prefix("privacy #? café-")
-            .tempdir()
-            .unwrap();
+        // Windows disallows '?' in filenames; space, '#' and Unicode still exercise URI escaping.
+        let prefix = if cfg!(windows) {
+            "privacy # café-"
+        } else {
+            "privacy #? café-"
+        };
+        let home = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
         raw.append(&crate::raw::test_event(
             r#"{"prompt":"One stored record."}"#,
