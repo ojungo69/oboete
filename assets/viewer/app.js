@@ -1041,6 +1041,9 @@ const TEXT = {
   provider_test_off: ['This entry or its name group is off.', 'この要約役、または同じ名前の設定が無効です。'],
   provider_test_missing_key: ['Register an API key for this entry first.', '先にこの要約役の API キーを登録してください。'],
   provider_test_unavailable: ['Connection testing is not available for this entry.', 'この要約役では接続テストを利用できません。'],
+  provider_test_cli_unbounded: ['Connection testing is unavailable for CLI providers because an output limit cannot be guaranteed. Normal curation still uses your saved settings.', 'CLI の接続テストは、出力の上限を保証できないため利用できません。保存済みの設定は、通常の要約に引き続き適用されます。'],
+  provider_test_busy: ['Another operation is using the spending history or sending recorded data. Wait for it to finish, then try again.', '別の処理が使用履歴を更新中、または記録データを送信中です。完了を待ってから再試行してください。'],
+  provider_test_ledger_invalid: ['The spending history could not be read. Run oboete doctor to check it before retrying.', '使用履歴を読み取れません。再試行する前に oboete doctor で状態を確認してください。'],
   provider_test_gate: ['The data-sending safety gate refused this test.', 'データ送信の安全性の確認により、テストを拒否しました。'],
   provider_test_auth: ['The provider refused authentication. Check the registered key or the provider’s own login.', '接続先が認証を拒否しました。登録したキー、またはサービス側のログインを確認してください。'],
   provider_test_http: ['The provider returned an HTTP error.', '接続先が HTTP のエラーを返しました。'],
@@ -1336,15 +1339,18 @@ function keyState(r) {
 
 const LIMIT_FIELDS = ['max_request_tokens', 'daily_tokens', 'usd_per_mtok_in', 'usd_per_mtok_out', 'max_output_tokens'];
 
+function providerText(value) {
+  return value === null || value === undefined ? '' : String(value);
+}
+
 function providerEdit(name = '', saved = {}) {
-  const text = (value) => value === null || value === undefined ? '' : String(value);
   const defaults = { max_request_tokens: null, daily_tokens: null, usd_per_mtok_in: 0,
     usd_per_mtok_out: 0, max_output_tokens: 4000 };
   return { kind: saved.kind || 'openai', name, enabled: saved.enabled ?? true,
     cli: saved.cli || 'claude', base_url: saved.base_url || '', model: saved.model || '',
-    timeout_s: text(saved.timeout_s ?? 60), subscription: saved.subscription ?? false,
-    daily_budget: text(saved.daily_budget),
-    limits: Object.fromEntries(LIMIT_FIELDS.map((key) => [key, text(saved.limits?.[key] ?? defaults[key])])),
+    timeout_s: providerText(saved.timeout_s ?? 60), subscription: saved.subscription ?? false,
+    daily_budget: providerText(saved.daily_budget), savedDailyBudget: saved.daily_budget ?? null,
+    limits: Object.fromEntries(LIMIT_FIELDS.map((key) => [key, providerText(saved.limits?.[key] ?? defaults[key])])),
   };
 }
 
@@ -1363,29 +1369,51 @@ function providerBody(draft) {
     timeout_s: Number(draft.timeout_s), limits };
   if (draft.kind === 'cli') entry.cli = draft.cli;
   else Object.assign(entry, { base_url: draft.base_url.trim(), subscription: draft.subscription,
-    daily_budget: draft.daily_budget.trim() === '' ? null : Number(draft.daily_budget) });
+    daily_budget: providerDailyBudget(draft) });
   return entry;
 }
 
-function providerValidation(draft) {
+// A subscription save preserves its legacy cap; the editable value stays pending while hidden.
+function providerDailyBudget(draft) {
+  if (draft.subscription) return draft.savedDailyBudget;
+  return draft.daily_budget.trim() === '' ? null : Number(draft.daily_budget);
+}
+
+function providerWholeInRange(value, [min, max]) {
+  return /^\d+$/.test(value) && !(Number(value) < min || Number(value) > max);
+}
+
+function providerConnectionField(draft) {
   if (!draft.name.trim() || [...draft.name].length > 64 || /[\x00-\x1f\x7f]/.test(draft.name)) return 'providers.name';
   if (draft.kind === 'openai' && !draft.base_url.trim()) return 'providers.base_url';
   if ((draft.kind === 'openai' && !draft.model.trim()) || [...draft.model].length > 200) return 'providers.model';
-  const [min, max] = form.ranges.timeout_s;
-  if (!/^\d+$/.test(draft.timeout_s) || Number(draft.timeout_s) < min || Number(draft.timeout_s) > max) return 'providers.timeout_s';
-  if (draft.kind === 'openai' && !draft.subscription && draft.daily_budget.trim()) {
-    const [least, most] = form.ranges.daily_budget;
-    if (!/^\d+$/.test(draft.daily_budget) || Number(draft.daily_budget) < least || Number(draft.daily_budget) > most) return 'providers.daily_budget';
-  }
+  return null;
+}
+
+function providerBudgetField(draft) {
+  if (!providerWholeInRange(draft.timeout_s, form.ranges.timeout_s)) return 'providers.timeout_s';
+  const unchangedDaily = /^\d+$/.test(draft.daily_budget) && Number(draft.daily_budget) === draft.savedDailyBudget;
+  if (draft.kind === 'openai' && !draft.subscription && draft.daily_budget.trim()
+      && !unchangedDaily
+      && !providerWholeInRange(draft.daily_budget, form.ranges.daily_budget)) return 'providers.daily_budget';
+  return null;
+}
+
+function providerLimitValid(key, value) {
+  const optional = ['max_request_tokens', 'daily_tokens'].includes(key);
+  if (optional && value === '') return true;
+  const number = Number(value);
+  const price = key.startsWith('usd_');
+  if (value === '' || !Number.isFinite(number) || number < (price ? 0 : 1)) return false;
+  return price || (/^\d+$/.test(value) && Number.isSafeInteger(number)
+    && (key === 'daily_tokens' || number <= 4294967295));
+}
+
+function providerValidation(draft) {
+  const field = providerConnectionField(draft) || providerBudgetField(draft);
+  if (field) return field;
   for (const key of LIMIT_FIELDS) {
-    const value = draft.limits[key].trim();
-    const optional = ['max_request_tokens', 'daily_tokens'].includes(key);
-    if (optional && value === '') continue;
-    const number = Number(value);
-    const price = key.startsWith('usd_');
-    if (value === '' || !Number.isFinite(number) || number < (price ? 0 : 1)
-        || (!price && (!/^\d+$/.test(value) || !Number.isSafeInteger(number)
-          || (key !== 'daily_tokens' && number > 4294967295)))) return `providers.limits.${key}`;
+    if (!providerLimitValid(key, draft.limits[key].trim())) return `providers.limits.${key}`;
   }
   return null;
 }
@@ -1393,56 +1421,89 @@ function providerValidation(draft) {
 // Config-changing entry/key writes replace the server baseline, while unrelated pending global
 // and name-group edits stay local. Physical selectors are remapped only by the operation's raw
 // index changes, never by the first entry with a matching name.
-function mergeProviderSettings(answer, mine, action) {
-  const next = formOf(answer);
-  if (!next) return next;
-  if (action.op !== 'settings') {
-    for (const key of ['worker', 'summary', 'paid_usd_per_month', 'inject', 'capture']) next[key] = mine[key];
-    next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
-    const groups = new Map(next.chain.map((r) => [r.name, r]));
-    next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {
-      const row = groups.get(r.name);
-      row.edit = { ...r.edit };
-      groups.delete(r.name);
-      return row;
-    }), ...groups.values()];
-  }
-  next.newProvider = action.op === 'create' ? null : mine.newProvider;
-  const materializesGemini = (action.selector?.source === 'gemini' && !['remove', 'move'].includes(action.op))
+function preserveSettingsDrafts(next, mine) {
+  for (const key of ['worker', 'summary', 'paid_usd_per_month', 'inject', 'capture']) next[key] = mine[key];
+  next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
+  const groups = new Map(next.chain.map((r) => [r.name, r]));
+  next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {
+    const row = groups.get(r.name);
+    row.edit = { ...r.edit };
+    groups.delete(r.name);
+    return row;
+  }), ...groups.values()];
+}
+
+function geminiInsertion(mine, action) {
+  const materializes = (action.selector?.source === 'gemini' && !['remove', 'move'].includes(action.op))
     || (action.op === 'create' && action.entry.name === 'gemini' && mine.providers.some((p) => p.selector.source === 'gemini'));
-  let inserted = null;
-  if (materializesGemini) {
-    const native = mine.providers.filter((p) => p.selector.source !== 'gemini');
-    const firstCli = native.find((p) => p.saved.kind === 'cli');
-    inserted = mine.saved.gemini === 'before-subscriptions' && firstCli ? firstCli.selector.index : native.length;
+  if (!materializes) return null;
+  const native = mine.providers.filter((p) => p.selector.source !== 'gemini');
+  const firstCli = native.find((p) => p.saved.kind === 'cli');
+  return mine.saved.gemini === 'before-subscriptions' && firstCli ? firstCli.selector.index : native.length;
+}
+
+function movedProviderIndex(index, from, to) {
+  if (index === from) return to;
+  if (from < to && index > from && index <= to) return index - 1;
+  if (from > to && index >= to && index < from) return index + 1;
+  return index;
+}
+
+function mappedProviderSelector(selector, hasFiles, action, inserted) {
+  const mapped = { ...selector };
+  if (mapped.source === 'gemini') {
+    if (inserted !== null) Object.assign(mapped, { source: 'file', index: inserted });
+    return mapped;
   }
+  if (hasFiles) mapped.source = 'file';
+  if (inserted !== null) {
+    if (mapped.index >= inserted) mapped.index += 1;
+    return mapped;
+  }
+  if (!action.selector || action.selector.source === 'gemini') return mapped;
+  const at = action.selector.index;
+  if (action.op === 'remove' && mapped.index > at) mapped.index -= 1;
+  if (action.op === 'move') mapped.index = movedProviderIndex(mapped.index, at, action.to);
+  return mapped;
+}
+
+function preserveProviderDrafts(next, mine, action) {
+  const inserted = geminiInsertion(mine, action);
+  const hasFiles = next.providers.some((p) => p.selector.source === 'file');
   for (const old of mine.providers) {
     const selected = action.selector && selectorKey(old.selector) === selectorKey(action.selector);
-    if (selected && ['edit', 'remove'].includes(action.op)) continue;
-    const mapped = { ...old.selector };
-    if (mapped.source === 'gemini') {
-      if (inserted !== null) Object.assign(mapped, { source: 'file', index: inserted });
-    } else {
-      if (next.providers.some((p) => p.selector.source === 'file')) mapped.source = 'file';
-      if (inserted !== null) {
-        if (mapped.index >= inserted) mapped.index += 1;
-      } else if (action.selector && action.selector.source !== 'gemini') {
-        const at = action.selector.index;
-        if (action.op === 'remove' && mapped.index > at) mapped.index -= 1;
-        if (action.op === 'move') {
-          if (mapped.index === at) mapped.index = action.to;
-          else if (at < action.to && mapped.index > at && mapped.index <= action.to) mapped.index -= 1;
-          else if (at > action.to && mapped.index >= action.to && mapped.index < at) mapped.index += 1;
-        }
-      }
-    }
+    if (selected && action.op === 'remove') continue;
+    const mapped = mappedProviderSelector(old.selector, hasFiles, action, inserted);
     const row = next.providers.find((p) => selectorKey(p.selector) === selectorKey(mapped));
+    if (selected && action.op === 'edit') {
+      // The hidden cap was not sent. Keep that pending edit while the response supplies the
+      // current saved baseline and every other saved field, including a rename.
+      if (row && action.entry.kind === 'openai' && action.entry.subscription) row.edit.daily_budget = old.edit.daily_budget;
+      continue;
+    }
     if (!row || row.name !== old.name) continue;
     row.edit = old.edit;
     row.edit.enabled = row.saved.enabled;
     row.editing = old.editing;
     row.advanced = old.advanced;
   }
+}
+
+function preserveCreatedSubscriptionDraft(next, mine, action) {
+  if (action.op !== 'create' || action.entry.kind !== 'openai' || !action.entry.subscription || !mine.newProvider) return;
+  // Creation appends one native entry, even if it also materializes automatic Gemini.
+  const at = next.providers.filter((p) => p.selector.source !== 'gemini').length - 1;
+  const created = next.providers.find((p) => p.selector.source === 'file' && p.selector.index === at);
+  if (created?.name === action.entry.name) created.edit.daily_budget = mine.newProvider.daily_budget;
+}
+
+function mergeProviderSettings(answer, mine, action) {
+  const next = formOf(answer);
+  if (!next) return next;
+  if (action.op !== 'settings') preserveSettingsDrafts(next, mine);
+  next.newProvider = action.op === 'create' ? null : mine.newProvider;
+  preserveProviderDrafts(next, mine, action);
+  preserveCreatedSubscriptionDraft(next, mine, action);
   return next;
 }
 
@@ -1450,6 +1511,8 @@ function providerReason(code, context = 'test') {
   const codes = {
     bad_endpoint: 'provider_bad_endpoint', provider_kind: 'provider_kind_error', bad_model: 'provider_bad_model',
     unsupported_provider: 'provider_test_unavailable', unsupported_cli: 'provider_test_unavailable', unavailable: 'provider_test_unavailable',
+    cli_probe_unbounded: 'provider_test_cli_unbounded',
+    provider_busy: 'provider_test_busy', ledger_invalid: 'provider_test_ledger_invalid',
     budget: 'provider_test_budget', budget_exceeded: 'provider_test_budget', monthly_cap: 'provider_test_budget',
     daily_cap: 'provider_test_budget', daily_budget: 'provider_test_budget', token_cap: 'provider_test_budget',
     cooldown: 'provider_test_cooldown', rate_limit: 'provider_test_cooldown', owner_hold: 'provider_test_hold',
@@ -1466,7 +1529,9 @@ function providerReason(code, context = 'test') {
     allowance: 'provider_test_allowance', confirmation: 'provider_test_confirmation',
     too_big: context === 'key' ? 'provider_storage_failed' : 'provider_test_size',
   };
-  return t(codes[code] || (Object.hasOwn(TEXT, code) ? code : context === 'test' ? 'provider_test_reason' : 'provider_operation_refused'));
+  let fallback = context === 'test' ? 'provider_test_reason' : 'provider_operation_refused';
+  if (Object.hasOwn(TEXT, code)) fallback = code;
+  return t(codes[code] || fallback);
 }
 
 async function providerRequest(path, body) {
@@ -1478,6 +1543,34 @@ async function providerRequest(path, body) {
   return { res, answer, current: res.status === 409 ? await api('settings') : null };
 }
 
+function currentSettings(mine) {
+  return view === 'settings' && form === mine;
+}
+
+function reloadProviderSettings(current) {
+  form = formOf(current);
+  drawSettings();
+  setStatus(t('stale'), true, lang);
+}
+
+function providerSuccessKey(action, path, answer) {
+  if (path === '/key') return answer.key_saved?.durable ? 'key_saved' : 'key_not_durable';
+  if (action.op === 'remove') return 'provider_removed';
+  if (action.op === 'move') return 'provider_moved';
+  return 'provider_saved';
+}
+
+function providerOperationFailure(action, path, res, answer, fields, scope) {
+  fields.inert = false;
+  if (answer.field) markInvalid(answer.field, scope || fields);
+  const known = answer.code || ({ 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' })[res.status];
+  let message = t('provider_operation_failed', { status: res.status });
+  if (answer.field === 'providers.name') message = t('provider_bad_name');
+  else if (known) message = providerReason(known, path === '/key' ? 'key' : 'operation');
+  setStatus(message, true, lang);
+  if (action.op === 'enabled') drawSettings();
+}
+
 async function providerOperation(action, button, body = null, path = '') {
   const mine = form;
   const fields = button.closest('.settings');
@@ -1486,27 +1579,14 @@ async function providerOperation(action, button, body = null, path = '') {
   fields.inert = true;
   try {
     const { res, answer, current } = await providerRequest(path, body || JSON.stringify({ version: mine.version, action }));
-    if (view !== 'settings' || form !== mine) return;
-    if (current) {
-      form = formOf(current);
-      drawSettings();
-      setStatus(t('stale'), true, lang);
-    } else if (res.ok) {
-      form = mergeProviderSettings(answer, mine, action);
-      drawSettings();
-      const key = path === '/key' ? (answer.key_saved?.durable ? 'key_saved' : 'key_not_durable')
-        : action.op === 'remove' ? 'provider_removed' : action.op === 'move' ? 'provider_moved' : 'provider_saved';
-      setStatus(t(key), path === '/key' && !answer.key_saved?.durable, lang);
-    } else {
-      fields.inert = false;
-      if (answer.field) markInvalid(answer.field, scope || fields);
-      const known = answer.code || ({ 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' })[res.status];
-      setStatus(answer.field === 'providers.name' ? t('provider_bad_name')
-        : known ? providerReason(known, path === '/key' ? 'key' : 'operation') : t('provider_operation_failed', { status: res.status }), true, lang);
-      if (action.op === 'enabled') drawSettings();
-    }
+    if (!currentSettings(mine)) return;
+    if (current) return reloadProviderSettings(current);
+    if (!res.ok) return providerOperationFailure(action, path, res, answer, fields, scope);
+    form = mergeProviderSettings(answer, mine, action);
+    drawSettings();
+    setStatus(t(providerSuccessKey(action, path, answer)), path === '/key' && !answer.key_saved?.durable, lang);
   } catch {
-    if (view === 'settings' && form === mine) {
+    if (currentSettings(mine)) {
       if (action.op === 'enabled') drawSettings();
       setStatus(t('network_failed'), true, lang);
     }
@@ -1547,42 +1627,71 @@ function usdValue(value) {
     : new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', maximumFractionDigits: 6 }).format(value);
 }
 
+function providerPreviewMatches(preview, provider, version) {
+  return preview.version === version && selectorKey(preview.selector) === selectorKey(provider.selector);
+}
+
 async function previewProvider(provider, button, run = false) {
   const mine = form;
   const fields = button.closest('.settings');
   const preview = provider.preview;
-  if (run && (!preview?.ready || preview.version !== mine.version
-      || selectorKey(preview.selector) !== selectorKey(provider.selector))) return;
+  if (run && (!preview?.ready || !providerPreviewMatches(preview, provider, mine.version))) return;
   const body = JSON.stringify({ version: mine.version, selector: provider.selector, ...(run ? { confirmed: true } : {}) });
   fields.inert = true;
   button.disabled = true;
   try {
     const { res, answer, current } = await providerRequest(run ? '/test' : '/test/preview', body);
-    if (view !== 'settings' || form !== mine) return;
-    if (current) {
-      form = formOf(current);
-      drawSettings();
-      setStatus(t('stale'), true, lang);
-    } else if (res.ok) {
-      if (run) { provider.result = answer; provider.preview = null; }
-      else {
-        if (answer.version !== mine.version || !answer.selector
-            || selectorKey(answer.selector) !== selectorKey(provider.selector)) {
-          setStatus(t('stale'), true, lang);
-          return;
-        }
-        provider.preview = answer;
-        provider.result = null;
+    if (!currentSettings(mine)) return;
+    if (current) return reloadProviderSettings(current);
+    if (!res.ok) {
+      setStatus(providerReason(answer.code || 'unavailable'), true, lang);
+      return;
+    }
+    if (run) { provider.result = answer; provider.preview = null; }
+    else {
+      if (!answer.selector || !providerPreviewMatches(answer, provider, mine.version)) {
+        setStatus(t('stale'), true, lang);
+        return;
       }
-      drawSettings();
-      setStatus('');
-    } else setStatus(providerReason(answer.code || 'unavailable'), true, lang);
+      provider.preview = answer;
+      provider.result = null;
+    }
+    drawSettings();
+    setStatus('');
   } catch {
-    if (view === 'settings' && form === mine) setStatus(t('network_failed'), true, lang);
+    if (currentSettings(mine)) setStatus(t('network_failed'), true, lang);
   } finally {
     fields.inert = false;
     button.disabled = false;
   }
+}
+
+function providerTestPreview(provider, preview) {
+  const run = el('button', 'small', t('provider_test_run'));
+  run.type = 'button';
+  run.disabled = !preview.ready;
+  run.addEventListener('click', () => void previewProvider(provider, run, true));
+  return el('div', 'test-preview',
+    el('p', null, t('provider_test_destination', { destination: preview.destination })),
+    el('p', null, t('provider_test_model', { model: preview.model ?? t('provider_default_model') })),
+    el('h4', null, t('provider_test_fixture')), el('pre', 'document-text', preview.fixture),
+    note(t('provider_test_tokens', { tokens: preview.estimated_input_tokens, output: preview.max_output_tokens ?? t('provider_test_unknown_cost') })),
+    el('p', null, t(preview.possible_charge ? 'provider_test_charge' : 'provider_test_no_charge',
+      { usd: usdValue(preview.estimated_usd), cap: usdValue(preview.monthly_cap_usd) })),
+    !preview.ready ? el('p', 'test-result error', t('provider_test_blocked', { reason: providerReason(preview.code) })) : null,
+    run);
+}
+
+function providerTestResult(result) {
+  let status = 'failed';
+  if (result.status === 'ok') status = 'ok';
+  else if (result.status === 'blocked') status = 'blocked';
+  return el('div', 'test-result',
+    el('p', result.status === 'ok' ? null : 'error', t(`provider_test_${status}`,
+      { ms: result.latency_ms ?? 0, reason: providerReason(result.code) })),
+    result.http_status === null || result.http_status === undefined ? null : note(t('provider_test_http_status', { status: result.http_status })),
+    result.usd === null || result.usd === undefined ? null : note(t('provider_test_billed', { usd: usdValue(result.usd) })),
+    result.retry_at ? note(t('provider_test_retry', { time: new Date(result.retry_at).toLocaleString(lang) })) : null);
 }
 
 function providerTest(provider) {
@@ -1590,30 +1699,40 @@ function providerTest(provider) {
   button.type = 'button';
   button.addEventListener('click', () => void previewProvider(provider, button));
   const nodes = [note(t('provider_preview_desc')), button];
-  const preview = provider.preview;
-  if (preview) {
-    const run = el('button', 'small', t('provider_test_run'));
-    run.type = 'button';
-    run.disabled = !preview.ready;
-    run.addEventListener('click', () => void previewProvider(provider, run, true));
-    nodes.push(el('div', 'test-preview',
-      el('p', null, t('provider_test_destination', { destination: preview.destination })),
-      el('p', null, t('provider_test_model', { model: preview.model ?? t('provider_default_model') })),
-      el('h4', null, t('provider_test_fixture')), el('pre', 'document-text', preview.fixture),
-      note(t('provider_test_tokens', { tokens: preview.estimated_input_tokens, output: preview.max_output_tokens ?? t('no_cap') })),
-      el('p', null, t(preview.possible_charge ? 'provider_test_charge' : 'provider_test_no_charge',
-        { usd: usdValue(preview.estimated_usd), cap: usdValue(preview.monthly_cap_usd) })),
-      !preview.ready ? el('p', 'test-result error', t('provider_test_blocked', { reason: providerReason(preview.code) })) : null,
-      run));
-  }
-  const result = provider.result;
-  if (result) nodes.push(el('div', 'test-result',
-    el('p', result.status === 'ok' ? null : 'error', t(`provider_test_${result.status === 'ok' ? 'ok' : result.status === 'blocked' ? 'blocked' : 'failed'}`,
-      { ms: result.latency_ms ?? 0, reason: providerReason(result.code) })),
-    result.http_status === null || result.http_status === undefined ? null : note(t('provider_test_http_status', { status: result.http_status })),
-    result.usd === null || result.usd === undefined ? null : note(t('provider_test_billed', { usd: usdValue(result.usd) })),
-    result.retry_at ? note(t('provider_test_retry', { time: new Date(result.retry_at).toLocaleString(lang) })) : null));
+  if (provider.preview) nodes.push(providerTestPreview(provider, provider.preview));
+  if (provider.result) nodes.push(providerTestResult(provider.result));
   return el('div', 'provider-test', ...nodes);
+}
+
+function providerLimitGrid(draft, unsupported) {
+  const grid = el('div', 'grid');
+  const outputField = el('label', 'field');
+  const syncOutput = () => {
+    // Normal dispatch enforces this maximum only for priced HTTP. Keep other entries' saved
+    // estimates in the typed draft without offering an ineffective generation-limit control.
+    const paidHttp = draft.kind === 'openai'
+      && (Number(draft.limits.usd_per_mtok_in) > 0 || Number(draft.limits.usd_per_mtok_out) > 0);
+    if (paidHttp) {
+      if (outputField.parentElement !== grid) grid.append(outputField);
+    } else outputField.remove();
+  };
+  for (const key of LIMIT_FIELDS) {
+    const price = key.startsWith('usd_');
+    const control = input('number', draft.limits[key], '', `providers.limits.${key}`, (value) => {
+      draft.limits[key] = value;
+      if (price) syncOutput();
+    });
+    control.min = price ? 0 : 1;
+    const max = key === 'daily_tokens' ? Number.MAX_SAFE_INTEGER : 4294967295;
+    if (!price) control.max = max;
+    if (price) { control.step = 'any'; control.inputMode = 'decimal'; }
+    control.disabled = Boolean(unsupported) || (draft.kind === 'cli' && price);
+    const label = key === 'max_output_tokens' ? outputField : el('label', 'field');
+    label.append(el('span', null, t(`provider_${key}`)), control);
+    if (key !== 'max_output_tokens') grid.append(label);
+  }
+  syncOutput();
+  return grid;
 }
 
 function providerEditor(draft, provider, card) {
@@ -1632,31 +1751,7 @@ function providerEditor(draft, provider, card) {
   const limits = el('details', 'provider-limits', el('summary', null, t('provider_advanced')));
   limits.open = provider?.advanced ?? false;
   if (provider) limits.addEventListener('toggle', () => { provider.advanced = limits.open; });
-  const grid = el('div', 'grid');
-  const outputField = el('label', 'field');
-  const syncOutput = () => {
-    // Normal dispatch enforces this maximum only for priced HTTP. Keep other entries' saved
-    // estimates in the typed draft without offering an ineffective generation-limit control.
-    const paidHttp = draft.kind === 'openai'
-      && (Number(draft.limits.usd_per_mtok_in) > 0 || Number(draft.limits.usd_per_mtok_out) > 0);
-    if (paidHttp) {
-      if (outputField.parentElement !== grid) grid.append(outputField);
-    } else outputField.remove();
-  };
-  for (const key of LIMIT_FIELDS) {
-    const control = input('number', draft.limits[key], '', `providers.limits.${key}`, (value) => {
-      draft.limits[key] = value;
-      if (key.startsWith('usd_')) syncOutput();
-    });
-    control.min = key.startsWith('usd_') ? 0 : 1;
-    if (!key.startsWith('usd_')) control.max = key === 'daily_tokens' ? Number.MAX_SAFE_INTEGER : 4294967295;
-    if (key.startsWith('usd_')) { control.step = 'any'; control.inputMode = 'decimal'; }
-    control.disabled = Boolean(unsupported) || (draft.kind === 'cli' && key.startsWith('usd_'));
-    const label = key === 'max_output_tokens' ? outputField : el('label', 'field');
-    label.append(el('span', null, t(`provider_${key}`)), control);
-    if (key !== 'max_output_tokens') grid.append(label);
-  }
-  syncOutput();
+  const grid = providerLimitGrid(draft, unsupported);
   const daily = field('daily_budget', 'col_budget', 'number');
   [daily.querySelector('input').min, daily.querySelector('input').max] = form.ranges.daily_budget;
   daily.hidden = draft.kind === 'cli' || draft.subscription;
@@ -1664,10 +1759,6 @@ function providerEditor(draft, provider, card) {
   limits.append(note(t('provider_limits_desc')), grid);
   const subscribe = checkbox(draft.subscription, (value) => {
     draft.subscription = value;
-    if (value) {
-      draft.daily_budget = provider?.saved.daily_budget === null || provider?.saved.daily_budget === undefined ? '' : String(provider.saved.daily_budget);
-      daily.querySelector('input').value = draft.daily_budget;
-    }
     daily.hidden = value;
   });
   const save = el('button', 'small', t(provider ? 'provider_save' : 'provider_create'));
@@ -1677,7 +1768,8 @@ function providerEditor(draft, provider, card) {
     const field = providerValidation(draft);
     if (field) {
       markInvalid(field, card);
-      setStatus(t(field === 'providers.base_url' ? 'provider_bad_endpoint' : field === 'providers.name' ? 'provider_bad_name' : 'range'), true, lang);
+      const message = { 'providers.base_url': 'provider_bad_endpoint', 'providers.name': 'provider_bad_name' }[field] || 'range';
+      setStatus(t(message), true, lang);
       return;
     }
     void providerOperation({ op: provider ? 'edit' : 'create', ...(provider ? { selector: provider.selector } : {}), entry: providerBody(draft) }, save);
@@ -1694,6 +1786,12 @@ function providerEditor(draft, provider, card) {
     draft.kind === 'openai' ? el('label', 'check', subscribe, t('provider_subscription')) : note(t('provider_cli_desc')),
     draft.kind === 'openai' ? note(t('provider_subscription_desc')) : null,
     limits, el('div', 'actions', save, cancel));
+}
+
+function providerKeyPanel(provider) {
+  if (provider.saved.kind !== 'openai') return null;
+  return el('div', 'provider-key', note(t('provider_key_desc')),
+    form.keyInput ? providerKeyField(provider) : note(t('provider_key_unsupported')));
 }
 
 function providerEntry(provider, nativeCount) {
@@ -1737,8 +1835,7 @@ function providerEntry(provider, nativeCount) {
     saved.kind === 'openai' ? note(saved.base_url || t('provider_unsupported_endpoint')) : note(saved.cli),
     unsupported ? note(t('provider_unsupported_cli')) : null,
     note(t(key)),
-    saved.kind === 'openai' ? el('div', 'provider-key', note(t('provider_key_desc')),
-      form.keyInput ? providerKeyField(provider) : note(t('provider_key_unsupported'))) : null,
+    providerKeyPanel(provider),
     unsupported ? null : edit,
     providerTest(provider)]));
   return card;

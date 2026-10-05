@@ -4117,7 +4117,7 @@ mod tests {
             .write(true)
             .open(p.join("state/view.lock"))
             .unwrap();
-        lock.try_lock().unwrap();
+        crate::worker::try_lock(&lock).unwrap();
         std::thread::sleep(Duration::from_millis(500));
         starter.due(p);
         assert!(

@@ -820,7 +820,7 @@ fn overlay(cfg: &mut Config) {
             .all(|p| !p.enabled() || chain.turns_off(p.name()))
     {
         warnings.push(
-            "every chain entry is off, so nothing is curated: to stop curation, set [summary] curate = false instead".into(),
+            "no provider is enabled: entries are individually disabled or their name groups are off; enable an entry and its name group to curate, or set [summary] curate = false to stop curation".into(),
         );
     }
 }
@@ -872,7 +872,7 @@ pub fn doctor_line(p: &Provider, chain: &ChainOverlay) -> String {
         } => (*timeout_s, model.as_deref()),
     };
     let mut parts = Vec::new();
-    if chain.turns_off(p.name()) {
+    if !p.enabled() || chain.turns_off(p.name()) {
         parts.push("off".to_owned());
     }
     if !p.budget_from_key() {
@@ -1707,6 +1707,22 @@ model = { gone = "m" }
             "{}",
             line("openrouter")
         );
+    }
+
+    #[test]
+    fn doctor_reports_native_off_entries_even_without_a_name_group_override() {
+        let cfg = load_text(
+            "[[providers]]\nkind = \"cli\"\nname = \"same\"\ncli = \"claude\"\nenabled = false\n\
+            [[providers]]\nkind = \"cli\"\nname = \"same\"\ncli = \"codex\"\n\
+            [[providers]]\nkind = \"openai\"\nname = \"http\"\nenabled = false\n\
+            base_url = \"https://example.invalid/v1\"\nmodel = \"synthetic\"\n",
+        );
+        for (p, off) in cfg.providers.iter().zip([true, false, true]) {
+            assert_eq!(doctor_line(p, &cfg.chain).starts_with("    off, "), off);
+        }
+        let mut chain = cfg.chain.clone();
+        chain.off.push("same".into());
+        assert!(doctor_line(&cfg.providers[1], &chain).starts_with("    off, "));
     }
 
     #[test]

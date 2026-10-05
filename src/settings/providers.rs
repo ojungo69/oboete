@@ -1,6 +1,16 @@
 //! Version-bound edits of native entries. Name-group overlays remain separate settings.
 
-use super::*;
+use std::path::Path;
+use std::sync::Mutex;
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use super::{
+    BUDGET, MODEL_CHARS, Refusal, TIMEOUT_S, alone, bytes, config_lock, endpoint_supported,
+    invalid, parsed, put_root, refused, show, utf8, version,
+};
+use crate::config::{self, Provider};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike};
 
 #[derive(Clone, Copy, Debug, Deserialize, serde::Serialize)]
@@ -84,7 +94,7 @@ enum Draft {
 }
 
 impl Draft {
-    fn checked(&self, old: Option<&Provider>) -> Result<Provider, Refusal> {
+    fn check_common_fields(&self) -> Result<(), Refusal> {
         let (name, timeout, limits) = match self {
             Self::Openai {
                 name,
@@ -110,6 +120,11 @@ impl Draft {
         {
             return Err(refused(422, "range", "providers.limits"));
         }
+        Ok(())
+    }
+
+    fn checked(&self, old: Option<&Provider>) -> Result<Provider, Refusal> {
+        self.check_common_fields()?;
         let model_ok = |m: &str| {
             !m.is_empty() && m.chars().count() <= MODEL_CHARS && !m.chars().any(char::is_control)
         };
@@ -159,8 +174,8 @@ impl Draft {
                     return Err(refused(422, "provider_kind", "providers.kind"));
                 };
                 // No new subscription daily-call cap. Legacy caps survive an unrelated edit.
-                if (*subscription && *daily_budget != *budget)
-                    || (!subscription && daily_budget.is_some_and(|v| !BUDGET.contains(&v)))
+                if *daily_budget != *budget
+                    && (*subscription || daily_budget.is_some_and(|v| !BUDGET.contains(&v)))
                 {
                     return Err(refused(422, "range", "providers.daily_budget"));
                 }
@@ -424,6 +439,28 @@ fn edit(table: &mut dyn TableLike, old: &Provider, new: &Provider) -> Result<(),
     Ok(())
 }
 
+fn create(path: &Path, doc: &mut DocumentMut, entry: Draft) -> Result<(), Refusal> {
+    let new = entry.checked(None)?;
+    let raw = base(path, doc)?;
+    let virtual_entry =
+        if new.name() == "gemini" && !raw.providers.iter().any(|p| p.name() == "gemini") {
+            let with = alone(path, doc).ok_or_else(invalid)?;
+            with.providers
+                .iter()
+                .enumerate()
+                .find(|(_, p)| p.name() == "gemini")
+                .map(|(at, p)| (at, p.clone()))
+        } else {
+            None
+        };
+    materialize(doc, &raw)?;
+    let added = usize::from(virtual_entry.is_some());
+    if let Some((at, p)) = virtual_entry {
+        insert(doc, at, table(&p)?)?;
+    }
+    insert(doc, raw.providers.len() + added, table(&new)?)
+}
+
 pub(super) fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
     let posted: Edit = serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
     let _held = saving
@@ -458,28 +495,7 @@ pub(super) fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value
         put_root(&mut doc, "gemini", None);
     } else {
         match posted.action {
-            Action::Create { entry } => {
-                let new = entry.checked(None)?;
-                let raw = base(&path, &doc)?;
-                let virtual_entry = if new.name() == "gemini"
-                    && !raw.providers.iter().any(|p| p.name() == "gemini")
-                {
-                    let with = alone(&path, &doc).ok_or_else(invalid)?;
-                    with.providers
-                        .iter()
-                        .enumerate()
-                        .find(|(_, p)| p.name() == "gemini")
-                        .map(|(at, p)| (at, p.clone()))
-                } else {
-                    None
-                };
-                materialize(&mut doc, &raw)?;
-                let added = usize::from(virtual_entry.is_some());
-                if let Some((at, p)) = virtual_entry {
-                    insert(&mut doc, at, table(&p)?)?;
-                }
-                insert(&mut doc, raw.providers.len() + added, table(&new)?)?;
-            }
+            Action::Create { entry } => create(&path, &mut doc, entry)?,
             Action::Edit { selector, entry } => {
                 let (at, old) = selected(&path, &mut doc, selector)?;
                 let new = entry.checked(Some(&old))?;
@@ -613,6 +629,30 @@ fn unavailable() -> Refusal {
     refused(503, "unavailable", "providers.test")
 }
 
+/// Only fixed, user-actionable causes cross the boundary. SQLite/IO messages can contain
+/// private paths or file contents, and unknown errors must not be reflected into the page.
+fn probe_failure(error: anyhow::Error) -> Refusal {
+    for cause in error.chain() {
+        if let Some(rusqlite::Error::SqliteFailure(sqlite, _)) = cause.downcast_ref() {
+            let code = match sqlite.code {
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked => {
+                    "provider_busy"
+                }
+                rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase => {
+                    "ledger_invalid"
+                }
+                _ => continue,
+            };
+            return refused(503, code, "providers.test");
+        }
+        // dispatch::lock's bounded wait uses this fixed cause rather than an IO error.
+        if cause.to_string() == "provider dispatch or forget is busy: try again" {
+            return refused(503, "provider_busy", "providers.test");
+        }
+    }
+    unavailable()
+}
+
 /// Select from one readonly snapshot. Materialization here changes only a private document in
 /// memory; preview never persists it or creates a coordination/ledger file.
 fn read_selection(home: &Path, expected: &str, selector: Selector) -> Result<Selected, Refusal> {
@@ -661,9 +701,9 @@ pub(super) fn preview(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
     let selected = read_selection(home, &posted.version, posted.selector)?;
     let p = crate::provider::probe_provider(&selected.provider)
         .map_err(|code| refused(422, code, "providers.test"))?;
-    let ledger = crate::providers_db::read_only(home).map_err(|_| unavailable())?;
+    let ledger = crate::providers_db::read_only(home).map_err(probe_failure)?;
     let factor = match &ledger {
-        Some(db) => crate::budget::factor(db, p.name()).map_err(|_| unavailable())?,
+        Some(db) => crate::budget::factor(db, p.name()).map_err(probe_failure)?,
         None => 1.0,
     };
     let input = f64::from(crate::provider::probe_estimate(&p)) * factor;
@@ -677,12 +717,12 @@ pub(super) fn preview(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
     } else if !egress_ok(&selected) {
         Some("egress")
     } else {
-        None
+        crate::provider::probe_unavailable(&p)
     };
     if code.is_none() {
         match &ledger {
             Some(db) => {
-                let state = crate::providers_db::state(db, p.name()).map_err(|_| unavailable())?;
+                let state = crate::providers_db::state(db, p.name()).map_err(probe_failure)?;
                 if state.down_until == crate::providers_db::OWNER_HOLD {
                     code = Some("owner_hold");
                 } else if state.down_until > crate::db::now_ms() {
@@ -694,7 +734,7 @@ pub(super) fn preview(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
                     selected.paid_cap,
                     &[],
                 )
-                .map_err(|_| unavailable())?
+                .map_err(probe_failure)?
                 {
                     code = Some(if r.outcome == "too_big" {
                         "too_big"
@@ -761,11 +801,14 @@ pub(super) fn test(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
     if !egress_ok(&selected) {
         return Err(refused(422, "egress", "providers.test"));
     }
-    let db = crate::providers_db::open(home).map_err(|_| unavailable())?;
+    if let Some(code) = crate::provider::probe_unavailable(&selected.provider) {
+        return Err(refused(422, code, "providers.test"));
+    }
+    let db = crate::providers_db::open(home).map_err(probe_failure)?;
     let refused_gate = std::cell::RefCell::new(None);
     let gate = || {
         let checked = (|| {
-            let admission = crate::dispatch::Admission::shared(home).map_err(|_| unavailable())?;
+            let admission = crate::dispatch::Admission::shared(home).map_err(probe_failure)?;
             let fresh = read_selection(home, &posted.version, posted.selector)?;
             if !egress_ok(&fresh) {
                 return Err(refused(422, "egress", "providers.test"));
@@ -782,7 +825,9 @@ pub(super) fn test(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
     };
     match crate::provider::probe(&db, &selected.provider, selected.paid_cap, &gate) {
         Ok(answer) => Ok(answer),
-        Err(_) => Err(refused_gate.into_inner().unwrap_or_else(unavailable)),
+        Err(error) => Err(refused_gate
+            .into_inner()
+            .unwrap_or_else(|| probe_failure(error))),
     }
 }
 
@@ -1126,6 +1171,56 @@ mod tests {
     }
 
     #[test]
+    fn editing_other_native_fields_keeps_legacy_http_caps_but_rejects_new_invalid_caps() {
+        for budget in [0_u32, u32::MAX] {
+            for subscription in [false, true] {
+                let text = format!(
+                    "# original\n[[providers]]\nkind = \"openai\"\nname = \"legacy\"\n\
+                    base_url = \"https://example.invalid/v1\"\nmodel = \"before\"\n\
+                    daily_budget = {budget} # legacy cap\nsubscription = {subscription}\nfuture = \"kept\"\n"
+                );
+                let home = home(&text);
+                let shown = show(home.path());
+                let mut entry = http("legacy", "https://example.invalid/v1");
+                entry["model"] = json!("after");
+                entry["enabled"] = json!(false);
+                entry["daily_budget"] = json!(budget);
+                entry["subscription"] = json!(subscription);
+                let selector = shown["providers"][0]["selector"].clone();
+                let saved = send(
+                    home.path(),
+                    json!({"op": "edit", "selector": selector, "entry": entry}),
+                )
+                .unwrap();
+                let native = &saved["providers"][0]["saved"];
+                assert_eq!(native["daily_budget"], budget);
+                assert_eq!(native["subscription"], subscription);
+                assert_eq!(native["model"], "after");
+                assert_eq!(native["enabled"], false);
+                let after = bytes(home.path()).unwrap();
+                let text = String::from_utf8(after.clone().unwrap()).unwrap();
+                for kept in ["# original", "# legacy cap", "future = \"kept\""] {
+                    assert!(text.contains(kept), "{text}");
+                }
+                entry["daily_budget"] = json!(if budget == 0 { u32::MAX } else { 0 });
+                let r = send(
+                    home.path(),
+                    json!({"op": "edit", "selector": selector, "entry": entry}),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    (r.status, r.code, r.field.as_str()),
+                    (422, "range", "providers.daily_budget")
+                );
+                assert_eq!(bytes(home.path()).unwrap(), after);
+                let r = send(home.path(), json!({"op": "create", "entry": entry})).unwrap_err();
+                assert_eq!((r.status, r.code), (422, "range"));
+                assert_eq!(bytes(home.path()).unwrap(), after);
+            }
+        }
+    }
+
+    #[test]
     fn moving_native_tables_keeps_their_nested_fields_and_unrelated_comments() {
         let text = "# root note\n[summary]\ncurate = false # summary note\n\
             [[providers]]\nkind = \"openai\"\nname = \"a\"\n\
@@ -1269,6 +1364,79 @@ mod tests {
         body["prompt"] = json!("private history must not be accepted");
         assert!(preview(home.path(), &serde_json::to_vec(&body).unwrap()).is_err());
         assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_cli_probe_preview_is_truthfully_unavailable_without_ledger_or_process_work() {
+        for cli in ["claude", "codex"] {
+            let text =
+                format!("[[providers]]\nkind = \"cli\"\nname = \"synthetic\"\ncli = {cli:?}\n");
+            let home = home(&text);
+            let shown = show(home.path());
+            let body = serde_json::to_vec(&json!({"version": shown["version"], "selector": shown["providers"][0]["selector"]})).unwrap();
+            let answer = preview(home.path(), &body).unwrap();
+            assert_eq!(answer["ready"], false);
+            assert_eq!(answer["code"], "cli_probe_unbounded");
+            assert_eq!(answer["max_output_tokens"], Value::Null);
+            assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
+            let mut confirmed: Value = serde_json::from_slice(&body).unwrap();
+            confirmed["confirmed"] = json!(true);
+            let r = test(home.path(), &serde_json::to_vec(&confirmed).unwrap()).unwrap_err();
+            assert_eq!((r.status, r.code), (422, "cli_probe_unbounded"));
+            assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
+            assert_eq!(
+                std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_ledger_reports_a_safe_cause_without_sending_or_rewriting_it() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let home = home(&format!(
+            "[[providers]]\nkind = \"openai\"\nname = \"synthetic\"\nbase_url = {endpoint:?}\nmodel = \"synthetic\"\n"
+        ));
+        let shown = show(home.path());
+        let body =
+            json!({"version": shown["version"], "selector": shown["providers"][0]["selector"]});
+        let ledger = home.path().join("providers.db");
+        let canary = b"not a database: PrivateSyntheticCanary999";
+        std::fs::write(&ledger, canary).unwrap();
+        let r = preview(home.path(), &serde_json::to_vec(&body).unwrap()).unwrap_err();
+        assert_eq!((r.status, r.code), (503, "ledger_invalid"));
+        let mut confirmed = body.clone();
+        confirmed["confirmed"] = json!(true);
+        let r = test(home.path(), &serde_json::to_vec(&confirmed).unwrap()).unwrap_err();
+        assert_eq!((r.status, r.code), (503, "ledger_invalid"));
+        assert!(!format!("{r:?}").contains("PrivateSyntheticCanary999"));
+        assert!(!format!("{r:?}").contains(home.path().to_str().unwrap()));
+        assert_eq!(std::fs::read(&ledger).unwrap(), canary);
+        assert!(!home.path().join("dispatch.lock").exists());
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    }
+
+    #[test]
+    fn a_busy_ledger_preview_is_retryable_and_does_not_send_or_create_files() {
+        let home = home(
+            "[[providers]]\nkind = \"openai\"\nname = \"synthetic\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"synthetic\"\n",
+        );
+        let db = crate::providers_db::open(home.path()).unwrap();
+        db.execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+            .unwrap();
+        let shown = show(home.path());
+        let body = serde_json::to_vec(
+            &json!({"version": shown["version"], "selector": shown["providers"][0]["selector"]}),
+        )
+        .unwrap();
+        let r = preview(home.path(), &body).unwrap_err();
+        assert_eq!((r.status, r.code), (503, "provider_busy"));
+        assert!(!home.path().join("dispatch.lock").exists());
+        assert!(!home.path().join("raw.db").exists());
+        db.execute_batch("ROLLBACK;").unwrap();
+        assert_eq!(preview(home.path(), &body).unwrap()["ready"], true);
     }
 
     #[test]

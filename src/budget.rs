@@ -56,9 +56,10 @@ const UNDECLARED_OUTPUT: u32 = 1_250;
 /// A ceiling check keeps this share of the ceiling free: the estimate is not exact.
 pub(crate) const CEILING_SHARE: f64 = 0.95;
 
-/// An in-flight request can settle sooner than any day/month reset. Recheck without changing
-/// provider state or discarding the reservation; even an abandoned one remains accounted for.
+/// Fresh reservations are checked promptly. A retained older row progressively backs off,
+/// up to the ordinary ten-minute outage wait, without inferring that its sender is dead.
 const RESERVATION_WAIT_MS: i64 = 1_000;
+const MAX_RESERVATION_WAIT_MS: i64 = 10 * 60_000;
 
 /// One curation request's reserved allowance. Dropping it is deliberately not a refund: the
 /// process may have sent the request before losing its answer.
@@ -214,13 +215,14 @@ pub(crate) fn reserve(
 /// Pending/frozen rows keep their own bounds; only unframed legacy rows need this fallback.
 pub(crate) fn reserve_with_history(
     db: &Connection,
-    (p, history): (&Provider, &Provider),
+    providers: (&Provider, &Provider),
     role: &str,
     span: &str,
     est: u32,
     paid_usd_per_month: f64,
     ceiling_hit: &[u32],
 ) -> Result<std::result::Result<Reservation, Refusal>> {
+    let (p, history) = providers;
     anyhow::ensure!(
         p.name() == history.name(),
         "budget history does not match provider"
@@ -371,11 +373,12 @@ pub fn key_budget(db: Option<&Connection>, p: &Provider) -> Result<String> {
 /// `tokens` is calibrated; `ceiling_hit` holds ceilings that refused this chain's request.
 pub(crate) fn admit_with_history(
     db: &Connection,
-    (p, history): (&Provider, &Provider),
+    providers: (&Provider, &Provider),
     tokens: f64,
     paid_usd_per_month: f64,
     ceiling_hit: &[u32],
 ) -> Result<Option<Refusal>> {
+    let (p, history) = providers;
     anyhow::ensure!(
         p.name() == history.name(),
         "budget history does not match provider"
@@ -406,7 +409,7 @@ pub(crate) fn admit_with_history(
             outcome: "budget",
             detail: format!("{used}/{budget} calls in 24 hours"),
             skip: if used.saturating_sub(pending.calls) < budget {
-                Skip::Wait(now + RESERVATION_WAIT_MS)
+                Skip::Wait(reservation_retry_at(db, Some(name), now)?)
             } else {
                 Skip::Budget(until)
             },
@@ -434,37 +437,8 @@ pub(crate) fn admit_with_history(
         }
     }
     let rate = providers_db::rate(db, name)?;
-    if rate
-        .requests
-        .is_some_and(|left| left <= i64::from(pending.calls))
-        && let Some(at) = rate.requests_reset_at.filter(|&t| t > now)
-    {
-        return Ok(Some(Refusal {
-            outcome: "budget",
-            detail: "no requests left until its reset".into(),
-            skip: Skip::Wait(if rate.requests == Some(0) {
-                at
-            } else {
-                at.min(now + RESERVATION_WAIT_MS)
-            }),
-        }));
-    }
-    if let (Some(left), Some(at)) = (rate.tokens, rate.tokens_reset_at)
-        && at > now
-        && (left as f64) < reserved + pending.tokens
-    {
-        return Ok(Some(Refusal {
-            outcome: "budget",
-            detail: format!(
-                "{left} tokens left until its reset in {} s",
-                (at - now) / 1000
-            ),
-            skip: Skip::Wait(if (left as f64) < reserved {
-                at
-            } else {
-                at.min(now + RESERVATION_WAIT_MS)
-            }),
-        }));
+    if let Some(refusal) = rate_refusal(db, name, rate, &pending, reserved, now)? {
+        return Ok(Some(refusal));
     }
     // Counted over the last 24 hours: Groq's day is a rolling window (docs/milestone-1.md), and a
     // budget kept per UTC day could take twice its share around midnight.
@@ -479,7 +453,7 @@ pub(crate) fn admit_with_history(
                 detail: format!("{used:.0}/{daily} tokens in 24 hours"),
                 // When the oldest call counted leaves the 24 hours.
                 skip: if settled + reserved <= daily as f64 {
-                    Skip::Wait(now + RESERVATION_WAIT_MS)
+                    Skip::Wait(reservation_retry_at(db, Some(name), now)?)
                 } else {
                     Skip::Budget(providers_db::out_of_the_day(oldest.unwrap_or(now)))
                 },
@@ -499,7 +473,7 @@ pub(crate) fn admit_with_history(
                 skip: if spent - providers_db::reserved_usd_this_month(db)? + this
                     <= paid_usd_per_month
                 {
-                    Skip::Wait(now + RESERVATION_WAIT_MS)
+                    Skip::Wait(reservation_retry_at(db, None, now)?)
                 } else {
                     Skip::Budget(providers_db::next_month())
                 },
@@ -507,6 +481,73 @@ pub(crate) fn admit_with_history(
         }
     }
     Ok(None)
+}
+
+/// A provider's reported rate window also covers requests whose reservations are still pending.
+fn rate_refusal(
+    db: &Connection,
+    name: &str,
+    rate: providers_db::RateLeft,
+    pending: &providers_db::Reserved,
+    reserved: f64,
+    now: i64,
+) -> Result<Option<Refusal>> {
+    if rate
+        .requests
+        .is_some_and(|left| left <= i64::from(pending.calls))
+        && let Some(at) = rate.requests_reset_at.filter(|&t| t > now)
+    {
+        return Ok(Some(Refusal {
+            outcome: "budget",
+            detail: "no requests left until its reset".into(),
+            skip: Skip::Wait(if rate.requests == Some(0) {
+                at
+            } else {
+                at.min(reservation_retry_at(db, Some(name), now)?)
+            }),
+        }));
+    }
+    if let (Some(left), Some(at)) = (rate.tokens, rate.tokens_reset_at)
+        && at > now
+        && (left as f64) < reserved + pending.tokens
+    {
+        return Ok(Some(Refusal {
+            outcome: "budget",
+            detail: format!(
+                "{left} tokens left until its reset in {} s",
+                (at - now) / 1000
+            ),
+            skip: Skip::Wait(if (left as f64) < reserved {
+                at
+            } else {
+                at.min(reservation_retry_at(db, Some(name), now)?)
+            }),
+        }));
+    }
+    Ok(None)
+}
+
+/// Reservation age is a scheduling signal, never evidence that it was unsent or refundable.
+/// Using the newest contributing row keeps a fresh sender responsive, survives restarts, and
+/// avoids a one-second loop for the full accounting window when a sender never settles.
+fn reservation_retry_at(db: &Connection, provider: Option<&str>, now: i64) -> Result<i64> {
+    let latest: Option<i64> = match provider {
+        Some(provider) => db.query_row(
+            "SELECT MAX(ts) FROM provider_calls WHERE provider=?1 AND ts>=?2
+             AND outcome='reserved' AND role NOT IN ('embed','query')",
+            rusqlite::params![provider, now - providers_db::DAY_MS],
+            |row| row.get(0),
+        )?,
+        None => db.query_row(
+            "SELECT MAX(ts) FROM provider_calls WHERE outcome='reserved' AND usd>0
+             AND role NOT IN ('embed','query')
+             AND ts>=CAST(strftime('%s',?1/1000,'unixepoch','start of month') AS INTEGER)*1000",
+            [now],
+            |row| row.get(0),
+        )?,
+    };
+    let age = now.saturating_sub(latest.unwrap_or(now));
+    Ok(now + age.clamp(RESERVATION_WAIT_MS, MAX_RESERVATION_WAIT_MS))
 }
 
 /// The most `calls` requests of `tokens` estimated tokens in all may cost when every paid entry of
@@ -685,6 +726,185 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn reservation_retry_uses_only_rows_contributing_to_each_accounting_window() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        // A fixed UTC clock at 2026-09-05 makes day/month boundary fixtures deterministic.
+        let now = 1_788_566_400_000_i64;
+        let add = |name: &str, role: &str, usd: Option<f64>, at: i64| {
+            record(
+                &db,
+                &Call {
+                    provider: name,
+                    role,
+                    span: name,
+                    outcome: "reserved",
+                    ms: 0,
+                    detail: Some("[100,4000]"),
+                    bytes_out: 0,
+                    est_tokens: None,
+                    usage: Usage::default(),
+                    usd,
+                },
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE provider_calls SET ts=?2 WHERE id=?1",
+                rusqlite::params![db.last_insert_rowid(), at],
+            )
+            .unwrap();
+        };
+        add(
+            "old-paid",
+            "curator",
+            Some(2.0),
+            now - 2 * providers_db::DAY_MS,
+        );
+        add(
+            "ancient-paid",
+            "curator",
+            Some(9.0),
+            now - 35 * providers_db::DAY_MS,
+        );
+        add("free", "curator", None, now);
+        add("zero", "curator", Some(0.0), now);
+        add("query", "query", Some(9.0), now);
+        add("embed", "embed", Some(9.0), now);
+        assert_eq!(
+            reservation_retry_at(&db, Some("old-paid"), now).unwrap(),
+            now + 1_000
+        );
+        assert_eq!(reservation_retry_at(&db, None, now).unwrap(), now + 600_000);
+        add("daily", "curator", Some(1.0), now - 3_600_000);
+        assert_eq!(
+            reservation_retry_at(&db, Some("daily"), now).unwrap(),
+            now + 600_000
+        );
+        // Only another positive paid reservation in this month restarts the short recheck.
+        add("fresh-paid", "curator", Some(0.5), now - 500);
+        assert_eq!(reservation_retry_at(&db, None, now).unwrap(), now + 1_000);
+        assert_eq!(
+            reservation_retry_at(&db, Some("daily"), now).unwrap(),
+            now + 600_000
+        );
+    }
+
+    #[test]
+    fn an_aged_active_sender_can_settle_and_immediately_release_a_small_probe() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let normal = entry(
+            "p",
+            Limits {
+                daily_tokens: Some(4_200),
+                max_output_tokens: 4_000,
+                usd_per_mtok_in: 1.0,
+                usd_per_mtok_out: 1.0,
+                ..Default::default()
+            },
+        );
+        let held = reserve(&db, &normal, "curator", "held", 100, 5.0, &[])
+            .unwrap()
+            .unwrap();
+        db.execute(
+            "UPDATE provider_calls SET ts=?1 WHERE span='held'",
+            [crate::db::now_ms() - 3_600_000],
+        )
+        .unwrap();
+        let prepared = crate::provider::probe_provider(&normal).unwrap();
+        let est = crate::provider::probe_estimate(&prepared);
+        let before = crate::db::now_ms();
+        let refusal =
+            reserve_with_history(&db, (&prepared, &normal), "probe", "test", est, 5.0, &[])
+                .unwrap()
+                .unwrap_err();
+        assert!(
+            matches!(refusal.skip, Skip::Wait(at) if at>=before+600_000 && at<=crate::db::now_ms()+600_000)
+        );
+        let usage = Usage {
+            prompt: Some(10),
+            completion: Some(10),
+            ..Default::default()
+        };
+        let usd = held.cost(&normal, usage, true);
+        held.settle(
+            &db,
+            &Call {
+                provider: "p",
+                role: "curator",
+                span: "held",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 100,
+                est_tokens: Some(100),
+                usage,
+                usd,
+            },
+            None,
+            |state| state,
+        )
+        .unwrap();
+        let allowed =
+            reserve_with_history(&db, (&prepared, &normal), "probe", "test", est, 5.0, &[])
+                .unwrap()
+                .unwrap();
+        assert!(
+            (allowed.cost(&prepared, Usage::default(), true).unwrap() - 0.000231).abs() < 1e-12
+        );
+        assert_eq!(
+            providers_db::state(&db, "p").unwrap(),
+            providers_db::State::default()
+        );
+        assert_eq!(providers_db::tokens_since(&db, "p", 0).unwrap().0, 20);
+        allowed.cancel(&db).unwrap();
+    }
+
+    #[test]
+    fn reservation_pressure_backs_off_after_restart_without_refunding_it() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let mut p = entry("p", Limits::default());
+        if let Provider::Openai { daily_budget, .. } = &mut p {
+            *daily_budget = Some(1);
+        }
+        let held = reserve(&db, &p, "curator", "held", 100, 5.0, &[])
+            .unwrap()
+            .unwrap();
+        let retry = |db: &Connection| {
+            let before = crate::db::now_ms();
+            let refusal = admit(db, &p, 1.0, 5.0, &[]).unwrap().unwrap();
+            let Skip::Wait(until) = refusal.skip else {
+                panic!("temporary pressure became a permanent hold")
+            };
+            (before, until)
+        };
+        let (before, fresh) = retry(&db);
+        assert!((1_000..2_000).contains(&(fresh - before)));
+        db.execute(
+            "UPDATE provider_calls SET ts=?1 WHERE span='held'",
+            [crate::db::now_ms() - 3_600_000],
+        )
+        .unwrap();
+        drop(db);
+        let reopened = open(home.path()).unwrap();
+        let (before, older) = retry(&reopened);
+        assert!(
+            (600_000..601_000).contains(&(older - before)),
+            "aged reservation retry delay: {}",
+            older - before
+        );
+        assert_eq!(providers_db::calls_in_a_day(&reopened, "p").unwrap().0, 1);
+        assert_eq!(
+            providers_db::state(&reopened, "p").unwrap(),
+            providers_db::State::default()
+        );
+        // Explicit proof that a sender never sent may still cancel; age alone did not refund.
+        held.cancel(&reopened).unwrap();
+        assert!(admit(&reopened, &p, 1.0, 5.0, &[]).unwrap().is_none());
     }
 
     #[test]

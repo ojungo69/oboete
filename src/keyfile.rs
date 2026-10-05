@@ -99,6 +99,8 @@ impl Drop for Managed {
 
 /// Registers a fresh key outside the corpus. Owner/data locations come from the trusted process
 /// caller, never a client's filesystem path. Existing key files are neither read nor replaced.
+/// Managed storage also needs kernel mount observations proving physical separation: overlay
+/// backing trees cannot provide that proof, so use a safe native fallback or refuse.
 pub(crate) fn managed(
     key: &str,
     corpus_home: &Path,
@@ -242,6 +244,13 @@ fn with_key(old: Option<&[u8]>, key: &str) -> Vec<u8> {
     }
 }
 
+/// Kernel mount observations supplied at the filesystem boundary in tests.
+#[cfg(test)]
+struct MountFixture {
+    table: Vec<u8>,
+    ids: Vec<(PathBuf, u64)>,
+}
+
 /// The steps a failure can be injected at, in tests.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Step {
@@ -255,6 +264,7 @@ enum Step {
 #[cfg(test)]
 thread_local! {
     static FAIL: std::cell::Cell<Option<Step>> = const { std::cell::Cell::new(None) };
+    static MOUNTS: std::cell::RefCell<Option<MountFixture>> = const { std::cell::RefCell::new(None) };
     /// Deterministic entropy for the managed filename's collision test.
     static MANAGED_TAG: std::cell::Cell<Option<[u8; 16]>> = const { std::cell::Cell::new(None) };
     /// The filesystem magic `private` sees instead of the real one.
@@ -281,6 +291,8 @@ fn step(at: Step) -> std::io::Result<()> {
 mod linux {
     use super::*;
     use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
     /// No other user may replace a part of the path to the key folder (#285). The path is
@@ -398,6 +410,243 @@ mod linux {
         Ok((dest, base))
     }
 
+    /// A mount's root is relative to its filesystem, not its mount point. This distinction
+    /// detects binds of corpus descendants even when no visible ancestor is the corpus inode.
+    struct Mount {
+        id: u64,
+        device: (u64, u64),
+        root: PathBuf,
+        at: PathBuf,
+        overlay: bool,
+    }
+
+    const MAX_MOUNTINFO: u64 = 1024 * 1024;
+
+    fn proc_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, Refused> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|_| Refused::Protected)?;
+        // These observations must come from the kernel, not a substituted ordinary file.
+        if magic(&file) != Some(0x9fa0) {
+            return Err(Refused::Protected);
+        }
+        let mut bytes = Vec::new();
+        file.take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Refused::Protected)?;
+        if bytes.len() as u64 > limit {
+            return Err(Refused::Protected);
+        }
+        Ok(bytes)
+    }
+
+    fn mount_number(bytes: &[u8]) -> Result<u64, Refused> {
+        if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+            return Err(Refused::Protected);
+        }
+        std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .ok_or(Refused::Protected)
+    }
+
+    /// mountinfo escapes space, tab, newline and backslash in its path fields. Preserve all
+    /// other bytes, including non-UTF-8 names, instead of treating them as separators.
+    fn mount_path(bytes: &[u8]) -> Result<PathBuf, Refused> {
+        let mut path = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] == b'\\' {
+                let escaped = bytes.get(at + 1..at + 4).ok_or(Refused::Protected)?;
+                path.push(match escaped {
+                    b"040" => b' ',
+                    b"011" => b'\t',
+                    b"012" => b'\n',
+                    b"134" => b'\\',
+                    _ => return Err(Refused::Protected),
+                });
+                at += 4;
+            } else {
+                path.push(bytes[at]);
+                at += 1;
+            }
+        }
+        let path = PathBuf::from(std::ffi::OsString::from_vec(path));
+        if path.as_os_str().as_bytes().contains(&0)
+            || path
+                .components()
+                .any(|p| p == std::path::Component::ParentDir)
+        {
+            return Err(Refused::Protected);
+        }
+        Ok(path)
+    }
+
+    fn mount_table() -> Result<Vec<Mount>, Refused> {
+        #[cfg(test)]
+        let supplied = MOUNTS.with(|f| f.borrow().as_ref().map(|f| f.table.clone()));
+        #[cfg(not(test))]
+        let supplied: Option<Vec<u8>> = None;
+        let bytes = match supplied {
+            Some(bytes) => bytes,
+            None => proc_bytes(Path::new("/proc/self/mountinfo"), MAX_MOUNTINFO)?,
+        };
+        if bytes.len() as u64 > MAX_MOUNTINFO {
+            return Err(Refused::Protected);
+        }
+        let mut mounts = Vec::new();
+        let mut ids = std::collections::HashSet::new();
+        for line in bytes.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+            let fields: Vec<_> = line.split(|&b| b == b' ').collect();
+            let separator = fields
+                .iter()
+                .position(|&f| f == b"-")
+                .ok_or(Refused::Protected)?;
+            if separator < 6
+                || fields.len() != separator + 4
+                || fields.iter().any(|f| f.is_empty())
+                || mounts.len() == 4096
+            {
+                return Err(Refused::Protected);
+            }
+            let id = mount_number(fields[0])?;
+            mount_number(fields[1])?;
+            let device = fields[2].split(|&b| b == b':').collect::<Vec<_>>();
+            if device.len() != 2 || !ids.insert(id) {
+                return Err(Refused::Protected);
+            }
+            let at = mount_path(fields[4])?;
+            if !at.is_absolute() {
+                return Err(Refused::Protected);
+            }
+            // nsfs and other pseudo-filesystems can have opaque roots such as `net:[id]`.
+            // Retain unrelated records; a selected/protected root must still be a real path.
+            mounts.push(Mount {
+                id,
+                device: (mount_number(device[0])?, mount_number(device[1])?),
+                root: mount_path(fields[3])?,
+                at,
+                overlay: fields[separator + 1] == b"overlay",
+            });
+        }
+        Ok(mounts)
+    }
+
+    fn mount_position<'a>(
+        dest: &Path,
+        base: &Path,
+        folder: &std::fs::File,
+        mounts: &'a [Mount],
+    ) -> Result<(&'a Mount, PathBuf, PathBuf), Refused> {
+        // The kernel's spelling also avoids deriving physical coordinates from user casing.
+        let visible = std::fs::read_link(format!("/proc/self/fd/{}", folder.as_raw_fd()))
+            .map_err(|_| Refused::Protected)?;
+        if !visible.is_absolute() || visible.as_os_str().as_bytes().ends_with(b" (deleted)") {
+            return Err(Refused::Protected);
+        }
+        #[cfg(test)]
+        let supplied = MOUNTS.with(|f| {
+            f.borrow().as_ref().map(|f| {
+                f.ids
+                    .iter()
+                    .filter(|(p, _)| visible.starts_with(p))
+                    .max_by_key(|(p, _)| p.components().count())
+                    .map(|(_, id)| *id)
+                    .ok_or(Refused::Protected)
+            })
+        });
+        #[cfg(not(test))]
+        let supplied: Option<Result<u64, Refused>> = None;
+        let id = match supplied {
+            Some(id) => id?,
+            None => {
+                let bytes = proc_bytes(
+                    Path::new(&format!("/proc/self/fdinfo/{}", folder.as_raw_fd())),
+                    4096,
+                )?;
+                let text = std::str::from_utf8(&bytes).map_err(|_| Refused::Protected)?;
+                let mut ids = text.lines().filter_map(|l| l.strip_prefix("mnt_id:"));
+                let id = mount_number(ids.next().ok_or(Refused::Protected)?.trim().as_bytes())?;
+                if ids.next().is_some() {
+                    return Err(Refused::Protected);
+                }
+                id
+            }
+        };
+        // An FD's actual mount ID selects the top visible mount even with stacked mount points.
+        let mount = mounts
+            .iter()
+            .find(|m| m.id == id)
+            .ok_or(Refused::Protected)?;
+        let dev = folder.metadata().map_err(|_| Refused::Protected)?.dev();
+        if !mount.root.is_absolute()
+            || mount.device != (u64::from(libc::major(dev)), u64::from(libc::minor(dev)))
+        {
+            return Err(Refused::Protected);
+        }
+        let relative = visible
+            .strip_prefix(&mount.at)
+            .map_err(|_| Refused::Protected)?;
+        let suffix = dest.strip_prefix(base).map_err(|_| Refused::Protected)?;
+        Ok((
+            mount,
+            mount.root.join(relative).join(suffix),
+            visible.join(suffix),
+        ))
+    }
+
+    fn outside_corpus(
+        dest: &Path,
+        base: &Path,
+        folder: &std::fs::File,
+        corpus: &Path,
+    ) -> Result<(), Refused> {
+        let (home_path, home_base) = planned_dir(corpus)?;
+        let home = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(&home_base)
+            .map_err(|_| Refused::Protected)?;
+        if !private(&home) {
+            return Err(Refused::NotPrivate);
+        }
+        let identity = home.metadata().map_err(|_| Refused::Protected)?;
+        if home_path == home_base {
+            for parent in base.ancestors() {
+                let meta = std::fs::metadata(parent).map_err(|_| Refused::Protected)?;
+                if (meta.dev(), meta.ino()) == (identity.dev(), identity.ino()) {
+                    return Err(Refused::Protected);
+                }
+            }
+        }
+        let mounts = mount_table()?;
+        let (key_mount, key_root, _) = mount_position(dest, base, folder, &mounts)?;
+        let (home_mount, home_root, home_visible) =
+            mount_position(&home_path, &home_base, &home, &mounts)?;
+        // Overlay coordinates separate logical paths, not independently exposed backing trees.
+        // Managed registration therefore needs a provably native location; legacy writes and
+        // PRIVATE_FS remain unchanged. Missing/ambiguous kernel observations fail closed too.
+        if key_mount.overlay
+            || home_mount.overlay
+            || (key_mount.device == home_mount.device && key_root.starts_with(&home_root))
+        {
+            return Err(Refused::Protected);
+        }
+        for mount in mounts.iter().filter(|m| m.at.starts_with(&home_visible)) {
+            // Include reported hidden submounts conservatively: missing one could expose a bind
+            // of a corpus child whose filesystem differs from the corpus root's filesystem.
+            if !mount.root.is_absolute()
+                || mount.overlay
+                || (mount.device == key_mount.device && key_root.starts_with(&mount.root))
+            {
+                return Err(Refused::Protected);
+            }
+        }
+        Ok(())
+    }
+
     fn managed_dir(path: &Path, corpus: &Path) -> Result<(PathBuf, std::fs::File, bool), Refused> {
         let (dest, mut at) = planned_dir(path)?;
         if dest.starts_with(corpus) {
@@ -407,6 +656,7 @@ mod linux {
         if !private(&folder) {
             return Err(Refused::NotPrivate);
         }
+        outside_corpus(&dest, &at, &folder, corpus)?;
         let mut durable = true;
         let missing = dest
             .strip_prefix(&at)
@@ -427,6 +677,7 @@ mod linux {
         }
         check_dirs(&dest)?;
         folder = private_dir(&dest)?;
+        outside_corpus(&dest, &dest, &folder, corpus)?;
         Ok((dest, folder, durable))
     }
 
@@ -746,6 +997,110 @@ mod tests {
                 }
             }
             out
+        }
+
+        /// A trusted kernel mount table and the mount IDs reported for opened fixture folders.
+        /// Actual files, permissions, owner checks and writes still use the temporary filesystem.
+        fn mounts(root: &Path, alias: &Path, source: &Path) {
+            use std::os::unix::fs::MetadataExt;
+            let dev = std::fs::metadata(root).unwrap().dev();
+            let dev = format!("{}:{}", libc::major(dev), libc::minor(dev));
+            let escape = |path: &Path| {
+                path.to_str()
+                    .unwrap()
+                    .replace('\\', "\\134")
+                    .replace(' ', "\\040")
+                    .replace('\t', "\\011")
+                    .replace('\n', "\\012")
+            };
+            let table = format!(
+                "1 0 {dev} / / rw - ext4 none rw\n2 1 {dev} {} {} rw shared:10 - ext4 none rw\n7 1 0:999 net:[12345] /unrelated-namespace rw - nsfs nsfs rw\n",
+                escape(source),
+                escape(alias)
+            );
+            MOUNTS.with(|f| {
+                *f.borrow_mut() = Some(MountFixture {
+                    table: table.into_bytes(),
+                    ids: vec![(root.to_path_buf(), 1), (alias.to_path_buf(), 2)],
+                })
+            });
+        }
+
+        #[test]
+        fn managed_registration_rejects_bound_corpus_descendants_before_mkdir() {
+            let (root, _keys, corpus) = setup();
+            let source = corpus.join("deep/descendant\t\n\\");
+            std::fs::create_dir_all(&source).unwrap();
+            let alias = root.path().join("ali as\t\n\\");
+            std::fs::create_dir(&alias).unwrap();
+            private(&alias);
+            mounts(root.path(), &alias, &source);
+            let result = managed(KEY, &corpus, root.path(), Some(&alias));
+            MOUNTS.with(|f| *f.borrow_mut() = None);
+            let registration = result.unwrap();
+            assert_eq!(
+                registration.path().parent().unwrap(),
+                root.path().join(".oboete-keys")
+            );
+            assert!(!alias.join("oboete").exists());
+            assert!(!source.join("oboete").exists());
+        }
+
+        #[test]
+        fn managed_registration_protects_a_missing_corpus_without_creating_it() {
+            let (root, _keys, _corpus) = setup();
+            let corpus = root.path().join("not-yet-created/corpus");
+            let registration = managed(KEY, &corpus, root.path(), None).unwrap();
+            assert_eq!(
+                registration.path().parent().unwrap(),
+                root.path().join(".local/share/oboete/keys")
+            );
+            assert!(!root.path().join("not-yet-created").exists());
+        }
+
+        #[test]
+        fn managed_registration_requires_complete_bounded_mount_observations() {
+            let (root, _keys, corpus) = setup();
+            let alias = root.path().join("alias");
+            std::fs::create_dir(&alias).unwrap();
+            private(&alias);
+            mounts(root.path(), &alias, &root.path().join("separate"));
+            let good = MOUNTS.with(|f| f.borrow().as_ref().unwrap().table.clone());
+            let empty_type = String::from_utf8(good.clone())
+                .unwrap()
+                .replace("- ext4 ", "-  ")
+                .into_bytes();
+            let bad_escape = String::from_utf8(good.clone())
+                .unwrap()
+                .replace(" / / ", " /bad\\999 / ")
+                .into_bytes();
+            let mut duplicate = good.clone();
+            duplicate.extend_from_slice(&good);
+            for bad in [
+                empty_type,
+                Vec::new(),
+                b"not a mount table".to_vec(),
+                bad_escape,
+                duplicate,
+                vec![b'x'; 1_048_577],
+            ] {
+                MOUNTS.with(|f| f.borrow_mut().as_mut().unwrap().table = bad);
+                let result = managed(KEY, &corpus, root.path(), Some(&alias));
+                assert_eq!(result.unwrap_err(), Refused::Protected);
+                assert!(!alias.join("oboete").exists());
+                assert!(!root.path().join(".oboete-keys").exists());
+            }
+            MOUNTS.with(|f| {
+                let mut f = f.borrow_mut();
+                let fixture = f.as_mut().unwrap();
+                fixture.table = good;
+                fixture.ids = vec![(root.path().to_path_buf(), 999)];
+            });
+            let result = managed(KEY, &corpus, root.path(), Some(&alias));
+            MOUNTS.with(|f| *f.borrow_mut() = None);
+            assert_eq!(result.unwrap_err(), Refused::Protected);
+            assert!(!alias.join("oboete").exists());
+            assert!(!root.path().join(".oboete-keys").exists());
         }
 
         #[test]

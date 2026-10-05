@@ -364,6 +364,13 @@ pub(crate) fn probe_provider(p: &Provider) -> std::result::Result<Provider, &'st
     Ok(p)
 }
 
+/// A stdout/time bound does not cap a CLI's model usage or its hidden recovery requests.
+/// Until an adapter can enforce the whole test's output allowance, keep ordinary CLI use
+/// available but refuse its optional inference probe before starting any external process.
+pub(crate) fn probe_unavailable(p: &Provider) -> Option<&'static str> {
+    matches!(p, Provider::Cli { .. }).then_some("cli_probe_unbounded")
+}
+
 /// Exactly one explicitly requested synthetic connection test. No chain fallback, 429 retry,
 /// key-limit discovery, provider response payload, or implicit owner resume.
 pub(crate) fn probe(
@@ -406,6 +413,9 @@ fn probe_attempt(
         Ok(p) => p,
         Err(code) => return Ok(report("blocked", code, None, None, None)),
     };
+    if !forced && let Some(code) = probe_unavailable(&p) {
+        return Ok(report("blocked", code, None, None, None));
+    }
     let est = probe_estimate(&p);
     let reservation = match budget::reserve_with_history(
         db,
@@ -418,62 +428,12 @@ fn probe_attempt(
     )? {
         Ok(reservation) => reservation,
         Err(refusal) => {
-            let (code, retry_at) = match refusal.skip {
-                Skip::Owner => (
-                    if p.enabled() {
-                        "owner_hold"
-                    } else {
-                        "disabled"
-                    },
-                    None,
-                ),
-                Skip::Budget(at) => ("budget", Some(at)),
-                Skip::Wait(at) => (
-                    if refusal.outcome == "budget" {
-                        "budget"
-                    } else {
-                        "cooldown"
-                    },
-                    Some(at),
-                ),
-                _ => ("too_big", None),
-            };
+            let (code, retry_at) = probe_refusal(&p, refusal);
             return Ok(report("blocked", code, None, None, retry_at));
         }
     };
-    if !forced && let Provider::Cli { cli, .. } = &p {
-        let isolated = match crate::isolation::gate(db, cli) {
-            Ok(isolated) => isolated,
-            Err(_) => {
-                reservation.cancel(db)?;
-                return Ok(report("blocked", "isolation", None, None, None));
-            }
-        };
-        if isolated != crate::isolation::Gate::Passed {
-            reservation.settle(
-                db,
-                &providers_db::Call {
-                    provider: p.name(),
-                    role: "probe",
-                    span: "connection-test",
-                    outcome: "gate",
-                    ms: started.elapsed().as_millis() as i64,
-                    detail: Some("probe isolation not verified"),
-                    bytes_out: 0,
-                    est_tokens: Some(est),
-                    usage: Usage::default(),
-                    usd: None,
-                },
-                None,
-                |state| state,
-            )?;
-            return Ok(report("blocked", "isolation", None, None, None));
-        }
-    }
     let ready = if forced {
         Err(CallError::other("forced failure (OBOETE_FAIL_PROVIDER)").unsent())
-    } else if let Provider::Cli { cli, .. } = &p {
-        cli_preflight(cli)
     } else {
         Ok(())
     };
@@ -487,55 +447,14 @@ fn probe_attempt(
                     return Err(error);
                 }
             };
-            match &p {
-                Provider::Openai {
-                    base_url,
-                    key_file,
-                    model,
-                    timeout_s,
-                    extra,
-                    headers,
-                    ..
-                } => openai_compat_redirects(
-                    base_url,
-                    key_file.as_deref(),
-                    model,
-                    *timeout_s,
-                    extra,
-                    headers,
-                    PROBE_PROMPT,
-                    &probe_schema(),
-                    admission,
-                    0,
-                ),
-                Provider::Cli {
-                    cli,
-                    model,
-                    timeout_s,
-                    ..
-                } => cli_headless_at(
-                    cli,
-                    model.as_deref(),
-                    *timeout_s,
-                    PROBE_PROMPT,
-                    &probe_schema(),
-                    admission,
-                    #[cfg(test)]
-                    cli_executable,
-                ),
-            }
+            probe_send(
+                &p,
+                admission,
+                #[cfg(test)]
+                cli_executable,
+            )
         }
-    }
-    .and_then(|answer| {
-        if answer.value == json!({"ok": true}) {
-            Ok(answer)
-        } else {
-            Err(CallError::other("invalid output: probe answer rejected")
-                .with_usage(answer.usage)
-                .rated(answer.rate)
-                .resting(answer.cool_until))
-        }
-    });
+    };
     match result {
         Ok(answer) => {
             let usd = reservation.cost(&p, answer.usage, true);
@@ -568,19 +487,7 @@ fn probe_attempt(
             ))
         }
         Err(error) => {
-            let code = if forced {
-                "forced_failure"
-            } else if error.status.is_some() {
-                "http"
-            } else if error.invalid() {
-                "invalid"
-            } else if !error.sent && error.cool_until.is_some() {
-                "allowance"
-            } else if !error.sent {
-                "unavailable"
-            } else {
-                "provider_error"
-            };
+            let code = probe_error_code(&error, forced);
             // The shared token accounting recognizes an HTTP refusal by this fixed prefix.
             let detail = error.status.map_or_else(
                 || format!("probe {code}"),
@@ -619,6 +526,100 @@ fn probe_attempt(
                     .then_some(state.down_until),
             ))
         }
+    }
+}
+
+fn probe_refusal(p: &Provider, refusal: budget::Refusal) -> (&'static str, Option<i64>) {
+    match refusal.skip {
+        Skip::Owner => (
+            if p.enabled() {
+                "owner_hold"
+            } else {
+                "disabled"
+            },
+            None,
+        ),
+        Skip::Budget(at) => ("budget", Some(at)),
+        Skip::Wait(at) => (
+            if refusal.outcome == "budget" {
+                "budget"
+            } else {
+                "cooldown"
+            },
+            Some(at),
+        ),
+        _ => ("too_big", None),
+    }
+}
+
+/// Send the fixed probe once and accept only its exact synthetic answer.
+fn probe_send(
+    p: &Provider,
+    admission: Option<crate::dispatch::Guard>,
+    #[cfg(test)] cli_executable: Option<&Path>,
+) -> Result<Answer, CallError> {
+    match p {
+        Provider::Openai {
+            base_url,
+            key_file,
+            model,
+            timeout_s,
+            extra,
+            headers,
+            ..
+        } => openai_compat_redirects(
+            base_url,
+            key_file.as_deref(),
+            model,
+            *timeout_s,
+            extra,
+            headers,
+            PROBE_PROMPT,
+            &probe_schema(),
+            admission,
+            0,
+        ),
+        Provider::Cli {
+            cli,
+            model,
+            timeout_s,
+            ..
+        } => cli_headless_at(
+            cli,
+            model.as_deref(),
+            *timeout_s,
+            PROBE_PROMPT,
+            &probe_schema(),
+            admission,
+            #[cfg(test)]
+            cli_executable,
+        ),
+    }
+    .and_then(|answer| {
+        if answer.value == json!({"ok": true}) {
+            Ok(answer)
+        } else {
+            Err(CallError::other("invalid output: probe answer rejected")
+                .with_usage(answer.usage)
+                .rated(answer.rate)
+                .resting(answer.cool_until))
+        }
+    })
+}
+
+fn probe_error_code(error: &CallError, forced: bool) -> &'static str {
+    if forced {
+        "forced_failure"
+    } else if error.status.is_some() {
+        "http"
+    } else if error.invalid() {
+        "invalid"
+    } else if !error.sent && error.cool_until.is_some() {
+        "allowance"
+    } else if !error.sent {
+        "unavailable"
+    } else {
+        "provider_error"
     }
 }
 
@@ -4223,11 +4224,55 @@ child.wait()
 
     #[test]
     #[cfg(unix)]
-    fn explicit_probe_cli_uses_fixed_stdin_private_home_and_checked_init() {
+    fn an_unbounded_cli_probe_cannot_run_a_nonconforming_long_response() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let executable = home.path().join("nonconforming-claude");
+        std::fs::write(&executable, r#"#!/usr/bin/env python3
+import json, pathlib, sys
+pathlib.Path(__file__).with_suffix('.ran').write_text('ran')
+sys.stdin.read()
+print(json.dumps({"type":"system","subtype":"init","tools":[],"mcp_servers":[],"plugins":[],"permissionMode":"dontAsk","apiKeySource":"none"}))
+print(json.dumps({"type":"result","is_error":False,"result":json.dumps({"ok":True,"extra":"x"*20000}),"usage":{"input_tokens":12,"output_tokens":5000}}))
+"#).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let p = Provider::Cli {
+            name: "fixture".into(),
+            enabled: true,
+            cli: "claude".into(),
+            model: None,
+            daily_budget: 10,
+            timeout_s: 2,
+            limits: config::Limits {
+                daily_tokens: Some(2_000),
+                ..Default::default()
+            },
+        };
+        let gates = std::cell::Cell::new(0);
+        let gate = || {
+            gates.set(gates.get() + 1);
+            Ok(None)
+        };
+        let result = probe_attempt(&conn, &p, 5.0, &gate, false, Some(&executable)).unwrap();
+        assert_eq!(
+            providers_db::tokens_since(&conn, "fixture", 0).unwrap().0,
+            0,
+            "a 1250-token estimate must not admit a 5000-token CLI response"
+        );
+        assert_eq!(result["status"], "blocked");
+        assert_eq!(result["code"], "cli_probe_unbounded");
+        assert_eq!(gates.get(), 0);
+        assert!(!executable.with_extension("ran").exists());
+        assert!(outcomes(&conn).is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn normal_cli_keeps_fixed_stdin_private_home_and_checked_init() {
         use std::os::unix::fs::PermissionsExt;
         for failed in [false, true] {
             let home = tempfile::tempdir().unwrap();
-            let conn = providers_db::open(home.path()).unwrap();
             let executable = home
                 .path()
                 .join(if failed { "error-cli" } else { "answer-cli" });
@@ -4244,29 +4289,19 @@ print(json.dumps({"type":"result","result":'{"ok":true}',"is_error":"error" in p
                   "subtype":"private-cli-error-canary","usage":{"input_tokens":12,"output_tokens":4}}))
 "#).unwrap();
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let p = Provider::Cli {
-                name: "fixture".into(),
-                enabled: true,
-                cli: "claude".into(),
-                model: Some("synthetic-model".into()),
-                daily_budget: 10,
-                timeout_s: 2,
-                limits: Default::default(),
-            };
-            let gates = std::cell::Cell::new(0);
-            let gate = || {
-                gates.set(gates.get() + 1);
-                assert!(
-                    !home.path().join("trace.json").exists(),
-                    "child ran before fresh gate"
-                );
-                Ok(None)
-            };
-            let result = probe_attempt(&conn, &p, 5.0, &gate, false, Some(&executable)).unwrap();
-            assert_eq!(result["status"], if failed { "failed" } else { "ok" });
-            assert_eq!(gates.get(), 1);
-            assert!(!result.to_string().contains("canary"));
-            assert!(!providers_db::last_calls(&conn, 1).unwrap()[0].contains("canary"));
+            let result = cli_headless_at(
+                "claude",
+                Some("synthetic-model"),
+                2,
+                PROBE_PROMPT,
+                &probe_schema(),
+                None,
+                Some(&executable),
+            );
+            assert_eq!(result.is_ok(), !failed);
+            if let Ok(answer) = result {
+                assert_eq!(answer.value, json!({"ok":true}));
+            }
             let trace: Value =
                 serde_json::from_slice(&std::fs::read(home.path().join("trace.json")).unwrap())
                     .unwrap();
@@ -4303,14 +4338,30 @@ print(json.dumps({"type":"result","result":'{"ok":true}',"is_error":"error" in p
         for reason in ["budget", "owner", "disabled", "forced"] {
             let home = tempfile::tempdir().unwrap();
             let conn = providers_db::open(home.path()).unwrap();
-            let p = Provider::Cli {
-                name: "codex".into(),
-                enabled: reason != "disabled",
-                cli: "codex".into(),
-                model: None,
-                daily_budget: if reason == "budget" { 0 } else { 10 },
-                timeout_s: 1,
-                limits: Default::default(),
+            let p = if reason == "forced" {
+                Provider::Cli {
+                    name: "codex".into(),
+                    enabled: true,
+                    cli: "codex".into(),
+                    model: None,
+                    daily_budget: 10,
+                    timeout_s: 1,
+                    limits: Default::default(),
+                }
+            } else {
+                let mut p = stub("http://127.0.0.1:9".into());
+                if let Provider::Openai {
+                    name,
+                    enabled,
+                    daily_budget,
+                    ..
+                } = &mut p
+                {
+                    *name = "codex".into();
+                    *enabled = reason != "disabled";
+                    *daily_budget = Some(if reason == "budget" { 0 } else { 10 });
+                }
+                p
             };
             if reason == "owner" {
                 providers_db::set_state(

@@ -128,12 +128,29 @@ fn doctor_prints_inject_and_chain_as_they_apply() {
     let detail = lines.next().unwrap_or_default();
     assert!(detail.trim_start().starts_with("off, "), "{text}");
     assert!(
-        text.contains("  warning: every chain entry is off, so nothing is curated"),
+        text.contains("  warning: no provider is enabled:"),
         "{text}"
     );
+    for cause_or_remedy in [
+        "entries are individually disabled or their name groups are off",
+        "enable an entry and its name group to curate",
+        "set [summary] curate = false to stop curation",
+    ] {
+        assert!(text.contains(cause_or_remedy), "{text}");
+    }
     assert!(
         text.contains("  warning: [chain] timeout_s: no chain entry is named \"nobody\""),
         "{text}"
+    );
+    let native_off = entries.replace("kind = \"cli\"", "kind = \"cli\"\nenabled = false");
+    let native_off = doctor(&format!("[summary]\ncurate = true\n{native_off}"));
+    assert!(
+        native_off.contains("  warning: no provider is enabled:"),
+        "{native_off}"
+    );
+    assert!(
+        native_off.contains("entries are individually disabled"),
+        "{native_off}"
     );
     let off = doctor(&format!(
         "{entries}[inject]\nsession_start = false\nper_prompt = true\nper_prompt_chars = 900\ncorrection = false\n"
