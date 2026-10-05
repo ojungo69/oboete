@@ -1,0 +1,40 @@
+src/dispatch.rs
+  s_ce2b24784deac6::t_1f923aa3357947 828-832
+  s_ce2b24784deac6::t_8d86eedc188f52 88-92
+src/providers_db.rs
+  s_ce2b24784deac6::t_e3bbdf6144e879 594
+src/budget.rs
+  s_ce2b24784deac6::t_e3bbdf6144e879 544-545
+assets/viewer/app.js
+  s_ce2b24784deac6::t_37369f572b60b7 1537-1538,1568,1649-1650,1774-1775
+docs/settings-providers.md
+  s_ce2b24784deac6::t_19bc97bccf0708 35-39
+src/keyfile.rs
+  s_ce2b24784deac6::t_e6e9dd635bc13a 102,420-436,547,595,600,642,645-646,655,1063-1187
+src/settings/providers.rs
+  s_cf4a2fe6361b92::t_2c053acd35f1f0 648-651
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b4480877c551dac3845e835f1ab4e8fc73a3f4e6",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_cf4a2fe6361b92": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10356-003e-7232-bfd2-38571dabf8fa",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
