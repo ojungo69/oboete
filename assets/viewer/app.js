@@ -1290,6 +1290,7 @@ const TEXT = {
   maintenance_phase_complete: ["Import completed", "取り込み完了"],
   maintenance_phase_partial: ["Import stopped with committed progress", "確定した進捗を残して停止"],
   maintenance_phase_failed: ["Import did not complete", "取り込みは完了しませんでした"],
+  maintenance_phase_unknown: ["Import result needs inspection", "取り込み結果の確認が必要です"],
   maintenance_stage_checking: ["Checking confirmed scope", "確認した範囲を検証"],
   maintenance_stage_settings: ["Older settings", "旧設定"],
   maintenance_stage_v1_events: ["Older events", "旧イベント"],
@@ -1299,11 +1300,13 @@ const TEXT = {
   maintenance_stage_complete: ["Completed", "完了"],
   maintenance_stage_partial: ["Stopped after committed progress", "確定済み進捗を残して停止"],
   maintenance_stage_failed: ["Stopped", "停止"],
+  maintenance_stage_unknown: ["Completion needs inspection", "完了状態の確認が必要"],
   maintenance_preview_failed: ["A safe preview could not be prepared. No import was started.", "安全なプレビューを作成できませんでした。取り込みは開始していません。"],
   maintenance_status_unavailable: ["Import status could not be read. The running operation is not cancelled.", "状況を読み取れませんでした。進行中の処理は中止していません。"],
   maintenance_unknown: ["The import result is unknown. Inspect before another operation.", "取り込み結果が不明です。別の処理の前に確認してください。"],
   maintenance_stale: ["Source, settings or effects changed. Prepare a fresh preview.", "元データ・設定・影響が変わりました。新しいプレビューを作成してください。"],
   maintenance_source: ["The local source could not be safely used. Check its path and data.", "元データを安全に使えませんでした。パスとデータを確認してください。"],
+  maintenance_source_missing: ["There is no older oboete.db in this memory folder. Choose an existing source file to preview.", "この記憶フォルダーには旧oboete.dbがありません。確認する元ファイルを指定してください。"],
   maintenance_config: ["Saved or older settings are invalid. Inspect them before importing.", "保存済み設定または旧設定が不正です。取り込み前に確認してください。"],
   maintenance_busy: ["Another native import is active. Inspect status and wait.", "別の取り込みが進行中です。状況を確認して待ってください。"],
   maintenance_refused: ["Some files were refused. Earlier committed progress is kept. Inspect it before another preview.", "取り込めないファイルがありました。確定済みの進捗は残ります。別のプレビュー前に確認してください。"],
@@ -1435,8 +1438,9 @@ function renderMaintenance(d) {
   const section=$('panel').querySelector('.maintenance');
   if(!section)return;
   const focused=section.contains(document.activeElement) ? document.activeElement : null;
-  const key=focused?.dataset.field ? ['field',focused.dataset.field]
-    : focused?.dataset.action ? ['action',focused.dataset.action] : null;
+  let key=null;
+  if(focused?.dataset.field)key=['field',focused.dataset.field];
+  else if(focused?.dataset.action)key=['action',focused.dataset.action];
   const selection=typeof focused?.selectionStart==='number'
     ? [focused.selectionStart,focused.selectionEnd,focused.selectionDirection] : null;
   section.replaceChildren(...maintenanceSection(form).childNodes);
@@ -1468,6 +1472,7 @@ function maintenanceSection(f) {
     d.preview=null;d.confirmed=false;d.operationId=null;d.error=null;
     const section=$('panel').querySelector('.maintenance');
     section?.querySelector('.maintenance-preview')?.remove();
+    section?.querySelector('.maintenance-error')?.remove();
     const consent=section && [...section.querySelectorAll('input')].find(input=>input.dataset.field==='maintenance.confirmed');
     if(consent){consent.checked=false;consent.disabled=true;}
     const start=section && [...section.querySelectorAll('button')].find(button=>button.dataset.action==='maintenance.start');
@@ -1548,7 +1553,7 @@ function maintenanceSection(f) {
     d.kind==='v1' ? el('p','desc',t('maintenance_source_default')) : el('p','desc',t('maintenance_native_roots')),
     preview,previewDetails,d.preview ? el('label','check',confirm,t('maintenance_consent')) : null,
     start,d.previewing ? el('p','desc',t('loading')) : null,
-    d.error ? el('p','desc text',t(d.error)) : null,
+    d.error ? el('p','desc text maintenance-error',t(d.error)) : null,
     d.unknown ? el('p','desc',t('maintenance_unknown_hint')) : null,
     active ? maintenanceStatus(active) : null,last ? maintenanceStatus(last) : null,
     d.status && !d.status.available ? el('p','desc',t('maintenance_no_receipt')) : null,
@@ -1577,22 +1582,26 @@ function maintenanceV1(s,settings,candidate=false) {
     bytes:s.bytes ?? 0,seen:s.seen ?? 0})),settings ? el('p','desc',t('maintenance_settings_effect',{
       effect:t('maintenance_settings_'+settings.effect),missing:settings.missing.length})) : null);
 }
+function maintenanceOutcome(out) {
+  if(!out)return [];
+  const rows=[];
+  if(out.transcripts)for(const [agent,s] of Object.entries(out.transcripts)) {
+    if(s)rows.push(el('p','desc',t('maintenance_transcript_actual',{
+      agent:t(agent==='claude'?'maintenance_claude':'maintenance_codex'),records:s.events,
+      seen:s.seen,waiting:s.waiting,refused:s.refused})));
+  }
+  const v1=out.v1 || (!out.transcripts ? out : null);
+  if(v1)rows.push(maintenanceV1(v1,v1.settings));
+  return rows;
+}
 function maintenanceStatus(run) {
-  const p=run.progress,out=run.result?.outcome;
+  const p=run.progress;
   const rows=[el('p','desc',t('maintenance_progress',{
     stage:t('maintenance_stage_'+run.stage),records:p.v1_records,repos:p.v1_repositories,
     documents:p.v1_documents,claude:p.claude.events,codex:p.codex.events}))];
   if(run.result?.code)rows.push(el('p','desc text',t(run.result.code)));
   if(run.phase==='partial' && run.committed)rows.push(el('p','desc',t('maintenance_committed_boundary')));
-  if(out) {
-    if(out.transcripts)for(const [agent,s] of Object.entries(out.transcripts)) {
-      if(s)rows.push(el('p','desc',t('maintenance_transcript_actual',{
-        agent:t(agent==='claude'?'maintenance_claude':'maintenance_codex'),records:s.events,
-        seen:s.seen,waiting:s.waiting,refused:s.refused})));
-    }
-    const v1=out.v1 || (!out.transcripts ? out : null);
-    if(v1)rows.push(maintenanceV1(v1,v1.settings));
-  }
+  rows.push(...maintenanceOutcome(run.result?.outcome));
   return el('div','maintenance-result',el('h4',null,t('maintenance_phase_'+run.phase)),...rows);
 }
 
@@ -2927,11 +2936,14 @@ let version = null;
 let polling = false;
 let pollFailureNotice = null;
 
+async function pollMaintenance() {
+  if(view==='settings' && form?.maintenance)await refreshMaintenance(form.maintenance);
+}
 async function poll() {
-  if (view === 'settings' && form?.maintenance) void refreshMaintenance(form.maintenance);
   if (polling || document.visibilityState !== 'visible') return;
   polling = true;
   try {
+    await pollMaintenance();
     const { v } = await api('version');
     $('live').classList.remove('off');
     $('live').textContent = t('live');

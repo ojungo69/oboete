@@ -1273,9 +1273,9 @@ fn import_files(
     writeln!(out, "{}", serde_json::to_string(&stats)?)?;
     let refused: u64 = stats.agents.values().map(|agent| agent.refused).sum();
     if refused != 0 {
-        return Err(anyhow::anyhow!(FailureCode::Refused).context(format!(
+        return Err(anyhow::anyhow!(FailureCode::Refused)).with_context(|| format!(
             "{refused} transcript file(s) refused: imported prefixes or cross-source forget identities cannot be verified; \
-             review the refusal reasons above; those files were not imported")));
+             review the refusal reasons above; those files were not imported"));
     }
     Ok(())
 }
@@ -1384,11 +1384,9 @@ fn stable_lines(path: &Path, agent: &str) -> Result<Option<Vec<Line>>> {
     let before = stamps(path, &subagents)?;
     let parsed = parse(path, agent, &subagents);
     #[cfg(test)]
-    AFTER_PARSE.with_borrow_mut(|hook| {
-        if let Some(hook) = hook.take() {
-            hook();
-        }
-    });
+    if let Some(hook) = AFTER_PARSE.with_borrow_mut(Option::take) {
+        hook();
+    }
     // Check the file set too: a new or removed subagent changes the session's event order.
     let after = subagent_files(path, agent).and_then(|files| stamps(path, &files));
     if after.as_ref().ok() != Some(&before) {
@@ -1399,7 +1397,7 @@ fn stable_lines(path: &Path, agent: &str) -> Result<Option<Vec<Line>>> {
 
 #[cfg(test)]
 thread_local! {
-    static AFTER_PARSE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+    pub(crate) static AFTER_PARSE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
         std::cell::RefCell::new(None)
     };
 }

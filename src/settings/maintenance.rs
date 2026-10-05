@@ -70,6 +70,35 @@ pub(crate) struct Maintenance {
     claude: PathBuf,
     codex: PathBuf,
 }
+struct ActiveRun<'a> {
+    maintenance: &'a Maintenance,
+    id: &'a str,
+}
+impl Drop for ActiveRun<'_> {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let mut state = self
+            .maintenance
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state
+            .active
+            .as_ref()
+            .is_none_or(|run| run.operation_id != self.id)
+        {
+            return;
+        }
+        if let Some(mut run) = state.active.take() {
+            run.phase = "unknown";
+            run.stage = "unknown";
+            run.result = Some(json!({"code":"maintenance_unknown","outcome":null}));
+            state.last = Some(run);
+        }
+    }
+}
 impl Default for Maintenance {
     fn default() -> Self {
         Self::with_roots(
@@ -128,7 +157,11 @@ impl Maintenance {
                     "no_model_request":true}))
             }
             Operation::V1 { from } => {
+                let default_source = from.as_deref().is_none_or(str::is_empty);
                 let from = from_path(home, from.as_deref());
+                if default_source && !from.try_exists().map_err(|_| failed())? {
+                    return Err(refused(422, "maintenance_source_missing", "operation.from"));
+                }
                 let preview = migrate::preview(home, &from).map_err(|_| failed())?;
                 let rules = crate::redact::Rules::load(home).map_err(|_| failed())?;
                 let label = crate::redact::outbound_with(&from.to_string_lossy(), &rules);
@@ -184,31 +217,14 @@ impl Maintenance {
             });
         }
         let id = &request.operation_id;
+        let _active = ActiveRun {
+            maintenance: self,
+            id,
+        };
         let (result, code, partial) = match request.operation {
             Operation::Transcripts { agent } => {
-                let mut committed = |event: &transcript::Committed| match event {
-                    transcript::Committed::V1(event) => self.migration_progress(id, event),
-                    transcript::Committed::Transcripts {
-                        agent,
-                        events,
-                        bytes,
-                    } => {
-                        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-                        if let Some(run) =
-                            state.active.as_mut().filter(|run| run.operation_id == *id)
-                        {
-                            run.committed = true;
-                            run.stage = "transcripts";
-                            let progress = match agent.as_str() {
-                                "claude" => &mut run.progress.claude,
-                                "codex" => &mut run.progress.codex,
-                                _ => return,
-                            };
-                            progress.events = *events;
-                            progress.selected_bytes = *bytes;
-                        }
-                    }
-                };
+                let mut committed =
+                    |event: &transcript::Committed| self.transcript_progress(id, event);
                 match transcript::run(
                     home,
                     &self.roots(agent),
@@ -254,6 +270,29 @@ impl Maintenance {
             state.last = Some(run);
         }
         Ok(Self::snapshot(&state))
+    }
+    fn transcript_progress(&self, id: &str, event: &transcript::Committed) {
+        match event {
+            transcript::Committed::V1(event) => self.migration_progress(id, event),
+            transcript::Committed::Transcripts {
+                agent,
+                events,
+                bytes,
+            } => {
+                let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(run) = state.active.as_mut().filter(|run| run.operation_id == id) {
+                    run.committed = true;
+                    run.stage = "transcripts";
+                    let progress = match agent.as_str() {
+                        "claude" => &mut run.progress.claude,
+                        "codex" => &mut run.progress.codex,
+                        _ => return,
+                    };
+                    progress.events = *events;
+                    progress.selected_bytes = *bytes;
+                }
+            }
+        }
     }
     fn migration_progress(&self, id: &str, event: &migrate::Committed) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -436,5 +475,153 @@ mod tests {
         assert!(!home.join("raw.db").exists());
         assert!(!home.join("config.toml").exists());
         assert!(!result.to_string().contains("unconfirmed source contents"));
+    }
+
+    fn panic_after_parse(remaining: usize) {
+        transcript::AFTER_PARSE.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                if remaining == 0 {
+                    panic!("controlled native unwind");
+                }
+                panic_after_parse(remaining - 1);
+            }));
+        });
+    }
+
+    #[test]
+    fn a_native_unwind_keeps_unknown_progress_and_releases_admission() {
+        for earlier_commit in [false, true] {
+            let (_root, maintenance, home, source) = fixture();
+            if earlier_commit {
+                let text = std::fs::read_to_string(&source).unwrap();
+                std::fs::write(
+                    source.with_file_name("rollout-z-new.jsonl"),
+                    text.replace(
+                        "22222222-2222-4222-8222-222222222222",
+                        "44444444-4444-4444-8444-444444444444",
+                    )
+                    .replace(
+                        "33333333-3333-4333-8333-333333333333",
+                        "55555555-5555-4555-8555-555555555555",
+                    ),
+                )
+                .unwrap();
+            }
+            let preview_request = serde_json::to_vec(&json!({
+                "operation":{"kind":"transcripts","agent":"codex"}
+            }))
+            .unwrap();
+            let preview = maintenance.preview(&home, &preview_request).unwrap();
+            let request = |key: &Value, id: char| {
+                serde_json::to_vec(&json!({"operation":{"kind":"transcripts","agent":"codex"},
+                    "preview_key":key,"operation_id":id.to_string().repeat(64),"confirmed":true}))
+                .unwrap()
+            };
+            let original = request(&preview["preview_key"], 'c');
+            // The two preview parses and first execution parse precede the real first commit.
+            panic_after_parse(if earlier_commit { 3 } else { 0 });
+            let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                maintenance.start(&home, &original)
+            }));
+            assert!(unwind.is_err());
+            let shown = maintenance.show();
+            assert!(shown["active"].is_null());
+            assert_eq!(shown["last"]["phase"], "unknown");
+            assert_eq!(shown["last"]["result"]["code"], "maintenance_unknown");
+            assert!(shown["last"]["result"]["outcome"].is_null());
+            assert_eq!(shown["last"]["committed"], earlier_commit);
+            assert_eq!(
+                shown["last"]["progress"]["codex"]["events"],
+                if earlier_commit { 8 } else { 0 }
+            );
+            assert_eq!(maintenance.start(&home, &original).unwrap(), shown);
+            let fresh = maintenance.preview(&home, &preview_request).unwrap();
+            let finished = maintenance
+                .start(&home, &request(&fresh["preview_key"], 'd'))
+                .unwrap();
+            assert_eq!(finished["last"]["phase"], "complete");
+            assert_eq!(finished["last"]["progress"]["codex"]["events"], 8);
+            let raw = crate::raw::read_only(&home).unwrap().unwrap();
+            let records: i64 = raw
+                .conn
+                .query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(records, if earlier_commit { 16 } else { 8 });
+        }
+    }
+
+    #[test]
+    fn a_normal_old_guard_cannot_clear_a_reused_id() {
+        let (_root, maintenance, home, _source) = fixture();
+        let maintenance = std::sync::Arc::new(maintenance);
+        let prepare = |id: char| {
+            let operation = json!({"kind":"transcripts","agent":"codex"});
+            let preview = maintenance
+                .preview(
+                    &home,
+                    &serde_json::to_vec(&json!({"operation":operation})).unwrap(),
+                )
+                .unwrap();
+            serde_json::to_vec(
+                &json!({"operation":operation,"preview_key":preview["preview_key"],
+                "operation_id":id.to_string().repeat(64),"confirmed":true}),
+            )
+            .unwrap()
+        };
+        maintenance.start(&home, &prepare('c')).unwrap();
+        let old_id = "c".repeat(64);
+        // Delay the first normal guard drop until another receipt evicts its ID.
+        let old = ActiveRun {
+            maintenance: &maintenance,
+            id: &old_id,
+        };
+        maintenance.start(&home, &prepare('d')).unwrap();
+        let reused = prepare('c');
+        let (ready, observed) = std::sync::mpsc::channel();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let running = maintenance.clone();
+        let thread = std::thread::spawn(move || {
+            transcript::AFTER_PARSE.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    ready.send(()).unwrap();
+                    waiting.recv().unwrap();
+                }));
+            });
+            running.start(&home, &reused)
+        });
+        observed
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .unwrap();
+        drop(old);
+        let while_running = maintenance.show();
+        release.send(()).unwrap();
+        let finished = thread.join().unwrap().unwrap();
+        assert_eq!(while_running["active"]["operation_id"], old_id);
+        assert_eq!(while_running["active"]["phase"], "running");
+        assert_eq!(finished["last"]["phase"], "complete");
+    }
+
+    #[test]
+    fn a_missing_default_v1_source_is_distinct_and_creates_no_store() {
+        let (_root, maintenance, home, _source) = fixture();
+        for from in [Value::Null, json!("")] {
+            let body = serde_json::to_vec(&json!({"operation":{"kind":"v1","from":from}})).unwrap();
+            let refused = maintenance.preview(&home, &body).unwrap_err();
+            assert_eq!(refused.code, "maintenance_source_missing");
+            assert!(!home.exists());
+            assert_eq!(
+                maintenance.show(),
+                json!({"available":false,"active":null,"last":null})
+            );
+        }
+        let body = serde_json::to_vec(
+            &json!({"operation":{"kind":"v1","from":home.join("explicit-missing.db")}}),
+        )
+        .unwrap();
+        assert_eq!(
+            maintenance.preview(&home, &body).unwrap_err().code,
+            "maintenance_preview_failed"
+        );
+        assert!(!home.exists());
     }
 }

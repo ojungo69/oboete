@@ -319,6 +319,7 @@ pub(crate) fn with_preview_v1<T>(
     let parent = from
         .parent()
         .context("v1 store has no parent")?
+        .join(".")
         .canonicalize()?;
     anyhow::ensure!(
         !std::env::temp_dir().canonicalize()?.starts_with(parent),
@@ -478,18 +479,17 @@ fn preview_connection(home: &Path, from: &Path, v1: &Connection, source: &str) -
             .map(|r| r.event.body.len() as u64)
             .sum::<u64>();
     }
-    let docs = read_documents(
+    read_documents(
         v1,
         &device,
         &capture,
         &mut Default::default(),
         &mut Stats::default(),
+        |doc| {
+            candidates.documents += 1;
+            candidates.bytes += (doc.title.len() + doc.body.len()) as u64;
+        },
     )?;
-    candidates.documents = docs.len() as u64;
-    candidates.bytes += docs
-        .iter()
-        .map(|d| (d.title.len() + d.body.len()) as u64)
-        .sum::<u64>();
     fingerprint(v1)?;
     let key = preview_key(
         home,
@@ -1147,7 +1147,11 @@ fn documents(
 ) -> Result<()> {
     let source = format!("{SOURCE}:{device}");
     let mut known = raw.import_keys(&source)?;
-    let docs = read_documents(v1, device, settings, &mut known, stats)?;
+    // Validate and shape every document before appending, as the native pass always has.
+    let mut docs = Vec::new();
+    read_documents(v1, device, settings, &mut known, stats, |doc| {
+        docs.push(doc)
+    })?;
     raw.append_imports_counted(docs, |n| {
         stats.documents += n;
         notify(stats, Stage::Documents, committed);
@@ -1161,10 +1165,10 @@ fn read_documents(
     settings: &Settings,
     known: &mut std::collections::HashSet<String>,
     stats: &mut Stats,
-) -> Result<Vec<ImportDoc>> {
+    mut document: impl FnMut(ImportDoc),
+) -> Result<()> {
     let source = format!("{SOURCE}:{device}");
     let gate = |text: String| crate::redact::outbound_with(&text, &settings.rules);
-    let mut docs = Vec::new();
     for (letter, sql) in [
         (
             "o",
@@ -1188,7 +1192,7 @@ fn read_documents(
                 continue;
             }
             let uid: Option<String> = r.get(1)?;
-            docs.push(ImportDoc {
+            document(ImportDoc {
                 uid: uid.unwrap_or_else(|| format!("{device}:{source_id}")),
                 source: source.clone(),
                 source_id,
@@ -1202,7 +1206,7 @@ fn read_documents(
             });
         }
     }
-    Ok(docs)
+    Ok(())
 }
 
 /// v1's store, read only (spec 7.4: the old store is left byte for byte), with the stores' busy
@@ -1931,6 +1935,40 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         );
         let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
         assert_eq!((stats.documents, stats.seen), (100, 500));
+    }
+
+    #[test]
+    fn a_bad_late_document_is_readonly_in_preview_and_appends_no_document_batch() {
+        let source = tempfile::tempdir().unwrap();
+        let v1 = V1::new(source.path());
+        v1.session("s1", "r", 100);
+        for i in 0..600 {
+            v1.observation("s1", 200 + i, "Note", "Native document body.");
+        }
+        // SQLite permits a BLOB in a TEXT column; the native typed reader must reject it.
+        v1.conn
+            .execute("UPDATE observations SET body = x'00' WHERE id = 600", [])
+            .unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let home = parent.path().join("absent");
+        assert!(preview(&home, &v1.path).is_err());
+        assert!(!home.exists());
+        let failed = run(&home, &v1.path, None, &mut |_| {}).unwrap_err();
+        assert_eq!(
+            (failed.outcome.stats.repos, failed.outcome.stats.documents),
+            (1, 0)
+        );
+        let raw = raw::open(&home).unwrap();
+        assert!(raw.import_keys("oboete-v1:d1e5").unwrap().is_empty());
+        drop(raw);
+        v1.conn
+            .execute(
+                "UPDATE observations SET body = 'Repaired.' WHERE id = 600",
+                [],
+            )
+            .unwrap();
+        let resumed = run(&home, &v1.path, None, &mut |_| {}).unwrap();
+        assert_eq!((resumed.stats.documents, resumed.stats.seen), (600, 0));
     }
 
     /// D6: events that record nothing still move the checkpoint, so the next pass does not read
