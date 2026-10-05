@@ -1092,32 +1092,45 @@ fn write_privacy_config(
     Ok(())
 }
 
-/// Reuse each rule's saved table by id, including comments and omitted defaults. Both TOML
-/// spellings accepted by capture (inline arrays and arrays of tables) keep their spelling.
+/// Keep matching ids on their tables; renamed rows reuse the remaining old tables in order.
+/// Both TOML spellings retain comments, formatting and unchanged optional values.
 fn write_extra_rules(
     doc: &mut toml_edit::DocumentMut,
     old: &[config::ExtraRule],
     rules: &[config::ExtraRule],
 ) {
     let mut comments = String::new();
+    let mut renamed = old
+        .iter()
+        .filter(|previous| !rules.iter().any(|rule| rule.id == previous.id));
     let saved = doc
         .get("redaction")
         .and_then(|r| r.get("extra_rules"))
         .cloned();
     if let Some(tables) = saved.as_ref().and_then(toml_edit::Item::as_array_of_tables) {
         let mut next = toml_edit::ArrayOfTables::new();
-        for rule in rules {
-            let mut table = tables
+        let mut reordered = false;
+        for (index, rule) in rules.iter().enumerate() {
+            let previous = old
                 .iter()
-                .find(|t| t.get("id").and_then(toml_edit::Item::as_str) == Some(&rule.id))
+                .find(|r| r.id == rule.id)
+                .or_else(|| renamed.next());
+            reordered |= old.get(index).map(|r| &r.id) != previous.map(|r| &r.id);
+            let mut table = previous
+                .and_then(|previous| {
+                    tables.iter().find(|t| {
+                        t.get("id").and_then(toml_edit::Item::as_str) == Some(&previous.id)
+                    })
+                })
                 .cloned()
                 .unwrap_or_default();
-            comments.push_str(&write_rule(
-                &mut table,
-                old.iter().find(|r| r.id == rule.id),
-                rule,
-            ));
+            comments.push_str(&write_rule(&mut table, previous, rule));
             next.push(table);
+        }
+        if reordered {
+            for table in next.iter_mut() {
+                table.set_position(isize::MAX);
+            }
         }
         doc["redaction"]["extra_rules"] = toml_edit::Item::ArrayOfTables(next);
     } else {
@@ -1125,21 +1138,21 @@ fn write_extra_rules(
         let mut next = saved.cloned().unwrap_or_default();
         next.clear();
         for rule in rules {
-            let mut table = saved
-                .and_then(|a| {
-                    a.iter().find_map(|v| {
+            let previous = old
+                .iter()
+                .find(|r| r.id == rule.id)
+                .or_else(|| renamed.next());
+            let mut table = previous
+                .and_then(|previous| {
+                    saved?.iter().find_map(|v| {
                         v.as_inline_table().filter(|t| {
-                            t.get("id").and_then(toml_edit::Value::as_str) == Some(&rule.id)
+                            t.get("id").and_then(toml_edit::Value::as_str) == Some(&previous.id)
                         })
                     })
                 })
                 .cloned()
                 .unwrap_or_default();
-            comments.push_str(&write_rule(
-                &mut table,
-                old.iter().find(|r| r.id == rule.id),
-                rule,
-            ));
+            comments.push_str(&write_rule(&mut table, previous, rule));
             next.push_formatted(toml_edit::Value::InlineTable(table));
         }
         put(
@@ -1584,6 +1597,66 @@ mod tests {
         );
         assert!(file(&home).unwrap().contains("# memory home"));
         assert!(!home.path().join("backups").exists());
+    }
+
+    #[test]
+    fn renaming_and_reordering_rules_keeps_saved_table_comments() {
+        let cases = [
+            "providers = []\n[redaction]\n\
+             # first table\n[[redaction.extra_rules]]\nid = 'one' # first name\n\
+             regex  = '(abc)' # first pattern\nkeywords = ['abc'] # first keywords\n\
+             entropy = 0.1 # first entropy\nsecret_group = 1 # first group\n\
+             # second table\n[[redaction.extra_rules]]\nid = 'two' # second name\nregex = '^x$'\n\
+             [backup]\ndir = 'kept' # other setting\n",
+            "providers = []\n[redaction]\nextra_rules = [\n\
+             # first table\n{ id = 'one', regex  = '(abc)', keywords = ['abc'], entropy = 0.1, secret_group = 1 }, # first name\n\
+             # second table\n{ id = 'two', regex = '^x$' }, # second name\n]\n\
+             [backup]\ndir = 'kept' # other setting\n",
+        ];
+        for original in cases {
+            let home = home_with(Some(original));
+            let shown = show(home.path());
+            let body = posted(&shown, |v| {
+                v["redaction"] = shown["redaction"].clone();
+                v["redaction"]["extra_rules"][0]["id"] = json!("renamed");
+                v["redaction"]["extra_rules"]
+                    .as_array_mut()
+                    .unwrap()
+                    .reverse();
+            });
+            let saved = save_to(&home, &body).unwrap();
+            assert_eq!(saved["redaction"]["extra_rules"][0]["id"], "two");
+            assert_eq!(saved["redaction"]["extra_rules"][1]["id"], "renamed");
+            let text = file(&home).unwrap();
+            for note in [
+                "# first table",
+                "# first name",
+                "# second table",
+                "# second name",
+                "# other setting",
+            ] {
+                assert_eq!(
+                    text.matches(note).count(),
+                    1,
+                    "comment lost or duplicated: {note}"
+                );
+            }
+            assert!(
+                text.contains("regex  = '(abc)'"),
+                "unchanged regex formatting was lost"
+            );
+            assert_eq!(
+                text.matches("[[redaction.extra_rules]]").count(),
+                original.matches("[[redaction.extra_rules]]").count()
+            );
+            let same = posted(&saved, |v| v["redaction"] = saved["redaction"].clone());
+            save_to(&home, &same).unwrap();
+            assert_eq!(
+                file(&home).unwrap(),
+                text,
+                "unchanged save rewrote the renamed rule"
+            );
+        }
     }
 
     #[test]

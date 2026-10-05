@@ -21,8 +21,9 @@ the bundled rules remain enabled. Invalid patterns, duplicate names, invalid
 capture groups or invalid exception hashes leave the previous file unchanged.
 Errors contain vetted codes rather than patterns or values. An older request
 that omits these fields preserves their saved values, comments and defaults.
-Clearing an optional rule field retains its comments without retaining the old
-setting value. An unchanged repeated save preserves the resulting file bytes.
+Changing rule names retains the saved tables and their comments; reordered rules
+keep their submitted order. Clearing an optional rule field retains its comments
+without retaining the old setting value. An unchanged repeated save preserves the resulting file bytes.
 
 The exact-value exception control hashes UTF-8 in the browser, clears the live
 input and sends only SHA-256 hashes with the configuration save. It preserves
@@ -56,7 +57,10 @@ Parent-directory aliases are resolved before SQLite opens while the database
 leaf still refuses symlinks. Original and opened paths retain the same file
 identity under the raw swap hold. An explicit exclusion write may finish a
 stopped restore's rename from `raw.db.restored` to `raw.db`; the reader accepts
-that same file rather than accepting a replacement store or new identity.
+that same file rather than accepting a replacement store or new identity. The
+read connection closes before the recovery rename so Windows can move the file;
+the original swap hold remains until the writer owns its hold and the pinned
+identity is checked again.
 
 ## Owner claims
 

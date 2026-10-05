@@ -460,7 +460,7 @@ fn correction_recorded(
     // while distinguishing an absent store from unreadable or not-yet-rebuilt knowledge.
     let existing = crate::raw::read_only(home).map_err(OwnerRefusal::unavailable)?;
     let knowledge = std::fs::symlink_metadata(home.join("knowledge.db"));
-    let mut existing = match (existing, knowledge) {
+    let existing = match (existing, knowledge) {
         (None, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(OwnerRefusal::missing(uid));
         }
@@ -476,8 +476,9 @@ fn correction_recorded(
         return Err(OwnerRefusal::missing(uid));
     }
     // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
-    let mut raw = crate::raw::open(home).map_err(OwnerRefusal::unavailable)?;
-    existing.after_open().map_err(OwnerRefusal::unavailable)?;
+    let mut raw = existing
+        .into_writer(home)
+        .map_err(OwnerRefusal::unavailable)?;
     let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
     schema(&k).map_err(OwnerRefusal::unavailable)?;
     let anchor = correction_anchor(&k, uid)
@@ -504,7 +505,6 @@ fn correction_recorded(
         .map_err(OwnerRefusal::unavailable)?;
     let device = raw.device().to_owned();
     drop(raw);
-    drop(existing);
     // A search or a SessionStart right after never shows the old claim.
     if let Err(cause) = applied(home, &k, &device, &seqs, "correction") {
         return Ok(OwnerReceipt::Pending {

@@ -475,32 +475,61 @@ pub(crate) struct ReadOnly {
 }
 
 impl ReadOnly {
-    /// `open` can finish a stopped restore by renaming the same file into raw.db. Keep the
-    /// pinned identity and swap hold; this never accepts a replacement store or new identity.
-    pub(crate) fn after_open(&mut self) -> Result<()> {
-        if self.path.file_name() == Some(std::ffi::OsStr::new("raw.db.restored")) {
-            self.path.set_file_name("raw.db");
-            self.sqlite_path.set_file_name("raw.db");
+    /// Windows cannot rename a file with an open SQLite handle. Close that connection, keeping
+    /// the original swap hold and identity until `open` owns a hold on the same recovered file.
+    pub(crate) fn into_writer(self, home: &Path) -> Result<Raw> {
+        self.current()?;
+        let Self {
+            conn,
+            mut sqlite_path,
+            mut path,
+            identity,
+            lock_path,
+            _swap: swap,
+        } = self;
+        conn.close().map_err(|(_, e)| e)?;
+        let raw = open(home)?;
+        if path.file_name() == Some(std::ffi::OsStr::new("raw.db.restored")) {
+            path.set_file_name("raw.db");
+            sqlite_path.set_file_name("raw.db");
         }
-        self.current()
+        current_read_file(&path, &sqlite_path, &identity, &lock_path, &swap)?;
+        drop(swap);
+        Ok(raw)
     }
 
     /// A home removed or replaced while a read was waiting must not answer from the old file.
     pub(crate) fn current(&self) -> Result<()> {
-        let regular = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file());
-        anyhow::ensure!(
-            !self.identity.is_empty()
-                && regular(&self.path)
-                && regular(&self.sqlite_path)
-                && regular(&self.lock_path)
-                && crate::db::store_file(&self.path) == self.identity
-                && crate::db::store_file(&self.sqlite_path) == self.identity
-                && crate::worker::file_id(std::fs::metadata(&self.lock_path))
-                    == crate::worker::file_id(self._swap.metadata()),
-            "raw store changed during a read"
-        );
-        Ok(())
+        current_read_file(
+            &self.path,
+            &self.sqlite_path,
+            &self.identity,
+            &self.lock_path,
+            &self._swap,
+        )
     }
+}
+
+fn current_read_file(
+    path: &Path,
+    sqlite_path: &Path,
+    identity: &str,
+    lock_path: &Path,
+    swap: &std::fs::File,
+) -> Result<()> {
+    let regular = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file());
+    anyhow::ensure!(
+        !identity.is_empty()
+            && regular(path)
+            && regular(sqlite_path)
+            && regular(lock_path)
+            && crate::db::store_file(path) == identity
+            && crate::db::store_file(sqlite_path) == identity
+            && crate::worker::file_id(std::fs::metadata(lock_path))
+                == crate::worker::file_id(swap.metadata()),
+        "raw store changed during a read"
+    );
+    Ok(())
 }
 
 fn existing_read_path(home: &Path) -> Result<Option<std::path::PathBuf>> {

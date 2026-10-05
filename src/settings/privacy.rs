@@ -258,7 +258,7 @@ pub fn exclude(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let unavailable = || refused(503, "privacy_unavailable", "");
-    let mut raw = crate::raw::read_only(home)
+    let raw = crate::raw::read_only(home)
         .map_err(|_| unavailable())?
         .ok_or_else(|| refused(404, "repo_not_found", "selector"))?;
     let excluded = crate::raw::exclusions_in(&raw.conn).map_err(|_| unavailable())?;
@@ -273,9 +273,7 @@ pub fn exclude(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
     if selected.next().is_some() {
         return Err(refused(409, "repo_changed", "selector"));
     }
-    raw.current().map_err(|_| unavailable())?;
-    let mut writer = crate::raw::open(home).map_err(|_| unavailable())?;
-    raw.after_open().map_err(|_| unavailable())?;
+    let mut writer = raw.into_writer(home).map_err(|_| unavailable())?;
     let op_seq = writer
         .exclude(label, posted.undo)
         .map_err(|_| unavailable())?;
