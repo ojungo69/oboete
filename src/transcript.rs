@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::capture::{self, Captured, Settings};
+use crate::migrate::FailureCode;
 use crate::raw::{self, Checkpoint, IMPORT_BATCH, MAX_BATCH_BYTES};
 
 /// Claude Code records that only the transcript has: no prompt hook ever saw them.
@@ -692,12 +693,12 @@ pub fn convert(path: &Path, agent: &str, mut out: impl Write) -> Result<Stats> {
 }
 
 /// What each agent's transcripts contributed, or would contribute in a preview (spec 7.4).
-#[derive(Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct ImportStats {
     pub agents: BTreeMap<String, AgentStats>,
 }
 
-#[derive(Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct AgentStats {
     pub files: u64,
     pub sessions: u64,
@@ -716,6 +717,294 @@ pub struct AgentStats {
     pub bytes: u64,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct Preview {
+    pub key: String,
+    pub candidates: ImportStats,
+    pub v1: Option<crate::migrate::Preview>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Outcome {
+    pub stats: ImportStats,
+    pub v1: Option<crate::migrate::Outcome>,
+}
+
+#[derive(Debug)]
+pub(crate) struct Failure {
+    pub outcome: Box<Outcome>,
+    pub code: crate::migrate::FailureCode,
+    pub cause: anyhow::Error,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum Committed {
+    V1(crate::migrate::Committed),
+    Transcripts {
+        agent: String,
+        events: u64,
+        bytes: u64,
+    },
+}
+
+#[derive(serde::Serialize)]
+struct BoundFile {
+    agent: String,
+    path: PathBuf,
+    digest: String,
+    parsed: String,
+}
+
+struct PreviewPlan {
+    preview: Preview,
+    files: Vec<BoundFile>,
+    config: Option<Vec<u8>>,
+    destination: String,
+}
+
+/// Bind the events actually parsed, including native-identity flags, rather than trusting
+/// that a later reread of a path still describes the bytes the parser consumed.
+fn parsed_digest(lines: &[Line]) -> Result<String> {
+    let mut hash = Sha256::new();
+    for line in lines {
+        hash.update(serde_json::to_vec(&(
+            line,
+            line.synthetic,
+            line.native_session_known,
+        ))?);
+        hash.update(b"\n");
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn check_bound(file: &BoundFile) -> Result<()> {
+    let current =
+        source_digest(&file.path, &file.agent).map_err(|_| anyhow::anyhow!(FailureCode::Stale))?;
+    anyhow::ensure!(current == file.digest, FailureCode::Stale);
+    Ok(())
+}
+
+fn source_digest(path: &Path, agent: &str) -> Result<String> {
+    let files = subagent_files(path, agent)?;
+    let entries = std::iter::once(path)
+        .chain(files.iter().map(PathBuf::as_path))
+        .map(|p| {
+            Ok((
+                p.canonicalize()?,
+                crate::db::store_file(p),
+                crate::migrate::file_version(p)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(crate::forget::hash(&serde_json::to_vec(&entries)?))
+}
+
+fn bound_files(roots: &[(&str, &Path)]) -> Result<Vec<BoundFile>> {
+    let mut files = Vec::new();
+    for (agent, root) in roots {
+        anyhow::ensure!(
+            matches!(*agent, "claude" | "codex"),
+            "unsupported transcript agent"
+        );
+        for path in transcript_files(root, agent)? {
+            files.push(BoundFile {
+                agent: (*agent).to_owned(),
+                digest: source_digest(&path, agent)?,
+                parsed: String::new(),
+                path,
+            });
+        }
+    }
+    Ok(files)
+}
+
+pub(crate) fn preview(home: &Path, roots: &[(&str, &Path)]) -> Result<Preview> {
+    Ok(preview_plan(home, roots)?.preview)
+}
+
+pub(crate) fn run(
+    home: &Path,
+    roots: &[(&str, &Path)],
+    expected: Option<&str>,
+    committed: &mut impl FnMut(&Committed),
+) -> std::result::Result<Outcome, Failure> {
+    run_with_output(home, roots, expected, committed, &mut std::io::sink())
+}
+
+fn run_with_output(
+    home: &Path,
+    roots: &[(&str, &Path)],
+    expected: Option<&str>,
+    committed: &mut impl FnMut(&Committed),
+    out: &mut impl Write,
+) -> std::result::Result<Outcome, Failure> {
+    let mut outcome = Outcome::default();
+    let mut code = FailureCode::InvalidSource;
+    let result = (|| {
+        let v1 = home.join("oboete.db");
+        crate::migrate::check_source(home, &v1)?;
+        code = FailureCode::Busy;
+        let _lock = crate::import::lock(home)?;
+        let mut plan = if let Some(expected) = expected {
+            code = FailureCode::Stale;
+            let plan = preview_plan(home, roots)?;
+            anyhow::ensure!(plan.preview.key == expected, FailureCode::Stale);
+            Some(plan)
+        } else {
+            None
+        };
+        let before_config = plan.as_ref().map(|p| p.config.clone());
+        let mut raw = None;
+        if v1.try_exists()? {
+            let expected_v1 = plan
+                .as_ref()
+                .and_then(|p| p.preview.v1.as_ref())
+                .map(|p| p.key.as_str());
+            if plan.is_some() {
+                anyhow::ensure!(expected_v1.is_some(), FailureCode::Stale);
+            }
+            let migrated =
+                crate::migrate::run_holding(home, &v1, &mut raw, expected_v1, &mut |c| {
+                    committed(&Committed::V1(c.clone()))
+                });
+            match migrated {
+                Ok(migrated) => {
+                    outcome.v1 = Some(migrated);
+                    if let Some(settings) =
+                        &outcome.v1.as_ref().context("v1 outcome absent")?.settings
+                    {
+                        for line in crate::migrate::settings_lines(&settings.missing) {
+                            writeln!(out, "{line}")?;
+                        }
+                    }
+                    writeln!(
+                        out,
+                        "v1 migration: {}",
+                        serde_json::to_string(
+                            &outcome.v1.as_ref().context("v1 outcome absent")?.stats
+                        )?
+                    )?;
+                }
+                Err(failed) => {
+                    outcome.v1 = Some(*failed.outcome);
+                    code = failed.code;
+                    if let Some(settings) =
+                        &outcome.v1.as_ref().context("v1 outcome absent")?.settings
+                    {
+                        for line in crate::migrate::settings_lines(&settings.missing) {
+                            writeln!(out, "{line}")?;
+                        }
+                    }
+                    return Err(failed.cause);
+                }
+            }
+        } else if plan.as_ref().is_some_and(|p| p.preview.v1.is_some()) {
+            anyhow::bail!(FailureCode::Stale);
+        }
+        // Recheck after acquiring the same lock every settings writer uses; hold the selected
+        // capture settings steady until the last transcript batch has committed.
+        let _config = crate::settings::config_lock(home)?;
+        code = FailureCode::Stale;
+        if let Some(before) = before_config {
+            anyhow::ensure!(
+                crate::migrate::config_bytes(home)? == before,
+                FailureCode::Stale
+            );
+        }
+        code = FailureCode::InvalidConfig;
+        Settings::load(home)?;
+        code = FailureCode::Stale;
+        if raw.is_none() {
+            let destination = if plan.is_some() {
+                raw::read_only(home)?
+            } else {
+                None
+            };
+            if let Some(plan) = &plan {
+                anyhow::ensure!(
+                    plan.destination == crate::migrate::preview_key(home, &"destination")?,
+                    FailureCode::Stale
+                );
+            }
+            crate::migrate::check_source(home, &v1)?;
+            code = FailureCode::Failed;
+            raw = Some(match destination {
+                Some(held) => held.into_writer(home)?,
+                None => raw::open(home)?,
+            });
+        }
+        code = FailureCode::Failed;
+        crate::forget::reconcile_or_say(home, raw.as_mut().context("transcript raw absent")?)?;
+        import_files(
+            home,
+            roots,
+            &mut raw,
+            &mut outcome.stats,
+            out,
+            committed,
+            plan.as_mut().map(|p| p.files.as_mut_slice()),
+        )
+    })();
+    match result {
+        Ok(()) => Ok(outcome),
+        Err(cause) => Err(Failure {
+            outcome: Box::new(outcome),
+            code: crate::migrate::failure_code(&cause, code),
+            cause,
+        }),
+    }
+}
+
+fn preview_plan(home: &Path, roots: &[(&str, &Path)]) -> Result<PreviewPlan> {
+    let destination = crate::migrate::preview_key(home, &"destination")?;
+    let config = crate::migrate::config_bytes(home)?;
+    let path = home.join("oboete.db");
+    let v1 = path
+        .try_exists()?
+        .then(|| crate::migrate::preview(home, &path))
+        .transpose()?;
+    let mut files = bound_files(roots)?;
+    let mut candidates = ImportStats::default();
+    import_files(
+        home,
+        roots,
+        &mut None,
+        &mut candidates,
+        &mut std::io::sink(),
+        &mut |_| {},
+        Some(&mut files),
+    )?;
+    anyhow::ensure!(
+        crate::migrate::config_bytes(home)? == config,
+        "transcript settings changed during preview"
+    );
+    let key = crate::migrate::preview_key(
+        home,
+        &(
+            "transcripts",
+            roots,
+            &files,
+            config.as_deref().map(crate::forget::hash),
+            &v1,
+            &candidates,
+        ),
+    )?;
+    anyhow::ensure!(
+        destination == crate::migrate::preview_key(home, &"destination")?,
+        FailureCode::Stale
+    );
+    Ok(PreviewPlan {
+        preview: Preview {
+            key,
+            candidates,
+            v1,
+        },
+        files,
+        config,
+        destination,
+    })
+}
+
 /// Import stable transcripts locally, with the time cut and transactional checkpoints of A60
 /// and D6. Preview reads only the transcripts, settings and v1 store, and creates nothing.
 pub fn import(
@@ -724,25 +1013,34 @@ pub fn import(
     yes: bool,
     out: &mut impl Write,
 ) -> Result<ImportStats> {
-    let _lock = yes.then(|| crate::import::lock(home)).transpose()?;
-    let v1 = home.join("oboete.db");
     if yes {
-        crate::migrate::check_source(home, &v1)?;
+        return run_with_output(home, roots, None, &mut |_| {}, out)
+            .map(|outcome| outcome.stats)
+            .map_err(|failed| {
+                if failed.code == FailureCode::Refused {
+                    // The typed code is internal; preserve the native CLI's refusal text.
+                    anyhow::anyhow!(failed.cause.to_string())
+                } else {
+                    failed.cause
+                }
+            });
     }
-    let mut raw = yes.then(|| raw::open(home)).transpose()?;
-    // Milestone 5 D1: the forget request logs first (`migrate::pass` does it again for v1).
-    if let Some(raw) = raw.as_mut() {
-        crate::forget::reconcile_or_say(home, raw)?;
-    }
-    if let Some(raw) = raw.as_mut()
-        && v1.exists()
-    {
-        for line in crate::migrate::settings(home, &v1)? {
-            writeln!(out, "{line}")?;
-        }
-        let migrated = crate::migrate::pass(home, raw, &v1)?;
-        writeln!(out, "v1 migration: {}", serde_json::to_string(&migrated)?)?;
-    }
+    let mut stats = ImportStats::default();
+    import_files(home, roots, &mut None, &mut stats, out, &mut |_| {}, None)?;
+    Ok(stats)
+}
+
+fn import_files(
+    home: &Path,
+    roots: &[(&str, &Path)],
+    raw: &mut Option<raw::Raw>,
+    stats: &mut ImportStats,
+    out: &mut impl Write,
+    committed: &mut impl FnMut(&Committed),
+    mut files: Option<&mut [BoundFile]>,
+) -> Result<()> {
+    let yes = raw.is_some();
+    let v1 = home.join("oboete.db");
     let cut = match raw.as_ref() {
         Some(raw) => raw.earliest_by_session()?,
         None => preview_cut(&v1)?,
@@ -756,16 +1054,47 @@ pub fn import(
         ..Settings::load(home)?
     };
     let clock = rusqlite::Connection::open_in_memory()?;
-    let mut stats = ImportStats::default();
     let mut sessions = HashSet::new();
     for (agent, root) in roots {
         let stats = stats.agents.entry((*agent).to_owned()).or_default();
-        for path in transcript_files(root, agent)? {
+        let paths = match files.as_deref() {
+            Some(files) => files
+                .iter()
+                .filter(|file| file.agent == *agent)
+                .map(|file| file.path.clone())
+                .collect(),
+            None => transcript_files(root, agent)?,
+        };
+        for path in paths {
+            let mut bound = files.as_deref_mut().and_then(|files| {
+                files
+                    .iter_mut()
+                    .find(|file| file.agent == *agent && file.path == path)
+            });
+            if let Some(bound) = bound.as_deref() {
+                check_bound(bound)?;
+            }
             stats.files += 1;
+            if yes && bound.as_deref().is_some_and(|file| file.parsed.is_empty()) {
+                stats.waiting += 1;
+                continue;
+            }
             let Some(mut lines) = stable_lines(&path, agent)? else {
+                if yes && bound.is_some() {
+                    anyhow::bail!(FailureCode::Stale);
+                }
                 stats.waiting += 1;
                 continue;
             };
+            if let Some(bound) = bound.as_deref_mut() {
+                check_bound(bound)?;
+                let parsed = parsed_digest(&lines)?;
+                if bound.parsed.is_empty() {
+                    bound.parsed = parsed;
+                } else {
+                    anyhow::ensure!(bound.parsed == parsed, FailureCode::Stale);
+                }
+            }
             // EOF's interrupted calls, Stop and SessionEnd may be replaced when the file grows.
             // Number only settled events, so none of those synthetic lines moves the checkpoint.
             lines.retain(|line| !line.synthetic && line.event != "SessionEnd");
@@ -885,7 +1214,17 @@ pub fn import(
                     capture::imported(agent, &line.event, &line.payload, ts, &repo, cwd, &settings);
                 let size: usize = captured.iter().map(|c| c.event.body.len()).sum();
                 if batch.len() + captured.len() > IMPORT_BATCH || bytes + size > MAX_BATCH_BYTES {
-                    append_batch(&mut raw, &mut batch, &checkpoint, &settings, stats)?;
+                    if let Some(bound) = bound.as_deref() {
+                        check_bound(bound)?;
+                    }
+                    append_batch(raw, &mut batch, &checkpoint, &settings, stats)?;
+                    if raw.is_some() {
+                        committed(&Committed::Transcripts {
+                            agent: (*agent).to_owned(),
+                            events: stats.events,
+                            bytes: stats.bytes,
+                        });
+                    }
                     bytes = 0;
                 }
                 batch.extend(captured.into_iter().enumerate().map(|(i, c)| {
@@ -910,7 +1249,17 @@ pub fn import(
                 checkpoint.prefix = fingerprint;
             }
             if checkpoint.through > seen {
-                append_batch(&mut raw, &mut batch, &checkpoint, &settings, stats)?;
+                if let Some(bound) = bound.as_deref() {
+                    check_bound(bound)?;
+                }
+                append_batch(raw, &mut batch, &checkpoint, &settings, stats)?;
+                if raw.is_some() {
+                    committed(&Committed::Transcripts {
+                        agent: (*agent).to_owned(),
+                        events: stats.events,
+                        bytes: stats.bytes,
+                    });
+                }
                 checkpoints.insert(key, checkpoint);
             }
         }
@@ -923,12 +1272,12 @@ pub fn import(
     }
     writeln!(out, "{}", serde_json::to_string(&stats)?)?;
     let refused: u64 = stats.agents.values().map(|agent| agent.refused).sum();
-    anyhow::ensure!(
-        refused == 0,
-        "{refused} transcript file(s) refused: imported prefixes or cross-source forget identities cannot be verified; \
-         review the refusal reasons above; those files were not imported"
-    );
-    Ok(stats)
+    if refused != 0 {
+        return Err(anyhow::anyhow!(FailureCode::Refused).context(format!(
+            "{refused} transcript file(s) refused: imported prefixes or cross-source forget identities cannot be verified; \
+             review the refusal reasons above; those files were not imported")));
+    }
+    Ok(())
 }
 
 fn hash_line(prefix: &mut Sha256, line: &Line) -> Result<()> {
@@ -978,56 +1327,14 @@ fn preview_cut(v1: &Path) -> Result<HashMap<(String, String), i64>> {
     if !v1.exists() {
         return Ok(HashMap::new());
     }
-    // Even a read-only SQLite open can create WAL sidecars. Read a stable private copy so
-    // preview changes nothing in the home; its WAL is copied too, never opened as immutable.
-    let home = v1
-        .parent()
-        .context("v1 store has no parent directory")?
-        .canonicalize()?;
-    anyhow::ensure!(
-        !std::env::temp_dir().canonicalize()?.starts_with(home),
-        "preview needs a temporary directory outside the oboete home"
-    );
-    let scratch = crate::provider::scratch_dir()
-        .map_err(|_| anyhow::anyhow!("cannot create a private v1 preview directory"))?;
-    let result = (|| {
-        // SQLite resolves a database symlink before locating its WAL.
-        let source = v1.canonicalize()?;
-        let mut wal = source.as_os_str().to_owned();
-        wal.push("-wal");
-        let wal = PathBuf::from(wal);
-        let logs = || -> Result<Vec<PathBuf>> {
-            Ok(if wal.try_exists()? {
-                vec![wal.clone()]
-            } else {
-                Vec::new()
-            })
-        };
-        let before = stamps(&source, &logs()?)?;
-        for (i, (path, _, _)) in before.iter().enumerate() {
-            std::fs::copy(
-                path,
-                scratch
-                    .0
-                    .join(if i == 0 { "oboete.db" } else { "oboete.db-wal" }),
-            )
-            .context("copy v1 for preview")?;
-        }
-        anyhow::ensure!(
-            before == stamps(&source, &logs()?)? && v1.canonicalize()? == source,
-            "v1 changed during preview; run it again when the writes stop"
-        );
-        let conn = crate::migrate::open_v1(&scratch.0.join("oboete.db"))?;
+    crate::migrate::with_preview_v1(v1, |conn, _| {
         let mut st = conn.prepare(
             "SELECT s.agent, e.session_id, MIN(e.ts) FROM events e
              JOIN sessions s ON s.id = e.session_id GROUP BY s.agent, e.session_id",
         )?;
         let rows = st.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
-    })();
-    // Close SQLite before removal, including on an error, so Windows releases its handles.
-    std::fs::remove_dir_all(&scratch.0).context("remove the private v1 preview copy")?;
-    result
+    })
 }
 
 fn transcript_files(root: &Path, agent: &str) -> Result<Vec<PathBuf>> {
@@ -1457,6 +1764,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn composite_preview_reports_waiting_without_authorizing_a_later_file_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, root) = fixtures(dir.path());
+        let changed = root.join("2026/09/02/rollout-basic.jsonl");
+        AFTER_PARSE.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(changed)
+                    .unwrap()
+                    .write_all(b"\n")
+                    .unwrap();
+            }))
+        });
+        let home = dir.path().join("home");
+        let roots = [("codex", root.as_path())];
+        let shown = preview(&home, &roots).unwrap();
+        assert_eq!(
+            (
+                shown.candidates.agents["codex"].events,
+                shown.candidates.agents["codex"].waiting
+            ),
+            (0, 1)
+        );
+        assert!(!home.exists());
+        let failed = run(&home, &roots, Some(&shown.key), &mut |_| {
+            panic!("no commits")
+        })
+        .unwrap_err();
+        assert_eq!(failed.code, FailureCode::Stale);
+        assert!(!raw::path(&home).exists());
+    }
+
     /// A line whose transcript named no directory gets no repository: "." is the importing
     /// process's directory, never the session's.
     #[test]
@@ -1655,6 +1996,119 @@ mod tests {
     }
 
     #[test]
+    fn typed_transcript_refusal_keeps_independent_commits_and_reruns() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, root) = fixtures(dir.path());
+        let home = dir.path().join("home");
+        let roots = [("codex", root.as_path())];
+        import(&home, &roots, true, &mut Vec::new()).unwrap();
+        let path = root.join("2026/09/02/rollout-basic.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            text.replace("Add a 50ms timeout to fetchJson", "Changed prior prompt"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("2026/09/02/rollout-new.jsonl"),
+            text.replace(CODEX_SESSION, "33333333-3333-4333-8333-333333333333"),
+        )
+        .unwrap();
+        let mut progress = Vec::new();
+        let result = run(&home, &roots, None, &mut |c| progress.push(c.clone())).unwrap_err();
+        assert_eq!(result.code, crate::migrate::FailureCode::Refused);
+        let stats = &result.outcome.stats.agents["codex"];
+        assert_eq!((stats.events, stats.refused), (8, 1));
+        assert!(matches!(
+            progress.last(),
+            Some(Committed::Transcripts { events: 8, .. })
+        ));
+        let again = run(&home, &roots, None, &mut |_| {}).unwrap_err();
+        let stats = &again.outcome.stats.agents["codex"];
+        assert_eq!((stats.events, stats.refused), (0, 1));
+    }
+
+    #[test]
+    fn transcript_consent_binds_content_file_set_scope_config_and_destination() {
+        for change in ["content", "file_set", "scope", "config", "destination"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (_, root) = fixtures(dir.path());
+            let home = dir.path().join("home");
+            let roots = [("codex", root.as_path())];
+            let shown = preview(&home, &roots).unwrap();
+            match change {
+                "content" => {
+                    let path = root.join("2026/09/02/rollout-basic.jsonl");
+                    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                    let times = std::fs::FileTimes::new()
+                        .set_modified(file.metadata().unwrap().modified().unwrap());
+                    let text = std::fs::read_to_string(&path)
+                        .unwrap()
+                        .replace("Try again with 100ms", "Try again with 200ms");
+                    std::fs::write(path, text).unwrap();
+                    file.set_times(times).unwrap();
+                }
+                "file_set" => {
+                    std::fs::copy(CODEX, root.join("rollout-new.jsonl")).unwrap();
+                }
+                "config" => {
+                    std::fs::create_dir_all(&home).unwrap();
+                    std::fs::write(home.join("config.toml"), "# new\n").unwrap();
+                }
+                "destination" => {
+                    std::fs::create_dir_all(&home).unwrap();
+                    drop(raw::open(&home).unwrap());
+                }
+                _ => {}
+            }
+            let selected = if change == "scope" {
+                vec![("claude", root.as_path())]
+            } else {
+                roots.to_vec()
+            };
+            let failed = run(&home, &selected, Some(&shown.key), &mut |_| {
+                panic!("no committed effects")
+            })
+            .unwrap_err();
+            assert_eq!(failed.code, FailureCode::Stale, "{change}: {failed:?}");
+            assert!(failed.outcome.stats.agents.is_empty());
+            if change != "destination" {
+                assert!(!raw::path(&home).exists());
+            }
+        }
+    }
+
+    #[test]
+    fn confirmed_transcript_stops_when_next_bound_file_changes_after_a_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, root) = fixtures(dir.path());
+        let next = root.join("2026/09/02/rollout-new.jsonl");
+        let text = std::fs::read_to_string(CODEX)
+            .unwrap()
+            .replace(CODEX_SESSION, "33333333-3333-4333-8333-333333333333");
+        std::fs::write(&next, &text).unwrap();
+        let home = dir.path().join("home");
+        let roots = [("codex", root.as_path())];
+        let shown = preview(&home, &roots).unwrap();
+        let failed = run(&home, &roots, Some(&shown.key), &mut |c| {
+            if matches!(c, Committed::Transcripts { .. }) {
+                std::fs::write(
+                    &next,
+                    text.replace("Try again with 100ms", "Try again with 200ms"),
+                )
+                .unwrap();
+            }
+        })
+        .unwrap_err();
+        assert_eq!(failed.code, FailureCode::Stale);
+        assert_eq!(failed.outcome.stats.agents["codex"].events, 8);
+        assert_eq!(records(&home).len(), 8);
+        let shown = preview(&home, &roots).unwrap();
+        let resumed = run(&home, &roots, Some(&shown.key), &mut |_| {}).unwrap();
+        assert_eq!(resumed.stats.agents["codex"].events, 8);
+    }
+
+    #[test]
     fn a_killed_import_resumes_without_duplicates_or_gaps() {
         for (count, bytes) in [(100, 60_000), (600, 10)] {
             let dir = tempfile::tempdir().unwrap();
@@ -1674,13 +2128,20 @@ mod tests {
             drop(raw::open(&home).unwrap());
             // Arm after parsing so SQLite setup is outside the two batch commits.
             AFTER_PARSE.with_borrow_mut(|hook| *hook = Some(Box::new(|| crate::crash::at(2))));
-            let killed = import(&home, &[("codex", &root)], true, &mut Vec::new());
+            let mut progress = Vec::new();
+            let killed = run(&home, &[("codex", &root)], None, &mut |c| {
+                progress.push(c.clone())
+            });
             crate::crash::off();
-            assert!(killed.is_err());
+            let killed = killed.unwrap_err();
             let landed = records(&home).len();
             assert!(
                 landed > 0 && landed < count as usize + 2,
                 "{landed} landed: {killed:?}"
+            );
+            assert_eq!(killed.outcome.stats.agents["codex"].events, landed as u64);
+            assert!(
+                matches!(progress.last(), Some(Committed::Transcripts { events, .. }) if *events == landed as u64)
             );
             import(&home, &[("codex", &root)], true, &mut Vec::new()).unwrap();
             let got = records(&home);

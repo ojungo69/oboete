@@ -72,7 +72,7 @@ left with "—" there.
 | Detect agents, wire and unwire their hooks | 7.2 | — | `oboete setup` | the agent's next session | all | — | W6 |
 | Readiness checks, as doctor reports them | 7.2, R13 | resident status CLI; full page — | `oboete doctor` | at once, read only | all; resident Linux/WSL | `tests/resident_defaults.rs` `doctor_reads_resident_locks_and_outcomes_without_starting_or_renumbering_them` | resident slice 5; remaining W6 |
 | Import claude-mem's history, with its projects mapped to repositories | 7.4, parity N1 | — | `oboete import` | when confirmed | all | — | W5 after N1 |
-| Migrate v1's store; import transcripts | 7.4 | — | `oboete migrate`, `transcript` | when confirmed | all | — | W5 |
+| Migrate v1's store; import transcripts | 7.4 | History import: candidates/settings preview, explicit consent, committed progress and partial receipt | shared `migrate`/`transcript`, `settings/maintenance.rs` | confirmed import; later processing uses saved settings | all | maintenance preview/start/status, native CLI compatibility and JA/EN import journeys | W5A |
 | Recurate, with the list and estimate before the send | 1.7 | — | `oboete recurate` | when confirmed | all | — | W5 |
 | Rebuild, restore | 1.7, 2.6 | — | `oboete rebuild`, `restore` | when confirmed | all | — | W5 |
 | Update check and update | 7.3 | — | `oboete update` (milestone 7) | when confirmed | all | — | after the switch, with milestone 7; W5 shows it as not built |

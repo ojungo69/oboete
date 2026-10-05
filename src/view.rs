@@ -53,6 +53,8 @@ struct Viewer {
     token: Token,
     /// Settings saves, one at a time.
     saving: Mutex<()>,
+    /// One synchronous import and its last bounded receipt.
+    maintenance: crate::settings::maintenance::Maintenance,
     /// The page `--open` gave the browser opener, removed by the first request with the token.
     opener: Mutex<Option<PathBuf>>,
     /// Connections being served: at most `MAX_CONNECTIONS`.
@@ -867,6 +869,7 @@ impl Viewer {
             port,
             token,
             saving: Mutex::new(()),
+            maintenance: crate::settings::maintenance::Maintenance::default(),
             opener: Mutex::new(None),
             live: AtomicUsize::new(0),
             requests: AtomicUsize::new(0),
@@ -985,6 +988,8 @@ impl Viewer {
             ("POST", "/api/claims/correct") => (MAX_BODY, Self::claim_correct),
             ("POST", "/api/claims/mute") => (MAX_BODY, Self::claim_mute),
             ("POST", "/api/preferences") => (MAX_BODY, Self::preference),
+            ("POST", "/api/maintenance/preview") => (MAX_BODY, Self::maintenance_preview),
+            ("POST", "/api/maintenance/start") => (MAX_BODY, Self::maintenance_start),
             _ => return Head::Answer(self.route(method, target, headers)),
         };
         match self.save_gate(headers, cap) {
@@ -1156,6 +1161,16 @@ impl Viewer {
         }
     }
 
+    fn maintenance_preview(&self, body: &[u8]) -> Response {
+        saved(self.maintenance.preview(&self.home, body))
+    }
+
+    fn maintenance_start(&self, body: &[u8]) -> Response {
+        // The caller's original connection Slot remains held through native completion,
+        // including when the peer disconnects; status reads use another short-lived Slot.
+        saved(self.maintenance.start(&self.home, body))
+    }
+
     /// `--open`: the page for the browser, registered before `launch` starts the opener.
     fn open(&self, home: &Path, url: &str, launch: impl FnOnce(&Path)) {
         match opener_page(home, self.port, url) {
@@ -1208,6 +1223,13 @@ impl Viewer {
         }
         if name == "privacy" {
             return Response::json(&crate::settings::privacy::show(&self.home));
+        }
+        if name == "maintenance" {
+            return if q.is_empty() {
+                Response::json(&self.maintenance.show())
+            } else {
+                Response::text(400, "status carries no query")
+            };
         }
         self.api(name, &q).unwrap_or_else(|e| failed(&e))
     }
@@ -1779,6 +1801,66 @@ fn params(query: &str) -> HashMap<String, String> {
 mod tests {
     use super::*;
     use crate::search::b::fixture::Store;
+
+    #[test]
+    fn maintenance_status_is_authenticated_bounded_and_opens_no_store() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("missing");
+        let v = Viewer::new(&home, None, 4321, Token::Run("t0k".into()));
+        let target = "/api/maintenance";
+        assert_eq!(v.route("GET", target, &[HOST]).status, 401);
+        assert_eq!(
+            v.route("GET", target, &[("Host", "elsewhere:4321"), TOKEN])
+                .status,
+            403
+        );
+        assert_eq!(v.route("POST", target, &[HOST, TOKEN]).status, 405);
+        let answer = v.route("GET", target, &[HOST, TOKEN]);
+        assert_eq!(answer.status, 200);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&answer.body).unwrap(),
+            json!({"available":false,"active":null,"last":null})
+        );
+        assert_eq!(
+            v.route("GET", "/api/maintenance?extra=1", &[HOST, TOKEN])
+                .status,
+            400
+        );
+        assert!(!home.exists(), "status initialized the absent destination");
+        assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn maintenance_posts_share_all_head_guards_before_operation_work() {
+        let (dir, v) = viewer("maintenance-head-guards");
+        let body = br#"{"operation":{"kind":"not_supported"}}"#;
+        for path in ["/api/maintenance/preview", "/api/maintenance/start"] {
+            save_guards(&v, path, MAX_BODY, body);
+            let len = body.len().to_string();
+            let response = request(
+                &v,
+                "POST",
+                path,
+                &[
+                    HOST,
+                    TOKEN,
+                    ("Origin", "http://127.0.0.1:4321"),
+                    ("Content-Type", "application/json"),
+                    ("Content-Length", len.as_str()),
+                ],
+                body,
+            );
+            assert_eq!(response.status, 400);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&response.body).unwrap(),
+                json!({"code":"bad_request","field":""})
+            );
+        }
+        assert!(!dir.join("raw.db").exists());
+        assert!(!dir.join("config.toml").exists());
+        assert!(!dir.join("state").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]

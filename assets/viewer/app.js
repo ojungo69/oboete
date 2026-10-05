@@ -1253,6 +1253,66 @@ const TEXT = {
     '`oboete view` が表示するアドレスから開いてください。',
   ],
   other: ['Saving failed ({status}).', '保存できませんでした({status})。'],
+  maintenance_h: ["Local history import", "ローカル履歴の取り込み"],
+  maintenance_desc: ["Preview the saved history and settings effects before importing. Import makes no model request; later background processing follows your saved settings.", "保存された履歴と設定への影響を確認してから取り込みます。取り込み自体はモデルを呼びません。その後のバックグラウンド処理は保存済み設定に従います。"],
+  maintenance_kind: ["History source", "履歴の種類"],
+  maintenance_transcripts: ["Agent transcripts", "エージェントの会話履歴"],
+  maintenance_v1: ["Older oboete store", "旧oboeteのストア"],
+  maintenance_agent: ["Agent", "エージェント"],
+  maintenance_all_agents: ["Claude Code and Codex", "Claude CodeとCodex"],
+  maintenance_claude: ["Claude Code", "Claude Code"],
+  maintenance_codex: ["Codex", "Codex"],
+  maintenance_source_path: ["Source database path (optional)", "元データベースのパス（任意）"],
+  maintenance_source_default: ["Leave the path empty to use the older oboete.db in this memory folder. Other paths follow the native local-file operation.", "空欄ではこの記憶フォルダー内の旧oboete.dbを使います。別のパスは既存のローカルファイル操作に従います。"],
+  maintenance_native_roots: ["Reads the agent’s saved transcript folders. The preview shows candidates, before duplicate and forgotten-record checks.", "エージェントが保存した会話フォルダーを読みます。プレビューは重複や忘却済みデータの確認前の候補数です。"],
+  maintenance_preview: ["Preview local import", "取り込み内容を確認"],
+  maintenance_preview_h: ["Candidate history and settings", "候補の履歴と設定"],
+  maintenance_consent: ["Import this previewed source and apply the listed settings effects.", "確認した履歴を取り込み、表示された設定への影響を適用する。"],
+  maintenance_start: ["Import confirmed history", "確認した履歴を取り込む"],
+  maintenance_refresh: ["Inspect current import status", "取り込み状況を確認"],
+  maintenance_another: ["Prepare another import after inspection", "確認後に別の取り込みを準備"],
+  maintenance_unknown_hint: ["The request may already be recorded. Inspect its status and stored history before preparing another import. It is not sent again automatically.", "処理が記録済みの可能性があります。状況と保存された履歴を確認してから、別の取り込みを準備してください。自動では再送しません。"],
+  maintenance_no_receipt: ["No receipt is available in this viewer session. After a restart, inspect stored history before another preview.", "このビューアのセッションには結果がありません。再起動後は保存された履歴を確認してから再びプレビューしてください。"],
+  maintenance_settings_hint: ["Import actions use saved settings and do not submit unrelated drafts. If older settings were copied, reload settings explicitly to inspect them.", "取り込みは保存済み設定を使い、ほかの編集中の内容は送信しません。旧設定がコピーされた場合は、設定を明示的に再読み込みして確認してください。"],
+  maintenance_other_unavailable: ["Claude-mem import waits for repository mapping. Rebuild, restore and recuration follow in the next maintenance slices; updating is not built yet.", "claude-memの取り込みはリポジトリ対応づけを待っています。再構築・復元・再キュレーションは後続の管理機能で追加し、更新機能はまだ未実装です。"],
+  maintenance_transcript_candidates: ["{agent}: {files} files, {sessions} sessions, {records} candidate records, {bytes} selected bytes; {waiting} waiting, {refused} refused.", "{agent}: {files}ファイル、{sessions}セッション、候補{records}レコード、選択{bytes}バイト。待機{waiting}、拒否{refused}。"],
+  maintenance_transcript_actual: ["{agent}: {records} committed records; {seen} previously seen, {waiting} waiting, {refused} refused.", "{agent}: 確定{records}レコード。既存{seen}、待機{waiting}、拒否{refused}。"],
+  maintenance_conditional_v1: ["This transcript import also includes the older store in this memory folder. Confirmation covers both imports and the following settings effect.", "この会話履歴の取り込みには、この記憶フォルダー内の旧ストアも含まれます。確認は両方の取り込みと次の設定への影響を対象にします。"],
+  maintenance_v1_candidates: ["Older store candidates: {events} events, {records} records, {repos} repository touches, {documents} documents, {bytes} bytes.", "旧ストアの候補: {events}イベント、{records}レコード、{repos}リポジトリ履歴、{documents}文書、{bytes}バイト。"],
+  maintenance_v1_actual: ["Older store: {events} events read; {records} records, {repos} repository touches and {documents} documents committed; {seen} previously imported.", "旧ストア: {events}イベントを読み取り、{records}レコード・{repos}リポジトリ履歴・{documents}文書が確定しました。既存{seen}。"],
+  maintenance_settings_effect: ["Settings: {effect}. {missing} groups are not answered by the older file.", "設定: {effect}。旧ファイルには{missing}種類の設定がありません。"],
+  maintenance_settings_preserve: ["keep the current file", "現在のファイルを保持"],
+  maintenance_settings_copy: ["copy the older file unchanged into a folder without settings", "設定がないフォルダーへ旧ファイルをそのままコピー"],
+  maintenance_settings_defaults: ["use the current defaults", "現在の既定値を使用"],
+  maintenance_progress: ["{stage}: committed {records} older records, {repos} repository touches, {documents} documents; Claude Code {claude} and Codex {codex} transcript records.", "{stage}: 旧レコード{records}、リポジトリ履歴{repos}、文書{documents}が確定。会話履歴はClaude Code {claude}、Codex {codex}レコード。"],
+  maintenance_committed_boundary: ["A native checkpoint or settings step has committed, even when its payload count is zero. Earlier progress is kept; inspect it before a new preview.", "保存件数がゼロでも、読み取り位置または設定の確定済み処理があります。それまでの進捗は残ります。新しいプレビュー前に確認してください。"],
+  maintenance_phase_running: ["Import is running", "取り込み中"],
+  maintenance_phase_complete: ["Import completed", "取り込み完了"],
+  maintenance_phase_partial: ["Import stopped with committed progress", "確定した進捗を残して停止"],
+  maintenance_phase_failed: ["Import did not complete", "取り込みは完了しませんでした"],
+  maintenance_stage_checking: ["Checking confirmed scope", "確認した範囲を検証"],
+  maintenance_stage_settings: ["Older settings", "旧設定"],
+  maintenance_stage_v1_events: ["Older events", "旧イベント"],
+  maintenance_stage_v1_repositories: ["Older repository history", "旧リポジトリ履歴"],
+  maintenance_stage_v1_documents: ["Older documents", "旧文書"],
+  maintenance_stage_transcripts: ["Agent transcripts", "会話履歴"],
+  maintenance_stage_complete: ["Completed", "完了"],
+  maintenance_stage_partial: ["Stopped after committed progress", "確定済み進捗を残して停止"],
+  maintenance_stage_failed: ["Stopped", "停止"],
+  maintenance_preview_failed: ["A safe preview could not be prepared. No import was started.", "安全なプレビューを作成できませんでした。取り込みは開始していません。"],
+  maintenance_status_unavailable: ["Import status could not be read. The running operation is not cancelled.", "状況を読み取れませんでした。進行中の処理は中止していません。"],
+  maintenance_unknown: ["The import result is unknown. Inspect before another operation.", "取り込み結果が不明です。別の処理の前に確認してください。"],
+  maintenance_stale: ["Source, settings or effects changed. Prepare a fresh preview.", "元データ・設定・影響が変わりました。新しいプレビューを作成してください。"],
+  maintenance_source: ["The local source could not be safely used. Check its path and data.", "元データを安全に使えませんでした。パスとデータを確認してください。"],
+  maintenance_config: ["Saved or older settings are invalid. Inspect them before importing.", "保存済み設定または旧設定が不正です。取り込み前に確認してください。"],
+  maintenance_busy: ["Another native import is active. Inspect status and wait.", "別の取り込みが進行中です。状況を確認して待ってください。"],
+  maintenance_refused: ["Some files were refused. Earlier committed progress is kept. Inspect it before another preview.", "取り込めないファイルがありました。確定済みの進捗は残ります。別のプレビュー前に確認してください。"],
+  maintenance_failed: ["The import stopped. Inspect the shown progress and current history before proceeding.", "取り込みが停止しました。表示された進捗と保存済み履歴を確認してから進めてください。"],
+  maintenance_confirmation: ["Confirm the previewed source and settings effects first.", "先にプレビューの履歴と設定への影響を確認してください。"],
+  maintenance_key: ["The preview is invalid. Prepare it again.", "プレビューが不正です。作成し直してください。"],
+  maintenance_id: ["The operation identifier is invalid. Prepare a fresh import.", "処理の識別情報が不正です。新しい取り込みを準備してください。"],
+  maintenance_id_changed: ["That operation identifier belongs to another confirmed request. Inspect status.", "その識別情報は別の確認済み処理のものです。状況を確認してください。"],
+
 };
 
 const stored = recall('oboete-lang', '');
@@ -1356,6 +1416,186 @@ function welcomeKey(event) {
 // The form's values between redraws: a language switch or a move keeps what is not saved yet.
 let form = null;
 // Preferences are separate append operations: retain their draft/receipt for this page only.
+// Wire refreshMaintenance before database reads in the existing poll(), while settings is shown
+// or an operation/unknown receipt needs inspection. This replaces a separate polling timer.
+let maintenanceDraft = { kind:'transcripts', agent:'all', from:'', preview:null, confirmed:false,
+  operationId:null, previewing:false, sending:false, unknown:false, status:null, error:null };
+function maintenanceOperation(d) {
+  return d.kind === 'v1' ? {kind:'v1',from:d.from || null}
+    : {kind:'transcripts',agent:d.agent === 'all' ? null : d.agent};
+}
+function maintenanceRun(d) {
+  return [d.status?.active,d.status?.last].find(run=>run?.operation_id===d.operationId) || null;
+}
+function maintenanceBlocked(d) {
+  return d.previewing || d.sending || d.unknown || Boolean(d.status?.active);
+}
+function renderMaintenance(d) {
+  if(!form || form.maintenance!==d || view!=='settings')return;
+  const section=$('panel').querySelector('.maintenance');
+  if(!section)return;
+  const focused=section.contains(document.activeElement) ? document.activeElement : null;
+  const key=focused?.dataset.field ? ['field',focused.dataset.field]
+    : focused?.dataset.action ? ['action',focused.dataset.action] : null;
+  const selection=typeof focused?.selectionStart==='number'
+    ? [focused.selectionStart,focused.selectionEnd,focused.selectionDirection] : null;
+  section.replaceChildren(...maintenanceSection(form).childNodes);
+  const next=key && section.querySelector(`[data-${key[0]}="${key[1]}"]`);
+  if(next && !next.disabled){next.focus({preventScroll:true});if(selection)next.setSelectionRange(...selection);}
+}
+async function refreshMaintenance(d = maintenanceDraft) {
+  const read = d.statusRead = (d.statusRead || 0) + 1;
+  try {
+    const status = await api('maintenance');
+    if (d.statusRead !== read) return;
+    const changed=JSON.stringify(d.status)!==JSON.stringify(status) || d.error!==null;
+    const wasUnknown=d.unknown;
+    d.status=status;
+    d.error=null;
+    if(maintenanceRun(d))d.unknown=false;
+    if(changed || wasUnknown!==d.unknown)renderMaintenance(d);
+  } catch {
+    if (d.statusRead !== read) return;
+    const changed=d.error!=='maintenance_status_unavailable';
+    d.error='maintenance_status_unavailable';
+    if(changed)renderMaintenance(d);
+  }
+}
+function maintenanceSection(f) {
+  const d=f.maintenance;
+  const busy=maintenanceBlocked(d);
+  const invalidate=()=>{
+    d.preview=null;d.confirmed=false;d.operationId=null;d.error=null;
+    const section=$('panel').querySelector('.maintenance');
+    section?.querySelector('.maintenance-preview')?.remove();
+    const consent=section && [...section.querySelectorAll('input')].find(input=>input.dataset.field==='maintenance.confirmed');
+    if(consent){consent.checked=false;consent.disabled=true;}
+    const start=section && [...section.querySelectorAll('button')].find(button=>button.dataset.action==='maintenance.start');
+    if(start)start.disabled=true;
+  };
+  const kind=el('select',null);
+  for(const [value,label] of [['transcripts','maintenance_transcripts'],['v1','maintenance_v1']]) {
+    const option=el('option',null,t(label));option.value=value;kind.append(option);
+  }
+  kind.value=d.kind;kind.dataset.field='maintenance.kind';kind.disabled=busy;
+  kind.addEventListener('change',()=>{d.kind=kind.value;invalidate();renderMaintenance(d);});
+  const agent=el('select',null);
+  for(const [value,label] of [['all','maintenance_all_agents'],['claude','maintenance_claude'],['codex','maintenance_codex']]) {
+    const option=el('option',null,t(label));option.value=value;agent.append(option);
+  }
+  agent.value=d.agent;agent.dataset.field='maintenance.agent';agent.disabled=busy;
+  agent.addEventListener('change',()=>{d.agent=agent.value;invalidate();});
+  const from=input('text',d.from,'','maintenance.from',value=>{d.from=value;invalidate();});
+  from.disabled=busy;
+  const preview=el('button','quiet small',t('maintenance_preview'));
+  preview.dataset.action='maintenance.preview';
+  preview.type='button';preview.disabled=busy;
+  preview.addEventListener('click',async()=>{
+    if(maintenanceBlocked(d))return;
+    invalidate();d.previewing=true;renderMaintenance(d);
+    try {
+      const {res,answer}=await memoryWrite('maintenance/preview',{operation:maintenanceOperation(d)});
+      if(!res.ok){d.error=answer.code || 'maintenance_preview_failed';return;}
+      d.preview=answer;
+    } catch {d.error='maintenance_preview_failed';}
+    finally {d.previewing=false;renderMaintenance(d);}
+  });
+  const confirm=checkbox(d.confirmed,value=>{d.confirmed=value;renderMaintenance(d);});
+  confirm.dataset.field='maintenance.confirmed';confirm.disabled=busy || !d.preview;
+  const start=el('button','quiet small',t('maintenance_start'));
+  start.dataset.action='maintenance.start';
+  start.type='button';start.disabled=busy || !d.preview || !d.confirmed;
+  start.addEventListener('click',async()=>{
+    if(maintenanceBlocked(d)||!d.preview||!d.confirmed)return;
+    const bytes=crypto.getRandomValues(new Uint8Array(32));
+    d.operationId=[...bytes].map(b=>b.toString(16).padStart(2,'0')).join('');
+    d.sending=true;d.unknown=false;d.error=null;
+    const id=d.operationId;
+    const posted={operation:maintenanceOperation(d),preview_key:d.preview.preview_key,
+      operation_id:id,confirmed:true};
+    d.preview=null;d.confirmed=false;
+    renderMaintenance(d);
+    try {
+      const {res,answer}=await memoryWrite('maintenance/start',posted);
+      if(d.operationId!==id)return;
+      if(!res.ok){d.error=answer.code || 'maintenance_failed';return;}
+      d.statusRead = (d.statusRead || 0) + 1;
+      d.status=answer;
+    } catch {
+      if(d.operationId===id){d.unknown=true;d.error='maintenance_unknown';}
+    } finally {
+      d.sending=false;
+      await refreshMaintenance(d);
+      renderMaintenance(d);
+    }
+  });
+  const refresh=el('button','quiet small',t('maintenance_refresh'));
+  refresh.dataset.action='maintenance.refresh';
+  refresh.type='button';refresh.addEventListener('click',()=>{void refreshMaintenance(d);});
+  const another=el('button','quiet small',t('maintenance_another'));
+  another.dataset.action='maintenance.another';
+  another.type='button';another.disabled=d.previewing || d.sending || Boolean(d.status?.active);
+  another.addEventListener('click',()=>{
+    if(d.sending||d.status?.active)return;
+    d.unknown=false;invalidate();renderMaintenance(d);
+  });
+  const previewDetails=d.preview ? maintenancePreview(d.preview) : null;
+  const active=d.status?.active,last=d.status?.last;
+  return el('section','maintenance',el('h3',null,t('maintenance_h')),el('p','desc',t('maintenance_desc')),
+    el('label','field',el('span',null,t('maintenance_kind')),kind),
+    d.kind==='transcripts' ? el('label','field',el('span',null,t('maintenance_agent')),agent)
+      : el('label','field',el('span',null,t('maintenance_source_path')),from),
+    d.kind==='v1' ? el('p','desc',t('maintenance_source_default')) : el('p','desc',t('maintenance_native_roots')),
+    preview,previewDetails,d.preview ? el('label','check',confirm,t('maintenance_consent')) : null,
+    start,d.previewing ? el('p','desc',t('loading')) : null,
+    d.error ? el('p','desc text',t(d.error)) : null,
+    d.unknown ? el('p','desc',t('maintenance_unknown_hint')) : null,
+    active ? maintenanceStatus(active) : null,last ? maintenanceStatus(last) : null,
+    d.status && !d.status.available ? el('p','desc',t('maintenance_no_receipt')) : null,
+    refresh,d.operationId && !d.status?.active ? another : null,
+    el('p','desc',t('maintenance_settings_hint')),
+    el('p','desc',t('maintenance_other_unavailable')));
+}
+function maintenancePreview(p) {
+  const rows=[];
+  if(p.kind==='v1') {
+    rows.push(el('p','text',p.source),maintenanceV1(p.candidates,p.settings,true));
+  } else {
+    for(const [agent,s] of Object.entries(p.candidates)) {
+      if(s)rows.push(el('p','desc',t('maintenance_transcript_candidates',{
+        agent:t(agent==='claude'?'maintenance_claude':'maintenance_codex'),files:s.files,
+        sessions:s.sessions,records:s.events,bytes:s.bytes,waiting:s.waiting,refused:s.refused})));
+    }
+    if(p.v1)rows.push(el('p','desc',t('maintenance_conditional_v1')),
+      maintenanceV1(p.v1.candidates,p.v1.settings,true));
+  }
+  return el('div','maintenance-preview',el('h4',null,t('maintenance_preview_h')),...rows);
+}
+function maintenanceV1(s,settings,candidate=false) {
+  return el('div',null,el('p','desc',t(candidate?'maintenance_v1_candidates':'maintenance_v1_actual',{
+    events:s.events,records:s.records,repos:s.repos ?? s.repositories,documents:s.documents,
+    bytes:s.bytes ?? 0,seen:s.seen ?? 0})),settings ? el('p','desc',t('maintenance_settings_effect',{
+      effect:t('maintenance_settings_'+settings.effect),missing:settings.missing.length})) : null);
+}
+function maintenanceStatus(run) {
+  const p=run.progress,out=run.result?.outcome;
+  const rows=[el('p','desc',t('maintenance_progress',{
+    stage:t('maintenance_stage_'+run.stage),records:p.v1_records,repos:p.v1_repositories,
+    documents:p.v1_documents,claude:p.claude.events,codex:p.codex.events}))];
+  if(run.result?.code)rows.push(el('p','desc text',t(run.result.code)));
+  if(run.phase==='partial' && run.committed)rows.push(el('p','desc',t('maintenance_committed_boundary')));
+  if(out) {
+    if(out.transcripts)for(const [agent,s] of Object.entries(out.transcripts)) {
+      if(s)rows.push(el('p','desc',t('maintenance_transcript_actual',{
+        agent:t(agent==='claude'?'maintenance_claude':'maintenance_codex'),records:s.events,
+        seen:s.seen,waiting:s.waiting,refused:s.refused})));
+    }
+    const v1=out.v1 || (!out.transcripts ? out : null);
+    if(v1)rows.push(maintenanceV1(v1,v1.settings));
+  }
+  return el('div','maintenance-result',el('h4',null,t('maintenance_phase_'+run.phase)),...rows);
+}
+
 let preferenceDraft = { text: '', confirmed: false, result: null };
 // `[inject]`'s sizes, each checked against the range the server states for it.
 const SIZES = ['session_start_chars', 'per_prompt_chars', 'correction_chars'];
@@ -1381,6 +1621,7 @@ function formOf(s) {
     redaction: { rules: (s.redaction?.extra_rules || []).map(redactionEdit), hashes: (s.redaction?.allowlist || []).join('\n') },
     privacy: s.privacy || privacyUnavailable(),
     preference: preferenceDraft,
+    maintenance: maintenanceDraft,
     chain: s.chain.map((e) => ({
       ...e,
       edit: { on: e.on, daily_budget: text(e.daily_budget), timeout_s: text(e.timeout_s), model: text(e.model) },
@@ -2595,7 +2836,7 @@ function drawSettings() {
     e.preventDefault();
     void saveSettings(save);
   });
-  panel.append(el('p', 'lead', t('lead')), formEl, preferenceSection(f));
+  panel.append(el('p', 'lead', t('lead')), formEl, preferenceSection(f), maintenanceSection(f));
   drawIn(panel);
 }
 
@@ -2687,6 +2928,7 @@ let polling = false;
 let pollFailureNotice = null;
 
 async function poll() {
+  if (view === 'settings' && form?.maintenance) void refreshMaintenance(form.maintenance);
   if (polling || document.visibilityState !== 'visible') return;
   polling = true;
   try {
