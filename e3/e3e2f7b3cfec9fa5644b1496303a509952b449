@@ -1,0 +1,24 @@
+src/settings/privacy.rs
+  s_ce2b24784deac6::t_e4d00739214c96 102,119,221-232,234-247,289-294
+  s_ce2b24784deac6::t_987e7611df71de 379-425,427,429,431,438-439,449
+  s_ce2b24784deac6::t_d5cd639dd997d1 338-378
+  s_ce2b24784deac6::t_b33986b1ad5ddc 426,428,430,432-437,440-448
+docs/settings-privacy.md
+  s_ce2b24784deac6::t_246c8a95d1caf2 47-50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e3e3e2f7b3cfec9fa5644b1496303a509952b449",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
