@@ -555,17 +555,29 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         }
         Cmd::Migrate { from, finish } => {
             let from = from.unwrap_or_else(|| home.join("oboete.db"));
-            migrate::check_source(&home, &from)?;
-            let _lock = import::lock(&home)?;
             if finish {
+                migrate::check_source(&home, &from)?;
+                let _lock = import::lock(&home)?;
                 let mut out = std::io::stdout().lock();
                 return migrate::finish(&home, std::io::stdin().lock(), &mut out);
             }
-            for line in migrate::settings(&home, &from)? {
-                println!("{line}");
+            let outcome = match migrate::run(&home, &from, None, &mut |_| {}) {
+                Ok(outcome) => outcome,
+                Err(failure) => {
+                    if let Some(settings) = &failure.outcome.settings {
+                        for line in migrate::settings_lines(&settings.missing) {
+                            println!("{line}");
+                        }
+                    }
+                    return Err(failure.cause);
+                }
+            };
+            if let Some(settings) = &outcome.settings {
+                for line in migrate::settings_lines(&settings.missing) {
+                    println!("{line}");
+                }
             }
-            let stats = migrate::pass(&home, &mut raw::open(&home)?, &from)?;
-            println!("{}", serde_json::to_string(&stats)?);
+            println!("{}", serde_json::to_string(&outcome.stats)?);
             Ok(())
         }
         Cmd::Cite { uids } => {

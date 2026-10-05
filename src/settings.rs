@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::config::{self, ChainOverlay, Provider, ToolOutput};
 
 pub(crate) mod claims;
+pub(crate) mod maintenance;
 pub(crate) mod privacy;
 mod providers;
 

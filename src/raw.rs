@@ -2236,6 +2236,15 @@ impl Raw {
     /// A body that would take its op over `MAX_OP_BYTES` is clipped with a marker; a document
     /// `denied` asks to leave out is not appended. The ops appended.
     pub fn append_imports(&mut self, docs: Vec<ImportDoc>) -> Result<usize> {
+        self.append_imports_counted(docs, |_| {})
+    }
+
+    /// Notify only after each bounded batch commits; earlier counts survive a later error.
+    pub(crate) fn append_imports_counted(
+        &mut self,
+        docs: Vec<ImportDoc>,
+        mut committed: impl FnMut(u64),
+    ) -> Result<usize> {
         let (mut batch, mut bytes, mut appended) = (Vec::new(), 0, 0);
         for doc in docs {
             let text = format!("{}\n{}", doc.title, doc.body);
@@ -2246,14 +2255,18 @@ impl Raw {
             let body = serde_json::to_value(within_op_cap(doc)?)?;
             let size = body.to_string().len();
             if batch.len() == IMPORT_BATCH || bytes + size > MAX_BATCH_BYTES {
-                appended += self.append_ops(&std::mem::take(&mut batch))?.len();
+                let count = self.append_ops(&std::mem::take(&mut batch))?.len();
+                appended += count;
+                committed(count as u64);
                 bytes = 0;
             }
             bytes += size;
             batch.push((OpKind::Import, body));
         }
         if !batch.is_empty() {
-            appended += self.append_ops(&batch)?.len();
+            let count = self.append_ops(&batch)?.len();
+            appended += count;
+            committed(count as u64);
         }
         Ok(appended)
     }
@@ -3924,6 +3937,23 @@ mod tests {
         assert_eq!(ops.len(), 100);
         assert!(batches.len() > 1);
         assert!(batches.values().all(|&bytes| bytes <= MAX_BATCH_BYTES));
+    }
+
+    #[test]
+    fn counted_documents_report_only_committed_batches_on_interruption() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let docs = (0..100)
+            .map(|i| import_doc(i, "x".repeat(60_000)))
+            .collect();
+        crate::crash::at(2);
+        let mut committed = Vec::new();
+        let result = raw.append_imports_counted(docs, |n| committed.push(n));
+        crate::crash::off();
+        assert!(result.is_err());
+        let durable = raw.ops_after(raw.device(), 0, 1_000).unwrap().len();
+        assert!(durable > 0 && durable < 100);
+        assert_eq!(committed, [durable as u64]);
     }
 
     /// OpenCodeReview on #305: an import op without a source id is passed over, not an error.

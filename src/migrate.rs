@@ -1,10 +1,11 @@
 //! Milestone 4 Task 9: the cut-over from v1's `oboete.db` to Design B's stores (spec 7.4, D6).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::capture::{self, Captured, Settings};
 use crate::raw::{
@@ -34,7 +35,7 @@ pub fn check_source(home: &Path, from: &Path) -> Result<()> {
 }
 
 /// What a pass imported.
-#[derive(Debug, Default, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct Stats {
     /// v1 events read past the checkpoint, and the records they became.
     pub events: u64,
@@ -52,11 +53,468 @@ pub struct Stats {
     pub uncertain: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub(crate) struct Candidates {
+    pub events: u64,
+    pub records: u64,
+    pub repos: u64,
+    pub documents: u64,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SettingsEffect {
+    Preserve,
+    Copy,
+    Defaults,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MissingSetting {
+    Curate,
+    Inject,
+    Capture,
+    Redaction,
+    Chain,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub(crate) struct SettingsPreview {
+    pub effect: SettingsEffect,
+    pub version: String,
+    pub missing: Vec<MissingSetting>,
+}
+
+pub(crate) type SettingsOutcome = SettingsPreview;
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub(crate) struct Preview {
+    pub key: String,
+    pub candidates: Candidates,
+    pub settings: SettingsPreview,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Outcome {
+    pub stats: Stats,
+    pub settings: Option<SettingsOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FailureCode {
+    Stale,
+    InvalidSource,
+    InvalidConfig,
+    Busy,
+    Refused,
+    Failed,
+}
+
+impl std::fmt::Display for FailureCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for FailureCode {}
+
+pub(crate) fn failure_code(cause: &anyhow::Error, fallback: FailureCode) -> FailureCode {
+    cause
+        .downcast_ref::<FailureCode>()
+        .copied()
+        .unwrap_or(fallback)
+}
+
+#[derive(Debug)]
+pub(crate) struct Failure {
+    pub outcome: Box<Outcome>,
+    pub code: FailureCode,
+    pub cause: anyhow::Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Stage {
+    Settings,
+    Events,
+    Repos,
+    Documents,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct Committed {
+    pub stage: Stage,
+    pub records: u64,
+    pub repos: u64,
+    pub documents: u64,
+}
+
+pub(crate) fn run(
+    home: &Path,
+    from: &Path,
+    expected: Option<&str>,
+    committed: &mut impl FnMut(&Committed),
+) -> std::result::Result<Outcome, Failure> {
+    check_source(home, from).map_err(|cause| Failure {
+        outcome: Box::default(),
+        code: FailureCode::InvalidSource,
+        cause,
+    })?;
+    let _lock = crate::import::lock(home).map_err(|cause| Failure {
+        outcome: Box::default(),
+        code: FailureCode::Busy,
+        cause,
+    })?;
+    run_holding(home, from, &mut None, expected, committed)
+}
+
+/// The caller owns import.lock. Confirmed runs read and apply the same private transaction.
+pub(crate) fn run_holding(
+    home: &Path,
+    from: &Path,
+    raw: &mut Option<Raw>,
+    expected: Option<&str>,
+    committed: &mut impl FnMut(&Committed),
+) -> std::result::Result<Outcome, Failure> {
+    let mut outcome = Outcome::default();
+    let mut code = FailureCode::InvalidSource;
+    let result = (|| {
+        check_source(home, from)?;
+        if let Some(expected) = expected {
+            with_preview_v1(from, |v1, source| {
+                let _config = crate::settings::config_lock(home)?;
+                code = FailureCode::Stale;
+                let destination = if raw.is_none() {
+                    crate::raw::read_only(home)?
+                } else {
+                    None
+                };
+                let shown = preview_connection(home, from, v1, source)?;
+                anyhow::ensure!(shown.key == expected, "migration preview is stale");
+                let (settings, bytes) = preview_settings(home, from)?;
+                anyhow::ensure!(
+                    settings == shown.settings,
+                    "migration config changed during confirmation"
+                );
+                check_source(home, from)?;
+                code = FailureCode::InvalidConfig;
+                apply_settings(
+                    home,
+                    from,
+                    Some((settings, bytes)),
+                    &mut outcome.settings,
+                    committed,
+                )?;
+                let capture = Settings {
+                    source: SOURCE,
+                    ..Settings::load(home)?
+                };
+                code = FailureCode::Failed;
+                if let Some(held) = destination {
+                    *raw = Some(held.into_writer(home)?);
+                }
+                execute_pass(home, raw, v1, &capture, &mut outcome.stats, committed)
+            })
+        } else {
+            let _config = crate::settings::config_lock(home)?;
+            code = FailureCode::InvalidConfig;
+            apply_settings(home, from, None, &mut outcome.settings, committed)?;
+            let capture = Settings {
+                source: SOURCE,
+                ..Settings::load(home)?
+            };
+            code = FailureCode::InvalidSource;
+            let v1 = open_v1(from)?;
+            v1.execute_batch("BEGIN")?;
+            code = FailureCode::Failed;
+            execute_pass(home, raw, &v1, &capture, &mut outcome.stats, committed)
+        }
+    })();
+    match result {
+        Ok(()) => Ok(outcome),
+        Err(cause) => Err(Failure {
+            outcome: Box::new(outcome),
+            code: failure_code(&cause, code),
+            cause,
+        }),
+    }
+}
+
+fn execute_pass(
+    home: &Path,
+    raw: &mut Option<Raw>,
+    v1: &Connection,
+    settings: &Settings,
+    stats: &mut Stats,
+    committed: &mut impl FnMut(&Committed),
+) -> Result<()> {
+    let device = crate::db::device_id(v1).context("not a v1 store")?;
+    if raw.is_none() {
+        *raw = Some(crate::raw::open(home)?);
+    }
+    let raw = raw.as_mut().context("migration raw store is absent")?;
+    crate::forget::reconcile_or_say(home, raw)?;
+    read_connection(v1, raw, &device, settings, stats, committed)
+}
+
+fn notify(stats: &Stats, stage: Stage, committed: &mut impl FnMut(&Committed)) {
+    committed(&Committed {
+        stage,
+        records: stats.records,
+        repos: stats.repos,
+        documents: stats.documents,
+    });
+}
+
+/// Bind consent to this code/ruleset, destination file identity, scope and effects.
+pub(crate) fn preview_key(home: &Path, scope: &impl serde::Serialize) -> Result<String> {
+    let identity = absolute_identity(home)?;
+    let bytes = serde_json::to_vec(&(
+        "settings-w5a-v1",
+        env!("CARGO_PKG_VERSION"),
+        crate::redact::Rules::default().version(),
+        identity,
+        crate::db::store_file(&crate::raw::path(home)),
+        scope,
+    ))?;
+    Ok(crate::forget::hash(&bytes))
+}
+
+fn absolute_identity(path: &Path) -> Result<PathBuf> {
+    if path.try_exists()? {
+        return Ok(path.canonicalize()?);
+    }
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let parent = path.parent().context("path has no parent")?;
+    Ok(absolute_identity(parent)?.join(path.file_name().context("path has no name")?))
+}
+
+pub(crate) fn file_version(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buf = [0; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+/// SQLite may create sidecars even on a read-only open. Only open a stable private DB/WAL copy.
+/// Deliberately schema-neutral: transcript's legacy time-cut preview needs only two tables.
+pub(crate) fn with_preview_v1<T>(
+    from: &Path,
+    inspect: impl FnOnce(&Connection, &str) -> Result<T>,
+) -> Result<T> {
+    let parent = from
+        .parent()
+        .context("v1 store has no parent")?
+        .join(".")
+        .canonicalize()?;
+    anyhow::ensure!(
+        !std::env::temp_dir().canonicalize()?.starts_with(parent),
+        "preview needs a temporary directory outside the oboete home"
+    );
+    let scratch = crate::provider::scratch_dir()
+        .map_err(|_| anyhow::anyhow!("cannot create a private v1 preview directory"))?;
+    let result = (|| {
+        let source = from.canonicalize()?;
+        let mut wal = source.as_os_str().to_owned();
+        wal.push("-wal");
+        let wal = PathBuf::from(wal);
+        type SourceStamp = (PathBuf, String, u64, std::time::SystemTime, String);
+        let versions = || -> Result<Vec<SourceStamp>> {
+            let mut paths = vec![source.clone()];
+            if wal.try_exists()? {
+                paths.push(wal.clone());
+            }
+            paths
+                .into_iter()
+                .map(|p| {
+                    let m = std::fs::metadata(&p)?;
+                    Ok((
+                        p.clone(),
+                        crate::db::store_file(&p),
+                        m.len(),
+                        m.modified()?,
+                        file_version(&p)?,
+                    ))
+                })
+                .collect()
+        };
+        let before = versions()?;
+        for (i, (path, _, _, _, hash)) in before.iter().enumerate() {
+            let copy = scratch
+                .0
+                .join(if i == 0 { "oboete.db" } else { "oboete.db-wal" });
+            std::fs::copy(path, &copy).context("copy v1 for preview")?;
+            anyhow::ensure!(file_version(&copy)? == *hash, "v1 changed during preview");
+        }
+        anyhow::ensure!(
+            before == versions()? && from.canonicalize()? == source,
+            "v1 changed during preview"
+        );
+        let version = crate::forget::hash(&serde_json::to_vec(&before)?);
+        let conn = open_v1(&scratch.0.join("oboete.db"))?;
+        conn.execute_batch("BEGIN")?;
+        inspect(&conn, &version)
+    })();
+    std::fs::remove_dir_all(&scratch.0).context("remove the private v1 preview copy")?;
+    result
+}
+
+pub(crate) fn config_bytes(home: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(home.join("config.toml")) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn missing_settings(text: &str) -> Result<Vec<MissingSetting>> {
+    let table: toml::Table = text
+        .parse()
+        .map_err(|e| crate::config::toml_error(text, &e))?;
+    let mut missing = Vec::new();
+    if table.get("summary").and_then(|s| s.get("curate")).is_none() {
+        missing.push(MissingSetting::Curate);
+    }
+    for (name, kind) in [
+        ("inject", MissingSetting::Inject),
+        ("capture", MissingSetting::Capture),
+        ("redaction", MissingSetting::Redaction),
+        ("chain", MissingSetting::Chain),
+    ] {
+        if !table.contains_key(name) {
+            missing.push(kind);
+        }
+    }
+    Ok(missing)
+}
+
+pub(crate) fn capture_settings(bytes: Option<&[u8]>, source: &'static str) -> Result<Settings> {
+    let text = bytes.map(std::str::from_utf8).transpose()?;
+    let config = crate::config::parse_capture(text)?;
+    Ok(Settings {
+        rules: crate::redact::Rules::new(&config.redaction)?,
+        store_prompts: config.capture.store_prompts,
+        tool_output: config.capture.tool_output,
+        source,
+    })
+}
+
+fn preview_settings(home: &Path, from: &Path) -> Result<(SettingsPreview, Option<Vec<u8>>)> {
+    let ours = config_bytes(home)?;
+    let (effect, bytes) = if ours.is_some() {
+        (SettingsEffect::Preserve, ours)
+    } else {
+        let theirs = config_bytes(from.parent().context("v1 store has no parent")?)?;
+        (
+            if theirs.is_some() {
+                SettingsEffect::Copy
+            } else {
+                SettingsEffect::Defaults
+            },
+            theirs,
+        )
+    };
+    capture_settings(bytes.as_deref(), SOURCE)?;
+    let text = bytes
+        .as_deref()
+        .map(std::str::from_utf8)
+        .transpose()?
+        .unwrap_or("");
+    Ok((
+        SettingsPreview {
+            effect,
+            version: bytes
+                .as_deref()
+                .map_or_else(|| "none".to_owned(), crate::forget::hash),
+            missing: missing_settings(text)?,
+        },
+        bytes,
+    ))
+}
+
+pub(crate) fn preview(home: &Path, from: &Path) -> Result<Preview> {
+    check_source(home, from)?;
+    with_preview_v1(from, |v1, source| {
+        preview_connection(home, from, v1, source)
+    })
+}
+
+fn preview_connection(home: &Path, from: &Path, v1: &Connection, source: &str) -> Result<Preview> {
+    let device = crate::db::device_id(v1).context("not a v1 store")?;
+    let (settings, bytes) = preview_settings(home, from)?;
+    let capture = capture_settings(bytes.as_deref(), SOURCE)?;
+    let mut candidates = Candidates::default();
+    let mut st = v1.prepare(EVENTS_SQL)?;
+    let mut rows = st.query([0])?;
+    while let Some(row) = rows.next()? {
+        candidates.events += 1;
+        let records = captured_row(row, &capture)?;
+        candidates.records += records.len() as u64;
+        candidates.bytes += records
+            .iter()
+            .map(|r| r.event.body.len() as u64)
+            .sum::<u64>();
+    }
+    let mut st = v1.prepare(REPOS_SQL)?;
+    let mut rows = st.query([])?;
+    while let Some(row) = rows.next()? {
+        let records = captured_repo(row, &capture)?;
+        candidates.repos += records.len() as u64;
+        candidates.bytes += records
+            .iter()
+            .map(|r| r.event.body.len() as u64)
+            .sum::<u64>();
+    }
+    read_documents(
+        v1,
+        &device,
+        &capture,
+        &mut Default::default(),
+        &mut Stats::default(),
+        |doc| {
+            candidates.documents += 1;
+            candidates.bytes += (doc.title.len() + doc.body.len()) as u64;
+        },
+    )?;
+    fingerprint(v1)?;
+    let key = preview_key(
+        home,
+        &(
+            "v1",
+            from,
+            absolute_identity(from)?,
+            source,
+            &settings,
+            &candidates,
+        ),
+    )?;
+    Ok(Preview {
+        key,
+        candidates,
+        settings,
+    })
+}
+
 /// One pass of the v1 import (spec 7.4, D6): the events past the checkpoint as records, in
 /// batches each appended with its checkpoint; the deleted sessions; `session_repos` as `touch`
 /// records; then the documents as import ops. Everything is read in one read transaction of the
 /// store at `from`, which is never written; a rerun imports nothing twice.
-pub fn pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<Stats> {
+#[cfg(test)]
+fn pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<Stats> {
     // Milestone 5 D1: the forget request logs first, so an import never brings back what a log
     // holds and raw.db lost.
     crate::forget::reconcile_or_say(home, raw)?;
@@ -117,28 +575,137 @@ fn read_pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<(Stats, Fingerpr
         ..Settings::load(home)?
     };
     let mut stats = Stats::default();
-    events(&v1, raw, &device, &settings, &mut stats)?;
-    deleted(&v1, raw, &settings, &mut stats)?;
-    repos(&v1, raw, &settings, &mut stats)?;
-    documents(&v1, raw, &device, &settings, &mut stats)?;
+    read_connection(&v1, raw, &device, &settings, &mut stats, &mut |_| {})?;
     Ok((stats, fingerprint(&v1)?))
+}
+
+fn read_connection(
+    v1: &Connection,
+    raw: &mut Raw,
+    device: &str,
+    settings: &Settings,
+    stats: &mut Stats,
+    committed: &mut impl FnMut(&Committed),
+) -> Result<()> {
+    events(v1, raw, device, settings, stats, committed)?;
+    deleted(v1, raw, settings, stats)?;
+    repos(v1, raw, settings, stats, committed)?;
+    documents(v1, raw, device, settings, stats, committed)?;
+    Ok(())
 }
 
 /// Spec 7.4, A106: v1's `config.toml` (beside its store) into a home that has none, unchanged; a
 /// home's own file is never edited. Then what the home's file leaves unanswered, one line each.
-pub fn settings(home: &Path, from: &Path) -> Result<Vec<String>> {
+#[cfg(test)]
+fn settings(home: &Path, from: &Path) -> Result<Vec<String>> {
     let _config = crate::settings::config_lock(home)?;
-    let ours = home.join("config.toml");
-    let theirs = from.with_file_name("config.toml");
-    if !ours.exists() && theirs.exists() {
-        crate::db::private(home, 0o700);
-        // Whole or not at all: a copy cut short would read as a file with nothing set, which a
-        // rerun keeps. A link, not a rename, so a config.toml written meanwhile is never replaced.
-        let part = home.join("config.toml.part");
-        match std::fs::remove_file(&part) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-            _ => {}
+    let mut outcome = None;
+    apply_settings(home, from, None, &mut outcome, &mut |_| {})?;
+    Ok(settings_lines(
+        &outcome.context("migration settings are absent")?.missing,
+    ))
+}
+
+/// Native CLI notices, derived from the same fixed settings codes the viewer receives.
+pub(crate) fn settings_lines(missing: &[MissingSetting]) -> Vec<String> {
+    let mut lines = Vec::new();
+    if missing.contains(&MissingSetting::Curate) {
+        lines.push(
+            "[summary] curate is not set: nothing is curated until it is (spec 7.4)".to_owned(),
+        );
+    }
+    let unset: Vec<_> = missing
+        .iter()
+        .filter_map(|kind| match kind {
+            MissingSetting::Curate => None,
+            MissingSetting::Inject => Some("inject"),
+            MissingSetting::Capture => Some("capture"),
+            MissingSetting::Redaction => Some("redaction"),
+            MissingSetting::Chain => Some("chain"),
+        })
+        .collect();
+    if !unset.is_empty() {
+        lines.push(format!(
+            "not set, so their defaults apply: [{}]",
+            unset.join("], [")
+        ));
+    }
+    lines
+}
+
+fn apply_settings(
+    home: &Path,
+    from: &Path,
+    confirmed: Option<(SettingsPreview, Option<Vec<u8>>)>,
+    outcome: &mut Option<SettingsOutcome>,
+    committed: &mut impl FnMut(&Committed),
+) -> Result<()> {
+    let is_confirmed = confirmed.is_some();
+    let (effect, bytes) = match confirmed {
+        Some((shown, bytes)) => (shown.effect, bytes),
+        None => {
+            let ours = config_bytes(home)?;
+            if ours.is_some() {
+                (SettingsEffect::Preserve, ours)
+            } else {
+                let theirs = config_bytes(from.parent().context("v1 store has no parent")?)?;
+                (
+                    if theirs.is_some() {
+                        SettingsEffect::Copy
+                    } else {
+                        SettingsEffect::Defaults
+                    },
+                    theirs,
+                )
+            }
         }
+    };
+    let mut result = SettingsOutcome {
+        effect,
+        version: bytes
+            .as_deref()
+            .map_or_else(|| "none".to_owned(), crate::forget::hash),
+        missing: Vec::new(),
+    };
+    if effect == SettingsEffect::Copy {
+        let copied = copy_config(home, bytes.as_deref().context("source config is absent")?)?;
+        if !copied {
+            result.effect = SettingsEffect::Preserve;
+        }
+        // The hard-link committed the settings even if their subsequent parse fails.
+        *outcome = Some(result.clone());
+        if copied {
+            notify(&Stats::default(), Stage::Settings, committed);
+        }
+        std::fs::remove_file(home.join("config.toml.part"))?;
+        anyhow::ensure!(!is_confirmed || copied, FailureCode::Stale);
+    }
+    let actual = config_bytes(home)?;
+    result.version = actual
+        .as_deref()
+        .map_or_else(|| "none".to_owned(), crate::forget::hash);
+    *outcome = Some(result.clone());
+    let text = actual
+        .as_deref()
+        .map(std::str::from_utf8)
+        .transpose()?
+        .unwrap_or("");
+    result.missing = missing_settings(text)
+        .with_context(|| format!("parse {}", home.join("config.toml").display()))?;
+    *outcome = Some(result);
+    Ok(())
+}
+
+/// config.lock is held; keep the original atomic no-replace copy semantics.
+fn copy_config(home: &Path, bytes: &[u8]) -> Result<bool> {
+    use std::io::Write;
+    crate::db::private(home, 0o700);
+    let part = home.join("config.toml.part");
+    match std::fs::remove_file(&part) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
+    let result = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -147,42 +714,20 @@ pub fn settings(home: &Path, from: &Path) -> Result<Vec<String>> {
             options.mode(0o600);
         }
         let mut staged = options.open(&part)?;
-        std::io::copy(&mut std::fs::File::open(&theirs)?, &mut staged)
-            .with_context(|| format!("copy {}", theirs.display()))?;
+        staged.write_all(bytes)?;
         staged.sync_all()?;
         drop(staged);
-        match std::fs::hard_link(&part, &ours) {
-            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
-            _ => std::fs::remove_file(&part)?,
+        match std::fs::hard_link(&part, home.join("config.toml")) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(e.into()),
         }
+    })();
+    if result.is_err() {
+        std::fs::remove_file(&part).ok();
     }
-    let text = match std::fs::read_to_string(&ours) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e).with_context(|| format!("read {}", ours.display())),
-    };
-    // Only the line in an error: the text can quote a value `[redaction]` hides.
-    let table: toml::Table = text
-        .parse()
-        .map_err(|e| crate::config::toml_error(&text, &e))
-        .with_context(|| format!("parse {}", ours.display()))?;
-    let mut lines = Vec::new();
-    if table.get("summary").and_then(|s| s.get("curate")).is_none() {
-        lines.push(
-            "[summary] curate is not set: nothing is curated until it is (spec 7.4)".to_owned(),
-        );
-    }
-    let unset: Vec<&str> = ["inject", "capture", "redaction", "chain"]
-        .into_iter()
-        .filter(|t| !table.contains_key(*t))
-        .collect();
-    if !unset.is_empty() {
-        lines.push(format!(
-            "not set, so their defaults apply: [{}]",
-            unset.join("], [")
-        ));
-    }
-    Ok(lines)
+    // The caller records the committed effect before removing the staging link.
+    result
 }
 
 /// Doctor's lines on the cut-over (spec 7.4): v1's events not migrated yet, v1's old files until
@@ -375,6 +920,7 @@ fn events(
     device: &str,
     settings: &Settings,
     stats: &mut Stats,
+    committed: &mut impl FnMut(&Committed),
 ) -> Result<()> {
     let key = format!("{SOURCE}:{device}");
     let through = match raw.migration_checkpoints(&key)?.remove(&key) {
@@ -394,33 +940,21 @@ fn events(
     };
     // ponytail: an event whose session row is gone is passed over; v1 deletes a session's events
     // with it (`db::delete_session`), and the owner's store held none on 2026-10-01.
-    let mut st = v1.prepare(
-        "SELECT e.id, e.ts, e.session_id, e.event, e.payload, s.agent, s.repo, s.cwd
-         FROM events e JOIN sessions s ON s.id = e.session_id WHERE e.id > ?1 ORDER BY e.id",
-    )?;
+    let mut st = v1.prepare(EVENTS_SQL)?;
     let mut rows = st.query([through])?;
     let ruleset = settings.rules.version();
     let mut batch = Batch::default();
     while let Some(r) = rows.next()? {
         let row = v1_row(r)?;
-        let (session, event, stored): (String, String, String) = (r.get(2)?, r.get(3)?, r.get(4)?);
-        let (agent, repo, cwd): (String, String, Option<String>) =
-            (r.get(5)?, r.get(6)?, r.get(7)?);
-        let payload = payload(&session, &stored);
-        let captured = capture::imported(
-            &agent,
-            &event,
-            &payload,
-            row.ts,
-            &repo,
-            cwd.as_deref(),
-            settings,
-        );
+        let (session, stored): (String, String) = (r.get(2)?, r.get(4)?);
+        let agent: String = r.get(5)?;
+        let captured = captured_row(r, settings)?;
         let bytes: usize = captured.iter().map(|c| c.event.body.len()).sum();
         if batch.records.len() + captured.len() > IMPORT_BATCH
             || batch.bytes + bytes > MAX_BATCH_BYTES
         {
             stats.records += batch.append(raw, &key, ruleset)?;
+            notify(stats, Stage::Events, committed);
             #[cfg(test)]
             if let Some(between) = BETWEEN_BATCHES.with(|seam| seam.borrow_mut().take()) {
                 between();
@@ -445,8 +979,47 @@ fn events(
         batch.last = Some(row);
         stats.events += 1;
     }
-    stats.records += batch.append(raw, &key, ruleset)?;
+    if batch.last.is_some() {
+        stats.records += batch.append(raw, &key, ruleset)?;
+        notify(stats, Stage::Events, committed);
+    }
     Ok(())
+}
+
+const EVENTS_SQL: &str =
+    "SELECT e.id, e.ts, e.session_id, e.event, e.payload, s.agent, s.repo, s.cwd
+    FROM events e JOIN sessions s ON s.id = e.session_id WHERE e.id > ?1 ORDER BY e.id";
+
+fn captured_row(r: &rusqlite::Row, settings: &Settings) -> Result<Vec<Captured>> {
+    let (session, event, stored): (String, String, String) = (r.get(2)?, r.get(3)?, r.get(4)?);
+    let (agent, repo, cwd): (String, String, Option<String>) = (r.get(5)?, r.get(6)?, r.get(7)?);
+    Ok(capture::imported(
+        &agent,
+        &event,
+        &payload(&session, &stored),
+        r.get(1)?,
+        &repo,
+        cwd.as_deref(),
+        settings,
+    ))
+}
+
+const REPOS_SQL: &str = "SELECT r.session_id, r.repo, s.agent, s.cwd, s.started_at
+    FROM session_repos r JOIN sessions s ON s.id = r.session_id
+    ORDER BY s.started_at, r.session_id, r.repo";
+
+fn captured_repo(r: &rusqlite::Row, settings: &Settings) -> Result<Vec<Captured>> {
+    let (session, repo, agent): (String, String, String) = (r.get(0)?, r.get(1)?, r.get(2)?);
+    let (cwd, started): (Option<String>, i64) = (r.get(3)?, r.get(4)?);
+    Ok(capture::imported(
+        &agent,
+        "Touch",
+        &json!({"session_id":session}),
+        started,
+        &repo,
+        cwd.as_deref(),
+        settings,
+    ))
 }
 
 /// v1 events read since the last append, in v1's id order: their records, and the last one's
@@ -536,29 +1109,20 @@ fn deleted(v1: &Connection, raw: &Raw, settings: &Settings, stats: &mut Stats) -
 
 /// v1's `session_repos` rows as `touch` records at their session's start (A57), so the
 /// repositories a v1 session touched stay known; a row whose labels Design B holds is passed over.
-fn repos(v1: &Connection, raw: &mut Raw, settings: &Settings, stats: &mut Stats) -> Result<()> {
+fn repos(
+    v1: &Connection,
+    raw: &mut Raw,
+    settings: &Settings,
+    stats: &mut Stats,
+    committed: &mut impl FnMut(&Committed),
+) -> Result<()> {
     let mut known = raw.touches(SOURCE)?;
-    let mut st = v1.prepare(
-        "SELECT r.session_id, r.repo, s.agent, s.cwd, s.started_at
-         FROM session_repos r JOIN sessions s ON s.id = r.session_id
-         ORDER BY s.started_at, r.session_id, r.repo",
-    )?;
+    let mut st = v1.prepare(REPOS_SQL)?;
     let mut rows = st.query([])?;
     let ruleset = settings.rules.version();
     let mut batch = Vec::new();
     while let Some(r) = rows.next()? {
-        let (session, repo, agent): (String, String, String) = (r.get(0)?, r.get(1)?, r.get(2)?);
-        let (cwd, started): (Option<String>, i64) = (r.get(3)?, r.get(4)?);
-        let payload = json!({"session_id": session});
-        for c in capture::imported(
-            &agent,
-            "Touch",
-            &payload,
-            started,
-            &repo,
-            cwd.as_deref(),
-            settings,
-        ) {
+        for c in captured_repo(r, settings)? {
             if known.insert((c.event.session.clone(), c.event.repo.clone())) {
                 batch.push(c);
             }
@@ -566,6 +1130,7 @@ fn repos(v1: &Connection, raw: &mut Raw, settings: &Settings, stats: &mut Stats)
     }
     for chunk in batch.chunks(IMPORT_BATCH) {
         stats.repos += raw.append_imported(chunk, ruleset, None)?.len() as u64;
+        notify(stats, Stage::Repos, committed);
     }
     Ok(())
 }
@@ -578,11 +1143,32 @@ fn documents(
     device: &str,
     settings: &Settings,
     stats: &mut Stats,
+    committed: &mut impl FnMut(&Committed),
 ) -> Result<()> {
     let source = format!("{SOURCE}:{device}");
     let mut known = raw.import_keys(&source)?;
-    let gate = |text: String| crate::redact::outbound_with(&text, &settings.rules);
+    // Validate and shape every document before appending, as the native pass always has.
     let mut docs = Vec::new();
+    read_documents(v1, device, settings, &mut known, stats, |doc| {
+        docs.push(doc)
+    })?;
+    raw.append_imports_counted(docs, |n| {
+        stats.documents += n;
+        notify(stats, Stage::Documents, committed);
+    })?;
+    Ok(())
+}
+
+fn read_documents(
+    v1: &Connection,
+    device: &str,
+    settings: &Settings,
+    known: &mut std::collections::HashSet<String>,
+    stats: &mut Stats,
+    mut document: impl FnMut(ImportDoc),
+) -> Result<()> {
+    let source = format!("{SOURCE}:{device}");
+    let gate = |text: String| crate::redact::outbound_with(&text, &settings.rules);
     for (letter, sql) in [
         (
             "o",
@@ -606,7 +1192,7 @@ fn documents(
                 continue;
             }
             let uid: Option<String> = r.get(1)?;
-            docs.push(ImportDoc {
+            document(ImportDoc {
                 uid: uid.unwrap_or_else(|| format!("{device}:{source_id}")),
                 source: source.clone(),
                 source_id,
@@ -620,7 +1206,6 @@ fn documents(
             });
         }
     }
-    stats.documents = raw.append_imports(docs)? as u64;
     Ok(())
 }
 
@@ -640,6 +1225,252 @@ mod tests {
     use crate::raw::{self, Event, Item, OpKind};
     use rusqlite::params;
     use std::path::PathBuf;
+
+    #[test]
+    fn readonly_preview_counts_wal_candidates_and_config_without_creating_home() {
+        let source = tempfile::tempdir().unwrap();
+        let v1 = V1::new(source.path());
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 200, "one");
+        v1.observation("s1", 210, "Tabs", "Use tabs.");
+        let config = b"# preserve these bytes\n[capture]\nstore_prompts = false\n";
+        std::fs::write(source.path().join("config.toml"), config).unwrap();
+        let bytes = |p: &Path| std::fs::read(p).unwrap();
+        let wal = v1.path.with_file_name("oboete.db-wal");
+        let before = (bytes(&v1.path), bytes(&wal));
+        let destination = tempfile::tempdir().unwrap();
+        let home = destination.path().join("absent");
+        let shown = preview(&home, &v1.path).unwrap();
+        assert_eq!(
+            (
+                shown.candidates.events,
+                shown.candidates.records,
+                shown.candidates.repos,
+                shown.candidates.documents
+            ),
+            (1, 1, 1, 1)
+        );
+        assert!(shown.candidates.bytes > 0);
+        assert_eq!(shown.settings.effect, SettingsEffect::Copy);
+        assert_eq!(shown.key.len(), 64);
+        assert_eq!(
+            shown.settings.missing,
+            [
+                MissingSetting::Curate,
+                MissingSetting::Inject,
+                MissingSetting::Redaction,
+                MissingSetting::Chain
+            ]
+        );
+        assert!(!home.exists());
+        assert_eq!((bytes(&v1.path), bytes(&wal)), before);
+        assert_eq!(bytes(&source.path().join("config.toml")), config);
+    }
+
+    #[test]
+    fn confirmed_migration_refuses_changed_wal_and_config_before_effects() {
+        for changed_config in [false, true] {
+            let source = tempfile::tempdir().unwrap();
+            let v1 = V1::new(source.path());
+            v1.session("s1", "r", 100);
+            v1.prompt("s1", 200, "one");
+            std::fs::write(source.path().join("config.toml"), "# original\n").unwrap();
+            let home = tempfile::tempdir().unwrap();
+            let shown = preview(home.path(), &v1.path).unwrap();
+            if changed_config {
+                std::fs::write(source.path().join("config.toml"), "# changed\n").unwrap();
+            } else {
+                v1.conn
+                    .execute("UPDATE events SET payload = '{\"prompt\":\"two\"}'", [])
+                    .unwrap();
+            }
+            let mut progress = Vec::new();
+            let failed = run(home.path(), &v1.path, Some(&shown.key), &mut |c| {
+                progress.push(c.clone())
+            })
+            .unwrap_err();
+            assert_eq!(failed.code, FailureCode::Stale);
+            assert_eq!(failed.outcome.stats.records, 0);
+            assert!(failed.outcome.settings.is_none() && progress.is_empty());
+            assert!(!crate::raw::path(home.path()).exists());
+            assert!(!home.path().join("config.toml").exists());
+        }
+    }
+
+    #[test]
+    fn composite_preview_discloses_conditional_v1_candidates_without_writes() {
+        let home = tempfile::tempdir().unwrap();
+        let v1 = V1::new(home.path());
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 200, "one");
+        v1.observation("s1", 210, "Tabs", "Use tabs.");
+        let source = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            "src/testdata/transcripts/codex-basic.jsonl",
+            source.path().join("rollout-basic.jsonl"),
+        )
+        .unwrap();
+        let shown = crate::transcript::preview(home.path(), &[("codex", source.path())]).unwrap();
+        assert_eq!(shown.candidates.agents["codex"].events, 8);
+        let migration = shown.v1.expect("transcript consent must include v1");
+        assert_eq!(
+            (migration.candidates.records, migration.candidates.documents),
+            (1, 1)
+        );
+        assert_eq!(migration.settings.effect, SettingsEffect::Defaults);
+        assert!(!crate::raw::path(home.path()).exists());
+        assert!(!home.path().join("state").exists());
+        let mut stages = Vec::new();
+        let imported = crate::transcript::run(
+            home.path(),
+            &[("codex", source.path())],
+            Some(&shown.key),
+            &mut |c| match c {
+                crate::transcript::Committed::V1(c) => stages.push(format!("v1:{:?}", c.stage)),
+                crate::transcript::Committed::Transcripts {
+                    agent,
+                    events,
+                    bytes,
+                } => {
+                    assert_eq!(agent, "codex");
+                    assert_eq!(*events, 8);
+                    assert!(*bytes > 0);
+                    stages.push("transcripts".to_owned());
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(imported.stats.agents["codex"].events, 8);
+        assert_eq!(imported.v1.unwrap().stats.documents, 1);
+        assert_eq!(
+            stages,
+            ["v1:Events", "v1:Repos", "v1:Documents", "transcripts"]
+        );
+    }
+
+    #[test]
+    fn typed_migration_keeps_settings_and_committed_event_or_document_batches() {
+        for stop in [Stage::Events, Stage::Documents] {
+            let source = tempfile::tempdir().unwrap();
+            let v1 = V1::new(source.path());
+            v1.session("s1", "r", 100);
+            for i in 0..600 {
+                v1.prompt("s1", 200 + i, "prompt");
+            }
+            for i in 0..100 {
+                v1.observation("s1", 1000 + i, "Title", &"x".repeat(60_000));
+            }
+            std::fs::write(source.path().join("config.toml"), "# original\n").unwrap();
+            let home = tempfile::tempdir().unwrap();
+            let shown = preview(home.path(), &v1.path).unwrap();
+            let mut progress = Vec::new();
+            let failed = run(home.path(), &v1.path, Some(&shown.key), &mut |c| {
+                progress.push(c.clone());
+                if c.stage == stop {
+                    crate::crash::at(1);
+                }
+            })
+            .unwrap_err();
+            crate::crash::off();
+            assert_eq!(
+                failed.outcome.settings.unwrap().effect,
+                SettingsEffect::Copy
+            );
+            let raw = raw::open(home.path()).unwrap();
+            let last = progress.last().unwrap();
+            let stats = failed.outcome.stats;
+            assert_eq!(
+                (last.records, last.repos, last.documents),
+                (stats.records, stats.repos, stats.documents)
+            );
+            assert_eq!(records(&raw).len() as u64, stats.records + stats.repos);
+            assert_eq!(
+                raw.import_keys("oboete-v1:d1e5").unwrap().len() as u64,
+                stats.documents
+            );
+            if stop == Stage::Events {
+                assert_eq!(stats.records, 500);
+            } else {
+                assert!(stats.documents > 0 && stats.documents < 100);
+            }
+            drop(raw);
+            let current = preview(home.path(), &v1.path).unwrap();
+            let resumed = run(home.path(), &v1.path, Some(&current.key), &mut |_| {}).unwrap();
+            assert_eq!(stats.records + resumed.stats.records, 600);
+            assert_eq!(stats.documents + resumed.stats.documents, 100);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn confirmed_migration_rechecks_config_after_waiting_for_its_writer() {
+        let source = tempfile::tempdir().unwrap();
+        let v1 = V1::new(source.path());
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 200, "one");
+        std::fs::write(source.path().join("config.toml"), "# source\n").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let shown = preview(home.path(), &v1.path).unwrap();
+        let fence = crate::settings::config_lock(home.path()).unwrap();
+        let (dest, from) = (home.path().to_owned(), v1.path.clone());
+        let thread = std::thread::Builder::new()
+            .name("w5-migrate".into())
+            .spawn(move || run(&dest, &from, Some(&shown.key), &mut |_| {}))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let waiting = std::fs::read_dir("/proc/self/task")
+                .unwrap()
+                .flatten()
+                .any(|task| {
+                    std::fs::read_to_string(task.path().join("comm"))
+                        .is_ok_and(|s| s.trim() == "w5-migrate")
+                        && std::fs::read_to_string(task.path().join("wchan"))
+                            .is_ok_and(|s| s.contains("locks_") || s.contains("flock_"))
+                });
+            if waiting {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "migration never waited for config.lock"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!raw::path(home.path()).exists());
+        std::fs::write(home.path().join("config.toml"), "# chosen by writer\n").unwrap();
+        drop(fence);
+        let failed = thread.join().unwrap().unwrap_err();
+        assert_eq!(failed.code, FailureCode::Stale);
+        assert!(failed.outcome.settings.is_none());
+        assert!(!raw::path(home.path()).exists());
+    }
+
+    #[test]
+    fn composite_failure_retains_v1_commits_before_transcripts_begin() {
+        let home = tempfile::tempdir().unwrap();
+        let v1 = V1::new(home.path());
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 200, "one");
+        let shown = crate::transcript::preview(home.path(), &[]).unwrap();
+        let failed = crate::transcript::run(home.path(), &[], Some(&shown.key), &mut |c| {
+            if matches!(
+                c,
+                crate::transcript::Committed::V1(Committed {
+                    stage: Stage::Events,
+                    ..
+                })
+            ) {
+                crate::crash::at(1);
+            }
+        })
+        .unwrap_err();
+        crate::crash::off();
+        let imported = failed.outcome.v1.unwrap();
+        assert_eq!((imported.stats.records, imported.stats.repos), (1, 0));
+        assert!(imported.settings.is_some());
+        assert!(failed.outcome.stats.agents.is_empty());
+    }
 
     /// v1's tables as its `db.rs` left them, `uid` columns included, in plain SQL: a fixture no
     /// Design B code writes.
@@ -1106,6 +1937,40 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         assert_eq!((stats.documents, stats.seen), (100, 500));
     }
 
+    #[test]
+    fn a_bad_late_document_is_readonly_in_preview_and_appends_no_document_batch() {
+        let source = tempfile::tempdir().unwrap();
+        let v1 = V1::new(source.path());
+        v1.session("s1", "r", 100);
+        for i in 0..600 {
+            v1.observation("s1", 200 + i, "Note", "Native document body.");
+        }
+        // SQLite permits a BLOB in a TEXT column; the native typed reader must reject it.
+        v1.conn
+            .execute("UPDATE observations SET body = x'00' WHERE id = 600", [])
+            .unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let home = parent.path().join("absent");
+        assert!(preview(&home, &v1.path).is_err());
+        assert!(!home.exists());
+        let failed = run(&home, &v1.path, None, &mut |_| {}).unwrap_err();
+        assert_eq!(
+            (failed.outcome.stats.repos, failed.outcome.stats.documents),
+            (1, 0)
+        );
+        let raw = raw::open(&home).unwrap();
+        assert!(raw.import_keys("oboete-v1:d1e5").unwrap().is_empty());
+        drop(raw);
+        v1.conn
+            .execute(
+                "UPDATE observations SET body = 'Repaired.' WHERE id = 600",
+                [],
+            )
+            .unwrap();
+        let resumed = run(&home, &v1.path, None, &mut |_| {}).unwrap();
+        assert_eq!((resumed.stats.documents, resumed.stats.seen), (600, 0));
+    }
+
     /// D6: events that record nothing still move the checkpoint, so the next pass does not read
     /// them again.
     #[test]
@@ -1117,12 +1982,36 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         v1.event("s1", "PreToolUse", 120, json!({}));
         v1.prompt("s1", 130, "<private>not for anyone</private>");
         let home = tempfile::tempdir().unwrap();
-        let mut raw = raw::open(home.path()).unwrap();
-        let stats = pass(home.path(), &mut raw, &v1.path).unwrap();
-        assert_eq!((stats.events, stats.records), (3, 0));
+        let shown = preview(home.path(), &v1.path).unwrap();
+        let mut commits = Vec::new();
+        let failed = run(home.path(), &v1.path, Some(&shown.key), &mut |c| {
+            commits.push(c.clone());
+            if c.stage == Stage::Events {
+                crate::crash::at(1);
+            }
+        })
+        .unwrap_err();
+        crate::crash::off();
+        let stats = failed.outcome.stats;
+        assert_eq!(
+            (stats.events, stats.records, stats.repos, stats.documents),
+            (3, 0, 0, 0)
+        );
+        // The zero-record event checkpoint is durable: count totals cannot classify this
+        // later repository-batch failure. The callback is the committed-boundary witness.
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].stage, Stage::Events);
+        assert_eq!(
+            (commits[0].records, commits[0].repos, commits[0].documents),
+            (0, 0, 0)
+        );
+        let raw = raw::open(home.path()).unwrap();
+        assert!(records(&raw).is_empty());
         let checkpoints = raw.migration_checkpoints("oboete-v1:").unwrap();
         assert_eq!(checkpoints["oboete-v1:d1e5"].through, 3);
-        assert_eq!(pass(home.path(), &mut raw, &v1.path).unwrap().events, 0);
+        drop(raw);
+        let resumed = run(home.path(), &v1.path, None, &mut |_| {}).unwrap();
+        assert_eq!((resumed.stats.events, resumed.stats.repos), (0, 1));
     }
 
     /// A57, D6: v1's `session_repos` rows become `touch` records at their session's start, which a
@@ -1571,6 +2460,14 @@ key_file = "/k/CF_WORKERS_AI_KEY.md"
         assert!(!fresh.path().join("config.toml.part").exists());
         let said = format!("{refused:#}");
         assert!(said.contains("line 2") && !said.contains(&secret), "{said}");
+        let fresh = tempfile::tempdir().unwrap();
+        let refused = run(fresh.path(), &v1.path, None, &mut |_| {}).unwrap_err();
+        assert_eq!(refused.code, FailureCode::InvalidConfig);
+        assert_eq!(
+            refused.outcome.settings.unwrap().effect,
+            SettingsEffect::Copy
+        );
+        assert!(!format!("{:#}", refused.cause).contains(&secret));
     }
 
     /// A58: `--finish` imports once more, lists v1's old files with their sizes, and deletes them
