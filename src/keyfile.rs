@@ -1054,7 +1054,14 @@ mod tests {
 
         #[test]
         fn managed_registration_refuses_unproven_corpus_submounts_before_mkdir() {
-            for kind in ["fuse.passthrough", "ecryptfs", "9p", "nfs", "unprovenfs"] {
+            for kind in [
+                "fuse.passthrough",
+                "ecryptfs",
+                "9p",
+                "nfs",
+                "unprovenfs",
+                "overlay",
+            ] {
                 let (root, _keys, corpus) = setup();
                 let data = root.path().join("data");
                 std::fs::create_dir(&data).unwrap();
