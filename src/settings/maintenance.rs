@@ -1,6 +1,6 @@
 //! Bounded viewer import previews and one active/last receipt; no scheduler or persisted jobs.
 use super::{Refusal, refused};
-use crate::{migrate, transcript};
+use crate::{backup, executable, migrate, transcript, worker};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -18,6 +18,8 @@ enum Agent {
 enum Operation {
     Transcripts { agent: Option<Agent> },
     V1 { from: Option<String> },
+    Rebuild {},
+    Restore {},
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +47,8 @@ struct Progress {
     v1_documents: u64,
     claude: AgentProgress,
     codex: AgentProgress,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native: Option<Value>,
 }
 #[derive(Clone, Serialize)]
 struct Run {
@@ -156,6 +160,27 @@ impl Maintenance {
                     "v1":preview.v1.map(|p| json!({"candidates":p.candidates,"settings":p.settings})),
                     "no_model_request":true}))
             }
+            Operation::Rebuild { .. } | Operation::Restore { .. } => {
+                let preview = match request.operation {
+                    Operation::Rebuild { .. } => worker::preview_rebuild(home),
+                    _ => backup::preview_restore(home),
+                }
+                .map_err(|error| refused(422, native_preview_code(&error), ""))?;
+                let rules = crate::redact::Rules::load(home).map_err(|_| failed())?;
+                let label =
+                    crate::redact::outbound_with(&preview.backup_dir.to_string_lossy(), &rules);
+                let mut value = serde_json::to_value(&preview).expect("typed preview serializes");
+                let fields = value.as_object_mut().expect("typed preview object");
+                let key = fields.remove("key").expect("preview key");
+                let kind = fields.remove("operation").expect("preview kind");
+                fields.insert("preview_key".into(), key);
+                fields.insert("kind".into(), kind);
+                fields.insert("no_model_request".into(), json!(true));
+                if preview.backup.is_some() {
+                    fields.insert("backup_label".into(), json!(label));
+                }
+                Ok(value)
+            }
             Operation::V1 { from } => {
                 let default_source = from.as_deref().is_none_or(str::is_empty);
                 let from = from_path(home, from.as_deref());
@@ -222,6 +247,32 @@ impl Maintenance {
             id,
         };
         let (result, code, partial) = match request.operation {
+            Operation::Rebuild { .. } | Operation::Restore { .. } => {
+                let mut committed =
+                    |event: &worker::MaintenanceCommit| self.native_progress(id, event);
+                let result = match request.operation {
+                    Operation::Rebuild { .. } => worker::rebuild_report(
+                        home,
+                        Some(&request.preview_key),
+                        executable::Role::Viewer,
+                        &mut committed,
+                    ),
+                    _ => worker::restore_report(
+                        home,
+                        Some(&request.preview_key),
+                        executable::Role::Viewer,
+                        &mut committed,
+                    ),
+                };
+                match result {
+                    Ok(outcome) => (native_outcome(&outcome), None, false),
+                    Err(failure) => (
+                        native_outcome(&failure.outcome),
+                        Some(native_code(&failure.code)),
+                        failure.outcome.committed(),
+                    ),
+                }
+            }
             Operation::Transcripts { agent } => {
                 let mut committed =
                     |event: &transcript::Committed| self.transcript_progress(id, event);
@@ -270,6 +321,18 @@ impl Maintenance {
             state.last = Some(run);
         }
         Ok(Self::snapshot(&state))
+    }
+    fn native_progress(&self, id: &str, event: &worker::MaintenanceCommit) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(run) = state.active.as_mut().filter(|run| run.operation_id == id) {
+            run.committed = true;
+            run.stage = match event {
+                worker::MaintenanceCommit::Effect { stage } => *stage,
+                worker::MaintenanceCommit::Index { .. } => "indexing",
+            };
+            run.progress.native =
+                Some(serde_json::to_value(event).expect("typed progress serializes"));
+        }
     }
     fn transcript_progress(&self, id: &str, event: &transcript::Committed) {
         match event {
@@ -323,12 +386,14 @@ impl Operation {
         match self {
             Self::Transcripts { .. } => "transcripts",
             Self::V1 { .. } => "v1",
+            Self::Rebuild { .. } => "rebuild",
+            Self::Restore { .. } => "restore",
         }
     }
     fn agent(&self) -> Option<&'static str> {
         match self {
             Self::Transcripts { agent } => Some(agent_name(*agent)),
-            Self::V1 { .. } => None,
+            Self::V1 { .. } | Self::Rebuild { .. } | Self::Restore { .. } => None,
         }
     }
 }
@@ -359,6 +424,24 @@ fn failure_code(code: migrate::FailureCode) -> &'static str {
         migrate::FailureCode::Failed => "maintenance_failed",
     }
 }
+fn native_code(code: &backup::MaintenanceCode) -> &'static str {
+    match code {
+        backup::MaintenanceCode::Stale => "maintenance_stale",
+        backup::MaintenanceCode::InvalidSource => "maintenance_source",
+        backup::MaintenanceCode::InvalidConfig => "maintenance_config",
+        backup::MaintenanceCode::Busy => "maintenance_busy",
+        backup::MaintenanceCode::RecoveryRequired => "maintenance_recovery_required",
+        backup::MaintenanceCode::Failed => "maintenance_failed",
+    }
+}
+fn native_preview_code(error: &anyhow::Error) -> &'static str {
+    error
+        .downcast_ref::<backup::MaintenanceCode>()
+        .map_or("maintenance_preview_failed", native_code)
+}
+fn native_outcome(outcome: &worker::MaintenanceOutcome) -> Value {
+    serde_json::to_value(outcome).expect("typed native outcome serializes")
+}
 fn transcript_counts(stats: &transcript::ImportStats) -> Value {
     json!({"claude":stats.agents.get("claude"),"codex":stats.agents.get("codex")})
 }
@@ -388,6 +471,82 @@ fn transcript_effects(outcome: &transcript::Outcome) -> bool {
 
 #[cfg(test)]
 mod tests {
+    fn imported_home() -> (tempfile::TempDir, Maintenance, PathBuf) {
+        let (root, maintenance, home, _) = fixture();
+        let operation = json!({"kind":"transcripts","agent":"codex"});
+        let preview = maintenance
+            .preview(
+                &home,
+                &serde_json::to_vec(&json!({"operation":operation})).unwrap(),
+            )
+            .unwrap();
+        let body = serde_json::to_vec(&json!({"operation":operation,"preview_key":preview["preview_key"],"operation_id":"1".repeat(64),"confirmed":true})).unwrap();
+        assert_eq!(
+            maintenance.start(&home, &body).unwrap()["last"]["phase"],
+            "complete"
+        );
+        crate::worker::run_once(&home).unwrap();
+        (root, maintenance, home)
+    }
+
+    #[test]
+    fn rebuild_and_restore_require_fixed_previewed_operations_and_replay_receipts() {
+        let (_root, maintenance, home) = imported_home();
+        for (index, kind) in ["rebuild", "restore"].into_iter().enumerate() {
+            let operation = json!({"kind":kind});
+            let preview = maintenance
+                .preview(
+                    &home,
+                    &serde_json::to_vec(&json!({"operation":operation})).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(preview["kind"], kind);
+            assert_eq!(preview["no_model_request"], true);
+            assert_eq!(preview["hybrid_ready"], false);
+            assert_eq!(preview["raw"]["records"], 8);
+            let body = serde_json::to_vec(&json!({"operation":operation,"preview_key":preview["preview_key"],"operation_id":if index==0 {"2".repeat(64)} else {"3".repeat(64)},"confirmed":true})).unwrap();
+            let receipt = maintenance.start(&home, &body).unwrap();
+            assert_eq!(receipt["last"]["kind"], kind);
+            assert_eq!(receipt["last"]["phase"], "complete");
+            assert_eq!(
+                receipt["last"]["result"]["outcome"]["index"]["state"],
+                "complete"
+            );
+            assert_eq!(receipt["last"]["result"]["outcome"]["hybrid_ready"], false);
+            assert_eq!(maintenance.start(&home, &body).unwrap(), receipt);
+        }
+    }
+
+    #[test]
+    fn rebuild_and_restore_reject_extra_sources_and_stale_saved_configuration() {
+        let (_root, maintenance, home) = imported_home();
+        for kind in ["rebuild", "restore"] {
+            let bad =
+                serde_json::to_vec(&json!({"operation":{"kind":kind,"from":"other-store.db"}}))
+                    .unwrap();
+            assert_eq!(maintenance.preview(&home, &bad).unwrap_err().status, 400);
+            let operation = json!({"kind":kind});
+            let preview = maintenance
+                .preview(
+                    &home,
+                    &serde_json::to_vec(&json!({"operation":operation})).unwrap(),
+                )
+                .unwrap();
+            let raw_before = std::fs::read(home.join("raw.db")).unwrap();
+            std::fs::write(
+                home.join("config.toml"),
+                format!("# changed saved scope {kind}\n[summary]\ncurate = false\n"),
+            )
+            .unwrap();
+            let request = serde_json::to_vec(&json!({"operation":operation,"preview_key":preview["preview_key"],"operation_id":if kind=="rebuild" {"4".repeat(64)} else {"5".repeat(64)},"confirmed":true})).unwrap();
+            let receipt = maintenance.start(&home, &request).unwrap();
+            assert_eq!(receipt["last"]["phase"], "failed");
+            assert_eq!(receipt["last"]["result"]["code"], "maintenance_stale");
+            assert_eq!(receipt["last"]["committed"], false);
+            assert_eq!(std::fs::read(home.join("raw.db")).unwrap(), raw_before);
+        }
+    }
+
     use super::*;
 
     fn fixture() -> (tempfile::TempDir, Maintenance, PathBuf, PathBuf) {

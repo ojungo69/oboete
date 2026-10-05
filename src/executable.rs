@@ -115,6 +115,57 @@ pub(crate) fn check_lock(
     Ok(())
 }
 
+/// One internal maintenance caller's original role/home, plus its own borrowed worker lock.
+/// This never changes the inherited role and cannot be constructed from an HTTP request.
+#[derive(Clone)]
+pub(crate) struct CommandHome {
+    role: Role,
+    original: crate::worker::FileId,
+    worker: crate::worker::FileId,
+}
+impl CommandHome {
+    pub(crate) fn new(home: &Path, role: Role) -> std::io::Result<Self> {
+        check_home(home, Some(role))?;
+        Ok(Self {
+            role,
+            original: expected(Some(role))?.or_else(|| {
+                crate::worker::file_id(std::fs::metadata(home.join("state").join(role.lock())))
+            }),
+            worker: None,
+        })
+    }
+    pub(crate) fn check(&self, home: &Path) -> std::io::Result<()> {
+        check_home(home, Some(self.role))?;
+        for (name, expected) in [
+            (self.role.lock(), self.original),
+            ("worker.lock", self.worker),
+        ] {
+            if expected.is_some()
+                && crate::worker::file_id(std::fs::metadata(home.join("state").join(name)))
+                    != expected
+            {
+                return Err(std::io::Error::other(
+                    "the maintenance caller's home changed",
+                ));
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn locked(
+        &self,
+        home: &Path,
+        identity: crate::worker::FileId,
+    ) -> std::io::Result<Self> {
+        if self.role == Role::Worker {
+            check_lock(Some(Role::Worker), identity)?;
+        }
+        let mut held = self.clone();
+        held.worker = identity;
+        held.check(home)?;
+        Ok(held)
+    }
+}
+
 /// A replacement starts these readers again. One read-only snapshot avoids dropping a live
 /// resident into startup errors while its owner is editing; egress still validates per call.
 pub(crate) fn startup_ready(home: &Path) -> bool {

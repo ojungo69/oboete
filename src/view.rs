@@ -53,7 +53,7 @@ struct Viewer {
     token: Token,
     /// Settings saves, one at a time.
     saving: Mutex<()>,
-    /// One synchronous import and its last bounded receipt.
+    /// One synchronous maintenance operation and its last bounded receipt.
     maintenance: crate::settings::maintenance::Maintenance,
     /// The page `--open` gave the browser opener, removed by the first request with the token.
     opener: Mutex<Option<PathBuf>>,

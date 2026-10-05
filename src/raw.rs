@@ -462,6 +462,21 @@ pub fn exists(home: &Path) -> bool {
     path(home).exists()
 }
 
+/// Finish only the complete stopped-swap file; a `.restoring` is never an authority.
+/// The caller holds raw.lock. Return whether this call performed the rename.
+pub(crate) fn finish_stopped_restore(home: &Path) -> Result<bool> {
+    let live = home.join("raw.db");
+    let restored = path(home);
+    if restored == live {
+        return Ok(false);
+    }
+    match std::fs::rename(&restored, &live) {
+        Ok(()) => Ok(true),
+        Err(_) if live.exists() => Ok(false),
+        Err(error) => Err(error).context("finish a stopped restore"),
+    }
+}
+
 /// A viewer read of an existing raw file. It never creates a store, schema, identity or lock.
 /// The connection closes before the shared swap hold; a restore cannot move either store
 /// while a privacy reader compares them.
@@ -654,6 +669,24 @@ pub fn open(home: &Path) -> Result<Raw> {
 /// Open with one lock-wait budget for restore, WAL, schema, column and device initialization.
 /// Hooks pass 2 s so a failed open reaches MUST-M16's marker before the agent kills the hook.
 pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
+    open_within_report(home, wait, None, &mut || Ok(()))
+}
+pub(crate) fn open_report(
+    home: &Path,
+    guard: Option<&crate::executable::CommandHome>,
+    stopped: &mut impl FnMut() -> Result<()>,
+) -> Result<Raw> {
+    open_within_report(home, crate::db::OPEN_WRITE_WAIT, guard, stopped)
+}
+fn open_within_report(
+    home: &Path,
+    wait: std::time::Duration,
+    guard: Option<&crate::executable::CommandHome>,
+    stopped: &mut impl FnMut() -> Result<()>,
+) -> Result<Raw> {
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
     let deadline = std::time::Instant::now() + wait;
     let path = home.join("raw.db");
     crate::db::private(home, 0o700);
@@ -662,17 +695,14 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
         false,
         OPEN_WAIT.min(deadline.saturating_duration_since(std::time::Instant::now())),
     )?;
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
     // A restore that stopped after moving the damaged file aside and before renaming the rebuilt
     // one in: `raw.db.restored` is only ever a whole rebuild (it gets that name once its records
     // are committed), so the rename is finished here instead of creating an empty store.
-    let restored = self::path(home);
-    if restored != path {
-        // Failed, and no other open finished it: an error, never a new empty store beside it.
-        if let Err(e) = std::fs::rename(&restored, &path)
-            && !path.exists()
-        {
-            return Err(e).context("finish a stopped restore");
-        }
+    if finish_stopped_restore(home)? {
+        stopped()?;
     }
     // Give first creation the same nonempty identity witness as an existing file. This is
     // after stopped-restore recovery and under the swap hold; an interrupted empty creation is

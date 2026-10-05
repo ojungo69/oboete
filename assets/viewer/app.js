@@ -1253,9 +1253,83 @@ const TEXT = {
     '`oboete view` が表示するアドレスから開いてください。',
   ],
   other: ['Saving failed ({status}).', '保存できませんでした({status})。'],
-  maintenance_h: ["Local history import", "ローカル履歴の取り込み"],
-  maintenance_desc: ["Preview the saved history and settings effects before importing. Import makes no model request; later background processing follows your saved settings.", "保存された履歴と設定への影響を確認してから取り込みます。取り込み自体はモデルを呼びません。その後のバックグラウンド処理は保存済み設定に従います。"],
-  maintenance_kind: ["History source", "履歴の種類"],
+  maintenance_h: ["History and recovery", "履歴の取り込みと復元"],
+  maintenance_desc: ["Preview the saved data and effects, then confirm this operation. These imports, rebuilds and restores make no model request; later background processing follows your saved settings.", "保存された記録と変更内容を確認してから実行します。取り込み・再構築・復元自体はモデルを呼びません。その後のバックグラウンド処理は保存済み設定に従います。"],
+  maintenance_rebuild: ["Rebuild search and derived information", "検索用の情報を作り直す"],
+  maintenance_restore: ["Restore from the configured backup", "バックアップから復元する"],
+  maintenance_rebuild_hint: ["Use the saved records and change history to rebuild search, cards and summaries. Preview the current data and recovery needs first.", "保存した記録と変更履歴から検索・カード・要約を作り直します。現在の記録と復元の必要性を先に確認します。"],
+  maintenance_restore_hint: ["Restore the configured backup into this memory home. This can replace current records; preview the selected backup and preserved data first.", "設定済みのバックアップをこの保存先に復元します。現在の記録が置き換わるため、選択されたバックアップと残す記録を先に確認します。"],
+  maintenance_native_preview: ["Preview data and effects", "変更する記録と影響を確認"],
+  maintenance_native_preview_h: ["Current data and recovery effects", "現在の記録と変更内容"],
+  maintenance_rebuild_consent: ["Rebuild search from the saved records and apply the previewed changes.", "保存した記録から検索用の情報を再構築し、確認した変更を適用する。"],
+  maintenance_restore_consent: ["Replace current records with the previewed backup and rebuild search information.", "確認したバックアップで現在の記録を置き換え、検索用の情報を再構築する。"],
+  maintenance_native_start: ["Apply the previewed changes", "確認した内容で実行"],
+  maintenance_native_refresh: ["Inspect current status", "現在の状況を確認"],
+  maintenance_native_another: ["Prepare another operation after inspection", "確認後に別の処理を準備"],
+  maintenance_native_unknown_hint: ["This operation may already have completed. Inspect the receipt and current data before another operation. It is not sent again automatically.", "処理が完了済みの可能性があります。結果と現在の記録を確認してから、別の処理を準備してください。自動では再送しません。"],
+  maintenance_native_settings_hint: ["This operation uses saved settings and does not submit other pending edits.", "保存済みの設定を使い、ほかの編集中の内容は送信しません。"],
+  maintenance_native_committed_boundary: ["Some local stages completed, even when their record count is zero. Inspect the shown results and preserved data before continuing.", "件数がゼロでも、一部のローカル処理は完了しています。表示された結果と保持データを確認してから続けてください。"],
+  maintenance_native_phase_running: ["Operation is running", "処理中"],
+  maintenance_native_phase_complete: ["Operation completed", "処理完了"],
+  maintenance_native_phase_partial: ["Operation stopped after local progress", "保存済みの進捗を残して停止"],
+  maintenance_native_phase_failed: ["Operation did not complete", "処理は完了しませんでした"],
+  maintenance_native_phase_unknown: ["Operation result needs inspection", "処理結果の確認が必要です"],
+  maintenance_current_records: ["Current saved records: {records}; change history: {ops}.", "現在の保存記録：{records}件、変更履歴：{ops}件。"],
+  maintenance_current_unknown: ["Current record counts are unavailable.", "現在の記録数は取得できません。"],
+  maintenance_cached: ["Cached search information: {count}; previously preserved files: {files}.", "保存済みの検索用情報：{count}件、以前から保持されている保存ファイル：{files}個。"],
+  maintenance_unknown_count: ["unknown", "不明"],
+  maintenance_forget_requests: ["Deletion requests to preserve: {count}.", "復元でも守る削除指定：{count}件。"],
+  maintenance_backup_candidates: ["Backup: {bytes} compressed bytes; {records} record segments and {ops} change-history segments. Skipped or invalid segments: {skipped}.", "バックアップ：圧縮後{bytes}バイト、記録{records}区間、変更履歴{ops}区間。無効・読み飛ばし区間：{skipped}。"],
+  maintenance_backup_work: ["Candidate record rows: {records}; change-history rows: {ops}. These are candidates; actual restored counts are known after validation.", "候補の記録：{records}行、変更履歴：{ops}行。これは候補です。実際に復元した件数は検証後に分かります。"],
+  maintenance_cache_limit: ["Cached search data does not mean semantic search is ready.", "保存済みの検索用情報があっても、意味検索の準備完了とは限りません。"],
+  maintenance_restored_actual: ["Restored records: {records}; replayed change history: {ops}; dropped changes: {dropped}; skipped segments: {skipped}.", "復元した記録：{records}件、再適用した変更履歴：{ops}件、除いた変更：{dropped}件、読み飛ばした区間：{skipped}。"],
+  maintenance_restored_prepared: ["Prepared records: {records}; change history: {ops}. The prepared data has not replaced the current records.", "準備した記録：{records}件、変更履歴：{ops}件。この準備データは現在の記録に置き換わっていません。"],
+  maintenance_kept_files: ["Preserved previous files: records {raw}, search information {knowledge}, backups {backups}.", "以前の保存ファイルを保持：記録{raw}個、検索用{knowledge}個、バックアップ{backups}個。"],
+  maintenance_index_complete: ["Search and derived information are ready.", "検索と表示用の情報を作り直しました。"],
+  maintenance_index_failed: ["Search rebuilding failed. Inspect this receipt before trying another operation.", "検索用の情報の再構築に失敗しました。次の操作を始める前に、この結果を確認してください。"],
+  maintenance_index_not_started: ["Search rebuilding has not started.", "検索用の情報の再構築は始まっていません。"],
+  maintenance_carried_cache: ["Cached search information carried: {count}.", "引き継いだ保存済みの検索用情報：{count}件。"],
+  maintenance_cleanup_warnings: ["Previous-file cleanup warnings: {count}.", "以前のファイルの整理に関する注意：{count}件。"],
+  maintenance_backup_warnings: ["Backup warnings: {count}.", "バックアップに関する注意：{count}件。"],
+  maintenance_forget_warnings: ["Deletion-history warnings: {count}.", "削除指定の履歴に関する注意：{count}件。"],
+  maintenance_put_back: ["Previous search information was put back.", "以前の検索用情報を戻しました。"],
+  maintenance_raw_put_back: ["Previous record files were put back.", "以前の記録ファイルを戻しました。"],
+  maintenance_old_knowledge_kept: ["Previous search files are preserved for recovery.", "復旧確認に使えるよう、以前の検索用保存ファイルを保持しています。"],
+  maintenance_stopped_restore_finished: ["A previously interrupted restore was completed before continuing.", "続行する前に、以前中断した復元を完了しました。"],
+  maintenance_quarantined_records: ["Previous record files preserved: {count}.", "保持した以前の記録ファイル：{count}個。"],
+  maintenance_quarantined_segments: ["Damaged backup files preserved: {count}.", "保持した壊れたバックアップファイル：{count}個。"],
+  maintenance_raw_recovery: ["Saved records were also recovered from backup.", "保存記録のバックアップからの復元も行いました。"],
+  maintenance_native_progress: ["Stage: {stage}.", "進行段階：{stage}。"],
+  maintenance_index_progress: ["Saved update: {consumer}; processed position {checkpoint} ({unit}). This is a checkpoint, not a count of new records.", "保存した更新：{consumer}、処理済み位置{checkpoint}（{unit}）。新しく作った記録の件数ではありません。"],
+  maintenance_unit_records: ["records", "記録"],
+  maintenance_unit_ops: ["change history", "変更履歴"],
+  maintenance_stage_knowledge_set_aside: ["Preserving previous search information", "以前の検索用情報を保持"],
+  maintenance_stage_knowledge_put_back: ["Putting previous search information back", "以前の検索用情報を戻す"],
+  maintenance_stage_vectors_carried: ["Carrying cached search information", "保存済みの検索用情報を引き継ぐ"],
+  maintenance_stage_raw_quarantined: ["Preserving previous records", "以前の記録を保持"],
+  maintenance_stage_raw_swapped: ["Saving restored records", "復元した記録を保存"],
+  maintenance_stage_raw_put_back: ["Putting previous record files back", "以前の記録ファイルを戻す"],
+  maintenance_stage_stopped_restore_finished: ["Completing an interrupted restore", "中断した復元を完了"],
+  maintenance_stage_segments_quarantined: ["Preserving damaged backup files", "壊れたバックアップを保持"],
+  maintenance_stage_stores_changed: ["Saving updated local information", "更新した保存情報を保存"],
+  maintenance_stage_forget_reconciled: ["Applying deletion requests", "削除指定を反映"],
+  maintenance_stage_backup_written: ["Saving backup files", "バックアップを保存"],
+  maintenance_stage_backup_quarantined: ["Preserving invalid backup files", "無効なバックアップを保持"],
+  maintenance_stage_indexing: ["Rebuilding search and display information", "検索と表示用の情報を再構築"],
+  maintenance_staged_partial: ["An interrupted restore left prepared data. Inspect the outcome of this operation before continuing.", "中断した復元の準備データが残っています。続行する前に今回の実行結果を確認してください。"],
+  maintenance_stage_directory_synced: ["Saving file changes", "ファイルの変更を保存"],
+  maintenance_consumer_rescan: ["Redaction and deletion checks", "伏せ字と削除の確認"],
+  maintenance_consumer_fts: ["Full-text search", "全文検索"],
+  maintenance_consumer_claims: ["Memories", "記憶"],
+  maintenance_consumer_anchors: ["Evidence", "根拠"],
+  maintenance_consumer_cards: ["Cards", "カード"],
+  maintenance_consumer_turns: ["Session summaries", "セッションの要約"],
+  maintenance_consumer_imported: ["Imported history", "取り込み履歴"],
+  maintenance_consumer_manifest: ["Work locations", "作業場所"],
+  maintenance_consumer_gaps: ["Uncurated records", "未整理の記録"],
+  maintenance_consumer_compress: ["Storage compression", "保存の圧縮"],
+  maintenance_recovery_required: ["An interrupted restore or damaged store needs recovery before this operation. Inspect the preserved data first.", "中断した復元、または壊れた保存記録の復旧が必要です。先に保持されている記録を確認してください。"],
+  maintenance_kind: ["Operation", "操作"],
   maintenance_transcripts: ["Agent transcripts", "エージェントの会話履歴"],
   maintenance_v1: ["Older oboete store", "旧oboeteのストア"],
   maintenance_agent: ["Agent", "エージェント"],
@@ -1274,7 +1348,7 @@ const TEXT = {
   maintenance_unknown_hint: ["The request may already be recorded. Inspect its status and stored history before preparing another import. It is not sent again automatically.", "処理が記録済みの可能性があります。状況と保存された履歴を確認してから、別の取り込みを準備してください。自動では再送しません。"],
   maintenance_no_receipt: ["No receipt is available in this viewer session. After a restart, inspect stored history before another preview.", "このビューアのセッションには結果がありません。再起動後は保存された履歴を確認してから再びプレビューしてください。"],
   maintenance_settings_hint: ["Import actions use saved settings and do not submit unrelated drafts. If older settings were copied, reload settings explicitly to inspect them.", "取り込みは保存済み設定を使い、ほかの編集中の内容は送信しません。旧設定がコピーされた場合は、設定を明示的に再読み込みして確認してください。"],
-  maintenance_other_unavailable: ["Claude-mem import waits for repository mapping. Rebuild, restore and recuration follow in the next maintenance slices; updating is not built yet.", "claude-memの取り込みはリポジトリ対応づけを待っています。再構築・復元・再キュレーションは後続の管理機能で追加し、更新機能はまだ未実装です。"],
+  maintenance_other_unavailable: ["Claude-mem import waits for repository mapping. Recuration and v1 finalization follow in the next slice; updating is not built yet.", "claude-memの取り込みはリポジトリ対応づけを待っています。要約のやり直しと旧版の移行完了は後続の機能で追加し、更新機能はまだ未実装です。"],
   maintenance_transcript_candidates: ["{agent}: {files} files, {sessions} sessions, {records} candidate records, {bytes} selected bytes; {waiting} waiting, {refused} refused.", "{agent}: {files}ファイル、{sessions}セッション、候補{records}レコード、選択{bytes}バイト。待機{waiting}、拒否{refused}。"],
   maintenance_transcript_actual: ["{agent}: {records} committed records; {seen} previously seen, {waiting} waiting, {refused} refused.", "{agent}: 確定{records}レコード。既存{seen}、待機{waiting}、拒否{refused}。"],
   maintenance_conditional_v1: ["This transcript import also includes the older store in this memory folder. Confirmation covers both imports and the following settings effect.", "この会話履歴の取り込みには、この記憶フォルダー内の旧ストアも含まれます。確認は両方の取り込みと次の設定への影響を対象にします。"],
@@ -1301,19 +1375,19 @@ const TEXT = {
   maintenance_stage_partial: ["Stopped after committed progress", "確定済み進捗を残して停止"],
   maintenance_stage_failed: ["Stopped", "停止"],
   maintenance_stage_unknown: ["Completion needs inspection", "完了状態の確認が必要"],
-  maintenance_preview_failed: ["A safe preview could not be prepared. No import was started.", "安全なプレビューを作成できませんでした。取り込みは開始していません。"],
-  maintenance_status_unavailable: ["Import status could not be read. The running operation is not cancelled.", "状況を読み取れませんでした。進行中の処理は中止していません。"],
-  maintenance_unknown: ["The import result is unknown. Inspect before another operation.", "取り込み結果が不明です。別の処理の前に確認してください。"],
+  maintenance_preview_failed: ["A safe preview could not be prepared. The operation was not started.", "安全なプレビューを作成できませんでした。処理は開始していません。"],
+  maintenance_status_unavailable: ["Operation status could not be read. The running operation is not cancelled.", "状況を読み取れませんでした。進行中の処理は中止していません。"],
+  maintenance_unknown: ["The result is unknown. Inspect before another operation.", "処理結果が不明です。別の処理の前に確認してください。"],
   maintenance_stale: ["Source, settings or effects changed. Prepare a fresh preview.", "元データ・設定・影響が変わりました。新しいプレビューを作成してください。"],
   maintenance_source: ["The local source could not be safely used. Check its path and data.", "元データを安全に使えませんでした。パスとデータを確認してください。"],
   maintenance_source_missing: ["There is no older oboete.db in this memory folder. Choose an existing source file to preview.", "この記憶フォルダーには旧oboete.dbがありません。確認する元ファイルを指定してください。"],
-  maintenance_config: ["Saved or older settings are invalid. Inspect them before importing.", "保存済み設定または旧設定が不正です。取り込み前に確認してください。"],
-  maintenance_busy: ["Another native import is active. Inspect status and wait.", "別の取り込みが進行中です。状況を確認して待ってください。"],
+  maintenance_config: ["Saved or older settings are invalid. Inspect them before continuing.", "保存済み設定または旧設定が不正です。続行する前に確認してください。"],
+  maintenance_busy: ["Another operation is active. Inspect status and wait.", "別の処理が進行中です。状況を確認して待ってください。"],
   maintenance_refused: ["Some files were refused. Earlier committed progress is kept. Inspect it before another preview.", "取り込めないファイルがありました。確定済みの進捗は残ります。別のプレビュー前に確認してください。"],
-  maintenance_failed: ["The import stopped. Inspect the shown progress and current history before proceeding.", "取り込みが停止しました。表示された進捗と保存済み履歴を確認してから進めてください。"],
-  maintenance_confirmation: ["Confirm the previewed source and settings effects first.", "先にプレビューの履歴と設定への影響を確認してください。"],
+  maintenance_failed: ["The operation stopped. Inspect the shown progress and current data before proceeding.", "処理が停止しました。表示された進捗と保存済みの記録を確認してから進めてください。"],
+  maintenance_confirmation: ["Confirm the previewed scope and effects first.", "先にプレビューの対象と影響を確認してください。"],
   maintenance_key: ["The preview is invalid. Prepare it again.", "プレビューが不正です。作成し直してください。"],
-  maintenance_id: ["The operation identifier is invalid. Prepare a fresh import.", "処理の識別情報が不正です。新しい取り込みを準備してください。"],
+  maintenance_id: ["The operation identifier is invalid. Prepare a fresh operation.", "処理の識別情報が不正です。新しい処理を準備してください。"],
   maintenance_id_changed: ["That operation identifier belongs to another confirmed request. Inspect status.", "その識別情報は別の確認済み処理のものです。状況を確認してください。"],
 
 };
@@ -1424,6 +1498,7 @@ let form = null;
 let maintenanceDraft = { kind:'transcripts', agent:'all', from:'', preview:null, confirmed:false,
   operationId:null, previewing:false, sending:false, unknown:false, status:null, error:null };
 function maintenanceOperation(d) {
+  if(d.kind==='rebuild'||d.kind==='restore')return {kind:d.kind};
   return d.kind === 'v1' ? {kind:'v1',from:d.from || null}
     : {kind:'transcripts',agent:d.agent === 'all' ? null : d.agent};
 }
@@ -1467,6 +1542,7 @@ async function refreshMaintenance(d = maintenanceDraft) {
 }
 function maintenanceSection(f) {
   const d=f.maintenance;
+  const native=d.kind==='rebuild'||d.kind==='restore';
   const busy=maintenanceBlocked(d);
   const invalidate=()=>{
     d.preview=null;d.confirmed=false;d.operationId=null;d.error=null;
@@ -1479,7 +1555,7 @@ function maintenanceSection(f) {
     if(start)start.disabled=true;
   };
   const kind=el('select',null);
-  for(const [value,label] of [['transcripts','maintenance_transcripts'],['v1','maintenance_v1']]) {
+  for(const [value,label] of [['transcripts','maintenance_transcripts'],['v1','maintenance_v1'],['rebuild','maintenance_rebuild'],['restore','maintenance_restore']]) {
     const option=el('option',null,t(label));option.value=value;kind.append(option);
   }
   kind.value=d.kind;kind.dataset.field='maintenance.kind';kind.disabled=busy;
@@ -1492,7 +1568,7 @@ function maintenanceSection(f) {
   agent.addEventListener('change',()=>{d.agent=agent.value;invalidate();});
   const from=input('text',d.from,'','maintenance.from',value=>{d.from=value;invalidate();});
   from.disabled=busy;
-  const preview=el('button','quiet small',t('maintenance_preview'));
+  const preview=el('button','quiet small',t(native?'maintenance_native_preview':'maintenance_preview'));
   preview.dataset.action='maintenance.preview';
   preview.type='button';preview.disabled=busy;
   preview.addEventListener('click',async()=>{
@@ -1507,7 +1583,7 @@ function maintenanceSection(f) {
   });
   const confirm=checkbox(d.confirmed,value=>{d.confirmed=value;renderMaintenance(d);});
   confirm.dataset.field='maintenance.confirmed';confirm.disabled=busy || !d.preview;
-  const start=el('button','quiet small',t('maintenance_start'));
+  const start=el('button','quiet small',t(native?'maintenance_native_start':'maintenance_start'));
   start.dataset.action='maintenance.start';
   start.type='button';start.disabled=busy || !d.preview || !d.confirmed;
   start.addEventListener('click',async()=>{
@@ -1534,10 +1610,10 @@ function maintenanceSection(f) {
       renderMaintenance(d);
     }
   });
-  const refresh=el('button','quiet small',t('maintenance_refresh'));
+  const refresh=el('button','quiet small',t(native?'maintenance_native_refresh':'maintenance_refresh'));
   refresh.dataset.action='maintenance.refresh';
   refresh.type='button';refresh.addEventListener('click',()=>{void refreshMaintenance(d);});
-  const another=el('button','quiet small',t('maintenance_another'));
+  const another=el('button','quiet small',t(native?'maintenance_native_another':'maintenance_another'));
   another.dataset.action='maintenance.another';
   another.type='button';another.disabled=d.previewing || d.sending || Boolean(d.status?.active);
   another.addEventListener('click',()=>{
@@ -1549,21 +1625,34 @@ function maintenanceSection(f) {
   return el('section','maintenance',el('h3',null,t('maintenance_h')),el('p','desc',t('maintenance_desc')),
     el('label','field',el('span',null,t('maintenance_kind')),kind),
     d.kind==='transcripts' ? el('label','field',el('span',null,t('maintenance_agent')),agent)
-      : el('label','field',el('span',null,t('maintenance_source_path')),from),
-    d.kind==='v1' ? el('p','desc',t('maintenance_source_default')) : el('p','desc',t('maintenance_native_roots')),
-    preview,previewDetails,d.preview ? el('label','check',confirm,t('maintenance_consent')) : null,
+      : d.kind==='v1' ? el('label','field',el('span',null,t('maintenance_source_path')),from) : null,
+    el('p','desc',t(d.kind==='v1'?'maintenance_source_default':d.kind==='transcripts'?'maintenance_native_roots':`maintenance_${d.kind}_hint`)),
+    preview,previewDetails,d.preview ? el('label','check',confirm,t(native?`maintenance_${d.kind}_consent`:'maintenance_consent')) : null,
     start,d.previewing ? el('p','desc',t('loading')) : null,
     d.error ? el('p','desc text maintenance-error',t(d.error)) : null,
-    d.unknown ? el('p','desc',t('maintenance_unknown_hint')) : null,
+    d.unknown ? el('p','desc',t(native?'maintenance_native_unknown_hint':'maintenance_unknown_hint')) : null,
     active ? maintenanceStatus(active) : null,last ? maintenanceStatus(last) : null,
     d.status && !d.status.available ? el('p','desc',t('maintenance_no_receipt')) : null,
     refresh,d.operationId && !d.status?.active ? another : null,
-    el('p','desc',t('maintenance_settings_hint')),
+    el('p','desc',t(native?'maintenance_native_settings_hint':'maintenance_settings_hint')),
     el('p','desc',t('maintenance_other_unavailable')));
 }
 function maintenancePreview(p) {
   const rows=[];
-  if(p.kind==='v1') {
+  if(p.kind==='rebuild'||p.kind==='restore') {
+    rows.push(el('p','desc',p.raw ? t('maintenance_current_records',p.raw) : t('maintenance_current_unknown')),
+      el('p','desc',t('maintenance_cached',{count:p.cached_vectors ?? t('maintenance_unknown_count'),files:p.kept_files})),
+      el('p','desc',t('maintenance_forget_requests',{count:p.forget_requests})),
+      el('p','desc',t('maintenance_cache_limit')));
+    if(p.staged_partial)rows.push(el('p','desc',t('maintenance_staged_partial')));
+    if(p.backup)rows.push(el('p','text',p.backup_label),
+      el('p','desc',t('maintenance_backup_candidates',{bytes:p.backup.compressed_bytes,
+        records:p.backup.record_segments,ops:p.backup.op_segments,
+        skipped:p.backup.invalid_record_segments+p.backup.skipped_op_segments})),
+      el('p','desc',t('maintenance_backup_work',{records:p.backup.record_lines ?? t('maintenance_unknown_count'),
+        ops:p.backup.op_lines ?? t('maintenance_unknown_count')})));
+    if(p.forget_log_warnings)rows.push(el('p','desc',t('maintenance_forget_warnings',{count:p.forget_log_warnings})));
+  } else if(p.kind==='v1') {
     rows.push(el('p','text',p.source),maintenanceV1(p.candidates,p.settings,true));
   } else {
     for(const [agent,s] of Object.entries(p.candidates)) {
@@ -1574,7 +1663,7 @@ function maintenancePreview(p) {
     if(p.v1)rows.push(el('p','desc',t('maintenance_conditional_v1')),
       maintenanceV1(p.v1.candidates,p.v1.settings,true));
   }
-  return el('div','maintenance-preview',el('h4',null,t('maintenance_preview_h')),...rows);
+  return el('div','maintenance-preview',el('h4',null,t(p.kind==='rebuild'||p.kind==='restore'?'maintenance_native_preview_h':'maintenance_preview_h')),...rows);
 }
 function maintenanceV1(s,settings,candidate=false) {
   return el('div',null,el('p','desc',t(candidate?'maintenance_v1_candidates':'maintenance_v1_actual',{
@@ -1582,8 +1671,48 @@ function maintenanceV1(s,settings,candidate=false) {
     bytes:s.bytes ?? 0,seen:s.seen ?? 0})),settings ? el('p','desc',t('maintenance_settings_effect',{
       effect:t('maintenance_settings_'+settings.effect),missing:settings.missing.length})) : null);
 }
+function maintenanceRestoreReceipt(receipt,recovery=false) {
+  const effects=receipt.effects;
+  const rows=[];
+  if(!(recovery&&effects.stopped_restore_finished&&receipt.replayed_records===0&&receipt.replayed_ops===0)) {
+    rows.push(el('p','desc',t(effects.raw_swapped?'maintenance_restored_actual':'maintenance_restored_prepared',{
+      records:receipt.replayed_records,ops:receipt.replayed_ops,dropped:receipt.dropped_ops,skipped:receipt.skipped_segments})));
+  }
+  rows.push(el('p','desc',t('maintenance_kept_files',{raw:receipt.old_raw_kept_files,
+    knowledge:receipt.old_knowledge_kept_files,backups:receipt.backup_files_kept})));
+  if(effects.raw_put_back)rows.push(el('p','desc',t('maintenance_raw_put_back')));
+  if(effects.knowledge_put_back)rows.push(el('p','desc',t('maintenance_put_back')));
+  if(effects.stopped_restore_finished)rows.push(el('p','desc',t('maintenance_stopped_restore_finished')));
+  if(effects.raw_files_quarantined)rows.push(el('p','desc',t('maintenance_quarantined_records',{count:effects.raw_files_quarantined})));
+  if(effects.segments_quarantined)rows.push(el('p','desc',t('maintenance_quarantined_segments',{count:effects.segments_quarantined})));
+  if(receipt.forget_log_warnings)rows.push(el('p','desc',t('maintenance_forget_warnings',{count:receipt.forget_log_warnings})));
+  return rows;
+}
 function maintenanceOutcome(out) {
   if(!out)return [];
+  if(out.operation==='rebuild'||out.operation==='restore') {
+    const effects=out.effects;
+    const rows=[el('p','desc',t('maintenance_index_'+out.index.state)),
+      el('p','desc',t('maintenance_carried_cache',{count:out.cached_vectors_carried})),
+      el('p','desc',t('maintenance_cache_limit'))];
+    if(out.restore)rows.push(...maintenanceRestoreReceipt(out.restore));
+    if(effects.knowledge_put_back)rows.push(el('p','desc',t('maintenance_put_back')));
+    if(effects.raw_put_back)rows.push(el('p','desc',t('maintenance_raw_put_back')));
+    if(out.old_knowledge_kept)rows.push(el('p','desc',t('maintenance_old_knowledge_kept')));
+    if(effects.stopped_restore_finished)rows.push(el('p','desc',t('maintenance_stopped_restore_finished')));
+    if(effects.raw_files_quarantined)rows.push(el('p','desc',t('maintenance_quarantined_records',{count:effects.raw_files_quarantined})));
+    if(effects.segments_quarantined)rows.push(el('p','desc',t('maintenance_quarantined_segments',{count:effects.segments_quarantined})));
+    if(out.index.raw_recovery) {
+      const recovery=out.index.raw_recovery;
+      if(recovery.effects.raw_swapped&&!recovery.effects.stopped_restore_finished)rows.push(el('p','desc',t('maintenance_raw_recovery')));
+      rows.push(...maintenanceRestoreReceipt(recovery,true));
+    }
+    for(const [key,count] of [['cleanup',out.cleanup_warnings],['backup',out.index.backup_warnings],
+      ['forget',out.index.forget_log_warnings]]) {
+      if(count)rows.push(el('p','desc',t(`maintenance_${key}_warnings`,{count})));
+    }
+    return rows;
+  }
   const rows=[];
   if(out.transcripts)for(const [agent,s] of Object.entries(out.transcripts)) {
     if(s)rows.push(el('p','desc',t('maintenance_transcript_actual',{
@@ -1596,13 +1725,20 @@ function maintenanceOutcome(out) {
 }
 function maintenanceStatus(run) {
   const p=run.progress;
-  const rows=[el('p','desc',t('maintenance_progress',{
+  const native=run.kind==='rebuild'||run.kind==='restore';
+  const rows=[el('p','desc',native ? p.native?.kind==='index'
+    ? t('maintenance_index_progress',{consumer:t('maintenance_consumer_'+p.native.consumer),
+      checkpoint:p.native.checkpoint,unit:t('maintenance_unit_'+p.native.unit)})
+    : t('maintenance_native_progress',{stage:t('maintenance_stage_'+run.stage)})
+    : t('maintenance_progress',{
     stage:t('maintenance_stage_'+run.stage),records:p.v1_records,repos:p.v1_repositories,
     documents:p.v1_documents,claude:p.claude.events,codex:p.codex.events}))];
   if(run.result?.code)rows.push(el('p','desc text',t(run.result.code)));
-  if(run.phase==='partial' && run.committed)rows.push(el('p','desc',t('maintenance_committed_boundary')));
+  if(run.phase==='partial' && run.committed)rows.push(el('p','desc',t(native?'maintenance_native_committed_boundary':'maintenance_committed_boundary')));
   rows.push(...maintenanceOutcome(run.result?.outcome));
-  return el('div','maintenance-result',el('h4',null,t('maintenance_phase_'+run.phase)),...rows);
+  const result=el('div','maintenance-result',el('h4',null,t((native?'maintenance_native_phase_':'maintenance_phase_')+run.phase)),...rows);
+  result.setAttribute('role','status');
+  return result;
 }
 
 let preferenceDraft = { text: '', confirmed: false, result: null };
