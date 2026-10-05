@@ -85,7 +85,11 @@ fn lock(home: &Path, exclusive: bool, wait: Duration) -> Result<File> {
                 std::thread::sleep(Duration::from_millis(1));
             }
             Err(std::fs::TryLockError::WouldBlock) => {
-                anyhow::bail!("provider dispatch or forget is busy: try again")
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "provider dispatch or forget is busy: try again",
+                )
+                .into());
             }
             Err(std::fs::TryLockError::Error(e)) => {
                 return Err(e).context("lock provider dispatch");
@@ -821,8 +825,11 @@ connection.close()
             "a failed physical TLS write released admission before the call failed"
         );
         assert!(
-            registration.try_lock().is_ok(),
-            "failed calls must release admission"
+            admission.held.lock().unwrap().is_none(),
+            "failed calls must release their own admission descriptor"
+        );
+        crate::worker::try_lock(&registration).expect(
+            "failed calls must permit registration after transient inherited descriptors close",
         );
     }
 }

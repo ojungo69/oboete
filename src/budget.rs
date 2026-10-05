@@ -40,6 +40,7 @@ pub fn factor(db: &Connection, provider: &str) -> Result<f64> {
 }
 
 /// Why a provider is not called for this request: the `provider_calls` outcome and its detail.
+#[derive(Debug)]
 pub struct Refusal {
     pub outcome: &'static str,
     pub detail: String,
@@ -53,7 +54,251 @@ pub struct Refusal {
 const UNDECLARED_OUTPUT: u32 = 1_250;
 
 /// A ceiling check keeps this share of the ceiling free: the estimate is not exact.
-const CEILING_SHARE: f64 = 0.95;
+pub(crate) const CEILING_SHARE: f64 = 0.95;
+
+/// Fresh reservations are checked promptly. A retained older row progressively backs off,
+/// up to the ordinary ten-minute outage wait, without inferring that its sender is dead.
+const RESERVATION_WAIT_MS: i64 = 1_000;
+const MAX_RESERVATION_WAIT_MS: i64 = 10 * 60_000;
+
+/// One curation request's reserved allowance. Dropping it is deliberately not a refund: the
+/// process may have sent the request before losing its answer.
+#[derive(Debug)]
+pub(crate) struct Reservation {
+    id: i64,
+    provider: String,
+    role: String,
+    span: String,
+    input: f64,
+    output: f64,
+}
+
+impl Reservation {
+    /// Actual reported usage, with the admission-time bounds for any missing part.
+    pub(crate) fn cost(&self, p: &Provider, usage: Usage, billed: bool) -> Option<f64> {
+        (billed && p.limits().is_paid()).then(|| {
+            p.limits().usd(
+                usage.prompt.map_or(self.input, |n| n as f64),
+                usage.completion.map_or(self.output, |n| n as f64),
+            )
+        })
+    }
+
+    /// Only for a positively unsent request that previously left no attempt (for example an
+    /// egress gate error). Ordinary provider/preflight errors settle and keep their attempt.
+    pub(crate) fn cancel(self, db: &Connection) -> Result<()> {
+        let changed = db.execute(
+            "DELETE FROM provider_calls WHERE id=?1 AND provider=?2 AND role=?3 AND span=?4
+             AND outcome='reserved'",
+            rusqlite::params![self.id, self.provider, self.role, self.span],
+        )?;
+        anyhow::ensure!(changed == 1, "reservation already settled or missing");
+        Ok(())
+    }
+
+    /// Settle exactly this attempt and its rate/state in one short transaction. State is read
+    /// here, after external work, so another sender's owner hold cannot be overwritten.
+    pub(crate) fn settle(
+        self,
+        db: &Connection,
+        call: &providers_db::Call<'_>,
+        rate: Option<providers_db::RateLeft>,
+        next: impl FnOnce(providers_db::State) -> providers_db::State,
+    ) -> Result<providers_db::State> {
+        anyhow::ensure!(
+            call.provider == self.provider && call.role == self.role && call.span == self.span,
+            "reservation does not match this attempt"
+        );
+        anyhow::ensure!(
+            call.outcome != "reserved",
+            "reservation needs a final outcome"
+        );
+        let tx =
+            rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE provider_calls SET outcome=?2, ms=?3, detail=?4, bytes_out=?5,
+             est_tokens=?6, prompt_tokens=?7, completion_tokens=?8, cached_tokens=?9,
+             reasoning_tokens=?10, usd=?11
+             WHERE id=?1 AND outcome='reserved' AND provider=?12 AND role=?13 AND span=?14",
+            rusqlite::params![
+                self.id,
+                call.outcome,
+                call.ms,
+                call.detail,
+                call.bytes_out as i64,
+                call.est_tokens,
+                call.usage.prompt,
+                call.usage.completion,
+                call.usage.cached,
+                call.usage.reasoning,
+                call.usd,
+                self.provider,
+                self.role,
+                self.span
+            ],
+        )?;
+        anyhow::ensure!(changed == 1, "reservation already settled or missing");
+        providers_db::freeze_unmetered(&tx, self.id, [self.input, self.output])?;
+        let current = providers_db::state(&tx, &self.provider)?;
+        let mut updated = next(current);
+        // An answer cannot implicitly resume an owner-held entry or shorten a concurrent rest.
+        if current.down_until > crate::db::now_ms() {
+            updated.down_until = updated.down_until.max(current.down_until);
+        }
+        if current.down_until == providers_db::OWNER_HOLD {
+            updated = current;
+        }
+        if updated != current {
+            providers_db::set_state(&tx, &self.provider, updated)?;
+        }
+        if let Some(rate) = rate {
+            let current = providers_db::rate(&tx, &self.provider)?;
+            let (requests, requests_reset_at) = live_rate(
+                (current.requests, current.requests_reset_at),
+                (rate.requests, rate.requests_reset_at),
+            );
+            let (tokens, tokens_reset_at) = live_rate(
+                (current.tokens, current.tokens_reset_at),
+                (rate.tokens, rate.tokens_reset_at),
+            );
+            providers_db::set_rate(
+                &tx,
+                &self.provider,
+                providers_db::RateLeft {
+                    requests,
+                    requests_reset_at,
+                    tokens,
+                    tokens_reset_at,
+                },
+            )?;
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+}
+
+/// Headers are captured before a response body finishes: an older snapshot can settle last.
+/// A live interval therefore keeps the smaller allowance and later reset. After its reset,
+/// the provider's next snapshot may replenish it normally.
+fn live_rate(
+    current: (Option<i64>, Option<i64>),
+    incoming: (Option<i64>, Option<i64>),
+) -> (Option<i64>, Option<i64>) {
+    if let (Some(left), Some(until)) = current
+        && until > crate::db::now_ms()
+    {
+        (
+            Some(incoming.0.map_or(left, |n| n.min(left))),
+            Some(until.max(incoming.1.unwrap_or(until))),
+        )
+    } else {
+        incoming
+    }
+}
+
+/// Atomically share curation budgets between the worker and an explicit settings probe. No
+/// transaction survives this function, so isolation, allowance discovery and dispatch can run
+/// afterwards without holding the ledger's write lock.
+pub(crate) fn reserve(
+    db: &Connection,
+    p: &Provider,
+    role: &str,
+    span: &str,
+    est: u32,
+    paid_usd_per_month: f64,
+    ceiling_hit: &[u32],
+) -> Result<std::result::Result<Reservation, Refusal>> {
+    reserve_with_history(db, (p, p), role, span, est, paid_usd_per_month, ceiling_hit)
+}
+
+/// Reserve this request while evaluating legacy history with the normal selected entry.
+/// Pending/frozen rows keep their own bounds; only unframed legacy rows need this fallback.
+pub(crate) fn reserve_with_history(
+    db: &Connection,
+    providers: (&Provider, &Provider),
+    role: &str,
+    span: &str,
+    est: u32,
+    paid_usd_per_month: f64,
+    ceiling_hit: &[u32],
+) -> Result<std::result::Result<Reservation, Refusal>> {
+    let (p, history) = providers;
+    anyhow::ensure!(
+        p.name() == history.name(),
+        "budget history does not match provider"
+    );
+    anyhow::ensure!(
+        !matches!(role, "embed" | "query"),
+        "embedding has its own reservation"
+    );
+    if !p.enabled() {
+        return Ok(Err(Refusal {
+            outcome: "gate",
+            detail: "disabled in settings".into(),
+            skip: Skip::Owner,
+        }));
+    }
+    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+    let state = providers_db::state(&tx, p.name())?;
+    if state.down_until == providers_db::OWNER_HOLD {
+        return Ok(Err(Refusal {
+            outcome: "gate",
+            detail: format!(
+                "stopped until the owner acts (`oboete resume {}`)",
+                p.name()
+            ),
+            skip: Skip::Owner,
+        }));
+    }
+    if state.down_until > crate::db::now_ms() {
+        return Ok(Err(Refusal {
+            outcome: "gate",
+            detail: "cooling down after an earlier failure".into(),
+            skip: Skip::Wait(state.down_until),
+        }));
+    }
+    let input = f64::from(est) * factor(&tx, p.name())?;
+    if let Some(refusal) =
+        admit_with_history(&tx, (p, history), input, paid_usd_per_month, ceiling_hit)?
+    {
+        return Ok(Err(refusal));
+    }
+    let output = f64::from(output_bound(p));
+    let detail = serde_json::to_string(&[input, output])?;
+    providers_db::record(
+        &tx,
+        &providers_db::Call {
+            provider: p.name(),
+            role,
+            span,
+            outcome: "reserved",
+            ms: 0,
+            detail: Some(&detail),
+            bytes_out: 0,
+            est_tokens: None,
+            usage: Usage::default(),
+            usd: p.limits().is_paid().then(|| p.limits().usd(input, output)),
+        },
+    )?;
+    let id = tx.last_insert_rowid();
+    tx.commit()?;
+    Ok(Ok(Reservation {
+        id,
+        provider: p.name().into(),
+        role: role.into(),
+        span: span.into(),
+        input,
+        output,
+    }))
+}
+
+pub(crate) fn output_bound(p: &Provider) -> u32 {
+    match p.declared_output() {
+        0 if p.limits().is_paid() => largest_output(p),
+        0 => UNDECLARED_OUTPUT,
+        n => n,
+    }
+}
 
 /// A read of a key's own limit (#238) holds a day; one that failed is tried again after an hour.
 pub(crate) const KEY_READ_HOLDS_MS: i64 = providers_db::DAY_MS;
@@ -123,20 +368,27 @@ pub fn key_budget(db: Option<&Connection>, p: &Provider) -> Result<String> {
     Ok(said)
 }
 
-/// Whether `p` may take a request of `tokens` (calibrated) now. `ceiling_hit` is a ceiling a
-/// provider answered 413 to earlier in this chain run: every entry with that ceiling is skipped.
-pub fn admit(
+/// Check a request with the normal selected entry's fallback for unmetered legacy rows.
+/// A bounded probe changes its own output allowance, not the policy for previous calls.
+/// `tokens` is calibrated; `ceiling_hit` holds ceilings that refused this chain's request.
+pub(crate) fn admit_with_history(
     db: &Connection,
-    p: &Provider,
+    providers: (&Provider, &Provider),
     tokens: f64,
     paid_usd_per_month: f64,
     ceiling_hit: &[u32],
 ) -> Result<Option<Refusal>> {
+    let (p, history) = providers;
+    anyhow::ensure!(
+        p.name() == history.name(),
+        "budget history does not match provider"
+    );
     let name = p.name();
     let limits = p.limits();
     let now = crate::db::now_ms();
     // A rolling day, as `limits.daily_tokens` below: until the oldest call counted leaves it.
     let (used, oldest) = providers_db::calls_in_a_day(db, name)?;
+    let pending = providers_db::reserved_since(db, name, now - providers_db::DAY_MS)?;
     // ponytail: a key's budget (#238) counts the entry's calls, not its key's. Two entries on one
     // OpenRouter key take a fifth each, and a replaced key's calls count for a day. Record the
     // key_id with each call and count by it if an entry ever shares its key; the default has one.
@@ -156,15 +408,16 @@ pub fn admit(
         return Ok(Some(Refusal {
             outcome: "budget",
             detail: format!("{used}/{budget} calls in 24 hours"),
-            skip: Skip::Budget(until),
+            skip: if used.saturating_sub(pending.calls) < budget {
+                Skip::Wait(reservation_retry_at(db, Some(name), now)?)
+            } else {
+                Skip::Budget(until)
+            },
         }));
     }
     // The answer counts against the same limits as the prompt (Groq's TPM is input and output
     // together): the declared output, or with none declared, the largest answer seen.
-    let output = match p.declared_output() {
-        0 => UNDECLARED_OUTPUT,
-        n => n,
-    };
+    let output = output_bound(p);
     let reserved = tokens + f64::from(output);
     if let Some(max) = limits.max_request_tokens {
         if ceiling_hit.contains(&max) {
@@ -184,18 +437,79 @@ pub fn admit(
         }
     }
     let rate = providers_db::rate(db, name)?;
-    if rate.requests == Some(0)
+    if let Some(refusal) = rate_refusal(db, name, rate, &pending, reserved, now)? {
+        return Ok(Some(refusal));
+    }
+    // Counted over the last 24 hours: Groq's day is a rolling window (docs/milestone-1.md), and a
+    // budget kept per UTC day could take twice its share around midnight.
+    if let Some(daily) = limits.daily_tokens {
+        let since = now - providers_db::DAY_MS;
+        let (reported, oldest) = providers_db::tokens_since(db, name, since)?;
+        let settled = reported as f64 + unmetered(db, history, since)?;
+        let used = settled + pending.tokens;
+        if used + reserved > daily as f64 {
+            return Ok(Some(Refusal {
+                outcome: "budget",
+                detail: format!("{used:.0}/{daily} tokens in 24 hours"),
+                // When the oldest call counted leaves the 24 hours.
+                skip: if settled + reserved <= daily as f64 {
+                    Skip::Wait(reservation_retry_at(db, Some(name), now)?)
+                } else {
+                    Skip::Budget(providers_db::out_of_the_day(oldest.unwrap_or(now)))
+                },
+            }));
+        }
+    }
+    if limits.is_paid() {
+        let spent = providers_db::usd_this_month(db)?;
+        // The output the request asks for at most, as `provider::call` sends it.
+        let this = limits.usd(tokens, f64::from(output));
+        if spent + this > paid_usd_per_month {
+            return Ok(Some(Refusal {
+                outcome: "budget",
+                detail: format!(
+                    "USD {spent:.2} of {paid_usd_per_month:.2} spent this month; this call up to {this:.3}"
+                ),
+                skip: if spent - providers_db::reserved_usd_this_month(db)? + this
+                    <= paid_usd_per_month
+                {
+                    Skip::Wait(reservation_retry_at(db, None, now)?)
+                } else {
+                    Skip::Budget(providers_db::next_month())
+                },
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// A provider's reported rate window also covers requests whose reservations are still pending.
+fn rate_refusal(
+    db: &Connection,
+    name: &str,
+    rate: providers_db::RateLeft,
+    pending: &providers_db::Reserved,
+    reserved: f64,
+    now: i64,
+) -> Result<Option<Refusal>> {
+    if rate
+        .requests
+        .is_some_and(|left| left <= i64::from(pending.calls))
         && let Some(at) = rate.requests_reset_at.filter(|&t| t > now)
     {
         return Ok(Some(Refusal {
             outcome: "budget",
             detail: "no requests left until its reset".into(),
-            skip: Skip::Wait(at),
+            skip: Skip::Wait(if rate.requests == Some(0) {
+                at
+            } else {
+                at.min(reservation_retry_at(db, Some(name), now)?)
+            }),
         }));
     }
     if let (Some(left), Some(at)) = (rate.tokens, rate.tokens_reset_at)
         && at > now
-        && (left as f64) < reserved
+        && (left as f64) < reserved + pending.tokens
     {
         return Ok(Some(Refusal {
             outcome: "budget",
@@ -203,64 +517,37 @@ pub fn admit(
                 "{left} tokens left until its reset in {} s",
                 (at - now) / 1000
             ),
-            skip: Skip::Wait(at),
+            skip: Skip::Wait(if (left as f64) < reserved {
+                at
+            } else {
+                at.min(reservation_retry_at(db, Some(name), now)?)
+            }),
         }));
-    }
-    // Counted over the last 24 hours: Groq's day is a rolling window (docs/milestone-1.md), and a
-    // budget kept per UTC day could take twice its share around midnight.
-    if let Some(daily) = limits.daily_tokens {
-        let since = now - providers_db::DAY_MS;
-        let (reported, oldest) = providers_db::tokens_since(db, name, since)?;
-        let used = reported as f64 + unmetered(db, p, since)?;
-        if used + reserved > daily as f64 {
-            return Ok(Some(Refusal {
-                outcome: "budget",
-                detail: format!("{used:.0}/{daily} tokens in 24 hours"),
-                // When the oldest call counted leaves the 24 hours.
-                skip: Skip::Budget(providers_db::out_of_the_day(oldest.unwrap_or(now))),
-            }));
-        }
-    }
-    if limits.is_paid() {
-        let spent = providers_db::usd_this_month(db)?;
-        // The output the request asks for at most, as `provider::call` sends it.
-        let this = limits.usd(tokens, f64::from(p.declared_output()));
-        if spent + this > paid_usd_per_month {
-            return Ok(Some(Refusal {
-                outcome: "budget",
-                detail: format!(
-                    "USD {spent:.2} of {paid_usd_per_month:.2} spent this month; this call up to {this:.3}"
-                ),
-                skip: Skip::Budget(providers_db::next_month()),
-            }));
-        }
     }
     Ok(None)
 }
 
-/// What one call to a paid entry `p` cost, to be stored with it: the usage it reported, and for a
-/// part it did not report, its largest (the calibrated estimate for the prompt, the declared
-/// output for the answer). None for an entry that is not paid, or a call that was not billed.
-pub fn cost(
-    db: &Connection,
-    p: &Provider,
-    est: u32,
-    usage: Usage,
-    billed: bool,
-) -> Result<Option<f64>> {
-    let limits = p.limits();
-    if !limits.is_paid() || !billed {
-        return Ok(None);
-    }
-    let input = match usage.prompt {
-        Some(n) => n as f64,
-        None => f64::from(est) * factor(db, p.name())?,
+/// Reservation age is a scheduling signal, never evidence that it was unsent or refundable.
+/// Using the newest contributing row keeps a fresh sender responsive, survives restarts, and
+/// avoids a one-second loop for the full accounting window when a sender never settles.
+fn reservation_retry_at(db: &Connection, provider: Option<&str>, now: i64) -> Result<i64> {
+    let latest: Option<i64> = match provider {
+        Some(provider) => db.query_row(
+            "SELECT MAX(ts) FROM provider_calls WHERE provider=?1 AND ts>=?2
+             AND outcome='reserved' AND role NOT IN ('embed','query')",
+            rusqlite::params![provider, now - providers_db::DAY_MS],
+            |row| row.get(0),
+        )?,
+        None => db.query_row(
+            "SELECT MAX(ts) FROM provider_calls WHERE outcome='reserved' AND usd>0
+             AND role NOT IN ('embed','query')
+             AND ts>=?1",
+            [providers_db::chrono_free_month_start(now)],
+            |row| row.get(0),
+        )?,
     };
-    let output = match usage.completion {
-        Some(n) => n as f64,
-        None => f64::from(largest_output(p)),
-    };
-    Ok(Some(limits.usd(input, output)))
+    let age = now.saturating_sub(latest.unwrap_or(now));
+    Ok(now + age.clamp(RESERVATION_WAIT_MS, MAX_RESERVATION_WAIT_MS))
 }
 
 /// The most `calls` requests of `tokens` estimated tokens in all may cost when every paid entry of
@@ -291,11 +578,16 @@ fn largest_output(p: &Provider) -> u32 {
     }
 }
 
-/// The tokens `p`'s sent calls since `start` may have used and did not report: a missing prompt
-/// count at its calibrated estimate, a missing completion count at its largest output.
+/// The tokens `p`'s sent calls since `start` may have used and did not report. Settled
+/// reservations keep their own input/output bounds; only legacy rows use today's fallback.
 fn unmetered(db: &Connection, p: &Provider, start: i64) -> Result<f64> {
-    let (est, calls) = providers_db::unmetered(db, p.name(), start)?;
-    Ok(est as f64 * factor(db, p.name())? + (calls * i64::from(largest_output(p))) as f64)
+    providers_db::unmetered(
+        db,
+        p.name(),
+        start,
+        factor(db, p.name())?,
+        largest_output(p),
+    )
 }
 
 #[cfg(test)]
@@ -304,8 +596,19 @@ mod tests {
     use crate::config::Limits;
     use crate::providers_db::{Call, Usage, open, record};
 
+    fn admit(
+        db: &Connection,
+        p: &Provider,
+        tokens: f64,
+        cap: f64,
+        ceilings: &[u32],
+    ) -> Result<Option<Refusal>> {
+        admit_with_history(db, (p, p), tokens, cap, ceilings)
+    }
+
     fn entry(name: &str, limits: Limits) -> Provider {
         Provider::Openai {
+            enabled: true,
             name: name.into(),
             base_url: "http://127.0.0.1:9".into(),
             key_file: None,
@@ -318,6 +621,20 @@ mod tests {
             limits,
             subscription: false,
         }
+    }
+
+    fn cost(
+        db: &Connection,
+        p: &Provider,
+        est: u32,
+        usage: Usage,
+        billed: bool,
+    ) -> Result<Option<f64>> {
+        let reservation = reserve(db, p, "curator", "estimate", est, f64::MAX, &[])?
+            .map_err(|r| anyhow::anyhow!(r.detail))?;
+        let usd = reservation.cost(p, usage, billed);
+        reservation.cancel(db)?;
+        Ok(usd)
     }
 
     /// A call the budget refused: recorded, nothing sent, no usage.
@@ -409,6 +726,778 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn reservation_retry_uses_only_rows_contributing_to_each_accounting_window() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        // A fixed UTC clock at 2026-09-05 makes day/month boundary fixtures deterministic.
+        let now = 1_788_566_400_000_i64;
+        let add = |name: &str, role: &str, usd: Option<f64>, at: i64| {
+            record(
+                &db,
+                &Call {
+                    provider: name,
+                    role,
+                    span: name,
+                    outcome: "reserved",
+                    ms: 0,
+                    detail: Some("[100,4000]"),
+                    bytes_out: 0,
+                    est_tokens: None,
+                    usage: Usage::default(),
+                    usd,
+                },
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE provider_calls SET ts=?2 WHERE id=?1",
+                rusqlite::params![db.last_insert_rowid(), at],
+            )
+            .unwrap();
+        };
+        add(
+            "old-paid",
+            "curator",
+            Some(2.0),
+            now - 2 * providers_db::DAY_MS,
+        );
+        add(
+            "ancient-paid",
+            "curator",
+            Some(9.0),
+            now - 35 * providers_db::DAY_MS,
+        );
+        add("free", "curator", None, now);
+        add("zero", "curator", Some(0.0), now);
+        add("query", "query", Some(9.0), now);
+        add("embed", "embed", Some(9.0), now);
+        assert_eq!(
+            reservation_retry_at(&db, Some("old-paid"), now).unwrap(),
+            now + 1_000
+        );
+        assert_eq!(reservation_retry_at(&db, None, now).unwrap(), now + 600_000);
+        add("daily", "curator", Some(1.0), now - 3_600_000);
+        assert_eq!(
+            reservation_retry_at(&db, Some("daily"), now).unwrap(),
+            now + 600_000
+        );
+        // Only another positive paid reservation in this month restarts the short recheck.
+        add("fresh-paid", "curator", Some(0.5), now - 500);
+        assert_eq!(reservation_retry_at(&db, None, now).unwrap(), now + 1_000);
+        assert_eq!(
+            reservation_retry_at(&db, Some("daily"), now).unwrap(),
+            now + 600_000
+        );
+    }
+
+    #[test]
+    fn an_aged_active_sender_can_settle_and_immediately_release_a_small_probe() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let normal = entry(
+            "p",
+            Limits {
+                daily_tokens: Some(4_200),
+                max_output_tokens: 4_000,
+                usd_per_mtok_in: 1.0,
+                usd_per_mtok_out: 1.0,
+                ..Default::default()
+            },
+        );
+        let held = reserve(&db, &normal, "curator", "held", 100, 5.0, &[])
+            .unwrap()
+            .unwrap();
+        db.execute(
+            "UPDATE provider_calls SET ts=?1 WHERE span='held'",
+            [crate::db::now_ms() - 3_600_000],
+        )
+        .unwrap();
+        let prepared = crate::provider::probe_provider(&normal).unwrap();
+        let est = crate::provider::probe_estimate(&prepared);
+        let before = crate::db::now_ms();
+        let refusal =
+            reserve_with_history(&db, (&prepared, &normal), "probe", "test", est, 5.0, &[])
+                .unwrap()
+                .unwrap_err();
+        assert!(
+            matches!(refusal.skip, Skip::Wait(at) if at>=before+600_000 && at<=crate::db::now_ms()+600_000)
+        );
+        let usage = Usage {
+            prompt: Some(10),
+            completion: Some(10),
+            ..Default::default()
+        };
+        let usd = held.cost(&normal, usage, true);
+        held.settle(
+            &db,
+            &Call {
+                provider: "p",
+                role: "curator",
+                span: "held",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 100,
+                est_tokens: Some(100),
+                usage,
+                usd,
+            },
+            None,
+            |state| state,
+        )
+        .unwrap();
+        let allowed =
+            reserve_with_history(&db, (&prepared, &normal), "probe", "test", est, 5.0, &[])
+                .unwrap()
+                .unwrap();
+        assert!(
+            (allowed.cost(&prepared, Usage::default(), true).unwrap() - 0.000231).abs() < 1e-12
+        );
+        assert_eq!(
+            providers_db::state(&db, "p").unwrap(),
+            providers_db::State::default()
+        );
+        assert_eq!(providers_db::tokens_since(&db, "p", 0).unwrap().0, 20);
+        allowed.cancel(&db).unwrap();
+    }
+
+    #[test]
+    fn reservation_pressure_backs_off_after_restart_without_refunding_it() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let mut p = entry("p", Limits::default());
+        if let Provider::Openai { daily_budget, .. } = &mut p {
+            *daily_budget = Some(1);
+        }
+        let held = reserve(&db, &p, "curator", "held", 100, 5.0, &[])
+            .unwrap()
+            .unwrap();
+        let retry = |db: &Connection| {
+            let before = crate::db::now_ms();
+            let refusal = admit(db, &p, 1.0, 5.0, &[]).unwrap().unwrap();
+            let Skip::Wait(until) = refusal.skip else {
+                panic!("temporary pressure became a permanent hold")
+            };
+            (before, until)
+        };
+        let (before, fresh) = retry(&db);
+        assert!((1_000..2_000).contains(&(fresh - before)));
+        db.execute(
+            "UPDATE provider_calls SET ts=?1 WHERE span='held'",
+            [crate::db::now_ms() - 3_600_000],
+        )
+        .unwrap();
+        drop(db);
+        let reopened = open(home.path()).unwrap();
+        let (before, older) = retry(&reopened);
+        assert!(
+            (600_000..601_000).contains(&(older - before)),
+            "aged reservation retry delay: {}",
+            older - before
+        );
+        assert_eq!(providers_db::calls_in_a_day(&reopened, "p").unwrap().0, 1);
+        assert_eq!(
+            providers_db::state(&reopened, "p").unwrap(),
+            providers_db::State::default()
+        );
+        // Explicit proof that a sender never sent may still cancel; age alone did not refund.
+        held.cancel(&reopened).unwrap();
+        assert!(admit(&reopened, &p, 1.0, 5.0, &[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn settled_missing_components_survive_calibration_and_same_name_parameter_changes() {
+        for (usage, reported, used, usd) in [
+            (
+                Usage {
+                    prompt: Some(70),
+                    ..Default::default()
+                },
+                4_070,
+                8_070,
+                0.00407,
+            ),
+            (
+                Usage {
+                    completion: Some(20),
+                    ..Default::default()
+                },
+                4_020,
+                4_220,
+                0.00022,
+            ),
+            (
+                Usage {
+                    prompt: Some(70),
+                    completion: Some(20),
+                    ..Default::default()
+                },
+                4_090,
+                4_090,
+                0.00009,
+            ),
+            (Usage::default(), 4_000, 8_200, 0.0042),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let db = open(home.path()).unwrap();
+            let mut normal = entry(
+                "p",
+                Limits {
+                    daily_tokens: Some(20_000),
+                    max_output_tokens: 4_000,
+                    usd_per_mtok_in: 1.0,
+                    usd_per_mtok_out: 1.0,
+                    ..Default::default()
+                },
+            );
+            if let Provider::Openai { daily_budget, .. } = &mut normal {
+                *daily_budget = Some(100);
+            }
+            // 1,000 actual tokens teach factor 2 before admission: the frozen input is 200.
+            for _ in 0..5 {
+                call(&db, "p", Some(100), 200, 0);
+            }
+            assert_eq!(factor(&db, "p").unwrap(), 2.0);
+            let reservation = reserve(&db, &normal, "curator", "original", 100, 5.0, &[])
+                .unwrap()
+                .unwrap();
+            let price = reservation.cost(&normal, usage, true);
+            reservation
+                .settle(
+                    &db,
+                    &Call {
+                        provider: "p",
+                        role: "curator",
+                        span: "original",
+                        outcome: "ok",
+                        ms: 1,
+                        detail: Some("vetted completion"),
+                        bytes_out: 100,
+                        est_tokens: Some(100),
+                        usage,
+                        usd: price,
+                    },
+                    None,
+                    |_| Default::default(),
+                )
+                .unwrap();
+            // A later 3,000 actual tokens change factor to 3. Changing model/prices/output for
+            // the same name cannot re-estimate either missing component of the earlier call.
+            for _ in 0..10 {
+                call(&db, "p", Some(100), 300, 0);
+            }
+            assert_eq!(factor(&db, "p").unwrap(), 3.0);
+            let mut current = crate::provider::probe_provider(&normal).unwrap();
+            if let Provider::Openai { model, limits, .. } = &mut current {
+                *model = "another-model".into();
+                limits.usd_per_mtok_in = 9.0;
+                limits.usd_per_mtok_out = 9.0;
+                limits.daily_tokens = Some(used + 127);
+            }
+            let refusal = admit(&db, &current, 0.0, 5.0, &[])
+                .unwrap()
+                .expect("128 output tokens do not fit");
+            assert_eq!(
+                refusal.detail,
+                format!("{used}/{} tokens in 24 hours", used + 127)
+            );
+            assert_eq!(providers_db::tokens_since(&db, "p", 0).unwrap().0, reported);
+            assert!((providers_db::usd_this_month(&db).unwrap() - usd).abs() < 1e-12);
+            assert!(
+                providers_db::last_calls(&db, 16)
+                    .unwrap()
+                    .iter()
+                    .any(|line| line == "p curator ok 1ms vetted completion")
+            );
+            assert!(
+                providers_db::last_calls(&db, 16)
+                    .unwrap()
+                    .iter()
+                    .all(|line| !line.contains("oboete-budget-v1"))
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_final_owned_bounds_count_and_invalid_stored_bounds_fail_closed() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let p = entry(
+            "p",
+            Limits {
+                daily_tokens: Some(4_100),
+                max_output_tokens: 4_000,
+                usd_per_mtok_in: 1.0,
+                ..Default::default()
+            },
+        );
+        let reservation = reserve(&db, &p, "curator", "original", 100, 5.0, &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            providers_db::last_calls(&db, 1).unwrap(),
+            ["p curator reserved 0ms allowance reserved"]
+        );
+        let reason = "vetted failure\u{1e}oboete-budget-v1:[0,0]";
+        reservation
+            .settle(
+                &db,
+                &Call {
+                    provider: "p",
+                    role: "curator",
+                    span: "original",
+                    outcome: "error",
+                    ms: 1,
+                    detail: Some(reason),
+                    bytes_out: 100,
+                    est_tokens: Some(100),
+                    usage: Usage::default(),
+                    usd: None,
+                },
+                None,
+                |state| state,
+            )
+            .unwrap();
+        let small = crate::provider::probe_provider(&p).unwrap();
+        assert_eq!(
+            admit(&db, &small, 0.0, 5.0, &[]).unwrap().unwrap().detail,
+            "4100/4100 tokens in 24 hours"
+        );
+        assert_eq!(
+            providers_db::last_calls(&db, 1).unwrap(),
+            [format!("p curator error 1ms {reason}")]
+        );
+        // Corrupt fixture metadata cannot silently become zero usage or today's smaller cap.
+        for malformed in [
+            "[-1,4000]",
+            "[100,-1]",
+            "[100,null]",
+            "[1e999,4000]",
+            "[100]",
+            "[100,4000,7]",
+            "[100,4000] trailing",
+            "\"private-canary\"",
+        ] {
+            let detail =
+                format!("\u{1e}oboete-call-v1:vetted failure\u{1e}oboete-budget-v1:{malformed}");
+            db.execute(
+                "UPDATE provider_calls SET detail=?1 WHERE span='original'",
+                [detail],
+            )
+            .unwrap();
+            let error = admit(&db, &small, 0.0, 5.0, &[])
+                .expect_err("invalid bounds must refuse admission");
+            assert_eq!(error.to_string(), "invalid stored token bounds");
+            assert_eq!(
+                providers_db::last_calls(&db, 1).unwrap(),
+                ["p curator error 1ms vetted failure"]
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_unmetered_rows_keep_the_existing_fallback_without_invented_history() {
+        for detail in [
+            "legacy timeout",
+            "[9000,9000]",
+            "claude error\u{1e}oboete-budget-v1:[0,0]",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let db = open(home.path()).unwrap();
+            record(
+                &db,
+                &Call {
+                    provider: "p",
+                    role: "curator",
+                    span: "legacy",
+                    outcome: "error",
+                    ms: 1,
+                    detail: Some(detail),
+                    bytes_out: 100,
+                    est_tokens: Some(100),
+                    usage: Usage::default(),
+                    usd: None,
+                },
+            )
+            .unwrap();
+            let p = entry(
+                "p",
+                Limits {
+                    daily_tokens: Some(300),
+                    max_output_tokens: 128,
+                    usd_per_mtok_in: 1.0,
+                    ..Default::default()
+                },
+            );
+            let refusal = admit(&db, &p, 1.0, 5.0, &[]).unwrap().unwrap();
+            assert_eq!(refusal.detail, "228/300 tokens in 24 hours");
+            assert_eq!(providers_db::tokens_since(&db, "p", 0).unwrap().0, 0);
+            assert_eq!(
+                providers_db::last_calls(&db, 1).unwrap(),
+                [format!("p curator error 1ms {detail}")]
+            );
+        }
+    }
+
+    #[test]
+    fn a_small_probe_cannot_shrink_a_previous_unmetered_curation_call() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let normal = entry(
+            "p",
+            Limits {
+                daily_tokens: Some(4_100),
+                max_output_tokens: 4_000,
+                usd_per_mtok_in: 1.0,
+                usd_per_mtok_out: 1.0,
+                ..Default::default()
+            },
+        );
+        let call = reserve(&db, &normal, "curator", "normal", 100, 5.0, &[])
+            .unwrap()
+            .unwrap();
+        let usd = call.cost(&normal, Usage::default(), true);
+        call.settle(
+            &db,
+            &Call {
+                provider: "p",
+                role: "curator",
+                span: "normal",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 100,
+                est_tokens: Some(100),
+                usage: Usage::default(),
+                usd,
+            },
+            None,
+            |_| Default::default(),
+        )
+        .unwrap();
+        let probe = crate::provider::probe_provider(&normal).unwrap();
+        let admission = reserve(
+            &db,
+            &probe,
+            "probe",
+            "settings",
+            crate::provider::probe_estimate(&probe),
+            5.0,
+            &[],
+        )
+        .unwrap();
+        let refusal =
+            admission.expect_err("the prior call still takes its full 100 + 4000 allowance");
+        assert_eq!(refusal.detail, "4100/4100 tokens in 24 hours");
+        assert!(matches!(refusal.skip, Skip::Budget(_)));
+        assert_eq!(providers_db::tokens_since(&db, "p", 0).unwrap().0, 0);
+        assert!(providers_db::token_ratios(&db, "p", 50).unwrap().is_empty());
+        assert_eq!(
+            providers_db::last_calls(&db, 1).unwrap(),
+            ["p curator ok 1ms "]
+        );
+    }
+
+    #[test]
+    fn settlement_keeps_the_admission_month() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let p = entry(
+            "p",
+            Limits {
+                max_output_tokens: 100,
+                usd_per_mtok_in: 4.5,
+                usd_per_mtok_out: 4.5,
+                ..Default::default()
+            },
+        );
+        let earlier = reserve(&db, &p, "curator", "earlier", 100, 0.001, &[])
+            .unwrap()
+            .unwrap();
+        // Age a fixture's admission across the calendar boundary; settlement must not move
+        // spending into a pool where other work has already reserved the remaining allowance.
+        db.execute("UPDATE provider_calls SET ts=0 WHERE span='earlier'", [])
+            .unwrap();
+        let _this_month = reserve(&db, &p, "probe", "current", 100, 0.001, &[])
+            .unwrap()
+            .unwrap();
+        let usd = earlier.cost(&p, Usage::default(), true);
+        earlier
+            .settle(
+                &db,
+                &Call {
+                    provider: "p",
+                    role: "curator",
+                    span: "earlier",
+                    outcome: "ok",
+                    ms: 1,
+                    detail: None,
+                    bytes_out: 1,
+                    est_tokens: Some(100),
+                    usage: Usage::default(),
+                    usd,
+                },
+                None,
+                |_| Default::default(),
+            )
+            .unwrap();
+        assert!((providers_db::usd_this_month(&db).unwrap() - 0.0009).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_late_response_cannot_replenish_a_live_rate_window() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let peer = open(home.path()).unwrap();
+        let p = entry("p", Limits::default());
+        let first = reserve(&db, &p, "curator", "s", 100, 5.0, &[])
+            .unwrap()
+            .unwrap();
+        let second = reserve(&peer, &p, "probe", "s", 100, 5.0, &[])
+            .unwrap()
+            .unwrap();
+        let until = crate::db::now_ms() + 60_000;
+        let actual = providers_db::RateLeft {
+            requests: Some(0),
+            requests_reset_at: Some(until),
+            tokens: Some(0),
+            tokens_reset_at: Some(until),
+        };
+        let stale = providers_db::RateLeft {
+            requests: Some(5),
+            tokens: Some(10_000),
+            ..actual
+        };
+        for (reservation, role, rate) in [(second, "probe", actual), (first, "curator", stale)] {
+            reservation
+                .settle(
+                    &db,
+                    &Call {
+                        provider: "p",
+                        role,
+                        span: "s",
+                        outcome: "ok",
+                        ms: 1,
+                        detail: None,
+                        bytes_out: 1,
+                        est_tokens: Some(100),
+                        usage: Usage::default(),
+                        usd: None,
+                    },
+                    Some(rate),
+                    |_| Default::default(),
+                )
+                .unwrap();
+        }
+        let refused = reserve(&peer, &p, "probe", "next", 100, 5.0, &[]).unwrap();
+        assert!(
+            matches!(refused, Err(Refusal { skip: Skip::Wait(t), .. }) if t == until),
+            "{refused:?}"
+        );
+        assert_eq!(providers_db::rate(&peer, "p").unwrap(), actual);
+    }
+
+    #[test]
+    fn reservations_share_the_reported_rate_allowance() {
+        for rate in [
+            providers_db::RateLeft {
+                requests: Some(1),
+                requests_reset_at: Some(crate::db::now_ms() + 60_000),
+                ..Default::default()
+            },
+            providers_db::RateLeft {
+                tokens: Some(1_500),
+                tokens_reset_at: Some(crate::db::now_ms() + 60_000),
+                ..Default::default()
+            },
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let db = open(home.path()).unwrap();
+            let peer = open(home.path()).unwrap();
+            let p = entry("p", Limits::default());
+            providers_db::set_rate(&db, "p", rate).unwrap();
+            let _inflight = reserve(&db, &p, "curator", "first", 100, 5.0, &[])
+                .unwrap()
+                .unwrap();
+            let refusal = reserve(&peer, &p, "probe", "second", 100, 5.0, &[]).unwrap();
+            assert!(
+                matches!(
+                    refusal,
+                    Err(Refusal {
+                        skip: Skip::Wait(_),
+                        ..
+                    })
+                ),
+                "{refusal:?}"
+            );
+            assert_eq!(providers_db::tokens_since(&peer, "p", 0).unwrap().0, 0);
+            assert_eq!(factor(&peer, "p").unwrap(), 1.0);
+        }
+    }
+
+    #[test]
+    fn concurrent_reservations_share_daily_calls_tokens_and_the_curation_month() {
+        for limit in ["calls", "tokens", "month"] {
+            let home = tempfile::tempdir().unwrap();
+            let db = open(home.path()).unwrap();
+            let peer = open(home.path()).unwrap();
+            let mut p = entry(
+                "p",
+                Limits {
+                    daily_tokens: (limit == "tokens").then_some(350),
+                    max_output_tokens: 100,
+                    usd_per_mtok_in: 1.0,
+                    usd_per_mtok_out: 1.0,
+                    ..Default::default()
+                },
+            );
+            if limit == "calls"
+                && let Provider::Openai { daily_budget, .. } = &mut p
+            {
+                *daily_budget = Some(1);
+            }
+            let mut other = p.clone();
+            if limit == "month"
+                && let Provider::Openai { name, .. } = &mut other
+            {
+                *name = "other".into();
+            }
+            let cap = if limit == "month" { 0.0003 } else { 5.0 };
+            let barrier = std::sync::Barrier::new(2);
+            let (first, second) = std::thread::scope(|scope| {
+                let first = scope.spawn(|| {
+                    let db = db;
+                    barrier.wait();
+                    reserve(&db, &p, "curator", "worker", 100, cap, &[]).unwrap()
+                });
+                let second = scope.spawn(|| {
+                    let peer = peer;
+                    barrier.wait();
+                    reserve(&peer, &other, "probe", "settings", 100, cap, &[]).unwrap()
+                });
+                (first.join().unwrap(), second.join().unwrap())
+            });
+            let results = [first, second];
+            assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1, "{limit}");
+            assert!(
+                results.iter().any(|r| matches!(
+                    r,
+                    Err(Refusal {
+                        skip: Skip::Wait(_),
+                        ..
+                    })
+                )),
+                "{limit}"
+            );
+            // Let the token go without settling, as when a caller crashes. Reopening does not
+            // forgive it, and hypothetical tokens cannot alter calibration or reported usage.
+            drop(results);
+            let reopened = open(home.path()).unwrap();
+            assert!((providers_db::usd_this_month(&reopened).unwrap() - 0.0002).abs() < 1e-12);
+            assert_eq!(providers_db::embed_usd_this_month(&reopened).unwrap(), 0.0);
+            assert_eq!(providers_db::tokens_since(&reopened, "p", 0).unwrap().0, 0);
+            assert!(
+                providers_db::token_ratios(&reopened, "p", 50)
+                    .unwrap()
+                    .is_empty()
+            );
+            let refusal = reserve(&reopened, &p, "curator", "after-crash", 100, cap, &[]).unwrap();
+            assert!(
+                matches!(
+                    refusal,
+                    Err(Refusal {
+                        skip: Skip::Wait(_),
+                        ..
+                    })
+                ),
+                "{limit}: {refusal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn settlement_releases_unbilled_cost_and_keeps_actual_or_missing_usage_conservative() {
+        for (sent, billed, usage, expected_usd, expected_tokens) in [
+            (false, false, Usage::default(), 0.0, 0),
+            (true, false, Usage::default(), 0.0, 0),
+            (true, true, Usage::default(), 0.0002, 0),
+            (
+                true,
+                true,
+                Usage {
+                    prompt: Some(20),
+                    completion: Some(10),
+                    ..Default::default()
+                },
+                0.00003,
+                30,
+            ),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let db = open(home.path()).unwrap();
+            let peer = open(home.path()).unwrap();
+            let p = entry(
+                "p",
+                Limits {
+                    max_output_tokens: 100,
+                    usd_per_mtok_in: 1.0,
+                    usd_per_mtok_out: 1.0,
+                    ..Default::default()
+                },
+            );
+            let reservation = reserve(&db, &p, "probe", "s", 100, 0.0003, &[])
+                .unwrap()
+                .unwrap();
+            let usd = reservation.cost(&p, usage, billed);
+            let hold = providers_db::State {
+                down_until: providers_db::OWNER_HOLD,
+                fails: 2,
+                backoff: 3,
+            };
+            providers_db::set_state(&peer, "p", hold).unwrap();
+            let state = reservation
+                .settle(
+                    &db,
+                    &Call {
+                        provider: "p",
+                        role: "probe",
+                        span: "s",
+                        outcome: "error",
+                        ms: 1,
+                        detail: Some(if billed {
+                            "http request: timeout: global"
+                        } else {
+                            "http 400"
+                        }),
+                        bytes_out: usize::from(sent),
+                        est_tokens: Some(100),
+                        usage,
+                        usd,
+                    },
+                    None,
+                    |_| Default::default(),
+                )
+                .unwrap();
+            assert_eq!(state, hold);
+            assert_eq!(providers_db::state(&peer, "p").unwrap(), hold);
+            assert_eq!(providers_db::calls_in_a_day(&peer, "p").unwrap().0, 1);
+            assert!((providers_db::usd_this_month(&peer).unwrap() - expected_usd).abs() < 1e-12);
+            assert_eq!(
+                providers_db::tokens_since(&peer, "p", 0).unwrap().0,
+                expected_tokens
+            );
+            assert_eq!(
+                providers_db::reserved_since(&peer, "p", 0).unwrap().calls,
+                0
+            );
+            assert!(
+                reserve(&peer, &p, "probe", "held", 100, 5.0, &[])
+                    .unwrap()
+                    .is_err()
+            );
+        }
     }
 
     #[test]

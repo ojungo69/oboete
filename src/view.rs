@@ -975,6 +975,10 @@ impl Viewer {
     fn head(&self, method: &str, target: &str, headers: &[(&str, &str)]) -> Head {
         let (cap, save): (usize, Save) = match (method, target) {
             ("POST", "/api/settings") => (MAX_BODY, Self::save),
+            ("POST", "/api/providers") => (MAX_BODY, Self::save_provider),
+            ("POST", "/api/providers/key") => (MAX_KEY_BODY, Self::save_provider_key),
+            ("POST", "/api/providers/test/preview") => (MAX_BODY, Self::preview_provider_test),
+            ("POST", "/api/providers/test") => (MAX_BODY, Self::test_provider),
             ("POST", "/api/key") => (MAX_KEY_BODY, Self::save_key),
             ("POST", "/api/resume") => (MAX_BODY, Self::resume),
             _ => return Head::Answer(self.route(method, target, headers)),
@@ -1043,6 +1047,30 @@ impl Viewer {
     /// The settings as saved.
     fn save(&self, body: &[u8]) -> Response {
         saved(crate::settings::save(&self.home, &self.saving, body))
+    }
+
+    fn save_provider(&self, body: &[u8]) -> Response {
+        saved(crate::settings::save_provider(
+            &self.home,
+            &self.saving,
+            body,
+        ))
+    }
+
+    fn save_provider_key(&self, body: &[u8]) -> Response {
+        saved(crate::settings::save_provider_key(
+            &self.home,
+            &self.saving,
+            body,
+        ))
+    }
+
+    fn preview_provider_test(&self, body: &[u8]) -> Response {
+        saved(crate::settings::preview_provider_test(&self.home, body))
+    }
+
+    fn test_provider(&self, body: &[u8]) -> Response {
+        saved(crate::settings::test_provider(&self.home, body))
     }
 
     /// A key written to its entry's key file (#94 part 3); the answer never holds it.
@@ -3270,7 +3298,14 @@ mod tests {
         let body = save_body(&shown);
         let len = body.len().to_string();
         let cl = ("Content-Length", len.as_str());
-        for (path, cap) in [("/api/settings", MAX_BODY), ("/api/key", MAX_KEY_BODY)] {
+        for (path, cap) in [
+            ("/api/settings", MAX_BODY),
+            ("/api/key", MAX_KEY_BODY),
+            ("/api/providers", MAX_BODY),
+            ("/api/providers/key", MAX_KEY_BODY),
+            ("/api/providers/test/preview", MAX_BODY),
+            ("/api/providers/test", MAX_BODY),
+        ] {
             save_guards(&v, path, cap, &body);
         }
         // Every other method on it, and a POST anywhere else, stay 405.
@@ -3282,6 +3317,10 @@ mod tests {
             "/api/repos",
             "/api/settings?x=1",
             "/api/key?x=1",
+            "/api/providers?x=1",
+            "/api/providers/key?x=1",
+            "/api/providers/test/preview?x=1",
+            "/api/providers/test?x=1",
             "/api/doc?id=o1",
         ] {
             let r = request(&v, "POST", t, &[HOST, TOKEN, origin, json_type, cl], &body);
@@ -4078,7 +4117,7 @@ mod tests {
             .write(true)
             .open(p.join("state/view.lock"))
             .unwrap();
-        lock.try_lock().unwrap();
+        crate::worker::try_lock(&lock).unwrap();
         std::thread::sleep(Duration::from_millis(500));
         starter.due(p);
         assert!(

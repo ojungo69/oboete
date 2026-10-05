@@ -783,7 +783,10 @@ pub fn doctor_lines(home: &Path, k: &Connection) -> Result<Vec<String>> {
         lines.push(format!(
             "  last error ({role}, {}): {}",
             crate::db::utc(ts),
-            detail.unwrap_or_default()
+            detail
+                .as_deref()
+                .map(pdb::visible_detail)
+                .unwrap_or_default()
         ));
     }
     Ok(lines)
@@ -3044,6 +3047,27 @@ mod tests {
         ];
         assert_eq!(lines[..3], want);
         assert!(lines[3].starts_with("  last error (embed, "), "{lines:?}");
+    }
+
+    #[test]
+    fn doctor_keeps_only_the_vetted_reason_when_a_curator_shares_the_embedder_name() {
+        let stub = Stub::start();
+        let s = Store::new();
+        s.run();
+        config(&s, &stub);
+        let home = s.home.path();
+        let k = crate::knowledge::open(home).unwrap();
+        let db = crate::providers_db::open(home).unwrap();
+        db.execute("INSERT INTO provider_calls(ts,provider,role,outcome,ms,detail,bytes_out) VALUES(?1,?2,'curator','error',0,'transport',10)", params![crate::db::now_ms(), crate::embed::CALLS]).unwrap();
+        crate::providers_db::freeze_unmetered(&db, db.last_insert_rowid(), [123.0, 456.0]).unwrap();
+        let shown = doctor_lines(home, &k).unwrap().join("\n");
+        assert!(shown.contains("last error (curator,"), "{shown}");
+        assert!(shown.ends_with(": transport"), "{shown}");
+        assert!(
+            !shown.contains("oboete-budget-v1") && !shown.contains("oboete-call-v1"),
+            "{shown}"
+        );
+        assert_eq!(stub.requests(), 0);
     }
 
     /// Rows 55-1 and 55-7: a call the embedder holds delays only the vectors: the worker indexes

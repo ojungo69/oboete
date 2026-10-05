@@ -1,4 +1,5 @@
-//! A key typed on the settings page, written into its chain entry's key file (#94, part 3): line 2
+//! A key typed on the settings page, registered in a new managed file or written into its
+//! existing chain entry's key file (#94, part 3): line 2
 //! of a file named `*_KEY.md` outside the oboete home, on Linux, on a filesystem known to enforce a
 //! Unix mode for every local user. Everything else in the file stays as it was, and the key goes
 //! nowhere but that file.
@@ -67,6 +68,57 @@ pub(crate) struct Written {
     pub durable: bool,
 }
 
+/// A newly registered key. Retain it only after its config reference is committed; dropping it
+/// first removes only the newly created file while its device/inode still match. `durable` is
+/// false when a directory sync failed, even though the file itself was synced.
+#[derive(Debug)]
+pub(crate) struct Managed {
+    path: PathBuf,
+    pub durable: bool,
+    file: Option<std::fs::File>,
+}
+
+impl Managed {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn retain(mut self) {
+        self.file.take();
+    }
+}
+
+impl Drop for Managed {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(file) = &self.file {
+            linux::discard(&self.path, file);
+        }
+    }
+}
+
+/// Registers a fresh key outside the corpus. Owner/data locations come from the trusted process
+/// caller, never a client's filesystem path. Existing key files are neither read nor replaced.
+/// Managed storage also needs kernel mount observations proving physical separation. Unproven
+/// backing trees cannot provide that proof, so use a safe native fallback or refuse.
+pub(crate) fn managed(
+    key: &str,
+    corpus_home: &Path,
+    owner_home: &Path,
+    local_data: Option<&Path>,
+) -> Result<Managed, Refused> {
+    if !valid(key) {
+        return Err(Refused::BadKey);
+    }
+    #[cfg(target_os = "linux")]
+    return linux::managed(key, corpus_home, owner_home, local_data);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (corpus_home, owner_home, local_data);
+        Err(Refused::Unsupported)
+    }
+}
+
 const KEY_LEN: RangeInclusive<usize> = 8..=512;
 /// A key file holds a few lines.
 const MAX_FILE: u64 = 64 * 1024;
@@ -77,15 +129,17 @@ const TITLE: &str = "API key (oboete)";
 /// WSL (9p), FUSE (sshfs with `allow_other` shows 0600 and lets every local user read), network
 /// shares, FAT, exFAT and NTFS among them, and eCryptfs, which leaves the check to the filesystem
 /// under it.
-const PRIVATE_FS: &[u32] = &[
-    0xEF53,      // ext2, ext3, ext4
-    0x5846_5342, // XFS
-    0x9123_683E, // Btrfs
-    0xF2F5_2010, // F2FS
-    0x2FC1_2FC1, // ZFS
-    0xCA45_1A4E, // bcachefs
-    0x0102_1994, // tmpfs
-    0x794C_7630, // overlayfs
+// The magic controls mode enforcement; the names identify provable native mount coordinates.
+// Overlay enforces modes but exposes no complete backing-tree coordinates, so has no names.
+const PRIVATE_FS: &[(u32, &[&[u8]])] = &[
+    (0xEF53, &[b"ext2", b"ext3", b"ext4"]),
+    (0x5846_5342, &[b"xfs"]),
+    (0x9123_683E, &[b"btrfs"]),
+    (0xF2F5_2010, &[b"f2fs"]),
+    (0x2FC1_2FC1, &[b"zfs"]),
+    (0xCA45_1A4E, &[b"bcachefs"]),
+    (0x0102_1994, &[b"tmpfs"]),
+    (0x794C_7630, &[]),
 ];
 
 /// 8 to 512 characters of letters, digits and `._~+/=:-`: every provider's keys, and no quote,
@@ -192,6 +246,13 @@ fn with_key(old: Option<&[u8]>, key: &str) -> Vec<u8> {
     }
 }
 
+/// Kernel mount observations supplied at the filesystem boundary in tests.
+#[cfg(test)]
+struct MountFixture {
+    table: Vec<u8>,
+    ids: Vec<(PathBuf, u64)>,
+}
+
 /// The steps a failure can be injected at, in tests.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Step {
@@ -205,6 +266,9 @@ enum Step {
 #[cfg(test)]
 thread_local! {
     static FAIL: std::cell::Cell<Option<Step>> = const { std::cell::Cell::new(None) };
+    static MOUNTS: std::cell::RefCell<Option<MountFixture>> = const { std::cell::RefCell::new(None) };
+    /// Deterministic entropy for the managed filename's collision test.
+    static MANAGED_TAG: std::cell::Cell<Option<[u8; 16]>> = const { std::cell::Cell::new(None) };
     /// The filesystem magic `private` sees instead of the real one.
     static FS: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
     /// A folder on the way to the key folder, and the filesystem magic the walk sees for it.
@@ -229,7 +293,9 @@ fn step(at: Step) -> std::io::Result<()> {
 mod linux {
     use super::*;
     use std::io::{Read, Write};
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
     /// No other user may replace a part of the path to the key folder (#285). The path is
     /// resolved as the kernel resolves it, one name at a time from the root, and each folder and
@@ -263,7 +329,7 @@ mod linux {
             Some((at, fake)) if at == path => Some(*fake),
             _ => fs,
         });
-        if !fs.is_some_and(|m| PRIVATE_FS.contains(&m)) {
+        if !fs.is_some_and(|m| PRIVATE_FS.iter().any(|(magic, _)| *magic == m)) {
             return Err(Refused::NotPrivate);
         }
         held.metadata().map_err(|_| Refused::NoDir)
@@ -310,6 +376,401 @@ mod linux {
             *at = next;
         }
         Ok(())
+    }
+
+    /// Resolve and guard the existing prefix before creating any missing directories. Reject
+    /// `..` in managed roots: unlike legacy destinations these are process-selected locations.
+    fn planned_dir(path: &Path) -> Result<(PathBuf, PathBuf), Refused> {
+        if !path.is_absolute() {
+            return Err(Refused::NotAbsolute);
+        }
+        if path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(Refused::NoDir);
+        }
+        let mut existing = path;
+        let mut missing = Vec::new();
+        loop {
+            match std::fs::symlink_metadata(existing) {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(existing.file_name().ok_or(Refused::NoDir)?.to_owned());
+                    existing = existing.parent().ok_or(Refused::NoDir)?;
+                }
+                Err(_) => return Err(Refused::NoDir),
+            }
+        }
+        let mut base = PathBuf::new();
+        // SAFETY: geteuid has no arguments and cannot fail.
+        walk(existing, &mut base, &mut 0, unsafe { libc::geteuid() })?;
+        let mut dest = base.clone();
+        for name in missing.into_iter().rev() {
+            dest.push(name);
+        }
+        Ok((dest, base))
+    }
+
+    /// A mount's root is relative to its filesystem, not its mount point. This distinction
+    /// detects binds of corpus descendants even when no visible ancestor is the corpus inode.
+    struct Mount {
+        id: u64,
+        device: (u64, u64),
+        root: PathBuf,
+        at: PathBuf,
+        native_coordinates: bool,
+    }
+
+    /// Translate native filesystem names to the existing mode-enforcement policy. Layered and
+    /// userspace views (including overlay) do not expose sufficient backing-tree coordinates.
+    fn native_coordinates(kind: &[u8]) -> bool {
+        PRIVATE_FS.iter().any(|(_, names)| names.contains(&kind))
+    }
+
+    const MAX_MOUNTINFO: u64 = 1024 * 1024;
+
+    fn proc_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, Refused> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|_| Refused::Protected)?;
+        // These observations must come from the kernel, not a substituted ordinary file.
+        if magic(&file) != Some(0x9fa0) {
+            return Err(Refused::Protected);
+        }
+        let mut bytes = Vec::new();
+        file.take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Refused::Protected)?;
+        if bytes.len() as u64 > limit {
+            return Err(Refused::Protected);
+        }
+        Ok(bytes)
+    }
+
+    fn mount_number(bytes: &[u8]) -> Result<u64, Refused> {
+        if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+            return Err(Refused::Protected);
+        }
+        std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .ok_or(Refused::Protected)
+    }
+
+    /// mountinfo escapes space, tab, newline and backslash in its path fields. Preserve all
+    /// other bytes, including non-UTF-8 names, instead of treating them as separators.
+    fn mount_path(bytes: &[u8]) -> Result<PathBuf, Refused> {
+        let mut path = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] == b'\\' {
+                let escaped = bytes.get(at + 1..at + 4).ok_or(Refused::Protected)?;
+                path.push(match escaped {
+                    b"040" => b' ',
+                    b"011" => b'\t',
+                    b"012" => b'\n',
+                    b"134" => b'\\',
+                    _ => return Err(Refused::Protected),
+                });
+                at += 4;
+            } else {
+                path.push(bytes[at]);
+                at += 1;
+            }
+        }
+        let path = PathBuf::from(std::ffi::OsString::from_vec(path));
+        if path.as_os_str().as_bytes().contains(&0)
+            || path
+                .components()
+                .any(|p| p == std::path::Component::ParentDir)
+        {
+            return Err(Refused::Protected);
+        }
+        Ok(path)
+    }
+
+    fn mount_table() -> Result<Vec<Mount>, Refused> {
+        #[cfg(test)]
+        let supplied = MOUNTS.with(|f| f.borrow().as_ref().map(|f| f.table.clone()));
+        #[cfg(not(test))]
+        let supplied: Option<Vec<u8>> = None;
+        let bytes = match supplied {
+            Some(bytes) => bytes,
+            None => proc_bytes(Path::new("/proc/self/mountinfo"), MAX_MOUNTINFO)?,
+        };
+        if bytes.len() as u64 > MAX_MOUNTINFO {
+            return Err(Refused::Protected);
+        }
+        let mut mounts = Vec::new();
+        let mut ids = std::collections::HashSet::new();
+        for line in bytes.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+            let fields: Vec<_> = line.split(|&b| b == b' ').collect();
+            let separator = fields
+                .iter()
+                .position(|&f| f == b"-")
+                .ok_or(Refused::Protected)?;
+            if separator < 6
+                || fields.len() != separator + 4
+                || fields.iter().any(|f| f.is_empty())
+                || mounts.len() == 4096
+            {
+                return Err(Refused::Protected);
+            }
+            let id = mount_number(fields[0])?;
+            mount_number(fields[1])?;
+            let device = fields[2].split(|&b| b == b':').collect::<Vec<_>>();
+            if device.len() != 2 || !ids.insert(id) {
+                return Err(Refused::Protected);
+            }
+            let at = mount_path(fields[4])?;
+            if !at.is_absolute() {
+                return Err(Refused::Protected);
+            }
+            // nsfs and other pseudo-filesystems can have opaque roots such as `net:[id]`.
+            // Retain unrelated records; a selected/protected root must still be a real path.
+            mounts.push(Mount {
+                id,
+                device: (mount_number(device[0])?, mount_number(device[1])?),
+                root: mount_path(fields[3])?,
+                at,
+                native_coordinates: native_coordinates(fields[separator + 1]),
+            });
+        }
+        Ok(mounts)
+    }
+
+    fn mount_position<'a>(
+        dest: &Path,
+        base: &Path,
+        folder: &std::fs::File,
+        mounts: &'a [Mount],
+    ) -> Result<(&'a Mount, PathBuf, PathBuf), Refused> {
+        // The kernel's spelling also avoids deriving physical coordinates from user casing.
+        let visible = std::fs::read_link(format!("/proc/self/fd/{}", folder.as_raw_fd()))
+            .map_err(|_| Refused::Protected)?;
+        if !visible.is_absolute() || visible.as_os_str().as_bytes().ends_with(b" (deleted)") {
+            return Err(Refused::Protected);
+        }
+        #[cfg(test)]
+        let supplied = MOUNTS.with(|f| {
+            f.borrow().as_ref().map(|f| {
+                f.ids
+                    .iter()
+                    .filter(|(p, _)| visible.starts_with(p))
+                    .max_by_key(|(p, _)| p.components().count())
+                    .map(|(_, id)| *id)
+                    .ok_or(Refused::Protected)
+            })
+        });
+        #[cfg(not(test))]
+        let supplied: Option<Result<u64, Refused>> = None;
+        let id = match supplied {
+            Some(id) => id?,
+            None => {
+                let bytes = proc_bytes(
+                    Path::new(&format!("/proc/self/fdinfo/{}", folder.as_raw_fd())),
+                    4096,
+                )?;
+                let text = std::str::from_utf8(&bytes).map_err(|_| Refused::Protected)?;
+                let mut ids = text.lines().filter_map(|l| l.strip_prefix("mnt_id:"));
+                let id = mount_number(ids.next().ok_or(Refused::Protected)?.trim().as_bytes())?;
+                if ids.next().is_some() {
+                    return Err(Refused::Protected);
+                }
+                id
+            }
+        };
+        // An FD's actual mount ID selects the top visible mount even with stacked mount points.
+        // Btrfs stat devices identify subvolumes and need not equal mountinfo's superblock device.
+        let mount = mounts
+            .iter()
+            .find(|m| m.id == id)
+            .ok_or(Refused::Protected)?;
+        if !mount.root.is_absolute() {
+            return Err(Refused::Protected);
+        }
+        let relative = visible
+            .strip_prefix(&mount.at)
+            .map_err(|_| Refused::Protected)?;
+        let suffix = dest.strip_prefix(base).map_err(|_| Refused::Protected)?;
+        Ok((
+            mount,
+            mount.root.join(relative).join(suffix),
+            visible.join(suffix),
+        ))
+    }
+
+    fn outside_corpus(
+        dest: &Path,
+        base: &Path,
+        folder: &std::fs::File,
+        corpus: &Path,
+    ) -> Result<(), Refused> {
+        let (home_path, home_base) = planned_dir(corpus)?;
+        let home = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(&home_base)
+            .map_err(|_| Refused::Protected)?;
+        if !private(&home) {
+            return Err(Refused::NotPrivate);
+        }
+        let identity = home.metadata().map_err(|_| Refused::Protected)?;
+        if home_path == home_base {
+            for parent in base.ancestors() {
+                let meta = std::fs::metadata(parent).map_err(|_| Refused::Protected)?;
+                if (meta.dev(), meta.ino()) == (identity.dev(), identity.ino()) {
+                    return Err(Refused::Protected);
+                }
+            }
+        }
+        let mounts = mount_table()?;
+        let (key_mount, key_root, _) = mount_position(dest, base, folder, &mounts)?;
+        let (home_mount, home_root, home_visible) =
+            mount_position(&home_path, &home_base, &home, &mounts)?;
+        // Layered or userspace filesystems can expose independently located backing trees.
+        // Managed registration therefore needs a provably native location; legacy writes and
+        // PRIVATE_FS remain unchanged. Missing/ambiguous kernel observations fail closed too.
+        if !key_mount.native_coordinates
+            || !home_mount.native_coordinates
+            || (key_mount.device == home_mount.device && key_root.starts_with(&home_root))
+        {
+            return Err(Refused::Protected);
+        }
+        for mount in mounts.iter().filter(|m| m.at.starts_with(&home_visible)) {
+            // Include reported hidden submounts conservatively: missing one could expose a bind
+            // of a corpus child whose filesystem differs from the corpus root's filesystem.
+            if !mount.root.is_absolute()
+                || !mount.native_coordinates
+                || (mount.device == key_mount.device && key_root.starts_with(&mount.root))
+            {
+                return Err(Refused::Protected);
+            }
+        }
+        Ok(())
+    }
+
+    fn managed_dir(path: &Path, corpus: &Path) -> Result<(PathBuf, std::fs::File, bool), Refused> {
+        let (dest, mut at) = planned_dir(path)?;
+        if dest.starts_with(corpus) {
+            return Err(Refused::Protected);
+        }
+        let mut folder = std::fs::File::open(&at).map_err(|_| Refused::NoDir)?;
+        if !private(&folder) {
+            return Err(Refused::NotPrivate);
+        }
+        outside_corpus(&dest, &at, &folder, corpus)?;
+        let mut durable = true;
+        let missing = dest
+            .strip_prefix(&at)
+            .map_err(|_| Refused::NoDir)?
+            .to_path_buf();
+        for name in missing.components() {
+            at.push(name);
+            match std::fs::DirBuilder::new().mode(0o700).create(&at) {
+                Ok(()) => {
+                    durable &= step(Step::DirSync).and_then(|()| folder.sync_all()).is_ok();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(Refused::NoDir),
+            }
+            // A concurrent creator's directory must meet the same policy, without chmod.
+            check_dirs(&at)?;
+            folder = private_dir(&at)?;
+        }
+        check_dirs(&dest)?;
+        folder = private_dir(&dest)?;
+        outside_corpus(&dest, &dest, &folder, corpus)?;
+        Ok((dest, folder, durable))
+    }
+
+    fn private_dir(path: &Path) -> Result<std::fs::File, Refused> {
+        let folder = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(path)
+            .map_err(|_| Refused::NoDir)?;
+        let meta = folder.metadata().map_err(|_| Refused::NoDir)?;
+        // SAFETY: geteuid has no arguments and cannot fail.
+        if !private(&folder)
+            || meta.uid() != unsafe { libc::geteuid() }
+            || meta.mode() & 0o777 != 0o700
+        {
+            return Err(Refused::NotPrivate);
+        }
+        Ok(folder)
+    }
+
+    /// The descriptor keeps the original inode alive until the identity comparison. A renamed
+    /// or replaced path is left alone, as are all pre-existing keys.
+    pub(super) fn discard(path: &Path, file: &std::fs::File) {
+        let Ok(owned) = file.metadata() else { return };
+        let Ok(current) = std::fs::symlink_metadata(path) else {
+            return;
+        };
+        if current.dev() == owned.dev() && current.ino() == owned.ino() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    pub(super) fn managed(
+        key: &str,
+        corpus_home: &Path,
+        owner_home: &Path,
+        local_data: Option<&Path>,
+    ) -> Result<Managed, Refused> {
+        let (corpus, _) = planned_dir(corpus_home)?;
+        let data = local_data
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| owner_home.join(".local/share"));
+        let (dir, folder, durable) = managed_dir(&data.join("oboete/keys"), &corpus)
+            .or_else(|_| managed_dir(&owner_home.join(".oboete-keys"), &corpus))?;
+        let mut tag = [0u8; 16];
+        getrandom::fill(&mut tag).map_err(|_| Refused::Failed)?;
+        #[cfg(test)]
+        if let Some(fixed) = MANAGED_TAG.with(|f| f.take()) {
+            tag = fixed;
+        }
+        let tag: String = tag.iter().map(|b| format!("{b:02x}")).collect();
+        let path = dir.join(format!("{tag}_KEY.md"));
+        step(Step::Stage).map_err(|_| Refused::Failed)?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|_| Refused::Failed)?;
+        let mut registration = Managed {
+            path,
+            durable,
+            file: Some(file),
+        };
+        #[cfg(test)]
+        if let Some(f) = BEFORE_WRITE.with(|b| b.borrow_mut().take()) {
+            f();
+        }
+        let file = registration.file.as_mut().ok_or(Refused::Failed)?;
+        let meta = file.metadata().map_err(|_| Refused::Failed)?;
+        // SAFETY: geteuid has no arguments and cannot fail.
+        if !private(file)
+            || !meta.is_file()
+            || meta.uid() != unsafe { libc::geteuid() }
+            || meta.mode() & 0o777 != 0o600
+        {
+            return Err(Refused::NotPrivate);
+        }
+        step(Step::Write)
+            .and_then(|()| file.write_all(&with_key(None, key)))
+            .map_err(|_| Refused::Failed)?;
+        step(Step::Sync)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| Refused::Failed)?;
+        registration.durable &= step(Step::DirSync).and_then(|()| folder.sync_all()).is_ok();
+        Ok(registration)
     }
 
     pub(super) fn write(path: &Path, key: &str, home: &Path) -> Result<Written, Refused> {
@@ -380,7 +841,7 @@ mod linux {
         let magic = magic(file);
         #[cfg(test)]
         let magic = FS.with(|f| f.get()).or(magic);
-        magic.is_some_and(|m| PRIVATE_FS.contains(&m))
+        magic.is_some_and(|m| PRIVATE_FS.iter().any(|(allowed, _)| *allowed == m))
     }
 
     /// The magic number of the filesystem `file` is on, when the kernel tells it.
@@ -469,6 +930,23 @@ mod tests {
 
     #[cfg(not(target_os = "linux"))]
     #[test]
+    fn managed_registration_waits_for_owner_only_storage_off_linux() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            managed(
+                "key-abcdefgh",
+                &root.path().join("corpus"),
+                &root.path().join("owner"),
+                None
+            )
+            .unwrap_err(),
+            Refused::Unsupported
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
     fn saving_a_key_waits_for_owner_only_files_off_linux() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("GROQ_KEY.md");
@@ -525,6 +1003,503 @@ mod tests {
                 }
             }
             out
+        }
+
+        /// A trusted kernel mount table and the mount IDs reported for opened fixture folders.
+        /// Actual files, permissions, owner checks and writes still use the temporary filesystem.
+        fn mounts(root: &Path, alias: &Path, source: &Path) {
+            use std::os::unix::fs::MetadataExt;
+            let dev = std::fs::metadata(root).unwrap().dev();
+            let dev = format!("{}:{}", libc::major(dev), libc::minor(dev));
+            let escape = |path: &Path| {
+                path.to_str()
+                    .unwrap()
+                    .replace('\\', "\\134")
+                    .replace(' ', "\\040")
+                    .replace('\t', "\\011")
+                    .replace('\n', "\\012")
+            };
+            let table = format!(
+                "1 0 {dev} / / rw - ext4 none rw\n2 1 {dev} {} {} rw shared:10 - ext4 none rw\n7 1 0:999 net:[12345] /unrelated-namespace rw - nsfs nsfs rw\n",
+                escape(source),
+                escape(alias)
+            );
+            MOUNTS.with(|f| {
+                *f.borrow_mut() = Some(MountFixture {
+                    table: table.into_bytes(),
+                    ids: vec![(root.to_path_buf(), 1), (alias.to_path_buf(), 2)],
+                })
+            });
+        }
+
+        #[test]
+        fn managed_registration_rejects_bound_corpus_descendants_before_mkdir() {
+            let (root, _keys, corpus) = setup();
+            let source = corpus.join("deep/descendant\t\n\\");
+            std::fs::create_dir_all(&source).unwrap();
+            let alias = root.path().join("ali as\t\n\\");
+            std::fs::create_dir(&alias).unwrap();
+            private(&alias);
+            mounts(root.path(), &alias, &source);
+            let result = managed(KEY, &corpus, root.path(), Some(&alias));
+            MOUNTS.with(|f| *f.borrow_mut() = None);
+            let registration = result.unwrap();
+            assert_eq!(
+                registration.path().parent().unwrap(),
+                root.path().join(".oboete-keys")
+            );
+            assert!(!alias.join("oboete").exists());
+            assert!(!source.join("oboete").exists());
+        }
+
+        #[test]
+        fn managed_registration_refuses_unproven_corpus_submounts_before_mkdir() {
+            for kind in [
+                "fuse.passthrough",
+                "ecryptfs",
+                "9p",
+                "nfs",
+                "unprovenfs",
+                "overlay",
+            ] {
+                let (root, _keys, corpus) = setup();
+                let data = root.path().join("data");
+                std::fs::create_dir(&data).unwrap();
+                private(&data);
+                let layer = corpus.join("layer");
+                std::fs::create_dir(&layer).unwrap();
+                private(&layer);
+                mounts(root.path(), &data, &root.path().join("separate"));
+                MOUNTS.with(|f| {
+                    f.borrow_mut().as_mut().unwrap().table.extend_from_slice(
+                        format!(
+                            "8 1 0:997 / {} rw - {kind} opaque-source rw\n",
+                            layer.display()
+                        )
+                        .as_bytes(),
+                    )
+                });
+                let result = managed(KEY, &corpus, root.path(), Some(&data));
+                MOUNTS.with(|f| *f.borrow_mut() = None);
+                assert_eq!(result.unwrap_err(), Refused::Protected, "{kind}");
+                assert!(!data.join("oboete").exists(), "{kind}");
+                assert!(!root.path().join(".oboete-keys").exists(), "{kind}");
+            }
+        }
+
+        #[test]
+        fn managed_registration_keeps_unrelated_opaque_and_disjoint_native_mounts_usable() {
+            for (kind, protected) in [
+                ("fuse.passthrough", false),
+                ("unprovenfs", false),
+                ("tmpfs", true),
+            ] {
+                let (root, _keys, corpus) = setup();
+                let data = root.path().join("data");
+                std::fs::create_dir(&data).unwrap();
+                private(&data);
+                let at = if protected {
+                    corpus.join("layer")
+                } else {
+                    root.path().join("unrelated")
+                };
+                std::fs::create_dir(&at).unwrap();
+                private(&at);
+                mounts(root.path(), &data, &root.path().join("separate"));
+                MOUNTS.with(|f| {
+                    f.borrow_mut().as_mut().unwrap().table.extend_from_slice(
+                        format!(
+                            "8 1 0:997 / {} rw - {kind} opaque-source rw\n",
+                            at.display()
+                        )
+                        .as_bytes(),
+                    )
+                });
+                let result = managed(KEY, &corpus, root.path(), Some(&data));
+                MOUNTS.with(|f| *f.borrow_mut() = None);
+                let registration = result.unwrap();
+                assert_eq!(
+                    registration.path().parent().unwrap(),
+                    data.join("oboete/keys"),
+                    "{kind}"
+                );
+                assert_eq!(mode(registration.path()), 0o600);
+            }
+        }
+
+        #[test]
+        fn managed_registration_uses_mount_identity_when_subvolume_stat_devices_differ() {
+            use std::os::unix::fs::MetadataExt;
+            let (root, _keys, corpus) = setup();
+            let alias = root.path().join("alias");
+            std::fs::create_dir(&alias).unwrap();
+            private(&alias);
+            let stat_dev = std::fs::metadata(root.path()).unwrap().dev();
+            let observed = format!(" {}:{} ", libc::major(stat_dev), libc::minor(stat_dev));
+            // Btrfs reports the subvolume's anon_dev through stat and the superblock's
+            // different s_dev in mountinfo. Only the mount observations are injected.
+            let mounted = format!(
+                " {}:{} ",
+                libc::major(stat_dev),
+                u64::from(libc::minor(stat_dev)) + 1
+            );
+            let describe_subvolume = || {
+                MOUNTS.with(|f| {
+                    let mut f = f.borrow_mut();
+                    let fixture = f.as_mut().unwrap();
+                    fixture.table = String::from_utf8(fixture.table.clone())
+                        .unwrap()
+                        .replace(&observed, &mounted)
+                        .replace("- ext4 ", "- btrfs ")
+                        .into_bytes();
+                })
+            };
+            mounts(root.path(), &alias, &root.path().join("separate"));
+            describe_subvolume();
+            let result = managed(KEY, &corpus, root.path(), Some(&alias));
+            MOUNTS.with(|f| *f.borrow_mut() = None);
+            let registration = result.unwrap();
+            assert_eq!(
+                registration.path().parent().unwrap(),
+                alias.join("oboete/keys")
+            );
+            assert_eq!(mode(registration.path()), 0o600);
+            drop(registration);
+
+            // Different stat devices must not hide a bind into the same protected filesystem.
+            mounts(root.path(), &alias, &corpus.join("descendant"));
+            describe_subvolume();
+            let result = managed(KEY, &corpus, root.path(), Some(&alias));
+            MOUNTS.with(|f| *f.borrow_mut() = None);
+            let registration = result.unwrap();
+            assert_eq!(
+                registration.path().parent().unwrap(),
+                root.path().join(".oboete-keys")
+            );
+            assert_eq!(
+                std::fs::read_dir(alias.join("oboete/keys"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+        }
+
+        #[test]
+        fn managed_registration_protects_a_missing_corpus_without_creating_it() {
+            let (root, _keys, _corpus) = setup();
+            let corpus = root.path().join("not-yet-created/corpus");
+            let registration = managed(KEY, &corpus, root.path(), None).unwrap();
+            assert_eq!(
+                registration.path().parent().unwrap(),
+                root.path().join(".local/share/oboete/keys")
+            );
+            assert!(!root.path().join("not-yet-created").exists());
+        }
+
+        #[test]
+        fn managed_registration_requires_complete_bounded_mount_observations() {
+            let (root, _keys, corpus) = setup();
+            let alias = root.path().join("alias");
+            std::fs::create_dir(&alias).unwrap();
+            private(&alias);
+            mounts(root.path(), &alias, &root.path().join("separate"));
+            let good = MOUNTS.with(|f| f.borrow().as_ref().unwrap().table.clone());
+            let empty_type = String::from_utf8(good.clone())
+                .unwrap()
+                .replace("- ext4 ", "-  ")
+                .into_bytes();
+            let bad_escape = String::from_utf8(good.clone())
+                .unwrap()
+                .replace(" / / ", " /bad\\999 / ")
+                .into_bytes();
+            let mut duplicate = good.clone();
+            duplicate.extend_from_slice(&good);
+            for bad in [
+                empty_type,
+                Vec::new(),
+                b"not a mount table".to_vec(),
+                bad_escape,
+                duplicate,
+                vec![b'x'; 1_048_577],
+            ] {
+                MOUNTS.with(|f| f.borrow_mut().as_mut().unwrap().table = bad);
+                let result = managed(KEY, &corpus, root.path(), Some(&alias));
+                assert_eq!(result.unwrap_err(), Refused::Protected);
+                assert!(!alias.join("oboete").exists());
+                assert!(!root.path().join(".oboete-keys").exists());
+            }
+            MOUNTS.with(|f| {
+                let mut f = f.borrow_mut();
+                let fixture = f.as_mut().unwrap();
+                fixture.table = good;
+                fixture.ids = vec![(root.path().to_path_buf(), 999)];
+            });
+            let result = managed(KEY, &corpus, root.path(), Some(&alias));
+            MOUNTS.with(|f| *f.borrow_mut() = None);
+            assert_eq!(result.unwrap_err(), Refused::Protected);
+            assert!(!alias.join("oboete").exists());
+            assert!(!root.path().join(".oboete-keys").exists());
+        }
+
+        #[test]
+        fn managed_registration_creates_private_directories_and_a_fresh_key() {
+            let (root, _keys, corpus) = setup();
+            let owner = root.path().join("owner");
+            std::fs::create_dir(&owner).unwrap();
+            private(&owner);
+            let registration = managed(KEY, &corpus, &owner, None).unwrap();
+            let path = registration.path().to_path_buf();
+            assert_eq!(
+                path.parent().unwrap(),
+                owner.join(".local/share/oboete/keys")
+            );
+            for name in [
+                ".local",
+                ".local/share",
+                ".local/share/oboete",
+                ".local/share/oboete/keys",
+            ] {
+                assert_eq!(mode(&owner.join(name)), 0o700);
+            }
+            assert_eq!(mode(&path), 0o600);
+            let name = path.file_name().unwrap().to_str().unwrap();
+            assert!(name.ends_with("_KEY.md"));
+            assert_eq!(name.len(), 39);
+            assert_eq!(crate::config::read_key(&path).unwrap(), KEY);
+            assert!(registration.durable);
+            registration.retain();
+            assert_eq!(crate::config::read_key(&path).unwrap(), KEY);
+        }
+
+        #[test]
+        fn managed_registration_falls_back_outside_the_corpus_before_creating_directories() {
+            let (root, _keys, corpus) = setup();
+            let owner = root.path().join("owner");
+            std::fs::create_dir(&owner).unwrap();
+            private(&owner);
+            let ordinary = corpus.join("local-data");
+            let registration = managed(KEY, &corpus, &owner, Some(&ordinary)).unwrap();
+            assert_eq!(
+                registration.path().parent().unwrap(),
+                owner.join(".oboete-keys")
+            );
+            assert!(!ordinary.exists());
+            assert!(!owner.join(".oboete").exists());
+            assert_eq!(mode(registration.path().parent().unwrap()), 0o700);
+            assert_eq!(crate::config::read_key(registration.path()).unwrap(), KEY);
+        }
+
+        #[test]
+        fn managed_registration_removes_only_its_own_uncommitted_file() {
+            let (root, _keys, corpus) = setup();
+            let registration = managed(KEY, &corpus, root.path(), None).unwrap();
+            let path = registration.path().to_path_buf();
+            let legacy = path.parent().unwrap().join("LEGACY_KEY.md");
+            std::fs::write(&legacy, "legacy unchanged").unwrap();
+            drop(registration);
+            assert!(!path.exists());
+            assert_eq!(
+                std::fs::read_to_string(&legacy).unwrap(),
+                "legacy unchanged"
+            );
+
+            let registration = managed(KEY, &corpus, root.path(), None).unwrap();
+            let path = registration.path().to_path_buf();
+            let moved = path.with_extension("saved");
+            std::fs::rename(&path, &moved).unwrap();
+            std::fs::write(&path, "concurrent replacement").unwrap();
+            drop(registration);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "concurrent replacement"
+            );
+            assert_eq!(crate::config::read_key(&moved).unwrap(), KEY);
+            assert_eq!(
+                std::fs::read_to_string(&legacy).unwrap(),
+                "legacy unchanged"
+            );
+        }
+
+        #[test]
+        fn managed_registration_write_and_sync_failures_leave_no_unused_key() {
+            for at in [Step::Stage, Step::Write, Step::Sync] {
+                let (root, _keys, corpus) = setup();
+                FAIL.with(|f| f.set(Some(at)));
+                let result = managed(KEY, &corpus, root.path(), None);
+                FAIL.with(|f| f.set(None));
+                assert_eq!(result.unwrap_err(), Refused::Failed, "{at:?}");
+                assert_eq!(
+                    std::fs::read_dir(root.path().join(".local/share/oboete/keys"))
+                        .unwrap()
+                        .count(),
+                    0,
+                    "{at:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn managed_registration_does_not_overwrite_or_delete_a_filename_collision() {
+            let (root, _keys, corpus) = setup();
+            let registration = managed(KEY, &corpus, root.path(), None).unwrap();
+            let dir = registration.path().parent().unwrap().to_path_buf();
+            drop(registration);
+            let collision = dir.join("abababababababababababababababab_KEY.md");
+            std::fs::write(&collision, "legacy bytes unchanged").unwrap();
+            std::fs::set_permissions(&collision, std::fs::Permissions::from_mode(0o640)).unwrap();
+            MANAGED_TAG.with(|f| f.set(Some([0xab; 16])));
+            assert_eq!(
+                managed(KEY, &corpus, root.path(), None).unwrap_err(),
+                Refused::Failed
+            );
+            assert_eq!(
+                std::fs::read_to_string(&collision).unwrap(),
+                "legacy bytes unchanged"
+            );
+            assert_eq!(mode(&collision), 0o640);
+            assert_eq!(std::fs::read_dir(dir).unwrap().count(), 1);
+        }
+
+        #[test]
+        fn managed_registration_refuses_a_bad_file_filesystem_before_writing_the_key() {
+            for magic in [0x0102_1997, 0x6573_5546] {
+                let (root, _keys, corpus) = setup();
+                let dir = root.path().join(".local/share/oboete/keys");
+                let observed = dir.clone();
+                BEFORE_WRITE.with(|b| {
+                    *b.borrow_mut() = Some(Box::new(move || {
+                        let files: Vec<_> =
+                            std::fs::read_dir(&observed).unwrap().flatten().collect();
+                        assert_eq!(files.len(), 1);
+                        assert_eq!(mode(&observed), 0o700);
+                        assert_eq!(mode(&files[0].path()), 0o600);
+                        assert!(std::fs::read(files[0].path()).unwrap().is_empty());
+                        fake_fs(Some(magic));
+                    }))
+                });
+                let result = managed(KEY, &corpus, root.path(), None);
+                fake_fs(None);
+                assert_eq!(result.unwrap_err(), Refused::NotPrivate);
+                assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+            }
+        }
+
+        #[test]
+        fn managed_registration_uses_safe_fallback_without_changing_shared_ancestors() {
+            let (root, _keys, corpus) = setup();
+            let shared = root.path().join("shared");
+            std::fs::create_dir(&shared).unwrap();
+            std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let alias = root.path().join("data-alias");
+            std::os::unix::fs::symlink(&shared, &alias).unwrap();
+            let registration = managed(KEY, &corpus, root.path(), Some(&alias)).unwrap();
+            assert_eq!(
+                registration.path().parent().unwrap(),
+                root.path().join(".oboete-keys")
+            );
+            assert_eq!(mode(&shared), 0o777);
+            assert_eq!(std::fs::read_dir(&shared).unwrap().count(), 0);
+            drop(registration);
+
+            std::fs::remove_dir(root.path().join(".oboete-keys")).unwrap();
+            let owner = shared.join("owner");
+            std::fs::create_dir(&owner).unwrap();
+            private(&owner);
+            assert_eq!(
+                managed(KEY, &corpus, &owner, Some(&alias)).unwrap_err(),
+                Refused::SharedDir
+            );
+            assert!(!owner.join(".oboete-keys").exists());
+        }
+
+        #[test]
+        fn managed_registration_keeps_existing_folder_modes_and_refuses_both_unsafe_locations() {
+            let (root, _keys, corpus) = setup();
+            let data = root.path().join("data");
+            let ordinary = data.join("oboete/keys");
+            std::fs::create_dir_all(&ordinary).unwrap();
+            for dir in [&data, &data.join("oboete")] {
+                private(dir);
+            }
+            std::fs::set_permissions(&ordinary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let fallback = root.path().join(".oboete-keys");
+            std::fs::create_dir(&fallback).unwrap();
+            std::fs::set_permissions(&fallback, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(
+                managed(KEY, &corpus, root.path(), Some(&data)).unwrap_err(),
+                Refused::NotPrivate
+            );
+            assert_eq!(mode(&ordinary), 0o755);
+            assert_eq!(mode(&fallback), 0o755);
+            assert_eq!(std::fs::read_dir(&ordinary).unwrap().count(), 0);
+            assert_eq!(std::fs::read_dir(&fallback).unwrap().count(), 0);
+        }
+
+        #[test]
+        fn managed_registration_refuses_unknown_ancestor_filesystems_before_creation() {
+            let (root, _keys, corpus) = setup();
+            let data = root.path().join("data");
+            std::fs::create_dir(&data).unwrap();
+            private(&data);
+            FS_AT.with(|f| *f.borrow_mut() = Some((data.clone(), 0x6573_5546)));
+            let result = managed(KEY, &corpus, root.path(), Some(&data));
+            FS_AT.with(|f| *f.borrow_mut() = None);
+            let registration = result.unwrap();
+            assert_eq!(
+                registration.path().parent().unwrap(),
+                root.path().join(".oboete-keys")
+            );
+            assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
+            drop(registration);
+
+            FS_AT.with(|f| *f.borrow_mut() = Some((data.clone(), 0x6573_5546)));
+            let result = managed(KEY, &corpus, &data, Some(&data));
+            FS_AT.with(|f| *f.borrow_mut() = None);
+            assert_eq!(result.unwrap_err(), Refused::NotPrivate);
+            assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
+        }
+
+        #[test]
+        fn managed_registration_refuses_corpus_aliases_and_never_creates_an_owner_corpus() {
+            let (root, _keys, corpus) = setup();
+            let alias = root.path().join("corpus-alias");
+            std::os::unix::fs::symlink(&corpus, &alias).unwrap();
+            let registration = managed(KEY, &corpus, root.path(), Some(&alias)).unwrap();
+            assert_eq!(
+                registration.path().parent().unwrap(),
+                root.path().join(".oboete-keys")
+            );
+            assert_eq!(std::fs::read_dir(&corpus).unwrap().count(), 0);
+            assert_eq!(
+                managed(KEY, &corpus, &corpus, None).unwrap_err(),
+                Refused::Protected
+            );
+            assert_eq!(std::fs::read_dir(&corpus).unwrap().count(), 0);
+            assert!(!root.path().join(".oboete").exists());
+        }
+
+        #[test]
+        fn managed_registration_reports_durability_without_losing_a_retained_key() {
+            let (root, _keys, corpus) = setup();
+            FAIL.with(|f| f.set(Some(Step::DirSync)));
+            let result = managed(KEY, &corpus, root.path(), None);
+            FAIL.with(|f| f.set(None));
+            let registration = result.unwrap();
+            let path = registration.path().to_path_buf();
+            assert!(!registration.durable);
+            registration.retain();
+            assert_eq!(crate::config::read_key(&path).unwrap(), KEY);
+        }
+
+        #[test]
+        fn managed_registration_bad_key_errors_never_include_the_input() {
+            let (root, _keys, corpus) = setup();
+            let input = "secret-canary\nrefused";
+            let refused = managed(input, &corpus, root.path(), None).unwrap_err();
+            assert_eq!(refused, Refused::BadKey);
+            assert!(!format!("{refused:?} {}", refused.code()).contains(input));
+            assert!(!root.path().join(".local").exists());
+            assert!(!root.path().join(".oboete-keys").exists());
         }
 
         #[test]

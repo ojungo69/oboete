@@ -187,12 +187,15 @@ fn default_idle_minutes() -> u32 {
     10
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Provider {
     /// OpenAI-compatible chat completions with `response_format: json_schema`.
     Openai {
         name: String,
+        /// One native entry's switch, independent of `[chain] off`'s name-group override.
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        enabled: bool,
         base_url: String,
         /// File whose second line is the API key (owner convention: ~/X_KEY.md). None = no auth.
         #[serde(default)]
@@ -226,6 +229,8 @@ pub enum Provider {
     /// A subscription CLI run headless (`agy`, `claude`, `grok`, `codex`).
     Cli {
         name: String,
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        enabled: bool,
         /// Which CLI; decides the argument shape.
         cli: String,
         #[serde(default)]
@@ -242,7 +247,7 @@ pub enum Provider {
 
 /// What one entry may take (docs/milestone-3-plan.md Task 4), as `limits = { ... }`. With prices
 /// it is a paid entry, inside `paid_usd_per_month` with every other paid entry.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     /// The provider's ceiling for one request, in tokens (Groq free: 8,000). A larger request is
@@ -290,6 +295,11 @@ fn default_max_output_tokens() -> u32 {
 }
 
 impl Provider {
+    pub fn enabled(&self) -> bool {
+        match self {
+            Self::Openai { enabled, .. } | Self::Cli { enabled, .. } => *enabled,
+        }
+    }
     /// The output tokens a request reserves on top of its prompt: `max_tokens` or
     /// `max_completion_tokens` in `extra`, at most `max_output_tokens` on a paid entry (as
     /// `provider::call` sends it), or 0 when it names none.
@@ -408,6 +418,9 @@ fn default_cli_timeout() -> u64 {
 fn default_true() -> bool {
     true
 }
+fn is_true(value: &bool) -> bool {
+    *value
+}
 fn default_language() -> String {
     "Japanese".into()
 }
@@ -433,6 +446,7 @@ fn openai(
 ) -> Provider {
     Provider::Openai {
         name: name.into(),
+        enabled: true,
         base_url: base_url.into(),
         key_file: Some(home_dir().join(key)),
         model: model.into(),
@@ -472,6 +486,7 @@ fn gemini() -> Provider {
 fn cli(name: &str, model: Option<&str>) -> Provider {
     Provider::Cli {
         name: name.into(),
+        enabled: true,
         cli: name.into(),
         model: model.map(Into::into),
         daily_budget: no_daily_cap(),
@@ -703,7 +718,7 @@ pub fn load_chain(home: &Path) -> Result<Config> {
     let Config {
         providers, chain, ..
     } = &mut cfg;
-    providers.retain(|p| !chain.turns_off(p.name()));
+    providers.retain(|p| p.enabled() && !chain.turns_off(p.name()));
     Ok(cfg)
 }
 
@@ -800,10 +815,12 @@ fn overlay(cfg: &mut Config) {
     }
     if summary.curate
         && !providers.is_empty()
-        && providers.iter().all(|p| chain.turns_off(p.name()))
+        && providers
+            .iter()
+            .all(|p| !p.enabled() || chain.turns_off(p.name()))
     {
         warnings.push(
-            "every chain entry is off, so nothing is curated: to stop curation, set [summary] curate = false instead".into(),
+            "no provider is enabled: entries are individually disabled or their name groups are off; enable an entry and its name group to curate, or set [summary] curate = false to stop curation".into(),
         );
     }
 }
@@ -855,7 +872,7 @@ pub fn doctor_line(p: &Provider, chain: &ChainOverlay) -> String {
         } => (*timeout_s, model.as_deref()),
     };
     let mut parts = Vec::new();
-    if chain.turns_off(p.name()) {
+    if !p.enabled() || chain.turns_off(p.name()) {
         parts.push("off".to_owned());
     }
     if !p.budget_from_key() {
@@ -1690,6 +1707,22 @@ model = { gone = "m" }
             "{}",
             line("openrouter")
         );
+    }
+
+    #[test]
+    fn doctor_reports_native_off_entries_even_without_a_name_group_override() {
+        let cfg = load_text(
+            "[[providers]]\nkind = \"cli\"\nname = \"same\"\ncli = \"claude\"\nenabled = false\n\
+            [[providers]]\nkind = \"cli\"\nname = \"same\"\ncli = \"codex\"\n\
+            [[providers]]\nkind = \"openai\"\nname = \"http\"\nenabled = false\n\
+            base_url = \"https://example.invalid/v1\"\nmodel = \"synthetic\"\n",
+        );
+        for (p, off) in cfg.providers.iter().zip([true, false, true]) {
+            assert_eq!(doctor_line(p, &cfg.chain).starts_with("    off, "), off);
+        }
+        let mut chain = cfg.chain.clone();
+        chain.off.push("same".into());
+        assert!(doctor_line(&cfg.providers[1], &chain).starts_with("    off, "));
     }
 
     #[test]
