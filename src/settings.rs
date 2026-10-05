@@ -1100,6 +1100,7 @@ fn write_extra_rules(
     rules: &[config::ExtraRule],
 ) {
     let mut comments = String::new();
+    // ponytail: editable ids leave bulk comment affinity ambiguous; add original-row metadata if needed.
     let mut renamed = old
         .iter()
         .filter(|previous| !rules.iter().any(|rule| rule.id == previous.id));

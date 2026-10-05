@@ -22,7 +22,11 @@ capture groups or invalid exception hashes leave the previous file unchanged.
 Errors contain vetted codes rather than patterns or values. An older request
 that omits these fields preserves their saved values, comments and defaults.
 Changing rule names retains the saved tables and their comments; reordered rules
-keep their submitted order. Clearing an optional rule field retains its comments
+keep their submitted order. If names change together with additions or removals,
+unmatched tables are retained in their saved order, so comments can move between
+rules. Save name changes separately when their comment association matters.
+The saved rule values always follow the submitted settings.
+Clearing an optional rule field retains its comments
 without retaining the old setting value. An unchanged repeated save preserves the resulting file bytes.
 
 The exact-value exception control hashes UTF-8 in the browser, clears the live
