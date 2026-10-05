@@ -129,15 +129,17 @@ const TITLE: &str = "API key (oboete)";
 /// WSL (9p), FUSE (sshfs with `allow_other` shows 0600 and lets every local user read), network
 /// shares, FAT, exFAT and NTFS among them, and eCryptfs, which leaves the check to the filesystem
 /// under it.
-const PRIVATE_FS: &[u32] = &[
-    0xEF53,      // ext2, ext3, ext4
-    0x5846_5342, // XFS
-    0x9123_683E, // Btrfs
-    0xF2F5_2010, // F2FS
-    0x2FC1_2FC1, // ZFS
-    0xCA45_1A4E, // bcachefs
-    0x0102_1994, // tmpfs
-    0x794C_7630, // overlayfs
+// The magic controls mode enforcement; the names identify provable native mount coordinates.
+// Overlay enforces modes but exposes no complete backing-tree coordinates, so has no names.
+const PRIVATE_FS: &[(u32, &[&[u8]])] = &[
+    (0xEF53, &[b"ext2", b"ext3", b"ext4"]),
+    (0x5846_5342, &[b"xfs"]),
+    (0x9123_683E, &[b"btrfs"]),
+    (0xF2F5_2010, &[b"f2fs"]),
+    (0x2FC1_2FC1, &[b"zfs"]),
+    (0xCA45_1A4E, &[b"bcachefs"]),
+    (0x0102_1994, &[b"tmpfs"]),
+    (0x794C_7630, &[]),
 ];
 
 /// 8 to 512 characters of letters, digits and `._~+/=:-`: every provider's keys, and no quote,
@@ -327,7 +329,7 @@ mod linux {
             Some((at, fake)) if at == path => Some(*fake),
             _ => fs,
         });
-        if !fs.is_some_and(|m| PRIVATE_FS.contains(&m)) {
+        if !fs.is_some_and(|m| PRIVATE_FS.iter().any(|(magic, _)| *magic == m)) {
             return Err(Refused::NotPrivate);
         }
         held.metadata().map_err(|_| Refused::NoDir)
@@ -423,17 +425,7 @@ mod linux {
     /// Translate native filesystem names to the existing mode-enforcement policy. Layered and
     /// userspace views (including overlay) do not expose sufficient backing-tree coordinates.
     fn native_coordinates(kind: &[u8]) -> bool {
-        let magic = match kind {
-            b"ext2" | b"ext3" | b"ext4" => 0xEF53,
-            b"xfs" => 0x5846_5342,
-            b"btrfs" => 0x9123_683E,
-            b"f2fs" => 0xF2F5_2010,
-            b"zfs" => 0x2FC1_2FC1,
-            b"bcachefs" => 0xCA45_1A4E,
-            b"tmpfs" => 0x0102_1994,
-            _ => return false,
-        };
-        PRIVATE_FS.contains(&magic)
+        PRIVATE_FS.iter().any(|(_, names)| names.contains(&kind))
     }
 
     const MAX_MOUNTINFO: u64 = 1024 * 1024;
@@ -849,7 +841,7 @@ mod linux {
         let magic = magic(file);
         #[cfg(test)]
         let magic = FS.with(|f| f.get()).or(magic);
-        magic.is_some_and(|m| PRIVATE_FS.contains(&m))
+        magic.is_some_and(|m| PRIVATE_FS.iter().any(|(allowed, _)| *allowed == m))
     }
 
     /// The magic number of the filesystem `file` is on, when the kernel tells it.
