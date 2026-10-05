@@ -234,11 +234,13 @@ fn labels(
     let (conn, query) = match raw {
         RawRepos::Main(conn) => (
             conn,
-            "SELECT DISTINCT repo FROM main.records WHERE repo IS NOT NULL AND repo <> ''",
+            "SELECT DISTINCT repo FROM main.records
+             WHERE type = 'event' AND repo IS NOT NULL AND repo <> ''",
         ),
         RawRepos::Attached(conn) => (
             conn,
-            "SELECT DISTINCT repo FROM privacy_raw.records WHERE repo IS NOT NULL AND repo <> ''",
+            "SELECT DISTINCT repo FROM privacy_raw.records
+             WHERE type = 'event' AND repo IS NOT NULL AND repo <> ''",
         ),
     };
     let mut records = conn.prepare(query)?;

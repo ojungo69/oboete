@@ -2044,6 +2044,7 @@ impl Raw {
     /// whatever the clocks of the devices that wrote them. A copied store keeps its old device's
     /// ops under a new device (Codex on #304).
     pub fn exclude(&mut self, repo: &str, undo: bool) -> Result<i64> {
+        let _dispatch = crate::dispatch::exclusive(&self.home)?;
         let seen: Option<i64> = self.conn.query_row(
             "SELECT MAX(COALESCE(json_extract(body, '$.clock'), ts)) FROM ops
              WHERE type = 'exclusion'",
@@ -3215,6 +3216,27 @@ pub fn test_event(body: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_wait_failure_records_no_exclusion() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let held = raw.dispatch().unwrap();
+
+        assert!(
+            raw.exclude("x", false).is_err(),
+            "a transmitting batch permitted an exclusion acknowledgement"
+        );
+        assert_eq!(raw.max_op_seq().unwrap(), 0);
+        assert!(raw.exclusions().unwrap().is_empty());
+        assert!(!home.path().join("providers.db").exists());
+
+        held.release();
+        assert_eq!(raw.exclude("x", false).unwrap(), 1);
+        assert_eq!(raw.exclusions().unwrap(), vec!["x"]);
+        assert_eq!(raw.exclude("x", true).unwrap(), 2);
+        assert!(raw.exclusions().unwrap().is_empty());
+    }
 
     #[test]
     fn dispatch_wait_failure_is_bounded_and_registers_no_partial_forget() {
