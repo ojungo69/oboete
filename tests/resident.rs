@@ -179,8 +179,12 @@ fn post_exec_viewer_readiness_requires_a_fresh_listening_outcome() {
     assert!(!fresh_viewer_listener(home.path(), 12345, &previous));
 }
 
-fn repos_response_on(home: &Path, port: u16, mut stream: std::net::TcpStream) -> String {
+fn repos_response_on(home: &Path, port: u16, stream: std::net::TcpStream) -> String {
     let token = std::fs::read_to_string(home.join("state/view-token")).unwrap();
+    repos_response_with_token(&token, port, stream)
+}
+
+fn repos_response_with_token(token: &str, port: u16, mut stream: std::net::TcpStream) -> String {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -330,6 +334,7 @@ fn a_replaced_worker_reaps_its_existing_viewer_child_without_starting_duplicates
         .collect();
     assert_eq!(viewers.len(), 1, "the worker started duplicate viewers");
     let child = viewers[0];
+    let previous_generation = std::fs::read(h.join("state/worker-gen")).unwrap();
     let next = scratch.path().join("oboete.next");
     std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
     let replacement = std::fs::metadata(&next).unwrap();
@@ -339,9 +344,30 @@ fn a_replaced_worker_reaps_its_existing_viewer_child_without_starting_duplicates
             (current.dev(), current.ino()) == (replacement.dev(), replacement.ino())
         })
     });
-    until("replacement ownership", || held(h, "worker.lock"));
+    let mut ready_processes = Vec::new();
+    until(
+        "replacement ownership and both existing process arguments",
+        || {
+            assert!(worker.0.try_wait().unwrap().is_none());
+            let generation_changed = std::fs::read(h.join("state/worker-gen"))
+                .is_ok_and(|generation| generation != previous_generation);
+            let running = started(h);
+            if generation_changed
+                && held(h, "worker.lock")
+                && running.contains(&pid)
+                && running.contains(&child)
+            {
+                ready_processes = running;
+                true
+            } else {
+                false
+            }
+        },
+    );
     assert!(worker.0.try_wait().unwrap().is_none());
-    assert_eq!(started(h).len(), 2, "exec duplicated the viewer");
+    // `/proc/PID/exe` can change before argv is readable. Use the same ready snapshot for the
+    // strict count; a third process still fails, and loss of the original child cannot pass.
+    assert_eq!(ready_processes.len(), 2, "exec duplicated the viewer");
     assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
     // SAFETY: this is the specific viewer PID created in this private home by our worker.
     assert_eq!(
@@ -1126,6 +1152,90 @@ fn held(home: &Path, name: &str) -> bool {
         .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
+fn captured_view(home: &Path) -> (Worker, tempfile::NamedTempFile, tempfile::NamedTempFile) {
+    let stdout = tempfile::NamedTempFile::new().unwrap();
+    let stderr = tempfile::NamedTempFile::new().unwrap();
+    let view = Worker(
+        Command::new(env!("CARGO_BIN_EXE_oboete"))
+            .arg("--home")
+            .arg(home)
+            .arg("view")
+            .stdin(Stdio::null())
+            .stdout(stdout.reopen().unwrap())
+            .stderr(stderr.reopen().unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    (view, stdout, stderr)
+}
+
+fn resident_listening(home: &Path, port: u16) -> bool {
+    held(home, "view.lock")
+        && std::fs::read_to_string(home.join("state/view-outcome"))
+            .is_ok_and(|outcome| outcome.trim() == format!("listening {port}"))
+}
+
+/// A slow start may correctly outlast the runtime's 3 s and serve in the foreground. Capture
+/// files never wait for that process's EOF; both addresses must really serve within the fixture.
+fn assert_resident_view_result(
+    home: &Path,
+    port: u16,
+    view: &mut Worker,
+    stdout: &tempfile::NamedTempFile,
+    stderr: &tempfile::NamedTempFile,
+    start: Instant,
+) {
+    let output = std::fs::read_to_string(stdout.path()).unwrap();
+    let token = std::fs::read_to_string(home.join("state/view-token")).unwrap();
+    let expected = format!("http://127.0.0.1:{port}/#t={token}\n");
+    if output.starts_with(&expected) {
+        until_within(
+            "the command selecting the resident viewer returns",
+            Duration::from_secs(20).saturating_sub(start.elapsed()),
+            || view.0.try_wait().unwrap().is_some(),
+        );
+        assert!(view.0.wait().unwrap().success());
+        return;
+    }
+    assert!(
+        view.0.try_wait().unwrap().is_none(),
+        "the foreground viewer exited"
+    );
+    let why = std::fs::read_to_string(stderr.path()).unwrap();
+    assert!(
+        why.contains("the resident viewer is not up:")
+            && why.contains("this run serves the page on its own address"),
+        "a nonreturning view did not explain its foreground fallback"
+    );
+    let address = output.lines().next().unwrap();
+    let (foreground, foreground_token) = address
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|address| address.split_once("/#t="))
+        .expect("a foreground loopback address with its token");
+    let foreground: u16 = foreground.parse().unwrap();
+    assert_ne!(foreground, port);
+    let response = repos_response_with_token(
+        foreground_token,
+        foreground,
+        std::net::TcpStream::connect(("127.0.0.1", foreground)).unwrap(),
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    // Once the original resident start is ready, a new command selects it and returns.
+    let (mut confirmation, stdout, _) = captured_view(home);
+    until_within(
+        "the ready resident viewer is selected",
+        Duration::from_secs(20).saturating_sub(start.elapsed()),
+        || confirmation.0.try_wait().unwrap().is_some(),
+    );
+    assert!(confirmation.0.wait().unwrap().success());
+    assert!(
+        std::fs::read_to_string(stdout.path())
+            .unwrap()
+            .starts_with(&expected),
+        "the ready resident address was not printed"
+    );
+}
+
 /// Resident test 2 (R7): `oboete view` in a resident home with nothing running starts the viewer
 /// and the worker, both locks held, and prints the address with the token of the viewer's file,
 /// which answers there.
@@ -1140,47 +1250,30 @@ fn view_in_a_resident_home_brings_up_the_viewer_and_the_worker() {
     )
     .unwrap();
     let _detached = Detached(h);
-    // As the owner runs it: it may start processes. One that does not return (it serves on its own
-    // address) is killed, and the test fails.
-    let mut view = Worker(
-        Command::new(env!("CARGO_BIN_EXE_oboete"))
-            .arg("--home")
-            .arg(h)
-            .arg("view")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
+    let start = Instant::now();
+    let (mut view, stdout, stderr) = captured_view(h);
+    until(
+        "oboete view reports its address and both resident roles are ready",
+        || {
+            std::fs::read_to_string(stdout.path()).is_ok_and(|out| out.contains('\n'))
+                && resident_listening(h, port)
+                && held(h, "worker.lock")
+        },
     );
-    until("oboete view returns", || {
-        view.0.try_wait().unwrap().is_some()
-    });
-    assert!(view.0.wait().unwrap().success());
-    let mut out = String::new();
-    std::io::Read::read_to_string(&mut view.0.stdout.take().unwrap(), &mut out).unwrap();
-    let token = std::fs::read_to_string(h.join("state").join("view-token")).unwrap();
-    assert!(
-        out.starts_with(&format!("http://127.0.0.1:{port}/#t={token}\n")),
-        "{out}"
-    );
+    assert_resident_view_result(h, port, &mut view, &stdout, &stderr, start);
     assert!(held(h, "view.lock") && held(h, "worker.lock"));
     // They run in the home, not in the folder `oboete view` ran in, which can then go (R1;
     // Codex on #378).
-    let pids = started(h);
+    let pids: Vec<_> = started(h)
+        .into_iter()
+        .filter(|pid| *pid != view.0.id())
+        .collect();
     assert!(pids.len() >= 2, "{pids:?}");
     for pid in pids {
         let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).unwrap();
         assert_eq!(cwd, h.canonicalize().unwrap(), "{pid}");
     }
-    let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    write!(
-        c,
-        "GET /api/repos HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Oboete-Token: {token}\r\n\r\n"
-    )
-    .unwrap();
-    let mut answer = String::new();
-    std::io::Read::read_to_string(&mut c, &mut answer).unwrap();
+    let answer = repos_response(h, port);
     assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
 }
 
@@ -1307,7 +1400,10 @@ fn the_token_file_is_0600_whatever_the_umask() {
 fn view_with_port_0_serves_here_in_a_resident_home() {
     let home = tempfile::tempdir().unwrap();
     let h = home.path();
-    let port = free_port();
+    // Keep the configured port reserved: a dropped free-port probe can be selected again by
+    // the kernel's bind(0), which would make a correct independent viewer fail this assertion.
+    let configured_port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = configured_port.local_addr().unwrap().port();
     std::fs::write(
         h.join("config.toml"),
         format!("[worker]\nresident = true\n[view]\nport = {port}\n"),
@@ -1381,14 +1477,17 @@ fn view_says_when_the_worker_does_not_start() {
     .unwrap();
     std::fs::create_dir_all(h.join("state").join("worker.lock")).unwrap();
     let _detached = Detached(h);
-    let out = Command::new(env!("CARGO_BIN_EXE_oboete"))
-        .arg("--home")
-        .arg(h)
-        .arg("view")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    let said = String::from_utf8_lossy(&out.stderr);
+    let start = Instant::now();
+    let (mut view, stdout, stderr) = captured_view(h);
+    until("the worker warning and resident listener", || {
+        std::fs::read_to_string(stderr.path())
+            .is_ok_and(|said| said.contains("the worker did not start"))
+            && std::fs::read_to_string(stdout.path()).is_ok_and(|out| out.contains('\n'))
+            && resident_listening(h, port)
+    });
+    let said = std::fs::read_to_string(stderr.path()).unwrap();
     assert!(said.contains("the worker did not start"), "{said}");
     assert!(held(h, "view.lock"));
+    assert_resident_view_result(h, port, &mut view, &stdout, &stderr, start);
+    assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
 }

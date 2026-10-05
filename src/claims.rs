@@ -276,6 +276,73 @@ impl CorrectionOp {
     }
 }
 
+/// The owner action was refused before anything was appended. The UI uses only `code`; the
+/// original cause stays inside the process for the CLI's existing error reporting.
+#[derive(Debug)]
+pub(crate) struct OwnerRefusal {
+    pub code: OwnerRefusalCode,
+    pub cause: anyhow::Error,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum OwnerRefusalCode {
+    Unavailable,
+    ClaimMissing,
+    CorrectionInvalid,
+    PreferenceEmpty,
+    PreferenceTooLong,
+}
+
+impl OwnerRefusal {
+    fn missing(uid: &str) -> Self {
+        Self {
+            code: OwnerRefusalCode::ClaimMissing,
+            cause: anyhow::anyhow!("no claim has the uid {uid}"),
+        }
+    }
+
+    fn unavailable(cause: impl Into<anyhow::Error>) -> Self {
+        Self {
+            code: OwnerRefusalCode::Unavailable,
+            cause: cause.into(),
+        }
+    }
+}
+
+/// A committed owner operation is never described as a refused write. The cause of a pending
+/// application is retained for the CLI, but never serialized into a viewer response.
+#[derive(Debug)]
+pub(crate) enum OwnerReceipt {
+    Applied {
+        uid: String,
+    },
+    Pending {
+        uid: String,
+        reason: PendingReason,
+        cause: anyhow::Error,
+    },
+    /// A preference's directive event committed, but its claim op did not. Retrying the whole
+    /// action would append another directive; no claim uid is presented as created.
+    DirectiveOnly {
+        cause: anyhow::Error,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PendingReason {
+    Application,
+    NotKept,
+}
+
+impl OwnerReceipt {
+    fn into_cli(self) -> Result<String> {
+        match self {
+            Self::Applied { uid } => Ok(uid),
+            Self::Pending { cause, .. } | Self::DirectiveOnly { cause } => Err(cause),
+        }
+    }
+}
+
 /// `oboete correct`: the owner's correction of the claim `uid`, appended as a correction op. The
 /// body goes through the same gate as every stored string; the claims consumer applies it, and
 /// this returns once it has (at most 10 seconds, else an error that says it is recorded).
@@ -285,40 +352,138 @@ pub fn correct(
     status: Option<&str>,
     body: Option<&str>,
 ) -> Result<()> {
-    correction(home, uid, status, body, None)
+    correct_recorded(home, uid, status, body)
+        .map_err(|e| e.cause)?
+        .into_cli()
+        .map(|_| ())
 }
 
 /// Mute or unmute a claim without changing its status or body (spec 6.1).
 pub fn mute(home: &std::path::Path, uid: &str, muted: bool) -> Result<()> {
-    correction(home, uid, None, None, Some(muted))
+    mute_recorded(home, uid, muted)
+        .map_err(|e| e.cause)?
+        .into_cli()
+        .map(|_| ())
 }
 
-fn correction(
+pub(crate) fn mute_recorded(
+    home: &std::path::Path,
+    uid: &str,
+    muted: bool,
+) -> std::result::Result<OwnerReceipt, OwnerRefusal> {
+    correction_recorded(home, uid, None, None, Some(muted))
+}
+
+pub(crate) fn correct_recorded(
+    home: &std::path::Path,
+    uid: &str,
+    status: Option<&str>,
+    body: Option<&str>,
+) -> std::result::Result<OwnerReceipt, OwnerRefusal> {
+    correction_recorded(home, uid, status, body, None)
+}
+
+fn correction_anchor(k: &Connection, uid: &str) -> Result<Option<Anchor>> {
+    use rusqlite::OptionalExtension;
+    Ok(k.query_row(
+        "SELECT anchor_device, anchor_seq FROM active WHERE uid = ?1",
+        [uid],
+        |r| {
+            Ok(Anchor {
+                device: r.get(0)?,
+                seq: r.get(1)?,
+            })
+        },
+    )
+    .optional()?)
+}
+
+/// A regular SQLite file may still be empty or only partly rebuilt. Resolve the target through
+/// existing core tables before any schema writer can turn that state into a missing claim.
+/// These columns predate mute and `claim_at`, so a usable older schema can still be upgraded.
+fn correction_target_exists(
+    home: &std::path::Path,
+    raw: &crate::raw::ReadOnly,
+    uid: &str,
+) -> Result<bool> {
+    raw.conn.prepare(
+        "SELECT r.device, r.seq, o.device, o.op_seq, o.type, o.ts, o.body, o.batch, m.key, m.value
+         FROM records r, ops o, meta m LIMIT 0",
+    )?;
+    let path = home.join("knowledge.db");
+    let identity = crate::db::store_file(&path);
+    let sqlite_path = home.canonicalize()?.join("knowledge.db");
+    let current = || -> Result<()> {
+        let regular = |path: &std::path::Path| {
+            std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+        };
+        anyhow::ensure!(
+            !identity.is_empty()
+                && regular(&path)
+                && regular(&sqlite_path)
+                && crate::db::store_file(&path) == identity
+                && crate::db::store_file(&sqlite_path) == identity,
+            "knowledge changed during an owner lookup"
+        );
+        Ok(())
+    };
+    current()?;
+    let k = Connection::open_with_flags(
+        &sqlite_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    k.busy_timeout(std::time::Duration::from_secs(2))?;
+    k.prepare(
+        "SELECT c.uid, c.op_device, c.op_seq, d.uid, d.anchor_device, d.anchor_seq,
+                x.uid, x.status, x.body, x.op_device, x.op_seq, x.ts
+         FROM claims c, derivations d, corrections x LIMIT 0",
+    )?;
+    let found = correction_anchor(&k, uid)?.is_some();
+    raw.current()?;
+    current()?;
+    Ok(found)
+}
+
+fn correction_recorded(
     home: &std::path::Path,
     uid: &str,
     status: Option<&str>,
     body: Option<&str>,
     muted: Option<bool>,
-) -> Result<()> {
-    use rusqlite::OptionalExtension;
-    let rules = crate::capture::Settings::load(home)?.rules;
+) -> std::result::Result<OwnerReceipt, OwnerRefusal> {
+    let rules = crate::capture::Settings::load(home)
+        .map_err(OwnerRefusal::unavailable)?
+        .rules;
+    // An unknown uid must not initialize a fresh home. Keep existing raw's swap admission
+    // while distinguishing an absent store from unreadable or not-yet-rebuilt knowledge.
+    let existing = crate::raw::read_only(home).map_err(OwnerRefusal::unavailable)?;
+    let knowledge = std::fs::symlink_metadata(home.join("knowledge.db"));
+    let existing = match (existing, knowledge) {
+        (None, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(OwnerRefusal::missing(uid));
+        }
+        (Some(raw), Ok(knowledge)) if knowledge.is_file() => raw,
+        (_, Err(e)) => return Err(OwnerRefusal::unavailable(e)),
+        _ => {
+            return Err(OwnerRefusal::unavailable(anyhow::anyhow!(
+                "claim stores are unavailable"
+            )));
+        }
+    };
+    if !correction_target_exists(home, &existing, uid).map_err(OwnerRefusal::unavailable)? {
+        return Err(OwnerRefusal::missing(uid));
+    }
     // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
-    let mut raw = crate::raw::open(home)?;
-    let k = crate::knowledge::open(home)?;
-    schema(&k)?;
-    let anchor = k
-        .query_row(
-            "SELECT anchor_device, anchor_seq FROM active WHERE uid = ?1",
-            [uid],
-            |r| {
-                Ok(Anchor {
-                    device: r.get(0)?,
-                    seq: r.get(1)?,
-                })
-            },
-        )
-        .optional()?
-        .ok_or_else(|| anyhow::anyhow!("no claim has the uid {uid}"))?;
+    let mut raw = existing
+        .into_writer(home)
+        .map_err(OwnerRefusal::unavailable)?;
+    let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
+    schema(&k).map_err(OwnerRefusal::unavailable)?;
+    let anchor = correction_anchor(&k, uid)
+        .map_err(OwnerRefusal::unavailable)?
+        .ok_or_else(|| OwnerRefusal::missing(uid))?;
     let op = CorrectionOp {
         uid: uid.to_owned(),
         anchor,
@@ -329,26 +494,50 @@ fn correction(
         muted,
     };
     if let Some(why) = op.fault() {
-        anyhow::bail!("the correction is refused: {why}");
+        return Err(OwnerRefusal {
+            code: OwnerRefusalCode::CorrectionInvalid,
+            cause: anyhow::anyhow!("the correction is refused: {why}"),
+        });
     }
-    let seqs = raw.append_ops(&[(crate::raw::OpKind::Correction, serde_json::to_value(&op)?)])?;
+    let body = serde_json::to_value(&op).map_err(OwnerRefusal::unavailable)?;
+    let seqs = raw
+        .append_ops(&[(crate::raw::OpKind::Correction, body)])
+        .map_err(OwnerRefusal::unavailable)?;
     let device = raw.device().to_owned();
     drop(raw);
     // A search or a SessionStart right after never shows the old claim.
-    applied(home, &k, &device, &seqs, "correction")?;
+    if let Err(cause) = applied(home, &k, &device, &seqs, "correction") {
+        return Ok(OwnerReceipt::Pending {
+            uid: uid.to_owned(),
+            reason: PendingReason::Application,
+            cause,
+        });
+    }
     // A worker of an older oboete that still held the lock passes a correction it does not
     // understand; the next worker of this one keeps it (`consumer::claims::retry`).
-    let kept: bool = k.query_row(
+    let kept = k.query_row(
         "SELECT EXISTS(SELECT 1 FROM corrections WHERE op_device = ?1 AND op_seq = ?2)",
         rusqlite::params![device, seqs.last()],
-        |r| r.get(0),
-    )?;
-    anyhow::ensure!(
-        kept,
-        "the correction is recorded; the worker running now is an older oboete and did not \
-         apply it: the next worker does"
+        |r| r.get::<_, bool>(0),
     );
-    Ok(())
+    Ok(match kept {
+        Ok(true) => OwnerReceipt::Applied {
+            uid: uid.to_owned(),
+        },
+        Ok(false) => OwnerReceipt::Pending {
+            uid: uid.to_owned(),
+            reason: PendingReason::NotKept,
+            cause: anyhow::anyhow!(
+                "the correction is recorded; the worker running now is an older oboete and did not \
+                 apply it: the next worker does"
+            ),
+        },
+        Err(cause) => OwnerReceipt::Pending {
+            uid: uid.to_owned(),
+            reason: PendingReason::Application,
+            cause: cause.into(),
+        },
+    })
 }
 
 /// The owner's ops `seqs`, applied before the command returns: by this process or by the worker
@@ -385,32 +574,52 @@ fn applied(
 /// `oboete pref add`: the owner's directive as an event, and a claim op quoting it whole, a
 /// decided preference of global scope (spec 3.3: global scope only through this or the viewer).
 /// Returns its uid, once the claims consumer has applied it: the next SessionStart shows it.
-// ponytail: two appends; a crash between them leaves the directive event with no claim (run it
-// again). One transaction when raw can append an event and ops together.
+// ponytail: two appends; a crash between them leaves the directive event with no claim. The
+// receipt reports that partial state without retrying. One transaction when raw supports both.
 pub fn pref_add(home: &std::path::Path, text: &str) -> Result<String> {
-    let settings = crate::capture::Settings::load(home)?;
+    pref_add_recorded(home, text)
+        .map_err(|e| e.cause)?
+        .into_cli()
+}
+
+pub(crate) fn pref_add_recorded(
+    home: &std::path::Path,
+    text: &str,
+) -> std::result::Result<OwnerReceipt, OwnerRefusal> {
+    let settings = crate::capture::Settings::load(home).map_err(OwnerRefusal::unavailable)?;
     let c = crate::capture::directive(text, crate::db::now_ms(), &settings);
     // What the gate stores: the quote reads verbatim there. Checked before either append, so a
     // preference that cannot be a claim leaves no event behind.
     let quote = crate::curate::long_text(&c.event).unwrap_or_default();
     if quote.trim().is_empty() {
-        anyhow::bail!("nothing is left to record once the <private> parts are removed");
+        return Err(OwnerRefusal {
+            code: OwnerRefusalCode::PreferenceEmpty,
+            cause: anyhow::anyhow!(
+                "nothing is left to record once the <private> parts are removed"
+            ),
+        });
     }
     if quote.chars().count() > MAX_BODY_CHARS {
-        anyhow::bail!(
-            "a preference can be at most {MAX_BODY_CHARS} characters; this one has {}",
-            quote.chars().count()
-        );
+        return Err(OwnerRefusal {
+            code: OwnerRefusalCode::PreferenceTooLong,
+            cause: anyhow::anyhow!(
+                "a preference can be at most {MAX_BODY_CHARS} characters; this one has {}",
+                quote.chars().count()
+            ),
+        });
     }
+    let length = i64::try_from(quote.len()).map_err(OwnerRefusal::unavailable)?;
     // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
-    let mut raw = crate::raw::open(home)?;
-    let k = crate::knowledge::open(home)?;
-    let seq = raw.append_with_ledger(&c.event, &c.ledger, settings.rules.version())?;
+    let mut raw = crate::raw::open(home).map_err(OwnerRefusal::unavailable)?;
+    let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
+    let seq = raw
+        .append_with_ledger(&c.event, &c.ledger, settings.rules.version())
+        .map_err(OwnerRefusal::unavailable)?;
     let evidence = Evidence {
         device: raw.device().to_owned(),
         seq,
         offset: 0,
-        length: i64::try_from(quote.len())?,
+        length,
         sentence: 0,
         quote: quote.clone(),
         claim_at: None,
@@ -430,11 +639,46 @@ pub fn pref_add(home: &std::path::Path, text: &str) -> Result<String> {
         why: String::new(),
         tainted: false,
     };
-    let seqs = raw.append_ops(&[(crate::raw::OpKind::Claim, serde_json::to_value(op)?)])?;
+    let append = (|| -> Result<Vec<i64>> {
+        raw.append_ops(&[(crate::raw::OpKind::Claim, serde_json::to_value(op)?)])
+    })();
+    let seqs = match append {
+        Ok(seqs) => seqs,
+        Err(cause) => return Ok(OwnerReceipt::DirectiveOnly { cause }),
+    };
     let device = raw.device().to_owned();
     drop(raw);
-    applied(home, &k, &device, &seqs, "preference")?;
-    Ok(uid)
+    if let Err(cause) = applied(home, &k, &device, &seqs, "preference") {
+        return Ok(OwnerReceipt::Pending {
+            uid,
+            reason: PendingReason::Application,
+            cause,
+        });
+    }
+    // Passing the op is not enough: a consumer may skip it, or its quote may disappear before
+    // the consumer keeps it. Never report that a global preference was created without it.
+    let kept = k.query_row(
+        "SELECT EXISTS(SELECT 1 FROM derivations
+         WHERE op_device = ?1 AND op_seq = ?2 AND uid = ?3)",
+        rusqlite::params![device, seqs.last(), uid],
+        |r| r.get::<_, bool>(0),
+    );
+    Ok(match kept {
+        Ok(true) => OwnerReceipt::Applied { uid },
+        Ok(false) => OwnerReceipt::Pending {
+            uid,
+            reason: PendingReason::NotKept,
+            cause: anyhow::anyhow!(
+                "the preference is recorded; the worker did not keep its claim: \
+                 check its state before retrying"
+            ),
+        },
+        Err(cause) => OwnerReceipt::Pending {
+            uid,
+            reason: PendingReason::Application,
+            cause: cause.into(),
+        },
+    })
 }
 
 /// A current claim.
