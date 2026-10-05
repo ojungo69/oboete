@@ -1,0 +1,23 @@
+tests/damaged_raw.rs
+  s_ce2b24784deac6::t_2f71f0bed7ad22 162-216,220-223,234-237
+  s_ce2b24784deac6::t_df69ddaf62eeaa 217-219,224-233
+  s_ce2b24784deac6::t_a1c0be0b25d084 238-250
+src/worker.rs
+  s_ce2b24784deac6::t_582edcbb7bb2da 1836-1838
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5f354d2e0896774ec865da319b234af5b591bb72",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
