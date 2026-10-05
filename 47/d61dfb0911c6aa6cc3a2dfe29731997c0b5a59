@@ -1,0 +1,35 @@
+assets/viewer/app.js
+  s_ce2b24784deac6::t_0b6e485c58954f 1293,1303
+  s_ce2b24784deac6::t_7353a6b5f3a937 1309,1441-1443,1475,1556,1585-1596,1598,1604,2939-2941,2946
+src/transcript.rs
+  s_ce2b24784deac6::t_1083851d67b85a 1387-1389,1400
+  s_ce2b24784deac6::t_ecfcdfc9d7c252 1276,1278
+src/migrate.rs
+  s_ce2b24784deac6::t_cd11dc0087af99 322
+  s_ce2b24784deac6::t_a1aa65543c62e9 1940-1961,1968
+  s_ce2b24784deac6::t_c9021c87823f78 482,488-491,1150-1152
+  s_ce2b24784deac6::t_58422ff449358f 1153-1154,1168-1169,1195,1209,1962-1967,1969-1973
+src/settings/maintenance.rs
+  s_ce2b24784deac6::t_1083851d67b85a 276-278,288,479-551
+  s_ce2b24784deac6::t_a70aaf0e3cf171 279,552-597
+  s_ce2b24784deac6::t_799f535c3fa871 292,294,598-612
+  s_ce2b24784deac6::t_0b6e485c58954f 73-78,82-101,220-223,281,291
+  s_ce2b24784deac6::t_7353a6b5f3a937 79-81,160,162-164
+  s_ce2b24784deac6::t_e0665ce0554853 226-227,274-275,280,282-287,289-290,293,295-296,613-626
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "47d61dfb0911c6aa6cc3a2dfe29731997c0b5a59",
+  "prompts": {},
+  "sessions": {
+    "s_ce2b24784deac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101cc-9b92-74f0-8f04-290f0395a5ac",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
