@@ -591,7 +591,7 @@ pub fn unmetered(
 }
 
 /// Unix ms of 00:00 UTC on the first day of `ms`'s month (civil-from-days, H. Hinnant).
-fn chrono_free_month_start(ms: i64) -> i64 {
+pub(crate) fn chrono_free_month_start(ms: i64) -> i64 {
     let days = ms.div_euclid(DAY_MS);
     let z = days + 719_468;
     let era = z.div_euclid(146_097);

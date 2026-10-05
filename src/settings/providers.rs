@@ -645,8 +645,10 @@ fn probe_failure(error: anyhow::Error) -> Refusal {
             };
             return refused(503, code, "providers.test");
         }
-        // dispatch::lock's bounded wait uses this fixed cause rather than an IO error.
-        if cause.to_string() == "provider dispatch or forget is busy: try again" {
+        if cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock)
+        {
             return refused(503, "provider_busy", "providers.test");
         }
     }

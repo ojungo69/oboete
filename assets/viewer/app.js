@@ -1534,6 +1534,8 @@ function providerReason(code, context = 'test') {
   return t(codes[code] || fallback);
 }
 
+const PROVIDER_HTTP_ERRORS = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
+
 async function providerRequest(path, body) {
   const res = await fetch(`/api/providers${path}`, {
     method: 'POST', headers: { 'X-Oboete-Token': token, 'Content-Type': 'application/json' },
@@ -1563,7 +1565,7 @@ function providerSuccessKey(action, path, answer) {
 function providerOperationFailure(action, path, res, answer, fields, scope) {
   fields.inert = false;
   if (answer.field) markInvalid(answer.field, scope || fields);
-  const known = answer.code || ({ 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' })[res.status];
+  const known = answer.code || PROVIDER_HTTP_ERRORS[res.status];
   let message = t('provider_operation_failed', { status: res.status });
   if (answer.field === 'providers.name') message = t('provider_bad_name');
   else if (known) message = providerReason(known, path === '/key' ? 'key' : 'operation');
@@ -1644,7 +1646,8 @@ async function previewProvider(provider, button, run = false) {
     if (!currentSettings(mine)) return;
     if (current) return reloadProviderSettings(current);
     if (!res.ok) {
-      setStatus(providerReason(answer.code || 'unavailable'), true, lang);
+      const known = answer.code || PROVIDER_HTTP_ERRORS[res.status] || 'unavailable';
+      setStatus(providerReason(known), true, lang);
       return;
     }
     if (run) { provider.result = answer; provider.preview = null; }
@@ -1768,7 +1771,8 @@ function providerEditor(draft, provider, card) {
     const field = providerValidation(draft);
     if (field) {
       markInvalid(field, card);
-      const message = { 'providers.base_url': 'provider_bad_endpoint', 'providers.name': 'provider_bad_name' }[field] || 'range';
+      const message = { 'providers.base_url': 'provider_bad_endpoint', 'providers.name': 'provider_bad_name',
+        'providers.model': 'provider_bad_model' }[field] || 'range';
       setStatus(t(message), true, lang);
       return;
     }

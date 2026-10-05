@@ -99,7 +99,7 @@ impl Drop for Managed {
 
 /// Registers a fresh key outside the corpus. Owner/data locations come from the trusted process
 /// caller, never a client's filesystem path. Existing key files are neither read nor replaced.
-/// Managed storage also needs kernel mount observations proving physical separation: overlay
+/// Managed storage also needs kernel mount observations proving physical separation. Unproven
 /// backing trees cannot provide that proof, so use a safe native fallback or refuse.
 pub(crate) fn managed(
     key: &str,
@@ -417,7 +417,23 @@ mod linux {
         device: (u64, u64),
         root: PathBuf,
         at: PathBuf,
-        overlay: bool,
+        native_coordinates: bool,
+    }
+
+    /// Translate native filesystem names to the existing mode-enforcement policy. Layered and
+    /// userspace views (including overlay) do not expose sufficient backing-tree coordinates.
+    fn native_coordinates(kind: &[u8]) -> bool {
+        let magic = match kind {
+            b"ext2" | b"ext3" | b"ext4" => 0xEF53,
+            b"xfs" => 0x5846_5342,
+            b"btrfs" => 0x9123_683E,
+            b"f2fs" => 0xF2F5_2010,
+            b"zfs" => 0x2FC1_2FC1,
+            b"bcachefs" => 0xCA45_1A4E,
+            b"tmpfs" => 0x0102_1994,
+            _ => return false,
+        };
+        PRIVATE_FS.contains(&magic)
     }
 
     const MAX_MOUNTINFO: u64 = 1024 * 1024;
@@ -528,7 +544,7 @@ mod linux {
                 device: (mount_number(device[0])?, mount_number(device[1])?),
                 root: mount_path(fields[3])?,
                 at,
-                overlay: fields[separator + 1] == b"overlay",
+                native_coordinates: native_coordinates(fields[separator + 1]),
             });
         }
         Ok(mounts)
@@ -576,14 +592,12 @@ mod linux {
             }
         };
         // An FD's actual mount ID selects the top visible mount even with stacked mount points.
+        // Btrfs stat devices identify subvolumes and need not equal mountinfo's superblock device.
         let mount = mounts
             .iter()
             .find(|m| m.id == id)
             .ok_or(Refused::Protected)?;
-        let dev = folder.metadata().map_err(|_| Refused::Protected)?.dev();
-        if !mount.root.is_absolute()
-            || mount.device != (u64::from(libc::major(dev)), u64::from(libc::minor(dev)))
-        {
+        if !mount.root.is_absolute() {
             return Err(Refused::Protected);
         }
         let relative = visible
@@ -625,11 +639,11 @@ mod linux {
         let (key_mount, key_root, _) = mount_position(dest, base, folder, &mounts)?;
         let (home_mount, home_root, home_visible) =
             mount_position(&home_path, &home_base, &home, &mounts)?;
-        // Overlay coordinates separate logical paths, not independently exposed backing trees.
+        // Layered or userspace filesystems can expose independently located backing trees.
         // Managed registration therefore needs a provably native location; legacy writes and
         // PRIVATE_FS remain unchanged. Missing/ambiguous kernel observations fail closed too.
-        if key_mount.overlay
-            || home_mount.overlay
+        if !key_mount.native_coordinates
+            || !home_mount.native_coordinates
             || (key_mount.device == home_mount.device && key_root.starts_with(&home_root))
         {
             return Err(Refused::Protected);
@@ -638,7 +652,7 @@ mod linux {
             // Include reported hidden submounts conservatively: missing one could expose a bind
             // of a corpus child whose filesystem differs from the corpus root's filesystem.
             if !mount.root.is_absolute()
-                || mount.overlay
+                || !mount.native_coordinates
                 || (mount.device == key_mount.device && key_root.starts_with(&mount.root))
             {
                 return Err(Refused::Protected);
@@ -1044,6 +1058,131 @@ mod tests {
             );
             assert!(!alias.join("oboete").exists());
             assert!(!source.join("oboete").exists());
+        }
+
+        #[test]
+        fn managed_registration_refuses_unproven_corpus_submounts_before_mkdir() {
+            for kind in ["fuse.passthrough", "ecryptfs", "9p", "nfs", "unprovenfs"] {
+                let (root, _keys, corpus) = setup();
+                let data = root.path().join("data");
+                std::fs::create_dir(&data).unwrap();
+                private(&data);
+                let layer = corpus.join("layer");
+                std::fs::create_dir(&layer).unwrap();
+                private(&layer);
+                mounts(root.path(), &data, &root.path().join("separate"));
+                MOUNTS.with(|f| {
+                    f.borrow_mut().as_mut().unwrap().table.extend_from_slice(
+                        format!(
+                            "8 1 0:997 / {} rw - {kind} opaque-source rw\n",
+                            layer.display()
+                        )
+                        .as_bytes(),
+                    )
+                });
+                let result = managed(KEY, &corpus, root.path(), Some(&data));
+                MOUNTS.with(|f| *f.borrow_mut() = None);
+                assert_eq!(result.unwrap_err(), Refused::Protected, "{kind}");
+                assert!(!data.join("oboete").exists(), "{kind}");
+                assert!(!root.path().join(".oboete-keys").exists(), "{kind}");
+            }
+        }
+
+        #[test]
+        fn managed_registration_keeps_unrelated_opaque_and_disjoint_native_mounts_usable() {
+            for (kind, protected) in [
+                ("fuse.passthrough", false),
+                ("unprovenfs", false),
+                ("tmpfs", true),
+            ] {
+                let (root, _keys, corpus) = setup();
+                let data = root.path().join("data");
+                std::fs::create_dir(&data).unwrap();
+                private(&data);
+                let at = if protected {
+                    corpus.join("layer")
+                } else {
+                    root.path().join("unrelated")
+                };
+                std::fs::create_dir(&at).unwrap();
+                private(&at);
+                mounts(root.path(), &data, &root.path().join("separate"));
+                MOUNTS.with(|f| {
+                    f.borrow_mut().as_mut().unwrap().table.extend_from_slice(
+                        format!(
+                            "8 1 0:997 / {} rw - {kind} opaque-source rw\n",
+                            at.display()
+                        )
+                        .as_bytes(),
+                    )
+                });
+                let result = managed(KEY, &corpus, root.path(), Some(&data));
+                MOUNTS.with(|f| *f.borrow_mut() = None);
+                let registration = result.unwrap();
+                assert_eq!(
+                    registration.path().parent().unwrap(),
+                    data.join("oboete/keys"),
+                    "{kind}"
+                );
+                assert_eq!(mode(registration.path()), 0o600);
+            }
+        }
+
+        #[test]
+        fn managed_registration_uses_mount_identity_when_subvolume_stat_devices_differ() {
+            use std::os::unix::fs::MetadataExt;
+            let (root, _keys, corpus) = setup();
+            let alias = root.path().join("alias");
+            std::fs::create_dir(&alias).unwrap();
+            private(&alias);
+            let stat_dev = std::fs::metadata(root.path()).unwrap().dev();
+            let observed = format!(" {}:{} ", libc::major(stat_dev), libc::minor(stat_dev));
+            // Btrfs reports the subvolume's anon_dev through stat and the superblock's
+            // different s_dev in mountinfo. Only the mount observations are injected.
+            let mounted = format!(
+                " {}:{} ",
+                libc::major(stat_dev),
+                u64::from(libc::minor(stat_dev)) + 1
+            );
+            let describe_subvolume = || {
+                MOUNTS.with(|f| {
+                    let mut f = f.borrow_mut();
+                    let fixture = f.as_mut().unwrap();
+                    fixture.table = String::from_utf8(fixture.table.clone())
+                        .unwrap()
+                        .replace(&observed, &mounted)
+                        .replace("- ext4 ", "- btrfs ")
+                        .into_bytes();
+                })
+            };
+            mounts(root.path(), &alias, &root.path().join("separate"));
+            describe_subvolume();
+            let result = managed(KEY, &corpus, root.path(), Some(&alias));
+            MOUNTS.with(|f| *f.borrow_mut() = None);
+            let registration = result.unwrap();
+            assert_eq!(
+                registration.path().parent().unwrap(),
+                alias.join("oboete/keys")
+            );
+            assert_eq!(mode(registration.path()), 0o600);
+            drop(registration);
+
+            // Different stat devices must not hide a bind into the same protected filesystem.
+            mounts(root.path(), &alias, &corpus.join("descendant"));
+            describe_subvolume();
+            let result = managed(KEY, &corpus, root.path(), Some(&alias));
+            MOUNTS.with(|f| *f.borrow_mut() = None);
+            let registration = result.unwrap();
+            assert_eq!(
+                registration.path().parent().unwrap(),
+                root.path().join(".oboete-keys")
+            );
+            assert_eq!(
+                std::fs::read_dir(alias.join("oboete/keys"))
+                    .unwrap()
+                    .count(),
+                0
+            );
         }
 
         #[test]

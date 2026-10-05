@@ -541,8 +541,8 @@ fn reservation_retry_at(db: &Connection, provider: Option<&str>, now: i64) -> Re
         None => db.query_row(
             "SELECT MAX(ts) FROM provider_calls WHERE outcome='reserved' AND usd>0
              AND role NOT IN ('embed','query')
-             AND ts>=CAST(strftime('%s',?1/1000,'unixepoch','start of month') AS INTEGER)*1000",
-            [now],
+             AND ts>=?1",
+            [providers_db::chrono_free_month_start(now)],
             |row| row.get(0),
         )?,
     };

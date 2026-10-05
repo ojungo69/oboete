@@ -32,8 +32,11 @@ Linux registration creates a new opaque `*_KEY.md` under the process owner's loc
 outside the corpus, with owner-only directory and file permissions. If that location is unsafe,
 the existing owner-home fallback must satisfy the same ownership, ancestor and filesystem checks.
 Kernel mount observations reject bind aliases of the corpus or its descendants before directory
-creation and again before key creation. Missing or ambiguous observations and overlay mappings
-cannot establish that separation, so registration refuses them rather than writing a secret.
+creation and again before key creation. The opened FD's mount ID selects the mount, including
+Btrfs subvolumes whose stat device differs from the mount's device. Missing or ambiguous
+observations and unproven views in the protected corpus (including overlay, FUSE and stacked
+filesystems) cannot establish that separation, so registration refuses them rather than writing
+a secret. Unrelated opaque mounts do not prevent an otherwise safe registration.
 The request supplies an entry selector and key, never a filesystem path. A config failure removes
 only the newly created unused file; it does not overwrite or delete an existing credential.
 
