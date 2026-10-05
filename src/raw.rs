@@ -462,6 +462,134 @@ pub fn exists(home: &Path) -> bool {
     path(home).exists()
 }
 
+/// A viewer read of an existing raw file. It never creates a store, schema, identity or lock.
+/// The connection closes before the shared swap hold; a restore cannot move either store
+/// while a privacy reader compares them.
+pub(crate) struct ReadOnly {
+    pub(crate) conn: Connection,
+    path: std::path::PathBuf,
+    identity: String,
+    lock_path: std::path::PathBuf,
+    _swap: std::fs::File,
+}
+
+impl ReadOnly {
+    /// A home removed or replaced while a read was waiting must not answer from the old file.
+    pub(crate) fn current(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.identity.is_empty()
+                && crate::db::store_file(&self.path) == self.identity
+                && crate::worker::file_id(std::fs::metadata(&self.lock_path))
+                    == crate::worker::file_id(self._swap.metadata()),
+            "raw store changed during a read"
+        );
+        Ok(())
+    }
+}
+
+fn existing_read_path(home: &Path) -> Result<Option<std::path::PathBuf>> {
+    for name in ["raw.db", "raw.db.restored"] {
+        let path = home.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                anyhow::ensure!(metadata.is_file(), "raw store is not a regular file");
+                return Ok(Some(path));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).context("read raw store"),
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
+    let before = existing_read_path(home)?;
+    let lock_path = home.join("raw.lock");
+    match std::fs::symlink_metadata(&lock_path) {
+        Ok(metadata) => {
+            anyhow::ensure!(metadata.is_file(), "raw coordination is not a regular file")
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && before.is_none() => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e).context("read raw coordination"),
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        libc::O_NOFOLLOW | libc::O_NONBLOCK,
+    );
+    let file = options.open(&lock_path)?;
+    anyhow::ensure!(
+        file.metadata()?.is_file(),
+        "raw coordination is not a regular file"
+    );
+    let swap = wait_for_swap(file, false, OPEN_WAIT)?;
+    anyhow::ensure!(
+        crate::worker::file_id(std::fs::metadata(&lock_path))
+            == crate::worker::file_id(swap.metadata()),
+        "raw coordination changed during a read"
+    );
+    let Some(path) = existing_read_path(home)? else {
+        anyhow::ensure!(before.is_none(), "raw store disappeared during a read");
+        return Ok(None);
+    };
+    let identity = crate::db::store_file(&path);
+    let conn = Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    conn.busy_timeout(OPEN_WAIT)?;
+    let read = ReadOnly {
+        conn,
+        path,
+        identity,
+        lock_path,
+        _swap: swap,
+    };
+    read.current()?;
+    Ok(Some(read))
+}
+
+/// The same current list for an existing read-only connection: no indexes or schema writes.
+pub(crate) fn exclusions_in(conn: &Connection) -> Result<Vec<String>> {
+    // A device's ops in its own order (op_seq), its clock never going back in it, then every
+    // device's by that clock: a clock set back never puts a newer op first, and an op
+    // `exclude` wrote comes after every op its store held (Codex on #304).
+    let mut st = conn.prepare(
+        "SELECT device, ts, body FROM main.ops WHERE type = 'exclusion' ORDER BY device, op_seq",
+    )?;
+    let mut ops: Vec<(i64, String, usize, serde_json::Value)> = Vec::new();
+    let (mut device, mut clock) = (String::new(), i64::MIN);
+    let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    for (i, row) in rows.enumerate() {
+        let (from, ts, body): (String, i64, String) = row?;
+        let v: serde_json::Value = serde_json::from_str(&body)?;
+        if from != device {
+            (device, clock) = (from.clone(), i64::MIN);
+        }
+        clock = clock.max(v["clock"].as_i64().unwrap_or(ts));
+        ops.push((clock, from, i, v));
+    }
+    ops.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
+    let mut out = std::collections::BTreeSet::new();
+    for (_, _, _, v) in ops {
+        let Some(repo) = v["repo"].as_str() else {
+            continue;
+        };
+        if v["undo"] == true {
+            out.remove(repo);
+        } else {
+            out.insert(repo.to_owned());
+        }
+    }
+    Ok(out.into_iter().collect())
+}
+
 /// `<home>/raw.db`: WAL, synchronous=FULL (and fullfsync on macOS), 2 s SQLite busy timeout.
 /// Non-hook opens share a 10 s initialization deadline; hooks use `open_within` with 2 s.
 pub fn open(home: &Path) -> Result<Raw> {
@@ -642,6 +770,14 @@ fn swap_lock(home: &Path, exclusive: bool, wait: std::time::Duration) -> Result<
         .open(&path)
         .with_context(|| format!("open {}", path.display()))?;
     crate::db::private(&path, 0o600);
+    wait_for_swap(f, exclusive, wait)
+}
+
+fn wait_for_swap(
+    f: std::fs::File,
+    exclusive: bool,
+    wait: std::time::Duration,
+) -> Result<std::fs::File> {
     let deadline = std::time::Instant::now() + wait;
     loop {
         let tried = if exclusive {
@@ -1845,37 +1981,7 @@ impl Raw {
     /// time order, an undo taking its repository back out. Read before each outbound call, with no
     /// consumer in between; with no hub, this device's list is the whole list.
     pub fn exclusions(&self) -> Result<Vec<String>> {
-        // A device's ops in its own order (op_seq), its clock never going back in it, then every
-        // device's by that clock: a clock set back never puts a newer op first, and an op
-        // `exclude` wrote comes after every op its store held (Codex on #304).
-        let mut st = self.conn.prepare(
-            "SELECT device, ts, body FROM ops WHERE type = 'exclusion' ORDER BY device, op_seq",
-        )?;
-        let mut ops: Vec<(i64, String, usize, serde_json::Value)> = Vec::new();
-        let (mut device, mut clock) = (String::new(), i64::MIN);
-        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-        for (i, row) in rows.enumerate() {
-            let (from, ts, body): (String, i64, String) = row?;
-            let v: serde_json::Value = serde_json::from_str(&body)?;
-            if from != device {
-                (device, clock) = (from.clone(), i64::MIN);
-            }
-            clock = clock.max(v["clock"].as_i64().unwrap_or(ts));
-            ops.push((clock, from, i, v));
-        }
-        ops.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
-        let mut out = std::collections::BTreeSet::new();
-        for (_, _, _, v) in ops {
-            let Some(repo) = v["repo"].as_str() else {
-                continue;
-            };
-            if v["undo"] == true {
-                out.remove(repo);
-            } else {
-                out.insert(repo.to_owned());
-            }
-        }
-        Ok(out.into_iter().collect())
+        exclusions_in(&self.conn)
     }
 
     /// Appends an exclusion op, or its undo (spec 5.5, D13), with a clock past every exclusion op

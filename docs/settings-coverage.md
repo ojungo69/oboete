@@ -44,15 +44,15 @@ left with "—" there.
 | Setting or operation | Spec | Now | Backend | Takes effect | OS | Test | Slice |
 |---|---|---|---|---|---|---|---|
 | Session start and per-prompt injection, on/off and size; correction notes | 4.4, 4.6, 4.8 | page | `[inject]` | the next session start or prompt | all | `settings.rs` `inject_settings_check_ranges_and_save_alone` | built |
-| The terminal line at session start, on/off | parity 9 | — | `[inject] session_start_note` | the next session start | all | — | W3 |
+| The terminal line at session start, on/off | parity 9 | page | `[inject] session_start_note` | the next session start | all | `settings.rs` `terminal_note_is_read_only_and_an_omitted_old_field_keeps_its_choice` | W3 |
 | Prompt storage, tool output detail | 2.3, 2.4 | page | `[capture]` | the next record | all | `settings.rs` `a_save_writes_only_what_changes`, `a_refused_save_leaves_the_file` | built |
-| Exclude a repository from curation and embedding, and take it back | 5.5 | — | `oboete exclude` | the next window | all | — | W3 |
+| Exclude a repository from curation and embedding, and take it back | 5.5 | page, saved-label selectors and exclusions without history | `oboete exclude`, `settings/privacy.rs` | the next eligible send | all | `settings/privacy.rs` `stored_repo_selectors_survive_rules_and_exclusions_without_history_can_be_undone` | W3 |
 | Stop recording a repository or folder | 1.5, 6.1, parity 14 | — | capture exclusion (M5 slice 4) | the next record | all | — | W3 after M5 slice 4 |
-| Additional redaction rules and allowed exceptions | 2.2, 6.4 | — | `[redaction]` | the next record and the next send; a rule added rescans what is stored, its hits becoming range tombstones (2.2), with the rescan's state on the page | all | — | W3 |
+| Additional redaction rules and allowed exceptions | 2.2, 6.4 | page, with current-device rescan checkpoint and state | `[redaction]`, `consumer::rescan` | the next record/send/display; the worker rescans at its next run, adding range tombstones (2.2) | all | `settings.rs` `redaction_saves_keep_all_rule_fields_and_reject_invalid_candidates_without_side_effects`; `settings/privacy.rs` `rescan_status_tracks_real_batches_rules_and_a_rewind_without_unmasking`, `a_fresh_privacy_get_is_empty_and_creates_nothing` | W3 |
 | Raw retention | 6.2 | — | retention (M5 slice 3) | the next retention pass | all | — | W3 after M5 slice 3 |
-| Backup location | 2.6 | — | `[backup] dir` | the next backup | all | — | W3 |
-| Correct, mute, unmute a claim | 3.4, 6.1 | — | `oboete correct`, `mute` | at once | all | — | W3 |
-| A preference for every repository | 4.4 | — | `oboete pref` | the next session start | all | — | W3 |
+| Backup location | 2.6 | page, preserving old files and logs | `[backup] dir` | the next backup | all | `settings.rs` `backup_choices_preserve_old_requests_and_move_no_existing_data` | W3 |
+| Correct, mute, unmute a claim | 3.4, 6.1 | claim details; recorded/pending/applied receipt | `oboete correct`, `mute`, shared recorded backend | application is confirmed, or explicitly pending | all | `settings/claims.rs` `w3_correct_applies_the_gated_owner_body_and_status`, `w3_mute_and_unmute_preserve_search_and_change_injection_eligibility` | W3 |
+| A preference for every repository | 4.4 | page with explicit global confirmation; partial recording distinguished | `oboete pref`, shared recorded backend | apply after consumer confirmation; delivery at the next eligible session start | all | `settings/claims.rs` `w3_explicit_global_preference_is_applied_without_inference` | W3 |
 | Forget, with its preview | 6.2 | — | M5 | at once, after the preview's confirmation | all | — | M5 slice 5 |
 
 ### Search and embeddings
@@ -105,6 +105,9 @@ cloud starts from a page view or a save.
   exceptions (validated as config.toml's are, with the rescan an added rule starts and its state),
   the backup location, correct, mute and unmute, the global preference; then capture exclusion and
   retention as M5 builds them.
+  [settings-privacy.md](settings-privacy.md) records the readonly rescan, exact-value hashes,
+  repository selectors and truthful owner-operation receipts. The capture, retention and forget
+  rows retain their milestone-5 dependencies.
 - **W4, embeddings.** The embedder's choice and caps, Workers AI's account id and write-only token, the
   local model's download with its consent and progress, and the generations' state; after the local
   embedder (parity 5).

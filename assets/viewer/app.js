@@ -174,7 +174,7 @@ function claimLinks(heading, uids) {
     uids.length ? el('ul', 'claim-links', ...uids.map((uid) => el('li', null, claimLink(uid)))) : word('p', 'text pending', 'none'));
 }
 
-async function claimPanel(uid) {
+async function claimPanel(uid, existing = null) {
   const c = await api('claim', { id: uid });
   const quotes = c.quotes.map((q) => el('li', null,
     el('p', 'text', q.text), fullText(q.key, q.key)));
@@ -186,7 +186,7 @@ async function claimPanel(uid) {
       change.status === null ? word('span', null, 'status_unchanged')
         : el('span', null, t('claim_status', { status: metadata(change.status) }))),
     change.body === null ? word('p', 'text pending', 'text_unchanged') : el('p', 'text', change.body)));
-  return el('section', 'detail claim-view',
+  const loaded = el('section', 'detail claim-view',
     word('h3', null, 'claim_title', { uid: c.uid }),
     el('div', 'meta', badge(c.kind, true), badge(c.status, true), badge(c.label, true), localTime(c.when)),
     el('dl', 'claim-meta', ...row('delivered', t(c.delivered ? 'yes' : 'no')),
@@ -198,6 +198,75 @@ async function claimPanel(uid) {
     claimLinks('supersedes', c.supersedes), claimLinks('ended_by', c.ended_by),
     el('section', null, word('h4', null, 'claim_history'),
       history.length ? el('ol', 'claim-history', ...history) : word('p', 'text pending', 'no_changes')));
+  const panel = existing || loaded;
+  if (existing) panel.replaceChildren(...loaded.childNodes);
+  panel.append(claimOwnerControls(c, panel));
+  return panel;
+}
+
+function claimOwnerControls(c, panel) {
+  const body = input('textarea', '', c.text, 'claim.body', () => {});
+  const status = el('select', null, el('option', null, t('status_unchanged')));
+  status.options[0].value = '';
+  for (const value of ['decided', 'proposed', 'retracted', 'done']) {
+    const option = el('option', null, metadata(value));
+    option.value = value;
+    status.append(option);
+  }
+  status.dataset.field = 'claim.status';
+  const save = el('button', 'quiet small', t('claim_correct_save'));
+  save.type = 'submit';
+  const correction = el('form', null,
+    el('label', 'field', el('span', null, t('claim_correct_text')), body),
+    el('label', 'field', el('span', null, t('claim_correct_status')), status), save);
+  correction.noValidate = true;
+  const mute = el('button', 'quiet small', t(c.muted ? 'claim_unmute' : 'claim_mute'));
+  mute.type = 'button';
+  const result = el('p', 'desc');
+  const fields = el('div', null, correction, mute);
+  const reload = el('button', 'quiet small', t('claim_refresh'));
+  reload.type = 'button';
+  reload.addEventListener('click', async () => {
+    reload.disabled = true;
+    try {
+      await claimPanel(c.uid, panel);
+    } catch (e) { if (panel.isConnected) showError(e, () => reload.click()); }
+    finally { reload.disabled = false; }
+  });
+  const submit = async (path, posted) => {
+    fields.inert = true;
+    let recorded = false;
+    try {
+      const { res, answer } = await memoryWrite(path, posted);
+      if (!panel.isConnected) return;
+      if (!res.ok) { result.textContent = memoryFailure(res, answer); return; }
+      recorded = true;
+      result.textContent = claimReceipt(answer);
+      if (answer.state === 'applied') {
+        try {
+          await claimPanel(c.uid, panel);
+          if (panel.isConnected) {
+            setStatus(t('claim_applied'), false, lang);
+          }
+        } catch { result.textContent += ` ${t('claim_refresh_hint')}`; }
+      }
+    } catch {
+      recorded = true; // A dropped answer cannot prove that append did not happen.
+      if (panel.isConnected) result.textContent = t('memory_result_unknown');
+    } finally { if (!recorded) fields.inert = false; }
+  };
+  correction.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (fields.inert) return;
+    const posted = { uid: c.uid };
+    if (status.value) posted.status = status.value;
+    if (body.value) posted.body = body.value;
+    if (!posted.status && !posted.body) { result.textContent = t('claim_invalid'); return; }
+    void submit('claims/correct', posted);
+  });
+  mute.addEventListener('click', () => { if (!fields.inert) void submit('claims/mute', { uid: c.uid, muted: !c.muted }); });
+  return el('section', 'claim-owner', el('h4', null, t('claim_owner_h')), el('p', 'desc', t('claim_owner_desc')),
+    el('p', 'desc', t(c.muted ? 'claim_muted_state' : 'claim_unmuted_state')), fields, result, reload);
 }
 
 function entryMeta(d, all) {
@@ -850,6 +919,8 @@ const TEXT = {
     'セッションの開始時に、エージェントへ渡す記憶のまとめです。',
   ],
   inject_on: ['Give agents the summary of your memory', 'エージェントに記憶のまとめを渡す'],
+  session_note_on: ['Show a status line in the terminal when a session starts', 'セッション開始時に端末へ状態を表示する'],
+  session_note_desc: ['A short notice with no stored text. This changes at the next session start.', '保存した本文を含まない短い案内です。次のセッション開始から反映されます。'],
   inject_chars: ['Size in characters ({min} to {max})', '大きさ(文字数、{min}〜{max})'],
   per_prompt_on: [
     'Also give the decisions that match each prompt (off until it has been measured)',
@@ -867,6 +938,80 @@ const TEXT = {
   tool_output: ['Output of tools', 'ツールの出力'],
   tool_full: ['Keep it whole (the start and end when very long)', 'すべて残す(非常に長いときは先頭と末尾)'],
   tool_head_tail: ['Keep only the start and end', '先頭と末尾だけ残す'],
+  backup_h: ['Backup location', 'バックアップの保存先'],
+  backup_dir: ['Directory', 'ディレクトリ'],
+  backup_default: ['Default: backups inside the memory home', '既定: 記憶の保存先にある backups'],
+  backup_home: ['Memory home (an empty saved path)', '記憶の保存先(保存済みパスが空文字)'],
+  backup_reset: ['Use the default backup location', '既定のバックアップ先を使う'],
+  backup_desc: ['An empty field uses the default. Relative paths start at the memory home; absolute paths stay absolute. The next backup uses this location. Saving creates no directory and moves no existing backups or forget logs.', '空欄では既定の場所を使います。相対パスは記憶の保存先を基準とし、絶対パスはそのまま使います。次のバックアップから反映されます。保存してもディレクトリは作らず、既存のバックアップや忘却のログは移動しません。'],
+  redaction_h: ['Masking sensitive values', '機密値のマスキング'],
+  redaction_desc: ['Built-in rules always stay on. Saved changes apply at the next recording, send or display. The worker rescans this device’s stored records at its next run; a saved change does not start the worker. This does not erase backups or cover other devices.', '組み込みのルールは常に有効です。保存した変更は、次の記録・送信・表示から使われます。ワーカーは次回の処理で、この端末の保存済み記録を再検査します。保存だけではワーカーは起動しません。バックアップの削除や他の端末の検査は含みません。'],
+  redaction_rule: ['Additional rule {number}', '追加ルール {number}'],
+  redaction_add: ['Add a masking rule', 'マスキングのルールを追加'],
+  redaction_remove: ['Remove this rule', 'このルールを削除'],
+  redaction_id: ['Rule name', 'ルール名'],
+  redaction_regex: ['Pattern (regular expression)', 'パターン(正規表現)'],
+  redaction_advanced: ['Advanced rule fields', 'ルールの詳細項目'],
+  redaction_keywords: ['Keywords (JSON array of strings)', 'キーワード(文字列の JSON 配列)'],
+  redaction_entropy: ['Minimum entropy (optional)', '最小エントロピー(任意)'],
+  redaction_group: ['Secret capture group (optional)', '機密値を取り出すグループ番号(任意)'],
+  redaction_allow_h: ['Keep an exact false-positive value', '誤検知した値をそのまま残す'],
+  redaction_allow_desc: ['Paste one exact value and add it. The browser keeps only its SHA-256 hash; the value is cleared and is never sent. Exceptions affect future masking. They do not restore text already masked or forgotten.', '値を正確に貼り付けて追加します。ブラウザーには SHA-256 のハッシュだけを残し、値は消去して送信しません。例外は今後のマスキングに使われます。すでに伏字にした本文や忘却した本文は復元しません。'],
+  redaction_value: ['Exact value', '正確な値'],
+  redaction_hash_add: ['Add its hash', 'ハッシュを追加'],
+  redaction_hashes: ['Allowed SHA-256 hashes (one per line)', '例外の SHA-256 ハッシュ(1行に1つ)'],
+  redaction_invalid: ['Check the additional rules and SHA-256 hashes. Nothing was saved.', '追加ルールと SHA-256 ハッシュを確認してください。保存はしていません。'],
+  redaction_hash_failed: ['The browser could not hash this value. It was cleared and nothing was saved.', 'ブラウザーで値をハッシュ化できませんでした。値は消去し、保存はしていません。'],
+  privacy_h: ['Repository sends', 'リポジトリの送信'],
+  privacy_desc: ['Excluding a repository stops future curation and embedding sends for sessions that touch it. Recording and search continue. Existing memories and backups remain. Undo allows future sends to resume; these buttons send nothing to a provider.', 'リポジトリを除外すると、それに関わるセッションの今後の要約・埋め込みへの送信を止めます。記録と検索は続き、既存の記憶とバックアップは残ります。解除すると今後の送信を再開できる状態になります。このボタンでは要約役へ送信しません。'],
+  privacy_none: ['No recorded repositories or send exclusions.', '記録済みのリポジトリや送信除外はありません。'],
+  privacy_excluded: ['Send exclusion on', '送信除外中'],
+  privacy_allowed: ['Eligible for future sends', '今後の送信対象'],
+  privacy_exclude: ['Exclude future sends', '今後の送信から除外'],
+  privacy_undo: ['Undo exclusion; allow future sends', '除外を解除し、今後の送信を許可'],
+  privacy_recorded: ['The send exclusion was recorded.', '送信除外を記録しました。'],
+  privacy_undone: ['The exclusion was undone. Future sends may resume.', '除外を解除しました。今後の送信を再開できる状態です。'],
+  privacy_unavailable: ['Privacy state could not be read or changed. Nothing is reported as complete.', 'プライバシーの状態を読み込み・変更できませんでした。完了したとは判定していません。'],
+  privacy_selector: ['This repository selection is invalid. Reload its state.', 'リポジトリの選択が無効です。状態を再読み込みしてください。'],
+  repo_not_found: ['This repository is no longer in the stored list. Reload its state.', 'このリポジトリは保存済み一覧にありません。状態を再読み込みしてください。'],
+  repo_changed: ['The repository selection changed. Reload its state.', 'リポジトリの選択対象が変わりました。状態を再読み込みしてください。'],
+  privacy_refresh: ['Refresh privacy state', 'プライバシーの状態を更新'],
+  rescan_h: ['Rescan on this device', 'この端末の再検査'],
+  rescan_empty: ['No raw records to scan.', '検査する元の記録はありません。'],
+  rescan_pending: ['Waiting for the worker or still scanning.', 'ワーカーの処理待ち、または検査中です。'],
+  rescan_complete: ['The current rules were checked through this device’s current raw sequence.', '現在のルールで、この端末の元の記録の末尾まで検査済みです。'],
+  rescan_unavailable: ['Rescan state could not be read.', '再検査の状態を読み込めませんでした。'],
+  rescan_progress: ['Checkpoint: {processed}; current raw sequence: {total}', '検査位置: {processed}、元の記録の末尾: {total}'],
+  memory_action_failed: ['The operation was refused ({status}).', '操作を受け付けられませんでした({status})。'],
+  memory_result_unknown: ['The connection ended before the result was confirmed. The operation may already be recorded. Check the stored state before repeating it.', '結果を確認する前に接続が終了しました。操作がすでに記録されている可能性があります。繰り返す前に保存済みの状態を確認してください。'],
+  preference_h: ['A preference for every repository', 'すべてのリポジトリに共通する希望'],
+  preference_desc: ['Save an owner preference for agents in every repository. It creates a new global claim; it does not rewrite existing claims. This operation makes no model request.', 'すべてのリポジトリでエージェントに伝える本人の希望を保存します。新しい共通の記憶を作り、既存の記憶は書き換えません。この操作ではモデルを呼び出しません。'],
+  preference_text: ['Preference (up to 1,000 characters)', '希望すること(1,000文字まで)'],
+  preference_confirm: ['Apply this preference to all repositories', 'この希望をすべてのリポジトリに適用する'],
+  preference_save: ['Add a global preference', '共通の希望を追加'],
+  preference_new: ['Write another preference', '別の希望を入力'],
+  preference_confirmation: ['Confirm that this preference applies to all repositories.', 'すべてのリポジトリに適用することを確認してください。'],
+  preference_empty: ['Write the preference first.', '希望することを入力してください。'],
+  preference_too_long: ['Use 1,000 characters or fewer.', '1,000文字以内で入力してください。'],
+  preference_partly_recorded: ['The owner instruction was recorded, but its global claim was not created. Do not repeat this action automatically. Check the stored memories before adding it again.', '本人の指示は記録されましたが、共通の記憶は作成されませんでした。操作を自動で繰り返していません。再度追加する前に保存済みの記憶を確認してください。'],
+  claim_applied: ['Recorded and applied.', '記録し、適用しました。'],
+  claim_pending: ['Recorded; application is still pending. Check this claim after the worker runs. Do not repeat the operation.', '記録済みで、適用を待っています。ワーカーの処理後にこの記憶を確認してください。操作を繰り返す必要はありません。'],
+  claim_not_applied: ['Recorded, but the derived claim did not confirm application. Check this claim before making another change.', '操作は記録済みですが、派生した記憶への適用は確認できませんでした。次の変更をする前にこの記憶を確認してください。'],
+  claim_uid: ['Select a complete claim identifier.', '記憶の完全な識別子を選んでください。'],
+  claim_not_found: ['This claim is no longer available. Reload its details.', 'この記憶を利用できません。詳細を再読み込みしてください。'],
+  claim_invalid: ['Check the correction and its status. Nothing was recorded.', '修正内容と状態を確認してください。操作は記録していません。'],
+  claim_unavailable: ['The claim could not be changed. Check its stored state before trying again.', '記憶を変更できませんでした。再試行する前に保存済みの状態を確認してください。'],
+  claim_owner_h: ['Owner changes', '本人による変更'],
+  claim_owner_desc: ['Correct this claim, or mute it from memory handed to agents. Muted claims remain searchable. Unmute restores the existing eligibility rules. These actions make no model request.', 'この記憶を修正したり、エージェントに渡す記憶からミュートしたりできます。ミュート後も検索でき、解除すると既存の条件に従って再び渡せる状態になります。この操作ではモデルを呼び出しません。'],
+  claim_correct_text: ['Replacement text (leave empty to keep it)', '修正後の本文(空欄では変更しない)'],
+  claim_correct_status: ['Status', '状態'],
+  claim_correct_save: ['Record this correction', 'この修正を記録'],
+  claim_mute: ['Mute from agent memory', 'エージェントに渡す記憶からミュート'],
+  claim_unmute: ['Unmute', 'ミュートを解除'],
+  claim_muted_state: ['Muted from agent memory; still searchable.', 'エージェントに渡す記憶からミュート中です。検索はできます。'],
+  claim_unmuted_state: ['Not muted. Normal memory eligibility applies.', 'ミュートしていません。通常の条件に従って記憶を渡します。'],
+  claim_refresh: ['Reload this claim', 'この記憶を再読み込み'],
+  claim_refresh_hint: ['Reload this claim to see its stored state.', '保存済みの状態は、この記憶の再読み込みで確認してください。'],
   chain_h: ['Controls for every entry with the same name', '同じ名前のすべての要約役への設定'],
   chain_desc: [
     'These controls apply to every entry with each name, including duplicates. This group order takes priority over the individual order above. An empty field follows the entry’s saved value, shown in grey.',
@@ -1229,6 +1374,10 @@ function formOf(s) {
     stopped: s.stopped,
     inject: { ...s.inject, ...Object.fromEntries(SIZES.map((k) => [k, String(s.inject[k])])) },
     capture: { ...s.capture },
+    backup: { dir: s.backup?.dir ?? null, edit: text(s.backup?.dir), reset: false },
+    redaction: { rules: (s.redaction?.extra_rules || []).map(redactionEdit), hashes: (s.redaction?.allowlist || []).join('\n') },
+    privacy: s.privacy || privacyUnavailable(),
+    preference: { text: '', confirmed: false, result: null },
     chain: s.chain.map((e) => ({
       ...e,
       edit: { on: e.on, daily_budget: text(e.daily_budget), timeout_s: text(e.timeout_s), model: text(e.model) },
@@ -1241,13 +1390,219 @@ function formOf(s) {
   };
 }
 
+function redactionEdit(rule = {}) {
+  return { id: rule.id ?? '', regex: rule.regex ?? '', keywords: JSON.stringify(rule.keywords || []),
+    entropy: rule.entropy === null || rule.entropy === undefined ? '' : String(rule.entropy),
+    secret_group: rule.secret_group === null || rule.secret_group === undefined ? '' : String(rule.secret_group) };
+}
+
+function redactionBody() {
+  const extra_rules = [];
+  for (const [index, edit] of form.redaction.rules.entries()) {
+    const field = `redaction.extra_rules.${index}`;
+    let keywords;
+    try { keywords = JSON.parse(edit.keywords); } catch { return { field: `${field}.keywords` }; }
+    if (!Array.isArray(keywords) || keywords.some((v) => typeof v !== 'string')) return { field: `${field}.keywords` };
+    const entropy = edit.entropy.trim() === '' ? null : Number(edit.entropy);
+    if (entropy !== null && !Number.isFinite(entropy)) return { field: `${field}.entropy` };
+    const group = edit.secret_group.trim();
+    const secret_group = group === '' ? null : /^\d+$/.test(group) && Number.isSafeInteger(Number(group)) ? Number(group) : Number.NaN;
+    if (Number.isNaN(secret_group)) return { field: `${field}.secret_group` };
+    extra_rules.push({ id: edit.id, regex: edit.regex, keywords, entropy, secret_group });
+  }
+  const allowlist = form.redaction.hashes.split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
+  if (allowlist.some((v) => !/^[0-9a-fA-F]{64}$/.test(v))) return { field: 'redaction.allowlist' };
+  return { value: { extra_rules, allowlist } };
+}
+
+function redactionSection(f) {
+  const rows = f.redaction.rules.map((rule, index) => {
+    const field = `redaction.extra_rules.${index}`;
+    const item = (key, label) => el('label', 'field', el('span', null, t(label)),
+      input(key === 'regex' || key === 'keywords' ? 'textarea' : 'text', rule[key], '', `${field}.${key}`, (v) => { rule[key] = v; }));
+    const remove = el('button', 'quiet small', t('redaction_remove'));
+    remove.type = 'button';
+    remove.addEventListener('click', () => { f.redaction.rules.splice(index, 1); drawSettings(); });
+    return el('section', 'redaction-rule', el('h4', null, t('redaction_rule', { number: index + 1 })),
+      item('id', 'redaction_id'), item('regex', 'redaction_regex'),
+      el('details', null, el('summary', null, t('redaction_advanced')),
+        item('keywords', 'redaction_keywords'), item('entropy', 'redaction_entropy'), item('secret_group', 'redaction_group')), remove);
+  });
+  const add = el('button', 'quiet small', t('redaction_add'));
+  add.type = 'button';
+  add.addEventListener('click', () => { f.redaction.rules.push(redactionEdit()); drawSettings(); });
+  // Plaintext exists only in this live field and the digest call, never in form/localStorage.
+  const exact = el('input');
+  exact.type = 'password';
+  exact.autocomplete = 'off';
+  exact.spellcheck = false;
+  exact.autocapitalize = 'off';
+  const hash = el('button', 'quiet small', t('redaction_hash_add'));
+  hash.type = 'button';
+  hash.disabled = true;
+  exact.addEventListener('input', () => { hash.disabled = !exact.value; });
+  exact.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); if (!hash.disabled) hash.click(); }
+  });
+  hash.addEventListener('click', async () => {
+    const bytes = new TextEncoder().encode(exact.value);
+    exact.value = '';
+    hash.disabled = true;
+    const fields = hash.closest('.settings');
+    f.hashing = true;
+    if (fields) fields.inert = true;
+    try {
+      const digest = await crypto.subtle.digest('SHA-256', bytes);
+      if (!currentSettings(f)) return;
+      const hex = [...new Uint8Array(digest)].map((v) => v.toString(16).padStart(2, '0')).join('');
+      const values = f.redaction.hashes.split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
+      if (!values.some((v) => v.toLowerCase() === hex)) f.redaction.hashes += `${f.redaction.hashes ? '\n' : ''}${hex}`;
+      f.hashing = false;
+      drawSettings();
+    } catch {
+      if (currentSettings(f)) setStatus(t('redaction_hash_failed'), true, lang);
+    } finally {
+      bytes.fill(0);
+      f.hashing = false;
+      if (fields) fields.inert = false;
+    }
+  });
+  return el('section', null, el('h3', null, t('redaction_h')), el('p', 'desc', t('redaction_desc')),
+    ...rows, add, el('h4', null, t('redaction_allow_h')), el('p', 'desc', t('redaction_allow_desc')),
+    el('label', 'field', el('span', null, t('redaction_value')), exact), hash,
+    el('details', null, el('summary', null, t('redaction_hashes')),
+      input('textarea', f.redaction.hashes, '', 'redaction.allowlist', (v) => { f.redaction.hashes = v; })));
+}
+
 async function showSettings() {
-  const s = await api('settings');
+  const [s, privacy] = await Promise.all([api('settings'), api('privacy').catch(privacyUnavailable)]);
+  s.privacy = privacy;
   return () => {
     form = formOf(s);
     drawSettings();
     setStatus('');
   };
+}
+
+function privacyUnavailable() {
+  return { available: false, repositories: [], rescan: { state: 'unavailable', processed: null, total: null } };
+}
+
+async function memoryWrite(path, body) {
+  const res = await fetch(`/api/${path}`, {
+    method: 'POST', headers: { 'X-Oboete-Token': token, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body), referrerPolicy: 'same-origin', credentials: 'omit',
+  });
+  const answer = (res.headers.get('content-type') || '').startsWith('application/json') ? await res.json() : {};
+  return { res, answer };
+}
+
+function memoryFailure(res, answer) {
+  const code = answer.code || PROVIDER_HTTP_ERRORS[res.status];
+  return code && Object.hasOwn(TEXT, code) ? t(code) : t('memory_action_failed', { status: res.status });
+}
+
+async function refreshPrivacy(f) {
+  if (!f) return;
+  const mine = f.privacyRead = (f.privacyRead || 0) + 1;
+  const state = await api('privacy').catch(privacyUnavailable);
+  if (!currentSettings(f) || f.privacyRead !== mine) return;
+  f.privacy = state;
+  if (!f.hashing) drawSettings();
+}
+
+function privacySection(f) {
+  const state = f.privacy;
+  const refresh = el('button', 'quiet small', t('privacy_refresh'));
+  refresh.type = 'button';
+  refresh.addEventListener('click', async () => {
+    refresh.disabled = true;
+    try { await refreshPrivacy(f); } finally { refresh.disabled = false; }
+  });
+  const rows = (state.repositories || []).map((repo) => {
+    const action = el('button', 'quiet small', t(repo.excluded ? 'privacy_undo' : 'privacy_exclude'));
+    action.type = 'button';
+    action.dataset.selector = repo.selector;
+    action.addEventListener('click', async () => {
+      const fields = action.closest('.settings');
+      fields.inert = true;
+      action.disabled = true;
+      try {
+        const { res, answer } = await memoryWrite('privacy/exclude', { selector: repo.selector, undo: repo.excluded });
+        if (!currentSettings(f)) return;
+        if (!res.ok) { setStatus(memoryFailure(res, answer), true, lang); return; }
+        await refreshPrivacy(f);
+        if (currentSettings(f)) setStatus(t(repo.excluded ? 'privacy_undone' : 'privacy_recorded'), false, lang);
+      } catch {
+        if (currentSettings(f)) setStatus(t('memory_result_unknown'), true, lang);
+      } finally { fields.inert = false; action.disabled = false; }
+    });
+    return el('li', null, el('p', 'text', repo.label), el('p', 'desc', t(repo.excluded ? 'privacy_excluded' : 'privacy_allowed')), action);
+  });
+  const scan = state.rescan;
+  const scanKey = `rescan_${scan.state}`;
+  return el('section', null, el('h3', null, t('privacy_h')), el('p', 'desc', t('privacy_desc')),
+    state.available ? rows.length ? el('ul', null, ...rows) : el('p', 'desc', t('privacy_none')) : el('p', 'desc', t('privacy_unavailable')),
+    el('h4', null, t('rescan_h')), el('p', 'desc', t(Object.hasOwn(TEXT, scanKey) ? scanKey : 'rescan_unavailable')),
+    scan.processed !== null && scan.total !== null ? el('p', 'desc', t('rescan_progress', scan)) : null, refresh);
+}
+
+function claimReceipt(answer) {
+  if (answer.state === 'applied') return t('claim_applied');
+  const code = answer.code;
+  return code && ['claim_pending', 'claim_not_applied', 'preference_partly_recorded'].includes(code)
+    ? t(code) : t('memory_result_unknown');
+}
+
+function preferenceSection(f) {
+  const draft = f.preference;
+  const field = input('textarea', draft.text, '', 'preference.text', (v) => { draft.text = v; });
+  const confirm = checkbox(draft.confirmed, (v) => { draft.confirmed = v; });
+  confirm.dataset.field = 'preference.apply_to_all_repos';
+  const save = el('button', 'quiet small', t('preference_save'));
+  save.type = 'submit';
+  save.disabled = Boolean(draft.result && draft.result.state !== 'applied');
+  const action = el('form', null,
+    el('label', 'field', el('span', null, t('preference_text')), field),
+    el('label', 'check', confirm, t('preference_confirm')), save);
+  action.noValidate = true;
+  action.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (save.disabled) return;
+    const code = !draft.text.trim() ? 'preference_empty' : [...draft.text.trim()].length > 1000 ? 'preference_too_long'
+      : !draft.confirmed ? 'preference_confirmation' : null;
+    if (code) { setStatus(t(code), true, lang); return; }
+    const fields = action.closest('.settings');
+    fields.inert = true;
+    save.disabled = true;
+    try {
+      const { res, answer } = await memoryWrite('preferences', { text: draft.text, apply_to_all_repos: true });
+      if (!currentSettings(f)) return;
+      if (!res.ok) { setStatus(memoryFailure(res, answer), true, lang); return; }
+      draft.result = answer;
+      draft.confirmed = false;
+      if (answer.state === 'applied') draft.text = '';
+      drawSettings();
+      setStatus(claimReceipt(answer), answer.state !== 'applied', lang);
+    } catch {
+      if (currentSettings(f)) {
+        draft.result = { state: 'unknown' };
+        draft.confirmed = false;
+        drawSettings();
+        setStatus(t('memory_result_unknown'), true, lang);
+      }
+    } finally { fields.inert = false; save.disabled = false; }
+  });
+  const next = el('button', 'quiet small', t('preference_new'));
+  next.type = 'button';
+  next.addEventListener('click', () => {
+    f.preference = { text: '', confirmed: false, result: null };
+    drawSettings();
+    document.querySelector('[data-field="preference.text"]')?.focus();
+  });
+  return el('section', null, el('h3', null, t('preference_h')), el('p', 'desc', t('preference_desc')),
+    action, draft.result ? el('p', 'desc', claimReceipt(draft.result)) : null,
+    draft.result?.uid ? claimLink(draft.result.uid) : null, draft.result && draft.result.state !== 'applied' ? next : null);
 }
 
 function checkbox(checked, onChange) {
@@ -1422,7 +1777,7 @@ function providerValidation(draft) {
 // and name-group edits stay local. Physical selectors are remapped only by the operation's raw
 // index changes, never by the first entry with a matching name.
 function preserveSettingsDrafts(next, mine) {
-  for (const key of ['worker', 'summary', 'paid_usd_per_month', 'inject', 'capture']) next[key] = mine[key];
+  for (const key of ['worker', 'summary', 'paid_usd_per_month', 'inject', 'capture', 'backup', 'redaction']) next[key] = mine[key];
   next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
   const groups = new Map(next.chain.map((r) => [r.name, r]));
   next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {
@@ -1501,6 +1856,8 @@ function mergeProviderSettings(answer, mine, action) {
   const next = formOf(answer);
   if (!next) return next;
   if (action.op !== 'settings') preserveSettingsDrafts(next, mine);
+  next.privacy = mine.privacy;
+  next.preference = mine.preference;
   next.newProvider = action.op === 'create' ? null : mine.newProvider;
   preserveProviderDrafts(next, mine, action);
   preserveCreatedSubscriptionDraft(next, mine, action);
@@ -1928,6 +2285,8 @@ function chainRow(r, i, redraw) {
 
 // The save's body, or the field a value is wrong in.
 function saveBody() {
+  const redaction = redactionBody();
+  if (!redaction.value) return { field: redaction.field };
   const whole = (v, min, max) => (/^\d+$/.test(v.trim()) && Number(v) >= min && Number(v) <= max ? Number(v) : Number.NaN);
   const sizes = {};
   for (const key of SIZES) {
@@ -1968,11 +2327,14 @@ function saveBody() {
       gemini: form.gemini === 'none' ? null : form.gemini,
       inject: {
         session_start: form.inject.session_start,
+        session_start_note: form.inject.session_start_note,
         per_prompt: form.inject.per_prompt,
         correction: form.inject.correction,
         ...sizes,
       },
       capture: { store_prompts: form.capture.store_prompts, tool_output: form.capture.tool_output },
+      ...(!form.backup.reset && form.backup.edit === (form.backup.dir ?? '') ? {} : { backup: { dir: form.backup.reset ? null : form.backup.edit || null } }),
+      redaction: redaction.value,
       chain,
     },
   };
@@ -1992,7 +2354,7 @@ async function saveSettings(button) {
   const { body, field } = saveBody();
   if (!body) {
     markInvalid(field);
-    setStatus(t('range'), true, lang);
+    setStatus(t(field.startsWith('redaction.') ? 'redaction_invalid' : 'range'), true, lang);
     return;
   }
   const mine = form;
@@ -2017,8 +2379,10 @@ async function saveSettings(button) {
     if (view !== 'settings' || form !== mine) return;
     if (res.ok || current) {
       form = current ? formOf(current) : mergeProviderSettings(answer, mine, { op: 'settings' });
+      if (form) form.privacy = privacyUnavailable();
       drawSettings();
       setStatus(t(current ? 'stale' : 'saved'), Boolean(current), lang);
+      if (form) void refreshPrivacy(form);
       return;
     }
     const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
@@ -2098,6 +2462,11 @@ function drawSettings() {
     return el('label', 'field', el('span', null, t(label, { min: least.toLocaleString('en-US'), max: most.toLocaleString('en-US') })), i);
   };
   const flag = (key, label) => el('label', 'check', checkbox(f.inject[key], (v) => { f.inject[key] = v; }), t(label));
+  const terminalNote = checkbox(f.inject.session_start_note, (v) => { f.inject.session_start_note = v; });
+  terminalNote.dataset.field = 'inject.session_start_note';
+  const backupReset = el('button', 'quiet small', t('backup_reset'));
+  backupReset.type = 'button';
+  backupReset.addEventListener('click', () => { f.backup.edit = ''; f.backup.reset = true; drawSettings(); });
   const tool = el('select', null, ...['full', 'head-tail'].map((v) => {
     const o = el('option', null, t(v === 'full' ? 'tool_full' : 'tool_head_tail'));
     o.value = v;
@@ -2142,6 +2511,7 @@ function drawSettings() {
       el('h3', null, t('inject_h')),
       el('p', 'desc', t('inject_desc')),
       flag('session_start', 'inject_on'), size('session_start_chars', 'inject_chars'),
+      el('label', 'check', terminalNote, t('session_note_on')), note(t('session_note_desc')),
       flag('per_prompt', 'per_prompt_on'), size('per_prompt_chars', 'per_prompt_chars'),
       flag('correction', 'correction_on'), size('correction_chars', 'correction_chars')),
     el('section', null,
@@ -2149,6 +2519,15 @@ function drawSettings() {
       el('p', 'desc', t('capture_desc')),
       el('label', 'check', checkbox(f.capture.store_prompts, (v) => { f.capture.store_prompts = v; }), t('store_prompts')),
       el('label', 'field', el('span', null, t('tool_output')), tool)),
+    el('section', null,
+      el('h3', null, t('backup_h')),
+      el('label', 'field', el('span', null, t('backup_dir')),
+        input('text', f.backup.edit, t('backup_default'), 'backup.dir', (v) => { f.backup.edit = v; f.backup.reset = false; }),
+        saved(f.backup.dir === '' ? t('backup_home') : f.backup.dir ?? t('backup_default'))),
+      backupReset,
+      el('p', 'desc', t('backup_desc'))),
+    redactionSection(f),
+    privacySection(f),
     providersSection(),
     el('section', null,
       el('h3', null, t('chain_h')),
@@ -2168,7 +2547,7 @@ function drawSettings() {
     e.preventDefault();
     void saveSettings(save);
   });
-  panel.append(el('p', 'lead', t('lead')), formEl);
+  panel.append(el('p', 'lead', t('lead')), formEl, preferenceSection(f));
   drawIn(panel);
 }
 

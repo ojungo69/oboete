@@ -981,6 +981,10 @@ impl Viewer {
             ("POST", "/api/providers/test") => (MAX_BODY, Self::test_provider),
             ("POST", "/api/key") => (MAX_KEY_BODY, Self::save_key),
             ("POST", "/api/resume") => (MAX_BODY, Self::resume),
+            ("POST", "/api/privacy/exclude") => (MAX_BODY, Self::exclude),
+            ("POST", "/api/claims/correct") => (MAX_BODY, Self::claim_correct),
+            ("POST", "/api/claims/mute") => (MAX_BODY, Self::claim_mute),
+            ("POST", "/api/preferences") => (MAX_BODY, Self::preference),
             _ => return Head::Answer(self.route(method, target, headers)),
         };
         match self.save_gate(headers, cap) {
@@ -1082,6 +1086,38 @@ impl Viewer {
         saved(crate::settings::resume(&self.home, &self.saving, body))
     }
 
+    fn exclude(&self, body: &[u8]) -> Response {
+        saved(crate::settings::privacy::exclude(
+            &self.home,
+            &self.saving,
+            body,
+        ))
+    }
+
+    fn claim_correct(&self, body: &[u8]) -> Response {
+        saved(crate::settings::claims::correct(
+            &self.home,
+            &self.saving,
+            body,
+        ))
+    }
+
+    fn claim_mute(&self, body: &[u8]) -> Response {
+        saved(crate::settings::claims::mute(
+            &self.home,
+            &self.saving,
+            body,
+        ))
+    }
+
+    fn preference(&self, body: &[u8]) -> Response {
+        saved(crate::settings::claims::pref_add(
+            &self.home,
+            &self.saving,
+            body,
+        ))
+    }
+
     /// DNS rebinding: a page on another name that resolves to 127.0.0.1 sends its own Host.
     /// Browsers leave port 80 out of Host.
     fn host_ok(&self, host: Option<&str>) -> bool {
@@ -1169,6 +1205,9 @@ impl Viewer {
         // config.toml, not the stores: no error text in the answer.
         if name == "settings" {
             return Response::json(&crate::settings::show(&self.home));
+        }
+        if name == "privacy" {
+            return Response::json(&crate::settings::privacy::show(&self.home));
         }
         self.api(name, &q).unwrap_or_else(|e| failed(&e))
     }
@@ -1335,7 +1374,11 @@ fn answered(name: &str, mut answer: Value) -> Value {
     let next = matches!(name, "feed" | "timeline")
         .then(|| answer.get_mut("next").map(Value::take))
         .flatten();
-    let mut answer = gated(answer);
+    let mut answer = if matches!(name, "claim" | "search" | "timeline" | "doc") {
+        gated_with_ids(answer, true)
+    } else {
+        gated(answer)
+    };
     if let Some(next) = next {
         answer["next"] = next;
     }
@@ -1343,15 +1386,48 @@ fn answered(name: &str, mut answer: Value) -> Value {
 }
 
 fn gated(v: Value) -> Value {
+    gated_with_ids(v, false)
+}
+
+/// Claim identifiers come from the typed store responses. They are returned to the API as
+/// selectors, rather than editable display text; a custom hash rule must not invalidate them.
+/// Other fields, malformed identifiers and APIs without claim selectors keep the normal gate.
+fn gated_with_ids(v: Value, ids: bool) -> Value {
     match v {
         Value::String(s) => Value::String(redact::outbound(&s)),
-        Value::Array(xs) => Value::Array(xs.into_iter().map(gated).collect()),
+        Value::Array(xs) => Value::Array(xs.into_iter().map(|v| gated_with_ids(v, ids)).collect()),
         Value::Object(m) => Value::Object(
             m.into_iter()
-                .map(|(k, v)| (redact::outbound(&k), gated(v)))
+                .map(|(k, v)| {
+                    let selector =
+                        ids && matches!(
+                            k.as_str(),
+                            "uid" | "key" | "id" | "later" | "by" | "supersedes" | "ended_by"
+                        ) && canonical_uid_value(&v);
+                    if selector {
+                        (k, v)
+                    } else {
+                        (redact::outbound(&k), gated_with_ids(v, ids))
+                    }
+                })
                 .collect(),
         ),
         other => other,
+    }
+}
+
+fn canonical_uid_value(v: &Value) -> bool {
+    match v {
+        Value::String(uid) => {
+            uid.len() == 64
+                && uid
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }
+        Value::Array(ids) => ids
+            .iter()
+            .all(|id| matches!(id, Value::String(_)) && canonical_uid_value(id)),
+        _ => false,
     }
 }
 
@@ -1540,6 +1616,11 @@ fn repos(home: &Path) -> Result<Vec<Value>> {
     let Some((_raw, k)) = search::b::stores(home)? else {
         return Ok(Vec::new());
     };
+    repos_in(&k)
+}
+
+/// Existing repository enumeration on a caller-owned connection, without opening stores.
+pub(crate) fn repos_in(k: &rusqlite::Connection) -> Result<Vec<Value>> {
     let mut st = k.prepare(
         "SELECT repo, SUM(claims), SUM(imported), SUM(records), MAX(last) FROM (
            SELECT repo, COUNT(DISTINCT uid) AS claims, 0 AS imported, 0 AS records,
@@ -2392,6 +2473,147 @@ mod tests {
             v.route("GET", "/api/doc?id=nope", &[HOST, TOKEN]).status,
             404
         );
+    }
+
+    #[test]
+    fn w3_privacy_and_claim_writes_pass_every_guard_before_store_work() {
+        let home = tempfile::tempdir().unwrap();
+        let v = Viewer::new(home.path(), None, 4321, Token::Run("t0k".into()));
+        assert_eq!(v.route("GET", "/api/privacy", &[HOST]).status, 401);
+        assert_eq!(
+            v.route(
+                "GET",
+                "/api/privacy",
+                &[("Host", "foreign.example:4321"), TOKEN]
+            )
+            .status,
+            403
+        );
+        let shown = get(&v, "/api/privacy");
+        assert_eq!(shown["available"], true);
+        assert_eq!(shown["rescan"]["state"], "empty");
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+        for path in [
+            "/api/privacy/exclude",
+            "/api/claims/correct",
+            "/api/claims/mute",
+            "/api/preferences",
+        ] {
+            save_guards(&v, path, MAX_BODY, b"{}");
+            for method in ["PUT", "PATCH", "OPTIONS", "DELETE"] {
+                assert_eq!(request(&v, method, path, &[HOST, TOKEN], b"").status, 405);
+            }
+            assert_eq!(
+                request(&v, "POST", &format!("{path}?x=1"), &[HOST, TOKEN], b"{}").status,
+                405
+            );
+        }
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn w3_claim_protocol_ids_survive_display_redaction_in_public_routes() {
+        const CHILD: &str = "OBOETE_W3_UID_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Egress is process-wide. Exercise its real configuration in one isolated test,
+            // without changing the rules seen by unrelated tests running in this process.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "view::tests::w3_claim_protocol_ids_survive_display_redaction_in_public_routes",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        let (mut store, v, x) = seeded();
+        store.correct(&x.current, None, Some(&x.current));
+        store.run();
+        std::fs::write(store.home.path().join("config.toml"),
+            "providers = []\n[summary]\ncurate = false\n[redaction]\nextra_rules = [{id = 'hash-text', regex = '^[0-9a-f]{64}$'}]\n").unwrap();
+        redact::set_home(store.home.path()).unwrap();
+        let route = format!("/api/claim?id={}", x.current);
+        let shown = get(&v, &route);
+        assert_eq!(shown["uid"], x.current);
+        assert_eq!(
+            shown["text"], "[REDACTED]",
+            "claim text must still be gated"
+        );
+        let old = get(&v, &format!("/api/claim?id={}", x.old));
+        assert_eq!(old["uid"], x.old);
+        assert_eq!(old["later"], x.proposal);
+        let proposal = get(&v, &format!("/api/claim?id={}", x.proposal));
+        assert_eq!(proposal["supersedes"], json!([x.old]));
+        let hits = get(&v, "/api/search?q=parser&history=1");
+        assert!(
+            hits["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|h| h["key"] == x.old)
+        );
+        let timeline = get(&v, "/api/timeline?all=1");
+        assert!(
+            timeline["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["key"] == x.current)
+        );
+        let post = |path: &str, value: Value| {
+            let body = serde_json::to_vec(&value).unwrap();
+            let len = body.len().to_string();
+            let response = request(
+                &v,
+                "POST",
+                path,
+                &[
+                    HOST,
+                    TOKEN,
+                    ("Origin", "http://127.0.0.1:4321"),
+                    ("Content-Type", "application/json"),
+                    ("Content-Length", &len),
+                ],
+                &body,
+            );
+            assert_eq!(response.status, 200);
+            json_of(&response)
+        };
+        assert_eq!(
+            post(
+                "/api/claims/correct",
+                json!({"uid": shown["uid"], "body": "Keep the corrected parser design.", "status": "done"})
+            ),
+            json!({"state": "applied", "uid": x.current})
+        );
+        assert_eq!(get(&v, &route)["text"], "Keep the corrected parser design.");
+        for muted in [true, false] {
+            assert_eq!(
+                post(
+                    "/api/claims/mute",
+                    json!({"uid": x.current, "muted": muted})
+                ),
+                json!({"state": "applied", "uid": x.current})
+            );
+            assert_eq!(get(&v, &route)["muted"], muted);
+        }
+        let preference = post(
+            "/api/preferences",
+            json!({"text": "Always use concise Japanese.", "apply_to_all_repos": true}),
+        );
+        assert_eq!(preference["state"], "applied");
+        let uid = preference["uid"].as_str().unwrap();
+        assert_eq!(uid.len(), 64);
+        assert_eq!(get(&v, &format!("/api/claim?id={uid}"))["uid"], uid);
     }
 
     #[test]

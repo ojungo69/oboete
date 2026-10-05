@@ -330,6 +330,7 @@ fn a_replaced_worker_reaps_its_existing_viewer_child_without_starting_duplicates
         .collect();
     assert_eq!(viewers.len(), 1, "the worker started duplicate viewers");
     let child = viewers[0];
+    let previous_generation = std::fs::read(h.join("state/worker-gen")).unwrap();
     let next = scratch.path().join("oboete.next");
     std::fs::copy(env!("CARGO_BIN_EXE_oboete"), &next).unwrap();
     let replacement = std::fs::metadata(&next).unwrap();
@@ -339,9 +340,30 @@ fn a_replaced_worker_reaps_its_existing_viewer_child_without_starting_duplicates
             (current.dev(), current.ino()) == (replacement.dev(), replacement.ino())
         })
     });
-    until("replacement ownership", || held(h, "worker.lock"));
+    let mut ready_processes = Vec::new();
+    until(
+        "replacement ownership and both existing process arguments",
+        || {
+            assert!(worker.0.try_wait().unwrap().is_none());
+            let generation_changed = std::fs::read(h.join("state/worker-gen"))
+                .is_ok_and(|generation| generation != previous_generation);
+            let running = started(h);
+            if generation_changed
+                && held(h, "worker.lock")
+                && running.contains(&pid)
+                && running.contains(&child)
+            {
+                ready_processes = running;
+                true
+            } else {
+                false
+            }
+        },
+    );
     assert!(worker.0.try_wait().unwrap().is_none());
-    assert_eq!(started(h).len(), 2, "exec duplicated the viewer");
+    // `/proc/PID/exe` can change before argv is readable. Use the same ready snapshot for the
+    // strict count; a third process still fails, and loss of the original child cannot pass.
+    assert_eq!(ready_processes.len(), 2, "exec duplicated the viewer");
     assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
     // SAFETY: this is the specific viewer PID created in this private home by our worker.
     assert_eq!(
@@ -1307,7 +1329,10 @@ fn the_token_file_is_0600_whatever_the_umask() {
 fn view_with_port_0_serves_here_in_a_resident_home() {
     let home = tempfile::tempdir().unwrap();
     let h = home.path();
-    let port = free_port();
+    // Keep the configured port reserved: a dropped free-port probe can be selected again by
+    // the kernel's bind(0), which would make a correct independent viewer fail this assertion.
+    let configured_port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = configured_port.local_addr().unwrap().port();
     std::fs::write(
         h.join("config.toml"),
         format!("[worker]\nresident = true\n[view]\nport = {port}\n"),

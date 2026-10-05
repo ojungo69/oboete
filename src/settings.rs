@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{self, ChainOverlay, Provider, ToolOutput};
 
+pub(crate) mod claims;
+pub(crate) mod privacy;
 mod providers;
 
 /// Why a save was refused: an HTTP status, a code the page puts in words, and the field it is
@@ -111,9 +113,11 @@ pub fn show(home: &Path) -> Value {
             alone(&path, &doc)?,
             config::parse_worker(t).ok()?,
             provider_rows(&path, &doc)?,
+            crate::backup::location(t).ok()?,
+            config::parse_capture(Some(t)).ok()?.redaction,
         ))
     });
-    let Some(((cfg, capture, inject), alone, worker, providers)) = read else {
+    let Some(((cfg, capture, inject), alone, worker, providers, backup, redaction)) = read else {
         return json!({"version": version, "error": "file_invalid"});
     };
     let ledger = crate::providers_db::read_only(home);
@@ -168,6 +172,7 @@ pub fn show(home: &Path) -> Value {
         "stopped": stopped,
         "inject": {
             "session_start": inject.session_start,
+            "session_start_note": inject.session_start_note,
             "session_start_chars": inject.session_start_chars,
             "per_prompt": inject.per_prompt,
             "per_prompt_chars": inject.per_prompt_chars,
@@ -178,6 +183,8 @@ pub fn show(home: &Path) -> Value {
             "store_prompts": capture.store_prompts,
             "tool_output": tool_output(capture.tool_output),
         },
+        "backup": {"dir": backup},
+        "redaction": {"extra_rules": redaction.extra_rules, "allowlist": redaction.allowlist},
         "chain": chain,
         "providers": providers,
         // Where a key typed on the page can be written (#94 part 3; macOS and Windows: #281).
@@ -441,8 +448,19 @@ struct Save {
     gemini: Option<config::GeminiPlace>,
     inject: InjectIn,
     capture: CaptureIn,
+    /// Omission preserves the existing location, including legacy spellings.
+    backup: Option<BackupIn>,
+    /// Older pages leave the custom rules and exact-value exceptions alone.
+    redaction: Option<config::Redaction>,
     /// Every chain entry once, in the order the page wants.
     chain: Vec<EntryIn>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupIn {
+    /// Null removes the override and follows backup::dir's default.
+    dir: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -465,6 +483,8 @@ struct SummaryIn {
 #[serde(deny_unknown_fields)]
 struct InjectIn {
     session_start: bool,
+    /// Older pages omit the terminal note choice and keep its saved value.
+    session_start_note: Option<bool>,
     session_start_chars: usize,
     per_prompt: bool,
     per_prompt_chars: usize,
@@ -620,6 +640,48 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| invalid())?;
     let base = alone(&path, &doc).ok_or_else(invalid)?;
     let chain = checked(&posted, &base, &now)?;
+    if let Some(backup) = &posted.backup {
+        let old = crate::backup::location(text).map_err(|_| invalid())?;
+        if backup.dir.as_deref().map(Path::new) != old.as_deref() {
+            match &backup.dir {
+                Some(dir) => put(&mut doc, "backup", "dir", dir.as_str().into()),
+                None => {
+                    let comments = doc
+                        .get("backup")
+                        .and_then(toml_edit::Item::as_table)
+                        .map(|table| key_comments(table, "dir"))
+                        .unwrap_or_default();
+                    if let Some(table) = doc
+                        .get_mut("backup")
+                        .and_then(toml_edit::Item::as_table_like_mut)
+                    {
+                        table.remove("dir");
+                    }
+                    keep_comments(&mut doc, &comments);
+                }
+            }
+        }
+    }
+    if let Some(redaction) = &posted.redaction {
+        crate::redact::Rules::new(redaction)
+            .map_err(|_| refused(422, "redaction_invalid", "redaction"))?;
+        let old = config::parse_capture(Some(text))
+            .map_err(|_| invalid())?
+            .redaction;
+        if serde_json::to_value(&redaction.extra_rules).expect("rules serialize")
+            != serde_json::to_value(&old.extra_rules).expect("rules serialize")
+        {
+            write_extra_rules(&mut doc, &old.extra_rules, &redaction.extra_rules);
+        }
+        if redaction.allowlist != old.allowlist {
+            put(
+                &mut doc,
+                "redaction",
+                "allowlist",
+                toml_edit::Value::Array(redaction.allowlist.iter().map(String::as_str).collect()),
+            );
+        }
+    }
     // The order changes when the chain's does, not when `order` would be spelled another way.
     let reordered = !(posted.chain.iter().map(|e| e.name.as_str())).eq(names(&now.providers));
     if let Some(worker) = &posted.worker {
@@ -662,6 +724,11 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
         }
     }
     let i = &posted.inject;
+    if let Some(note) = i.session_start_note
+        && note != inject.session_start_note
+    {
+        put(&mut doc, "inject", "session_start_note", note.into());
+    }
     for (key, now, was) in [
         ("session_start", i.session_start, inject.session_start),
         ("per_prompt", i.per_prompt, inject.per_prompt),
@@ -973,30 +1040,37 @@ fn put_root(doc: &mut toml_edit::DocumentMut, key: &str, value: Option<toml_edit
     } else {
         // TOML has no null value for Gemini. Keep the removed line's comments at the end
         // of the document instead of dropping them with its key.
-        let comments = doc
-            .as_table()
-            .get_key_value(key)
-            .map(|(name, item)| {
-                let prefix = name
-                    .leaf_decor()
-                    .prefix()
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("");
-                let suffix = item
-                    .as_value()
-                    .and_then(|v| v.decor().suffix())
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("");
-                format!("{prefix}{suffix}")
-            })
-            .unwrap_or_default();
+        let comments = key_comments(doc.as_table(), key);
         doc.remove(key);
-        if comments.contains('#') {
-            doc.set_trailing(format!(
-                "{}\n{comments}\n",
-                doc.trailing().as_str().unwrap_or("")
-            ));
-        }
+        keep_comments(doc, &comments);
+    }
+}
+
+fn key_comments(table: &toml_edit::Table, key: &str) -> String {
+    table
+        .get_key_value(key)
+        .map(|(name, item)| {
+            let prefix = name
+                .leaf_decor()
+                .prefix()
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            let suffix = item
+                .as_value()
+                .and_then(|v| v.decor().suffix())
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            format!("{prefix}{suffix}")
+        })
+        .unwrap_or_default()
+}
+
+fn keep_comments(doc: &mut toml_edit::DocumentMut, comments: &str) {
+    if comments.contains('#') {
+        doc.set_trailing(format!(
+            "{}\n{comments}\n",
+            doc.trailing().as_str().unwrap_or("")
+        ));
     }
 }
 
@@ -1010,6 +1084,105 @@ fn put(doc: &mut toml_edit::DocumentMut, table: &str, key: &str, mut value: toml
         *value.decor_mut() = old.decor().clone();
     }
     doc[table][key] = toml_edit::Item::Value(value);
+}
+
+/// Reuse each rule's saved table by id, including comments and omitted defaults. Both TOML
+/// spellings accepted by capture (inline arrays and arrays of tables) keep their spelling.
+fn write_extra_rules(
+    doc: &mut toml_edit::DocumentMut,
+    old: &[config::ExtraRule],
+    rules: &[config::ExtraRule],
+) {
+    let saved = doc
+        .get("redaction")
+        .and_then(|r| r.get("extra_rules"))
+        .cloned();
+    if let Some(tables) = saved.as_ref().and_then(toml_edit::Item::as_array_of_tables) {
+        let mut next = toml_edit::ArrayOfTables::new();
+        for rule in rules {
+            let mut table = tables
+                .iter()
+                .find(|t| t.get("id").and_then(toml_edit::Item::as_str) == Some(&rule.id))
+                .cloned()
+                .unwrap_or_default();
+            write_rule(&mut table, old.iter().find(|r| r.id == rule.id), rule);
+            next.push(table);
+        }
+        doc["redaction"]["extra_rules"] = toml_edit::Item::ArrayOfTables(next);
+    } else {
+        let saved = saved.as_ref().and_then(toml_edit::Item::as_array);
+        let mut next = saved.cloned().unwrap_or_default();
+        next.clear();
+        for rule in rules {
+            let mut table = saved
+                .and_then(|a| {
+                    a.iter().find_map(|v| {
+                        v.as_inline_table().filter(|t| {
+                            t.get("id").and_then(toml_edit::Value::as_str) == Some(&rule.id)
+                        })
+                    })
+                })
+                .cloned()
+                .unwrap_or_default();
+            write_rule(&mut table, old.iter().find(|r| r.id == rule.id), rule);
+            next.push_formatted(toml_edit::Value::InlineTable(table));
+        }
+        put(
+            doc,
+            "redaction",
+            "extra_rules",
+            toml_edit::Value::Array(next),
+        );
+    }
+}
+
+fn write_rule(
+    table: &mut dyn toml_edit::TableLike,
+    old: Option<&config::ExtraRule>,
+    rule: &config::ExtraRule,
+) {
+    let values = [
+        (
+            "id",
+            Some(rule.id.as_str().into()),
+            old.is_none_or(|r| r.id != rule.id),
+        ),
+        (
+            "regex",
+            Some(rule.regex.as_str().into()),
+            old.is_none_or(|r| r.regex != rule.regex),
+        ),
+        (
+            "keywords",
+            (!rule.keywords.is_empty()).then(|| {
+                toml_edit::Value::Array(rule.keywords.iter().map(String::as_str).collect())
+            }),
+            old.is_none_or(|r| r.keywords != rule.keywords),
+        ),
+        (
+            "entropy",
+            rule.entropy.map(toml_edit::Value::from),
+            old.is_none_or(|r| r.entropy != rule.entropy),
+        ),
+        (
+            "secret_group",
+            rule.secret_group.map(|g| toml_edit::Value::from(g as i64)),
+            old.is_none_or(|r| r.secret_group != rule.secret_group),
+        ),
+    ];
+    for (key, value, changed) in values {
+        if !changed {
+            continue;
+        }
+        if let Some(mut value) = value {
+            if let Some(old) = table.get(key).and_then(toml_edit::Item::as_value) {
+                *value.decor_mut() = old.decor().clone();
+            }
+            table.insert(key, toml_edit::Item::Value(value));
+        } else {
+            table.remove(key);
+        }
+    }
 }
 
 /// Writes each `[chain]` key whose value changes from what the file has now (`now`; the order
@@ -1155,6 +1328,242 @@ mod tests {
 
     fn save_to(home: &tempfile::TempDir, body: &[u8]) -> Result<Value, Refusal> {
         save(home.path(), &Mutex::new(()), body)
+    }
+
+    #[test]
+    fn terminal_note_is_read_only_and_an_omitted_old_field_keeps_its_choice() {
+        let original = "providers = []\n[inject]\nsession_start_note = false # quiet\n";
+        let home = home_with(Some(original));
+        let shown = show(home.path());
+        assert_eq!(shown["inject"]["session_start_note"], false);
+        assert_eq!(file(&home).as_deref(), Some(original));
+        for name in ["raw.db", "knowledge.db", "providers.db"] {
+            assert!(!home.path().join(name).exists());
+        }
+        let body = posted(&shown, |value| {
+            value["inject"]
+                .as_object_mut()
+                .unwrap()
+                .remove("session_start_note");
+            value["summary"]["language"] = json!("English");
+        });
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(saved["inject"]["session_start_note"], false);
+        assert!(
+            file(&home)
+                .unwrap()
+                .contains("session_start_note = false # quiet")
+        );
+        let body = posted(&saved, |value| {
+            value["inject"]["session_start_note"] = json!(true);
+        });
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(saved["inject"]["session_start_note"], true);
+        assert!(
+            crate::config::inject(home.path())
+                .unwrap()
+                .session_start_note
+        );
+    }
+
+    #[test]
+    fn backup_choices_preserve_old_requests_and_move_no_existing_data() {
+        let original = "providers = []\n# backup note\n[backup]\ndir = 'old' # keep\n";
+        let home = home_with(Some(original));
+        let shown = show(home.path());
+        assert_eq!(shown["backup"]["dir"], "old");
+        assert_eq!(file(&home).as_deref(), Some(original));
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
+        let no_change = posted(&shown, |v| v["backup"] = json!({"dir": "old"}));
+        let saved = save_to(&home, &no_change).unwrap();
+        assert_eq!(file(&home).as_deref(), Some(original));
+        let old_page = posted(&saved, |v| v["summary"]["language"] = json!("English"));
+        let saved = save_to(&home, &old_page).unwrap();
+        assert_eq!(saved["backup"]["dir"], "old");
+        assert!(file(&home).unwrap().contains("dir = 'old' # keep"));
+        std::fs::create_dir(home.path().join("old")).unwrap();
+        std::fs::write(home.path().join("old/segment.zst"), "retained backup").unwrap();
+        std::fs::write(home.path().join("forget.jsonl"), "retained forget log").unwrap();
+        let stale = posted(&saved, |v| v["backup"] = json!({"dir": "stale-choice"}));
+        let relative = posted(&saved, |v| v["backup"] = json!({"dir": "next/future"}));
+        let saved = save_to(&home, &relative).unwrap();
+        assert_eq!(saved["backup"]["dir"], "next/future");
+        assert_eq!(
+            crate::backup::dir(home.path()).unwrap(),
+            home.path().join("next/future")
+        );
+        assert!(!home.path().join("next").exists());
+        assert_eq!(save_to(&home, &stale).unwrap_err().code, "stale");
+        let destination = tempfile::tempdir().unwrap();
+        let absolute = destination.path().join("not-created");
+        let body = posted(&saved, |v| v["backup"] = json!({"dir": absolute}));
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(crate::backup::dir(home.path()).unwrap(), absolute);
+        assert!(!absolute.exists());
+        let body = posted(&saved, |v| v["backup"] = json!({"dir": null}));
+        let saved = save_to(&home, &body).unwrap();
+        assert!(saved["backup"]["dir"].is_null());
+        assert!(
+            file(&home).unwrap().contains("# keep"),
+            "removing the override lost its comment"
+        );
+        assert_eq!(
+            crate::backup::dir(home.path()).unwrap(),
+            home.path().join("backups")
+        );
+        assert!(!home.path().join("backups").exists());
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("old/segment.zst")).unwrap(),
+            "retained backup"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("forget.jsonl")).unwrap(),
+            "retained forget log"
+        );
+        for name in [
+            "raw.db",
+            "knowledge.db",
+            "providers.db",
+            "state/worker.lock",
+        ] {
+            assert!(!home.path().join(name).exists());
+        }
+    }
+
+    #[test]
+    fn redaction_saves_keep_all_rule_fields_and_reject_invalid_candidates_without_side_effects() {
+        let original = "providers = []\n[redaction] # mandatory bundled rules stay on\n\
+            extra_rules = [\n  { id = 'stable', regex = 'fixture-([A-Z]+)', keywords = ['fixture'], entropy = 0.1, secret_group = 1 }, # stable rule\n]\n\
+            allowlist = [] # exceptions\n[backup]\ndir = 'retained' # other setting\n";
+        let home = home_with(Some(original));
+        let shown = show(home.path());
+        assert_eq!(shown["redaction"]["extra_rules"][0]["secret_group"], 1);
+        assert_eq!(
+            shown["redaction"]["extra_rules"][0]["keywords"],
+            json!(["fixture"])
+        );
+        assert_eq!(file(&home).as_deref(), Some(original));
+        let unchanged = posted(&shown, |v| v["redaction"] = shown["redaction"].clone());
+        let saved = save_to(&home, &unchanged).unwrap();
+        assert_eq!(file(&home).as_deref(), Some(original));
+        let old_page = posted(&saved, |v| v["summary"]["language"] = json!("English"));
+        let saved = save_to(&home, &old_page).unwrap();
+        assert!(file(&home).unwrap().contains("# stable rule"));
+        let rules_before = crate::redact::Rules::load(home.path())
+            .unwrap()
+            .version()
+            .to_owned();
+        // secret_group hashes the extracted secret, rather than the surrounding regex match.
+        let kept = format!("{:x}", Sha256::digest(b"PRESERVE"));
+        let body = posted(&saved, |v| {
+            v["redaction"] = saved["redaction"].clone();
+            v["redaction"]["allowlist"] = json!([kept]);
+            v["redaction"]["extra_rules"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({
+                    "id": "second", "regex": "second-([A-Z]+)", "keywords": ["second", "UPPER"],
+                    "entropy": 0.25, "secret_group": 1,
+                }));
+        });
+        let saved = save_to(&home, &body).unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        assert_ne!(rules.version(), rules_before);
+        assert_eq!(
+            saved["redaction"]["extra_rules"][1]["keywords"],
+            json!(["second", "UPPER"])
+        );
+        assert_eq!(saved["redaction"]["extra_rules"][1]["entropy"], 0.25);
+        assert_eq!(saved["redaction"]["extra_rules"][1]["secret_group"], 1);
+        assert_eq!(
+            crate::redact::outbound_with("fixture-PRESERVE", &rules),
+            "fixture-PRESERVE"
+        );
+        assert_eq!(
+            crate::redact::outbound_with("second-PRIVATE", &rules),
+            "second-[REDACTED]"
+        );
+        assert!(file(&home).unwrap().contains("# stable rule"));
+        assert!(
+            file(&home)
+                .unwrap()
+                .contains("dir = 'retained' # other setting")
+        );
+        let preserved = file(&home).unwrap();
+        for invalid in [
+            json!({"extra_rules": [{"id": "bad", "regex": "("}], "allowlist": []}),
+            json!({"extra_rules": [{"id": "bad", "regex": "x", "secret_group": 1}], "allowlist": []}),
+            json!({"extra_rules": [{"id": "same", "regex": "x"}, {"id": "same", "regex": "y"}], "allowlist": []}),
+            json!({"extra_rules": [], "allowlist": ["not-a-hash-sensitive-sentinel"]}),
+        ] {
+            let body = posted(&saved, |v| v["redaction"] = invalid);
+            let refusal = save_to(&home, &body).unwrap_err();
+            assert_eq!(refusal.code, "redaction_invalid");
+            assert_eq!(refusal.field, "redaction");
+            assert!(!format!("{refusal:?}").contains("sentinel"));
+            assert_eq!(file(&home).as_deref(), Some(preserved.as_str()));
+        }
+        assert_eq!(
+            std::fs::read_dir(home.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+                .count(),
+            0
+        );
+        for name in [
+            "raw.db",
+            "knowledge.db",
+            "providers.db",
+            "state/worker.lock",
+            "retained",
+        ] {
+            assert!(!home.path().join(name).exists());
+        }
+    }
+
+    #[test]
+    fn rule_tables_and_an_empty_legacy_backup_survive_unrelated_saves() {
+        let original = "providers = []\n[redaction]\nallowlist = []\n\
+            [[redaction.extra_rules]]\nid = 'existing' # named rule\nregex = '^existing-fixture$' # pattern note\n\
+            [backup]\ndir = '' # memory home\n";
+        let home = home_with(Some(original));
+        let shown = show(home.path());
+        assert_eq!(shown["backup"]["dir"], "");
+        assert_eq!(crate::backup::dir(home.path()).unwrap(), home.path());
+        let body = posted(&shown, |v| {
+            v["redaction"] = shown["redaction"].clone();
+            v["summary"]["language"] = json!("English");
+        });
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(saved["backup"]["dir"], "");
+        assert!(file(&home).unwrap().contains("dir = '' # memory home"));
+        let body = posted(&saved, |v| {
+            v["redaction"] = saved["redaction"].clone();
+            v["redaction"]["extra_rules"][0]["regex"] = json!("^new-fixture$");
+            v["redaction"]["extra_rules"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id": "added", "regex": "^added-fixture$"}));
+        });
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(
+            saved["redaction"]["extra_rules"].as_array().unwrap().len(),
+            2
+        );
+        let text = file(&home).unwrap();
+        assert_eq!(text.matches("[[redaction.extra_rules]]").count(), 2);
+        assert!(text.contains("id = 'existing' # named rule"));
+        assert!(text.contains("# pattern note"));
+        assert!(text.contains("dir = '' # memory home"));
+        let body = posted(&saved, |v| v["backup"] = json!({"dir": null}));
+        save_to(&home, &body).unwrap();
+        assert_eq!(
+            crate::backup::dir(home.path()).unwrap(),
+            home.path().join("backups")
+        );
+        assert!(file(&home).unwrap().contains("# memory home"));
+        assert!(!home.path().join("backups").exists());
     }
 
     #[test]
@@ -1979,7 +2388,7 @@ mod tests {
         let shown = show(home.path());
         assert_eq!(
             shown["inject"],
-            json!({"session_start": true, "session_start_chars": 9000, "per_prompt": false,
+            json!({"session_start": true, "session_start_note": true, "session_start_chars": 9000, "per_prompt": false,
                 "per_prompt_chars": 1500, "correction": true, "correction_chars": 800})
         );
         assert_eq!(shown["ranges"]["per_prompt_chars"], json!([500, 6000]));
