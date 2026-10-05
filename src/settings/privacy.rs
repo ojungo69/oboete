@@ -99,7 +99,7 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
         k.execute("ATTACH DATABASE ?1 AS privacy_raw", [uri])?;
         let tx = k.transaction()?;
         let state = rescan_in(&tx, settings.rules.version(), &crate::db::store_file(path))?;
-        let labels = labels(Some(&tx), &excluded)?;
+        let labels = labels(Some(&tx), RawRepos::Attached(&tx), &excluded)?;
         tx.commit()?;
         anyhow::ensure!(
             std::fs::symlink_metadata(home.join("knowledge.db")).is_ok_and(|m| m.is_file())
@@ -116,7 +116,7 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         (
-            labels(None, &excluded)?,
+            labels(None, RawRepos::Main(&raw.conn), &excluded)?,
             RescanState {
                 state: RescanPhase::Pending,
                 processed: None,
@@ -218,10 +218,33 @@ fn knowledge(home: &Path) -> anyhow::Result<Option<(Connection, String)>> {
     Ok(Some((conn, identity)))
 }
 
-/// Reuse the viewer's existing repository query after its derived tables exist, then include
-/// exclusions whose history is absent. A GET never creates those derived tables.
-fn labels(k: Option<&Connection>, excluded: &[String]) -> anyhow::Result<BTreeSet<String>> {
+enum RawRepos<'a> {
+    Main(&'a Connection),
+    Attached(&'a Connection),
+}
+
+/// Include newly captured repository metadata before indexing, the viewer's derived labels,
+/// and exclusions without history. A GET never creates derived tables.
+fn labels(
+    k: Option<&Connection>,
+    raw: RawRepos<'_>,
+    excluded: &[String],
+) -> anyhow::Result<BTreeSet<String>> {
     let mut labels: BTreeSet<String> = excluded.iter().cloned().collect();
+    let (conn, query) = match raw {
+        RawRepos::Main(conn) => (
+            conn,
+            "SELECT DISTINCT repo FROM main.records WHERE repo IS NOT NULL AND repo <> ''",
+        ),
+        RawRepos::Attached(conn) => (
+            conn,
+            "SELECT DISTINCT repo FROM privacy_raw.records WHERE repo IS NOT NULL AND repo <> ''",
+        ),
+    };
+    let mut records = conn.prepare(query)?;
+    for label in records.query_map([], |row| row.get::<_, String>(0))? {
+        labels.insert(label?);
+    }
     if let Some(k) = k {
         let tables: i64 = k.query_row(
             "SELECT COUNT(*) FROM main.sqlite_master WHERE type = 'table'
@@ -263,7 +286,12 @@ pub fn exclude(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
         .ok_or_else(|| refused(404, "repo_not_found", "selector"))?;
     let excluded = crate::raw::exclusions_in(&raw.conn).map_err(|_| unavailable())?;
     let k = knowledge(home).map_err(|_| unavailable())?;
-    let labels = labels(k.as_ref().map(|(conn, _)| conn), &excluded).map_err(|_| unavailable())?;
+    let labels = labels(
+        k.as_ref().map(|(conn, _)| conn),
+        RawRepos::Main(&raw.conn),
+        &excluded,
+    )
+    .map_err(|_| unavailable())?;
     let mut selected = labels
         .iter()
         .filter(|label| selector(label) == posted.selector);
@@ -305,6 +333,118 @@ mod tests {
         );
         assert!(!home.exists(), "a GET initialized the absent home");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_new_raw_repository_can_be_excluded_before_any_worker_index_exists() {
+        let mut store = Store::new();
+        store.event(
+            "prompt",
+            "new-session",
+            ("new-repo", "main"),
+            1_000,
+            json!({"prompt": "New work.", "repo": "body-only-repo"}),
+        );
+        let before = (
+            store.raw.max_seq().unwrap(),
+            store.raw.max_op_seq().unwrap(),
+        );
+        let shown = show(store.home.path());
+        assert_eq!(shown["available"], true);
+        assert_eq!(
+            shown["repositories"],
+            json!([{"selector": selector("new-repo"), "label": "new-repo", "excluded": false}])
+        );
+        assert_eq!(
+            (
+                store.raw.max_seq().unwrap(),
+                store.raw.max_op_seq().unwrap()
+            ),
+            before
+        );
+        for file in ["knowledge.db", "providers.db", "state"] {
+            assert!(!store.home.path().join(file).exists(), "GET created {file}");
+        }
+        let saved = exclude(
+            store.home.path(),
+            &Mutex::new(()),
+            &serde_json::to_vec(&json!({
+                "selector": shown["repositories"][0]["selector"], "undo": false
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["recorded"], true);
+        assert_eq!(saved["excluded"], true);
+        assert_eq!(store.raw.exclusions().unwrap(), ["new-repo"]);
+        for file in ["knowledge.db", "providers.db", "state"] {
+            assert!(
+                !store.home.path().join(file).exists(),
+                "POST created {file}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_repository_labels_join_existing_derived_and_excluded_labels_before_indexing() {
+        let mut store = Store::new();
+        store.said("mixed", "shared", 1_000, "Indexed work.");
+        store.imported("derived", "derived-only", 1_000, "A note", "Imported work.");
+        store.raw.exclude("excluded-only", false).unwrap();
+        store.run();
+        store.said("mixed", "shared", 2_000, "Duplicate label.");
+        store.said("mixed", "new-repo", 3_000, "Unindexed work.");
+        store.said("remote", "remote-repo", 4_000, "Another device's work.");
+        store.said("empty", "", 5_000, "No repository label.");
+        store
+            .raw
+            .append(&crate::raw::test_event("Unlabelled work."))
+            .unwrap();
+        let raw = Connection::open(crate::raw::path(store.home.path())).unwrap();
+        raw.execute(
+            "UPDATE records SET device = 'remote-device' WHERE repo = 'remote-repo'",
+            [],
+        )
+        .unwrap();
+        let shown = show(store.home.path());
+        assert_eq!(shown["available"], true);
+        assert_eq!(shown["rescan"]["state"], "pending");
+        let rows = shown["repositories"].as_array().unwrap();
+        let labels: Vec<_> = rows
+            .iter()
+            .map(|row| row["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "claude-mem:derived-only",
+                "excluded-only",
+                "new-repo",
+                "remote-repo",
+                "shared"
+            ]
+        );
+        let selected = rows.iter().find(|row| row["label"] == "new-repo").unwrap();
+        let saved = exclude(
+            store.home.path(),
+            &Mutex::new(()),
+            &serde_json::to_vec(&json!({"selector": selected["selector"], "undo": false})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["recorded"], true);
+        assert_eq!(
+            store.raw.exclusions().unwrap(),
+            ["excluded-only", "new-repo"]
+        );
+        let k = knowledge(store.home.path()).unwrap().unwrap().0;
+        assert_eq!(
+            k.query_row("SELECT count(*) FROM raw_docs", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "privacy lookup or exclusion indexed the new raw records"
+        );
+        assert!(!store.home.path().join("providers.db").exists());
     }
 
     #[cfg(unix)]

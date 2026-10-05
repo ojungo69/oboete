@@ -44,8 +44,10 @@ touching it, including mixed sessions. Recording and search continue. Undo makes
 future sends eligible again. Existing records, memories and backups remain.
 
 Repository selectors are opaque hashes of the saved labels, resolved freshly on
-the server. Display labels are redacted separately. Exclusions without history
-remain listed for undo. The viewer's working directory is not a mutation target.
+the server. Newly captured raw repository metadata is listed before the worker
+indexes it, together with derived/imported labels and exclusions without history.
+Display labels are redacted separately. Exclusions without history remain listed
+for undo. The viewer's working directory is not a mutation target.
 
 The rescan state reports the current append device. The worker rescans when it
 next runs; saving rules does not start it. Rules-version equality alone does not
