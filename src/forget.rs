@@ -399,13 +399,13 @@ fn skip_line(reader: &mut impl BufRead) -> std::io::Result<()> {
 /// directory synced when the file is made (rule 9).
 #[cfg(test)]
 fn append_log(path: &Path, requests: &[&Request]) -> Result<()> {
-    append_log_report(path, requests, &mut || {})
+    append_log_report(path, requests, &mut |_| {})
 }
 
 fn append_log_report(
     path: &Path,
     requests: &[&Request],
-    committed: &mut impl FnMut(),
+    committed: &mut impl FnMut(&'static str),
 ) -> Result<()> {
     if requests.is_empty() {
         return Ok(());
@@ -445,18 +445,29 @@ fn append_log_report(
     }
     let written = f.write_all(&out);
     // The held log lock excludes other native appenders, including on a partial write error.
-    if written.is_ok() || f.metadata().is_ok_and(|metadata| metadata.len() != len) {
-        committed();
+    let changed = written.is_ok() || f.metadata().is_ok_and(|metadata| metadata.len() != len);
+    let result = (|| {
+        written?;
+        #[cfg(test)]
+        crate::backup::fail_after("forget_log_sync")?;
+        f.sync_all()?;
+        if made && let Some(dir) = path.parent() {
+            #[cfg(all(test, unix))]
+            crate::backup::fail_after("forget_log_directory_sync")?;
+            #[cfg(unix)]
+            std::fs::File::open(dir)?.sync_all()?;
+            #[cfg(not(unix))]
+            let _ = dir;
+        }
+        Ok(())
+    })();
+    // A complete copy follows its syncs; known partial effects retain the existing warning.
+    if result.is_ok() {
+        committed("forget_reconciled");
+    } else if changed {
+        committed("stores_changed");
     }
-    written?;
-    f.sync_all()?;
-    if made && let Some(dir) = path.parent() {
-        #[cfg(unix)]
-        std::fs::File::open(dir)?.sync_all()?;
-        #[cfg(not(unix))]
-        let _ = dir;
-    }
-    Ok(())
+    result
 }
 
 /// Rule 4, in both directions and never refusing: every request a readable log copy holds that
@@ -501,7 +512,7 @@ pub(crate) fn reconcile_report(
             .iter()
             .filter(|r| !copy.iter().any(|c| c.job == r.job))
             .collect();
-        match append_log_report(&path, &lacking, &mut || committed("forget_reconciled", 0)) {
+        match append_log_report(&path, &lacking, &mut |stage| committed(stage, 0)) {
             Ok(()) => report.copies.push(path),
             Err(e) => report
                 .problems

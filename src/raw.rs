@@ -2620,7 +2620,18 @@ impl Raw {
     /// Bodies are read and compressed outside the write lock, then written in one short
     /// transaction per batch, so a hook waits on it no longer than on another hook. Returns how
     /// many were rewritten.
+    #[cfg(test)]
     pub fn compress_through(&self, device: &str, after: i64, through: i64) -> Result<usize> {
+        self.compress_through_report(device, after, through, &mut || {})
+    }
+
+    pub(crate) fn compress_through_report(
+        &self,
+        device: &str,
+        after: i64,
+        through: i64,
+        committed: &mut dyn FnMut(),
+    ) -> Result<usize> {
         let mut from = after;
         let mut rewritten = 0;
         loop {
@@ -2668,6 +2679,7 @@ impl Raw {
                 &self.conn,
                 rusqlite::TransactionBehavior::Immediate,
             )?;
+            let before = rewritten;
             for (seq, z) in &smaller {
                 rewritten += tx.execute(
                     "UPDATE records SET body = ?1, enc = 'zstd'
@@ -2676,6 +2688,9 @@ impl Raw {
                 )?;
             }
             tx.commit()?;
+            if rewritten != before {
+                committed();
+            }
             from = upto;
         }
     }

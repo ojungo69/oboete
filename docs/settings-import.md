@@ -88,6 +88,8 @@ completion handling apply to these operations too.
 A consumer transaction counts as committed progress when it changes data,
 schema or a checkpoint. Store initialization, recovery, committed rewind steps
 and deletion-log repairs report their own effects even before a later failure.
+A consumer's separately committed Raw writes remain reported effects when its
+later step or knowledge checkpoint fails.
 Another connection's writes and SQLite storage housekeeping do not count as this
 operation's progress. Receipt reporting does not hash whole stores. An empty
 transaction does not itself make a failed

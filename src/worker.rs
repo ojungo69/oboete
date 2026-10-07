@@ -218,6 +218,17 @@ pub trait Consumer {
         }
     }
     fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64>;
+    /// Report effects committed outside `k` immediately, even if the step later fails.
+    fn step_report(
+        &mut self,
+        raw: &Raw,
+        k: &Connection,
+        device: &str,
+        after: i64,
+        _committed: &mut dyn FnMut(),
+    ) -> Result<i64> {
+        self.step(raw, k, device, after)
+    }
     fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()>;
 }
 
@@ -277,7 +288,13 @@ fn pass_report(
                 0
             };
             let at = checkpoint::get_in(&tx, c.checkpoints(), c.name(), &device)?;
-            let next = c.step(raw, &tx, &device, at)?;
+            let next = if let Some(report) = report.as_deref_mut() {
+                c.step_report(raw, &tx, &device, at, &mut || {
+                    report.changed("stores_changed")
+                })?
+            } else {
+                c.step(raw, &tx, &device, at)?
+            };
             if next != at {
                 checkpoint::set_in(&tx, c.checkpoints(), c.name(), &device, next)?;
                 advanced = true;
@@ -2016,6 +2033,221 @@ mod tests {
     }
 
     #[test]
+    fn w5b_rescan_raw_commits_survive_later_raw_or_checkpoint_failure() {
+        for fault in ["checkpoint", "next_raw"] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            let mut raw = raw::open(p).unwrap();
+            for canary in ["111111", "222222"] {
+                raw.append(&raw::test_event(&format!(
+                    r#"{{"prompt":"synthetic causal-canary-{canary}"}}"#
+                )))
+                .unwrap();
+            }
+            drop(raw);
+            run_once(p).unwrap();
+            std::fs::remove_dir_all(p.join("backups")).unwrap();
+            raw::open(p)
+                .unwrap()
+                .append(&raw::test_event("synthetic pending rescan"))
+                .unwrap();
+            if fault == "checkpoint" {
+                knowledge::open(p)
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER stop_rescan_checkpoint BEFORE UPDATE ON checkpoints
+                     WHEN OLD.consumer='rescan'
+                     BEGIN SELECT RAISE(ABORT, 'synthetic failed rescan checkpoint'); END;",
+                    )
+                    .unwrap();
+            } else {
+                Connection::open(p.join("raw.db"))
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER stop_next_rescan BEFORE INSERT ON records
+                     WHEN NEW.type='tombstone' AND NEW.target_seq=2
+                     BEGIN SELECT RAISE(ABORT, 'synthetic failed next raw rescan'); END;",
+                    )
+                    .unwrap();
+            }
+            std::fs::write(p.join("config.toml"),
+                "[redaction]\nextra_rules = [{ id = 'causal', regex = 'causal-canary-[0-9]{6}' }]\n"
+            ).unwrap();
+            let mut commits = Vec::new();
+            let failure = restore_report(
+                p,
+                None,
+                crate::executable::CommandCaller::Worker,
+                &mut |event| commits.push(event.clone()),
+            )
+            .unwrap_err();
+            assert!(
+                failure
+                    .cause
+                    .to_string()
+                    .contains("no usable backup segment")
+            );
+            assert!(
+                failure
+                    .index_cause
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("synthetic failed")
+            );
+            let raw = raw::open(p).unwrap();
+            let expected = if fault == "checkpoint" { 2 } else { 1 };
+            assert_eq!(raw.tombstones().unwrap(), expected);
+            let crate::raw::Item::Event(first) = &raw.after(raw.device(), 0, 1).unwrap()[0].item
+            else {
+                panic!("synthetic first record disappeared");
+            };
+            assert!(!first.body.contains("causal-canary-111111"));
+            assert_eq!(failure.outcome.index.consumer_commits, 0);
+            assert!(
+                !failure
+                    .outcome
+                    .restore
+                    .as_ref()
+                    .unwrap()
+                    .effects
+                    .committed()
+            );
+            assert!(
+                failure.outcome.index.stores_changed,
+                "independently committed rescan was lost from the receipt: {fault}"
+            );
+            assert!(failure.outcome.committed());
+            assert_eq!(
+                commits
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        MaintenanceCommit::Effect {
+                            stage: "stores_changed"
+                        }
+                    ))
+                    .count(),
+                expected as usize
+            );
+        }
+    }
+
+    #[test]
+    fn w5b_compressed_batches_survive_later_errors_without_counting_empty_batches() {
+        for fault in ["checkpoint", "later_batch", "noop_checkpoint"] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            let body = if fault == "noop_checkpoint" {
+                "hi".to_owned()
+            } else {
+                "synthetic compression payload ".repeat(300)
+            };
+            let count = if fault == "later_batch" { 201 } else { 1 };
+            let mut raw = raw::open(p).unwrap();
+            for _ in 0..count {
+                raw.append(&raw::test_event(&body)).unwrap();
+            }
+            let device = raw.device().to_owned();
+            drop(raw);
+            let mut initial = consumers(p);
+            assert_eq!(initial.pop().unwrap().name(), "compress");
+            run_holding(p, 0, initial, || {}, None, Phases::default()).unwrap();
+            std::fs::remove_dir_all(p.join("backups")).unwrap();
+            if fault == "later_batch" {
+                Connection::open(p.join("raw.db"))
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER stop_later_compression BEFORE UPDATE OF enc ON records
+                     WHEN OLD.seq=201
+                     BEGIN SELECT RAISE(ABORT, 'synthetic failed later compression'); END;",
+                    )
+                    .unwrap();
+            } else {
+                knowledge::open(p)
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER stop_compress_checkpoint BEFORE INSERT ON checkpoints
+                     WHEN NEW.consumer='compress'
+                     BEGIN SELECT RAISE(ABORT, 'synthetic failed compression checkpoint'); END;",
+                    )
+                    .unwrap();
+            }
+            let mut commits = Vec::new();
+            let failure = restore_report(
+                p,
+                None,
+                crate::executable::CommandCaller::Worker,
+                &mut |event| commits.push(event.clone()),
+            )
+            .unwrap_err();
+            assert!(
+                failure
+                    .cause
+                    .to_string()
+                    .contains("no usable backup segment")
+            );
+            assert!(
+                failure
+                    .index_cause
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("synthetic failed")
+            );
+            let c = Connection::open(p.join("raw.db")).unwrap();
+            let encoding = |seq| {
+                c.query_row(
+                    "SELECT enc FROM records WHERE device=?1 AND seq=?2",
+                    (&device, seq),
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+            };
+            let changed = fault != "noop_checkpoint";
+            assert_eq!(encoding(1), if changed { "zstd" } else { "plain" });
+            if fault == "later_batch" {
+                assert_eq!(encoding(201), "plain");
+            }
+            drop(c);
+            let raw = raw::open(p).unwrap();
+            let records = raw.after(&device, 0, 1).unwrap();
+            let crate::raw::Item::Event(first) = &records[0].item else {
+                panic!("synthetic compressed record disappeared");
+            };
+            assert_eq!(first.body, body);
+            assert_eq!(raw.max_seq().unwrap(), count);
+            assert_eq!(failure.outcome.index.consumer_commits, 0);
+            assert!(
+                !failure
+                    .outcome
+                    .restore
+                    .as_ref()
+                    .unwrap()
+                    .effects
+                    .committed()
+            );
+            assert_eq!(
+                failure.outcome.index.stores_changed, changed,
+                "independently committed compression was lost or an empty batch counted: {fault}"
+            );
+            assert_eq!(failure.outcome.committed(), changed);
+            assert_eq!(
+                commits
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        MaintenanceCommit::Effect {
+                            stage: "stores_changed"
+                        }
+                    ))
+                    .count(),
+                usize::from(changed)
+            );
+        }
+    }
+
+    #[test]
     fn w5b_owned_initialization_progress_survives_a_later_open_failure() {
         for setup in ["new_raw", "raw_schema", "raw_identity", "knowledge_schema"] {
             let home = tempfile::tempdir().unwrap();
@@ -2118,54 +2350,71 @@ mod tests {
 
     #[test]
     fn w5b_a_repaired_forget_log_is_progress_without_a_consumer_commit() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let (original, _) = crate::backup::tests::w5b_log_change(p);
-        run_once(p).unwrap();
-        for entry in std::fs::read_dir(p.join("backups")).unwrap() {
-            let path = entry.unwrap().path();
-            if path.file_name().unwrap() != "forget.log" {
-                std::fs::remove_file(path).unwrap();
-            }
-        }
-        std::fs::remove_file(p.join("forget.log")).unwrap();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("synthetic pending log repair"))
-            .unwrap();
-        knowledge::open(p)
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER stop_log_repair_drain BEFORE UPDATE ON checkpoints
-             BEGIN SELECT RAISE(ABORT, 'synthetic stopped log repair drain'); END;",
-            )
-            .unwrap();
-        let mut commits = Vec::new();
-        let failure = restore_report(
-            p,
+        let faults = [
             None,
-            crate::executable::CommandCaller::Worker,
-            &mut |event| commits.push(event.clone()),
-        )
-        .unwrap_err();
-        assert!(
-            failure
-                .index_cause
-                .as_ref()
+            Some("forget_log_sync"),
+            #[cfg(unix)]
+            Some("forget_log_directory_sync"),
+        ];
+        for fault in faults {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            let (original, _) = crate::backup::tests::w5b_log_change(p);
+            run_once(p).unwrap();
+            for entry in std::fs::read_dir(p.join("backups")).unwrap() {
+                let path = entry.unwrap().path();
+                if path.file_name().unwrap() != "forget.log" {
+                    std::fs::remove_file(path).unwrap();
+                }
+            }
+            std::fs::remove_file(p.join("forget.log")).unwrap();
+            raw::open(p)
                 .unwrap()
-                .to_string()
-                .contains("synthetic stopped log repair drain")
-        );
-        assert_eq!(failure.outcome.index.consumer_commits, 0);
-        assert_eq!(failure.outcome.index.forget_requests_applied, 0);
-        assert!(failure.outcome.committed());
-        assert_eq!(std::fs::read(p.join("forget.log")).unwrap(), original);
-        assert!(matches!(
-            commits.as_slice(),
-            [MaintenanceCommit::Effect {
-                stage: "forget_reconciled"
-            }]
-        ));
+                .append(&raw::test_event("synthetic pending log repair"))
+                .unwrap();
+            knowledge::open(p)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER stop_log_repair_drain BEFORE UPDATE ON checkpoints
+                 BEGIN SELECT RAISE(ABORT, 'synthetic stopped log repair drain'); END;",
+                )
+                .unwrap();
+            let mut commits = Vec::new();
+            crate::backup::FAIL_AFTER.set(fault);
+            let result = restore_report(
+                p,
+                None,
+                crate::executable::CommandCaller::Worker,
+                &mut |event| commits.push(event.clone()),
+            );
+            crate::backup::FAIL_AFTER.set(None);
+            let failure = result.unwrap_err();
+            assert!(
+                failure
+                    .index_cause
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("synthetic stopped log repair drain")
+            );
+            assert_eq!(failure.outcome.index.consumer_commits, 0);
+            assert_eq!(failure.outcome.index.forget_requests_applied, 0);
+            assert!(failure.outcome.committed());
+            assert_eq!(std::fs::read(p.join("forget.log")).unwrap(), original);
+            let expected = if fault.is_some() {
+                "stores_changed"
+            } else {
+                "forget_reconciled"
+            };
+            assert_eq!(
+                failure.outcome.index.forget_log_warnings,
+                u64::from(fault.is_some())
+            );
+            assert!(
+                matches!(commits.as_slice(), [MaintenanceCommit::Effect { stage }] if *stage == expected),
+                "failed log sync was reported as fully reconciled: {fault:?}"
+            );
+        }
     }
 
     #[test]

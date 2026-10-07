@@ -40,7 +40,18 @@ impl Consumer for Rescan {
     /// With the rules the records were last scanned with, it only follows new records (capture
     /// scanned them). With other rules, it starts again from seq 1: its checkpoint moves back,
     /// which the worker takes from any consumer.
-    fn step(&mut self, raw: &Raw, k: &Connection, _device: &str, after: i64) -> Result<i64> {
+    fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64> {
+        self.step_report(raw, k, device, after, &mut || {})
+    }
+
+    fn step_report(
+        &mut self,
+        raw: &Raw,
+        k: &Connection,
+        _device: &str,
+        after: i64,
+        committed: &mut dyn FnMut(),
+    ) -> Result<i64> {
         schema(k)?;
         // Settings that do not load stop capture too, and doctor names them. The batch is passed
         // over (a checkpoint that never moves keeps the worker from exiting), and the version is
@@ -78,7 +89,10 @@ impl Consumer for Rescan {
             let Item::Event(e) = &r.item else { continue };
             for (start, end) in crate::redact::field_ranges(&e.body, &settings.rules) {
                 if writer.is_none() {
-                    writer = Some(crate::raw::open(&self.home)?);
+                    writer = Some(crate::raw::open_report(&self.home, None, &mut |_| {
+                        committed();
+                        Ok(())
+                    })?);
                 }
                 let w = writer.as_mut().expect("opened");
                 w.append_tombstone(Target::Range {
@@ -87,6 +101,7 @@ impl Consumer for Rescan {
                     offset: start as i64,
                     length: (end - start) as i64,
                 })?;
+                committed();
             }
         }
         Ok(recs.last().map_or(from, |r| r.seq))
