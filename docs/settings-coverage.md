@@ -157,6 +157,10 @@ cloud starts from a page view or a save.
   labels while keeping IDs and effects. Loading saved settings clears preview/consent and cached
   display text, preserving unknown operations and counts until the next status GET. Late replies
   cannot restore discarded consent; a matching C2 status only refreshes an existing preview.
+
+- **W6, first run and agents.** The first-run presets, the agents' wiring, the readiness checks, and
+  the resident worker's and viewer's switches with resident.md's slice 2.
+
   W6's first inventory is an authenticated query-only GET, with seven independent native agent
   rows and fixed state codes. Finding a launcher or a matching registration does not prove login,
   permission to execute, or live delivery. Invalid oboete configuration does not hide agent facts.
@@ -165,9 +169,10 @@ cloud starts from a page view or a save.
   response values remain unknown. Full Doctor checks, confirmed wiring and first-run completion
   remain subsequent W6 work. Both inventory and maintenance status reject nonempty raw queries;
   the existing caller's empty trailing question mark remains valid.
-
-- **W6, first run and agents.** The first-run presets, the agents' wiring, the readiness checks, and
-  the resident worker's and viewer's switches with resident.md's slice 2.
+  Metadata failures and skipped Windows UNC/device namespaces produce unknown file flags, while
+  a confirmed local launcher still produces found. Text reads stop at 1 MiB per file; larger
+  files are unavailable and never parsed as a truncated registration. This namespace guard does
+  not establish that mapped drives or local symlinks resolve to local storage.
 
 W1, W3, W5 and W6 are independent of each other once their backends exist; W2 is security scope and
 W4 waits for the local embedder.

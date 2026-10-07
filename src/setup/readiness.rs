@@ -1,7 +1,17 @@
 //! Passive agent-file inventory. Never invokes setup, doctor, a store, or an agent process.
 
-use super::*;
+use super::{
+    AGENTS, HookCommand, MCP_NAME, PI_MARKER, agy_dir, agy_spec, claude_dir, claude_groups,
+    claude_mcp_paths, claude_settings_file, codex_groups, codex_home, codex_trust_keys, cursor_dir,
+    cursor_hook_spec, diagnostic_metadata, grok_config_file, grok_groups, has_ours, is_our_handler,
+    launcher_files, mcp_command_in_json, mcp_command_in_toml, mcp_disabled_in_json,
+    mcp_disabled_in_toml, opencode_dir, opencode_plugin, pi_dir, pi_extension,
+};
+use crate::config;
+use anyhow::Result;
+use serde_json::{Value, json};
 use std::io::Read;
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -83,8 +93,8 @@ pub(crate) enum Trust {
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct AgentReadiness {
     pub(crate) agent: &'static str,
-    pub(crate) launch_file_found: bool,
-    pub(crate) directory_found: bool,
+    pub(crate) launch_file_found: Option<bool>,
+    pub(crate) directory_found: Option<bool>,
     pub(crate) capture: Capture,
     pub(crate) mcp: Component,
     pub(crate) trust: Trust,
@@ -100,12 +110,60 @@ pub(crate) struct Readiness {
 
 type Observed<T> = std::result::Result<Option<T>, State>;
 
+fn found(path: &Path, directory: bool) -> Option<bool> {
+    match diagnostic_metadata(path) {
+        Ok(metadata) => Some(if directory {
+            metadata.is_dir()
+        } else {
+            metadata.is_file()
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
+}
+
+fn launch_found(bins: &[&str]) -> Option<bool> {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return Some(false);
+    };
+    let mut result = Some(false);
+    for dir in std::env::split_paths(&paths) {
+        for file in bins.iter().flat_map(|bin| launcher_files(&dir, bin)) {
+            match found(&file, false) {
+                Some(true) => return Some(true),
+                None => result = None,
+                Some(false) => {}
+            }
+        }
+    }
+    result
+}
+
+// Inventory is diagnostic: oversized files remain unavailable, never parsed as a prefix.
+const TEXT_LIMIT: u64 = 1024 * 1024;
+
+fn bounded_text(reader: impl Read) -> std::result::Result<String, State> {
+    let mut bytes = Vec::new();
+    reader
+        .take(TEXT_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| State::Unreadable)?;
+    if bytes.len() as u64 > TEXT_LIMIT {
+        return Err(State::Unavailable);
+    }
+    String::from_utf8(bytes).map_err(|_| State::Invalid)
+}
+
 /// Missing and unreadable stay distinct. Read only regular files, including dotfile symlinks.
 fn text(file: &Path) -> Observed<String> {
-    match std::fs::metadata(file) {
+    match diagnostic_metadata(file) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+            return Err(State::Unavailable);
+        }
         Err(_) => return Err(State::Unreadable),
         Ok(metadata) if !metadata.is_file() => return Err(State::Unavailable),
+        Ok(metadata) if metadata.len() > TEXT_LIMIT => return Err(State::Unavailable),
         Ok(_) => {}
     }
     let mut options = std::fs::OpenOptions::new();
@@ -115,19 +173,12 @@ fn text(file: &Path) -> Observed<String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK);
     }
-    let mut opened = options.open(file).map_err(|_| State::Unreadable)?;
-    if !opened.metadata().is_ok_and(|metadata| metadata.is_file()) {
+    let opened = options.open(file).map_err(|_| State::Unreadable)?;
+    let metadata = opened.metadata().map_err(|_| State::Unreadable)?;
+    if !metadata.is_file() || metadata.len() > TEXT_LIMIT {
         return Err(State::Unavailable);
     }
-    let mut value = String::new();
-    opened.read_to_string(&mut value).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::InvalidData {
-            State::Invalid
-        } else {
-            State::Unreadable
-        }
-    })?;
-    Ok(Some(value))
+    bounded_text(opened).map(Some)
 }
 
 fn json_file(file: &Path, empty_object: bool) -> Observed<Value> {
@@ -143,6 +194,16 @@ fn json_file(file: &Path, empty_object: bool) -> Observed<Value> {
         Ok(Some(root))
     } else {
         Err(State::Invalid)
+    }
+}
+
+fn claude_mcp_registration() -> Observed<Value> {
+    let [legacy, current] = claude_mcp_paths();
+    match diagnostic_metadata(&legacy) {
+        Ok(_) => json_file(&legacy, true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json_file(&current, true),
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => Err(State::Unavailable),
+        Err(_) => Err(State::Unreadable),
     }
 }
 
@@ -485,9 +546,9 @@ fn row(agent: &'static str, want: Option<&HookCommand>) -> AgentReadiness {
         _ => unreachable!("the native seven-agent list"),
     };
     let launch_file_found = if agent == "cursor" {
-        on_path("cursor-agent") || on_path("agent")
+        launch_found(&["cursor-agent", "agent"])
     } else {
-        on_path(agent)
+        launch_found(&[agent])
     };
     let mut trust = Trust::NotApplicable;
     let (kind, capture, mcp) = match agent {
@@ -498,7 +559,7 @@ fn row(agent: &'static str, want: Option<&HookCommand>) -> AgentReadiness {
                 want,
                 claude_groups,
             ),
-            json_mcp(&json_file(&claude_mcp_file(), true), want, false),
+            json_mcp(&claude_mcp_registration(), want, false),
         ),
         "codex" => {
             let file = dir.join("hooks.json");
@@ -531,9 +592,14 @@ fn row(agent: &'static str, want: Option<&HookCommand>) -> AgentReadiness {
             ),
         ),
         "opencode" => {
-            let config = match dir.join("opencode.jsonc").try_exists() {
-                Ok(true) => Err(State::Unavailable),
-                Ok(false) => json_file(&dir.join("opencode.json"), false),
+            let config = match diagnostic_metadata(&dir.join("opencode.jsonc")) {
+                Ok(_) => Err(State::Unavailable),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    json_file(&dir.join("opencode.json"), false)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+                    Err(State::Unavailable)
+                }
                 Err(_) => Err(State::Unreadable),
             };
             (
@@ -562,7 +628,7 @@ fn row(agent: &'static str, want: Option<&HookCommand>) -> AgentReadiness {
     AgentReadiness {
         agent,
         launch_file_found,
-        directory_found: dir.is_dir(),
+        directory_found: found(&dir, true),
         capture: Capture {
             kind,
             component: capture,
@@ -574,7 +640,7 @@ fn row(agent: &'static str, want: Option<&HookCommand>) -> AgentReadiness {
 }
 
 pub(crate) fn readiness(home: &Path) -> Readiness {
-    let home_state = match std::fs::metadata(home) {
+    let home_state = match diagnostic_metadata(home) {
         Ok(metadata) if metadata.is_dir() => HomeState::Present,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => HomeState::Missing,
         _ => HomeState::Unreadable,
@@ -586,7 +652,11 @@ pub(crate) fn readiness(home: &Path) -> Readiness {
         Ok(Some(_)) | Err(State::Invalid) => ConfigState::Invalid,
         Err(_) => ConfigState::Unreadable,
     };
-    let want = if matches!(home_state, HomeState::Present) {
+    let want = if matches!(home_state, HomeState::Present)
+        && std::env::current_exe().is_ok_and(|exe| diagnostic_metadata(&exe).is_ok())
+        && !diagnostic_metadata(&config::home_dir().join(".oboete"))
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::Unsupported)
+    {
         HookCommand::current(home).ok()
     } else {
         None
@@ -606,9 +676,81 @@ mod tests {
     use super::*;
     use crate::setup as native;
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     #[test]
-    fn w6_registered_agents_matrix_is_read_only() {
+    fn w6_inventory_refuses_oversized_text_without_truncating() {
+        let private = tempfile::tempdir().unwrap();
+        let file = private.path().join("settings.json");
+        let mut value = vec![b' '; 1024 * 1024 + 1];
+        value[..2].copy_from_slice(b"{}");
+        std::fs::write(&file, &value).unwrap();
+        assert!(
+            matches!(text(&file), Err(State::Unavailable)),
+            "oversized inventory file was read"
+        );
+        assert!(
+            std::fs::read(&file).unwrap() == value,
+            "inspection changed source bytes"
+        );
+        value.truncate(1024 * 1024);
+        std::fs::write(&file, &value).unwrap();
+        assert!(
+            matches!(json_file(&file, false), Ok(Some(_))),
+            "file at the limit was refused"
+        );
+        std::fs::write(&file, [0xff]).unwrap();
+        assert!(matches!(text(&file), Err(State::Invalid)));
+        // Even a stream that grows after metadata inspection consumes only limit + 1 bytes.
+        let mut growing = std::io::repeat(b' ').take(TEXT_LIMIT + 5);
+        assert!(matches!(
+            bounded_text(&mut growing),
+            Err(State::Unavailable)
+        ));
+        assert_eq!(growing.limit(), 4);
+    }
+
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![root.to_owned()];
+        while let Some(path) = pending.pop() {
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            let relative = path.strip_prefix(root).unwrap().to_owned();
+            if metadata.is_dir() {
+                files.insert(relative, None);
+                pending.extend(
+                    std::fs::read_dir(&path)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path()),
+                );
+            } else if metadata.file_type().is_symlink() {
+                files.insert(
+                    relative,
+                    Some(
+                        std::fs::read_link(&path)
+                            .unwrap()
+                            .into_os_string()
+                            .into_encoded_bytes(),
+                    ),
+                );
+            } else {
+                assert!(metadata.is_file(), "private fixture gained a special file");
+                files.insert(relative, Some(std::fs::read(&path).unwrap()));
+            }
+        }
+        files
+    }
+
+    fn agent<'a>(shown: &'a Value, name: &str) -> &'a Value {
+        shown["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["agent"] == name)
+            .expect("fixed agent row missing")
+    }
+
+    fn registered_matrix_root() -> Option<PathBuf> {
         const CHILD: &str = "OBOETE_W6_REGISTERED_MATRIX_CHILD";
         const TEST: &str = "setup::readiness::tests::w6_registered_agents_matrix_is_read_only";
         let Some(root) = std::env::var_os(CHILD).map(PathBuf::from) else {
@@ -679,38 +821,17 @@ mod tests {
                 root.join("matrix-complete").is_file(),
                 "exact child test did not finish"
             );
-            return;
+            return None;
         };
 
-        fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
-            let mut files = BTreeMap::new();
-            let mut pending = vec![root.to_owned()];
-            while let Some(path) = pending.pop() {
-                let metadata = std::fs::symlink_metadata(&path).unwrap();
-                let relative = path.strip_prefix(root).unwrap().to_owned();
-                if metadata.is_dir() {
-                    files.insert(relative, None);
-                    pending.extend(
-                        std::fs::read_dir(&path)
-                            .unwrap()
-                            .map(|entry| entry.unwrap().path()),
-                    );
-                } else {
-                    assert!(metadata.is_file(), "private fixture gained a special file");
-                    files.insert(relative, Some(std::fs::read(&path).unwrap()));
-                }
-            }
-            files
-        }
+        Some(root)
+    }
 
-        fn agent<'a>(shown: &'a Value, name: &str) -> &'a Value {
-            shown["agents"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|row| row["agent"] == name)
-                .expect("fixed agent row missing")
-        }
+    #[test]
+    fn w6_registered_agents_matrix_is_read_only() {
+        let Some(root) = registered_matrix_root() else {
+            return;
+        };
 
         let home = root.join("store");
         std::fs::write(
@@ -977,6 +1098,43 @@ mod tests {
             inspect() == changed,
             "readiness did not recover from restored private settings"
         );
+        #[cfg(unix)]
+        {
+            // A symlink loop returns a real metadata error even under a privileged test user.
+            // It must not become "not found". Only this child's private roots are changed.
+            let dir = native::claude_dir();
+            std::fs::rename(&dir, root.join("claude-held")).unwrap();
+            std::os::unix::fs::symlink(&dir, &dir).unwrap();
+            let launcher = root.join("bin/claude");
+            std::os::unix::fs::symlink(&launcher, &launcher).unwrap();
+            let before = snapshot(&root);
+            let shown = serde_json::to_value(native::readiness(&home)).unwrap();
+            assert!(
+                snapshot(&root) == before,
+                "metadata errors changed private files"
+            );
+            let claude = agent(&shown, "claude");
+            assert!(
+                claude["directory_found"].is_null(),
+                "unreadable agent directory appeared absent"
+            );
+            assert!(
+                claude["launch_file_found"].is_null(),
+                "unreadable launcher appeared absent"
+            );
+            assert!(claude["capture"]["state"] == "unreadable");
+            for name in ["codex", "grok", "agy", "opencode", "pi", "cursor"] {
+                assert!(
+                    agent(&shown, name) == agent(&changed, name),
+                    "metadata failure changed an independent row"
+                );
+            }
+            let cursor = root.join("bin/cursor-agent");
+            std::os::unix::fs::symlink(&cursor, &cursor).unwrap();
+            assert_eq!(launch_found(&["cursor-agent", "agent"]), None);
+            std::fs::write(root.join("bin/agent"), b"inert, never executed").unwrap();
+            assert_eq!(launch_found(&["cursor-agent", "agent"]), Some(true));
+        }
         std::fs::write(root.join("matrix-complete"), b"passed").unwrap();
     }
 }

@@ -692,14 +692,21 @@ pub(crate) fn claude_dir() -> PathBuf {
 /// The file `claude mcp --scope user` edits, found the way Claude Code 2.1 finds it: a legacy
 /// `<config dir>/.config.json` if one exists, else `.claude.json` in `$CLAUDE_CONFIG_DIR` or home.
 fn claude_mcp_file() -> PathBuf {
-    let legacy = claude_dir().join(".config.json");
+    let [legacy, current] = claude_mcp_paths();
     if legacy.exists() {
         return legacy;
     }
-    std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(config::home_dir)
-        .join(".claude.json")
+    current
+}
+
+fn claude_mcp_paths() -> [PathBuf; 2] {
+    [
+        claude_dir().join(".config.json"),
+        std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(config::home_dir)
+            .join(".claude.json"),
+    ]
 }
 
 /// That file is Claude Code's state file, rewritten all the time under its own lock; a write
@@ -2247,20 +2254,86 @@ pub fn doctor(home: &Path) -> Result<()> {
 pub(crate) fn on_path(bin: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths)
-            // Windows npm launchers use `.cmd`; WSL must not count Windows launchers.
-            .any(|d| {
-                d.join(bin).is_file()
-                    || (cfg!(windows)
-                        && ["exe", "cmd"]
-                            .iter()
-                            .any(|ext| d.join(format!("{bin}.{ext}")).is_file()))
-            })
+            .flat_map(|dir| launcher_files(&dir, bin))
+            .any(|file| diagnostic_metadata(&file).is_ok_and(|metadata| metadata.is_file()))
     })
+}
+
+fn diagnostic_metadata_with(
+    path: &Path,
+    windows: bool,
+    probe: impl FnOnce(&Path) -> std::io::Result<std::fs::Metadata>,
+) -> std::io::Result<std::fs::Metadata> {
+    if windows {
+        let bytes = path.as_os_str().as_encoded_bytes();
+        // UNC and device namespaces can authenticate remotely during a metadata lookup.
+        // Ordinary and verbatim drive paths remain supported. Inspect bytes without UTF-8 loss.
+        let verbatim_drive = bytes.starts_with(br"\\?\")
+            && bytes.get(4).is_some_and(u8::is_ascii_alphabetic)
+            && bytes.get(5..7) == Some(b":\\");
+        let separator = |byte: u8| matches!(byte, b'/' | b'\\');
+        if !verbatim_drive
+            && (bytes.first().is_some_and(|byte| separator(*byte))
+                && bytes.get(1).is_some_and(|byte| separator(*byte))
+                || bytes.starts_with(br"\??\"))
+        {
+            return Err(std::io::ErrorKind::Unsupported.into());
+        }
+    }
+    probe(path)
+}
+
+fn diagnostic_metadata(path: &Path) -> std::io::Result<std::fs::Metadata> {
+    // On Windows a relative PATH entry can resolve under a UNC working directory.
+    #[cfg(windows)]
+    let absolute = std::path::absolute(path)?;
+    #[cfg(windows)]
+    let path = absolute.as_path();
+    diagnostic_metadata_with(path, cfg!(windows), |path| std::fs::metadata(path))
+}
+
+fn launcher_files(dir: &Path, bin: &str) -> Vec<PathBuf> {
+    // Windows npm launchers use `.cmd`; WSL must not count Windows launchers.
+    let mut files = vec![dir.join(bin)];
+    if cfg!(windows) {
+        files.extend(["exe", "cmd"].map(|ext| dir.join(format!("{bin}.{ext}"))));
+    }
+    files
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn w6_windows_namespace_paths_never_reach_metadata() {
+        use std::cell::Cell;
+        for path in [
+            r"\\server\share\codex.exe",
+            "//server/share/grok.cmd",
+            r"\\?\UNC\server\share\agent",
+            r"\\.\UNC\server\share\agent",
+            r"\??\UNC\server\share\agent",
+            r"\\?\GLOBALROOT\Device\Mup\server\share",
+        ] {
+            let calls = Cell::new(0);
+            let result = diagnostic_metadata_with(Path::new(path), true, |_| {
+                calls.set(calls.get() + 1);
+                Err(std::io::ErrorKind::NotFound.into())
+            });
+            assert_eq!(calls.get(), 0, "UNC/device path reached metadata");
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+        }
+        for path in [r"C:\agents\codex.exe", r"\\?\C:\agents\codex.exe"] {
+            let calls = Cell::new(0);
+            let result = diagnostic_metadata_with(Path::new(path), true, |_| {
+                calls.set(calls.get() + 1);
+                Err(std::io::ErrorKind::NotFound.into())
+            });
+            assert_eq!(calls.get(), 1);
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        }
+    }
 
     #[test]
     fn one_agent_that_fails_leaves_the_others_wired() {
