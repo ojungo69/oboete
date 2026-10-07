@@ -894,8 +894,9 @@ mod tests {
         // A local junction exercises the kernel's parent-reparse refusal without ever
         // naming or contacting a remote share. cmd is the fixed OS junction creator.
         let junction = |link: &Path, target: &Path, failure: &str| {
-            let cmd =
-                PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
+            let cmd = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32")
+                .join("cmd.exe");
             let output = std::process::Command::new(cmd)
                 .args(["/d", "/c", "mklink", "/J"])
                 .arg(link)
