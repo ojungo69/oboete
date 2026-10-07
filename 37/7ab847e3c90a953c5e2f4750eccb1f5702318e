@@ -1,0 +1,21 @@
+assets/viewer/app.js
+  s_b993208c852846::t_86c2aeeda27e6c 3155-3158
+src/migrate.rs
+  s_b993208c852846::t_04d58c43a82890 1473-1476
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "377ab847e3c90a953c5e2f4750eccb1f5702318e",
+  "prompts": {},
+  "sessions": {
+    "s_b993208c852846": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11376-f4a3-7023-a53e-863d60579723",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
