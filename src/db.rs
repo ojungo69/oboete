@@ -191,16 +191,20 @@ pub(crate) fn ensure_schema_until(
     conn: &Connection,
     schema: &str,
     deadline: Instant,
-) -> Result<()> {
+) -> Result<bool> {
     if schema_present(conn, schema)? {
-        return Ok(());
+        return Ok(false);
     }
     retry_busy(conn, deadline, || {
         let tx =
             rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        let before: i64 = tx.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
+        let changes = tx.total_changes();
         tx.execute_batch(schema)?;
+        let changed = tx.total_changes() != changes
+            || tx.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0))? != before;
         tx.commit()?;
-        Ok(())
+        Ok(changed)
     })
 }
 
@@ -384,10 +388,14 @@ fn legacy_store_file(_: &Path) -> Option<String> {
 /// turns up as another file (a `~/.oboete` copied to another machine), so two devices never share
 /// one. It prefixes ids that must be unique across devices.
 pub(crate) fn ensure_device(conn: &Connection, path: &Path) -> Result<()> {
-    ensure_device_until(conn, path, Instant::now() + OPEN_WRITE_WAIT)
+    ensure_device_until(conn, path, Instant::now() + OPEN_WRITE_WAIT).map(|_| ())
 }
 
-pub(crate) fn ensure_device_until(conn: &Connection, path: &Path, deadline: Instant) -> Result<()> {
+pub(crate) fn ensure_device_until(
+    conn: &Connection,
+    path: &Path,
+    deadline: Instant,
+) -> Result<bool> {
     let here = store_file(path);
     let known: Option<String> = conn
         .query_row("SELECT value FROM meta WHERE key='store_file'", [], |r| {
@@ -395,17 +403,17 @@ pub(crate) fn ensure_device_until(conn: &Connection, path: &Path, deadline: Inst
         })
         .optional()?;
     if known.as_deref() == Some(here.as_str()) {
-        return Ok(());
+        return Ok(false);
     }
     // A store from before #122 on Windows holds its creation time: the same file, so it keeps its
     // device id and takes the new identity (its records stay under their device, Codex on #122).
     if known.is_some() && known == legacy_store_file(path) {
         return retry_busy(conn, deadline, || {
-            conn.execute(
+            let changed = conn.execute(
                 "UPDATE meta SET value=?1 WHERE key='store_file'",
                 params![here],
             )?;
-            Ok(())
+            Ok(changed != 0)
         });
     }
     let mut raw = [0u8; 4];
@@ -428,7 +436,7 @@ pub(crate) fn ensure_device_until(conn: &Connection, path: &Path, deadline: Inst
             )?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(changed != 0)
     })
 }
 
@@ -635,7 +643,7 @@ pub(crate) fn ensure_column(
     column: &str,
     decl: &str,
 ) -> Result<()> {
-    ensure_column_until(conn, table, column, decl, Instant::now() + OPEN_WRITE_WAIT)
+    ensure_column_until(conn, table, column, decl, Instant::now() + OPEN_WRITE_WAIT).map(|_| ())
 }
 
 pub(crate) fn ensure_column_until(
@@ -644,18 +652,19 @@ pub(crate) fn ensure_column_until(
     column: &str,
     decl: &str,
     deadline: Instant,
-) -> Result<()> {
+) -> Result<bool> {
     if has_column(conn, table, column)? {
-        return Ok(());
+        return Ok(false);
     }
     retry_busy(conn, deadline, || {
         let tx =
             rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-        if !has_column(&tx, table, column)? {
+        let changed = !has_column(&tx, table, column)?;
+        if changed {
             tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(changed)
     })
 }
 

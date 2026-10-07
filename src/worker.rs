@@ -9,6 +9,178 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CheckpointUnit {
+    Records,
+    Ops,
+}
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum MaintenanceCommit {
+    Effect {
+        stage: &'static str,
+    },
+    Index {
+        consumer: &'static str,
+        unit: CheckpointUnit,
+        checkpoint: i64,
+    },
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IndexState {
+    #[default]
+    NotStarted,
+    Complete,
+    Failed,
+}
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct IndexReceipt {
+    pub state: IndexState,
+    pub consumer_commits: u64,
+    pub stores_changed: bool,
+    pub raw_recovery: Option<crate::backup::RestoreReceipt>,
+    pub backup_files_written: u64,
+    pub backup_files_quarantined: u64,
+    pub backup_warnings: u64,
+    pub forget_log_warnings: u64,
+    pub forget_requests_applied: u64,
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct MaintenanceOutcome {
+    pub operation: crate::backup::MaintenanceOperation,
+    pub effects: crate::backup::Effects,
+    pub restore: Option<crate::backup::RestoreReceipt>,
+    pub index: IndexReceipt,
+    pub cached_vectors_carried: u64,
+    pub old_knowledge_kept: bool,
+    pub cleanup_warnings: u64,
+    pub hybrid_ready: bool,
+}
+impl MaintenanceOutcome {
+    fn new(operation: crate::backup::MaintenanceOperation) -> Self {
+        Self {
+            operation,
+            effects: Default::default(),
+            restore: None,
+            index: Default::default(),
+            cached_vectors_carried: 0,
+            old_knowledge_kept: false,
+            cleanup_warnings: 0,
+            hybrid_ready: false,
+        }
+    }
+    pub(crate) fn committed(&self) -> bool {
+        self.effects.committed()
+            || self.restore.as_ref().is_some_and(|r| r.effects.committed())
+            || self.index.consumer_commits != 0
+            || self.index.backup_files_written != 0
+            || self.index.stores_changed
+            || self.index.backup_files_quarantined != 0
+            || self
+                .index
+                .raw_recovery
+                .as_ref()
+                .is_some_and(|r| r.effects.committed())
+    }
+}
+#[derive(Debug)]
+pub(crate) struct MaintenanceFailure {
+    pub outcome: Box<MaintenanceOutcome>,
+    pub code: crate::backup::MaintenanceCode,
+    pub cause: anyhow::Error,
+    pub index_cause: Option<anyhow::Error>,
+}
+impl MaintenanceFailure {
+    fn into_cause(self) -> anyhow::Error {
+        debug_assert!(
+            self.code != crate::backup::MaintenanceCode::Stale || !self.outcome.committed(),
+            "stale consent precedes data effects"
+        );
+        debug_assert!(self.index_cause.is_none() || self.outcome.index.state == IndexState::Failed);
+        self.cause
+    }
+}
+fn maintenance_failure(
+    outcome: MaintenanceOutcome,
+    cause: anyhow::Error,
+    fallback: crate::backup::MaintenanceCode,
+) -> MaintenanceFailure {
+    let code = cause
+        .downcast_ref::<crate::backup::MaintenanceCode>()
+        .copied()
+        .unwrap_or(fallback);
+    MaintenanceFailure {
+        outcome: Box::new(outcome),
+        code,
+        cause,
+        index_cause: None,
+    }
+}
+
+struct IndexReport<'a> {
+    receipt: &'a mut IndexReceipt,
+    committed: &'a mut dyn FnMut(&MaintenanceCommit),
+}
+fn report_backup(home: &Path, raw: &Raw, report: &mut Option<&mut IndexReport<'_>>, check: bool) {
+    if let Some(report) = report.as_deref_mut() {
+        let warnings = if check {
+            crate::backup::check_report(home, raw, &mut |stage| report.backup(stage))
+        } else {
+            crate::backup::run_report(home, raw, &mut |stage| report.backup(stage))
+        };
+        report.receipt.backup_warnings += warnings;
+    } else if check {
+        crate::backup::check(home, raw);
+    } else {
+        crate::backup::run(home, raw);
+    }
+}
+impl IndexReport<'_> {
+    fn changed(&mut self, stage: &'static str) {
+        self.receipt.stores_changed = true;
+        (self.committed)(&MaintenanceCommit::Effect { stage });
+    }
+    fn backup(&mut self, stage: &'static str) {
+        if stage == "backup_written" {
+            self.receipt.backup_files_written += 1;
+        } else {
+            self.receipt.backup_files_quarantined += 1;
+        }
+        (self.committed)(&MaintenanceCommit::Effect { stage });
+    }
+}
+fn check_reported_stores(home: &Path) -> Result<()> {
+    for name in [
+        "raw.db",
+        "raw.db.restored",
+        "knowledge.db",
+        "raw.db-wal",
+        "knowledge.db-wal",
+    ] {
+        let path = home.join(name);
+        match std::fs::metadata(&path) {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    metadata.is_file(),
+                    "maintenance store is not a regular file"
+                );
+                #[cfg(test)]
+                if name.ends_with("-wal")
+                    && metadata.len() > 32
+                    && let Some(before) = BEFORE_STORE_OPEN.take()
+                {
+                    before(&path);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 /// One derived view of raw.db. `step` processes what `device` holds after `after` and returns its
 /// new checkpoint; `rewind` deletes its output above `to`. Both run inside the knowledge.db
 /// transaction that also moves the checkpoint (D10). A consumer of raw's records reads this
@@ -46,6 +218,17 @@ pub trait Consumer {
         }
     }
     fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64>;
+    /// Report effects committed outside `k` immediately, even if the step later fails.
+    fn step_report(
+        &mut self,
+        raw: &Raw,
+        k: &Connection,
+        device: &str,
+        after: i64,
+        _committed: &mut dyn FnMut(),
+    ) -> Result<i64> {
+        self.step(raw, k, device, after)
+    }
     fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()>;
 }
 
@@ -83,6 +266,14 @@ pub fn drain(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>])
 
 /// One batch for each consumer: whether any checkpoint moved.
 fn pass(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<bool> {
+    pass_report(raw, k, consumers, &mut None)
+}
+fn pass_report(
+    raw: &Raw,
+    k: &mut Connection,
+    consumers: &mut [Box<dyn Consumer>],
+    report: &mut Option<&mut IndexReport<'_>>,
+) -> Result<bool> {
     let mut advanced = false;
     for c in consumers.iter_mut() {
         for device in c.devices(raw)? {
@@ -90,13 +281,42 @@ fn pass(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> R
             // another writer moved meanwhile (a search creating its table in a fresh knowledge.db)
             // fails its first write with SQLITE_BUSY at once, which stopped the worker.
             let tx = k.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let changes = tx.total_changes();
+            let schema: i64 = if report.is_some() {
+                tx.query_row("PRAGMA schema_version", [], |r| r.get(0))?
+            } else {
+                0
+            };
             let at = checkpoint::get_in(&tx, c.checkpoints(), c.name(), &device)?;
-            let next = c.step(raw, &tx, &device, at)?;
+            let next = if let Some(report) = report.as_deref_mut() {
+                c.step_report(raw, &tx, &device, at, &mut || {
+                    report.changed("stores_changed")
+                })?
+            } else {
+                c.step(raw, &tx, &device, at)?
+            };
             if next != at {
                 checkpoint::set_in(&tx, c.checkpoints(), c.name(), &device, next)?;
                 advanced = true;
             }
+            let changed = report.is_some()
+                && (tx.total_changes() != changes
+                    || tx.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0))?
+                        != schema);
             tx.commit()?;
+            if changed && let Some(report) = report.as_deref_mut() {
+                report.receipt.consumer_commits += 1;
+                (report.committed)(&MaintenanceCommit::Index {
+                    consumer: c.name(),
+                    unit: if c.reads_ops() {
+                        CheckpointUnit::Ops
+                    } else {
+                        CheckpointUnit::Records
+                    },
+                    checkpoint: next,
+                });
+                crate::backup::fail_after("index_commit")?;
+            }
         }
     }
     Ok(advanced)
@@ -118,7 +338,11 @@ impl std::error::Error for Gone {}
 
 /// The per-home worker lock, `<home>/state/worker.lock`; released when dropped. Each taking of it
 /// has the next number of `state/worker-gen`, so a run's outcome is ordered against a later run's.
-pub struct Lock(#[allow(dead_code)] std::fs::File, u64);
+pub struct Lock(
+    #[allow(dead_code)] std::fs::File,
+    u64,
+    Option<crate::executable::CommandHome>,
+);
 
 /// Which file a lock file is: its device and inode. `None` where the system has none to give, and
 /// for a file that cannot be read.
@@ -140,7 +364,14 @@ pub(crate) fn file_id(file: std::io::Result<std::fs::Metadata>) -> FileId {
 /// The lock, or `None` when another process holds it. Hooks try it too, and start a worker only
 /// when they get it (dropping it at once).
 pub fn lock(home: &Path) -> Result<Option<Lock>> {
-    crate::executable::check_home(home, Some(crate::executable::Role::Worker))?;
+    lock_for(home, None)
+}
+fn lock_for(home: &Path, command: Option<&crate::executable::CommandHome>) -> Result<Option<Lock>> {
+    if let Some(command) = command {
+        command.check(home)?;
+    } else {
+        crate::executable::check_home(home, Some(crate::executable::Role::Worker))?;
+    }
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
     let f = std::fs::OpenOptions::new()
@@ -150,14 +381,19 @@ pub fn lock(home: &Path) -> Result<Option<Lock>> {
         .open(state.join("worker.lock"))?;
     match try_lock(&f) {
         Ok(()) => {
-            crate::executable::check_lock(
-                Some(crate::executable::Role::Worker),
-                file_id(f.metadata()),
-            )?;
+            if command.is_none() {
+                crate::executable::check_lock(
+                    Some(crate::executable::Role::Worker),
+                    file_id(f.metadata()),
+                )?;
+            }
             #[cfg(test)]
             if let Some(after) = AFTER_OPEN.get() {
                 after(home);
             }
+            let command = command
+                .map(|command| command.locked(home, file_id(f.metadata())))
+                .transpose()?;
             // The home was replaced since the file was opened: the lock is the old one's, and
             // nothing is written into the new one by path (R3, Codex on #359). A command asking
             // for the lock takes the new home's at its next try.
@@ -177,7 +413,7 @@ pub fn lock(home: &Path) -> Result<Option<Lock>> {
             let next = state.join("worker-gen.next");
             std::fs::write(&next, taken.to_string())?;
             std::fs::rename(&next, &gen_file)?;
-            Ok(Some(Lock(f, taken)))
+            Ok(Some(Lock(f, taken, command)))
         }
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
         Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
@@ -233,10 +469,13 @@ thread_local! {
     static AFTER_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
     /// A one-shot test seam: the pathname changes after SQLite opened raw.db.
     static AFTER_RAW_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    static AFTER_KNOWLEDGE_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
     /// A one-shot test seam: the pathname changes between the last check and the next round.
     static BEFORE_ROUND: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
     /// A synchronous one-shot fixture action after a rebuild meets a shared status probe.
     static REBUILD_STATUS_BLOCKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_CARRY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_STORE_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
 /// How long a command waits for a worker to step aside.
@@ -246,7 +485,10 @@ const ASK: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 30 });
 /// restore`, `rebuild`, `recurate --yes`). A worker that holds it is asked to step aside, which
 /// it does between rounds and while it waits, not during a call to a provider.
 pub fn lock_asking(home: &Path) -> Result<Lock> {
-    if let Some(held) = lock(home)? {
+    lock_asking_for(home, None)
+}
+fn lock_asking_for(home: &Path, command: Option<&crate::executable::CommandHome>) -> Result<Lock> {
+    if let Some(held) = lock_for(home, command)? {
         return Ok(held);
     }
     static ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -262,7 +504,7 @@ pub fn lock_asking(home: &Path) -> Result<Lock> {
     std::fs::write(&ask, "")?;
     let until = Instant::now() + ASK;
     let held = loop {
-        match lock(home) {
+        match lock_for(home, command) {
             Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(50)),
             tried => break tried,
         }
@@ -372,13 +614,40 @@ pub struct Phases<'a, 'f> {
 pub(crate) fn run_holding(
     home: &Path,
     idle_ms: u64,
+    consumers: Vec<Box<dyn Consumer>>,
+    before_exit: impl FnMut(),
+    taken: Option<Lock>,
+    phases: Phases,
+) -> Result<()> {
+    run_holding_report(
+        home,
+        idle_ms,
+        consumers,
+        before_exit,
+        taken,
+        phases,
+        &mut None,
+    )
+}
+fn run_holding_report(
+    home: &Path,
+    idle_ms: u64,
     mut consumers: Vec<Box<dyn Consumer>>,
     mut before_exit: impl FnMut(),
     taken: Option<Lock>,
     mut phases: Phases,
+    report: &mut Option<&mut IndexReport<'_>>,
 ) -> Result<()> {
+    let command = taken.as_ref().and_then(|held| held.2.clone());
+    let initial = if let Some(command) = &command {
+        command.check(home)?;
+        None
+    } else {
+        crate::executable::expected(Some(crate::executable::Role::Worker))?
+    };
     let mut holding = Holding {
-        home: crate::executable::expected(Some(crate::executable::Role::Worker))?,
+        home: initial,
+        command,
         ..Holding::default()
     };
     if let Some(l) = taken {
@@ -391,6 +660,7 @@ pub(crate) fn run_holding(
         &mut before_exit,
         &mut holding,
         &mut phases,
+        report,
     );
     // Released first: a hook that finds the lock free starts a worker for what it appended.
     holding.lock = None;
@@ -413,8 +683,12 @@ fn config_stamp(home: &Path) -> Option<(std::time::SystemTime, u64)> {
 /// by path (a backup, the prune, an outcome, the lock taken again), which would go into another
 /// home, and it holds after the lock is released too.
 fn gone(home: &Path, holding: &Holding) -> bool {
-    holding.home.is_some()
-        && file_id(std::fs::metadata(home.join("state").join("worker.lock"))) != holding.home
+    (holding.home.is_some()
+        && file_id(std::fs::metadata(home.join("state").join("worker.lock"))) != holding.home)
+        || holding
+            .command
+            .as_ref()
+            .is_some_and(|command| command.check(home).is_err())
 }
 
 /// Every lock this run takes is noted as a run that has not ended, until `record` replaces the
@@ -440,6 +714,7 @@ struct Holding {
     lock: Option<Lock>,
     last: u64,
     home: FileId,
+    command: Option<crate::executable::CommandHome>,
     executable: crate::executable::Watch,
 }
 
@@ -450,6 +725,7 @@ fn serve_until_done(
     before_exit: &mut impl FnMut(),
     holding: &mut Holding,
     phases: &mut Phases,
+    report: &mut Option<&mut IndexReport<'_>>,
 ) -> Result<()> {
     // ponytail: D11's 30-minute deadline in memory; every idle exit backs up too, so a lost
     // deadline only brings the next backup forward. It is checked between batches and while
@@ -465,7 +741,7 @@ fn serve_until_done(
             home,
             idle_ms,
             consumers,
-            holding,
+            (holding, report),
             &mut next_backup,
             before_exit,
             phases,
@@ -487,14 +763,15 @@ fn serve(
     home: &Path,
     idle_ms: u64,
     consumers: &mut [Box<dyn Consumer>],
-    holding: &mut Holding,
+    state: (&mut Holding, &mut Option<&mut IndexReport<'_>>),
     next_backup: &mut Instant,
     before_exit: &mut impl FnMut(),
     phases: &mut Phases,
 ) -> Result<bool> {
+    let (holding, report) = state;
     let reopened = holding.lock.is_some();
     if !reopened {
-        match lock(home)? {
+        match lock_for(home, holding.command.as_ref())? {
             Some(l) => take(home, l, holding),
             None => return Ok(false),
         }
@@ -516,8 +793,33 @@ fn serve(
     let asked = crate::backup::take_restore_request(home);
     let before = file_id(std::fs::metadata(home.join("raw.db")));
     // Task 8: a damaged raw.db is restored from the backups, a damaged knowledge.db rebuilt.
-    let mut raw = crate::backup::open_raw(home).inspect_err(|_| {
-        if asked {
+    let opened = (|| {
+        if report.is_some() {
+            check_reported_stores(home)?;
+        }
+        let opened = if let Some(report) = report.as_deref_mut() {
+            let changed = &mut report.receipt.stores_changed;
+            crate::backup::open_raw_report(
+                home,
+                &mut report.receipt.raw_recovery,
+                holding.command.as_ref(),
+                &mut |stage| {
+                    if stage == "stores_changed" {
+                        *changed = true;
+                    }
+                    (report.committed)(&MaintenanceCommit::Effect { stage });
+                },
+            )
+        } else {
+            crate::backup::open_raw(home)
+        };
+        if gone(home, holding) {
+            return Err(Gone.into());
+        }
+        opened
+    })();
+    let mut raw = opened.inspect_err(|_| {
+        if asked && !gone(home, holding) {
             crate::backup::request_restore(home);
         }
     })?;
@@ -544,16 +846,56 @@ fn serve(
         let now = file_id(std::fs::metadata(home.join("raw.db")));
         held.is_some() && now.is_some() && now != held
     };
-    let mut k = crate::backup::open_knowledge(home)?;
-    checkpoint::rewind(&raw, &k, consumers)?;
-    crate::backup::check(home, &raw);
+    let opened = if let Some(report) = report.as_deref_mut() {
+        crate::backup::open_knowledge_report(home, holding.command.as_ref(), &mut |stage| {
+            report.changed(stage)
+        })
+    } else {
+        crate::backup::open_knowledge(home)
+    };
+    #[cfg(test)]
+    if let Some(after) = AFTER_KNOWLEDGE_OPEN.take() {
+        after(home);
+    }
+    let mut k = opened?;
+    if let Some(report) = report.as_deref_mut() {
+        checkpoint::rewind_report(&raw, &k, consumers, &mut |consumer, ops, checkpoint| {
+            report.receipt.consumer_commits += 1;
+            (report.committed)(&MaintenanceCommit::Index {
+                consumer,
+                unit: if ops {
+                    CheckpointUnit::Ops
+                } else {
+                    CheckpointUnit::Records
+                },
+                checkpoint,
+            });
+        })?;
+    } else {
+        checkpoint::rewind(&raw, &k, consumers)?;
+    }
+    report_backup(home, &raw, report, true);
     // Milestone 5 D1 rule 7: the forget request logs after the segments are checked, before any
     // consumer runs and before the export.
-    crate::forget::reconcile_or_say(home, &mut raw)?;
+    if let Some(report) = report.as_deref_mut() {
+        let reconciled = crate::forget::reconcile_report(home, &mut raw, &mut |stage, applied| {
+            report.receipt.forget_requests_applied += applied as u64;
+            report.changed(stage);
+        })?;
+        report.receipt.forget_log_warnings += reconciled.problems.len() as u64;
+        for problem in reconciled.problems {
+            eprintln!("oboete: forget request log: {problem}");
+        }
+    } else {
+        crate::forget::reconcile_or_say(home, &mut raw)?;
+    }
     // The resident viewer is started where the backup deadline is looked at (R4). True means
     // the scheduled export first needs the stores reopened.
     let (resident, yields) = (phases.resident, phases.yields);
-    let mut due = |raw: &Raw, holding: &Holding, viewer: Option<&mut crate::view::Starter>| {
+    let mut due = |raw: &Raw,
+                   holding: &Holding,
+                   viewer: Option<&mut crate::view::Starter>,
+                   report: &mut Option<&mut IndexReport<'_>>| {
         if gone(home, holding) {
             return false;
         }
@@ -561,7 +903,7 @@ fn serve(
             if replaced() {
                 return true;
             }
-            crate::backup::run(home, raw);
+            report_backup(home, raw, report, false);
             *next_backup = Instant::now() + crate::backup::EVERY;
         }
         if let Some(viewer) = viewer {
@@ -632,16 +974,16 @@ fn serve(
         // What the pass below reads up to, new records or new ops of this device (an owner's
         // correction appends only an op): one that lands after it, even before the wait, wakes it.
         let seen = (raw.max_seq()?, raw.max_op_seq_of(raw.device())?);
-        while pass(&raw, &mut k, consumers)? {
+        while pass_report(&raw, &mut k, consumers, report)? {
             // Between two batches too: a consumer opens the home's files by path (the rescan).
             if gone(home, holding) {
                 return Err(Gone.into());
             }
-            if due(&raw, holding, phases.viewer.as_deref_mut()) {
+            if due(&raw, holding, phases.viewer.as_deref_mut(), report) {
                 return Ok(true);
             }
         }
-        if due(&raw, holding, phases.viewer.as_deref_mut()) {
+        if due(&raw, holding, phases.viewer.as_deref_mut(), report) {
             return Ok(true);
         }
         // D3 and milestone 4's D8 and D9: once the consumers have drained, the embedding phase, the
@@ -745,7 +1087,7 @@ fn serve(
                     more = true;
                     break;
                 }
-                if due(&raw, holding, phases.viewer.as_deref_mut()) {
+                if due(&raw, holding, phases.viewer.as_deref_mut(), report) {
                     return Ok(true);
                 }
             }
@@ -761,7 +1103,7 @@ fn serve(
             }
             // Its idle step: what an exit does, once for the rounds since the last one.
             if std::mem::take(&mut ran) {
-                crate::backup::run(home, &raw);
+                report_backup(home, &raw, report, false);
                 crate::hookstate::prune(home, crate::hookstate::KEEP);
             }
             // Only a config.toml that loads and does not say `resident = true` ends it: one the
@@ -788,7 +1130,7 @@ fn serve(
             return Ok(true);
         }
         // Under the lock: a worker started after the release cannot export the same seqs.
-        crate::backup::run(home, &raw);
+        report_backup(home, &raw, report, false);
         crate::hookstate::prune(home, crate::hookstate::KEEP);
         holding.lock = None;
         before_exit();
@@ -801,7 +1143,7 @@ fn serve(
         if !wanted && !behind(&raw, &k, consumers)? {
             return Ok(false);
         }
-        match lock(home)? {
+        match lock_for(home, holding.command.as_ref())? {
             Some(l) => take(home, l, holding),
             // Another worker took the lock after the release: the records are its now.
             None => return Ok(false),
@@ -1088,85 +1430,267 @@ pub(crate) fn contending() -> impl Drop {
 /// consumer runs from zero over raw.db and the op log, with no curation phase, so no provider is
 /// called. The old file is removed once the new one is complete; a rebuild that fails keeps it,
 /// named in the error.
-pub fn rebuild(home: &Path) -> Result<()> {
-    use anyhow::Context;
-    let held = lock_asking(home)?;
-    // R13: only this operation owns rebuilding status, including failure and old-file cleanup.
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let _rebuilding = options.open(home.join("state/rebuild.lock"))?;
-    // Stats probes acquire and immediately drop this lock. Under the worker lock no other
-    // rebuild can run; allow a transient probe to finish, without waiting forever on a holder.
-    let start = Instant::now();
-    loop {
-        match _rebuilding.try_lock() {
-            Ok(()) => break,
-            Err(std::fs::TryLockError::WouldBlock)
-                if start.elapsed() < Duration::from_millis(200) =>
-            {
-                #[cfg(test)]
-                if let Some(release) = REBUILD_STATUS_BLOCKED.with(|hook| hook.borrow_mut().take())
-                {
-                    release();
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(std::fs::TryLockError::WouldBlock) => {
-                anyhow::bail!("the rebuild status lock is in use")
-            }
-            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-        }
+pub(crate) fn preview_rebuild(home: &Path) -> Result<crate::backup::MaintenancePreview> {
+    crate::backup::preview_maintenance(home, crate::backup::MaintenanceOperation::Rebuild)
+}
+fn check_preview(
+    home: &Path,
+    operation: crate::backup::MaintenanceOperation,
+    expected: Option<&str>,
+) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let shown = match operation {
+        crate::backup::MaintenanceOperation::Rebuild => preview_rebuild(home),
+        crate::backup::MaintenanceOperation::Restore => crate::backup::preview_restore(home),
     }
-    let name = format!("knowledge.db.rebuilding-{}", crate::db::now_ms());
-    set_aside(home, &name)?;
-    let kept = home.join(&name);
-    // Spec 1.7: a rebuild makes no AI call, so its vectors come from the file set aside. One whose
-    // vectors cannot be read stops it before anything else changes: the file goes back.
+    .map_err(|cause| cause.context(crate::backup::MaintenanceCode::Stale))?;
+    anyhow::ensure!(shown.key == expected, crate::backup::MaintenanceCode::Stale);
+    Ok(())
+}
+
+pub fn rebuild(home: &Path) -> Result<()> {
+    rebuild_report(
+        home,
+        None,
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    )
+    .map(|_| ())
+    .map_err(MaintenanceFailure::into_cause)
+}
+
+fn carry_rebuild_vectors(
+    home: &Path,
+    name: &str,
+    proof: &crate::executable::CommandHome,
+    outcome: &mut MaintenanceOutcome,
+    committed: &mut impl FnMut(&MaintenanceCommit),
+) -> Result<()> {
+    let kept = home.join(name);
     if kept.exists() {
         let carried =
             crate::knowledge::open(home).and_then(|k| crate::embed_phase::carry(&k, &kept));
-        if let Err(e) = carried {
-            put_back(home, &name)?;
-            return Err(e.context(
-                "rebuild: the vectors of knowledge.db could not be read; nothing was changed",
-            ));
+        #[cfg(test)]
+        if let Some(after) = AFTER_CARRY.with(|hook| hook.borrow_mut().take()) {
+            after();
         }
-    }
-    run_holding(
-        home,
-        0,
-        consumers(home),
-        || {},
-        Some(held),
-        Phases::default(),
-    )
-    .with_context(|| {
-        // A home with no knowledge.db yet set nothing aside.
-        if kept.exists() {
-            format!(
-                "rebuild; the old knowledge.db is kept as {}",
-                kept.display()
-            )
-        } else {
-            "rebuild".to_owned()
-        }
-    })?;
-    // The rebuild is complete: an old file that will not go is left and named, not a failure.
-    // Its sidecars too, which reading its vectors may have made.
-    for ext in ["", "-wal", "-shm"] {
-        let f = home.join(format!("{name}{ext}"));
-        if f.exists()
-            && let Err(e) = std::fs::remove_file(&f)
-        {
-            eprintln!(
-                "oboete: rebuilt; {} is left ({e}): delete it by hand",
-                f.display()
-            );
+        match carried {
+            Ok(count) => {
+                outcome.cached_vectors_carried = count as u64;
+                crate::backup::effect("vectors_carried", &mut |stage| {
+                    committed(&MaintenanceCommit::Effect { stage })
+                })?;
+            }
+            Err(error) => {
+                match put_back(home, name, proof) {
+                    Ok(()) => {
+                        outcome.effects.knowledge_put_back = true;
+                        outcome.old_knowledge_kept = false;
+                        crate::backup::effect("knowledge_put_back", &mut |stage| {
+                            committed(&MaintenanceCommit::Effect { stage })
+                        })?;
+                    }
+                    Err(back) => {
+                        return Err(error)
+                            .with_context(|| format!("rebuild put-back also failed: {back:#}"));
+                    }
+                }
+                return Err(error).context(
+                    "rebuild: the vectors of knowledge.db could not be read; nothing was changed",
+                );
+            }
         }
     }
     Ok(())
+}
+
+pub(crate) fn rebuild_report(
+    home: &Path,
+    expected: Option<&str>,
+    caller: crate::executable::CommandCaller,
+    committed: &mut impl FnMut(&MaintenanceCommit),
+) -> std::result::Result<MaintenanceOutcome, MaintenanceFailure> {
+    use crate::backup::{MaintenanceCode as Code, MaintenanceOperation as Operation};
+    let mut outcome = MaintenanceOutcome::new(Operation::Rebuild);
+    let mut code = Code::Stale;
+    let result = (|| {
+        code = Code::Busy;
+        let command = crate::executable::CommandHome::new(home, caller)?;
+        code = Code::Stale;
+        check_preview(home, Operation::Rebuild, expected)?;
+        code = Code::Busy;
+        let held = lock_asking_for(home, Some(&command))?;
+        let proof = held.2.clone().expect("reported command retains its home");
+        proof.check(home)?;
+        let _config = crate::settings::config_lock(home)?;
+        code = Code::Stale;
+        let consent = crate::backup::consent(home, Operation::Rebuild, expected)?;
+        code = Code::Busy;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let _rebuilding = options.open(home.join("state/rebuild.lock"))?;
+        let start = Instant::now();
+        loop {
+            match _rebuilding.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock)
+                    if start.elapsed() < Duration::from_millis(200) =>
+                {
+                    #[cfg(test)]
+                    if let Some(release) =
+                        REBUILD_STATUS_BLOCKED.with(|hook| hook.borrow_mut().take())
+                    {
+                        release();
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    anyhow::bail!("the rebuild status lock is in use")
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+        code = Code::Failed;
+        let name = crate::backup::fresh_name(home, "knowledge.db.rebuilding-")?;
+        let kept = home.join(&name);
+        let rebuilding = (|| {
+            set_aside_report(
+                home,
+                &name,
+                consent.as_ref(),
+                Some(&proof),
+                &mut outcome.effects,
+                &mut |stage| committed(&MaintenanceCommit::Effect { stage }),
+            )?;
+            proof.check(home)?;
+            outcome.old_knowledge_kept = kept.exists();
+            carry_rebuild_vectors(home, &name, &proof, &mut outcome, committed)?;
+            let (index, result) = run_once_holding_report(home, held, committed);
+            outcome.index = index;
+            result.with_context(|| {
+                if kept.exists() {
+                    format!(
+                        "rebuild; the old knowledge.db is kept as {}",
+                        kept.display()
+                    )
+                } else {
+                    "rebuild".into()
+                }
+            })?;
+            for ext in ["", "-wal", "-shm"] {
+                proof.check(home)?;
+                let file = home.join(format!("{name}{ext}"));
+                if file.exists()
+                    && let Err(error) = crate::backup::fail_after("old_cleanup")
+                        .and_then(|()| std::fs::remove_file(&file).map_err(anyhow::Error::from))
+                {
+                    outcome.cleanup_warnings += 1;
+                    eprintln!(
+                        "oboete: rebuilt; {} is left ({error}): delete it by hand",
+                        file.display()
+                    );
+                }
+            }
+            Ok(())
+        })();
+        outcome.old_knowledge_kept = if proof.check(home).is_ok() {
+            kept.exists()
+        } else {
+            outcome.effects.knowledge_files_moved != 0 && !outcome.effects.knowledge_put_back
+        };
+        rebuilding
+    })();
+    match result {
+        Ok(()) => Ok(outcome),
+        Err(cause) => Err(maintenance_failure(outcome, cause, code)),
+    }
+}
+
+/// The CLI's complete restore: one admission, mandatory drain even on restore failure.
+pub fn restore(home: &Path) -> Result<String> {
+    restore_report(
+        home,
+        None,
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    )
+    .map(|outcome| {
+        outcome
+            .restore
+            .expect("successful restore has a receipt")
+            .note
+    })
+    .map_err(MaintenanceFailure::into_cause)
+}
+pub(crate) fn restore_report(
+    home: &Path,
+    expected: Option<&str>,
+    caller: crate::executable::CommandCaller,
+    committed: &mut impl FnMut(&MaintenanceCommit),
+) -> std::result::Result<MaintenanceOutcome, MaintenanceFailure> {
+    use crate::backup::{MaintenanceCode as Code, MaintenanceOperation as Operation};
+    let mut outcome = MaintenanceOutcome::new(Operation::Restore);
+    let command = crate::executable::CommandHome::new(home, caller)
+        .map_err(|cause| maintenance_failure(outcome.clone(), cause.into(), Code::Busy))?;
+    if let Err(cause) = check_preview(home, Operation::Restore, expected) {
+        return Err(maintenance_failure(outcome, cause, Code::Stale));
+    }
+    let held = lock_asking_for(home, Some(&command))
+        .map_err(|cause| maintenance_failure(outcome.clone(), cause, Code::Busy))?;
+    let _config = crate::settings::config_lock(home)
+        .map_err(|cause| maintenance_failure(outcome.clone(), cause.into(), Code::Busy))?;
+    let restored =
+        crate::backup::restore_report_holding(home, expected, held.2.as_ref(), &mut |stage| {
+            committed(&MaintenanceCommit::Effect { stage })
+        });
+    let failure = match restored {
+        Ok(receipt) => {
+            outcome.restore = Some(receipt);
+            None
+        }
+        Err(failure) => {
+            outcome.restore = Some(*failure.receipt);
+            Some((failure.code, failure.cause))
+        }
+    };
+    // A stale confirmation never admits a drain's writes. Ordinary native restore errors keep
+    // the CLI guarantee: hooks that appended under the admission are indexed before release.
+    if let Some((Code::Stale, cause)) = failure {
+        return Err(maintenance_failure(outcome, cause, Code::Stale));
+    }
+    let staged = outcome
+        .restore
+        .as_ref()
+        .filter(|r| r.effects.staging_complete)
+        .map(|_| crate::db::store_file(&home.join("raw.db.restored")))
+        .filter(|identity| !identity.is_empty());
+    let (index, ran) = run_once_holding_report(home, held, committed);
+    if staged.is_some()
+        && staged.as_deref() == Some(crate::db::store_file(&home.join("raw.db")).as_str())
+        && index
+            .raw_recovery
+            .as_ref()
+            .is_some_and(|r| r.effects.stopped_restore_finished)
+        && let Some(restored) = outcome.restore.as_mut()
+    {
+        restored.effects.raw_swapped = true;
+        restored.effects.stopped_restore_finished = true;
+    }
+    outcome.index = index;
+    match (failure, ran) {
+        (None, Ok(())) => Ok(outcome),
+        (Some((code, cause)), ran) => Err(MaintenanceFailure {
+            outcome: Box::new(outcome),
+            code,
+            cause,
+            index_cause: ran.err(),
+        }),
+        (None, Err(cause)) => Err(maintenance_failure(outcome, cause, Code::Failed)),
+    }
 }
 
 /// knowledge.db moved aside as `name`, its sidecars with it under the names SQLite looks for
@@ -1175,9 +1699,47 @@ pub fn rebuild(home: &Path) -> Result<()> {
 /// open (a shared hold) while it reads. The sidecars first: never the file's name free with an
 /// old WAL beside it that SQLite would replay into the new file. A move that fails puts back the
 /// ones before it, so the file never stays without its WAL.
+#[cfg(test)]
 fn set_aside(home: &Path, name: &str) -> Result<Vec<std::path::PathBuf>> {
+    set_aside_report(
+        home,
+        name,
+        None,
+        None,
+        &mut crate::backup::Effects::default(),
+        &mut |_| {},
+    )
+}
+fn set_aside_report(
+    home: &Path,
+    name: &str,
+    consent: Option<&crate::backup::Consent>,
+    guard: Option<&crate::executable::CommandHome>,
+    effects: &mut crate::backup::Effects,
+    committed: &mut impl FnMut(&'static str),
+) -> Result<Vec<std::path::PathBuf>> {
     use anyhow::Context;
+    crate::backup::before_swap();
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
+    if let Some(consent) = consent {
+        consent.check_logs()?;
+    }
     let _swap = crate::raw::lock_for_swap(home)?;
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
+    if let Some(consent) = consent {
+        consent.check_locked(home)?;
+    }
+    for ext in ["", "-wal", "-shm"] {
+        anyhow::ensure!(
+            std::fs::symlink_metadata(home.join(format!("{name}{ext}")))
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+            "rebuild recovery target exists or is unreadable"
+        );
+    }
     // Names joined to `home`, never through its display form: a home path need not be UTF-8.
     let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     for ext in ["-wal", "-shm", ""] {
@@ -1186,7 +1748,14 @@ fn set_aside(home: &Path, name: &str) -> Result<Vec<std::path::PathBuf>> {
             continue;
         }
         let to = home.join(format!("{name}{ext}"));
-        if let Err(e) = std::fs::rename(&from, &to) {
+        let result = std::fs::rename(&from, &to)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| {
+                moved.push((from.clone(), to.clone()));
+                effects.knowledge_files_moved += 1;
+                crate::backup::effect("knowledge_set_aside", committed)
+            });
+        if let Err(e) = result {
             // One that cannot go back is named, so the owner can put it back by hand.
             let mut why = format!("move {}", from.display());
             for (from, to) in moved.iter().rev() {
@@ -1194,25 +1763,33 @@ fn set_aside(home: &Path, name: &str) -> Result<Vec<std::path::PathBuf>> {
                     why += &format!("; {} stays as {} ({back})", from.display(), to.display());
                 }
             }
+            effects.knowledge_put_back =
+                moved.iter().all(|(from, to)| from.exists() && !to.exists());
+            if effects.knowledge_put_back && !moved.is_empty() {
+                committed("knowledge_put_back");
+            }
             return Err(e).context(why);
         }
-        moved.push((from, to));
     }
     Ok(moved.into_iter().map(|(_, to)| to).collect())
 }
 
 /// `set_aside` undone: the new knowledge.db removed, and the one set aside as `name` back, the
 /// file before its sidecars, under raw.lock as it was moved.
-fn put_back(home: &Path, name: &str) -> Result<()> {
+fn put_back(home: &Path, name: &str, guard: &crate::executable::CommandHome) -> Result<()> {
     use anyhow::Context;
+    guard.check(home)?;
     let _swap = crate::raw::lock_for_swap(home)?;
+    guard.check(home)?;
     for ext in ["", "-wal", "-shm"] {
+        guard.check(home)?;
         let new = home.join(format!("knowledge.db{ext}"));
         if new.exists() {
             std::fs::remove_file(&new).with_context(|| format!("remove {}", new.display()))?;
         }
     }
     for ext in ["", "-wal", "-shm"] {
+        guard.check(home)?;
         let kept = home.join(format!("{name}{ext}"));
         if kept.exists() {
             std::fs::rename(&kept, home.join(format!("knowledge.db{ext}")))
@@ -1238,6 +1815,32 @@ pub fn run_once_holding(home: &Path, held: Lock) -> Result<()> {
         Phases::default(),
     )
 }
+fn run_once_holding_report(
+    home: &Path,
+    held: Lock,
+    committed: &mut impl FnMut(&MaintenanceCommit),
+) -> (IndexReceipt, Result<()>) {
+    let mut receipt = IndexReceipt::default();
+    let mut report = IndexReport {
+        receipt: &mut receipt,
+        committed,
+    };
+    let result = run_holding_report(
+        home,
+        0,
+        consumers(home),
+        || {},
+        Some(held),
+        Phases::default(),
+        &mut Some(&mut report),
+    );
+    receipt.state = if result.is_ok() {
+        IndexState::Complete
+    } else {
+        IndexState::Failed
+    };
+    (receipt, result)
+}
 
 pub fn run_once(home: &Path) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -1262,6 +1865,1003 @@ mod tests {
     use super::*;
     use crate::knowledge;
     use crate::raw;
+
+    #[test]
+    fn w5b_a_failed_store_inspection_keeps_the_restore_request() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        drop(raw::open(p).unwrap());
+        std::fs::create_dir(p.join("knowledge.db")).unwrap();
+        crate::backup::request_restore(p);
+        let failure = restore_report(
+            p,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(failure.outcome.index.state, IndexState::Failed);
+        assert!(failure.index_cause.is_some());
+        assert!(
+            crate::backup::restore_requested(p),
+            "inspection lost the pending restore request"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn w5b_a_rejected_home_does_not_receive_a_restore_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("memory");
+        let replacement = home.with_extension("replacement");
+        std::fs::create_dir(&home).unwrap();
+        let mut raw = raw::open(&home).unwrap();
+        raw.append(&raw::test_event("synthetic restore retry"))
+            .unwrap();
+        let wal = std::fs::read(home.join("raw.db-wal")).unwrap();
+        drop(raw);
+        std::fs::write(home.join("raw.db-wal"), wal).unwrap();
+        crate::backup::request_restore(&home);
+        std::fs::create_dir_all(replacement.join("state")).unwrap();
+        std::fs::write(replacement.join("state/worker.lock"), "other home").unwrap();
+        std::fs::write(replacement.join("canary"), "synthetic unrelated home").unwrap();
+        BEFORE_STORE_OPEN.set(Some(|path| {
+            let home = path.parent().unwrap().to_owned();
+            let held = raw::lock_for_swap(&home).unwrap();
+            raw::SWAP_BLOCKED.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    std::fs::rename(&home, home.with_extension("retired")).unwrap();
+                    std::fs::rename(home.with_extension("replacement"), &home).unwrap();
+                    drop(held);
+                }));
+            });
+        }));
+        let result = restore_report(
+            &home,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        );
+        BEFORE_STORE_OPEN.set(None);
+        raw::SWAP_BLOCKED.with_borrow_mut(|hook| *hook = None);
+        let failure = result.unwrap_err();
+        assert_eq!(failure.outcome.index.state, IndexState::Failed);
+        assert!(
+            !crate::backup::restore_requested(&home),
+            "the rejected home got a retry marker"
+        );
+        assert!(!home.join("raw.lock").exists());
+        assert!(!home.join("raw.db").exists());
+        assert_eq!(
+            std::fs::read(home.join("canary")).unwrap(),
+            b"synthetic unrelated home"
+        );
+    }
+
+    #[test]
+    fn w5b_consumer_progress_counts_durable_changes_and_not_empty_transactions() {
+        struct ReceiptConsumer(&'static str);
+        impl Consumer for ReceiptConsumer {
+            fn name(&self) -> &'static str {
+                "receipt-fixture"
+            }
+            fn top(&self, _: &Raw, _: &str) -> Result<i64> {
+                Ok(i64::from(self.0 == "checkpoint"))
+            }
+            fn step(&mut self, _: &Raw, k: &Connection, _: &str, after: i64) -> Result<i64> {
+                match self.0 {
+                    "checkpoint" => return Ok(1),
+                    "row" => {
+                        k.execute("INSERT INTO receipt_rows VALUES(73)", [])?;
+                    }
+                    "schema" => {
+                        k.execute("CREATE TABLE receipt_schema(value)", [])?;
+                    }
+                    _ => {}
+                }
+                Ok(after)
+            }
+            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+                Ok(())
+            }
+        }
+        for (mode, expected) in [("noop", 0), ("checkpoint", 1), ("row", 1), ("schema", 1)] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            raw::open(p)
+                .unwrap()
+                .append(&raw::test_event("synthetic receipt checkpoint"))
+                .unwrap();
+            knowledge::open(p)
+                .unwrap()
+                .execute("CREATE TABLE receipt_rows(value)", [])
+                .unwrap();
+            let mut receipt = IndexReceipt::default();
+            let mut commits = Vec::new();
+            {
+                let mut callback = |event: &MaintenanceCommit| commits.push(event.clone());
+                let mut report = IndexReport {
+                    receipt: &mut receipt,
+                    committed: &mut callback,
+                };
+                run_holding_report(
+                    p,
+                    0,
+                    vec![Box::new(ReceiptConsumer(mode))],
+                    || {},
+                    None,
+                    Phases::default(),
+                    &mut Some(&mut report),
+                )
+                .unwrap();
+            }
+            assert_eq!(receipt.consumer_commits, expected, "{mode}");
+            assert_eq!(
+                commits
+                    .iter()
+                    .filter(|event| matches!(event, MaintenanceCommit::Index { .. }))
+                    .count(),
+                expected as usize,
+                "{mode}"
+            );
+            let k = knowledge::open(p).unwrap();
+            if mode == "checkpoint" {
+                let raw = raw::open(p).unwrap();
+                assert_eq!(
+                    checkpoint::get_in(&k, checkpoint::SEQS, "receipt-fixture", raw.device())
+                        .unwrap(),
+                    1
+                );
+            } else if mode == "row" {
+                assert_eq!(
+                    k.query_row("SELECT value FROM receipt_rows", [], |r| r.get::<_, i64>(0))
+                        .unwrap(),
+                    73
+                );
+            } else if mode == "schema" {
+                assert_eq!(
+                    k.query_row(
+                        "SELECT count(*) FROM sqlite_master WHERE name='receipt_schema'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn w5b_rescan_raw_commits_survive_later_raw_or_checkpoint_failure() {
+        for fault in ["checkpoint", "next_raw"] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            let mut raw = raw::open(p).unwrap();
+            for canary in ["111111", "222222"] {
+                raw.append(&raw::test_event(&format!(
+                    r#"{{"prompt":"synthetic causal-canary-{canary}"}}"#
+                )))
+                .unwrap();
+            }
+            drop(raw);
+            run_once(p).unwrap();
+            std::fs::remove_dir_all(p.join("backups")).unwrap();
+            raw::open(p)
+                .unwrap()
+                .append(&raw::test_event("synthetic pending rescan"))
+                .unwrap();
+            if fault == "checkpoint" {
+                knowledge::open(p)
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER stop_rescan_checkpoint BEFORE UPDATE ON checkpoints
+                     WHEN OLD.consumer='rescan'
+                     BEGIN SELECT RAISE(ABORT, 'synthetic failed rescan checkpoint'); END;",
+                    )
+                    .unwrap();
+            } else {
+                Connection::open(p.join("raw.db"))
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER stop_next_rescan BEFORE INSERT ON records
+                     WHEN NEW.type='tombstone' AND NEW.target_seq=2
+                     BEGIN SELECT RAISE(ABORT, 'synthetic failed next raw rescan'); END;",
+                    )
+                    .unwrap();
+            }
+            std::fs::write(p.join("config.toml"),
+                "[redaction]\nextra_rules = [{ id = 'causal', regex = 'causal-canary-[0-9]{6}' }]\n"
+            ).unwrap();
+            let mut commits = Vec::new();
+            let failure = restore_report(
+                p,
+                None,
+                crate::executable::CommandCaller::Worker,
+                &mut |event| commits.push(event.clone()),
+            )
+            .unwrap_err();
+            assert!(
+                failure
+                    .cause
+                    .to_string()
+                    .contains("no usable backup segment")
+            );
+            assert!(
+                failure
+                    .index_cause
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("synthetic failed")
+            );
+            let raw = raw::open(p).unwrap();
+            let expected = if fault == "checkpoint" { 2 } else { 1 };
+            assert_eq!(raw.tombstones().unwrap(), expected);
+            let crate::raw::Item::Event(first) = &raw.after(raw.device(), 0, 1).unwrap()[0].item
+            else {
+                panic!("synthetic first record disappeared");
+            };
+            assert!(!first.body.contains("causal-canary-111111"));
+            assert_eq!(failure.outcome.index.consumer_commits, 0);
+            assert!(
+                !failure
+                    .outcome
+                    .restore
+                    .as_ref()
+                    .unwrap()
+                    .effects
+                    .committed()
+            );
+            assert!(
+                failure.outcome.index.stores_changed,
+                "independently committed rescan was lost from the receipt: {fault}"
+            );
+            assert!(failure.outcome.committed());
+            assert_eq!(
+                commits
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        MaintenanceCommit::Effect {
+                            stage: "stores_changed"
+                        }
+                    ))
+                    .count(),
+                expected as usize
+            );
+        }
+    }
+
+    #[test]
+    fn w5b_compressed_batches_survive_later_errors_without_counting_empty_batches() {
+        for fault in ["checkpoint", "later_batch", "noop_checkpoint"] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            let body = if fault == "noop_checkpoint" {
+                "hi".to_owned()
+            } else {
+                "synthetic compression payload ".repeat(300)
+            };
+            let count = if fault == "later_batch" { 201 } else { 1 };
+            let mut raw = raw::open(p).unwrap();
+            for _ in 0..count {
+                raw.append(&raw::test_event(&body)).unwrap();
+            }
+            let device = raw.device().to_owned();
+            drop(raw);
+            let mut initial = consumers(p);
+            assert_eq!(initial.pop().unwrap().name(), "compress");
+            run_holding(p, 0, initial, || {}, None, Phases::default()).unwrap();
+            std::fs::remove_dir_all(p.join("backups")).unwrap();
+            if fault == "later_batch" {
+                Connection::open(p.join("raw.db"))
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER stop_later_compression BEFORE UPDATE OF enc ON records
+                     WHEN OLD.seq=201
+                     BEGIN SELECT RAISE(ABORT, 'synthetic failed later compression'); END;",
+                    )
+                    .unwrap();
+            } else {
+                knowledge::open(p)
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER stop_compress_checkpoint BEFORE INSERT ON checkpoints
+                     WHEN NEW.consumer='compress'
+                     BEGIN SELECT RAISE(ABORT, 'synthetic failed compression checkpoint'); END;",
+                    )
+                    .unwrap();
+            }
+            let mut commits = Vec::new();
+            let failure = restore_report(
+                p,
+                None,
+                crate::executable::CommandCaller::Worker,
+                &mut |event| commits.push(event.clone()),
+            )
+            .unwrap_err();
+            assert!(
+                failure
+                    .cause
+                    .to_string()
+                    .contains("no usable backup segment")
+            );
+            assert!(
+                failure
+                    .index_cause
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("synthetic failed")
+            );
+            let c = Connection::open(p.join("raw.db")).unwrap();
+            let encoding = |seq| {
+                c.query_row(
+                    "SELECT enc FROM records WHERE device=?1 AND seq=?2",
+                    (&device, seq),
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+            };
+            let changed = fault != "noop_checkpoint";
+            assert_eq!(encoding(1), if changed { "zstd" } else { "plain" });
+            if fault == "later_batch" {
+                assert_eq!(encoding(201), "plain");
+            }
+            drop(c);
+            let raw = raw::open(p).unwrap();
+            let records = raw.after(&device, 0, 1).unwrap();
+            let crate::raw::Item::Event(first) = &records[0].item else {
+                panic!("synthetic compressed record disappeared");
+            };
+            assert_eq!(first.body, body);
+            assert_eq!(raw.max_seq().unwrap(), count);
+            assert_eq!(failure.outcome.index.consumer_commits, 0);
+            assert!(
+                !failure
+                    .outcome
+                    .restore
+                    .as_ref()
+                    .unwrap()
+                    .effects
+                    .committed()
+            );
+            assert_eq!(
+                failure.outcome.index.stores_changed, changed,
+                "independently committed compression was lost or an empty batch counted: {fault}"
+            );
+            assert_eq!(failure.outcome.committed(), changed);
+            assert_eq!(
+                commits
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        MaintenanceCommit::Effect {
+                            stage: "stores_changed"
+                        }
+                    ))
+                    .count(),
+                usize::from(changed)
+            );
+        }
+    }
+
+    #[test]
+    fn w5b_owned_initialization_progress_survives_a_later_open_failure() {
+        for setup in ["new_raw", "raw_schema", "raw_identity", "knowledge_schema"] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            if setup != "new_raw" {
+                drop(raw::open(p).unwrap());
+                drop(knowledge::open(p).unwrap());
+                let (file, sql) = match setup {
+                    "raw_schema" => ("raw.db", "DROP TABLE ledger"),
+                    "raw_identity" => ("raw.db", "DELETE FROM meta WHERE key='store_file'"),
+                    _ => ("knowledge.db", "DROP TABLE rewinds"),
+                };
+                Connection::open(p.join(file))
+                    .unwrap()
+                    .execute_batch(sql)
+                    .unwrap();
+            }
+            crate::backup::FAIL_AFTER.set(Some("stores_changed"));
+            let failure = restore_report(
+                p,
+                None,
+                crate::executable::CommandCaller::Worker,
+                &mut |_| {},
+            )
+            .unwrap_err();
+            crate::backup::FAIL_AFTER.set(None);
+            assert!(
+                failure.cause.to_string().contains(if setup == "new_raw" {
+                    "no backup segments"
+                } else {
+                    "no usable backup segment"
+                }),
+                "{setup}"
+            );
+            assert!(
+                failure
+                    .index_cause
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("stores_changed"),
+                "{setup}"
+            );
+            assert_eq!(failure.outcome.index.consumer_commits, 0, "{setup}");
+            assert!(failure.outcome.index.stores_changed, "{setup}");
+            assert!(failure.outcome.committed(), "{setup}");
+        }
+    }
+
+    #[test]
+    fn w5b_a_rewind_commit_is_reported_before_a_later_rewind_fails() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("synthetic rewind receipt"))
+            .unwrap();
+        let device = raw.device().to_owned();
+        drop(raw);
+        run_once(p).unwrap();
+        std::fs::remove_dir_all(p.join("backups")).unwrap();
+        let k = knowledge::open(p).unwrap();
+        for consumer in ["rescan", "fts"] {
+            checkpoint::set_in(&k, checkpoint::SEQS, consumer, &device, 2).unwrap();
+        }
+        k.execute_batch(
+            "CREATE TRIGGER stop_fts_rewind BEFORE UPDATE ON checkpoints
+                         WHEN OLD.consumer='fts'
+                         BEGIN SELECT RAISE(ABORT, 'synthetic failed rewind'); END;",
+        )
+        .unwrap();
+        drop(k);
+        let mut commits = Vec::new();
+        let failure = restore_report(
+            p,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |event| commits.push(event.clone()),
+        )
+        .unwrap_err();
+        assert!(
+            failure
+                .index_cause
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("synthetic failed rewind")
+        );
+        assert_eq!(failure.outcome.index.consumer_commits, 1);
+        assert!(!failure.outcome.index.stores_changed);
+        assert!(failure.outcome.committed());
+        assert!(matches!(
+            commits.as_slice(),
+            [MaintenanceCommit::Index {
+                consumer: "rescan",
+                checkpoint: 1,
+                unit: CheckpointUnit::Records
+            }]
+        ));
+    }
+
+    #[test]
+    fn w5b_a_repaired_forget_log_is_progress_without_a_consumer_commit() {
+        let faults = [
+            None,
+            Some("forget_log_sync"),
+            #[cfg(unix)]
+            Some("forget_log_directory_sync"),
+        ];
+        for fault in faults {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            let (original, _) = crate::backup::tests::w5b_log_change(p);
+            run_once(p).unwrap();
+            for entry in std::fs::read_dir(p.join("backups")).unwrap() {
+                let path = entry.unwrap().path();
+                if path.file_name().unwrap() != "forget.log" {
+                    std::fs::remove_file(path).unwrap();
+                }
+            }
+            std::fs::remove_file(p.join("forget.log")).unwrap();
+            raw::open(p)
+                .unwrap()
+                .append(&raw::test_event("synthetic pending log repair"))
+                .unwrap();
+            knowledge::open(p)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER stop_log_repair_drain BEFORE UPDATE ON checkpoints
+                 BEGIN SELECT RAISE(ABORT, 'synthetic stopped log repair drain'); END;",
+                )
+                .unwrap();
+            let mut commits = Vec::new();
+            crate::backup::FAIL_AFTER.set(fault);
+            let result = restore_report(
+                p,
+                None,
+                crate::executable::CommandCaller::Worker,
+                &mut |event| commits.push(event.clone()),
+            );
+            crate::backup::FAIL_AFTER.set(None);
+            let failure = result.unwrap_err();
+            assert!(
+                failure
+                    .index_cause
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("synthetic stopped log repair drain")
+            );
+            assert_eq!(failure.outcome.index.consumer_commits, 0);
+            assert_eq!(failure.outcome.index.forget_requests_applied, 0);
+            assert!(failure.outcome.committed());
+            assert_eq!(std::fs::read(p.join("forget.log")).unwrap(), original);
+            let expected = if fault.is_some() {
+                "stores_changed"
+            } else {
+                "forget_reconciled"
+            };
+            assert_eq!(
+                failure.outcome.index.forget_log_warnings,
+                u64::from(fault.is_some())
+            );
+            assert!(
+                matches!(commits.as_slice(), [MaintenanceCommit::Effect { stage }] if *stage == expected),
+                "failed log sync was reported as fully reconciled: {fault:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn w5b_concurrent_records_are_not_reported_as_this_failed_restores_progress() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic already indexed record"))
+            .unwrap();
+        run_once(p).unwrap();
+        std::fs::remove_dir_all(p.join("backups")).unwrap();
+        knowledge::open(p)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER stop_receipt_checkpoint BEFORE UPDATE ON checkpoints
+                 BEGIN SELECT RAISE(ABORT, 'synthetic blocked checkpoint'); END;",
+            )
+            .unwrap();
+        AFTER_RAW_OPEN.set(Some(|home| {
+            raw::open(home)
+                .unwrap()
+                .append(&raw::test_event("synthetic concurrent first record"))
+                .unwrap();
+            AFTER_KNOWLEDGE_OPEN.set(Some(|home| {
+                raw::open(home)
+                    .unwrap()
+                    .append(&raw::test_event("synthetic concurrent second record"))
+                    .unwrap();
+            }));
+        }));
+        let mut commits = Vec::new();
+        let failure = restore_report(
+            p,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |event| commits.push(event.clone()),
+        )
+        .unwrap_err();
+        AFTER_RAW_OPEN.set(None);
+        AFTER_KNOWLEDGE_OPEN.set(None);
+        assert!(
+            failure
+                .cause
+                .to_string()
+                .contains("no usable backup segment")
+        );
+        assert!(
+            failure
+                .index_cause
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("synthetic blocked checkpoint")
+        );
+        assert_eq!(raw::open(p).unwrap().max_seq().unwrap(), 3);
+        assert_eq!(failure.outcome.index.consumer_commits, 0);
+        assert!(
+            !failure
+                .outcome
+                .restore
+                .as_ref()
+                .unwrap()
+                .effects
+                .committed()
+        );
+        assert!(
+            !failure.outcome.committed(),
+            "concurrent writes were attributed to the failed restore"
+        );
+        assert!(commits.is_empty(), "uncommitted restore emitted progress");
+    }
+
+    #[test]
+    fn w5b_a_disappearing_wal_does_not_abort_the_required_restore_drain() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("synthetic disappearing WAL"))
+            .unwrap();
+        let wal = std::fs::read(p.join("raw.db-wal")).unwrap();
+        assert!(wal.len() > 32);
+        drop(raw);
+        std::fs::write(p.join("raw.db-wal"), wal).unwrap();
+        BEFORE_STORE_OPEN.set(Some(|path| std::fs::remove_file(path).unwrap()));
+        let failure = restore_report(
+            p,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        BEFORE_STORE_OPEN.set(None);
+        assert_eq!(failure.outcome.index.state, IndexState::Complete);
+        assert!(failure.index_cause.is_none());
+        assert_eq!(
+            crate::search::raw(p, "disappearing WAL", None, 5)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn w5b_viewer_commands_require_a_readable_original_view_lock() {
+        for operation in ["rebuild", "restore"] {
+            for unusable in ["missing", "directory", "unreadable"] {
+                let home = tempfile::tempdir().unwrap();
+                let p = home.path();
+                drop(raw::open(p).unwrap());
+                run_once(p).unwrap();
+                let lock = p.join("state/view.lock");
+                let viewer = std::fs::File::create(&lock).unwrap();
+                let identity = file_id(viewer.metadata()).unwrap();
+                if unusable != "unreadable" {
+                    std::fs::remove_file(&lock).unwrap();
+                }
+                if unusable == "directory" {
+                    std::fs::create_dir(&lock).unwrap();
+                } else if unusable == "unreadable" {
+                    std::fs::write(&lock, "").unwrap();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o0))
+                            .unwrap();
+                    }
+                }
+                let generation = std::fs::read(p.join("state/worker-gen")).unwrap();
+                let result = if operation == "rebuild" {
+                    rebuild_report(
+                        p,
+                        None,
+                        crate::executable::CommandCaller::Viewer(identity),
+                        &mut |_| {},
+                    )
+                } else {
+                    restore_report(
+                        p,
+                        None,
+                        crate::executable::CommandCaller::Viewer(identity),
+                        &mut |_| {},
+                    )
+                };
+                let failure = result.expect_err("viewer without its home proof was admitted");
+                assert!(!failure.outcome.committed(), "{operation}: {unusable}");
+                assert_eq!(
+                    std::fs::read(p.join("state/worker-gen")).unwrap(),
+                    generation,
+                    "{operation}: {unusable} borrowed the worker lock"
+                );
+            }
+        }
+    }
+
+    // This R3/R9 proof needs Unix device/inode identity and renaming a home with open locks.
+    // Windows rejects that fixture's rename before the rollback guard is reached.
+    #[cfg(unix)]
+    #[test]
+    fn w5b_a_replaced_home_is_not_touched_by_a_failed_carry_put_back() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("memory");
+        let retired = root.path().join("retired");
+        std::fs::create_dir(&home).unwrap();
+        drop(raw::open(&home).unwrap());
+        std::fs::write(home.join("knowledge.db"), "synthetic unreadable old cache").unwrap();
+        let shown = preview_rebuild(&home).unwrap();
+        let replacement = home.clone();
+        let kept_home = retired.clone();
+        AFTER_CARRY.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                std::fs::rename(&replacement, &kept_home).unwrap();
+                std::fs::create_dir_all(replacement.join("state")).unwrap();
+                std::fs::write(replacement.join("state/worker.lock"), "different home").unwrap();
+                let knowledge = knowledge::open(&replacement).unwrap();
+                knowledge
+                    .execute_batch(
+                        "CREATE TABLE unrelated(value); INSERT INTO unrelated VALUES(73)",
+                    )
+                    .unwrap();
+            }))
+        });
+        let failed = rebuild_report(
+            &home,
+            Some(&shown.key),
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            home.join("knowledge.db").exists(),
+            "rollback deleted the replacement home's unrelated store"
+        );
+        assert!(!home.join("raw.lock").exists());
+        let replacement = Connection::open_with_flags(
+            home.join("knowledge.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            replacement
+                .query_row("SELECT value FROM unrelated", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            73
+        );
+        assert!(!failed.outcome.effects.knowledge_put_back);
+        assert!(failed.outcome.old_knowledge_kept);
+        assert!(std::fs::read_dir(&retired).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("knowledge.db.rebuilding-")
+        }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w5b_exec_viewer_probe() {
+        let Some(home) = std::env::var_os("OBOETE_TEST_MAINT_HOME") else {
+            return;
+        };
+        let home = std::path::PathBuf::from(home);
+        let original = crate::executable::expected(Some(crate::executable::Role::Viewer)).unwrap();
+        assert!(original.is_some());
+        assert!(crate::executable::expected(Some(crate::executable::Role::Worker)).is_err());
+        let shown = preview_rebuild(&home).unwrap();
+        let result = rebuild_report(
+            &home,
+            Some(&shown.key),
+            crate::executable::CommandCaller::Viewer(original.unwrap()),
+            &mut |_| {},
+        );
+        assert!(result.is_ok(), "borrowed viewer command: {result:?}");
+        assert_eq!(result.unwrap().index.state, IndexState::Complete);
+        assert_eq!(
+            crate::executable::expected(Some(crate::executable::Role::Viewer)).unwrap(),
+            original
+        );
+        let shown = preview_rebuild(&home).unwrap();
+        AFTER_OPEN.set(Some(|home| {
+            std::fs::remove_file(home.join("state/view.lock")).unwrap();
+            std::fs::write(home.join("state/view.lock"), "new viewer home authority").unwrap();
+        }));
+        let failed = rebuild_report(
+            &home,
+            Some(&shown.key),
+            crate::executable::CommandCaller::Viewer(original.unwrap()),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        AFTER_OPEN.set(None);
+        assert!(!failed.outcome.committed());
+        assert!(crate::executable::expected(Some(crate::executable::Role::Worker)).is_err());
+        assert_eq!(
+            crate::executable::expected(Some(crate::executable::Role::Viewer)).unwrap(),
+            original
+        );
+        assert!(!std::fs::read_dir(&home).unwrap().flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("knowledge.db.rebuilding-")
+        }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w5b_a_real_exec_viewer_can_borrow_worker_authority_and_keeps_both_home_checks() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic viewer maintenance"))
+            .unwrap();
+        run_once(p).unwrap();
+        let viewer = std::fs::File::create(p.join("state/view.lock")).unwrap();
+        let (device, inode) = file_id(viewer.metadata()).unwrap();
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "export OBOETE_EXEC_HOME=\"$$:view.lock:$1:$2\"; exec \"$3\" --exact worker::tests::w5b_exec_viewer_probe --nocapture", "private-viewer-fixture"])
+            .arg(device.to_string()).arg(inode.to_string()).arg(std::env::current_exe().unwrap())
+            .env("OBOETE_TEST_MAINT_HOME", p).stdin(std::process::Stdio::null());
+        for (key, _) in std::env::vars_os() {
+            if ["KEY", "TOKEN", "SECRET", "PASSWORD"]
+                .iter()
+                .any(|part| key.to_string_lossy().to_ascii_uppercase().contains(part))
+            {
+                command.env_remove(key);
+            }
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn w5b_a_failed_native_restore_still_drains_and_reports_store_commits() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic pending FTS record"))
+            .unwrap();
+        let mut commits = Vec::new();
+        let failure = restore_report(
+            p,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |event| commits.push(event.clone()),
+        )
+        .unwrap_err();
+        assert!(
+            failure
+                .cause
+                .to_string()
+                .contains("no usable backup segment")
+        );
+        assert_eq!(failure.outcome.index.state, IndexState::Complete);
+        assert!(failure.outcome.index.stores_changed);
+        assert!(failure.outcome.committed());
+        assert!(failure.outcome.index.consumer_commits > 0);
+        assert!(commits.iter().any(|event| matches!(
+            event,
+            MaintenanceCommit::Index {
+                consumer: "fts",
+                unit: CheckpointUnit::Records,
+                checkpoint: 1
+            }
+        )));
+        assert_eq!(
+            crate::search::raw(p, "pending FTS", None, 5).unwrap().len(),
+            1
+        );
+        assert!(!p.join("providers.db").exists());
+        assert!(!failure.outcome.hybrid_ready);
+    }
+
+    #[test]
+    fn w5b_restore_preserves_both_native_failures_and_committed_consumer_progress() {
+        let home = tempfile::tempdir().unwrap();
+        raw::open(home.path())
+            .unwrap()
+            .append(&raw::test_event("synthetic dual failure"))
+            .unwrap();
+        crate::backup::FAIL_AFTER.set(Some("index_commit"));
+        let failure = restore_report(
+            home.path(),
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        crate::backup::FAIL_AFTER.set(None);
+        assert!(
+            failure
+                .cause
+                .to_string()
+                .contains("no usable backup segment")
+        );
+        assert!(
+            failure
+                .index_cause
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("index_commit")
+        );
+        assert_eq!(failure.outcome.index.state, IndexState::Failed);
+        assert_eq!(failure.outcome.index.consumer_commits, 1);
+        assert!(failure.outcome.committed());
+    }
+
+    #[test]
+    fn w5b_a_zero_payload_rebuild_retains_carry_and_cleanup_failure_receipts() {
+        for stage in ["knowledge_set_aside", "vectors_carried", "old_cleanup"] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            drop(raw::open(p).unwrap());
+            drop(knowledge::open(p).unwrap());
+            let shown = preview_rebuild(p).unwrap();
+            crate::backup::FAIL_AFTER.set(Some(stage));
+            let result = rebuild_report(
+                p,
+                Some(&shown.key),
+                crate::executable::CommandCaller::Worker,
+                &mut |_| {},
+            );
+            crate::backup::FAIL_AFTER.set(None);
+            let outcome = if stage == "old_cleanup" {
+                result.unwrap()
+            } else {
+                *result.unwrap_err().outcome
+            };
+            assert!(outcome.committed(), "zero payload {stage}");
+            assert_eq!(outcome.cached_vectors_carried, 0);
+            assert!(!outcome.hybrid_ready);
+            match stage {
+                "knowledge_set_aside" => assert!(outcome.effects.knowledge_put_back),
+                "vectors_carried" => assert!(outcome.old_knowledge_kept),
+                "old_cleanup" => {
+                    assert_eq!(outcome.cleanup_warnings, 1);
+                    assert_eq!(outcome.index.state, IndexState::Complete);
+                    assert!(outcome.old_knowledge_kept);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn w5b_source_change_while_worker_admission_runs_refuses_before_rebuild() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic admission fixture"))
+            .unwrap();
+        drop(knowledge::open(p).unwrap());
+        let shown = preview_rebuild(p).unwrap();
+        AFTER_OPEN.set(Some(|home| {
+            std::fs::write(
+                home.join("config.toml"),
+                "[capture]\nstore_prompts = false\n",
+            )
+            .unwrap()
+        }));
+        let failed = rebuild_report(
+            p,
+            Some(&shown.key),
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        AFTER_OPEN.set(None);
+        assert_eq!(failed.code, crate::backup::MaintenanceCode::Stale);
+        assert!(!failed.outcome.committed());
+        assert!(p.join("knowledge.db").exists());
+        assert!(!std::fs::read_dir(p).unwrap().flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("knowledge.db.rebuilding-")
+        }));
+    }
 
     /// A consumer that writes each seq it sees into knowledge.db, so these tests need no index
     /// (Task 6).
@@ -2065,7 +3665,7 @@ mod tests {
                 p,
                 0,
                 &mut consumers,
-                &mut holding,
+                (&mut holding, &mut None),
                 &mut deadline,
                 &mut || {},
                 &mut Phases::default(),

@@ -39,7 +39,64 @@ follows saved configuration, including an explicitly confirmed copied config.
 Import does not submit unrelated settings or preference drafts; copied settings
 are inspected through an explicit settings reload.
 
-Claude-mem everyday import waits for repository mapping. Rebuild/restore and
-recuration/finalization retain their later W5 slices. The updater remains unavailable
-until its native backend exists. Owner data/runtime, held evaluations and cutover
-are not changed by implementation or synthetic acceptance tests.
+## Rebuild and restore
+
+Rebuild and restore use the same complete operations as the CLI. Their preview
+reads existing private database/WAL copies and backup metadata without creating
+stores, locks or identities. It shows current record/change counts, selected
+backup work and invalid segments, kept files and deletion requests. Missing or
+unreadable counts remain unknown. Candidate rows are not promised restored rows.
+A damaged Raw store requires a separately previewed restore; a completed stopped
+restore is reported as recovery required and is not finished by a preview.
+
+Consent binds the current home identity, saved configuration, live store/WAL and
+backup files, logs and preserved/staged state. Native worker admission comes
+before data work. The operation rechecks consent after admission and under the
+exclusive Raw fence before moving files. The saved configuration writer lock is
+kept through the complete operation. Rebuild and restore run the normal consumers
+with no embedding or curation phase; copied vector cache is not a completed
+semantic-search generation. Later background work follows saved settings.
+
+Confirmed restore uses the parsed deletion-log snapshot whose contents produced
+the confirmation key. Log contents are rechecked before taking the Raw fence;
+their file identities, sizes and modification times are checked again under it.
+No deletion-log content is read while the exclusive fence is held.
+
+Restore drains the same native consumers even when restoration fails, preserving
+the CLI guarantee. A stale unadmitted confirmation performs no data work. Receipts
+keep each phase's facts: rebuild file effects, explicit restore effects and any
+later automatic recovery. Prepared replay counts become live only when that
+restore's swap is known complete. A drain that finishes the same interrupted
+staged file records that completion; it does not infer it from candidate counts.
+Rollback checks the admitted home before deleting or renaming files, and keeps
+known old-file facts if the home was replaced. The last complete stopped Raw and
+its live deletion requests remain authority during recovery.
+
+Resident maintenance retains the identity of the viewer's held lock from startup,
+including before its first binary restart. A changed or non-regular lock is
+refused without replacing it or waiting on a FIFO. Inspection/open failures keep
+a pending restore request only while the original home proof remains valid.
+The [resident R3 path-check limits](resident.md#limits-to-state-in-the-docs-the-owners-words-are-in-the-review-result-verdictlimits) still apply.
+
+Progress reports actual native effect/consumer boundaries. Its records/ops
+checkpoint is an absolute position, not a number of new records or an ETA. Known
+progress survives later failure, even at zero payload. Derived/FTS success waits
+for the native drain; cleanup/log/backup warnings and retained old files remain
+visible. Existing one-active/one-last, exact-ID replay, guarded routes and unknown
+completion handling apply to these operations too.
+
+A consumer transaction counts as committed progress when it changes data,
+schema or a checkpoint. Store initialization, recovery, committed rewind steps
+and deletion-log repairs report their own effects even before a later failure.
+A consumer's separately committed Raw writes remain reported effects when its
+later step or knowledge checkpoint fails.
+Another connection's writes and SQLite storage housekeeping do not count as this
+operation's progress. Receipt reporting does not hash whole stores. An empty
+transaction does not itself make a failed
+restore partial. Quarantined segment counts count each logical segment once;
+kept-file counts also include its checksum file.
+
+Claude-mem everyday import waits for repository mapping. Recuration/finalization
+retain their next W5 slice. The updater remains unavailable until its native
+backend exists. Owner data/runtime, held evaluations and cutover are not changed
+by implementation or synthetic acceptance tests.

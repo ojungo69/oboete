@@ -753,17 +753,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             Ok(())
         }
         Cmd::Restore => {
-            // The worker's lock, so no worker reads raw.db while it is replaced.
-            let held = worker::lock_asking(&home)?;
-            let said = backup::restore(&home);
-            // Derived data was moved aside: it is rebuilt before this returns, so a search right
-            // after finds the restored records. After a restore that failed too: a hook that
-            // appended while the lock was held started no worker. Under the same lock, so another
-            // command cannot take it between (Codex on #359).
-            let ran = worker::run_once_holding(&home, held);
-            let said = said?;
-            // Restored only once its records are searchable again (Codex on #359).
-            ran?;
+            let said = worker::restore(&home)?;
             println!("{said}");
             Ok(())
         }

@@ -462,6 +462,21 @@ pub fn exists(home: &Path) -> bool {
     path(home).exists()
 }
 
+/// Finish only the complete stopped-swap file; a `.restoring` is never an authority.
+/// The caller holds raw.lock. Return whether this call performed the rename.
+pub(crate) fn finish_stopped_restore(home: &Path) -> Result<bool> {
+    let live = home.join("raw.db");
+    let restored = path(home);
+    if restored == live {
+        return Ok(false);
+    }
+    match std::fs::rename(&restored, &live) {
+        Ok(()) => Ok(true),
+        Err(_) if live.exists() => Ok(false),
+        Err(error) => Err(error).context("finish a stopped restore"),
+    }
+}
+
 /// A viewer read of an existing raw file. It never creates a store, schema, identity or lock.
 /// The connection closes before the shared swap hold; a restore cannot move either store
 /// while a privacy reader compares them.
@@ -654,6 +669,24 @@ pub fn open(home: &Path) -> Result<Raw> {
 /// Open with one lock-wait budget for restore, WAL, schema, column and device initialization.
 /// Hooks pass 2 s so a failed open reaches MUST-M16's marker before the agent kills the hook.
 pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
+    open_within_report(home, wait, None, &mut |_| Ok(()))
+}
+pub(crate) fn open_report(
+    home: &Path,
+    guard: Option<&crate::executable::CommandHome>,
+    committed: &mut impl FnMut(&'static str) -> Result<()>,
+) -> Result<Raw> {
+    open_within_report(home, crate::db::OPEN_WRITE_WAIT, guard, committed)
+}
+fn open_within_report(
+    home: &Path,
+    wait: std::time::Duration,
+    guard: Option<&crate::executable::CommandHome>,
+    committed: &mut impl FnMut(&'static str) -> Result<()>,
+) -> Result<Raw> {
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
     let deadline = std::time::Instant::now() + wait;
     let path = home.join("raw.db");
     crate::db::private(home, 0o700);
@@ -662,17 +695,14 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
         false,
         OPEN_WAIT.min(deadline.saturating_duration_since(std::time::Instant::now())),
     )?;
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
     // A restore that stopped after moving the damaged file aside and before renaming the rebuilt
     // one in: `raw.db.restored` is only ever a whole rebuild (it gets that name once its records
     // are committed), so the rename is finished here instead of creating an empty store.
-    let restored = self::path(home);
-    if restored != path {
-        // Failed, and no other open finished it: an error, never a new empty store beside it.
-        if let Err(e) = std::fs::rename(&restored, &path)
-            && !path.exists()
-        {
-            return Err(e).context("finish a stopped restore");
-        }
+    if finish_stopped_restore(home)? {
+        committed("stopped_restore_finished")?;
     }
     // Give first creation the same nonempty identity witness as an existing file. This is
     // after stopped-restore recovery and under the swap hold; an interrupted empty creation is
@@ -685,7 +715,7 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
         create.mode(0o600);
     }
     match create.open(&path) {
-        Ok(_) => {}
+        Ok(_) => committed("stores_changed")?,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e).with_context(|| format!("create {}", path.display())),
     }
@@ -699,35 +729,50 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     crate::db::wal_until(&conn, "FULL", deadline)?;
     #[cfg(target_os = "macos")]
     conn.execute_batch("PRAGMA fullfsync=ON;")?;
-    crate::db::ensure_schema_until(&conn, &schema_for_file(&conn, &path)?, deadline)
-        .context("raw schema")?;
+    if crate::db::ensure_schema_until(&conn, &schema_for_file(&conn, &path)?, deadline)
+        .context("raw schema")?
+    {
+        committed("stores_changed")?;
+    }
     // A raw.db from before the ledger named its field (milestone 2 Task 1's schema).
-    crate::db::ensure_column_until(
+    if crate::db::ensure_column_until(
         &mut conn,
         "ledger",
         "field",
         "TEXT NOT NULL DEFAULT ''",
         deadline,
     )
-    .context("migrate ledger")?;
-    crate::db::ensure_column_until(
+    .context("migrate ledger")?
+    {
+        committed("stores_changed")?;
+    }
+    if crate::db::ensure_column_until(
         &mut conn,
         "import_origins",
         "native_session",
         "TEXT",
         deadline,
     )
-    .context("migrate import session identity")?;
-    crate::db::ensure_column_until(
+    .context("migrate import session identity")?
+    {
+        committed("stores_changed")?;
+    }
+    if crate::db::ensure_column_until(
         &mut conn,
         "import_origins",
         "ambiguous",
         "INTEGER NOT NULL DEFAULT 1",
         deadline,
     )
-    .context("migrate import identity confidence")?;
-    crate::db::ensure_column_until(&mut conn, "records", "deny_origin", "TEXT", deadline)
-        .context("migrate forget control identity")?;
+    .context("migrate import identity confidence")?
+    {
+        committed("stores_changed")?;
+    }
+    if crate::db::ensure_column_until(&mut conn, "records", "deny_origin", "TEXT", deadline)
+        .context("migrate forget control identity")?
+    {
+        committed("stores_changed")?;
+    }
     for file in ["raw.db", "raw.db-wal", "raw.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -750,20 +795,24 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     };
     let seed_home = |id: &str| {
         crate::db::retry_busy(&conn, deadline, || {
-            conn.execute(
+            let changed = conn.execute(
                 "INSERT OR IGNORE INTO meta(key, value) VALUES('home_id', ?1)",
                 [id],
             )?;
-            Ok(())
+            Ok(changed != 0)
         })
     };
     // Seed before changing a copied store's device, so two simultaneous opens cannot choose
     // the new device as its lineage in the gap between the two writes.
-    if let Some(id) = &previous_device {
-        seed_home(id)?;
+    if let Some(id) = &previous_device
+        && seed_home(id)?
+    {
+        committed("stores_changed")?;
     }
     bound &= crate::db::store_file(&path) == file_before;
-    crate::db::ensure_device_until(&conn, &path, deadline).context("device id")?;
+    if crate::db::ensure_device_until(&conn, &path, deadline).context("device id")? {
+        committed("stores_changed")?;
+    }
     let file_identity: String =
         conn.query_row("SELECT value FROM meta WHERE key='store_file'", [], |r| {
             r.get(0)
@@ -777,8 +826,8 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     let home_id = match known_home {
         Some(id) => id,
         None => {
-            if previous_device.is_none() {
-                seed_home(&device)?;
+            if previous_device.is_none() && seed_home(&device)? {
+                committed("stores_changed")?;
             }
             conn.query_row("SELECT value FROM meta WHERE key='home_id'", [], |r| {
                 r.get(0)
@@ -813,6 +862,12 @@ impl std::error::Error for Restoring {}
 const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 const SWAP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+#[cfg(test)]
+thread_local! {
+    // One-shot for the next blocked shared or exclusive wait; callers reset an unused hook.
+    pub(crate) static SWAP_BLOCKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Task 8: every open of raw.db holds `<home>/raw.lock` shared; a restore holds it exclusively
 /// while it moves the damaged file aside and renames the rebuilt one in, so no writer keeps the
 /// old file across the swap and loses its event there.
@@ -843,6 +898,10 @@ fn wait_for_swap(
         match tried {
             Ok(()) => return Ok(f),
             Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                #[cfg(test)]
+                if let Some(blocked) = SWAP_BLOCKED.with(|hook| hook.borrow_mut().take()) {
+                    blocked();
+                }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(std::fs::TryLockError::WouldBlock) if exclusive => anyhow::bail!(
@@ -2561,7 +2620,18 @@ impl Raw {
     /// Bodies are read and compressed outside the write lock, then written in one short
     /// transaction per batch, so a hook waits on it no longer than on another hook. Returns how
     /// many were rewritten.
+    #[cfg(test)]
     pub fn compress_through(&self, device: &str, after: i64, through: i64) -> Result<usize> {
+        self.compress_through_report(device, after, through, &mut || {})
+    }
+
+    pub(crate) fn compress_through_report(
+        &self,
+        device: &str,
+        after: i64,
+        through: i64,
+        committed: &mut dyn FnMut(),
+    ) -> Result<usize> {
         let mut from = after;
         let mut rewritten = 0;
         loop {
@@ -2609,6 +2679,7 @@ impl Raw {
                 &self.conn,
                 rusqlite::TransactionBehavior::Immediate,
             )?;
+            let before = rewritten;
             for (seq, z) in &smaller {
                 rewritten += tx.execute(
                     "UPDATE records SET body = ?1, enc = 'zstd'
@@ -2617,6 +2688,9 @@ impl Raw {
                 )?;
             }
             tx.commit()?;
+            if rewritten != before {
+                committed();
+            }
             from = upto;
         }
     }

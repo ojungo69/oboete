@@ -397,7 +397,16 @@ fn skip_line(reader: &mut impl BufRead) -> std::io::Result<()> {
 /// Appends `requests` to the log at `path`, one at a time under an exclusive lock on the file: a
 /// newline first when the last byte is not one, each line written whole and synced, the
 /// directory synced when the file is made (rule 9).
+#[cfg(test)]
 fn append_log(path: &Path, requests: &[&Request]) -> Result<()> {
+    append_log_report(path, requests, &mut |_| {})
+}
+
+fn append_log_report(
+    path: &Path,
+    requests: &[&Request],
+    committed: &mut impl FnMut(&'static str),
+) -> Result<()> {
     if requests.is_empty() {
         return Ok(());
     }
@@ -434,21 +443,45 @@ fn append_log(path: &Path, requests: &[&Request]) -> Result<()> {
         out.extend(r.line()?.as_bytes());
         out.push(b'\n');
     }
-    f.write_all(&out)?;
-    f.sync_all()?;
-    if made && let Some(dir) = path.parent() {
-        #[cfg(unix)]
-        std::fs::File::open(dir)?.sync_all()?;
-        #[cfg(not(unix))]
-        let _ = dir;
+    let written = f.write_all(&out);
+    // The held log lock excludes other native appenders, including on a partial write error.
+    let changed = written.is_ok() || f.metadata().is_ok_and(|metadata| metadata.len() != len);
+    let result = (|| {
+        written?;
+        #[cfg(test)]
+        crate::backup::fail_after("forget_log_sync")?;
+        f.sync_all()?;
+        if made && let Some(dir) = path.parent() {
+            #[cfg(all(test, unix))]
+            crate::backup::fail_after("forget_log_directory_sync")?;
+            #[cfg(unix)]
+            std::fs::File::open(dir)?.sync_all()?;
+            #[cfg(not(unix))]
+            let _ = dir;
+        }
+        Ok(())
+    })();
+    // A complete copy follows its syncs; known partial effects retain the existing warning.
+    if result.is_ok() {
+        committed("forget_reconciled");
+    } else if changed {
+        committed("stores_changed");
     }
-    Ok(())
+    result
 }
 
 /// Rule 4, in both directions and never refusing: every request a readable log copy holds that
 /// raw.db lacks is applied to it (by identity, rule 5), and every request raw.db holds is
 /// appended to each copy that lacks it. A copy that cannot be read or written is reported.
 pub(crate) fn reconcile(home: &Path, raw: &mut crate::raw::Raw) -> Result<Report> {
+    reconcile_report(home, raw, &mut |_, _| {})
+}
+
+pub(crate) fn reconcile_report(
+    home: &Path,
+    raw: &mut crate::raw::Raw,
+    committed: &mut impl FnMut(&'static str, usize),
+) -> Result<Report> {
     let mut report = Report::default();
     let home_id = raw.home_id().to_owned();
     let copies: Vec<(PathBuf, Option<Vec<Request>>)> = logs(home, &mut report)
@@ -467,6 +500,9 @@ pub(crate) fn reconcile(home: &Path, raw: &mut crate::raw::Raw) -> Result<Report
         }
     }
     report.applied = raw.forget_apply(&missing)?;
+    if report.applied != 0 {
+        committed("forget_reconciled", report.applied);
+    }
     let all = raw.forget_requests()?;
     for (path, copy) in copies {
         let Some(copy) = copy else {
@@ -476,7 +512,7 @@ pub(crate) fn reconcile(home: &Path, raw: &mut crate::raw::Raw) -> Result<Report
             .iter()
             .filter(|r| !copy.iter().any(|c| c.job == r.job))
             .collect();
-        match append_log(&path, &lacking) {
+        match append_log_report(&path, &lacking, &mut |stage| committed(stage, 0)) {
             Ok(()) => report.copies.push(path),
             Err(e) => report
                 .problems

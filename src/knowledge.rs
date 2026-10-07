@@ -7,12 +7,28 @@ use rusqlite::Connection;
 use std::path::Path;
 
 pub fn open(home: &Path) -> Result<Connection> {
+    open_report(home, &mut || Ok(()))
+}
+
+pub(crate) fn open_report(
+    home: &Path,
+    committed: &mut impl FnMut() -> Result<()>,
+) -> Result<Connection> {
     let deadline = std::time::Instant::now() + crate::db::OPEN_WRITE_WAIT;
     let path = home.join("knowledge.db");
     crate::db::private(home, 0o700);
     // Before the open: `vec_index` is a vec0 table, which a connection without the module cannot
     // read (milestone 4 D8).
     crate::db::register_sqlite_vec();
+    let mut create = std::fs::OpenOptions::new();
+    create.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut create, 0o600);
+    match create.open(&path) {
+        Ok(_) => committed()?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error).with_context(|| format!("create {}", path.display())),
+    }
     let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     #[cfg(test)]
     crate::crash::arm(&conn);
@@ -59,7 +75,9 @@ pub fn open(home: &Path) -> Result<Connection> {
         ),
         crate::embed::DIM
     );
-    crate::db::ensure_schema_until(&conn, &schema, deadline).context("knowledge schema")?;
+    if crate::db::ensure_schema_until(&conn, &schema, deadline).context("knowledge schema")? {
+        committed()?;
+    }
     for file in ["knowledge.db", "knowledge.db-wal", "knowledge.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -121,6 +139,15 @@ pub mod checkpoint {
         k: &Connection,
         consumers: &mut [Box<dyn Consumer>],
     ) -> Result<Vec<(String, i64, i64)>> {
+        rewind_report(raw, k, consumers, &mut |_, _, _| {})
+    }
+
+    pub(crate) fn rewind_report(
+        raw: &Raw,
+        k: &Connection,
+        consumers: &mut [Box<dyn Consumer>],
+        committed: &mut impl FnMut(&'static str, bool, i64),
+    ) -> Result<Vec<(String, i64, i64)>> {
         let mut moved = Vec::new();
         for c in consumers.iter_mut() {
             let table = c.checkpoints();
@@ -148,6 +175,7 @@ pub mod checkpoint {
                     params![crate::db::now_ms(), c.name(), device, was, top],
                 )?;
                 tx.commit()?;
+                committed(c.name(), c.reads_ops(), top);
                 moved.push((c.name().to_owned(), was, top));
             }
         }

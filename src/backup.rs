@@ -12,6 +12,583 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MaintenanceOperation {
+    Rebuild,
+    Restore,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MaintenanceCode {
+    Stale,
+    InvalidSource,
+    InvalidConfig,
+    Busy,
+    RecoveryRequired,
+    Failed,
+}
+impl std::fmt::Display for MaintenanceCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for MaintenanceCode {}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub(crate) struct StoreCounts {
+    pub records: u64,
+    pub ops: u64,
+}
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub(crate) struct BackupPreview {
+    pub compressed_bytes: u64,
+    pub record_segments: u64,
+    pub invalid_record_segments: u64,
+    pub op_segments: u64,
+    pub skipped_op_segments: u64,
+    pub record_first: Option<i64>,
+    pub record_last: Option<i64>,
+    pub op_prefix_through: i64,
+    pub record_lines: Option<u64>,
+    pub op_lines: Option<u64>,
+    pub exact_drops_known: bool,
+}
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub(crate) struct MaintenancePreview {
+    pub key: String,
+    pub operation: MaintenanceOperation,
+    pub raw: Option<StoreCounts>,
+    pub knowledge_present: bool,
+    pub cached_vectors: Option<u64>,
+    pub kept_files: u64,
+    pub staged_partial: bool,
+    pub forget_requests: u64,
+    pub forget_log_warnings: u64,
+    pub backup: Option<BackupPreview>,
+    #[serde(skip)]
+    pub backup_dir: PathBuf,
+    pub hybrid_ready: bool,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct Effects {
+    pub knowledge_files_moved: u64,
+    pub knowledge_put_back: bool,
+    pub raw_files_quarantined: u64,
+    pub raw_put_back: bool,
+    pub raw_swapped: bool,
+    pub stopped_restore_finished: bool,
+    pub staging_created: bool,
+    pub staging_complete: bool,
+    pub segments_quarantined: u64,
+    pub directory_sync_complete: bool,
+}
+impl Effects {
+    pub(crate) fn committed(&self) -> bool {
+        self.knowledge_files_moved != 0
+            || self.raw_files_quarantined != 0
+            || self.raw_swapped
+            || self.stopped_restore_finished
+            || self.segments_quarantined != 0
+    }
+}
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct RestoreReceipt {
+    pub effects: Effects,
+    pub replayed_records: u64,
+    pub replayed_ops: u64,
+    pub retained_ops: u64,
+    pub dropped_ops: u64,
+    pub skipped_segments: u64,
+    pub old_raw_kept_files: u64,
+    pub old_knowledge_kept_files: u64,
+    pub backup_files_kept: u64,
+    pub forget_log_warnings: u64,
+    pub note_written: bool,
+    #[serde(skip)]
+    pub note: String,
+}
+#[derive(Debug)]
+pub(crate) struct RestoreFailure {
+    pub receipt: Box<RestoreReceipt>,
+    pub code: MaintenanceCode,
+    pub cause: anyhow::Error,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// One deterministic native failure after the named, already recorded boundary.
+    pub(crate) static FAIL_AFTER: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    pub(crate) static BEFORE_SWAP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_REOPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_CONSENT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+pub(crate) fn before_swap() {
+    #[cfg(test)]
+    if let Some(before) = BEFORE_SWAP.with(|hook| hook.borrow_mut().take()) {
+        before();
+    }
+}
+pub(crate) fn effect(stage: &'static str, committed: &mut impl FnMut(&'static str)) -> Result<()> {
+    committed(stage);
+    fail_after(stage)
+}
+pub(crate) fn fail_after(stage: &'static str) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_AFTER.get() == Some(stage) {
+        FAIL_AFTER.set(None);
+        anyhow::bail!("controlled failure after {stage}");
+    }
+    let _ = stage;
+    Ok(())
+}
+
+/// A transient version manifest, discarded by preview and never kept in viewer state.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+struct FileVersion {
+    identity: String,
+    bytes: u64,
+    modified: std::time::SystemTime,
+    hash: String,
+}
+fn version(path: &Path) -> Result<Option<FileVersion>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    anyhow::ensure!(
+        metadata.is_file(),
+        "maintenance source is not a regular file"
+    );
+    let identity = crate::db::store_file(path);
+    anyhow::ensure!(
+        !identity.is_empty(),
+        "maintenance source identity unavailable"
+    );
+    Ok(Some(FileVersion {
+        identity,
+        bytes: metadata.len(),
+        modified: metadata.modified()?,
+        hash: crate::migrate::file_version(path)?,
+    }))
+}
+
+fn kept_name(name: &str) -> bool {
+    [
+        "raw.db.quarantined-",
+        "raw.db.restored.quarantined-",
+        "knowledge.db.quarantined-",
+        "knowledge.db.rebuilding-",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
+}
+fn store_name(name: &str) -> bool {
+    name.starts_with("raw.db") || name.starts_with("knowledge.db")
+}
+fn preview_paths(home: &Path, backup: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths: Vec<PathBuf> = [
+        "config.toml",
+        "raw.db",
+        "raw.db-wal",
+        "raw.db-shm",
+        "knowledge.db",
+        "knowledge.db-wal",
+        "knowledge.db-shm",
+        "raw.db.restoring",
+        "raw.db.restoring-journal",
+        "raw.db.restored",
+        "raw.db.restored-wal",
+        "raw.db.restored-shm",
+        "forget.log",
+        "state/restore-wanted",
+    ]
+    .into_iter()
+    .map(|name| home.join(name))
+    .collect();
+    if home.try_exists()? {
+        for entry in std::fs::read_dir(home)? {
+            let entry = entry?;
+            if kept_name(&entry.file_name().to_string_lossy()) {
+                paths.push(entry.path());
+            }
+        }
+    }
+    paths.push(backup.join("forget.log"));
+    for segment in segments(backup, Kind::Records)?
+        .into_iter()
+        .chain(segments(backup, Kind::Ops)?)
+    {
+        paths.push(PathBuf::from(format!("{}.sha256", segment.path.display())));
+        paths.push(segment.path);
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+fn preview_files(home: &Path, backup: &Path) -> Result<Vec<(PathBuf, Option<FileVersion>)>> {
+    let paths = preview_paths(home, backup)?;
+    let versions: Vec<_> = paths
+        .into_iter()
+        .map(|path| Ok((path.clone(), version(&path)?)))
+        .collect::<Result<_>>()?;
+    // A backup, config, log or staging pathname cannot double as a live/kept store.
+    let mut store_ids = std::collections::BTreeSet::new();
+    for (path, value) in &versions {
+        if path.parent() == Some(home)
+            && path
+                .file_name()
+                .is_some_and(|name| store_name(&name.to_string_lossy()))
+            && let Some(value) = value
+        {
+            anyhow::ensure!(
+                store_ids.insert(&value.identity),
+                "maintenance store paths alias"
+            );
+        }
+    }
+    for (path, value) in &versions {
+        if path.parent() != Some(home)
+            || path
+                .file_name()
+                .is_none_or(|name| !store_name(&name.to_string_lossy()))
+        {
+            anyhow::ensure!(
+                value
+                    .as_ref()
+                    .is_none_or(|value| !store_ids.contains(&value.identity)),
+                "maintenance source aliases a store"
+            );
+        }
+    }
+    Ok(versions)
+}
+
+struct RawInfo {
+    counts: Option<StoreCounts>,
+    device: Option<String>,
+    requests: Vec<crate::forget::Request>,
+    healthy: bool,
+}
+fn raw_info(home: &Path) -> Result<RawInfo> {
+    let path = raw::path(home);
+    if !path.try_exists()? {
+        return Ok(RawInfo {
+            counts: None,
+            device: None,
+            requests: Vec::new(),
+            healthy: false,
+        });
+    }
+    let result = crate::migrate::with_preview_v1(&path, |conn, _| {
+        let healthy = crate::db::quick_check(conn, "raw.db").is_ok();
+        let counts = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM records), (SELECT COUNT(*) FROM ops)",
+                [],
+                |row| {
+                    Ok(StoreCounts {
+                        records: row.get::<_, i64>(0)? as u64,
+                        ops: row.get::<_, i64>(1)? as u64,
+                    })
+                },
+            )
+            .ok();
+        Ok(RawInfo {
+            counts,
+            device: crate::db::device_id(conn).ok(),
+            requests: requests_in(conn)?,
+            healthy,
+        })
+    });
+    match result {
+        Err(error) if damaged(&error) => Ok(RawInfo {
+            counts: None,
+            device: None,
+            requests: Vec::new(),
+            healthy: false,
+        }),
+        result => result,
+    }
+}
+
+struct Selection {
+    device: String,
+    records: Vec<Segment>,
+    bad_records: Vec<Segment>,
+    ops: Vec<Segment>,
+    bad_ops: Vec<Segment>,
+}
+fn select(backup: &Path, device: Option<String>) -> Result<Selection> {
+    let all = segments(backup, Kind::Records)?;
+    let device = match device {
+        Some(device) => device,
+        None => unique_device(&all)?,
+    };
+    let (records, bad_records): (Vec<_>, Vec<_>) = all
+        .into_iter()
+        .filter(|s| s.device == device)
+        .partition(|s| damage(&s.path).is_none());
+    anyhow::ensure!(
+        !records.is_empty(),
+        "no usable backup segment of device {device} in {}",
+        backup.display()
+    );
+    let (mut ops, mut bad_ops, mut next) = (Vec::new(), Vec::new(), 1);
+    for segment in segments(backup, Kind::Ops)?
+        .into_iter()
+        .filter(|s| s.device == device)
+    {
+        if bad_ops.is_empty() && segment.first == next && damage(&segment.path).is_none() {
+            next = segment.last + 1;
+            ops.push(segment);
+        } else {
+            bad_ops.push(segment);
+        }
+    }
+    Ok(Selection {
+        device,
+        records,
+        bad_records,
+        ops,
+        bad_ops,
+    })
+}
+fn backup_preview(selection: &Selection) -> Result<BackupPreview> {
+    let lines = |segments: &[Segment]| -> Option<u64> {
+        segments.iter().try_fold(0, |total, segment| {
+            Some(
+                total
+                    + read_segment(&segment.path)
+                        .ok()?
+                        .lines()
+                        .filter(|line| !line.is_empty())
+                        .count() as u64,
+            )
+        })
+    };
+    let compressed_bytes = selection
+        .records
+        .iter()
+        .chain(&selection.bad_records)
+        .chain(&selection.ops)
+        .chain(&selection.bad_ops)
+        .try_fold(0, |sum, s| {
+            Ok::<_, anyhow::Error>(sum + std::fs::metadata(&s.path)?.len())
+        })?;
+    Ok(BackupPreview {
+        compressed_bytes,
+        record_segments: selection.records.len() as u64,
+        invalid_record_segments: selection.bad_records.len() as u64,
+        op_segments: selection.ops.len() as u64,
+        skipped_op_segments: selection.bad_ops.len() as u64,
+        record_first: selection.records.iter().map(|s| s.first).min(),
+        record_last: selection.records.iter().map(|s| s.last).max(),
+        op_prefix_through: selection.ops.last().map_or(0, |s| s.last),
+        record_lines: lines(&selection.records),
+        op_lines: lines(&selection.ops),
+        exact_drops_known: false,
+    })
+}
+
+pub(crate) fn preview_restore(home: &Path) -> Result<MaintenancePreview> {
+    preview_maintenance(home, MaintenanceOperation::Restore)
+}
+pub(crate) fn preview_maintenance(
+    home: &Path,
+    operation: MaintenanceOperation,
+) -> Result<MaintenancePreview> {
+    preview_plan(home, operation).map(|(shown, _, _)| shown)
+}
+type Versions = Vec<(PathBuf, Option<FileVersion>)>;
+type LogSnapshot = (Vec<crate::forget::Request>, crate::forget::Report);
+fn preview_plan(
+    home: &Path,
+    operation: MaintenanceOperation,
+) -> Result<(MaintenancePreview, Versions, LogSnapshot)> {
+    let backup_dir = dir(home).map_err(|e| e.context(MaintenanceCode::InvalidConfig))?;
+    let capture = crate::capture::Settings::load(home)
+        .map_err(|e| e.context(MaintenanceCode::InvalidConfig))?;
+    let files =
+        preview_files(home, &backup_dir).map_err(|e| e.context(MaintenanceCode::InvalidSource))?;
+    anyhow::ensure!(
+        !home.join("raw.db.restored").try_exists()?,
+        MaintenanceCode::RecoveryRequired
+    );
+    let info = raw_info(home).map_err(|e| e.context(MaintenanceCode::InvalidSource))?;
+    if operation == MaintenanceOperation::Rebuild {
+        anyhow::ensure!(info.healthy, MaintenanceCode::RecoveryRequired);
+        anyhow::ensure!(info.counts.is_some(), MaintenanceCode::InvalidSource);
+    }
+    let knowledge_present = home.join("knowledge.db").try_exists()?;
+    let cached_vectors = if knowledge_present {
+        crate::migrate::with_preview_v1(&home.join("knowledge.db"), |conn, _| {
+            let has: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='vectors')",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(if has {
+                conn.query_row("SELECT COUNT(*) FROM vectors", [], |r| r.get::<_, i64>(0))? as u64
+            } else {
+                0
+            })
+        })
+        .ok()
+    } else {
+        None
+    };
+    let (logged, report) = crate::forget::logged(home);
+    let forget_requests = info
+        .requests
+        .iter()
+        .chain(&logged)
+        .map(|r| &r.job)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u64;
+    let backup = if operation == MaintenanceOperation::Restore {
+        Some(backup_preview(&select(&backup_dir, info.device)?)?)
+    } else {
+        None
+    };
+    let mut shown = MaintenancePreview {
+        key: String::new(),
+        operation,
+        raw: info.counts,
+        knowledge_present,
+        cached_vectors,
+        kept_files: files
+            .iter()
+            .filter(|(p, v)| {
+                p.file_name()
+                    .is_some_and(|n| kept_name(&n.to_string_lossy()))
+                    && v.is_some()
+            })
+            .count() as u64,
+        staged_partial: home.join("raw.db.restoring").try_exists()?,
+        forget_requests,
+        forget_log_warnings: report.problems.len() as u64,
+        backup,
+        backup_dir: backup_dir.clone(),
+        hybrid_ready: false,
+    };
+    anyhow::ensure!(
+        files == preview_files(home, &backup_dir)?,
+        MaintenanceCode::Stale
+    );
+    let canonical = if home.try_exists()? {
+        home.canonicalize()?
+    } else {
+        std::env::current_dir()?.join(home)
+    };
+    shown.key = crate::forget::hash(&serde_json::to_vec(&(
+        "oboete:maintenance-preview:v1",
+        canonical,
+        crate::db::store_file(home),
+        &backup_dir,
+        crate::db::store_file(&backup_dir),
+        capture.rules.version(),
+        &files,
+        &shown,
+    ))?);
+    Ok((shown, files, (logged, report)))
+}
+
+pub(crate) struct Consent {
+    files: Versions,
+    logs: LogSnapshot,
+    home: String,
+    backup: PathBuf,
+    backup_identity: String,
+}
+pub(crate) fn consent(
+    home: &Path,
+    operation: MaintenanceOperation,
+    expected: Option<&str>,
+) -> Result<Option<Consent>> {
+    let Some(expected) = expected else {
+        return Ok(None);
+    };
+    let (shown, files, logs) =
+        preview_plan(home, operation).map_err(|e| e.context(MaintenanceCode::Stale))?;
+    anyhow::ensure!(shown.key == expected, MaintenanceCode::Stale);
+    Ok(Some(Consent {
+        files,
+        logs,
+        home: crate::db::store_file(home),
+        backup_identity: crate::db::store_file(&shown.backup_dir),
+        backup: shown.backup_dir,
+    }))
+}
+impl Consent {
+    pub(crate) fn check_logs(&self) -> Result<()> {
+        for (path, before) in &self.files {
+            if path.file_name() == Some(std::ffi::OsStr::new("forget.log")) {
+                anyhow::ensure!(
+                    version(path).map_err(|e| e.context(MaintenanceCode::Stale))? == *before,
+                    MaintenanceCode::Stale
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The caller owns exclusive raw.lock. Logs were read outside it; here only their identity,
+    /// length and modification time are compared, so no log I/O occurs under a raw write fence.
+    pub(crate) fn check_locked(&self, home: &Path) -> Result<()> {
+        anyhow::ensure!(
+            self.home == crate::db::store_file(home),
+            MaintenanceCode::Stale
+        );
+        anyhow::ensure!(
+            self.backup_identity == crate::db::store_file(&self.backup),
+            MaintenanceCode::Stale
+        );
+        let paths =
+            preview_paths(home, &self.backup).map_err(|e| e.context(MaintenanceCode::Stale))?;
+        anyhow::ensure!(
+            paths
+                == self
+                    .files
+                    .iter()
+                    .map(|(p, _)| p.clone())
+                    .collect::<Vec<_>>(),
+            MaintenanceCode::Stale
+        );
+        for (path, before) in &self.files {
+            if path.file_name() == Some(std::ffi::OsStr::new("forget.log")) {
+                let now = match std::fs::symlink_metadata(path) {
+                    Ok(metadata) => {
+                        anyhow::ensure!(metadata.is_file(), MaintenanceCode::Stale);
+                        Some((
+                            crate::db::store_file(path),
+                            metadata.len(),
+                            metadata.modified()?,
+                        ))
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => return Err(e).context(MaintenanceCode::Stale),
+                };
+                anyhow::ensure!(
+                    now == before
+                        .as_ref()
+                        .map(|v| (v.identity.clone(), v.bytes, v.modified)),
+                    MaintenanceCode::Stale
+                );
+            } else {
+                anyhow::ensure!(
+                    version(path).map_err(|e| e.context(MaintenanceCode::Stale))? == *before,
+                    MaintenanceCode::Stale
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 /// D11: the most record bytes one segment holds (Task 12 may halve it).
 pub const SEGMENT_BYTES: usize = 8 << 20;
 /// D11: how often a running worker backs up besides at its idle exit.
@@ -158,6 +735,13 @@ pub fn export_timed(home: &Path) -> Result<Vec<(PathBuf, std::time::Duration)>> 
 
 /// Each segment written, with the time it took to read, compress and seal.
 fn export_from(raw: &Raw, dir: &Path) -> Result<Vec<(PathBuf, std::time::Duration)>> {
+    export_from_report(raw, dir, &mut |_| {})
+}
+fn export_from_report(
+    raw: &Raw,
+    dir: &Path,
+    committed: &mut impl FnMut(&'static str),
+) -> Result<Vec<(PathBuf, std::time::Duration)>> {
     let device = raw.device();
     anyhow::ensure!(
         !device.is_empty() && device.chars().all(|c| c.is_ascii_alphanumeric()),
@@ -165,7 +749,7 @@ fn export_from(raw: &Raw, dir: &Path) -> Result<Vec<(PathBuf, std::time::Duratio
     );
     let mut wrote = Vec::new();
     for kind in [Kind::Records, Kind::Ops] {
-        let mut last = cursor(raw, dir, kind)?;
+        let mut last = cursor_report(raw, dir, kind, committed)?;
         if kind.top(raw)? <= last {
             continue;
         }
@@ -186,7 +770,12 @@ fn export_from(raw: &Raw, dir: &Path) -> Result<Vec<(PathBuf, std::time::Duratio
                 text.push_str(l);
                 text.push('\n');
             }
-            let path = seal(dir, &name(device, first, end, kind), text.as_bytes())?;
+            let path = seal_report(
+                dir,
+                &name(device, first, end, kind),
+                text.as_bytes(),
+                committed,
+            )?;
             wrote.push((path, started.elapsed()));
             last = end;
         }
@@ -198,14 +787,21 @@ fn export_from(raw: &Raw, dir: &Path) -> Result<Vec<(PathBuf, std::time::Duratio
 /// records reuse those seqs. The segments past raw's end are set aside, so that range is backed
 /// up again from raw as it is reused (a loss that new records have already covered again goes
 /// unseen here, as it does for the consumers' rewind: #83).
-fn cursor(raw: &Raw, dir: &Path, kind: Kind) -> Result<i64> {
+fn cursor_report(
+    raw: &Raw,
+    dir: &Path,
+    kind: Kind,
+    committed: &mut impl FnMut(&'static str),
+) -> Result<i64> {
     let max = kind.top(raw)?;
     let mut mine: Vec<Segment> = segments(dir, kind)?
         .into_iter()
         .filter(|s| s.device == raw.device())
         .collect();
     mine.sort_by_key(|s| s.first);
-    set_aside(mine.iter().filter(|s| s.last > max))?;
+    set_aside_report(mine.iter().filter(|s| s.last > max), &mut |_| {
+        effect("backup_quarantined", committed)
+    })?;
     mine.retain(|s| s.last <= max);
     // A range raw holds that no segment covers (a segment file was removed): the segments after
     // it are set aside too, so the next export writes that range and the rest again. A range raw
@@ -213,7 +809,7 @@ fn cursor(raw: &Raw, dir: &Path, kind: Kind) -> Result<i64> {
     let mut end = 0;
     for (i, s) in mine.iter().enumerate() {
         if s.first > end + 1 && kind.next(raw, end)?.is_some_and(|seq| seq < s.first) {
-            set_aside(&mine[i..])?;
+            set_aside_report(&mine[i..], &mut |_| effect("backup_quarantined", committed))?;
             break;
         }
         end = end.max(s.last);
@@ -223,16 +819,26 @@ fn cursor(raw: &Raw, dir: &Path, kind: Kind) -> Result<i64> {
 
 /// Segments no longer trusted, renamed (the segment before its checksum: a checksum left alone
 /// is written again by the next export). Their files stay on disk.
-fn set_aside<'a>(segs: impl IntoIterator<Item = &'a Segment>) -> Result<()> {
-    let stamp = crate::db::now_ms();
+fn set_aside_report<'a>(
+    segs: impl IntoIterator<Item = &'a Segment>,
+    moved: &mut impl FnMut(bool) -> Result<()>,
+) -> Result<()> {
     for s in segs {
+        let mut first = true;
         for path in [
             s.path.clone(),
             PathBuf::from(format!("{}.sha256", s.path.display())),
         ] {
             if path.exists() {
-                let aside = PathBuf::from(format!("{}.quarantined-{stamp}", path.display()));
+                let name = path
+                    .file_name()
+                    .context("segment filename")?
+                    .to_string_lossy();
+                let parent = path.parent().context("segment directory")?;
+                let aside = parent.join(fresh_name(parent, &format!("{name}.quarantined-"))?);
                 std::fs::rename(&path, aside)?;
+                moved(first)?;
+                first = false;
             }
         }
     }
@@ -242,22 +848,40 @@ fn set_aside<'a>(segs: impl IntoIterator<Item = &'a Segment>) -> Result<()> {
 /// At a worker's start, when raw may have lost commits: the backups past its end set aside
 /// before new records reuse their seqs.
 pub fn check(home: &Path, raw: &Raw) {
+    check_report(home, raw, &mut |_| {});
+}
+pub(crate) fn check_report(
+    home: &Path,
+    raw: &Raw,
+    committed: &mut impl FnMut(&'static str),
+) -> u64 {
+    let mut warnings = 0;
     for kind in [Kind::Records, Kind::Ops] {
-        if let Err(e) = dir(home).and_then(|d| cursor(raw, &d, kind)) {
+        if let Err(e) = dir(home).and_then(|d| cursor_report(raw, &d, kind, committed)) {
             eprintln!("oboete: backup: {e:#}");
+            warnings += 1;
         }
     }
+    warnings
 }
 
 /// Sealing: the checksum, then the segment, each written to a temporary name, synced, renamed
 /// and its directory entry synced before the next. A segment never exists without its checksum,
 /// even after a power loss; a checksum left without its segment is written again by the next
 /// export.
-fn seal(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf> {
+fn seal_report(
+    dir: &Path,
+    name: &str,
+    data: &[u8],
+    committed: &mut impl FnMut(&'static str),
+) -> Result<PathBuf> {
     let z = zstd::bulk::compress(data, 3)?;
     let sum = format!("{}  {name}\n", hex(&Sha256::digest(&z)));
     write_synced(dir, &format!("{name}.sha256"), sum.as_bytes())?;
-    write_synced(dir, name, &z)
+    effect("backup_written", committed)?;
+    let path = write_synced(dir, name, &z)?;
+    effect("backup_written", committed)?;
+    Ok(path)
 }
 
 fn write_synced(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf> {
@@ -313,33 +937,144 @@ fn damage(seg: &Path) -> Option<String> {
 /// `<name>` (and its -wal and -shm, which SQLite binds to the name) moved aside as
 /// `<name>.quarantined-<ms>`, its sidecars under the names SQLite looks for beside that (`...-wal`,
 /// `...-shm`), so the kept file opens with its last commits. Returns the new name of the main file.
+#[cfg(test)]
 pub(crate) fn quarantine(home: &Path, name: &str) -> Result<PathBuf> {
-    let suffix = format!("quarantined-{}", crate::db::now_ms());
-    let main = home.join(format!("{name}.{suffix}"));
-    // The sidecars before the file: stopped in between, the file is left without them (and is
-    // still damaged, so it is quarantined again), never the file's name free with an old WAL
-    // beside it that SQLite would replay into the next file of that name.
+    quarantine_report(home, name, None, &mut |_| Ok(()))
+}
+pub(crate) fn fresh_name(home: &Path, prefix: &str) -> Result<String> {
+    let mut stamp = crate::db::now_ms();
+    loop {
+        let name = format!("{prefix}{stamp}");
+        let mut occupied = false;
+        for ext in ["", "-wal", "-shm"] {
+            match std::fs::symlink_metadata(home.join(format!("{name}{ext}"))) {
+                Ok(_) => occupied = true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if !occupied {
+            return Ok(name);
+        }
+        stamp = stamp
+            .checked_add(1)
+            .context("recovery filename exhausted")?;
+    }
+}
+enum FileMove {
+    Moved,
+    Returned,
+    PutBack,
+}
+fn quarantine_report(
+    home: &Path,
+    name: &str,
+    guard: Option<&crate::executable::CommandHome>,
+    changed: &mut impl FnMut(FileMove) -> Result<()>,
+) -> Result<PathBuf> {
+    let kept = fresh_name(home, &format!("{name}.quarantined-"))?;
+    let main = home.join(&kept);
+    let mut moved = Vec::new();
     for ext in ["-wal", "-shm", ""] {
+        if let Some(guard) = guard {
+            guard.check(home)?;
+        }
         let from = home.join(format!("{name}{ext}"));
         if from.exists() {
-            std::fs::rename(&from, home.join(format!("{name}.{suffix}{ext}")))
-                .with_context(|| format!("quarantine {}", from.display()))?;
+            let to = home.join(format!("{kept}{ext}"));
+            let result = std::fs::rename(&from, &to)
+                .map_err(anyhow::Error::from)
+                .and_then(|()| {
+                    moved.push((from.clone(), to));
+                    changed(FileMove::Moved)
+                });
+            if let Err(error) = result {
+                // Preserve the original committed WAL on a failed quarantine. Main first if it
+                // moved too; never put anything back into a replacement home.
+                let put_back: Result<()> = (|| {
+                    for (from, to) in moved.iter().rev() {
+                        if let Some(guard) = guard {
+                            guard
+                                .check(home)
+                                .context("quarantine put-back home changed")?;
+                        }
+                        anyhow::ensure!(
+                            !from.try_exists()?,
+                            "quarantine put-back destination exists"
+                        );
+                        std::fs::rename(to, from)
+                            .with_context(|| format!("quarantine put back {}", from.display()))?;
+                        changed(FileMove::Returned)?;
+                    }
+                    if !moved.is_empty() {
+                        changed(FileMove::PutBack)?;
+                    }
+                    Ok(())
+                })();
+                if let Err(back) = put_back {
+                    return Err(error)
+                        .with_context(|| format!("quarantine put-back also failed: {back:#}"));
+                }
+                return Err(error).with_context(|| format!("quarantine {}", from.display()));
+            }
         }
     }
     Ok(main)
+}
+fn restore_file_change(
+    receipt: &mut RestoreReceipt,
+    name: &str,
+    event: FileMove,
+    committed: &mut impl FnMut(&'static str),
+) -> Result<()> {
+    let (moves, kept, put_back, stage, returned) = if name == "knowledge.db" {
+        (
+            &mut receipt.effects.knowledge_files_moved,
+            &mut receipt.old_knowledge_kept_files,
+            &mut receipt.effects.knowledge_put_back,
+            "knowledge_set_aside",
+            "knowledge_put_back",
+        )
+    } else {
+        (
+            &mut receipt.effects.raw_files_quarantined,
+            &mut receipt.old_raw_kept_files,
+            &mut receipt.effects.raw_put_back,
+            "raw_quarantined",
+            "raw_put_back",
+        )
+    };
+    match event {
+        FileMove::Moved => {
+            *moves += 1;
+            *kept += 1;
+            effect(stage, committed)
+        }
+        FileMove::Returned => {
+            *kept -= 1;
+            Ok(())
+        }
+        FileMove::PutBack => {
+            *put_back = true;
+            effect(returned, committed)
+        }
+    }
 }
 
 /// The device whose history the backups hold: the damaged file's own id when it can still be
 /// read, else the one device the segments name. Never a guess between two.
 fn device_of(home: &Path, segs: &[Segment]) -> Result<String> {
     let from_file = rusqlite::Connection::open_with_flags(
-        home.join("raw.db"),
+        raw::path(home),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
-    .and_then(|c| crate::db::device_id(&c).map_err(|_| rusqlite::Error::InvalidQuery));
+    .and_then(|conn| crate::db::device_id(&conn).map_err(|_| rusqlite::Error::InvalidQuery));
     if let Ok(id) = from_file {
         return Ok(id);
     }
+    unique_device(segs)
+}
+fn unique_device(segs: &[Segment]) -> Result<String> {
     let mut devices: Vec<&str> = segs.iter().map(|s| s.device.as_str()).collect();
     devices.dedup();
     match devices.as_slice() {
@@ -356,18 +1091,88 @@ fn device_of(home: &Path, segs: &[Segment]) -> Result<String> {
 /// that verify, in seq order. Returns what was done, for stderr and doctor
 /// (`<home>/state/restored`).
 pub fn restore(home: &Path) -> Result<String> {
-    // Milestone 5 D1: the forget request logs are read before raw's swap lock, and written after
-    // it from the restored raw.db; no log I/O under the lock.
-    let (logged, mut report) = crate::forget::logged(home);
-    let mut note = restore_locked(home, logged)?;
-    match raw::open(home).and_then(|mut raw| crate::forget::reconcile(home, &mut raw)) {
-        Ok(r) => report.problems.extend(r.problems),
-        Err(e) => report.problems.push(format!("{e:#}")),
+    let _config = crate::settings::config_lock(home)?;
+    restore_report_holding(home, None, None, &mut |_| {})
+        .map(|r| r.note)
+        .map_err(|f| f.cause)
+}
+
+/// Complete native raw restoration. The caller holds config.lock and owns worker admission.
+pub(crate) fn restore_report_holding(
+    home: &Path,
+    expected: Option<&str>,
+    guard: Option<&crate::executable::CommandHome>,
+    committed: &mut impl FnMut(&'static str),
+) -> std::result::Result<RestoreReceipt, RestoreFailure> {
+    let mut receipt = RestoreReceipt::default();
+    let result: Result<()> = (|| {
+        if let Some(guard) = guard {
+            guard.check(home)?;
+        }
+        let mut consent = consent(home, MaintenanceOperation::Restore, expected)?;
+        #[cfg(test)]
+        if let Some(after) = AFTER_CONSENT.with(|hook| hook.borrow_mut().take()) {
+            after();
+        }
+        // Milestone 5 D1: the forget request logs are read before raw's swap lock, and written after
+        // it from the restored raw.db; no log I/O under the lock.
+        let (logged, mut report) = consent
+            .as_mut()
+            .map(|consent| std::mem::take(&mut consent.logs))
+            .unwrap_or_else(|| crate::forget::logged(home));
+        receipt.forget_log_warnings = report.problems.len() as u64;
+        let mut note = restore_locked(
+            home,
+            logged,
+            consent.as_ref(),
+            guard,
+            &mut receipt,
+            committed,
+        )?;
+        if let Some(guard) = guard {
+            guard.check(home)?;
+        }
+        #[cfg(test)]
+        if let Some(before) = BEFORE_REOPEN.with(|hook| hook.borrow_mut().take()) {
+            before();
+        }
+        match raw::open_report(home, guard, &mut |stage| {
+            if stage == "stopped_restore_finished" {
+                receipt.effects.stopped_restore_finished = true;
+                receipt.effects.raw_swapped = true;
+            }
+            effect(stage, committed)
+        })
+        .and_then(|mut raw| {
+            if let Some(guard) = guard {
+                guard.check(home)?;
+            }
+            crate::forget::reconcile(home, &mut raw)
+        }) {
+            Ok(r) => report.problems.extend(r.problems),
+            Err(e) => report.problems.push(format!("{e:#}")),
+        }
+        receipt.forget_log_warnings = report.problems.len() as u64;
+        if let Some(guard) = guard {
+            guard.check(home)?;
+        }
+        for p in &report.problems {
+            note.push_str(&format!("; forget request log: {p}"));
+        }
+        receipt.note = note;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(receipt),
+        Err(cause) => Err(RestoreFailure {
+            receipt: Box::new(receipt),
+            code: cause
+                .downcast_ref::<MaintenanceCode>()
+                .copied()
+                .unwrap_or(MaintenanceCode::Failed),
+            cause,
+        }),
     }
-    for p in &report.problems {
-        note.push_str(&format!("; forget request log: {p}"));
-    }
-    Ok(note)
 }
 
 /// The forget requests a raw.db that still reads holds (D1 rule 14), read under the swap lock
@@ -375,11 +1180,15 @@ pub fn restore(home: &Path) -> Result<String> {
 /// table opens, a bad row must stop the restore rather than discard other live requests.
 fn held_requests(home: &Path) -> Result<Vec<crate::forget::Request>> {
     let Ok(conn) = rusqlite::Connection::open_with_flags(
-        home.join("raw.db"),
+        raw::path(home),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     ) else {
         return Ok(Vec::new());
     };
+    requests_in(&conn)
+}
+
+fn requests_in(conn: &rusqlite::Connection) -> Result<Vec<crate::forget::Request>> {
     let Ok(mut st) = conn.prepare("SELECT request FROM forget_jobs") else {
         return Ok(Vec::new());
     };
@@ -408,62 +1217,80 @@ fn held_requests(home: &Path) -> Result<Vec<crate::forget::Request>> {
     Ok(out)
 }
 
-fn restore_locked(home: &Path, logged: Vec<crate::forget::Request>) -> Result<String> {
+fn restore_locked(
+    home: &Path,
+    logged: Vec<crate::forget::Request>,
+    consent: Option<&Consent>,
+    guard: Option<&crate::executable::CommandHome>,
+    receipt: &mut RestoreReceipt,
+    committed: &mut impl FnMut(&'static str),
+) -> Result<String> {
     // No store is open while the file is read, rebuilt and swapped; a hook waits (or fails with
     // MUST-M16's marker) instead of writing into the file that is moved aside.
+    before_swap();
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
+    if let Some(consent) = consent {
+        consent.check_logs()?;
+    }
     let _swap = raw::lock_for_swap(home)?;
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
+    if let Some(consent) = consent {
+        consent.check_locked(home)?;
+    }
     let held = held_requests(home)?;
     let dir = dir(home)?;
-    let all = segments(&dir, Kind::Records)?;
-    let device = device_of(home, &all)?;
-    let (ok, bad): (Vec<Segment>, Vec<Segment>) = all
-        .into_iter()
-        .filter(|s| s.device == device)
-        .partition(|s| damage(&s.path).is_none());
-    anyhow::ensure!(
-        !ok.is_empty(),
-        "no usable backup segment of device {device} in {}",
-        dir.display()
-    );
+    let Selection {
+        device,
+        records: ok,
+        bad_records: bad,
+        ops: ops_ok,
+        bad_ops: ops_bad,
+    } = select(
+        &dir,
+        Some(device_of(home, &segments(&dir, Kind::Records)?)?),
+    )?;
+    receipt.skipped_segments = (bad.len() + ops_bad.len()) as u64;
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
+    // Validate/read live requests first. The sole complete stopped file stays authority until
+    // this shared native recovery finishes it; never unlink the last store or its forgets.
+    if raw::finish_stopped_restore(home)? {
+        receipt.effects.stopped_restore_finished = true;
+        effect("stopped_restore_finished", committed)?;
+    }
+    if home.join("raw.db.restored").exists() {
+        quarantine_report(home, "raw.db.restored", guard, &mut |event| {
+            restore_file_change(receipt, "raw.db.restored", event, committed)
+        })?;
+    }
     // A build left by a restore that stopped is made again: `.restoring` may be partial, and a
     // `.restored` beside a raw.db still in place came from segments that may have changed since.
     let tmp = home.join("raw.db.restoring");
-    for name in [
-        "raw.db.restoring",
-        "raw.db.restoring-journal",
-        "raw.db.restored",
-    ] {
+    for name in ["raw.db.restoring", "raw.db.restoring-journal"] {
         let _ = std::fs::remove_file(home.join(name));
     }
     let mut rebuild = raw::Rebuild::new(&tmp, &device)?;
-    let mut records = 0;
+    receipt.effects.staging_created = true;
+    fail_after("staging_created")?;
     for s in &ok {
         for line in read_segment(&s.path)?.lines().filter(|l| !l.is_empty()) {
             rebuild.add(line)?;
-            records += 1;
+            receipt.replayed_records += 1;
         }
     }
     // The ops after the records, in op order up to the first segment that is damaged or does not
     // start where the one before it ended. The op log after such a hole is set aside with it: its
     // windows would move the curation checkpoint past the lost ones, whose claims go with
     // knowledge.db, and their records would never be curated again.
-    let (mut ops_ok, mut ops_bad, mut next) = (Vec::new(), Vec::new(), 1);
-    for s in segments(&dir, Kind::Ops)?
-        .into_iter()
-        .filter(|s| s.device == device)
-    {
-        if ops_bad.is_empty() && s.first == next && damage(&s.path).is_none() {
-            next = s.last + 1;
-            ops_ok.push(s);
-        } else {
-            ops_bad.push(s);
-        }
-    }
-    let mut ops = 0;
     for s in &ops_ok {
         for line in read_segment(&s.path)?.lines().filter(|l| !l.is_empty()) {
             rebuild.add_op(line)?;
-            ops += 1;
+            receipt.replayed_ops += 1;
         }
     }
     // Rule 14: what the live raw.db and the logs hold of this home's forgets, before the swap.
@@ -477,42 +1304,69 @@ fn restore_locked(home: &Path, logged: Vec<crate::forget::Request>) -> Result<St
     }
     rebuild.forget(forget);
     let dropped = rebuild.finish()?;
+    receipt.dropped_ops = dropped as u64;
+    receipt.retained_ops = receipt.replayed_ops - receipt.dropped_ops;
     let whole = home.join("raw.db.restored");
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
     std::fs::rename(&tmp, &whole)?;
+    receipt.effects.staging_complete = true;
+    fail_after("staging_complete")?;
     // Durable before the damaged file goes: an open that finds neither would make an empty store.
     #[cfg(unix)]
     std::fs::File::open(home)?.sync_all()?;
+    fail_after("staging_synced")?;
     // Reconstruction was isolated. Its denials become live at the swap: order that moment
     // after any sender's actual transmission, outside every raw SQLite transaction.
     let _dispatch = crate::dispatch::exclusive(home)?;
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
     // Everything that must not outlive the old raw.db goes before the swap, so a restore that
     // stops at any point is either redone (raw.db still damaged) or complete.
     // Derived data is rebuilt from what was restored: a skipped segment leaves a gap below raw's
     // highest seq that the old index and checkpoints would still cover.
     if home.join("knowledge.db").exists() {
-        quarantine(home, "knowledge.db")?;
+        quarantine_report(home, "knowledge.db", guard, &mut |event| {
+            restore_file_change(receipt, "knowledge.db", event, committed)
+        })?;
     }
     // A skipped segment is moved aside, so the export cursor never trusts its name and the seqs
     // it claimed are backed up again as they are reused.
-    set_aside(bad.iter().chain(&ops_bad))?;
-    let kept = quarantine(home, "raw.db")?;
+    set_aside_report(bad.iter().chain(&ops_bad), &mut |first| {
+        receipt.effects.segments_quarantined += u64::from(first);
+        receipt.backup_files_kept += 1;
+        effect("segments_quarantined", committed)
+    })?;
+    let kept = quarantine_report(home, "raw.db", guard, &mut |event| {
+        restore_file_change(receipt, "raw.db", event, committed)
+    })?;
+    fail_after("raw_quarantine_complete")?;
     std::fs::rename(&whole, home.join("raw.db"))?;
+    receipt.effects.raw_swapped = true;
+    effect("raw_swapped", committed)?;
     #[cfg(unix)]
-    std::fs::File::open(home)?.sync_all()?;
+    {
+        std::fs::File::open(home)?.sync_all()?;
+        receipt.effects.directory_sync_complete = true;
+        effect("directory_synced", committed)?;
+    }
     let skipped: Vec<String> = bad
         .iter()
         .chain(&ops_bad)
         .filter_map(|s| s.path.file_name().map(|n| n.to_string_lossy().into_owned()))
         .collect();
     let note = format!(
-        "raw.db restored at {} from {} segment(s), {records} record(s) and {} op(s); the damaged file is kept as {}{}{}",
+        "raw.db restored at {} from {} segment(s), {} record(s) and {} op(s); the damaged file is kept as {}{}{}",
         rusqlite::Connection::open_in_memory()?.query_row(
             "SELECT strftime('%Y-%m-%d %H:%M UTC', ?1 / 1000, 'unixepoch')",
             [crate::db::now_ms()],
             |r| r.get::<_, String>(0)
         )?,
         ok.len() + ops_ok.len(),
-        ops - dropped,
+        receipt.replayed_records,
+        receipt.retained_ops,
         kept.file_name().unwrap_or_default().to_string_lossy(),
         if dropped > 0 {
             format!("; {dropped} op(s) past the restored records dropped")
@@ -529,8 +1383,13 @@ fn restore_locked(home: &Path, logged: Vec<crate::forget::Request>) -> Result<St
         }
     );
     let state = home.join("state");
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
     std::fs::create_dir_all(&state)?;
     std::fs::write(state.join("restored"), format!("{note}\n"))?;
+    receipt.note_written = true;
+    fail_after("restore_note")?;
     Ok(note)
 }
 
@@ -582,10 +1441,52 @@ pub fn corrupt(e: &anyhow::Error) -> bool {
 /// `quick_check` fails. Any other error stays an error.
 pub fn open_raw(home: &Path) -> Result<Raw> {
     match raw::open(home).and_then(|r| r.quick_check().map(|()| r)) {
+        Ok(raw) => Ok(raw),
+        Err(error) if damaged(&error) => {
+            eprintln!("oboete: raw.db: {error:#}; {}", restore(home)?);
+            raw::open(home)
+        }
+        Err(error) => Err(error),
+    }
+}
+pub(crate) fn open_raw_report(
+    home: &Path,
+    receipt: &mut Option<RestoreReceipt>,
+    guard: Option<&crate::executable::CommandHome>,
+    committed: &mut impl FnMut(&'static str),
+) -> Result<Raw> {
+    // Only complete reported commands use this entry; they retain config.lock across the drain.
+    match raw::open_report(home, guard, &mut |stage| {
+        if stage == "stopped_restore_finished" {
+            let receipt = receipt.get_or_insert_with(RestoreReceipt::default);
+            receipt.effects.stopped_restore_finished = true;
+            receipt.effects.raw_swapped = true;
+        }
+        effect(stage, committed)
+    })
+    .and_then(|r| r.quick_check().map(|()| r))
+    {
         Ok(r) => Ok(r),
         Err(e) if damaged(&e) => {
-            eprintln!("oboete: raw.db: {e:#}; {}", restore(home)?);
-            raw::open(home)
+            let restored = restore_report_holding(home, None, guard, committed);
+            match restored {
+                Ok(report) => {
+                    eprintln!("oboete: raw.db: {e:#}; {}", report.note);
+                    *receipt = Some(report);
+                }
+                Err(failure) => {
+                    *receipt = Some(*failure.receipt);
+                    return Err(failure.cause);
+                }
+            }
+            raw::open_report(home, guard, &mut |stage| {
+                if stage == "stopped_restore_finished" {
+                    let receipt = receipt.get_or_insert_with(RestoreReceipt::default);
+                    receipt.effects.stopped_restore_finished = true;
+                    receipt.effects.raw_swapped = true;
+                }
+                effect(stage, committed)
+            })
         }
         Err(e) => Err(e),
     }
@@ -594,19 +1495,37 @@ pub fn open_raw(home: &Path) -> Result<Raw> {
 /// knowledge.db for the worker: a damaged one is quarantined and started empty. Every consumer
 /// then rebuilds from seq 0 (spec 1.7); raw.db and the segments are not touched.
 pub fn open_knowledge(home: &Path) -> Result<rusqlite::Connection> {
-    let checked = crate::knowledge::open(home).and_then(|k| {
-        crate::db::quick_check_without_vtabs(&home.join("knowledge.db"), "knowledge.db").map(|()| k)
-    });
+    open_knowledge_report(home, None, &mut |_| {})
+}
+
+pub(crate) fn open_knowledge_report(
+    home: &Path,
+    guard: Option<&crate::executable::CommandHome>,
+    committed: &mut impl FnMut(&'static str),
+) -> Result<rusqlite::Connection> {
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
+    let checked = crate::knowledge::open_report(home, &mut || effect("stores_changed", committed))
+        .and_then(|k| {
+            crate::db::quick_check_without_vtabs(&home.join("knowledge.db"), "knowledge.db")
+                .map(|()| k)
+        });
     match checked {
         Ok(k) => Ok(k),
         Err(e) if damaged(&e) => {
-            let kept = quarantine(home, "knowledge.db")?;
+            let kept = quarantine_report(home, "knowledge.db", guard, &mut |_| {
+                effect("stores_changed", committed)
+            })?;
             eprintln!(
                 "oboete: knowledge.db: {e:#}; kept as {} and rebuilt from raw.db",
                 kept.display()
             );
             // Its vectors, when they still read, come with the embedding phase's first poll.
-            crate::knowledge::open(home)
+            if let Some(guard) = guard {
+                guard.check(home)?;
+            }
+            crate::knowledge::open_report(home, &mut || effect("stores_changed", committed))
         }
         Err(e) => Err(e),
     }
@@ -626,9 +1545,14 @@ pub(crate) fn damaged(e: &anyhow::Error) -> bool {
 /// The worker's backup step (D11): export what is new. A failure is reported and never stops
 /// the worker; doctor shows how far the backups reach.
 pub fn run(home: &Path, raw: &Raw) {
-    if let Err(e) = dir(home).and_then(|d| export_from(raw, &d)) {
+    run_report(home, raw, &mut |_| {});
+}
+pub(crate) fn run_report(home: &Path, raw: &Raw, committed: &mut impl FnMut(&'static str)) -> u64 {
+    if let Err(e) = dir(home).and_then(|d| export_from_report(raw, &d, committed)) {
         eprintln!("oboete: backup: {e:#}");
+        return 1;
     }
+    0
 }
 
 /// Spec 7 (files): a folder a sync client uploads.
@@ -727,9 +1651,793 @@ pub fn doctor(home: &Path) -> (Vec<String>, bool) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::raw::{Item, Target};
+
+    pub(crate) fn w5b_files(root: &Path) -> Vec<(PathBuf, String)> {
+        fn walk(root: &Path, path: &Path, files: &mut Vec<(PathBuf, String)>) {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    walk(root, &path, files);
+                } else {
+                    files.push((
+                        path.strip_prefix(root).unwrap().into(),
+                        crate::migrate::file_version(&path).unwrap(),
+                    ));
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(root, root, &mut files);
+        files.sort();
+        files
+    }
+
+    pub(crate) fn w5b_log_change(p: &Path) -> (Vec<u8>, Vec<u8>) {
+        let mut raw = raw::open(p).unwrap();
+        let mut event = raw::test_event(r#"{"prompt":"synthetic confirmed log canary"}"#);
+        event.source = "transcript".into();
+        let identity = raw::ImportIdentity {
+            origin: crate::forget::origin("synthetic", "confirmed-log"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let seq = raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                }],
+                &[identity],
+                "",
+                None,
+            )
+            .unwrap()[0];
+        export(p).unwrap();
+        let shown = raw
+            .forget_preview(crate::forget::Target::Record {
+                device: raw.device().into(),
+                seq,
+            })
+            .unwrap();
+        drop(raw);
+        crate::forget::start(p, &shown).unwrap();
+        let original = std::fs::read(p.join("forget.log")).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        let mut changed: crate::forget::Request =
+            serde_json::from_value(value["request"].clone()).unwrap();
+        changed.job = "0".repeat(32);
+        let body = serde_json::to_string(&changed).unwrap();
+        let changed = format!(
+            "{{\"sum\":\"{}\",\"request\":{body}}}\n",
+            crate::forget::hash(body.as_bytes())
+        )
+        .into_bytes();
+        assert_ne!(original, changed);
+        assert_eq!(original.len(), changed.len());
+        (original, changed)
+    }
+
+    #[test]
+    fn w5b_same_size_and_mtime_log_changes_require_fresh_confirmation() {
+        for operation in [MaintenanceOperation::Rebuild, MaintenanceOperation::Restore] {
+            for backup_log in [false, true] {
+                let home = tempfile::tempdir().unwrap();
+                let p = home.path();
+                let (_, changed) = w5b_log_change(p);
+                let path = if backup_log {
+                    dir(p).unwrap().join("forget.log")
+                } else {
+                    p.join("forget.log")
+                };
+                let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+                let identity = crate::db::store_file(&path);
+                let before = std::fs::read(p.join("raw.db")).unwrap();
+                let preview = preview_maintenance(p, operation).unwrap();
+                BEFORE_SWAP.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move || {
+                        std::fs::write(&path, changed).unwrap();
+                        std::fs::File::options()
+                            .write(true)
+                            .open(&path)
+                            .unwrap()
+                            .set_times(std::fs::FileTimes::new().set_modified(modified))
+                            .unwrap();
+                        assert_eq!(crate::db::store_file(&path), identity);
+                        assert_eq!(
+                            std::fs::metadata(&path).unwrap().modified().unwrap(),
+                            modified
+                        );
+                    }));
+                });
+                let mut commits = Vec::new();
+                let failure = match operation {
+                    MaintenanceOperation::Rebuild => crate::worker::rebuild_report(
+                        p,
+                        Some(&preview.key),
+                        crate::executable::CommandCaller::Worker,
+                        &mut |event| commits.push(event.clone()),
+                    ),
+                    MaintenanceOperation::Restore => crate::worker::restore_report(
+                        p,
+                        Some(&preview.key),
+                        crate::executable::CommandCaller::Worker,
+                        &mut |event| commits.push(event.clone()),
+                    ),
+                }
+                .unwrap_err();
+                assert_eq!(failure.code, MaintenanceCode::Stale);
+                assert!(!failure.outcome.committed());
+                assert!(commits.is_empty());
+                assert_eq!(std::fs::read(p.join("raw.db")).unwrap(), before);
+                assert!(!quarantined(p, "raw.db"));
+                assert!(!quarantined(p, "knowledge.db"));
+            }
+        }
+    }
+
+    #[test]
+    fn w5b_restore_uses_the_confirmed_log_snapshot_through_an_aba_change() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let (original, changed) = w5b_log_change(p);
+        let paths: Vec<_> = [p.join("forget.log"), dir(p).unwrap().join("forget.log")]
+            .into_iter()
+            .map(|path| {
+                let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+                (path, modified)
+            })
+            .collect();
+        let original_job = raw::open(p).unwrap().forget_requests().unwrap()[0]
+            .job
+            .clone();
+        let preview = preview_restore(p).unwrap();
+        let changed_paths = paths.clone();
+        AFTER_CONSENT.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                for (path, modified) in changed_paths {
+                    std::fs::write(&path, &changed).unwrap();
+                    std::fs::File::options()
+                        .write(true)
+                        .open(&path)
+                        .unwrap()
+                        .set_times(std::fs::FileTimes::new().set_modified(modified))
+                        .unwrap();
+                }
+            }));
+        });
+        BEFORE_SWAP.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                for (path, modified) in paths {
+                    std::fs::write(&path, &original).unwrap();
+                    std::fs::File::options()
+                        .write(true)
+                        .open(&path)
+                        .unwrap()
+                        .set_times(std::fs::FileTimes::new().set_modified(modified))
+                        .unwrap();
+                }
+            }));
+        });
+        crate::worker::restore_report(
+            p,
+            Some(&preview.key),
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        )
+        .unwrap();
+        let requests = raw::open(p).unwrap().forget_requests().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "a transient unconfirmed request entered the restored store"
+        );
+        assert_eq!(requests[0].job, original_job);
+        assert!(
+            crate::search::raw(p, "confirmed log canary", None, 5)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn w5b_quarantined_segments_are_counted_once_with_each_kept_file() {
+        for fail_after_first_file in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            segmented(p, 6, 3);
+            let bad = segments(&p.join("backups"), Kind::Records)
+                .unwrap()
+                .remove(1);
+            std::fs::write(&bad.path, "synthetic damaged segment").unwrap();
+            let preview = preview_restore(p).unwrap();
+            if fail_after_first_file {
+                FAIL_AFTER.set(Some("segments_quarantined"));
+            }
+            let result = crate::worker::restore_report(
+                p,
+                Some(&preview.key),
+                crate::executable::CommandCaller::Worker,
+                &mut |_| {},
+            );
+            FAIL_AFTER.set(None);
+            let outcome = if fail_after_first_file {
+                *result.unwrap_err().outcome
+            } else {
+                result.unwrap()
+            };
+            let receipt = outcome.restore.unwrap();
+            assert_eq!(receipt.skipped_segments, 1);
+            assert_eq!(receipt.effects.segments_quarantined, 1);
+            assert_eq!(
+                receipt.backup_files_kept,
+                if fail_after_first_file { 1 } else { 2 }
+            );
+            assert!(receipt.effects.committed());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn w5b_a_home_replaced_during_post_restore_reopen_is_untouched() {
+        for stopped in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let home = root.path().join("memory");
+            let replacement = root.path().join("replacement");
+            let retired = root.path().join("retired");
+            std::fs::create_dir(&home).unwrap();
+            segmented(&home, 3, 3);
+            std::fs::create_dir_all(replacement.join("state")).unwrap();
+            std::fs::write(replacement.join("state/worker.lock"), "other home").unwrap();
+            std::fs::write(replacement.join("canary"), "synthetic unrelated home").unwrap();
+            if stopped {
+                drop(raw::open(&replacement).unwrap());
+                std::fs::rename(
+                    replacement.join("raw.db"),
+                    replacement.join("raw.db.restored"),
+                )
+                .unwrap();
+            }
+            let before = w5b_files(&replacement);
+            let path = home.clone();
+            BEFORE_REOPEN.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    let held = raw::lock_for_swap(&path).unwrap();
+                    raw::SWAP_BLOCKED.with_borrow_mut(|hook| {
+                        *hook = Some(Box::new(move || {
+                            std::fs::rename(&path, &retired).unwrap();
+                            std::fs::rename(&replacement, &path).unwrap();
+                            drop(held);
+                        }));
+                    });
+                }));
+            });
+            let result = crate::worker::restore_report(
+                &home,
+                None,
+                crate::executable::CommandCaller::Worker,
+                &mut |_| {},
+            );
+            BEFORE_REOPEN.with_borrow_mut(|hook| *hook = None);
+            raw::SWAP_BLOCKED.with_borrow_mut(|hook| *hook = None);
+            assert_eq!(
+                w5b_files(&home),
+                before,
+                "post-restore reopen wrote into the replacement home (stopped={stopped})"
+            );
+            let failure = result.unwrap_err();
+            assert!(failure.outcome.restore.unwrap().effects.raw_swapped);
+            assert_eq!(
+                failure.outcome.index.state,
+                crate::worker::IndexState::Failed
+            );
+        }
+    }
+
+    #[test]
+    fn w5b_readonly_previews_keep_the_native_stores_wals_logs_and_paths_unchanged() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 3, 3);
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("synthetic hot WAL")).unwrap();
+        let knowledge = crate::knowledge::open(p).unwrap();
+        knowledge
+            .execute_batch("CREATE TABLE preview_canary(x); INSERT INTO preview_canary VALUES(1)")
+            .unwrap();
+        let before = w5b_files(p);
+        let rebuild = crate::worker::preview_rebuild(p).unwrap();
+        let restore = preview_restore(p).unwrap();
+        assert_eq!(rebuild.raw.unwrap().records, 4);
+        assert_eq!(restore.backup.unwrap().record_lines, Some(3));
+        assert!(!rebuild.hybrid_ready && !restore.hybrid_ready);
+        assert_ne!(rebuild.key, restore.key);
+        assert_eq!(w5b_files(p), before);
+        assert!(!p.join("state/rebuild.lock").exists());
+        assert!(!p.join("providers.db").exists());
+        let absent = p.join("unconfigured");
+        assert!(crate::worker::preview_rebuild(&absent).is_err());
+        assert!(preview_restore(&absent).is_err());
+        assert!(!absent.exists());
+    }
+
+    #[test]
+    fn w5b_changed_confirmation_refuses_before_any_data_effect() {
+        for operation in [MaintenanceOperation::Rebuild, MaintenanceOperation::Restore] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            segmented(p, 3, 3);
+            drop(crate::knowledge::open(p).unwrap());
+            let shown = preview_maintenance(p, operation).unwrap();
+            std::fs::write(p.join("config.toml"), "[capture]\nstore_prompts = false\n").unwrap();
+            let before = w5b_files(p);
+            let mut commits = Vec::new();
+            let failure = match operation {
+                MaintenanceOperation::Rebuild => crate::worker::rebuild_report(
+                    p,
+                    Some(&shown.key),
+                    crate::executable::CommandCaller::Worker,
+                    &mut |event| commits.push(event.clone()),
+                ),
+                MaintenanceOperation::Restore => crate::worker::restore_report(
+                    p,
+                    Some(&shown.key),
+                    crate::executable::CommandCaller::Worker,
+                    &mut |event| commits.push(event.clone()),
+                ),
+            }
+            .unwrap_err();
+            assert_eq!(failure.code, MaintenanceCode::Stale);
+            assert!(!failure.outcome.committed());
+            assert!(commits.is_empty());
+            assert_eq!(w5b_files(p), before);
+        }
+    }
+
+    #[test]
+    fn w5b_a_failure_after_quarantine_keeps_the_completed_swap_and_old_store_receipt() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 3, 3);
+        let shown = preview_restore(p).unwrap();
+        FAIL_AFTER.set(Some("raw_quarantine_complete"));
+        let failure = crate::worker::restore_report(
+            p,
+            Some(&shown.key),
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        FAIL_AFTER.set(None);
+        let restored = failure.outcome.restore.as_ref().unwrap();
+        assert_eq!(
+            failure.outcome.index.state,
+            crate::worker::IndexState::Complete
+        );
+        assert!(restored.effects.raw_swapped);
+        assert!(restored.effects.stopped_restore_finished);
+        assert_eq!(restored.replayed_records, 3);
+        assert!(restored.old_raw_kept_files > 0);
+        assert!(failure.outcome.committed());
+        assert_eq!(raw::open(p).unwrap().max_seq().unwrap(), 3);
+        assert!(quarantined(p, "raw.db"));
+    }
+
+    #[test]
+    fn w5b_a_first_sidecar_failure_keeps_the_live_wal_and_unlogged_forget() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let mut event = raw::test_event(r#"{"prompt":"synthetic live WAL denial"}"#);
+        event.source = "transcript".into();
+        let identity = raw::ImportIdentity {
+            origin: crate::forget::origin("synthetic", "live-wal-denial"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let seq = raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                }],
+                &[identity],
+                "",
+                None,
+            )
+            .unwrap()[0];
+        let device = raw.device().to_owned();
+        export(p).unwrap();
+        drop(raw);
+        let raw = raw::open(p).unwrap();
+        let shown = raw
+            .forget_preview(crate::forget::Target::Record {
+                device: device.clone(),
+                seq,
+            })
+            .unwrap();
+        crate::forget::start(p, &shown).unwrap();
+        for ext in ["", "-wal"] {
+            std::fs::copy(
+                p.join(format!("raw.db{ext}")),
+                p.join(format!("saved{ext}")),
+            )
+            .unwrap();
+        }
+        drop(raw);
+        for ext in ["", "-wal"] {
+            std::fs::copy(
+                p.join(format!("saved{ext}")),
+                p.join(format!("raw.db{ext}")),
+            )
+            .unwrap();
+        }
+        for log in [p.join("forget.log"), p.join("backups/forget.log")] {
+            std::fs::remove_file(log).unwrap();
+        }
+        let shown = preview_restore(p).unwrap();
+        FAIL_AFTER.set(Some("raw_quarantined"));
+        let failed = crate::worker::restore_report(
+            p,
+            Some(&shown.key),
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        FAIL_AFTER.set(None);
+        assert!(!failed.outcome.restore.as_ref().unwrap().effects.raw_swapped);
+        assert!(
+            failed
+                .outcome
+                .restore
+                .as_ref()
+                .unwrap()
+                .effects
+                .raw_put_back
+        );
+        assert_eq!(
+            failed.outcome.restore.as_ref().unwrap().old_raw_kept_files,
+            0
+        );
+        assert!(failed.outcome.committed());
+        let live = raw::open(p).unwrap();
+        assert_eq!(live.forget_requests().unwrap().len(), 1);
+        assert!(matches!(
+            live.after(&device, seq - 1, 1).unwrap()[0].item,
+            Item::Removed
+        ));
+    }
+
+    #[test]
+    fn w5b_stopped_or_damaged_rebuild_previews_require_recovery_without_finishing_it() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 3, 3);
+        std::fs::rename(p.join("raw.db"), p.join("raw.db.restored")).unwrap();
+        let before = w5b_files(p);
+        for operation in [MaintenanceOperation::Rebuild, MaintenanceOperation::Restore] {
+            assert_eq!(
+                preview_maintenance(p, operation)
+                    .unwrap_err()
+                    .downcast_ref::<MaintenanceCode>(),
+                Some(&MaintenanceCode::RecoveryRequired)
+            );
+        }
+        assert_eq!(w5b_files(p), before);
+        std::fs::rename(p.join("raw.db.restored"), p.join("raw.db")).unwrap();
+        damage_raw(p);
+        let before = w5b_files(p);
+        assert_eq!(
+            crate::worker::preview_rebuild(p)
+                .unwrap_err()
+                .downcast_ref::<MaintenanceCode>(),
+            Some(&MaintenanceCode::RecoveryRequired)
+        );
+        let restore = preview_restore(p).unwrap();
+        assert!(restore.raw.is_none());
+        assert_eq!(restore.backup.unwrap().record_lines, Some(3));
+        assert_eq!(w5b_files(p), before);
+    }
+
+    #[test]
+    fn w5b_backup_preview_reports_bad_segments_and_the_contiguous_op_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 6, 3);
+        let records = segments(&p.join("backups"), Kind::Records).unwrap();
+        std::fs::write(&records[1].path, b"synthetic damaged segment").unwrap();
+        let mut raw = raw::open(p).unwrap();
+        for _ in 0..3 {
+            raw.append_ops(&[(
+                raw::OpKind::Exclusion,
+                serde_json::json!({"repo":"synthetic","undo":true}),
+            )])
+            .unwrap();
+            export(p).unwrap();
+        }
+        drop(raw);
+        let ops = segments(&p.join("backups"), Kind::Ops).unwrap();
+        std::fs::remove_file(&ops[1].path).unwrap();
+        let before = w5b_files(p);
+        let shown = preview_restore(p).unwrap();
+        let backup = shown.backup.unwrap();
+        assert_eq!(
+            (backup.record_segments, backup.invalid_record_segments),
+            (1, 1)
+        );
+        assert_eq!(
+            (
+                backup.op_segments,
+                backup.skipped_op_segments,
+                backup.op_prefix_through
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(backup.record_lines, Some(3));
+        assert!(!backup.exact_drops_known);
+        assert_eq!(w5b_files(p), before);
+        let safe = serde_json::to_string(&preview_restore(p).unwrap()).unwrap();
+        assert!(!safe.contains(&p.to_string_lossy().into_owned()));
+        assert!(!safe.contains("damaged segment"));
+    }
+
+    #[test]
+    fn w5b_preview_refuses_aliases_and_does_not_guess_unreadable_mixed_device_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 3, 3);
+        let segment = segments(&p.join("backups"), Kind::Records)
+            .unwrap()
+            .remove(0)
+            .path;
+        std::fs::remove_file(&segment).unwrap();
+        std::fs::hard_link(p.join("raw.db"), &segment).unwrap();
+        let before = w5b_files(p);
+        assert!(preview_restore(p).is_err());
+        assert_eq!(w5b_files(p), before);
+
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 3, 3);
+        let segment = segments(&p.join("backups"), Kind::Records)
+            .unwrap()
+            .remove(0)
+            .path;
+        let other = p.join("backups/otherdevice-000000000001-000000000003.seg.zst");
+        std::fs::copy(&segment, &other).unwrap();
+        std::fs::copy(
+            PathBuf::from(format!("{}.sha256", segment.display())),
+            PathBuf::from(format!("{}.sha256", other.display())),
+        )
+        .unwrap();
+        damage_raw(p);
+        let before = w5b_files(p);
+        let failed = preview_restore(p).unwrap_err();
+        assert!(failed.to_string().contains("2 devices"));
+        assert_eq!(w5b_files(p), before);
+    }
+
+    #[test]
+    fn w5b_partial_staging_is_disclosed_and_is_not_finished_by_preview() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 3, 3);
+        std::fs::rename(p.join("raw.db"), p.join("raw.db.restoring")).unwrap();
+        let before = w5b_files(p);
+        let shown = preview_restore(p).unwrap();
+        assert!(shown.staged_partial && shown.raw.is_none());
+        assert_eq!(shown.backup.unwrap().record_lines, Some(3));
+        assert!(!p.join("raw.db").exists());
+        assert_eq!(w5b_files(p), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn w5b_readonly_preview_copies_a_closed_hot_wal_without_source_sidecars() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        {
+            let mut raw = raw::open(p).unwrap();
+            raw.append(&raw::test_event("synthetic WAL-only event"))
+                .unwrap();
+            for ext in ["", "-wal"] {
+                std::fs::copy(p.join(format!("raw.db{ext}")), p.join(format!("copy{ext}")))
+                    .unwrap();
+            }
+        }
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(p.join(format!("raw.db{ext}")));
+        }
+        for ext in ["", "-wal"] {
+            std::fs::rename(p.join(format!("copy{ext}")), p.join(format!("raw.db{ext}"))).unwrap();
+        }
+        let before = w5b_files(p);
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let shown = crate::worker::preview_rebuild(p);
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(shown.unwrap().raw.unwrap().records, 1);
+        assert_eq!(w5b_files(p), before);
+        assert!(!p.join("raw.db-shm").exists());
+    }
+
+    #[test]
+    fn w5b_raw_writes_after_admission_are_rechecked_under_the_swap_fence() {
+        for operation in [MaintenanceOperation::Rebuild, MaintenanceOperation::Restore] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            segmented(p, 3, 3);
+            let shown = preview_maintenance(p, operation).unwrap();
+            let root = p.to_owned();
+            BEFORE_SWAP.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    raw::open(&root)
+                        .unwrap()
+                        .append(&raw::test_event("synthetic unconfirmed hook event"))
+                        .unwrap();
+                }))
+            });
+            let mut commits = Vec::new();
+            let failure = match operation {
+                MaintenanceOperation::Rebuild => crate::worker::rebuild_report(
+                    p,
+                    Some(&shown.key),
+                    crate::executable::CommandCaller::Worker,
+                    &mut |event| commits.push(event.clone()),
+                ),
+                MaintenanceOperation::Restore => crate::worker::restore_report(
+                    p,
+                    Some(&shown.key),
+                    crate::executable::CommandCaller::Worker,
+                    &mut |event| commits.push(event.clone()),
+                ),
+            }
+            .unwrap_err();
+            assert_eq!(failure.code, MaintenanceCode::Stale);
+            assert!(!failure.outcome.committed());
+            assert!(commits.is_empty());
+            assert_eq!(raw::open(p).unwrap().max_seq().unwrap(), 4);
+            assert!(!quarantined(p, "raw.db"));
+            assert!(!quarantined(p, "knowledge.db"));
+        }
+    }
+
+    #[test]
+    fn w5b_the_confirmed_configuration_remains_locked_during_consumer_commits() {
+        for operation in [MaintenanceOperation::Rebuild, MaintenanceOperation::Restore] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            segmented(p, 3, 3);
+            let shown = preview_maintenance(p, operation).unwrap();
+            let mut observed = false;
+            let mut committed = |event: &crate::worker::MaintenanceCommit| {
+                if matches!(event, crate::worker::MaintenanceCommit::Index { .. }) {
+                    let lock = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(p.join("state/config.lock"))
+                        .unwrap();
+                    observed = matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock));
+                }
+            };
+            match operation {
+                MaintenanceOperation::Rebuild => crate::worker::rebuild_report(
+                    p,
+                    Some(&shown.key),
+                    crate::executable::CommandCaller::Worker,
+                    &mut committed,
+                ),
+                MaintenanceOperation::Restore => crate::worker::restore_report(
+                    p,
+                    Some(&shown.key),
+                    crate::executable::CommandCaller::Worker,
+                    &mut committed,
+                ),
+            }
+            .unwrap();
+            assert!(
+                observed,
+                "configuration writers could change the confirmed rules during {operation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn w5b_restore_receipts_retain_post_swap_failures_and_search_completion() {
+        for stage in [
+            "raw_swapped",
+            "directory_synced",
+            "restore_note",
+            "index_commit",
+        ] {
+            if stage == "directory_synced" && !cfg!(unix) {
+                continue;
+            }
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            segmented(p, 3, 3);
+            let shown = preview_restore(p).unwrap();
+            FAIL_AFTER.set(Some(stage));
+            let failure = crate::worker::restore_report(
+                p,
+                Some(&shown.key),
+                crate::executable::CommandCaller::Worker,
+                &mut |_| {},
+            )
+            .unwrap_err();
+            FAIL_AFTER.set(None);
+            let restored = failure.outcome.restore.as_ref().unwrap();
+            assert!(restored.effects.raw_swapped, "{stage}: {failure:?}");
+            assert!(failure.outcome.committed());
+            assert_eq!(restored.replayed_records, 3);
+            assert!(restored.old_raw_kept_files > 0);
+            assert_eq!(
+                failure.outcome.index.state,
+                if stage == "index_commit" {
+                    crate::worker::IndexState::Failed
+                } else {
+                    crate::worker::IndexState::Complete
+                }
+            );
+            assert!(!failure.outcome.hybrid_ready);
+        }
+    }
+
+    #[test]
+    fn w5b_stopped_complete_restore_keeps_the_live_forget_authority() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let mut event = raw::test_event(r#"{"prompt":"synthetic stopped-store canary"}"#);
+        event.source = "transcript".into();
+        let identity = raw::ImportIdentity {
+            origin: crate::forget::origin("synthetic", "stopped-authority"),
+            session: crate::forget::session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let seq = raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                }],
+                &[identity],
+                "",
+                None,
+            )
+            .unwrap()[0];
+        export(p).unwrap(); // The backup predates the sole live denial.
+        let preview = raw
+            .forget_preview(crate::forget::Target::Record {
+                device: raw.device().into(),
+                seq,
+            })
+            .unwrap();
+        crate::forget::start(p, &preview).unwrap();
+        drop(raw);
+        for log in [p.join("forget.log"), p.join("backups/forget.log")] {
+            std::fs::remove_file(log).unwrap();
+        }
+        std::fs::rename(p.join("raw.db"), p.join("raw.db.restored")).unwrap();
+        restore(p).unwrap();
+        let restored = raw::open(p).unwrap();
+        assert_eq!(restored.forget_requests().unwrap().len(), 1);
+        assert!(matches!(
+            restored.after(restored.device(), seq - 1, 1).unwrap()[0].item,
+            Item::Removed
+        ));
+        assert!(
+            crate::search::raw(p, "stopped-store canary", None, 5)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     fn overwrite(path: &Path, at: u64, bytes: &[u8]) {
         use std::io::{Seek, SeekFrom};

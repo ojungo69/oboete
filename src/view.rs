@@ -45,6 +45,8 @@ const SECURITY_HEADERS: &str = "Content-Security-Policy: default-src 'none'; scr
 
 struct Viewer {
     home: PathBuf,
+    /// The held resident lock's identity from listen; foreground viewers have none.
+    home_lock: crate::worker::FileId,
     /// Where `oboete view` was started: its checkout is the page's default scope and its search's
     /// caller (`checkout`). The resident viewer has none, and every repository is its default
     /// scope (docs/resident.md R8).
@@ -53,7 +55,7 @@ struct Viewer {
     token: Token,
     /// Settings saves, one at a time.
     saving: Mutex<()>,
-    /// One synchronous import and its last bounded receipt.
+    /// One synchronous maintenance operation and its last bounded receipt.
     maintenance: crate::settings::maintenance::Maintenance,
     /// The page `--open` gave the browser opener, removed by the first request with the token.
     opener: Mutex<Option<PathBuf>>,
@@ -499,7 +501,7 @@ pub fn resident(home: &Path) -> Result<()> {
     else {
         return Ok(());
     };
-    let id = crate::worker::file_id(lock.metadata());
+    let id = viewer.home_lock;
     let looking = Arc::clone(&viewer);
     std::thread::spawn(move || {
         let mut seen = looking.requests.load(Ordering::SeqCst);
@@ -605,10 +607,8 @@ fn listen(home: &Path) -> Result<Option<Resident>> {
         return Ok(None);
     }
     let lock = view_lock(&state)?;
-    crate::executable::check_lock(
-        Some(crate::executable::Role::Viewer),
-        crate::worker::file_id(lock.metadata()),
-    )?;
+    let home_lock = crate::worker::file_id(lock.metadata());
+    crate::executable::check_lock(Some(crate::executable::Role::Viewer), home_lock)?;
     match crate::worker::try_lock(&lock) {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
@@ -635,7 +635,10 @@ fn listen(home: &Path) -> Result<Option<Resident>> {
     Ok(Some(Resident {
         lock,
         listener,
-        viewer: Arc::new(Viewer::new(home, None, port, Token::File)),
+        viewer: Arc::new(Viewer {
+            home_lock,
+            ..Viewer::new(home, None, port, Token::File)
+        }),
     }))
 }
 
@@ -865,6 +868,7 @@ impl Viewer {
     fn new(home: &Path, cwd: Option<PathBuf>, port: u16, token: Token) -> Self {
         Self {
             home: home.to_path_buf(),
+            home_lock: None,
             cwd,
             port,
             token,
@@ -1168,7 +1172,20 @@ impl Viewer {
     fn maintenance_start(&self, body: &[u8]) -> Response {
         // The caller's original connection Slot remains held through native completion,
         // including when the peer disconnects; status reads use another short-lived Slot.
-        saved(self.maintenance.start(&self.home, body))
+        let caller = match &self.token {
+            Token::Run(_) => crate::executable::CommandCaller::Worker,
+            Token::File => match self.home_lock {
+                Some(identity) => crate::executable::CommandCaller::Viewer(identity),
+                None => {
+                    return saved(Err(crate::settings::Refusal {
+                        status: 422,
+                        code: "maintenance_busy",
+                        field: String::new(),
+                    }));
+                }
+            },
+        };
+        saved(self.maintenance.start(caller, &self.home, body))
     }
 
     /// `--open`: the page for the browser, registered before `launch` starts the opener.
@@ -1801,6 +1818,164 @@ fn params(query: &str) -> HashMap<String, String> {
 mod tests {
     use super::*;
     use crate::search::b::fixture::Store;
+
+    #[cfg(target_os = "linux")]
+    fn w5b_post(v: &Viewer, target: &str, value: Value) -> Response {
+        let body = serde_json::to_vec(&value).unwrap();
+        let host = format!("127.0.0.1:{}", v.port);
+        let origin = format!("http://{host}");
+        let token = file_token(&v.home).unwrap();
+        let length = body.len().to_string();
+        request(
+            v,
+            "POST",
+            target,
+            &[
+                ("Host", &host),
+                ("Origin", &origin),
+                ("X-Oboete-Token", &token),
+                ("Content-Type", "application/json"),
+                ("Content-Length", &length),
+            ],
+            &body,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w5b_an_initial_resident_viewer_keeps_its_original_home_for_maintenance() {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            crate::executable::expected(Some(crate::executable::Role::Viewer))
+                .unwrap()
+                .is_none()
+        );
+        for kind in ["rebuild", "restore"] {
+            let (port, home, started) = listening();
+            let p = home.path();
+            let retired = tempfile::tempdir().unwrap();
+            std::fs::rename(p, retired.path().join("previous")).unwrap();
+            std::fs::create_dir(p).unwrap();
+            std::fs::write(
+                p.join("config.toml"),
+                format!("providers = []\n[summary]\ncurate = false\n[view]\nport = {port}\n"),
+            )
+            .unwrap();
+            crate::raw::open(p)
+                .unwrap()
+                .append(&crate::raw::test_event("synthetic replacement home"))
+                .unwrap();
+            crate::worker::run_once(p).unwrap();
+            std::fs::set_permissions(p.join("state"), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            std::fs::write(p.join("state/view.lock"), "replacement viewer authority").unwrap();
+            ensure_token(p).unwrap();
+            let preview = w5b_post(
+                &started.viewer,
+                "/api/maintenance/preview",
+                json!({"operation":{"kind":kind}}),
+            );
+            assert_eq!(preview.status, 200);
+            let preview: Value = serde_json::from_slice(&preview.body).unwrap();
+            let before = crate::backup::tests::w5b_files(p);
+            let slot = Slot::take(&started.viewer).unwrap();
+            let answer = w5b_post(
+                &started.viewer,
+                "/api/maintenance/start",
+                json!({
+                    "operation":{"kind":kind}, "preview_key":preview["preview_key"],
+                    "operation_id":"a".repeat(64), "confirmed":true,
+                }),
+            );
+            drop(slot);
+            assert_eq!(answer.status, 200);
+            let answer: Value = serde_json::from_slice(&answer.body).unwrap();
+            assert_eq!(
+                answer["last"]["phase"], "failed",
+                "old viewer adopted the replacement home"
+            );
+            assert_eq!(answer["last"]["committed"], false);
+            assert_eq!(crate::backup::tests::w5b_files(p), before);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w5b_a_fifo_view_lock_is_refused_without_blocking_or_replacing_it() {
+        use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+        let (_, home, started) = listening();
+        let p = home.path();
+        crate::raw::open(p)
+            .unwrap()
+            .append(&crate::raw::test_event("synthetic FIFO proof"))
+            .unwrap();
+        crate::worker::run_once(p).unwrap();
+        let preview = w5b_post(
+            &started.viewer,
+            "/api/maintenance/preview",
+            json!({"operation":{"kind":"rebuild"}}),
+        );
+        assert_eq!(preview.status, 200);
+        let preview: Value = serde_json::from_slice(&preview.body).unwrap();
+        let lock = p.join("state/view.lock");
+        std::fs::remove_file(&lock).unwrap();
+        let path = std::ffi::CString::new(lock.to_str().unwrap()).unwrap();
+        // SAFETY: the owned fixture path is NUL-terminated and remains valid.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let identity = crate::worker::file_id(std::fs::symlink_metadata(&lock));
+        let before = std::fs::read(p.join("raw.db")).unwrap();
+        let viewer = Arc::clone(&started.viewer);
+        let (send, receive) = std::sync::mpsc::channel();
+        let call = std::thread::spawn(move || {
+            let _slot = Slot::take(&viewer).unwrap();
+            send.send(w5b_post(
+                &viewer,
+                "/api/maintenance/start",
+                json!({
+                    "operation":{"kind":"rebuild"}, "preview_key":preview["preview_key"],
+                    "operation_id":"b".repeat(64), "confirmed":true,
+                }),
+            ))
+            .unwrap();
+        });
+        let first = receive.recv_timeout(Duration::from_secs(5));
+        let prompt = first.is_ok();
+        // Let a faulty blocking reader finish before failing, so the test leaves no thread.
+        let (answer, _rescue) = match first {
+            Ok(answer) => (answer, None),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let rescue = std::fs::File::options()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&lock)
+                    .unwrap();
+                (
+                    receive.recv_timeout(Duration::from_secs(5)).unwrap(),
+                    Some(rescue),
+                )
+            }
+            Err(error) => panic!("viewer request failed: {error}"),
+        };
+        call.join().unwrap();
+        assert!(prompt, "a FIFO blocked maintenance admission");
+        assert_eq!(answer.status, 200);
+        let answer: Value = serde_json::from_slice(&answer.body).unwrap();
+        assert_eq!(answer["last"]["phase"], "failed");
+        assert_eq!(answer["last"]["committed"], false);
+        assert!(
+            std::fs::symlink_metadata(&lock)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+        assert_eq!(
+            crate::worker::file_id(std::fs::symlink_metadata(&lock)),
+            identity
+        );
+        assert_eq!(std::fs::read(p.join("raw.db")).unwrap(), before);
+        assert_eq!(started.viewer.live.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn maintenance_status_is_authenticated_bounded_and_opens_no_store() {
