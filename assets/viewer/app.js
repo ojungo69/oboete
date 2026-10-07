@@ -1254,7 +1254,89 @@ const TEXT = {
   ],
   other: ['Saving failed ({status}).', '保存できませんでした({status})。'],
   maintenance_h: ["History and recovery", "履歴の取り込みと復元"],
-  maintenance_desc: ["Preview the saved data and effects, then confirm this operation. These imports, rebuilds and restores make no model request; later background processing follows your saved settings.", "保存された記録と変更内容を確認してから実行します。取り込み・再構築・復元自体はモデルを呼びません。その後のバックグラウンド処理は保存済み設定に従います。"],
+  maintenance_desc: ["Preview the saved data and effects, then confirm this operation. Imports, rebuild, restore and v1 finalization make no model request. Recuration preparation makes no model request; its confirmed run may send history to your saved providers. Later background processing follows saved settings.", "保存された記録と変更内容を確認してから実行します。取り込み・再構築・復元・旧版の移行完了はモデルを呼びません。要約のやり直しの準備もモデルを呼びませんが、確認後の実行では保存済みの要約役へ履歴を送る場合があります。その後のバックグラウンド処理は保存済み設定に従います。"],
+  maintenance_finish: ["Finish v1 migration and remove old files", "旧版の移行を完了して旧ファイルを削除"],
+  maintenance_finish_hint: ["One final import runs before deleting only the listed v1 files and folders. Preview reads the current v1 source and selected files without changing them. This action makes no model request.", "最後の取り込みを1回行ってから、一覧の旧版ファイルとフォルダーだけを削除します。プレビューは現在の旧版データと対象ファイルを読み取るだけです。この操作ではモデルを呼びません。"],
+  maintenance_finish_preview: ["Preview final import and exact deletion scope", "最後の取り込みと正確な削除対象を確認"],
+  maintenance_finish_preview_h: ["Final import and selected v1 files", "最後の取り込みと旧版の削除対象"],
+  maintenance_finish_candidates: ["Final import candidates: {events} events, {records} records, {repositories} repositories, {documents} documents, {bytes} source bytes.", "最後の取り込み候補：イベント{events}件、レコード{records}件、リポジトリ{repositories}件、文書{documents}件、元データ{bytes}バイト。"],
+  maintenance_finish_order: ["The final import runs before deletion. No model request is made by this operation.", "最後の取り込みは削除より前に実行します。この操作ではモデルへの要求を行いません。"],
+  maintenance_finish_deletion: ["Exact deletion scope: {targets} targets, {nodes} nodes, {bytes} logical bytes. Removed bytes do not guarantee freed disk space.", "正確な削除範囲：対象{targets}件、内部を含む項目{nodes}個、論理サイズ{bytes}バイト。削除バイト数は空き容量の増加を保証しません。"],
+  maintenance_finish_target_hidden: ["Name hidden by display rules", "表示規則により名前を非表示"],
+  maintenance_finish_consent: ["Run the final import, then permanently remove exactly the listed v1 targets. I understand partial import or deletion may remain after a failure and there is no automatic rollback.", "最後の取り込みを実行し、一覧の旧版対象だけを完全に削除することに同意します。失敗時には取り込みや削除が一部残り、自動で元に戻らないことを確認しました。"],
+  maintenance_finish_start: ["Finish migration and remove listed files", "移行を完了して一覧のファイルを削除"],
+  maintenance_finish_refresh: ["Inspect finalization status", "移行完了の状況を確認"],
+  maintenance_finish_another: ["Inspect remaining files before a new preview", "残るファイルを確認してから再プレビュー"],
+  maintenance_finish_unknown_hint: ["The final import or deletion may already have happened. Inspect the receipt, current memory, backups and remaining v1 files. Do not assume the source still exists. Nothing is retried automatically.", "最後の取り込みや削除が既に行われた可能性があります。結果、現在の記憶、バックアップ、残る旧版ファイルを確認してください。元データが残っているとは限りません。自動では再試行しません。"],
+  maintenance_finish_settings_hint: ["This operation uses saved settings and makes no model request. Later background processing follows saved settings; pending edits on this page are not submitted.", "この操作は保存済み設定を使い、モデルを呼びません。その後のバックグラウンド処理は保存済み設定に従います。この画面の編集中の設定は送信しません。"],
+  maintenance_finish_phase_running: ["Final import and deletion in progress", "最後の取り込みと削除を処理中"],
+  maintenance_finish_phase_complete: ["v1 finalization completed", "旧版の移行完了処理が完了"],
+  maintenance_finish_phase_partial: ["v1 finalization stopped; inspect completed and possible changes", "旧版の移行完了処理が停止：変更内容を確認"],
+  maintenance_finish_phase_failed: ["v1 finalization did not complete", "旧版の移行完了処理は完了せず"],
+  maintenance_finish_phase_unknown: ["v1 finalization needs inspection", "旧版の移行完了結果を確認してください"],
+  maintenance_finish_progress: ["Final import so far: {records} records, {repositories} repository touches, {documents} documents committed.", "最後の取り込みの途中経過：レコード{records}件、リポジトリ履歴{repositories}件、文書{documents}件が確定。"],
+  maintenance_finish_import: ["Final import: {events} events read; {records} records, {repositories} repository touches, {documents} documents committed; {seen} already seen. Missing from older source {deleted_sessions}; identifiers requiring inspection {uncertain_identifiers}.", "最後の取り込み：イベント{events}件を読み取り、レコード{records}件・リポジトリ履歴{repositories}件・文書{documents}件が確定。既存{seen}件、旧データから消えたセッション{deleted_sessions}件、確認が必要な識別情報{uncertain_identifiers}件。"],
+  maintenance_finish_missing_sessions: ["The older source no longer contains {total} imported sessions. Showing {shown} names; review their retained memory and use Forget separately if needed.", "旧データから消えた取り込み済みセッションは{total}件です。{shown}件の名前を表示します。保持された記憶を確認し、必要なら別途忘却してください。"],
+  maintenance_finish_uncertain_sessions: ["Cannot reliably match {total} older session identities. Showing {shown} names; inspect their retained memory before forgetting.", "旧セッションの識別情報を確実に対応づけられない対象は{total}件です。{shown}件の名前を表示します。忘却する前に保持された記憶を確認してください。"],
+  maintenance_finish_effects: ["Local stores changed: {changed}; deletion requests applied: {applied}; deletion-history warnings: {warnings}.", "ローカルの保存情報の変更：{changed}。反映した削除指定：{applied}件、削除履歴の注意：{warnings}件。"],
+  maintenance_finish_changed_yes: ["yes", "あり"],
+  maintenance_finish_changed_no: ["no", "なし"],
+  maintenance_finish_deletion_progress: ["Deletion progress: {attempted} attempted, {removed} removed, {failed} failed, {uncertain} uncertain.", "削除の途中経過：試行{attempted}件、削除{removed}件、失敗{failed}件、結果が不確実{uncertain}件。"],
+  maintenance_finish_deletion_result: ["Deletion: {selected} selected, {attempted} attempted, {removed} removed, {failed} failed, {uncertain} uncertain; {authorized_bytes} logical bytes authorized, {removed_bytes} logical bytes reported removed.", "削除：対象{selected}件、試行{attempted}件、削除{removed}件、失敗{failed}件、結果が不確実{uncertain}件。許可した論理サイズ{authorized_bytes}バイト、削除を確認した論理サイズ{removed_bytes}バイト。"],
+  maintenance_finish_target_result: ["{label}: {state} ({bytes} logical bytes)", "{label}：{state}（論理サイズ{bytes}バイト）"],
+  maintenance_finish_target_removed: ["removed", "削除済み"],
+  maintenance_finish_target_failed: ["failed", "失敗"],
+  maintenance_finish_target_changed: ["changed before deletion", "削除前に変更"],
+  maintenance_finish_target_not_attempted: ["not attempted", "未試行"],
+  maintenance_finish_target_unknown_extent: ["subtree effect uncertain", "内部の削除範囲が不確実"],
+  maintenance_finish_committed_boundary: ["Some local changes completed. Inspect the receipt and remaining files before continuing.", "一部のローカル変更は完了しています。続行する前に結果と残るファイルを確認してください。"],
+  maintenance_finish_inspect: ["Earlier imports or removals are not rolled back. Some targets may remain or a subtree may have changed. The v1 source may already be gone; inspect current memory, backups and remaining files before considering any new operation.", "先に行われた取り込みや削除は自動で元に戻りません。対象が残る場合や、フォルダー内の変更範囲が不確実な場合があります。旧版の元データが既にない可能性もあるため、新たな操作を検討する前に現在の記憶・バックアップ・残るファイルを確認してください。"],
+  maintenance_finish_kept: ["Current memory and configured backups are kept. New imports follow your saved background processing settings.", "現在の記憶と設定済みバックアップは保持します。新しい取り込みのバックグラウンド処理は保存済み設定に従います。"],
+  maintenance_recurate: ["Recurate selected history", "対象の履歴を再整理"],
+  maintenance_recurate_hint: ["Preparation can update local indexing, recover or rescan stored data. It makes no model request. A confirmed run may send selected text to saved providers and incur charges.", "準備ではローカルの索引更新、保存データの復旧・再走査が起こり得ます。準備ではモデルを呼びません。確認後の実行では選んだ本文を保存済みの要約役へ送り、料金が発生する場合があります。"],
+  maintenance_recurate_scope: ["History to recurate", "再整理する履歴"],
+  maintenance_recurate_queued: ["Queued history on this device", "この端末の待機中の履歴"],
+  maintenance_recurate_skipped: ["Previously skipped history on this device", "この端末で以前に読み飛ばした履歴"],
+  maintenance_recurate_imported_v1: ["Imported oboete v1 history", "取り込んだ旧 oboete の履歴"],
+  maintenance_recurate_imported_transcripts: ["Imported agent transcripts", "取り込んだエージェントの会話履歴"],
+  maintenance_recurate_records: ["This device's record range", "この端末のレコード範囲"],
+  maintenance_recurate_from: ["First record number", "最初のレコード番号"],
+  maintenance_recurate_to: ["Last record number", "最後のレコード番号"],
+  maintenance_recurate_range_hint: ["Enter two whole record numbers; the last must be at least the first.", "整数のレコード番号を二つ入力してください。最後は最初以上にします。"],
+  maintenance_recurate_preview: ["Prepare selected history without a model request", "モデルを呼ばずに対象履歴を準備"],
+  maintenance_recurate_preview_h: ["Prepared scope and paid-chain estimate", "準備した範囲と有料経路の見積もり"],
+  maintenance_recurate_selected_scope: ["Prepared scope: {scope}.", "準備した対象：{scope}。"],
+  maintenance_recurate_range: ["this device's records {from}–{to}", "この端末のレコード{from}～{to}"],
+  maintenance_recurate_plan: ["{spans} spans; {windows} candidate windows; {tokens} estimated input tokens in total; {kept} kept back; {unparked} newly imported records still awaiting the curation checkpoint, outside this run.", "対象{spans}区間、候補{windows}窓、推定入力トークン合計{tokens}、送信対象から保持{kept}窓、今回の対象外で整理処理の読み取り位置より先にある取り込み記録{unparked}件。"],
+  maintenance_recurate_cost: ["Worst paid-chain estimate: USD {usd} if every paid entry bills every selected window. This is an estimate, not a spending cap.", "有料経路の最大見積もり：全ての有料要約役が各対象窓を請求した場合 USD {usd}。支出上限ではなく見積もりです。"],
+  maintenance_recurate_no_paid: ["No paid entry is in the saved provider chain. A confirmed run may still send to free or subscription providers.", "保存済みの要約役の経路に有料の項目はありません。確認後の実行では無料またはサブスクリプションの要約役へ送る場合があります。"],
+  maintenance_recurate_long: ["Long imported v1 sessions, longest first ({total} total)", "長い旧版取り込みセッション、長い順（計{total}件）"],
+  maintenance_recurate_long_item: ["{label}: {characters} characters", "{label}：{characters}文字"],
+  maintenance_recurate_consent: ["Send this freshly prepared scope through my saved provider chain. I understand the shown estimate and that charges may occur.", "今準備した対象を保存済みの要約役の経路へ送ることに同意します。表示された見積もりと料金が発生する可能性を確認しました。"],
+  maintenance_recurate_start: ["Start confirmed recuration", "確認した履歴の再整理を開始"],
+  maintenance_recurate_refresh: ["Inspect recuration status", "再整理の状況を確認"],
+  maintenance_recurate_another: ["Prepare another scope after inspection", "確認後に別の対象を準備"],
+  maintenance_recurate_unknown_hint: ["The request or local preparation may already have changed saved data or reached a provider. Inspect the receipt and current data. Nothing is retried automatically.", "要求またはローカルの準備で保存データが変わり、要約役へ送信済みの可能性もあります。結果と現在の記録を確認してください。自動では再試行しません。"],
+  maintenance_recurate_settings_hint: ["Uses saved provider, privacy and spending settings; pending edits on this page are not sent.", "保存済みの要約役・プライバシー・支出設定を使います。この画面の編集中の設定は送信しません。"],
+  maintenance_recurate_phase_prepared: ["Local preparation completed", "ローカルの準備が完了"],
+  maintenance_recurate_phase_running: ["Recuration is running", "履歴を再整理中"],
+  maintenance_recurate_phase_complete: ["Recuration completed", "履歴の再整理が完了"],
+  maintenance_recurate_phase_partial: ["Recuration stopped with retained effects", "変更内容を保持したまま再整理が停止"],
+  maintenance_recurate_phase_failed: ["Recuration did not complete", "履歴の再整理は完了せず"],
+  maintenance_recurate_phase_unknown: ["Recuration result needs inspection", "履歴の再整理結果を確認してください"],
+  maintenance_recurate_stage: ["Stage: {stage}.", "段階：{stage}。"],
+  maintenance_stage_preparing: ["Preparing local data", "ローカルのデータを準備"],
+  maintenance_stage_prepared: ["Ready for explicit consent", "明示的な同意を待機"],
+  maintenance_stage_curating: ["Processing selected windows", "選んだ窓を処理"],
+  maintenance_recurate_providers: ["Provider attempts: reserved {reserved}, possibly sent {sent}, settled {settled}, cancelled {cancelled}, pending {pending}, uncertain {uncertain}; usage unknown {usage_unknown}.", "要約役への試行：予約{reserved}回、送信済みの可能性{sent}回、精算{settled}回、取消{cancelled}回、保留{pending}回、不確実{uncertain}回。使用量不明{usage_unknown}回。"],
+  maintenance_recurate_accounted: ["Accounted at saved prices: {usd}, including pending bounds. This is not a provider invoice.", "保存済み単価による計上額：{usd}（保留中の上限額を含む）。要約役からの請求額ではありません。"],
+  maintenance_recurate_windows: ["Windows: committed {committed}, failed {failed}, stopped {stopped}, kept back {kept_back}; claims {claims}, retractions {retracted}.", "窓の処理：確定{committed}、失敗{failed}、停止{stopped}、送信対象から保持{kept_back}。記憶{claims}、撤回{retracted}。"],
+  maintenance_recurate_local_receipt: ["Local preparation can leave saved changes even without a consent key. Inspect this receipt before preparing again.", "同意用のキーがなくてもローカルの準備で保存内容が変わる場合があります。再準備する前にこの結果を確認してください。"],
+  maintenance_recurate_preview_failed: ["Preparation returned no usable consent key. Inspect the local receipt before trying again; no model request was started by this preview.", "準備から有効な同意用キーが返りませんでした。再試行する前にローカルの結果を確認してください。この準備ではモデルへの要求を開始していません。"],
+  maintenance_recurate_prepare_unknown: ["Preparation response was lost. Local work may have completed. Inspect status and saved data before preparing again; no automatic retry occurs.", "準備の応答が失われました。ローカルの処理が完了済みの可能性があります。再準備する前に状況と保存データを確認してください。自動では再試行しません。"],
+  maintenance_recurate_committed_boundary: ["Earlier local or provider effects are retained. Inspect pending and uncertain attempts before another operation.", "先に確定したローカル処理や要約役への試行は保持されています。次の処理の前に保留・不確実な試行を確認してください。"],
+  maintenance_scope: ["The selected record range is invalid. Enter two valid record numbers.", "指定したレコード範囲が不正です。有効な番号を二つ入力してください。"],
+  maintenance_incomplete: ["Some selected windows remain. Inspect the receipt before another operation.", "選んだ窓の一部が未完了です。次の処理の前に結果を確認してください。"],
   maintenance_rebuild: ["Rebuild search and derived information", "検索用の情報を作り直す"],
   maintenance_restore: ["Restore from the configured backup", "バックアップから復元する"],
   maintenance_rebuild_hint: ["Use the saved records and change history to rebuild search, cards and summaries. Preview the current data and recovery needs first.", "保存した記録と変更履歴から検索・カード・要約を作り直します。現在の記録と復元の必要性を先に確認します。"],
@@ -1348,7 +1430,7 @@ const TEXT = {
   maintenance_unknown_hint: ["The request may already be recorded. Inspect its status and stored history before preparing another import. It is not sent again automatically.", "処理が記録済みの可能性があります。状況と保存された履歴を確認してから、別の取り込みを準備してください。自動では再送しません。"],
   maintenance_no_receipt: ["No receipt is available in this viewer session. After a restart, inspect stored history before another preview.", "このビューアのセッションには結果がありません。再起動後は保存された履歴を確認してから再びプレビューしてください。"],
   maintenance_settings_hint: ["Import actions use saved settings and do not submit unrelated drafts. If older settings were copied, reload settings explicitly to inspect them.", "取り込みは保存済み設定を使い、ほかの編集中の内容は送信しません。旧設定がコピーされた場合は、設定を明示的に再読み込みして確認してください。"],
-  maintenance_other_unavailable: ["Claude-mem import waits for repository mapping. Recuration and v1 finalization follow in the next slice; updating is not built yet.", "claude-memの取り込みはリポジトリ対応づけを待っています。要約のやり直しと旧版の移行完了は後続の機能で追加し、更新機能はまだ未実装です。"],
+  maintenance_other_unavailable: ["Claude-mem import waits for repository mapping; updating is not built yet.", "claude-memの取り込みはリポジトリ対応づけを待っています。更新機能はまだ未実装です。"],
   maintenance_transcript_candidates: ["{agent}: {files} files, {sessions} sessions, {records} candidate records, {bytes} selected bytes; {waiting} waiting, {refused} refused.", "{agent}: {files}ファイル、{sessions}セッション、候補{records}レコード、選択{bytes}バイト。待機{waiting}、拒否{refused}。"],
   maintenance_transcript_actual: ["{agent}: {records} committed records; {seen} previously seen, {waiting} waiting, {refused} refused.", "{agent}: 確定{records}レコード。既存{seen}、待機{waiting}、拒否{refused}。"],
   maintenance_conditional_v1: ["This transcript import also includes the older store in this memory folder. Confirmation covers both imports and the following settings effect.", "この会話履歴の取り込みには、この記憶フォルダー内の旧ストアも含まれます。確認は両方の取り込みと次の設定への影響を対象にします。"],
@@ -1495,12 +1577,25 @@ let form = null;
 // Preferences are separate append operations: retain their draft/receipt for this page only.
 // Wire refreshMaintenance before database reads in the existing poll(), while settings is shown
 // or an operation/unknown receipt needs inspection. This replaces a separate polling timer.
-let maintenanceDraft = { kind:'transcripts', agent:'all', from:'', preview:null, confirmed:false,
+let maintenanceDraft = { kind:'transcripts', agent:'all', from:'', recurateScope:'queued', recurateFrom:'', recurateTo:'', preview:null, confirmed:false,
   operationId:null, previewing:false, sending:false, unknown:false, status:null, error:null };
 function maintenanceOperation(d) {
-  if(d.kind==='rebuild'||d.kind==='restore')return {kind:d.kind};
+  if(d.kind==='rebuild'||d.kind==='restore'||d.kind==='finish')return {kind:d.kind};
+  if(d.kind==='recurate') {
+    const scope=d.recurateScope==='records' ? {kind:'records',from:Number(d.recurateFrom),to:Number(d.recurateTo)}
+      : d.recurateScope==='imported_v1' ? {kind:'imported',source:'v1'}
+        : d.recurateScope==='imported_transcripts' ? {kind:'imported',source:'transcripts'}
+          : {kind:d.recurateScope};
+    return {kind:'recurate',scope};
+  }
   return d.kind === 'v1' ? {kind:'v1',from:d.from || null}
     : {kind:'transcripts',agent:d.agent === 'all' ? null : d.agent};
+}
+function maintenanceRangeValid(d) {
+  if(d.kind!=='recurate'||d.recurateScope!=='records')return true;
+  const from=Number(d.recurateFrom),to=Number(d.recurateTo);
+  return /^\d+$/.test(d.recurateFrom) && /^\d+$/.test(d.recurateTo)
+    && Number.isSafeInteger(from) && Number.isSafeInteger(to) && from>0 && to>=from;
 }
 function maintenanceRun(d) {
   return [d.status?.active,d.status?.last].find(run=>run?.operation_id===d.operationId) || null;
@@ -1530,9 +1625,16 @@ async function refreshMaintenance(d = maintenanceDraft) {
     const changed=JSON.stringify(d.status)!==JSON.stringify(status) || d.error!==null;
     const wasUnknown=d.unknown;
     d.status=status;
+    const prepared=status.last?.result?.outcome?.preview;
+    let previewChanged=false;
+    if(d.preview?.kind==='recurate' && prepared?.preview_key===d.preview.preview_key) {
+      previewChanged=JSON.stringify(d.preview.plan)!==JSON.stringify(prepared.plan);
+      if(previewChanged)d.confirmed=false;
+      d.preview={...prepared,preparation:status};
+    }
     d.error=null;
     if(maintenanceRun(d))d.unknown=false;
-    if(changed || wasUnknown!==d.unknown)renderMaintenance(d);
+    if(changed || previewChanged || wasUnknown!==d.unknown)renderMaintenance(d);
   } catch {
     if (d.statusRead !== read) return;
     const changed=d.error!=='maintenance_status_unavailable';
@@ -1543,7 +1645,9 @@ async function refreshMaintenance(d = maintenanceDraft) {
 function maintenanceSection(f) {
   const d=f.maintenance;
   const native=d.kind==='rebuild'||d.kind==='restore';
-  const prefix=native?'maintenance_native_':'maintenance_';
+  const recurate=d.kind==='recurate';
+  const finish=d.kind==='finish';
+  const prefix=finish?'maintenance_finish_':recurate?'maintenance_recurate_':native?'maintenance_native_':'maintenance_';
   const busy=maintenanceBlocked(d);
   const invalidate=()=>{
     d.preview=null;d.confirmed=false;d.operationId=null;d.error=null;
@@ -1556,7 +1660,7 @@ function maintenanceSection(f) {
     if(start)start.disabled=true;
   };
   const kind=el('select',null);
-  for(const [value,label] of [['transcripts','maintenance_transcripts'],['v1','maintenance_v1'],['rebuild','maintenance_rebuild'],['restore','maintenance_restore']]) {
+  for(const [value,label] of [['transcripts','maintenance_transcripts'],['v1','maintenance_v1'],['rebuild','maintenance_rebuild'],['restore','maintenance_restore'],['recurate','maintenance_recurate'],['finish','maintenance_finish']]) {
     const option=el('option',null,t(label));option.value=value;kind.append(option);
   }
   kind.value=d.kind;kind.dataset.field='maintenance.kind';kind.disabled=busy;
@@ -1569,26 +1673,52 @@ function maintenanceSection(f) {
   agent.addEventListener('change',()=>{d.agent=agent.value;invalidate();});
   const from=input('text',d.from,'','maintenance.from',value=>{d.from=value;invalidate();});
   from.disabled=busy;
+  const scope=el('select',null);
+  for(const [value,label] of [['queued','maintenance_recurate_queued'],['skipped','maintenance_recurate_skipped'],
+    ['imported_v1','maintenance_recurate_imported_v1'],['imported_transcripts','maintenance_recurate_imported_transcripts'],
+    ['records','maintenance_recurate_records']]) {
+    const option=el('option',null,t(label));option.value=value;scope.append(option);
+  }
+  scope.value=d.recurateScope;scope.dataset.field='maintenance.scope';scope.disabled=busy;
+  scope.addEventListener('change',()=>{d.recurateScope=scope.value;invalidate();renderMaintenance(d);});
+  const recordField=(name)=>{
+    const control=input('number',d[name],'',`maintenance.${name}`,value=>{d[name]=value;invalidate();renderMaintenance(d);});
+    control.min='1';control.disabled=busy;
+    return el('label','field',el('span',null,t(name==='recurateFrom'?'maintenance_recurate_from':'maintenance_recurate_to')),control);
+  };
   const preview=el('button','quiet small',t(prefix+'preview'));
   preview.dataset.action='maintenance.preview';
-  preview.type='button';preview.disabled=busy;
+  preview.type='button';preview.disabled=busy || !maintenanceRangeValid(d);
   preview.addEventListener('click',async()=>{
-    if(maintenanceBlocked(d))return;
+    if(maintenanceBlocked(d)||!maintenanceRangeValid(d))return;
     invalidate();d.previewing=true;renderMaintenance(d);
     try {
       const {res,answer}=await memoryWrite('maintenance/preview',{operation:maintenanceOperation(d)});
-      if(!res.ok){d.error=answer.code || 'maintenance_preview_failed';return;}
+      if(form!==f)return;
+      if(!res.ok){d.error=answer.code || 'maintenance_preview_failed';if(recurate && res.status>=500)d.unknown=true;return;}
+      if(recurate && answer.preparation) {
+        d.statusRead=(d.statusRead || 0)+1;
+        d.status=answer.preparation;
+      }
+      if(recurate && (!/^[0-9a-f]{64}$/.test(answer.preview_key || '')
+        || answer.preparation && answer.preparation.last?.phase!=='prepared')) {
+        d.error='maintenance_recurate_preview_failed';
+        return;
+      }
       d.preview=answer;
-    } catch {d.error='maintenance_preview_failed';}
-    finally {d.previewing=false;renderMaintenance(d);}
+    } catch {
+      if(recurate){d.unknown=true;d.error='maintenance_recurate_prepare_unknown';await refreshMaintenance(d);}
+      else d.error='maintenance_preview_failed';
+    }
+    finally {d.previewing=false;if(form!==f && recurate)await refreshMaintenance(d);renderMaintenance(d);}
   });
   const confirm=checkbox(d.confirmed,value=>{d.confirmed=value;renderMaintenance(d);});
   confirm.dataset.field='maintenance.confirmed';confirm.disabled=busy || !d.preview;
   const start=el('button','quiet small',t(prefix+'start'));
   start.dataset.action='maintenance.start';
-  start.type='button';start.disabled=busy || !d.preview || !d.confirmed;
+  start.type='button';start.disabled=busy || !d.preview || !d.preview.preview_key || !d.confirmed;
   start.addEventListener('click',async()=>{
-    if(maintenanceBlocked(d)||!d.preview||!d.confirmed)return;
+    if(maintenanceBlocked(d)||!d.preview?.preview_key||!d.confirmed)return;
     const bytes=crypto.getRandomValues(new Uint8Array(32));
     d.operationId=[...bytes].map(b=>b.toString(16).padStart(2,'0')).join('');
     d.sending=true;d.unknown=false;d.error=null;
@@ -1599,8 +1729,8 @@ function maintenanceSection(f) {
     renderMaintenance(d);
     try {
       const {res,answer}=await memoryWrite('maintenance/start',posted);
-      if(d.operationId!==id)return;
-      if(!res.ok){d.error=answer.code || 'maintenance_failed';return;}
+      if(d.operationId!==id || form!==f)return;
+      if(!res.ok){d.error=answer.code || 'maintenance_failed';if((recurate||finish) && res.status>=500)d.unknown=true;return;}
       d.statusRead = (d.statusRead || 0) + 1;
       d.status=answer;
     } catch {
@@ -1621,24 +1751,26 @@ function maintenanceSection(f) {
     if(d.sending||d.status?.active)return;
     d.unknown=false;invalidate();renderMaintenance(d);
   });
-  const scope={transcripts:['maintenance_agent',agent],v1:['maintenance_source_path',from]}[d.kind];
-  const scopeControl=scope ? el('label','field',el('span',null,t(scope[0])),scope[1]) : null;
+  const selection={transcripts:['maintenance_agent',agent],v1:['maintenance_source_path',from],recurate:['maintenance_recurate_scope',scope]}[d.kind];
+  const scopeControl=selection ? el('label','field',el('span',null,t(selection[0])),selection[1]) : null;
   const hintKey={v1:'maintenance_source_default',transcripts:'maintenance_native_roots'}[d.kind] ?? `maintenance_${d.kind}_hint`;
-  const consentKey={rebuild:'maintenance_rebuild_consent',restore:'maintenance_restore_consent'}[d.kind] ?? 'maintenance_consent';
+  const consentKey={rebuild:'maintenance_rebuild_consent',restore:'maintenance_restore_consent',recurate:'maintenance_recurate_consent',finish:'maintenance_finish_consent'}[d.kind] ?? 'maintenance_consent';
   const previewDetails=[];
   if(d.preview)previewDetails.push(maintenancePreview(d.preview),el('label','check',confirm,t(consentKey)));
   const active=d.status?.active,last=d.status?.last;
   return el('section','maintenance',el('h3',null,t('maintenance_h')),el('p','desc',t('maintenance_desc')),
     el('label','field',el('span',null,t('maintenance_kind')),kind),
-    scopeControl,el('p','desc',t(hintKey)),preview,...previewDetails,
+    scopeControl,recurate&&d.recurateScope==='records' ? el('div','grid',recordField('recurateFrom'),recordField('recurateTo')) : null,
+    recurate&&d.recurateScope==='records' ? el('p','desc',t('maintenance_recurate_range_hint')) : null,
+    el('p','desc',t(hintKey)),preview,...previewDetails,
     start,d.previewing ? el('p','desc',t('loading')) : null,
     d.error ? el('p','desc text maintenance-error',t(d.error)) : null,
-    d.unknown ? el('p','desc',t(prefix+'unknown_hint')) : null,
+    d.unknown ? el('p','desc',t(recurate&&!d.operationId?'maintenance_recurate_prepare_unknown':prefix+'unknown_hint')) : null,
     active ? maintenanceStatus(active) : null,last ? maintenanceStatus(last) : null,
     d.status && !d.status.available ? el('p','desc',t('maintenance_no_receipt')) : null,
-    refresh,d.operationId && !d.status?.active ? another : null,
+    refresh,(d.operationId || d.unknown) && !d.status?.active ? another : null,
     el('p','desc',t(prefix+'settings_hint')),
-    native ? null : el('p','desc',t('maintenance_other_unavailable')));
+    native || recurate || finish ? null : el('p','desc',t('maintenance_other_unavailable')));
 }
 function maintenanceNativePreview(p) {
   const rows=[];
@@ -1656,10 +1788,35 @@ function maintenanceNativePreview(p) {
   if(p.forget_log_warnings)rows.push(el('p','desc',t('maintenance_forget_warnings',{count:p.forget_log_warnings})));
   return rows;
 }
+function maintenanceRecuratePreview(p) {
+  const s=p.plan;
+  const scope=p.scope.kind==='records' ? t('maintenance_recurate_range',p.scope)
+    : t('maintenance_recurate_'+(p.scope.kind==='imported' ? `imported_${p.scope.source}` : p.scope.kind));
+  const rows=[el('p','desc',t('maintenance_recurate_selected_scope',{scope})),
+    el('p','desc',t('maintenance_recurate_plan',{
+    spans:s.spans,windows:s.windows,tokens:s.tokens,kept:s.kept_back,unparked:s.unparked_records}))];
+  rows.push(el('p','desc',s.worst_paid_usd===null
+    ? t('maintenance_recurate_no_paid')
+    : t('maintenance_recurate_cost',{usd:String(s.worst_paid_usd)})));
+  if(s.long_sessions_total)rows.push(el('p','desc',t('maintenance_recurate_long',{total:s.long_sessions_total})),
+    el('ol',null,...s.long_sessions.map(item=>el('li',null,t('maintenance_recurate_long_item',item)))));
+  return rows;
+}
+function maintenanceFinishPreview(p) {
+  return [el('p','desc',t('maintenance_finish_candidates',p.candidates)),
+    el('p','desc',t('maintenance_finish_order')),
+    el('p','desc',t('maintenance_finish_deletion',{
+      targets:p.deletion.targets.length,nodes:p.deletion.nodes,bytes:p.deletion.bytes})),
+    el('ul',null,...p.deletion.targets.map(label=>el('li','text',label || t('maintenance_finish_target_hidden'))))];
+}
 function maintenancePreview(p) {
   const rows=[];
   const native=p.kind==='rebuild'||p.kind==='restore';
-  if(native) {
+  if(p.kind==='finish') {
+    rows.push(...maintenanceFinishPreview(p));
+  } else if(p.kind==='recurate') {
+    rows.push(...maintenanceRecuratePreview(p));
+  } else if(native) {
     rows.push(...maintenanceNativePreview(p));
   } else if(p.kind==='v1') {
     rows.push(el('p','text',p.source),maintenanceV1(p.candidates,p.settings,true));
@@ -1672,7 +1829,7 @@ function maintenancePreview(p) {
     if(p.v1)rows.push(el('p','desc',t('maintenance_conditional_v1')),
       maintenanceV1(p.v1.candidates,p.v1.settings,true));
   }
-  return el('div','maintenance-preview',el('h4',null,t(native?'maintenance_native_preview_h':'maintenance_preview_h')),...rows);
+  return el('div','maintenance-preview',el('h4',null,t(p.kind==='finish'?'maintenance_finish_preview_h':p.kind==='recurate'?'maintenance_recurate_preview_h':native?'maintenance_native_preview_h':'maintenance_preview_h')),...rows);
 }
 function maintenanceV1(s,settings,candidate=false) {
   return el('div',null,el('p','desc',t(candidate?'maintenance_v1_candidates':'maintenance_v1_actual',{
@@ -1720,9 +1877,54 @@ function maintenanceNativeOutcome(out) {
   }
   return rows;
 }
-function maintenanceOutcome(out) {
+function maintenanceRecurateTotals(providers,windows) {
+  const rows=[];
+  if(providers)rows.push(el('p','desc',t('maintenance_recurate_providers',providers)),
+    el('p','desc',t('maintenance_recurate_accounted',{usd:usdValue(providers.accounted_usd)})));
+  if(windows)rows.push(el('p','desc',t('maintenance_recurate_windows',windows)));
+  return rows;
+}
+function maintenanceFinishEffects(effects) {
+  if(!effects)return [];
+  return [el('p','desc',t('maintenance_finish_effects',{
+    changed:t(effects.stores_changed?'maintenance_finish_changed_yes':'maintenance_finish_changed_no'),
+    applied:effects.forget_requests_applied,warnings:effects.forget_log_warnings}))];
+}
+function maintenanceFinishDeletion(deletion) {
+  if(!deletion)return [];
+  return [el('p','desc',t('maintenance_finish_deletion_result',deletion)),
+    el('ul',null,...(deletion.targets || []).map(target=>{
+      const key='maintenance_finish_target_'+target.state;
+      return el('li','text',t('maintenance_finish_target_result',{
+        label:target.label || t('maintenance_finish_target_hidden'),
+        state:t(Object.hasOwn(TEXT,key)?key:'maintenance_finish_target_unknown_extent'),bytes:target.bytes}));
+    }))];
+}
+function maintenanceFinishOutcome(out) {
+  const rows=[];
+  if(out.import)rows.push(el('p','desc',t('maintenance_finish_import',out.import)));
+  if(out.import)for(const [count,labels,key] of [
+    [out.import.deleted_sessions,out.import.deleted_session_labels,'maintenance_finish_missing_sessions'],
+    [out.import.uncertain_identifiers,out.import.uncertain_identifier_labels,'maintenance_finish_uncertain_sessions']]) {
+    if(count)rows.push(el('p','desc',t(key,{total:count,shown:labels?.length || 0})),
+      el('ul',null,...(labels || []).map(label=>el('li','text',label || t('maintenance_finish_target_hidden')))));
+  }
+  rows.push(...maintenanceFinishEffects(out.effects),...maintenanceFinishDeletion(out.deletion),
+    el('p','desc',t('maintenance_finish_kept')));
+  return rows;
+}
+function maintenanceOutcome(out,phase) {
   if(!out)return [];
   if(out.operation==='rebuild'||out.operation==='restore')return maintenanceNativeOutcome(out);
+  if(out.operation==='finish')return maintenanceFinishOutcome(out);
+  if(out.operation==='recurate')return [
+    ...maintenanceRecurateTotals(out.providers,out.windows),
+    out.index?.state ? el('p','desc',t('maintenance_index_'+out.index.state)) : null,
+  ].filter(Boolean);
+  if(out.preview?.kind==='recurate')return [
+    phase==='prepared' ? null : el('p','desc',t('maintenance_recurate_local_receipt')),
+    out.index?.state ? el('p','desc',t('maintenance_index_'+out.index.state)) : null,
+  ].filter(Boolean);
   const rows=[];
   if(out.transcripts)for(const [agent,s] of Object.entries(out.transcripts)) {
     if(s)rows.push(el('p','desc',t('maintenance_transcript_actual',{
@@ -1736,8 +1938,16 @@ function maintenanceOutcome(out) {
 function maintenanceStatus(run) {
   const p=run.progress;
   const native=run.kind==='rebuild'||run.kind==='restore';
+  const recurate=run.kind==='recurate';
+  const finish=run.kind==='finish';
   let progressText;
-  if(!native)progressText=t('maintenance_progress',{
+  if(finish)progressText=t('maintenance_finish_progress',{
+    records:p.v1_records,repositories:p.v1_repositories,documents:p.v1_documents});
+  else if(recurate)progressText=p.native?.kind==='index'
+    ? t('maintenance_index_progress',{consumer:t('maintenance_consumer_'+p.native.consumer),checkpoint:p.native.checkpoint,
+      unit:t('maintenance_unit_'+p.native.unit)})
+    : t('maintenance_recurate_stage',{stage:t('maintenance_stage_'+run.stage)});
+  else if(!native)progressText=t('maintenance_progress',{
     stage:t('maintenance_stage_'+run.stage),records:p.v1_records,repos:p.v1_repositories,
     documents:p.v1_documents,claude:p.claude.events,codex:p.codex.events});
   else if(p.native?.kind==='index')progressText=t('maintenance_index_progress',{
@@ -1746,9 +1956,13 @@ function maintenanceStatus(run) {
   else progressText=t('maintenance_native_progress',{stage:t('maintenance_stage_'+run.stage)});
   const rows=[el('p','desc',progressText)];
   if(run.result?.code)rows.push(el('p','desc text',t(run.result.code)));
-  if(run.phase==='partial' && run.committed)rows.push(el('p','desc',t(native?'maintenance_native_committed_boundary':'maintenance_committed_boundary')));
-  rows.push(...maintenanceOutcome(run.result?.outcome));
-  const result=el('div','maintenance-result',el('h4',null,t((native?'maintenance_native_phase_':'maintenance_phase_')+run.phase)),...rows);
+  if(run.phase==='partial' && run.committed)rows.push(el('p','desc',t(finish?'maintenance_finish_committed_boundary':recurate?'maintenance_recurate_committed_boundary':native?'maintenance_native_committed_boundary':'maintenance_committed_boundary')));
+  if(finish && run.phase==='running')rows.push(...maintenanceFinishEffects(p.finish_effects));
+  if(finish && run.phase==='running' && p.native?.kind==='deletion')rows.push(el('p','desc',t('maintenance_finish_deletion_progress',p.native.receipt)));
+  if(recurate && run.phase==='running')rows.push(...maintenanceRecurateTotals(p.providers,p.windows));
+  rows.push(...maintenanceOutcome(run.result?.outcome,run.phase));
+  if(finish && ['partial','failed','unknown'].includes(run.phase))rows.push(el('p','desc',t('maintenance_finish_inspect')));
+  const result=el('div','maintenance-result',el('h4',null,t((finish?'maintenance_finish_phase_':recurate?'maintenance_recurate_phase_':native?'maintenance_native_phase_':'maintenance_phase_')+run.phase)),...rows);
   result.setAttribute('role','status');
   return result;
 }
@@ -1759,6 +1973,13 @@ const SIZES = ['session_start_chars', 'per_prompt_chars', 'correction_chars'];
 
 function formOf(s) {
   if (s.error) return null;
+  // Saved settings invalidate consent and cached display text. Keep known effects and unknown
+  // operation IDs; the regular status GET reloads labels through the current server gate.
+  maintenanceDraft.preview=null;
+  maintenanceDraft.confirmed=false;
+  maintenanceDraft.statusRead=(maintenanceDraft.statusRead || 0)+1;
+  if(maintenanceDraft.status)maintenanceDraft.status=JSON.parse(JSON.stringify(maintenanceDraft.status,
+    (key,value)=>key==='label' ? '' : ['deleted_session_labels','uncertain_identifier_labels'].includes(key) ? [] : value));
   const text = (v) => (v === null || v === undefined ? '' : String(v));
   return {
     version: s.version,
@@ -2425,7 +2646,7 @@ function providerKeyField(provider) {
 
 function usdValue(value) {
   return value === null || value === undefined ? t('provider_test_unknown_cost')
-    : new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', maximumFractionDigits: 6 }).format(value);
+    : new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', maximumSignificantDigits: 6 }).format(value);
 }
 
 function providerPreviewMatches(preview, provider, version) {

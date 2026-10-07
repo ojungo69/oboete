@@ -124,14 +124,36 @@ pub fn read_only(home: &Path) -> Result<Option<Connection>> {
 }
 
 pub fn open(home: &Path) -> Result<Connection> {
+    open_report(home, &mut |_| {})
+}
+
+/// Report this opener's own file creation and committed schema changes only.
+pub(crate) fn open_report(
+    home: &Path,
+    committed: &mut impl FnMut(&'static str),
+) -> Result<Connection> {
     let deadline = std::time::Instant::now() + crate::db::OPEN_WRITE_WAIT;
     let path = home.join("providers.db");
     crate::db::private(home, 0o700);
+    let mut create = std::fs::OpenOptions::new();
+    create.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        create.mode(0o600);
+    }
+    match create.open(&path) {
+        Ok(_) => committed("stores_changed"),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error).context("create providers ledger"),
+    }
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     #[cfg(test)]
     crate::crash::arm(&conn);
     crate::db::wal_until(&conn, "NORMAL", deadline)?;
-    crate::db::ensure_schema_until(&conn, SCHEMA, deadline).context("providers schema")?;
+    if crate::db::ensure_schema_until(&conn, SCHEMA, deadline).context("providers schema")? {
+        committed("stores_changed");
+    }
     // Columns added after the table's first version (milestone 3, Task 4).
     for column in [
         "tokens_left",
@@ -139,9 +161,14 @@ pub fn open(home: &Path) -> Result<Connection> {
         "requests_left",
         "requests_reset_at",
     ] {
-        crate::db::ensure_column_until(&mut conn, "provider_state", column, "INTEGER", deadline)?;
+        if crate::db::ensure_column_until(&mut conn, "provider_state", column, "INTEGER", deadline)?
+        {
+            committed("stores_changed");
+        }
     }
-    crate::db::ensure_column_until(&mut conn, "provider_calls", "usd", "REAL", deadline)?;
+    if crate::db::ensure_column_until(&mut conn, "provider_calls", "usd", "REAL", deadline)? {
+        committed("stores_changed");
+    }
     for file in ["providers.db", "providers.db-wal", "providers.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }

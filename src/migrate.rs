@@ -96,6 +96,173 @@ pub(crate) struct Preview {
     pub settings: SettingsPreview,
 }
 
+/// Finalization's read-only preview. Candidate imports are not committed counts.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub(crate) struct FinishPreview {
+    pub(crate) key: String,
+    pub(crate) candidates: Candidates,
+    pub(crate) deletion: FinishDeletion,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub(crate) struct FinishDeletion {
+    pub(crate) targets: Vec<String>,
+    pub(crate) nodes: u64,
+    pub(crate) bytes: u64,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct FinishEffects {
+    pub(crate) stores_changed: bool,
+    pub(crate) forget_requests_applied: u64,
+    pub(crate) forget_log_warnings: u64,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FinishTargetState {
+    Removed,
+    Failed,
+    Changed,
+    NotAttempted,
+    UnknownExtent,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct FinishTargetOutcome {
+    pub(crate) label: String,
+    pub(crate) state: FinishTargetState,
+    pub(crate) bytes: u64,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct FinishDeletionReport {
+    pub(crate) selected: u64,
+    pub(crate) attempted: u64,
+    pub(crate) removed: u64,
+    pub(crate) failed: u64,
+    pub(crate) uncertain: u64,
+    pub(crate) authorized_bytes: u64,
+    pub(crate) removed_bytes: u64,
+    pub(crate) targets: Vec<FinishTargetOutcome>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FinishOutcome {
+    pub(crate) stats: Stats,
+    pub(crate) effects: FinishEffects,
+    pub(crate) deletion: FinishDeletionReport,
+}
+
+impl FinishOutcome {
+    pub(crate) fn committed(&self) -> bool {
+        self.effects.stores_changed || self.deletion.removed != 0
+    }
+
+    pub(crate) fn uncertain(&self) -> bool {
+        self.deletion.uncertain != 0
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct FinishFailure {
+    pub(crate) outcome: Box<FinishOutcome>,
+    pub(crate) code: FailureCode,
+    pub(crate) cause: anyhow::Error,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "kind", content = "receipt", rename_all = "snake_case")]
+pub(crate) enum FinishCommit {
+    Import(Committed),
+    Effects(FinishEffects),
+    Deletion {
+        selected: u64,
+        attempted: u64,
+        removed: u64,
+        failed: u64,
+        uncertain: u64,
+        authorized_bytes: u64,
+        removed_bytes: u64,
+    },
+}
+
+impl FinishCommit {
+    pub(crate) fn committed(&self) -> bool {
+        match self {
+            Self::Import(_) => true,
+            Self::Effects(effects) => effects.stores_changed,
+            Self::Deletion { removed, .. } => *removed != 0,
+        }
+    }
+}
+
+impl FinishDeletionReport {
+    fn planned(manifest: &FinishManifest, rules: &crate::redact::Rules) -> Self {
+        Self {
+            selected: manifest.targets.len() as u64,
+            authorized_bytes: manifest.bytes,
+            targets: manifest
+                .targets
+                .iter()
+                .map(|target| FinishTargetOutcome {
+                    label: crate::redact::outbound_with(&target.name, rules),
+                    state: FinishTargetState::NotAttempted,
+                    bytes: target.bytes,
+                })
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    fn event(&self) -> FinishCommit {
+        FinishCommit::Deletion {
+            selected: self.selected,
+            attempted: self.attempted,
+            removed: self.removed,
+            failed: self.failed,
+            uncertain: self.uncertain,
+            authorized_bytes: self.authorized_bytes,
+            removed_bytes: self.removed_bytes,
+        }
+    }
+}
+
+// Bound returned metadata, recursive stack and buffered child digests, not file contents.
+const FINISH_TARGETS: usize = 128;
+const FINISH_LABEL_BYTES: usize = 16 * 1024;
+const FINISH_PATH_BYTES: usize = 4096;
+const FINISH_DEPTH: usize = 32;
+const FINISH_DIGEST_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(PartialEq, serde::Serialize)]
+struct FinishTarget {
+    name: String,
+    directory: bool,
+    nodes: u64,
+    bytes: u64,
+    digest: [u8; 32],
+}
+
+/// Used by preview; a confirmed finish can recheck the same per-target bindings.
+#[derive(PartialEq, serde::Serialize)]
+struct FinishManifest {
+    targets: Vec<FinishTarget>,
+    nodes: u64,
+    bytes: u64,
+}
+
+#[derive(Default)]
+struct FinishWalk {
+    nodes: u64,
+    bytes: u64,
+    buffered: usize,
+    directory: bool,
+}
+
+// Type, the entry's own identity, logical length and modification time.
+type FinishStamp = (u8, (u64, u64), u64, std::time::SystemTime);
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Outcome {
     pub stats: Stats,
@@ -453,16 +620,13 @@ pub(crate) fn preview(home: &Path, from: &Path) -> Result<Preview> {
     })
 }
 
-fn preview_connection(home: &Path, from: &Path, v1: &Connection, source: &str) -> Result<Preview> {
-    let device = crate::db::device_id(v1).context("not a v1 store")?;
-    let (settings, bytes) = preview_settings(home, from)?;
-    let capture = capture_settings(bytes.as_deref(), SOURCE)?;
+fn preview_candidates(v1: &Connection, device: &str, capture: &Settings) -> Result<Candidates> {
     let mut candidates = Candidates::default();
     let mut st = v1.prepare(EVENTS_SQL)?;
     let mut rows = st.query([0])?;
     while let Some(row) = rows.next()? {
         candidates.events += 1;
-        let records = captured_row(row, &capture)?;
+        let records = captured_row(row, capture)?;
         candidates.records += records.len() as u64;
         candidates.bytes += records
             .iter()
@@ -472,7 +636,7 @@ fn preview_connection(home: &Path, from: &Path, v1: &Connection, source: &str) -
     let mut st = v1.prepare(REPOS_SQL)?;
     let mut rows = st.query([])?;
     while let Some(row) = rows.next()? {
-        let records = captured_repo(row, &capture)?;
+        let records = captured_repo(row, capture)?;
         candidates.repos += records.len() as u64;
         candidates.bytes += records
             .iter()
@@ -481,8 +645,8 @@ fn preview_connection(home: &Path, from: &Path, v1: &Connection, source: &str) -
     }
     read_documents(
         v1,
-        &device,
-        &capture,
+        device,
+        capture,
         &mut Default::default(),
         &mut Stats::default(),
         |doc| {
@@ -491,6 +655,14 @@ fn preview_connection(home: &Path, from: &Path, v1: &Connection, source: &str) -
         },
     )?;
     fingerprint(v1)?;
+    Ok(candidates)
+}
+
+fn preview_connection(home: &Path, from: &Path, v1: &Connection, source: &str) -> Result<Preview> {
+    let device = crate::db::device_id(v1).context("not a v1 store")?;
+    let (settings, bytes) = preview_settings(home, from)?;
+    let capture = capture_settings(bytes.as_deref(), SOURCE)?;
+    let candidates = preview_candidates(v1, &device, &capture)?;
     let key = preview_key(
         home,
         &(
@@ -507,6 +679,352 @@ fn preview_connection(home: &Path, from: &Path, v1: &Connection, source: &str) -
         candidates,
         settings,
     })
+}
+
+/// Inspect only: no Raw open, recovery, settings copy, coordination file or final pass.
+pub(crate) fn preview_finish(home: &Path) -> Result<FinishPreview> {
+    let from = home.join("oboete.db");
+    check_source(home, &from)?;
+    let destination = preview_key(home, &"finish destination")?;
+    let config = finish_config_bytes(home)?;
+    let capture = capture_settings(config.as_deref(), SOURCE)?;
+    let backup = finish_backup(home, config.as_deref())?;
+    let manifest = finish_manifest(home, &backup)?;
+    check_finish_source(&from)?;
+    let (candidates, source) = with_preview_v1(&from, |v1, source| {
+        let device = crate::db::device_id(v1).context("not a v1 store")?;
+        Ok((
+            preview_candidates(v1, &device, &capture)?,
+            source.to_owned(),
+        ))
+    })?;
+    anyhow::ensure!(
+        manifest == finish_manifest(home, &backup)? && config == finish_config_bytes(home)?,
+        "finish preview inputs changed"
+    );
+    check_source(home, &from)?;
+    let key = finish_key(home, &source, config.as_deref(), &manifest)?;
+    anyhow::ensure!(
+        destination == preview_key(home, &"finish destination")?,
+        "finish destination changed"
+    );
+    let targets: Vec<String> = manifest
+        .targets
+        .iter()
+        .map(|target| target.name.clone())
+        .collect();
+    let label_bytes = targets.iter().try_fold(0usize, |sum, label| {
+        sum.checked_add(label.len())
+            .context("finish labels are too large")
+    })?;
+    anyhow::ensure!(
+        label_bytes <= FINISH_LABEL_BYTES,
+        "finish labels are too large"
+    );
+    Ok(FinishPreview {
+        key,
+        candidates,
+        deletion: FinishDeletion {
+            targets,
+            nodes: manifest.nodes,
+            bytes: manifest.bytes,
+        },
+    })
+}
+
+fn finish_backup(home: &Path, config: Option<&[u8]>) -> Result<PathBuf> {
+    let text = config.map(std::str::from_utf8).transpose()?;
+    Ok(text
+        .map(crate::backup::location)
+        .transpose()?
+        .flatten()
+        .map_or_else(|| home.join("backups"), |path| home.join(path)))
+}
+
+fn finish_key(
+    home: &Path,
+    source: &str,
+    config: Option<&[u8]>,
+    manifest: &FinishManifest,
+) -> Result<String> {
+    preview_key(
+        home,
+        &("finish", source, config.map(crate::forget::hash), manifest),
+    )
+}
+
+fn check_finish_source(from: &Path) -> Result<()> {
+    // A source link may name a regular v1 DB; neither it nor its WAL may be a special file.
+    let source_path = from.canonicalize()?;
+    anyhow::ensure!(
+        finish_stamp(&source_path)?.0 == 0,
+        "finish source is not a file"
+    );
+    let mut wal = source_path.as_os_str().to_owned();
+    wal.push("-wal");
+    match std::fs::symlink_metadata(Path::new(&wal)) {
+        Ok(_) => anyhow::ensure!(
+            finish_stamp(Path::new(&wal))?.0 == 0,
+            "finish WAL is not a file"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn finish_config_bytes(home: &Path) -> Result<Option<Vec<u8>>> {
+    // Keep the native config reader/parser; refuse a static pipe/device before reading it.
+    match std::fs::metadata(home.join("config.toml")) {
+        Ok(metadata) => anyhow::ensure!(metadata.is_file(), "finish config is not a file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    config_bytes(home)
+}
+
+fn finish_manifest(home: &Path, backup: &Path) -> Result<FinishManifest> {
+    let home = std::path::absolute(home)?;
+    let backup_path = std::path::absolute(backup)?;
+    let backup = absolute_identity(backup)?;
+    let mut names = Vec::new();
+    let mut labels = 0usize;
+    for entry in std::fs::read_dir(&home)? {
+        let entry = entry?;
+        let filename = entry.file_name();
+        let kind = entry.file_type()?;
+        if !old_name(&filename.to_string_lossy(), kind.is_dir()) {
+            continue;
+        }
+        let name = filename
+            .to_str()
+            .context("finish target is not UTF-8")?
+            .to_owned();
+        labels = labels
+            .checked_add(name.len())
+            .context("finish labels are too large")?;
+        anyhow::ensure!(
+            names.len() < FINISH_TARGETS && labels <= FINISH_LABEL_BYTES,
+            "finish target metadata is too large"
+        );
+        let path = entry.path();
+        anyhow::ensure!(
+            !backup_path.starts_with(&path),
+            "finish target overlaps native backups"
+        );
+        if kind.is_dir() {
+            anyhow::ensure!(
+                !backup.starts_with(path.canonicalize()?),
+                "finish target overlaps native backups"
+            );
+        } else if !kind.is_symlink() {
+            anyhow::ensure!(
+                backup != absolute_identity(&path)?,
+                "finish target overlaps native backups"
+            );
+        }
+        names.push(name);
+    }
+    names.sort();
+    let mut walk = FinishWalk::default();
+    let mut targets = Vec::new();
+    for name in names {
+        let (nodes, bytes) = (walk.nodes, walk.bytes);
+        let digest = finish_node(&home, Path::new(&name), 0, &mut walk)?;
+        targets.push(FinishTarget {
+            name,
+            directory: walk.directory,
+            nodes: walk.nodes - nodes,
+            bytes: walk.bytes - bytes,
+            digest,
+        });
+    }
+    Ok(FinishManifest {
+        targets,
+        nodes: walk.nodes,
+        bytes: walk.bytes,
+    })
+}
+
+fn finish_node(
+    home: &Path,
+    relative: &Path,
+    depth: usize,
+    walk: &mut FinishWalk,
+) -> Result<[u8; 32]> {
+    anyhow::ensure!(
+        depth <= FINISH_DEPTH && relative.as_os_str().as_encoded_bytes().len() <= FINISH_PATH_BYTES,
+        "finish path metadata is too large"
+    );
+    let path = home.join(relative);
+    let stamp = finish_stamp(&path)?;
+    if depth == 0 {
+        walk.directory = stamp.0 == 1;
+    }
+    walk.nodes = walk
+        .nodes
+        .checked_add(1)
+        .context("finish node count overflow")?;
+    let mut hash = Sha256::new();
+    hash.update(serde_json::to_vec(&(
+        relative.as_os_str().as_encoded_bytes(),
+        &stamp,
+    ))?);
+    match stamp.0 {
+        0 => {
+            walk.bytes = walk
+                .bytes
+                .checked_add(stamp.2)
+                .context("finish byte count overflow")?;
+            hash.update(finish_file_hash(&path, &stamp)?);
+        }
+        1 => {
+            // Sort fixed-size child hashes, not whole paths or file bodies. Full relative paths
+            // are bound inside each hash, so enumeration order cannot change membership.
+            let mut children = Vec::new();
+            for entry in std::fs::read_dir(&path)? {
+                let child = relative.join(entry?.file_name());
+                let digest = finish_node(home, &child, depth + 1, walk)?;
+                walk.buffered = walk
+                    .buffered
+                    .checked_add(32)
+                    .context("finish metadata overflow")?;
+                anyhow::ensure!(
+                    walk.buffered <= FINISH_DIGEST_BYTES,
+                    "finish directory metadata is too large"
+                );
+                children.push(digest);
+            }
+            children.sort_unstable();
+            for child in &children {
+                hash.update(child);
+            }
+            walk.buffered -= children.len() * 32;
+        }
+        2 => {
+            let target = std::fs::read_link(&path)?;
+            let bytes = target.as_os_str().as_encoded_bytes();
+            anyhow::ensure!(
+                bytes.len() <= FINISH_PATH_BYTES,
+                "finish link metadata is too large"
+            );
+            walk.bytes = walk
+                .bytes
+                .checked_add(stamp.2)
+                .context("finish byte count overflow")?;
+            hash.update(bytes);
+        }
+        _ => unreachable!("finish_stamp only accepts fixed entry types"),
+    }
+    anyhow::ensure!(
+        stamp == finish_stamp(&path)?,
+        "finish target changed during inspection"
+    );
+    Ok(hash.finalize().into())
+}
+
+fn finish_stamp(path: &Path) -> Result<FinishStamp> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    let kind = if metadata.file_type().is_symlink() {
+        2
+    } else if metadata.is_dir() {
+        1
+    } else if metadata.is_file() {
+        0
+    } else {
+        anyhow::bail!("finish target is not a file, directory or link")
+    };
+    Ok((
+        kind,
+        finish_identity(path, &metadata, None)?,
+        metadata.len(),
+        metadata.modified()?,
+    ))
+}
+
+fn finish_open(path: &Path) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT.
+        options.custom_flags(0x0200_0000 | 0x0020_0000);
+    }
+    Ok(options.open(path)?)
+}
+
+fn finish_identity(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    file: Option<&std::fs::File>,
+) -> Result<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let _ = (path, file);
+        Ok((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(windows)]
+    {
+        let _ = metadata;
+        let opened;
+        let file = match file {
+            Some(file) => file,
+            None => {
+                opened = finish_open(path)?;
+                &opened
+            }
+        };
+        let info = winapi_util::file::information(file)?;
+        Ok((info.volume_serial_number(), info.file_index()))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, metadata, file);
+        anyhow::bail!("finish entry identity is unavailable")
+    }
+}
+
+fn finish_file_hash(path: &Path, stamp: &FinishStamp) -> Result<[u8; 32]> {
+    use std::io::Read;
+    let mut file = finish_open(path)?;
+    let opened = file.metadata()?;
+    anyhow::ensure!(
+        opened.is_file()
+            && finish_identity(path, &opened, Some(&file))? == stamp.1
+            && opened.len() == stamp.2
+            && opened.modified()? == stamp.3,
+        "finish file changed before reading"
+    );
+    let limit = stamp
+        .2
+        .checked_add(1)
+        .context("finish file length overflow")?;
+    let mut hash = Sha256::new();
+    let mut bytes = 0u64;
+    {
+        let mut reader = (&mut file).take(limit);
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let n = reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hash.update(&buffer[..n]);
+            bytes += n as u64; // take(limit) bounds the complete sum.
+        }
+    }
+    anyhow::ensure!(
+        bytes == stamp.2 && *stamp == finish_stamp(path)?,
+        "finish file changed during reading"
+    );
+    Ok(hash.finalize().into())
 }
 
 /// One pass of the v1 import (spec 7.4, D6): the events past the checkpoint as records, in
@@ -564,6 +1082,7 @@ fn v1_row(r: &rusqlite::Row) -> rusqlite::Result<V1Row> {
 }
 
 /// `pass`, with v1's fingerprint read in the same transaction.
+#[cfg(test)]
 fn read_pass(home: &Path, raw: &mut Raw, from: &Path) -> Result<(Stats, Fingerprint)> {
     let v1 = open_v1(from)?;
     // One read transaction: a consistent snapshot while v1's hooks keep writing.
@@ -793,78 +1312,299 @@ pub fn finish(
     mut answer: impl std::io::BufRead,
     out: &mut impl std::io::Write,
 ) -> Result<()> {
-    let from = &home.join("oboete.db");
-    // Open to the end: its shared lock keeps a restore from swapping raw.db, with the batches the
-    // pass just checked, while the answer is read and v1 is deleted.
-    let mut raw = crate::raw::open(home)?;
-    // Like pass, apply surviving forget requests before this final pass can commit imports.
-    crate::forget::reconcile_or_say(home, &mut raw)?;
-    let (stats, before) = read_pass(home, &mut raw, from)?;
-    let mut files = old_files(home)?;
-    writeln!(out, "v1's old files in {}:", home.display())?;
-    for (path, bytes) in &files {
-        writeln!(out, "  {} ({bytes} bytes)", path.display())?;
-    }
-    if !stats.deleted.is_empty() {
-        writeln!(
-            out,
-            "v1 sessions deleted from oboete.db after they were imported (forget them to remove \
-             them here too): {}",
-            stats.deleted.join(", ")
-        )?;
-    }
-    if !stats.uncertain.is_empty() {
-        writeln!(
-            out,
-            "v1 session deletion cannot be determined (earlier redaction or clipping): {}",
-            stats.uncertain.join(", ")
-        )?;
-    }
-    write!(out, "Delete these files? Type yes to delete them: ")?;
-    out.flush()?;
-    let mut line = String::new();
-    answer.read_line(&mut line)?;
-    if line.trim() != "yes" {
-        writeln!(out, "Nothing was deleted.")?;
-        return Ok(());
-    }
-    let now = {
-        let v1 = open_v1(from)?;
-        v1.execute_batch("BEGIN")?;
-        fingerprint(&v1)?
+    let mode = FinishMode::Cli {
+        answer: &mut answer,
+        out,
     };
-    anyhow::ensure!(
-        now == before,
-        "oboete.db changed after the import pass (an old hook still writes to it): nothing was \
-         deleted; run `oboete migrate --finish` again"
-    );
-    // The store first, right after the recheck, since a v1 write between the two is lost.
-    // ponytail: so is one by a v1 process that still holds oboete.db open after it is deleted; spec
-    // 7.5 runs `--finish` once the sessions started before the switch have restarted, and the
-    // recheck catches most that have not. Excluding v1's writers would need v1's write lock.
-    files.sort_by_key(|(path, _)| {
-        !path
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy().starts_with("oboete.db"))
-    });
-    let mut failed = 0;
-    for (path, _) in &files {
-        // `remove_dir_all` removes a link, never what it points to.
-        let gone = if path.is_dir() {
-            std::fs::remove_dir_all(path)
-        } else {
-            std::fs::remove_file(path)
-        };
-        match gone {
-            Ok(()) => writeln!(out, "deleted {}", path.display())?,
-            Err(e) => {
-                failed += 1;
-                writeln!(out, "not deleted {}: {e}", path.display())?;
-            }
+    finish_operation(
+        home,
+        crate::executable::CommandCaller::Worker,
+        mode,
+        &mut |_| {},
+    )
+    .map(|_| ())
+    .map_err(|failure| failure.cause)
+}
+
+pub(crate) fn finish_report(
+    home: &Path,
+    expected_key: &str,
+    caller: crate::executable::CommandCaller,
+    progress: &mut impl FnMut(&FinishCommit),
+) -> std::result::Result<FinishOutcome, FinishFailure> {
+    finish_operation(home, caller, FinishMode::Prepared(expected_key), progress)
+}
+
+/// Only the two native entrypoints choose confirmation timing; no request supplies IO or paths.
+enum FinishMode<'a> {
+    Prepared(&'a str),
+    Cli {
+        answer: &'a mut dyn std::io::BufRead,
+        out: &'a mut dyn std::io::Write,
+    },
+}
+
+impl FinishMode<'_> {
+    fn expected(&self) -> Option<&str> {
+        match self {
+            Self::Prepared(key) => Some(key),
+            Self::Cli { .. } => None,
         }
     }
-    anyhow::ensure!(failed == 0, "{failed} file(s) not deleted");
-    Ok(())
+
+    fn confirm(&mut self, home: &Path, stats: &Stats, files: &FinishManifest) -> Result<bool> {
+        let Self::Cli { answer, out } = self else {
+            return Ok(true);
+        };
+        writeln!(out, "v1's old files in {}:", home.display())?;
+        for target in &files.targets {
+            writeln!(
+                out,
+                "  {} ({} bytes)",
+                home.join(&target.name).display(),
+                target.bytes
+            )?;
+        }
+        if !stats.deleted.is_empty() {
+            writeln!(
+                out,
+                "v1 sessions deleted from oboete.db after they were imported (forget them to remove \
+                 them here too): {}",
+                stats.deleted.join(", ")
+            )?;
+        }
+        if !stats.uncertain.is_empty() {
+            writeln!(
+                out,
+                "v1 session deletion cannot be determined (earlier redaction or clipping): {}",
+                stats.uncertain.join(", ")
+            )?;
+        }
+        write!(out, "Delete these files? Type yes to delete them: ")?;
+        out.flush()?;
+        let mut line = String::new();
+        answer.read_line(&mut line)?;
+        if line.trim() == "yes" {
+            Ok(true)
+        } else {
+            writeln!(out, "Nothing was deleted.")?;
+            Ok(false)
+        }
+    }
+
+    fn removed(&mut self, path: &Path, result: &std::io::Result<()>) -> Result<()> {
+        if let Self::Cli { out, .. } = self {
+            match result {
+                Ok(()) => writeln!(out, "deleted {}", path.display())?,
+                Err(error) => writeln!(out, "not deleted {}: {error}", path.display())?,
+            }
+        }
+        Ok(())
+    }
+}
+
+fn finish_operation(
+    home: &Path,
+    caller: crate::executable::CommandCaller,
+    mut mode: FinishMode<'_>,
+    progress: &mut impl FnMut(&FinishCommit),
+) -> std::result::Result<FinishOutcome, FinishFailure> {
+    let mut outcome = FinishOutcome::default();
+    let mut code = FailureCode::Busy;
+    let result = (|| -> Result<()> {
+        let proof = crate::executable::CommandHome::new(home, caller)?;
+        let from = home.join("oboete.db");
+        code = FailureCode::InvalidSource;
+        check_source(home, &from)?;
+        let expected = mode.expected();
+        if let Some(expected) = expected {
+            code = FailureCode::Stale;
+            anyhow::ensure!(
+                preview_finish(home)?.key == expected,
+                "finish preview is stale"
+            );
+        }
+        code = FailureCode::Busy;
+        proof.check(home)?;
+        let _import = crate::import::lock(home)?;
+        proof.check(home)?;
+        let _config = crate::settings::config_lock(home)?;
+        proof.check(home)?;
+        code = FailureCode::InvalidConfig;
+        let config = finish_config_bytes(home)?;
+        let capture = capture_settings(config.as_deref(), SOURCE)?;
+        let backup = finish_backup(home, config.as_deref())?;
+        code = FailureCode::InvalidSource;
+        let mut manifest = finish_manifest(home, &backup)?;
+        check_finish_source(&from)?;
+        let mut raw = None;
+        let (source, before) = with_preview_v1(&from, |v1, source| {
+            code = FailureCode::Stale;
+            proof.check(home)?;
+            anyhow::ensure!(
+                config == finish_config_bytes(home)? && manifest == finish_manifest(home, &backup)?,
+                "finish inputs changed during admission"
+            );
+            if let Some(expected) = expected {
+                anyhow::ensure!(
+                    finish_key(home, source, config.as_deref(), &manifest)? == expected,
+                    "finish preview is stale"
+                );
+            }
+            check_source(home, &from)?;
+            let device = crate::db::device_id(v1).context("not a v1 store")?;
+            outcome.deletion = FinishDeletionReport::planned(&manifest, &capture.rules);
+            code = FailureCode::Failed;
+            raw = Some(crate::raw::open_report(home, Some(&proof), &mut |_| {
+                outcome.effects.stores_changed = true;
+                progress(&FinishCommit::Effects(outcome.effects.clone()));
+                Ok(())
+            })?);
+            let raw = raw.as_mut().context("finish raw is absent")?;
+            proof.check(home)?;
+            let report = crate::forget::reconcile_report(home, raw, &mut |_, applied| {
+                outcome.effects.stores_changed = true;
+                outcome.effects.forget_requests_applied += applied as u64;
+                progress(&FinishCommit::Effects(outcome.effects.clone()));
+            })?;
+            outcome.effects.forget_log_warnings = report.problems.len() as u64;
+            if !report.problems.is_empty() {
+                progress(&FinishCommit::Effects(outcome.effects.clone()));
+                if matches!(&mode, FinishMode::Cli { .. }) {
+                    for problem in &report.problems {
+                        eprintln!("oboete: forget request log: {problem}");
+                    }
+                }
+            }
+            proof.check(home)?;
+            let effects = &mut outcome.effects;
+            read_connection(
+                v1,
+                raw,
+                &device,
+                &capture,
+                &mut outcome.stats,
+                &mut |event| {
+                    effects.stores_changed = true;
+                    progress(&FinishCommit::Import(event.clone()));
+                },
+            )?;
+            Ok((source.to_owned(), fingerprint(v1)?))
+        })?;
+        // Retain the shared Raw swap hold through CLI input and deletion, after scratch cleanup.
+        let _raw_hold = raw.context("finish raw is absent")?;
+        proof.check(home)?;
+        if matches!(&mode, FinishMode::Cli { .. }) {
+            manifest = finish_manifest(home, &backup)?;
+            outcome.deletion = FinishDeletionReport::planned(&manifest, &capture.rules);
+        }
+        progress(&outcome.deletion.event());
+        if !mode.confirm(home, &outcome.stats, &manifest)? {
+            return Ok(());
+        }
+
+        code = FailureCode::Stale;
+        proof.check(home)?;
+        anyhow::ensure!(
+            config == finish_config_bytes(home)?,
+            "finish config changed after the import pass"
+        );
+        let current = finish_manifest(home, &backup)?;
+        if current != manifest {
+            for (target, reported) in manifest.targets.iter().zip(&mut outcome.deletion.targets) {
+                if current.targets.iter().find(|now| now.name == target.name) != Some(target) {
+                    reported.state = FinishTargetState::Changed;
+                }
+            }
+            progress(&outcome.deletion.event());
+            anyhow::bail!("v1's old files changed after the import pass: nothing was deleted");
+        }
+        check_finish_source(&from)?;
+        with_preview_v1(&from, |v1, now| {
+            anyhow::ensure!(
+                now == source && fingerprint(v1)? == before,
+                "oboete.db changed after the import pass (an old hook still writes to it): nothing was \
+                 deleted; run `oboete migrate --finish` again"
+            );
+            Ok(())
+        })?;
+        proof.check(home)?;
+
+        // The last check/unlink gap and old v1 writers retaining an unlinked handle remain
+        // spec 7.5's cutover precondition; import.lock does not stop that old writer.
+        let mut order: Vec<usize> = (0..manifest.targets.len()).collect();
+        order.sort_by_key(|&index| !manifest.targets[index].name.starts_with("oboete.db"));
+        for index in order {
+            code = FailureCode::Stale;
+            proof.check(home)?;
+            anyhow::ensure!(
+                config == finish_config_bytes(home)?,
+                "finish config changed during deletion"
+            );
+            let target = &manifest.targets[index];
+            let path = home.join(&target.name);
+            let current = (|| -> Result<()> {
+                let mut walk = FinishWalk::default();
+                let digest = finish_node(home, Path::new(&target.name), 0, &mut walk)?;
+                anyhow::ensure!(
+                    digest == target.digest
+                        && walk.nodes == target.nodes
+                        && walk.bytes == target.bytes
+                        && walk.directory == target.directory,
+                    "finish target changed before deletion"
+                );
+                Ok(())
+            })();
+            if let Err(error) = current {
+                outcome.deletion.targets[index].state = FinishTargetState::Changed;
+                progress(&outcome.deletion.event());
+                return Err(error);
+            }
+            proof.check(home)?;
+            code = FailureCode::Failed;
+            // Preserve the CLI's directory-symlink removal on Windows too. The standard
+            // remove_dir_all unlinks a symlink without traversing its outside target.
+            let removed = if target.directory || path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            outcome.deletion.attempted += 1;
+            match &removed {
+                Ok(()) => {
+                    outcome.deletion.removed += 1;
+                    outcome.deletion.removed_bytes += target.bytes;
+                    outcome.deletion.targets[index].state = FinishTargetState::Removed;
+                }
+                Err(_) => {
+                    outcome.deletion.failed += 1;
+                    outcome.deletion.targets[index].state = if target.directory {
+                        outcome.deletion.uncertain += 1;
+                        FinishTargetState::UnknownExtent
+                    } else {
+                        FinishTargetState::Failed
+                    };
+                }
+            }
+            // Preserve actual effects before either an observer or stdout can fail.
+            progress(&outcome.deletion.event());
+            mode.removed(&path, &removed)?;
+        }
+        anyhow::ensure!(
+            outcome.deletion.failed == 0,
+            "{} file(s) not deleted",
+            outcome.deletion.failed
+        );
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(outcome),
+        Err(cause) => Err(FinishFailure {
+            outcome: Box::new(outcome),
+            code: failure_code(&cause, code),
+            cause,
+        }),
+    }
 }
 
 /// v1's runtime files in the home, spec 7.4's list (what ~/.oboete held on WSL on 2026-09-25):
@@ -877,26 +1617,29 @@ fn old_files(home: &Path) -> Result<Vec<(std::path::PathBuf, u64)>> {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let dir = entry.file_type()?.is_dir();
-        let db = |stem: &str| {
-            ["", "-wal", "-shm"]
-                .iter()
-                .any(|end| name == format!("{stem}{end}"))
-        };
-        let snapshot = name.starts_with("pre-")
-            && [".db", ".db-wal", ".db-shm"]
-                .iter()
-                .any(|e| name.ends_with(e));
-        let old = if dir {
-            name.starts_with("pre-rollout-") || ["spool", "cache", "logs"].contains(&name.as_str())
-        } else {
-            db("oboete.db") || db("memory.db") || snapshot
-        };
-        if old {
+        if old_name(&name, dir) {
             files.push((entry.path(), size(&entry.path())?));
         }
     }
     files.sort();
     Ok(files)
+}
+
+fn old_name(name: &str, dir: bool) -> bool {
+    let db = |stem: &str| {
+        ["", "-wal", "-shm"]
+            .iter()
+            .any(|end| name == format!("{stem}{end}"))
+    };
+    let snapshot = name.starts_with("pre-")
+        && [".db", ".db-wal", ".db-shm"]
+            .iter()
+            .any(|end| name.ends_with(end));
+    if dir {
+        name.starts_with("pre-rollout-") || ["spool", "cache", "logs"].contains(&name)
+    } else {
+        db("oboete.db") || db("memory.db") || snapshot
+    }
 }
 
 fn size(path: &Path) -> Result<u64> {
@@ -1225,6 +1968,484 @@ mod tests {
     use crate::raw::{self, Event, Item, OpKind};
     use rusqlite::params;
     use std::path::PathBuf;
+
+    #[test]
+    fn w5c_confirmed_finish_creates_raw_without_invalidating_its_own_consent() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let v1 = V1::new(h);
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 110, "finish into fresh raw");
+        drop(v1); // Close v1 before preview/deletion, including on Windows.
+        std::fs::write(
+            h.join("config.toml"),
+            "providers = []\n[summary]\ncurate = false\n",
+        )
+        .unwrap();
+        assert!(!h.join("raw.db").exists());
+        let shown = preview_finish(h).unwrap();
+        assert_eq!(shown.deletion.targets, ["oboete.db"]);
+        assert_eq!(
+            (
+                shown.candidates.events,
+                shown.candidates.records,
+                shown.candidates.repos,
+                shown.candidates.documents,
+            ),
+            (1, 1, 1, 0)
+        );
+        assert!(!h.join("raw.db").exists());
+
+        let outcome = finish_report(
+            h,
+            &shown.key,
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        assert!(outcome.committed());
+        assert!(outcome.effects.stores_changed);
+        assert_eq!(
+            (
+                outcome.stats.events,
+                outcome.stats.records,
+                outcome.stats.repos,
+                outcome.stats.documents,
+            ),
+            (1, 1, 1, 0)
+        );
+        assert_eq!(
+            (
+                outcome.deletion.selected,
+                outcome.deletion.attempted,
+                outcome.deletion.removed,
+                outcome.deletion.failed,
+                outcome.deletion.uncertain,
+            ),
+            (1, 1, 1, 0, 0)
+        );
+        assert!(matches!(
+            outcome.deletion.targets[0].state,
+            FinishTargetState::Removed
+        ));
+        let raw = raw::open(h).unwrap();
+        assert_eq!(
+            of_kind(&raw, "prompt"),
+            [json!({"prompt": "finish into fresh raw"})]
+        );
+        assert_eq!(of_kind(&raw, "touch").len(), 1);
+        assert_eq!(records(&raw).len(), 2);
+        assert!(!h.join("oboete.db").exists());
+    }
+
+    #[test]
+    fn w5c_confirmed_finish_keeps_imports_when_inputs_change_after_event_commit() {
+        for changed in ["source", "cache", "config"] {
+            let home = tempfile::tempdir().unwrap();
+            let h = home.path();
+            let v1 = V1::new(h);
+            v1.session("s1", "r", 100);
+            v1.prompt("s1", 110, "committed before input changed");
+            // This case deliberately retains an old writer; all three paths must refuse deletion.
+            let config = h.join("config.toml");
+            std::fs::write(&config, "providers = []\n[summary]\ncurate = false\n").unwrap();
+            std::fs::create_dir(h.join("cache")).unwrap();
+            let child = h.join("cache/selected.txt");
+            std::fs::write(&child, b"before").unwrap();
+            let shown = preview_finish(h).unwrap();
+            assert!(
+                shown
+                    .deletion
+                    .targets
+                    .iter()
+                    .any(|target| target == "cache")
+            );
+            let mut mutated = false;
+            let failure = finish_report(
+                h,
+                &shown.key,
+                crate::executable::CommandCaller::Worker,
+                &mut |event| {
+                    if mutated
+                        || !matches!(
+                            event,
+                            FinishCommit::Import(Committed {
+                                stage: Stage::Events,
+                                ..
+                            })
+                        )
+                    {
+                        return;
+                    }
+                    mutated = true;
+                    match changed {
+                        "source" => {
+                            v1.prompt("s1", 120, "late source record");
+                        }
+                        "cache" => std::fs::write(&child, b"after!").unwrap(),
+                        "config" => std::fs::write(
+                            &config,
+                            "providers = []\n[summary]\ncurate = false\n# changed after import\n",
+                        )
+                        .unwrap(),
+                        _ => unreachable!(),
+                    }
+                },
+            )
+            .unwrap_err();
+
+            assert_eq!(failure.code, FailureCode::Stale, "{changed}");
+            let outcome = &failure.outcome;
+            assert!(outcome.committed(), "{changed}");
+            assert_eq!(
+                (
+                    outcome.stats.events,
+                    outcome.stats.records,
+                    outcome.stats.repos,
+                    outcome.stats.documents,
+                ),
+                (1, 1, 1, 0),
+                "{changed}"
+            );
+            assert_eq!(
+                (
+                    outcome.deletion.attempted,
+                    outcome.deletion.removed,
+                    outcome.deletion.failed,
+                    outcome.deletion.uncertain,
+                ),
+                (0, 0, 0, 0),
+                "{changed}"
+            );
+            let raw = raw::open(h).unwrap();
+            assert_eq!(
+                of_kind(&raw, "prompt"),
+                [json!({"prompt": "committed before input changed"})],
+                "{changed}"
+            );
+            assert_eq!(of_kind(&raw, "touch").len(), 1, "{changed}");
+            assert_eq!(records(&raw).len(), 2, "{changed}");
+            assert!(
+                mutated,
+                "the admitted Events callback was not reached: {changed}"
+            );
+            assert!(h.join("oboete.db").is_file(), "{changed}");
+            assert!(child.is_file(), "{changed}");
+            assert!(config.is_file(), "{changed}");
+        }
+    }
+
+    #[test]
+    fn w5c_confirmed_finish_checks_remaining_content_after_deleting_the_source() {
+        use std::io::Write;
+
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let v1 = V1::new(h);
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 110, "committed before partial deletion");
+        drop(v1); // No original v1 handle may prevent the first deletion on Windows.
+        std::fs::write(
+            h.join("config.toml"),
+            "providers = []\n[summary]\ncurate = false\n",
+        )
+        .unwrap();
+        let memory = h.join("memory.db");
+        std::fs::write(&memory, b"before").unwrap();
+        let modified = std::fs::metadata(&memory).unwrap().modified().unwrap();
+        let shown = preview_finish(h).unwrap();
+        assert_eq!(shown.deletion.targets, ["memory.db", "oboete.db"]);
+        let mut mutated = false;
+        let mut source_was_absent = false;
+        let failure = finish_report(
+            h,
+            &shown.key,
+            crate::executable::CommandCaller::Worker,
+            &mut |event| {
+                if mutated
+                    || !matches!(
+                        event,
+                        FinishCommit::Deletion {
+                            attempted: 1,
+                            removed: 1,
+                            ..
+                        }
+                    )
+                {
+                    return;
+                }
+                source_was_absent = !h.join("oboete.db").exists();
+                let mut file = std::fs::File::options().write(true).open(&memory).unwrap();
+                file.write_all(b"after!").unwrap();
+                file.set_times(std::fs::FileTimes::new().set_modified(modified))
+                    .unwrap();
+                mutated = true;
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.code, FailureCode::Stale);
+        let outcome = &failure.outcome;
+        assert!(outcome.committed());
+        assert_eq!(
+            (
+                outcome.stats.events,
+                outcome.stats.records,
+                outcome.stats.repos,
+                outcome.stats.documents,
+            ),
+            (1, 1, 1, 0)
+        );
+        assert_eq!(
+            (
+                outcome.deletion.selected,
+                outcome.deletion.attempted,
+                outcome.deletion.removed,
+                outcome.deletion.failed,
+                outcome.deletion.uncertain,
+            ),
+            (2, 1, 1, 0, 0)
+        );
+        let source_target = outcome
+            .deletion
+            .targets
+            .iter()
+            .find(|target| target.label == "oboete.db")
+            .unwrap();
+        let memory_target = outcome
+            .deletion
+            .targets
+            .iter()
+            .find(|target| target.label == "memory.db")
+            .unwrap();
+        assert!(matches!(source_target.state, FinishTargetState::Removed));
+        assert!(matches!(memory_target.state, FinishTargetState::Changed));
+        let raw = raw::open(h).unwrap();
+        assert_eq!(
+            of_kind(&raw, "prompt"),
+            [json!({"prompt": "committed before partial deletion"})]
+        );
+        assert_eq!(of_kind(&raw, "touch").len(), 1);
+        assert_eq!(records(&raw).len(), 2);
+        assert!(mutated && source_was_absent);
+        // Changed, rather than NotAttempted, proves the remaining-target check ran after source removal.
+        assert!(!h.join("oboete.db").exists());
+        assert_eq!(std::fs::read(&memory).unwrap(), b"after!");
+        let kept = std::fs::metadata(&memory).unwrap();
+        assert_eq!(kept.len(), 6);
+        assert_eq!(kept.modified().unwrap(), modified);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w5c_finish_preview_treats_links_as_links_and_refuses_fifo_and_backup_overlap() {
+        use std::io::Write;
+        use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let v1 = V1::new(h);
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 110, "synthetic finish preview");
+        assert!(!h.join("config.toml").exists());
+        let db_before = std::fs::read(h.join("oboete.db")).unwrap();
+        let wal_before = std::fs::read(h.join("oboete.db-wal")).unwrap();
+        assert!(!wal_before.is_empty());
+        let stable_source = || {
+            assert_eq!(std::fs::read(h.join("oboete.db")).unwrap(), db_before);
+            assert_eq!(std::fs::read(h.join("oboete.db-wal")).unwrap(), wal_before);
+            assert!(!h.join("raw.db").exists() && !h.join("state").exists());
+        };
+        let bare = preview_finish(h).unwrap();
+        assert_eq!(
+            (
+                bare.candidates.events,
+                bare.candidates.records,
+                bare.candidates.repos,
+                bare.candidates.documents
+            ),
+            (1, 1, 1, 0)
+        );
+        assert_eq!(
+            bare.deletion.targets,
+            ["oboete.db", "oboete.db-shm", "oboete.db-wal"]
+        );
+        stable_source();
+        assert!(!h.join("config.toml").exists());
+
+        // The old-name selector includes memory.db-wal, but finish must bind this
+        // selected link itself and must never hash/open its outside target.
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("not-an-old-store");
+        std::fs::write(&outside_file, b"outside-one").unwrap();
+        let link = h.join("memory.db-wal");
+        std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+        let shown = preview_finish(h).unwrap();
+        assert_ne!(shown.key, bare.key);
+        assert_eq!(
+            (
+                shown.candidates.events,
+                shown.candidates.records,
+                shown.candidates.repos,
+                shown.candidates.documents
+            ),
+            (1, 1, 1, 0)
+        );
+        assert!(
+            shown
+                .deletion
+                .targets
+                .iter()
+                .any(|name| name == "memory.db-wal")
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), outside_file);
+        assert_eq!(std::fs::read(&outside_file).unwrap(), b"outside-one");
+        stable_source();
+        assert!(!h.join("config.toml").exists());
+
+        // Same-length outside edit changes only the link target's contents. The
+        // target is retained; the link entry, its label and its literal target do
+        // not change, so this edit must not change finish consent.
+        std::fs::write(&outside_file, b"outside-two").unwrap();
+        let changed_outside = preview_finish(h).unwrap();
+        assert_eq!(changed_outside.key, shown.key);
+        assert_eq!(changed_outside.deletion, shown.deletion);
+        assert_eq!(std::fs::read_link(&link).unwrap(), outside_file);
+        assert_eq!(std::fs::read(&outside_file).unwrap(), b"outside-two");
+        stable_source();
+        assert!(!h.join("config.toml").exists());
+
+        // A special descendant beneath a selected directory is refused before
+        // open/read. Bound the call: a regression to blocking FIFO reads must fail
+        // rather than leave a stuck test thread.
+        std::fs::create_dir(h.join("cache")).unwrap();
+        let pipe = h.join("cache/selected-pipe");
+        let name = std::ffi::CString::new(pipe.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: the fixture path is owned, NUL-terminated and alive for mkfifo.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (send, receive) = std::sync::mpsc::channel();
+        let owned_home = h.to_path_buf();
+        let call = std::thread::spawn(move || {
+            send.send(preview_finish(&owned_home)).unwrap();
+        });
+        let first = receive.recv_timeout(std::time::Duration::from_secs(5));
+        let did_not_block = first.is_ok();
+        let result = match first {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Rescue only this owned FIFO if a faulty reader is waiting for a
+                // writer. Close it before collecting the thread's terminal result.
+                let mut rescue = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&pipe)
+                    .unwrap();
+                rescue.write_all(b"x").unwrap();
+                drop(rescue);
+                receive
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+            }
+            Err(error) => panic!("owned finish preview thread disconnected: {error}"),
+        };
+        call.join().unwrap();
+        assert!(did_not_block, "finish preview blocked on selected FIFO");
+        assert!(
+            format!("{:#}", result.unwrap_err())
+                .contains("finish target is not a file, directory or link")
+        );
+        assert!(
+            std::fs::symlink_metadata(&pipe)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+        assert_eq!(std::fs::read(&outside_file).unwrap(), b"outside-two");
+        stable_source();
+        assert!(!h.join("config.toml").exists());
+
+        // Remove the special fixture entry before the next independent refusal.
+        std::fs::remove_file(&pipe).unwrap();
+        std::fs::create_dir_all(h.join("cache/native")).unwrap();
+        let kept_backup = h.join("cache/native/retained-segment");
+        std::fs::write(&kept_backup, b"synthetic native backup marker").unwrap();
+        std::fs::write(h.join("config.toml"), "[backup]\ndir = 'cache/native'\n").unwrap();
+        let config_before = std::fs::read(h.join("config.toml")).unwrap();
+        let backup_before = std::fs::read(&kept_backup).unwrap();
+        let refused = preview_finish(h).unwrap_err();
+        assert!(format!("{refused:#}").contains("finish target overlaps native backups"));
+        assert_eq!(std::fs::read(h.join("config.toml")).unwrap(), config_before);
+        assert_eq!(std::fs::read(&kept_backup).unwrap(), backup_before);
+        assert_eq!(std::fs::read_link(&link).unwrap(), outside_file);
+        assert_eq!(std::fs::read(&outside_file).unwrap(), b"outside-two");
+        stable_source();
+    }
+
+    #[test]
+    fn w5c_finish_preview_keeps_live_wal_and_binds_empty_directory_identity() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let v1 = V1::new(h);
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 110, "one");
+        v1.observation("s1", 120, "Tabs", "Use tabs.");
+        std::fs::write(
+            h.join("config.toml"),
+            "providers = []\n[summary]\ncurate = false\n",
+        )
+        .unwrap();
+        std::fs::write(h.join("pre-1.db"), "x").unwrap();
+        std::fs::create_dir_all(h.join("cache/empty")).unwrap();
+        std::fs::create_dir_all(h.join("cache/deep")).unwrap();
+        std::fs::write(h.join("cache/deep/f"), "xyz").unwrap();
+        std::fs::create_dir(h.join("eval")).unwrap();
+        std::fs::write(h.join("eval/kept"), "evaluation kept").unwrap();
+        let before = crate::backup::tests::w5b_files(h);
+        let shown = preview_finish(h).unwrap();
+        assert_eq!(
+            (
+                shown.candidates.events,
+                shown.candidates.records,
+                shown.candidates.repos,
+                shown.candidates.documents
+            ),
+            (1, 1, 1, 1)
+        );
+        assert_eq!(
+            shown.deletion.targets,
+            [
+                "cache",
+                "oboete.db",
+                "oboete.db-shm",
+                "oboete.db-wal",
+                "pre-1.db"
+            ]
+        );
+        assert_eq!(shown.deletion.nodes, 8);
+        let source_bytes: u64 = ["oboete.db", "oboete.db-wal", "oboete.db-shm"]
+            .iter()
+            .map(|name| std::fs::metadata(h.join(name)).unwrap().len())
+            .sum();
+        assert_eq!(shown.deletion.bytes, source_bytes + 4);
+        assert_eq!(preview_finish(h).unwrap().key, shown.key);
+        assert_eq!(crate::backup::tests::w5b_files(h), before);
+        assert!(!h.join("raw.db").exists() && !h.join("state").exists());
+
+        // Keep the old directory alive so a recreated empty one cannot reuse its inode.
+        let retired = tempfile::tempdir().unwrap();
+        std::fs::rename(h.join("cache/empty"), retired.path().join("empty")).unwrap();
+        std::fs::create_dir(h.join("cache/empty")).unwrap();
+        let replaced = preview_finish(h).unwrap();
+        assert_ne!(
+            replaced.key, shown.key,
+            "a replaced empty directory inherited consent"
+        );
+        assert_eq!(replaced.deletion.targets, shown.deletion.targets);
+        assert_eq!(replaced.deletion.nodes, shown.deletion.nodes);
+        assert_eq!(replaced.deletion.bytes, shown.deletion.bytes);
+    }
 
     #[test]
     fn readonly_preview_counts_wal_candidates_and_config_without_creating_home() {

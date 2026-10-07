@@ -53,6 +53,66 @@ pub struct ChainResult {
     pub tier: i64,
 }
 
+/// Fixed metadata for this chain's own committed reservations and observed sends.
+/// No prompt, provider name, span, response or free-form detail crosses this seam.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum AttemptEvent {
+    Reserved {
+        attempt: i64,
+        usd_bound: Option<f64>,
+    },
+    /// The native call returned an answer or a failure that may have sent its prompt.
+    /// This precedes any fallible settlement; pending remains until a terminal event.
+    Sent {
+        attempt: i64,
+    },
+    Settled {
+        attempt: i64,
+        outcome: AttemptOutcome,
+        sent: bool,
+        usd: Option<f64>,
+        usage_unknown: bool,
+    },
+    Cancelled {
+        attempt: i64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptOutcome {
+    Ok,
+    Gate,
+    Wait,
+    Error,
+    Invalid,
+    Empty,
+    Prose,
+    Shape,
+    OverCap,
+    Unanchored,
+    Other,
+}
+
+impl AttemptOutcome {
+    pub(crate) fn from_ledger(outcome: &str) -> Self {
+        match outcome {
+            "ok" => Self::Ok,
+            "gate" => Self::Gate,
+            "wait" => Self::Wait,
+            "error" => Self::Error,
+            "invalid" => Self::Invalid,
+            "empty" => Self::Empty,
+            "prose" => Self::Prose,
+            "shape" => Self::Shape,
+            "over_cap" => Self::OverCap,
+            "unanchored" => Self::Unanchored,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// Why the chain went past a provider, which the curation phase needs to know (D10, D11).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Skip {
@@ -683,6 +743,18 @@ impl<'a> Chain<'a> {
         prompt: &str,
         schema: &Value,
     ) -> Result<ChainResult> {
+        self.run_report(role, span, prompt, schema, &mut |_| {})
+    }
+
+    /// Observe only this invocation's own attempts; unrelated probes share the ledger.
+    pub fn run_report(
+        &mut self,
+        role: &str,
+        span: &str,
+        prompt: &str,
+        schema: &Value,
+        observer: &mut impl FnMut(&AttemptEvent),
+    ) -> Result<ChainResult> {
         let conn = self.db;
         let forced_fail = self.forced_fail.clone();
         let mut fallbacks = Vec::new();
@@ -756,7 +828,13 @@ impl<'a> Chain<'a> {
                 self.paid_usd_per_month,
                 &ceiling_hit,
             )? {
-                Ok(reservation) => reservation,
+                Ok(reservation) => {
+                    observer(&AttemptEvent::Reserved {
+                        attempt: reservation.id(),
+                        usd_bound: reservation.cost(p, Usage::default(), true),
+                    });
+                    reservation
+                }
                 Err(refusal) => {
                     // State-only skips have never been attempts in the chain's ledger.
                     if refusal.outcome != "gate" {
@@ -786,13 +864,13 @@ impl<'a> Chain<'a> {
                 let gate = match gate {
                     Ok(gate) => gate,
                     Err(error) => {
-                        reservation.cancel(conn)?;
+                        reservation.cancel_report(conn, observer)?;
                         return Err(error);
                     }
                 };
                 if gate != crate::isolation::Gate::Passed {
                     let ms = started.elapsed().as_millis() as i64;
-                    reservation.settle(
+                    reservation.settle_report(
                         conn,
                         &providers_db::Call {
                             provider: &name,
@@ -808,6 +886,8 @@ impl<'a> Chain<'a> {
                         },
                         None,
                         |state| state,
+                        false,
+                        observer,
                     )?;
                     skip(gate.why(), Skip::Owner);
                     continue;
@@ -825,7 +905,7 @@ impl<'a> Chain<'a> {
                 match self.gate.map(|gate| gate()).transpose() {
                     Ok(admission) => admission.flatten(),
                     Err(error) => {
-                        reservation.cancel(conn)?;
+                        reservation.cancel_report(conn, observer)?;
                         return Err(error);
                     }
                 }
@@ -839,6 +919,12 @@ impl<'a> Chain<'a> {
             } else {
                 ready.and_then(|()| call(p, prompt, schema, admission))
             };
+            let sent = !forced && result.as_ref().map_or_else(|error| error.sent, |_| true);
+            if sent {
+                observer(&AttemptEvent::Sent {
+                    attempt: reservation.id(),
+                });
+            }
             // The retry is a second request: only when the daily budget has room for it.
             if let Err(e) = &result
                 && e.status == Some(429)
@@ -851,7 +937,7 @@ impl<'a> Chain<'a> {
                 let ms = started.elapsed().as_millis() as i64;
                 let until = db::now_ms() + (wait * 1_000.0).ceil() as i64;
                 // A 429 is an answer with an HTTP error status: not billed.
-                reservation.settle(
+                reservation.settle_report(
                     conn,
                     &providers_db::Call {
                         provider: &name,
@@ -870,6 +956,8 @@ impl<'a> Chain<'a> {
                         down_until: state.down_until.max(until),
                         ..state
                     },
+                    sent,
+                    observer,
                 )?;
                 std::thread::sleep(Duration::from_secs_f64(wait + 0.5));
                 reservation = match budget::reserve(
@@ -881,7 +969,13 @@ impl<'a> Chain<'a> {
                     self.paid_usd_per_month,
                     &ceiling_hit,
                 )? {
-                    Ok(reservation) => reservation,
+                    Ok(reservation) => {
+                        observer(&AttemptEvent::Reserved {
+                            attempt: reservation.id(),
+                            usd_bound: reservation.cost(p, Usage::default(), true),
+                        });
+                        reservation
+                    }
                     Err(refusal) => {
                         if refusal.outcome != "gate" {
                             record(
@@ -906,7 +1000,7 @@ impl<'a> Chain<'a> {
                     match self.gate.map(|gate| gate()).transpose() {
                         Ok(admission) => admission.flatten(),
                         Err(error) => {
-                            reservation.cancel(conn)?;
+                            reservation.cancel_report(conn, observer)?;
                             return Err(error);
                         }
                     }
@@ -914,6 +1008,11 @@ impl<'a> Chain<'a> {
                     None
                 };
                 result = ready.and_then(|()| call(p, prompt, schema, admission));
+                if !forced && result.as_ref().map_or_else(|error| error.sent, |_| true) {
+                    observer(&AttemptEvent::Sent {
+                        attempt: reservation.id(),
+                    });
+                }
             }
             // The headers hold whatever the answer turns out to be.
             let rate = match &result {
@@ -951,7 +1050,7 @@ impl<'a> Chain<'a> {
             match result {
                 Ok(a) => {
                     let usd = reservation.cost(p, a.usage, true);
-                    reservation.settle(
+                    reservation.settle_report(
                         conn,
                         &providers_db::Call {
                             provider: &name,
@@ -970,6 +1069,8 @@ impl<'a> Chain<'a> {
                             down_until: a.cool_until.unwrap_or(0),
                             ..Default::default()
                         },
+                        true,
+                        observer,
                     )?;
                     return Ok(ChainResult {
                         provider: name,
@@ -986,7 +1087,7 @@ impl<'a> Chain<'a> {
                     // An HTTP error status was not billed; a timeout or a dropped answer may be.
                     let usd = reservation.cost(p, e.usage, sent && e.status.is_none());
                     let unanchored = refused == Some("unanchored");
-                    let next = reservation.settle(
+                    let next = reservation.settle_report(
                         conn,
                         &providers_db::Call {
                             provider: &name,
@@ -1013,6 +1114,8 @@ impl<'a> Chain<'a> {
                                 next_state(state, &e)
                             }
                         },
+                        sent,
+                        observer,
                     )?;
                     // A forced failure is a test of the fallback, not of the provider.
                     let mut skip = Skip::Failed;
@@ -4944,10 +5047,13 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             }
             Ok(None)
         };
+        let mut events = Vec::new();
         let error = Chain::new(&[p], &conn)
             .paid_cap(0.00015)
             .gate(&gate)
-            .run("curator", "s", "synthetic", &json!({}))
+            .run_report("curator", "s", "synthetic", &json!({}), &mut |event| {
+                events.push(*event)
+            })
             .unwrap_err();
         assert_eq!(error.to_string(), "retry gate refused");
         assert_eq!(gates.get(), 2);
@@ -4955,6 +5061,19 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         assert_eq!(outcomes(&peer), ["wait"]);
         assert_eq!(providers_db::usd_this_month(&peer).unwrap(), 0.0);
         assert_eq!(providers_db::calls_in_a_day(&peer, "stub").unwrap().0, 1);
+        assert!(
+            matches!(events.as_slice(), [
+            AttemptEvent::Reserved { attempt: first, usd_bound: Some(first_usd) },
+            AttemptEvent::Sent { attempt: sent },
+            AttemptEvent::Settled { attempt: settled, outcome: AttemptOutcome::Wait,
+                sent: true, usd: None, usage_unknown: true },
+            AttemptEvent::Reserved { attempt: retry, usd_bound: Some(retry_usd) },
+            AttemptEvent::Cancelled { attempt: cancelled },
+        ] if first == sent && first == settled && retry == cancelled && first != retry
+            && (*first_usd - 0.000103).abs() < 1e-12
+            && (*retry_usd - 0.000103).abs() < 1e-12),
+            "own retry receipt: {events:?}"
+        );
     }
 
     #[test]

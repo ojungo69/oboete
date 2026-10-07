@@ -73,8 +73,9 @@ left with "—" there.
 | Readiness checks, as doctor reports them | 7.2, R13 | resident status CLI; full page — | `oboete doctor` | at once, read only | all; resident Linux/WSL | `tests/resident_defaults.rs` `doctor_reads_resident_locks_and_outcomes_without_starting_or_renumbering_them` | resident slice 5; remaining W6 |
 | Import claude-mem's history, with its projects mapped to repositories | 7.4, parity N1 | — | `oboete import` | when confirmed | all | — | W5 after N1 |
 | Migrate v1's store; import transcripts | 7.4 | History import: candidates/settings preview, explicit consent, committed progress and partial receipt | shared `migrate`/`transcript`, `settings/maintenance.rs` | confirmed import; later processing uses saved settings | all | maintenance preview/start/status, native CLI compatibility and JA/EN import journeys | W5A |
-| Recurate, with the list and estimate before the send | 1.7 | — | `oboete recurate` | when confirmed | all | — | W5 |
+| Recurate, with the list and estimate before the send | 1.7 | Typed local no-send preparation, scope/work/cost consent, own provider/window progress and partial receipt | shared native `curate::prepare_report`, `recurate_report`, ordinary Chain | explicit preparation; send only after confirmation and fresh admission | all; pinned resident caller on Linux | `w5c_` native/guarded regressions; synthetic HTTP send/replay, concurrent probe, settlement and later-index failure; actual same-PID Viewer exec and JA/EN browser consent/fractional-USD journeys | W5C |
 | Rebuild, restore | 1.7, 2.6 | History and recovery: current-data/backup preview, explicit consent, native progress and recovery receipt | shared complete `worker::rebuild_report`, `restore_report` | confirmed native operation; later background work follows saved settings | all; R9 borrowed viewer on Linux | `settings/maintenance.rs` fixed-operation and receipt replay; `w5b_` regressions for home proof/replacement, disappearing WAL, durable progress, segment/file counts and same-metadata/ABA log consent; native CLI and foreground/resident JA/EN journeys | W5B |
+| Finish v1 migration and remove old files | 7.4, 7.5 | Read-only exact-target preview, final-import/deletion consent, causal counts and inspection of partial/uncertain results | shared CLI/HTTP `migrate::finish_report` | final import before confirmed deletion | all; pinned resident caller on Linux | `w5c_` pure/WAL/link/FIFO/backup/identity/self-stale/partial tests; actual HTTP complete/replay/current-rule label gates and permission-failure receipt; JA/EN browser complete/partial and saved-rule display journeys | W5C |
 | Update check and update | 7.3 | — | `oboete update` (milestone 7) | when confirmed | all | — | after the switch, with milestone 7; W5 shows it as not built |
 | The resident worker and viewer: on or off | 1.8, A111 | page; setup fills absent defaults | `[worker] resident` | on: next hook or `oboete view`; off: worker idle, viewer minute tick without requests | Linux/WSL | `settings.rs` `resident_settings_are_read_only_until_the_visible_choice_is_saved`, `resident_saves_reject_wrong_types_stale_versions_and_invalid_runtime_settings`, `a_settings_save_waits_for_the_other_config_writer_then_refuses_its_stale_body`; `migrate.rs` `migrated_settings_wait_for_the_config_writer_and_keep_its_choice`; `tests/resident_defaults.rs`; native browser first-save/off/reload | resident slice 5 |
 | Resident page port and a new page token | 1.8, 6.6 | CLI; page — | `[view] port`, `oboete view --new-token` | port: viewer's next start; token: at once | Linux/WSL; other OS token storage waits for #281 | resident.md slice 3 CLI tests; page — | remaining W6 |
@@ -112,8 +113,48 @@ cloud starts from a page view or a save.
   local model's download with its consent and progress, and the generations' state; after the local
   embedder (parity 5).
 - **W5, import and maintenance.** The imports with their previews, recurate with its estimate,
-  rebuild and restore with their confirmations and progress; the updater's row shown as not built
-  until milestone 7 builds it.
+  rebuild and restore with their confirmations and progress, and v1 finalization with its exact
+  deletion scope. The updater stays visibly not built until milestone 7 builds it.
+
+  W5C preparation of recuration is an explicit no-send POST: native recovery, redaction/rescan,
+  backup and indexing may commit locally. No provider ledger is created to price an absent one.
+  Confirmation binds the own-device scope, exact requests, configured prices/calibration, rules
+  and full source content/identity. Original caller proof is checked before worker admission and
+  again under it; no store handles or locks survive the browser's confirmation gap. A stale
+  confirmation performs no admitted drain. A hook during that refusal can need the next hook,
+  view command or explicit preparation to index it, as the existing R12 stale boundary does.
+
+  The paid-chain estimate is an estimate, not a new operation spending cap. Execution keeps the
+  ordinary shared live budget, privacy and dispatch gates. Receipts count this operation's own
+  reservations, possible sends and settlements; a concurrent connection test is excluded.
+  Accounted USD includes outstanding bounds, replaces them on settlement and removes them only
+  after proven-unsent cancellation. It is not an invoice. A later index failure retains a
+  committed window and its provider accounting. Unknown settlement never implies a refund.
+
+  Finalization preview copies v1 DB/WAL privately and binds the native whitelist's full recursive
+  membership, entry identities, contents and link text without following link targets. It refuses
+  overlap with configured native backups. Metadata bounds are 128 top targets, 16 KiB of original
+  labels, 4 KiB per relative/link path, depth 32 and 8 MiB of buffered child hashes. File hashing
+  streams 64 KiB; there is no total file-byte/node cap or silent truncation. Windows uses native
+  no-follow entry identity. An unsupported identity or exceeded metadata bound refuses preview.
+
+  Confirmed finish shares the CLI's final pass and keeps its Raw swap hold through CLI yes/no/EOF.
+  It copies no settings and performs no inference or knowledge-index drain. Owned Raw/checkpoint
+  changes do not invalidate consent: after import, only stable v1 source/config/selected forest
+  are rechecked; after removing the source, only remaining targets are checked. Earlier imports
+  and removals survive failure, recursive removal errors expose uncertain extent, and reported
+  logical bytes do not promise reclaimed disk space. Missing old sessions are retained memory,
+  not automatic forgets; the UI keeps counts and at most ten gated labels of 256 characters for
+  inspection. The native check/unlink and old-open-writer limits remain spec 7.5's cutover condition.
+
+  All operations retain the existing single active/last receipt and connection Slot. Disconnect
+  does not cancel; same-ID replay within that receipt does not repeat work. A lost/restarted
+  receipt requires inspection and an explicit fresh operation, never automatic retry. Owner
+  finalization, installation and cutover remain outside these synthetic acceptance tests.
+  Cached receipt labels pass the current display rules again on delivery; unreadable rules hide
+  labels while keeping IDs and effects. Loading saved settings clears preview/consent and cached
+  display text, preserving unknown operations and counts until the next status GET. Late replies
+  cannot restore discarded consent; a matching C2 status only refreshes an existing preview.
 - **W6, first run and agents.** The first-run presets, the agents' wiring, the readiness checks, and
   the resident worker's and viewer's switches with resident.md's slice 2.
 
