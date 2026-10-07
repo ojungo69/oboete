@@ -115,4 +115,10 @@ assert(shown.includes('Launch file: Unknown')&&shown.includes('Settings folder: 
 assert(shown.includes('Live use: Unknown')&&!shown.includes(privateMarker),'unrecognized states never become live verification or raw text');
 assert.equal(ctx.ui.getForm(),mine,'unknown report fields preserve the draft');
 assert.equal(posts,0,'passive and explicit inventory reads never POST');
+ctx.ui.setLang('en');
+assert.equal(text(vm.runInContext('keyState({key:"unknown"})[0]',ctx)),
+  'Installation could not be checked','unknown CLI status has an English label');
+ctx.ui.setLang('ja');
+assert.equal(text(vm.runInContext('keyState({key:"unknown"})[0]',ctx)),
+  'インストール状況は確認できません','unknown CLI status has a Japanese label');
 console.log('PASS: seven fixed agent rows, JA/EN, latest GET and unchanged draft');

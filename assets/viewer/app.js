@@ -1031,6 +1031,7 @@ const TEXT = {
   key_none: ['No key needed', 'キーは不要です'],
   key_on_path: ['Installed', 'インストール済み'],
   key_not_on_path: ['Not installed', 'インストールされていません'],
+  key_unknown: ['Installation could not be checked', 'インストール状況は確認できません'],
   key_file: ['Key file: {path}', 'キーのファイル: {path}'],
   key_label: ['New key for {name}', '{name} の新しいキー'],
   key_placeholder: ['Paste a new key', '新しいキーを貼り付け'],

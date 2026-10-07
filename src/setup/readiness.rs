@@ -87,6 +87,7 @@ pub(crate) enum Trust {
     Stale,
     Invalid,
     Unreadable,
+    Unavailable,
     NotApplicable,
 }
 
@@ -319,8 +320,13 @@ fn agy_hooks(value: &Observed<Value>, want: Option<&HookCommand>) -> Component {
         Ok(enabled) => !enabled,
         Err(state) => return Component::unknown(state),
     };
+    let mut hooks = own.clone();
+    hooks
+        .as_object_mut()
+        .expect("checked Agy object")
+        .remove("enabled");
     let same = match want.map(|want| agy_spec(want, cfg!(windows))).transpose() {
-        Ok(expected) => expected.map(|expected| own == &expected),
+        Ok(expected) => expected.map(|expected| hooks == expected),
         Err(_) => return Component::unknown(State::Unavailable),
     };
     Component::registered(same, disabled)
@@ -498,6 +504,7 @@ fn codex_trust(
         Ok(Some(root)) => root,
         Ok(None) => return Trust::Missing,
         Err(State::Invalid) => return Trust::Invalid,
+        Err(State::Unavailable) => return Trust::Unavailable,
         Err(_) => return Trust::Unreadable,
     };
     let keys: Vec<_> = codex_trust_keys(file, root)
@@ -511,6 +518,7 @@ fn codex_trust(
         Ok(Some(doc)) => doc,
         Ok(None) => return Trust::Missing,
         Err(State::Invalid) => return Trust::Invalid,
+        Err(State::Unavailable) => return Trust::Unavailable,
         Err(_) => return Trust::Unreadable,
     };
     let Some(hooks) = doc.get("hooks") else {
@@ -579,7 +587,6 @@ fn row(agent: &'static str, want: Option<&HookCommand>) -> AgentReadiness {
             let capture = grouped_hooks(&hooks, want, codex_groups);
             trust = match capture.state {
                 State::Invalid => Trust::Invalid,
-                State::Unreadable | State::Unavailable => Trust::Unreadable,
                 _ => codex_trust(&hooks, &config, &file),
             };
             ("hooks", capture, toml_mcp_state(&config, want))
@@ -707,6 +714,39 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn w6_agy_switch_is_separate_from_command_alignment() {
+        let want = HookCommand {
+            exe: "oboete".into(),
+            home: None,
+        };
+        let other = HookCommand {
+            exe: "synthetic-other-binary".into(),
+            home: None,
+        };
+        for enabled in [Some(false), None] {
+            let mut own = agy_spec(&want, cfg!(windows)).unwrap();
+            if let Some(enabled) = enabled {
+                own["enabled"] = json!(enabled);
+            } else {
+                own.as_object_mut().unwrap().remove("enabled");
+            }
+            let observed = Ok(Some(json!({"oboete": own})));
+            let actual = agy_hooks(&observed, Some(&want));
+            assert_eq!(
+                actual.matches_current,
+                Some(true),
+                "Agy switch changed matching commands"
+            );
+            assert!(matches!(actual.state, State::Disabled) == (enabled == Some(false)));
+            assert_eq!(
+                agy_hooks(&observed, Some(&other)).matches_current,
+                Some(false),
+                "Agy switch hid a different command"
+            );
+        }
+    }
+
+    #[test]
     fn w6_current_command_retains_actual_comparison_errors() {
         let private = tempfile::tempdir().unwrap();
         for kind in [
@@ -801,6 +841,126 @@ mod tests {
             .iter()
             .find(|row| row["agent"] == name)
             .expect("fixed agent row missing")
+    }
+
+    fn codex_guarded_files_keep_unknown_trust(root: &Path, home: &Path) {
+        for (name, prefix) in [
+            ("hooks.json", b"{}".as_slice()),
+            ("config.toml", b"#".as_slice()),
+        ] {
+            let file = native::codex_home().join(name);
+            let kept = std::fs::read(&file).unwrap();
+            let mut oversized = vec![b' '; TEXT_LIMIT as usize + 1];
+            oversized[..prefix.len()].copy_from_slice(prefix);
+            std::fs::write(&file, oversized).unwrap();
+            let before = snapshot(root);
+            let shown = serde_json::to_value(native::readiness(home)).unwrap();
+            assert!(
+                snapshot(root) == before,
+                "guarded Codex read changed private files"
+            );
+            assert!(
+                agent(&shown, "codex")["trust"] == "unavailable",
+                "guarded Codex trust was reported as a read failure"
+            );
+            std::fs::write(file, kept).unwrap();
+        }
+    }
+
+    fn unavailable_cli_is_unknown_in_both_settings_views(root: &Path) {
+        let home = root.join("provider-unknown");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(home.join("config.toml"),
+            "[[providers]]\nkind = \"cli\"\nname = \"private-cli\"\ncli = \"claude\"\n[summary]\ncurate = false\n").unwrap();
+        let before = snapshot(root);
+        let shown = crate::settings::show(&home);
+        assert!(
+            snapshot(root) == before,
+            "passive CLI settings changed private files"
+        );
+        assert!(
+            shown["chain"][0]["key"] == "unknown",
+            "unavailable CLI was reported missing in chain settings"
+        );
+        assert!(
+            shown["providers"][0]["saved"]["key"] == "unknown"
+                && shown["providers"][0]["effective"]["key"] == "unknown",
+            "unavailable CLI was reported missing in provider settings"
+        );
+    }
+
+    #[cfg(windows)]
+    fn windows_junction_checks(root: &Path, home: &Path, changed: &Value) {
+        // A local junction exercises the kernel's parent-reparse refusal without ever
+        // naming or contacting a remote share. cmd is the fixed OS junction creator.
+        let junction = |link: &Path, target: &Path, failure: &str| {
+            let cmd =
+                PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
+            let output = std::process::Command::new(cmd)
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap();
+            let scrub = |bytes: &[u8]| {
+                String::from_utf8_lossy(bytes)
+                    .replace(root.to_string_lossy().as_ref(), "<private-root>")
+                    .chars()
+                    .filter(|c| !c.is_control() || *c == '\n')
+                    .take(600)
+                    .collect::<String>()
+            };
+            assert!(
+                output.status.success(),
+                "{failure}; status={:?}; stdout={}; stderr={}",
+                output.status.code(),
+                scrub(&output.stdout),
+                scrub(&output.stderr)
+            );
+        };
+        let dir = native::claude_dir();
+        let kept = root.join("claude-before-junction");
+        std::fs::rename(&dir, &kept).unwrap();
+        junction(&dir, &kept, "private local junction fixture failed");
+        assert!(
+            std::fs::metadata(dir.join("settings.json"))
+                .unwrap()
+                .is_file(),
+            "junction control did not resolve to a local file"
+        );
+        let link = std::fs::read_link(&dir).unwrap();
+        let bytes = std::fs::read(kept.join("settings.json")).unwrap();
+        let shown = serde_json::to_value(native::readiness(home)).unwrap();
+        let claude = agent(&shown, "claude");
+        assert!(
+            claude["directory_found"].is_null() && claude["capture"]["state"] == "unavailable",
+            "Windows diagnostics followed a parent junction"
+        );
+        assert!(
+            std::fs::read_link(&dir).unwrap() == link
+                && std::fs::read(kept.join("settings.json")).unwrap() == bytes,
+            "junction inspection changed its target or source bytes"
+        );
+        for name in ["codex", "grok", "agy", "opencode", "pi", "cursor"] {
+            assert!(
+                agent(&shown, name) == agent(changed, name),
+                "junction failure changed an independent row"
+            );
+        }
+        let bin = root.join("bin");
+        let kept_bin = root.join("bin-before-junction");
+        std::fs::rename(&bin, &kept_bin).unwrap();
+        std::fs::write(kept_bin.join("grok"), b"inert, never executed").unwrap();
+        junction(&bin, &kept_bin, "private launcher junction fixture failed");
+        assert!(
+            native::on_path("grok"),
+            "native CLI lost its local-link launcher"
+        );
+        assert_eq!(
+            native::launch_found(&["grok"]),
+            None,
+            "passive launcher probe followed a junction"
+        );
     }
 
     fn registered_matrix_root() -> Option<PathBuf> {
@@ -1153,6 +1313,11 @@ mod tests {
             inspect() == changed,
             "readiness did not recover from restored private settings"
         );
+        codex_guarded_files_keep_unknown_trust(&root, &home);
+        assert!(
+            inspect() == changed,
+            "guarded Codex inspection did not recover"
+        );
         #[cfg(unix)]
         {
             let default_home = root.join("owner/.oboete");
@@ -1216,64 +1381,8 @@ mod tests {
             assert_eq!(launch_found(&["cursor-agent", "agent"]), Some(true));
         }
         #[cfg(windows)]
-        {
-            // A local junction exercises the kernel's parent-reparse refusal without ever
-            // naming or contacting a remote share. cmd is the fixed OS junction creator.
-            let junction = |link: &Path, target: &Path, failure: &str| {
-                let cmd =
-                    PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
-                let output = std::process::Command::new(cmd)
-                    .args(["/d", "/c", "mklink", "/J"])
-                    .arg(link)
-                    .arg(target)
-                    .output()
-                    .unwrap();
-                assert!(output.status.success(), "{failure}");
-            };
-            let dir = native::claude_dir();
-            let kept = root.join("claude-before-junction");
-            std::fs::rename(&dir, &kept).unwrap();
-            junction(&dir, &kept, "private local junction fixture failed");
-            assert!(
-                std::fs::metadata(dir.join("settings.json"))
-                    .unwrap()
-                    .is_file(),
-                "junction control did not resolve to a local file"
-            );
-            let link = std::fs::read_link(&dir).unwrap();
-            let bytes = std::fs::read(kept.join("settings.json")).unwrap();
-            let shown = serde_json::to_value(native::readiness(&home)).unwrap();
-            let claude = agent(&shown, "claude");
-            assert!(
-                claude["directory_found"].is_null() && claude["capture"]["state"] == "unavailable",
-                "Windows diagnostics followed a parent junction"
-            );
-            assert!(
-                std::fs::read_link(&dir).unwrap() == link
-                    && std::fs::read(kept.join("settings.json")).unwrap() == bytes,
-                "junction inspection changed its target or source bytes"
-            );
-            for name in ["codex", "grok", "agy", "opencode", "pi", "cursor"] {
-                assert!(
-                    agent(&shown, name) == agent(&changed, name),
-                    "junction failure changed an independent row"
-                );
-            }
-            let bin = root.join("bin");
-            let kept_bin = root.join("bin-before-junction");
-            std::fs::rename(&bin, &kept_bin).unwrap();
-            std::fs::write(kept_bin.join("grok"), b"inert, never executed").unwrap();
-            junction(&bin, &kept_bin, "private launcher junction fixture failed");
-            assert!(
-                native::on_path("grok"),
-                "native CLI lost its local-link launcher"
-            );
-            assert_eq!(
-                native::launch_found(&["grok"]),
-                None,
-                "passive launcher probe followed a junction"
-            );
-        }
+        windows_junction_checks(&root, &home, &changed);
+        unavailable_cli_is_unknown_in_both_settings_views(&root);
         std::fs::write(root.join("matrix-complete"), b"passed").unwrap();
     }
 }

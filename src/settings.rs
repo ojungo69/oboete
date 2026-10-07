@@ -213,6 +213,14 @@ fn range(r: std::ops::RangeInclusive<usize>) -> [usize; 2] {
     [*r.start(), *r.end()]
 }
 
+fn cli_path_state(cli: &str) -> &'static str {
+    match crate::setup::launch_found(&[cli]) {
+        Some(true) => "on-path",
+        Some(false) => "not-on-path",
+        None => "unknown",
+    }
+}
+
 fn tool_output(t: ToolOutput) -> &'static str {
     match t {
         ToolOutput::Full => "full",
@@ -318,9 +326,7 @@ fn provider_row(
             ..
         } => json!({
             "kind": "cli", "cli": cli, "model": model, "timeout_s": timeout_s,
-            "subscription": true, "key": if crate::setup::launch_found(&[cli]) == Some(true) {
-                "on-path"
-            } else { "not-on-path" },
+            "subscription": true, "key": cli_path_state(cli),
         }),
     };
     let limits = saved.limits();
@@ -373,11 +379,7 @@ fn entry(
             ..
         } => (
             "cli",
-            if crate::setup::launch_found(&[cli]) == Some(true) {
-                "on-path"
-            } else {
-                "not-on-path"
-            },
+            cli_path_state(cli),
             None,
             model.as_deref(),
             *timeout_s,

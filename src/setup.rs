@@ -331,7 +331,7 @@ struct HookCommand {
 
 impl HookCommand {
     fn current(home: &Path) -> Result<Self> {
-        Self::current_with(home, |path| path.canonicalize())
+        Self::current_with(home, Path::canonicalize)
     }
 
     fn current_with(
