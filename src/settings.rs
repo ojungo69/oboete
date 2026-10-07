@@ -87,7 +87,10 @@ fn utf8(bytes: Option<&[u8]>) -> Option<&str> {
 
 /// The file as every reader of it parses it, or none when one of them would refuse it: the
 /// curators, capture and its redaction rules, injection, and backups (Codex on #270).
-fn parsed(path: &Path, text: &str) -> Option<(config::Config, config::Capture, config::Inject)> {
+pub(crate) fn parsed(
+    path: &Path,
+    text: &str,
+) -> Option<(config::Config, config::Capture, config::Inject)> {
     let capture = config::parse_capture(Some(text)).ok()?;
     crate::redact::Rules::new(&capture.redaction).ok()?;
     crate::backup::location(text).ok()?;
