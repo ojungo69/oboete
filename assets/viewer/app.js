@@ -1579,17 +1579,22 @@ let form = null;
 // or an operation/unknown receipt needs inspection. This replaces a separate polling timer.
 let maintenanceDraft = { kind:'transcripts', agent:'all', from:'', recurateScope:'queued', recurateFrom:'', recurateTo:'', preview:null, confirmed:false,
   operationId:null, previewing:false, sending:false, unknown:false, status:null, error:null };
+const MAINTENANCE_PREFIX = {rebuild:'maintenance_native_',restore:'maintenance_native_',
+  recurate:'maintenance_recurate_',finish:'maintenance_finish_'};
+function maintenancePrefix(kind) {
+  return Object.hasOwn(MAINTENANCE_PREFIX,kind) ? MAINTENANCE_PREFIX[kind] : 'maintenance_';
+}
 function maintenanceOperation(d) {
   if(d.kind==='rebuild'||d.kind==='restore'||d.kind==='finish')return {kind:d.kind};
   if(d.kind==='recurate') {
-    const scope=d.recurateScope==='records' ? {kind:'records',from:Number(d.recurateFrom),to:Number(d.recurateTo)}
-      : d.recurateScope==='imported_v1' ? {kind:'imported',source:'v1'}
-        : d.recurateScope==='imported_transcripts' ? {kind:'imported',source:'transcripts'}
-          : {kind:d.recurateScope};
+    let scope={kind:d.recurateScope};
+    if(d.recurateScope==='records')scope={kind:'records',from:Number(d.recurateFrom),to:Number(d.recurateTo)};
+    else if(d.recurateScope==='imported_v1')scope={kind:'imported',source:'v1'};
+    else if(d.recurateScope==='imported_transcripts')scope={kind:'imported',source:'transcripts'};
     return {kind:'recurate',scope};
   }
-  return d.kind === 'v1' ? {kind:'v1',from:d.from || null}
-    : {kind:'transcripts',agent:d.agent === 'all' ? null : d.agent};
+  if(d.kind==='v1')return {kind:'v1',from:d.from || null};
+  return {kind:'transcripts',agent:d.agent === 'all' ? null : d.agent};
 }
 function maintenanceRangeValid(d) {
   if(d.kind!=='recurate'||d.recurateScope!=='records')return true;
@@ -1642,23 +1647,95 @@ async function refreshMaintenance(d = maintenanceDraft) {
     if(changed)renderMaintenance(d);
   }
 }
+function applyMaintenancePreview(d,recurate,res,answer) {
+  if(!res.ok) {
+    d.error=answer.code || 'maintenance_preview_failed';
+    if(recurate && res.status>=500){d.unknown=true;}
+    return;
+  }
+  if(recurate && answer.preparation) {
+    d.statusRead=(d.statusRead || 0)+1;
+    d.status=answer.preparation;
+  }
+  if(recurate && (!/^[0-9a-f]{64}$/.test(answer.preview_key || '')
+    || answer.preparation && answer.preparation.last?.phase!=='prepared')) {
+    d.error='maintenance_recurate_preview_failed';
+    return;
+  }
+  d.preview=answer;
+}
+async function prepareMaintenance(d,f,invalidate,recurate) {
+  if(maintenanceBlocked(d)||!maintenanceRangeValid(d))return;
+  invalidate();d.previewing=true;renderMaintenance(d);
+  try {
+    const {res,answer}=await memoryWrite('maintenance/preview',{operation:maintenanceOperation(d)});
+    if(form!==f)return;
+    applyMaintenancePreview(d,recurate,res,answer);
+  } catch {
+    if(recurate){d.unknown=true;d.error='maintenance_recurate_prepare_unknown';await refreshMaintenance(d);}
+    else d.error='maintenance_preview_failed';
+  } finally {
+    d.previewing=false;
+    if(form!==f && recurate){await refreshMaintenance(d);}
+    renderMaintenance(d);
+  }
+}
+async function startMaintenance(d,f,recurate,finish) {
+  if(maintenanceBlocked(d)||!d.preview?.preview_key||!d.confirmed)return;
+  const bytes=crypto.getRandomValues(new Uint8Array(32));
+  d.operationId=[...bytes].map(b=>b.toString(16).padStart(2,'0')).join('');
+  d.sending=true;d.unknown=false;d.error=null;
+  const id=d.operationId;
+  const posted={operation:maintenanceOperation(d),preview_key:d.preview.preview_key,
+    operation_id:id,confirmed:true};
+  d.preview=null;d.confirmed=false;
+  renderMaintenance(d);
+  try {
+    const {res,answer}=await memoryWrite('maintenance/start',posted);
+    if(d.operationId!==id || form!==f)return;
+    if(!res.ok) {
+      d.error=answer.code || 'maintenance_failed';
+      if((recurate||finish) && res.status>=500){d.unknown=true;}
+      return;
+    }
+    d.statusRead = (d.statusRead || 0) + 1;
+    d.status=answer;
+  } catch {
+    if(d.operationId===id){d.unknown=true;d.error='maintenance_unknown';}
+  } finally {
+    d.sending=false;
+    await refreshMaintenance(d);
+    renderMaintenance(d);
+  }
+}
+function maintenanceStatusSection(d,prefix) {
+  const active=d.status?.active,last=d.status?.last;
+  const unknownHint=d.kind==='recurate'&&!d.operationId
+    ? 'maintenance_recurate_prepare_unknown' : prefix+'unknown_hint';
+  return [d.previewing ? el('p','desc',t('loading')) : null,
+    d.error ? el('p','desc text maintenance-error',t(d.error)) : null,
+    d.unknown ? el('p','desc',t(unknownHint)) : null,
+    active ? maintenanceStatus(active) : null,last ? maintenanceStatus(last) : null,
+    d.status && !d.status.available ? el('p','desc',t('maintenance_no_receipt')) : null];
+}
+function invalidateMaintenance(d) {
+  d.preview=null;d.confirmed=false;d.operationId=null;d.error=null;
+  const section=$('panel').querySelector('.maintenance');
+  section?.querySelector('.maintenance-preview')?.remove();
+  section?.querySelector('.maintenance-error')?.remove();
+  const consent=section && [...section.querySelectorAll('input')].find(input=>input.dataset.field==='maintenance.confirmed');
+  if(consent){consent.checked=false;consent.disabled=true;}
+  const start=section && [...section.querySelectorAll('button')].find(button=>button.dataset.action==='maintenance.start');
+  if(start)start.disabled=true;
+}
 function maintenanceSection(f) {
   const d=f.maintenance;
   const native=d.kind==='rebuild'||d.kind==='restore';
   const recurate=d.kind==='recurate';
   const finish=d.kind==='finish';
-  const prefix=finish?'maintenance_finish_':recurate?'maintenance_recurate_':native?'maintenance_native_':'maintenance_';
+  const prefix=maintenancePrefix(d.kind);
   const busy=maintenanceBlocked(d);
-  const invalidate=()=>{
-    d.preview=null;d.confirmed=false;d.operationId=null;d.error=null;
-    const section=$('panel').querySelector('.maintenance');
-    section?.querySelector('.maintenance-preview')?.remove();
-    section?.querySelector('.maintenance-error')?.remove();
-    const consent=section && [...section.querySelectorAll('input')].find(input=>input.dataset.field==='maintenance.confirmed');
-    if(consent){consent.checked=false;consent.disabled=true;}
-    const start=section && [...section.querySelectorAll('button')].find(button=>button.dataset.action==='maintenance.start');
-    if(start)start.disabled=true;
-  };
+  const invalidate=()=>invalidateMaintenance(d);
   const kind=el('select',null);
   for(const [value,label] of [['transcripts','maintenance_transcripts'],['v1','maintenance_v1'],['rebuild','maintenance_rebuild'],['restore','maintenance_restore'],['recurate','maintenance_recurate'],['finish','maintenance_finish']]) {
     const option=el('option',null,t(label));option.value=value;kind.append(option);
@@ -1689,58 +1766,13 @@ function maintenanceSection(f) {
   const preview=el('button','quiet small',t(prefix+'preview'));
   preview.dataset.action='maintenance.preview';
   preview.type='button';preview.disabled=busy || !maintenanceRangeValid(d);
-  preview.addEventListener('click',async()=>{
-    if(maintenanceBlocked(d)||!maintenanceRangeValid(d))return;
-    invalidate();d.previewing=true;renderMaintenance(d);
-    try {
-      const {res,answer}=await memoryWrite('maintenance/preview',{operation:maintenanceOperation(d)});
-      if(form!==f)return;
-      if(!res.ok){d.error=answer.code || 'maintenance_preview_failed';if(recurate && res.status>=500)d.unknown=true;return;}
-      if(recurate && answer.preparation) {
-        d.statusRead=(d.statusRead || 0)+1;
-        d.status=answer.preparation;
-      }
-      if(recurate && (!/^[0-9a-f]{64}$/.test(answer.preview_key || '')
-        || answer.preparation && answer.preparation.last?.phase!=='prepared')) {
-        d.error='maintenance_recurate_preview_failed';
-        return;
-      }
-      d.preview=answer;
-    } catch {
-      if(recurate){d.unknown=true;d.error='maintenance_recurate_prepare_unknown';await refreshMaintenance(d);}
-      else d.error='maintenance_preview_failed';
-    }
-    finally {d.previewing=false;if(form!==f && recurate)await refreshMaintenance(d);renderMaintenance(d);}
-  });
+  preview.addEventListener('click',()=>void prepareMaintenance(d,f,invalidate,recurate));
   const confirm=checkbox(d.confirmed,value=>{d.confirmed=value;renderMaintenance(d);});
   confirm.dataset.field='maintenance.confirmed';confirm.disabled=busy || !d.preview;
   const start=el('button','quiet small',t(prefix+'start'));
   start.dataset.action='maintenance.start';
-  start.type='button';start.disabled=busy || !d.preview || !d.preview.preview_key || !d.confirmed;
-  start.addEventListener('click',async()=>{
-    if(maintenanceBlocked(d)||!d.preview?.preview_key||!d.confirmed)return;
-    const bytes=crypto.getRandomValues(new Uint8Array(32));
-    d.operationId=[...bytes].map(b=>b.toString(16).padStart(2,'0')).join('');
-    d.sending=true;d.unknown=false;d.error=null;
-    const id=d.operationId;
-    const posted={operation:maintenanceOperation(d),preview_key:d.preview.preview_key,
-      operation_id:id,confirmed:true};
-    d.preview=null;d.confirmed=false;
-    renderMaintenance(d);
-    try {
-      const {res,answer}=await memoryWrite('maintenance/start',posted);
-      if(d.operationId!==id || form!==f)return;
-      if(!res.ok){d.error=answer.code || 'maintenance_failed';if((recurate||finish) && res.status>=500)d.unknown=true;return;}
-      d.statusRead = (d.statusRead || 0) + 1;
-      d.status=answer;
-    } catch {
-      if(d.operationId===id){d.unknown=true;d.error='maintenance_unknown';}
-    } finally {
-      d.sending=false;
-      await refreshMaintenance(d);
-      renderMaintenance(d);
-    }
-  });
+  start.type='button';start.disabled=busy || !d.preview?.preview_key || !d.confirmed;
+  start.addEventListener('click',()=>void startMaintenance(d,f,recurate,finish));
   const refresh=el('button','quiet small',t(prefix+'refresh'));
   refresh.dataset.action='maintenance.refresh';
   refresh.type='button';refresh.addEventListener('click',()=>{void refreshMaintenance(d);});
@@ -1757,17 +1789,12 @@ function maintenanceSection(f) {
   const consentKey={rebuild:'maintenance_rebuild_consent',restore:'maintenance_restore_consent',recurate:'maintenance_recurate_consent',finish:'maintenance_finish_consent'}[d.kind] ?? 'maintenance_consent';
   const previewDetails=[];
   if(d.preview)previewDetails.push(maintenancePreview(d.preview),el('label','check',confirm,t(consentKey)));
-  const active=d.status?.active,last=d.status?.last;
   return el('section','maintenance',el('h3',null,t('maintenance_h')),el('p','desc',t('maintenance_desc')),
     el('label','field',el('span',null,t('maintenance_kind')),kind),
     scopeControl,recurate&&d.recurateScope==='records' ? el('div','grid',recordField('recurateFrom'),recordField('recurateTo')) : null,
     recurate&&d.recurateScope==='records' ? el('p','desc',t('maintenance_recurate_range_hint')) : null,
     el('p','desc',t(hintKey)),preview,...previewDetails,
-    start,d.previewing ? el('p','desc',t('loading')) : null,
-    d.error ? el('p','desc text maintenance-error',t(d.error)) : null,
-    d.unknown ? el('p','desc',t(recurate&&!d.operationId?'maintenance_recurate_prepare_unknown':prefix+'unknown_hint')) : null,
-    active ? maintenanceStatus(active) : null,last ? maintenanceStatus(last) : null,
-    d.status && !d.status.available ? el('p','desc',t('maintenance_no_receipt')) : null,
+    start,...maintenanceStatusSection(d,prefix),
     refresh,(d.operationId || d.unknown) && !d.status?.active ? another : null,
     el('p','desc',t(prefix+'settings_hint')),
     native || recurate || finish ? null : el('p','desc',t('maintenance_other_unavailable')));
@@ -1790,8 +1817,12 @@ function maintenanceNativePreview(p) {
 }
 function maintenanceRecuratePreview(p) {
   const s=p.plan;
-  const scope=p.scope.kind==='records' ? t('maintenance_recurate_range',p.scope)
-    : t('maintenance_recurate_'+(p.scope.kind==='imported' ? `imported_${p.scope.source}` : p.scope.kind));
+  let scope;
+  if(p.scope.kind==='records')scope=t('maintenance_recurate_range',p.scope);
+  else {
+    const kind=p.scope.kind==='imported' ? `imported_${p.scope.source}` : p.scope.kind;
+    scope=t('maintenance_recurate_'+kind);
+  }
   const rows=[el('p','desc',t('maintenance_recurate_selected_scope',{scope})),
     el('p','desc',t('maintenance_recurate_plan',{
     spans:s.spans,windows:s.windows,tokens:s.tokens,kept:s.kept_back,unparked:s.unparked_records}))];
@@ -1809,6 +1840,17 @@ function maintenanceFinishPreview(p) {
       targets:p.deletion.targets.length,nodes:p.deletion.nodes,bytes:p.deletion.bytes})),
     el('ul',null,...p.deletion.targets.map(label=>el('li','text',label || t('maintenance_finish_target_hidden'))))];
 }
+function maintenanceTranscriptPreview(p) {
+  const rows=[];
+  for(const [agent,s] of Object.entries(p.candidates)) {
+    if(s)rows.push(el('p','desc',t('maintenance_transcript_candidates',{
+      agent:t(agent==='claude'?'maintenance_claude':'maintenance_codex'),files:s.files,
+      sessions:s.sessions,records:s.events,bytes:s.bytes,waiting:s.waiting,refused:s.refused})));
+  }
+  if(p.v1)rows.push(el('p','desc',t('maintenance_conditional_v1')),
+    maintenanceV1(p.v1.candidates,p.v1.settings,true));
+  return rows;
+}
 function maintenancePreview(p) {
   const rows=[];
   const native=p.kind==='rebuild'||p.kind==='restore';
@@ -1821,15 +1863,9 @@ function maintenancePreview(p) {
   } else if(p.kind==='v1') {
     rows.push(el('p','text',p.source),maintenanceV1(p.candidates,p.settings,true));
   } else {
-    for(const [agent,s] of Object.entries(p.candidates)) {
-      if(s)rows.push(el('p','desc',t('maintenance_transcript_candidates',{
-        agent:t(agent==='claude'?'maintenance_claude':'maintenance_codex'),files:s.files,
-        sessions:s.sessions,records:s.events,bytes:s.bytes,waiting:s.waiting,refused:s.refused})));
-    }
-    if(p.v1)rows.push(el('p','desc',t('maintenance_conditional_v1')),
-      maintenanceV1(p.v1.candidates,p.v1.settings,true));
+    rows.push(...maintenanceTranscriptPreview(p));
   }
-  return el('div','maintenance-preview',el('h4',null,t(p.kind==='finish'?'maintenance_finish_preview_h':p.kind==='recurate'?'maintenance_recurate_preview_h':native?'maintenance_native_preview_h':'maintenance_preview_h')),...rows);
+  return el('div','maintenance-preview',el('h4',null,t(maintenancePrefix(p.kind)+'preview_h')),...rows);
 }
 function maintenanceV1(s,settings,candidate=false) {
   return el('div',null,el('p','desc',t(candidate?'maintenance_v1_candidates':'maintenance_v1_actual',{
@@ -1913,6 +1949,17 @@ function maintenanceFinishOutcome(out) {
     el('p','desc',t('maintenance_finish_kept')));
   return rows;
 }
+function maintenanceImportOutcome(out) {
+  const rows=[];
+  if(out.transcripts)for(const [agent,s] of Object.entries(out.transcripts)) {
+    if(s)rows.push(el('p','desc',t('maintenance_transcript_actual',{
+      agent:t(agent==='claude'?'maintenance_claude':'maintenance_codex'),records:s.events,
+      seen:s.seen,waiting:s.waiting,refused:s.refused})));
+  }
+  const v1=out.v1 || (!out.transcripts ? out : null);
+  if(v1)rows.push(maintenanceV1(v1,v1.settings));
+  return rows;
+}
 function maintenanceOutcome(out,phase) {
   if(!out)return [];
   if(out.operation==='rebuild'||out.operation==='restore')return maintenanceNativeOutcome(out);
@@ -1925,44 +1972,38 @@ function maintenanceOutcome(out,phase) {
     phase==='prepared' ? null : el('p','desc',t('maintenance_recurate_local_receipt')),
     out.index?.state ? el('p','desc',t('maintenance_index_'+out.index.state)) : null,
   ].filter(Boolean);
-  const rows=[];
-  if(out.transcripts)for(const [agent,s] of Object.entries(out.transcripts)) {
-    if(s)rows.push(el('p','desc',t('maintenance_transcript_actual',{
-      agent:t(agent==='claude'?'maintenance_claude':'maintenance_codex'),records:s.events,
-      seen:s.seen,waiting:s.waiting,refused:s.refused})));
-  }
-  const v1=out.v1 || (!out.transcripts ? out : null);
-  if(v1)rows.push(maintenanceV1(v1,v1.settings));
-  return rows;
+  return maintenanceImportOutcome(out);
+}
+function maintenanceIndexProgress(native) {
+  return t('maintenance_index_progress',{consumer:t('maintenance_consumer_'+native.consumer),
+    checkpoint:native.checkpoint,unit:t('maintenance_unit_'+native.unit)});
+}
+function maintenanceProgressText(run) {
+  const p=run.progress;
+  if(run.kind==='finish')return t('maintenance_finish_progress',{
+    records:p.v1_records,repositories:p.v1_repositories,documents:p.v1_documents});
+  if(run.kind==='recurate')return p.native?.kind==='index'
+    ? maintenanceIndexProgress(p.native)
+    : t('maintenance_recurate_stage',{stage:t('maintenance_stage_'+run.stage)});
+  if(run.kind==='rebuild'||run.kind==='restore')return p.native?.kind==='index'
+    ? maintenanceIndexProgress(p.native)
+    : t('maintenance_native_progress',{stage:t('maintenance_stage_'+run.stage)});
+  return t('maintenance_progress',{
+    stage:t('maintenance_stage_'+run.stage),records:p.v1_records,repos:p.v1_repositories,
+    documents:p.v1_documents,claude:p.claude.events,codex:p.codex.events});
 }
 function maintenanceStatus(run) {
   const p=run.progress;
-  const native=run.kind==='rebuild'||run.kind==='restore';
-  const recurate=run.kind==='recurate';
-  const finish=run.kind==='finish';
-  let progressText;
-  if(finish)progressText=t('maintenance_finish_progress',{
-    records:p.v1_records,repositories:p.v1_repositories,documents:p.v1_documents});
-  else if(recurate)progressText=p.native?.kind==='index'
-    ? t('maintenance_index_progress',{consumer:t('maintenance_consumer_'+p.native.consumer),checkpoint:p.native.checkpoint,
-      unit:t('maintenance_unit_'+p.native.unit)})
-    : t('maintenance_recurate_stage',{stage:t('maintenance_stage_'+run.stage)});
-  else if(!native)progressText=t('maintenance_progress',{
-    stage:t('maintenance_stage_'+run.stage),records:p.v1_records,repos:p.v1_repositories,
-    documents:p.v1_documents,claude:p.claude.events,codex:p.codex.events});
-  else if(p.native?.kind==='index')progressText=t('maintenance_index_progress',{
-    consumer:t('maintenance_consumer_'+p.native.consumer),checkpoint:p.native.checkpoint,
-    unit:t('maintenance_unit_'+p.native.unit)});
-  else progressText=t('maintenance_native_progress',{stage:t('maintenance_stage_'+run.stage)});
-  const rows=[el('p','desc',progressText)];
+  const prefix=maintenancePrefix(run.kind);
+  const rows=[el('p','desc',maintenanceProgressText(run))];
   if(run.result?.code)rows.push(el('p','desc text',t(run.result.code)));
-  if(run.phase==='partial' && run.committed)rows.push(el('p','desc',t(finish?'maintenance_finish_committed_boundary':recurate?'maintenance_recurate_committed_boundary':native?'maintenance_native_committed_boundary':'maintenance_committed_boundary')));
-  if(finish && run.phase==='running')rows.push(...maintenanceFinishEffects(p.finish_effects));
-  if(finish && run.phase==='running' && p.native?.kind==='deletion')rows.push(el('p','desc',t('maintenance_finish_deletion_progress',p.native.receipt)));
-  if(recurate && run.phase==='running')rows.push(...maintenanceRecurateTotals(p.providers,p.windows));
+  if(run.phase==='partial' && run.committed)rows.push(el('p','desc',t(prefix+'committed_boundary')));
+  if(run.kind==='finish' && run.phase==='running')rows.push(...maintenanceFinishEffects(p.finish_effects));
+  if(run.kind==='finish' && run.phase==='running' && p.native?.kind==='deletion')rows.push(el('p','desc',t('maintenance_finish_deletion_progress',p.native.receipt)));
+  if(run.kind==='recurate' && run.phase==='running')rows.push(...maintenanceRecurateTotals(p.providers,p.windows));
   rows.push(...maintenanceOutcome(run.result?.outcome,run.phase));
-  if(finish && ['partial','failed','unknown'].includes(run.phase))rows.push(el('p','desc',t('maintenance_finish_inspect')));
-  const result=el('div','maintenance-result',el('h4',null,t((finish?'maintenance_finish_phase_':recurate?'maintenance_recurate_phase_':native?'maintenance_native_phase_':'maintenance_phase_')+run.phase)),...rows);
+  if(run.kind==='finish' && ['partial','failed','unknown'].includes(run.phase))rows.push(el('p','desc',t('maintenance_finish_inspect')));
+  const result=el('div','maintenance-result',el('h4',null,t(prefix+'phase_'+run.phase)),...rows);
   result.setAttribute('role','status');
   return result;
 }
@@ -1979,7 +2020,11 @@ function formOf(s) {
   maintenanceDraft.confirmed=false;
   maintenanceDraft.statusRead=(maintenanceDraft.statusRead || 0)+1;
   if(maintenanceDraft.status)maintenanceDraft.status=JSON.parse(JSON.stringify(maintenanceDraft.status,
-    (key,value)=>key==='label' ? '' : ['deleted_session_labels','uncertain_identifier_labels'].includes(key) ? [] : value));
+    (key,value)=>{
+      if(key==='label')return '';
+      if(['deleted_session_labels','uncertain_identifier_labels'].includes(key))return [];
+      return value;
+    }));
   const text = (v) => (v === null || v === undefined ? '' : String(v));
   return {
     version: s.version,

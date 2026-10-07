@@ -919,12 +919,7 @@ impl<'a> Chain<'a> {
             } else {
                 ready.and_then(|()| call(p, prompt, schema, admission))
             };
-            let sent = !forced && result.as_ref().map_or_else(|error| error.sent, |_| true);
-            if sent {
-                observer(&AttemptEvent::Sent {
-                    attempt: reservation.id(),
-                });
-            }
+            let sent = report_sent(reservation.id(), forced, &result, observer);
             // The retry is a second request: only when the daily budget has room for it.
             if let Err(e) = &result
                 && e.status == Some(429)
@@ -1008,11 +1003,7 @@ impl<'a> Chain<'a> {
                     None
                 };
                 result = ready.and_then(|()| call(p, prompt, schema, admission));
-                if !forced && result.as_ref().map_or_else(|error| error.sent, |_| true) {
-                    observer(&AttemptEvent::Sent {
-                        attempt: reservation.id(),
-                    });
-                }
+                report_sent(reservation.id(), forced, &result, observer);
             }
             // The headers hold whatever the answer turns out to be.
             let rate = match &result {
@@ -1232,6 +1223,20 @@ pub(crate) fn next_state(was: providers_db::State, e: &CallError) -> providers_d
         fails,
         backoff,
     }
+}
+
+/// Both initial and retried calls report possible sends before a fallible settlement.
+fn report_sent(
+    attempt: i64,
+    forced: bool,
+    result: &Result<Answer, CallError>,
+    observer: &mut impl FnMut(&AttemptEvent),
+) -> bool {
+    let sent = !forced && result.as_ref().map_or_else(|error| error.sent, |_| true);
+    if sent {
+        observer(&AttemptEvent::Sent { attempt });
+    }
+    sent
 }
 
 fn call(

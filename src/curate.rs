@@ -7564,9 +7564,9 @@ curate = false
         assert!(!home.path().join("providers.db").exists());
         let listed =
             recurate(home.path(), Again::Span(device, Span::records(1, 1)), false).unwrap();
-        assert!(listed.contains("1 span(s) in 1 window(s)"), "{listed}");
-        assert!(listed.contains("at most USD 2.00"), "{listed}");
-        assert!(listed.contains("nothing sent"), "{listed}");
+        assert!(listed.contains("1 span(s) in 1 window(s)"));
+        assert!(listed.contains("at most USD 2.00"));
+        assert!(listed.contains("nothing sent"));
         assert!(
             !home.path().join("providers.db").exists(),
             "no-send preparation initialized the provider ledger"

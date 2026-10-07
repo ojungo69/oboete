@@ -429,7 +429,31 @@ impl Maintenance {
             maintenance: self,
             id,
         };
-        let (result, code, partial) = match request.operation {
+        let (result, code, partial) = self.execute(caller, home, &request, consent);
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(mut run) = state.active.take() {
+            run.phase = if code.is_none() {
+                "complete"
+            } else if partial || run.committed {
+                "partial"
+            } else {
+                "failed"
+            };
+            run.stage = run.phase;
+            run.result = Some(json!({"code":code,"outcome":result}));
+            state.last = Some(run);
+        }
+        Ok(Self::snapshot(home, &state))
+    }
+    fn execute(
+        &self,
+        caller: executable::CommandCaller,
+        home: &Path,
+        request: &StartRequest,
+        consent: Option<curate::Consent>,
+    ) -> (Value, Option<&'static str>, bool) {
+        let id = &request.operation_id;
+        match &request.operation {
             Operation::Finish { .. } => {
                 match migrate::finish_report(home, &request.preview_key, caller, &mut |event| {
                     self.finish_progress(id, event)
@@ -445,7 +469,7 @@ impl Maintenance {
             Operation::Recurate { scope } => {
                 let (outcome, result) = curate::recurate_report(
                     home,
-                    &scope,
+                    scope,
                     &consent.expect("recuration admission retained its consent"),
                     caller,
                     &mut |event| self.recuration_progress(id, event),
@@ -469,7 +493,7 @@ impl Maintenance {
             Operation::Rebuild { .. } | Operation::Restore { .. } => {
                 let mut committed =
                     |event: &worker::MaintenanceCommit| self.native_progress(id, event);
-                let result = match request.operation {
+                let result = match &request.operation {
                     Operation::Rebuild { .. } => worker::rebuild_report(
                         home,
                         Some(&request.preview_key),
@@ -497,7 +521,7 @@ impl Maintenance {
                     |event: &transcript::Committed| self.transcript_progress(id, event);
                 match transcript::run(
                     home,
-                    &self.roots(agent),
+                    &self.roots(*agent),
                     Some(&request.preview_key),
                     &mut committed,
                 ) {
@@ -525,21 +549,7 @@ impl Maintenance {
                     ),
                 }
             }
-        };
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(mut run) = state.active.take() {
-            run.phase = if code.is_none() {
-                "complete"
-            } else if partial || run.committed {
-                "partial"
-            } else {
-                "failed"
-            };
-            run.stage = run.phase;
-            run.result = Some(json!({"code":code,"outcome":result}));
-            state.last = Some(run);
         }
-        Ok(Self::snapshot(home, &state))
     }
     fn finish_progress(&self, id: &str, event: &migrate::FinishCommit) {
         if let migrate::FinishCommit::Import(import) = event {

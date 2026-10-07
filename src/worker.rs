@@ -613,7 +613,21 @@ pub(crate) fn with_prepared_report<T, U>(
             .clone()
             .expect("reported preparation retains its home");
         proof.check(home)?;
-        let config = crate::settings::config_lock(home)?;
+        let config = match crate::settings::config_lock(home) {
+            Ok(config) => config,
+            Err(error) => {
+                // A hook saw the worker hold even when config admission failed. Keep this
+                // caller's original home proof for the same reported completion drain.
+                proof.check(home)?;
+                validate(&proof)?;
+                proof.check(home)?;
+                return match drain_holding_report(home, held, &mut receipt, committed) {
+                    Ok(()) => Err(error.into()),
+                    Err(cleanup) => Err(error)
+                        .with_context(|| format!("operation cleanup also failed: {cleanup:#}")),
+                };
+            }
+        };
         proof.check(home)?;
         // Stale consent refuses before any store work, including the completion drain.
         validate(&proof)?;
@@ -2037,6 +2051,98 @@ mod tests {
     use super::*;
     use crate::knowledge;
     use crate::raw;
+
+    #[test]
+    fn w5c_config_lock_failure_drains_records_captured_while_worker_held() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(
+            p.join("config.toml"),
+            "providers = []\n[summary]\ncurate = false\n",
+        )
+        .unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic initial configuration failure"))
+            .unwrap();
+        run_once(p).unwrap();
+        assert_eq!(backlog(p).unwrap(), 0);
+        if p.join("providers.db").exists() {
+            std::fs::remove_file(p.join("providers.db")).unwrap();
+        }
+        std::fs::create_dir(p.join("state/config.lock")).unwrap();
+        AFTER_OPEN.set(Some(|home| {
+            AFTER_OPEN.set(None);
+            assert!(lock(home).unwrap().is_none());
+            raw::open(home)
+                .unwrap()
+                .append(&raw::test_event("synthetic 尾刻"))
+                .unwrap();
+        }));
+        let (index, result) = crate::curate::prepare_report(
+            p,
+            &crate::curate::RecurationScope::Queued {},
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        );
+        AFTER_OPEN.set(None);
+        assert!(result.is_err());
+        assert_eq!(index.state, IndexState::Complete);
+        assert_eq!(backlog(p).unwrap(), 0);
+        assert_eq!(crate::search::raw(p, "尾刻", None, 5).unwrap().len(), 1);
+        assert!(!p.join("providers.db").exists());
+    }
+
+    #[test]
+    fn w5c_config_lock_failure_keeps_stale_recuration_without_a_drain() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(
+            p.join("config.toml"),
+            "providers = []\n[summary]\ncurate = false\n",
+        )
+        .unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic original recuration"))
+            .unwrap();
+        let scope = crate::curate::RecurationScope::Queued {};
+        let (_, prepared) = crate::curate::prepare_report(
+            p,
+            &scope,
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        );
+        let (_, consent) = prepared.unwrap();
+        std::fs::remove_file(p.join("state/config.lock")).unwrap();
+        std::fs::create_dir(p.join("state/config.lock")).unwrap();
+        AFTER_OPEN.set(Some(|home| {
+            AFTER_OPEN.set(None);
+            raw::open(home)
+                .unwrap()
+                .append(&raw::test_event("synthetic 異帆"))
+                .unwrap();
+        }));
+        let (receipt, result) = crate::curate::recurate_report(
+            p,
+            &scope,
+            &consent,
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        );
+        AFTER_OPEN.set(None);
+        assert_eq!(receipt.index.state, IndexState::NotStarted);
+        assert!(matches!(
+            result
+                .unwrap_err()
+                .downcast_ref::<crate::backup::MaintenanceCode>(),
+            Some(crate::backup::MaintenanceCode::Stale)
+        ));
+        assert_eq!(backlog(p).unwrap(), 1);
+        assert_eq!(receipt.providers.sent, 0);
+        assert!(crate::search::raw(p, "異帆", None, 5).unwrap().is_empty());
+        assert!(!p.join("providers.db").exists());
+    }
 
     #[test]
     fn w5b_a_failed_store_inspection_keeps_the_restore_request() {

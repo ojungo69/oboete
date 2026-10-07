@@ -123,6 +123,8 @@ cloud starts from a page view or a save.
   again under it; no store handles or locks survive the browser's confirmation gap. A stale
   confirmation performs no admitted drain. A hook during that refusal can need the next hook,
   view command or explicit preparation to index it, as the existing R12 stale boundary does.
+  A config-lock failure after acquiring the worker hold still attempts the reported completion
+  drain under the original home and valid consent; stale consent continues to refuse that drain.
 
   The paid-chain estimate is an estimate, not a new operation spending cap. Execution keeps the
   ordinary shared live budget, privacy and dispatch gates. Receipts count this operation's own

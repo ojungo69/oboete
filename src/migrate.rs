@@ -1530,6 +1530,39 @@ fn finish_operation(
         })?;
         proof.check(home)?;
 
+        let (deletion_code, removed) = remove_finish_targets(
+            home,
+            &proof,
+            config.as_deref(),
+            &manifest,
+            &mut outcome.deletion,
+            &mut mode,
+            progress,
+        );
+        code = deletion_code;
+        removed
+    })();
+    match result {
+        Ok(()) => Ok(outcome),
+        Err(cause) => Err(FinishFailure {
+            outcome: Box::new(outcome),
+            code: failure_code(&cause, code),
+            cause,
+        }),
+    }
+}
+
+fn remove_finish_targets(
+    home: &Path,
+    proof: &crate::executable::CommandHome,
+    config: Option<&[u8]>,
+    manifest: &FinishManifest,
+    deletion: &mut FinishDeletionReport,
+    mode: &mut FinishMode<'_>,
+    progress: &mut impl FnMut(&FinishCommit),
+) -> (FailureCode, Result<()>) {
+    let mut code = FailureCode::Stale;
+    let result = (|| -> Result<()> {
         // The last check/unlink gap and old v1 writers retaining an unlinked handle remain
         // spec 7.5's cutover precondition; import.lock does not stop that old writer.
         let mut order: Vec<usize> = (0..manifest.targets.len()).collect();
@@ -1538,7 +1571,7 @@ fn finish_operation(
             code = FailureCode::Stale;
             proof.check(home)?;
             anyhow::ensure!(
-                config == finish_config_bytes(home)?,
+                config == finish_config_bytes(home)?.as_deref(),
                 "finish config changed during deletion"
             );
             let target = &manifest.targets[index];
@@ -1556,8 +1589,8 @@ fn finish_operation(
                 Ok(())
             })();
             if let Err(error) = current {
-                outcome.deletion.targets[index].state = FinishTargetState::Changed;
-                progress(&outcome.deletion.event());
+                deletion.targets[index].state = FinishTargetState::Changed;
+                progress(&deletion.event());
                 return Err(error);
             }
             proof.check(home)?;
@@ -1569,17 +1602,17 @@ fn finish_operation(
             } else {
                 std::fs::remove_file(&path)
             };
-            outcome.deletion.attempted += 1;
+            deletion.attempted += 1;
             match &removed {
                 Ok(()) => {
-                    outcome.deletion.removed += 1;
-                    outcome.deletion.removed_bytes += target.bytes;
-                    outcome.deletion.targets[index].state = FinishTargetState::Removed;
+                    deletion.removed += 1;
+                    deletion.removed_bytes += target.bytes;
+                    deletion.targets[index].state = FinishTargetState::Removed;
                 }
                 Err(_) => {
-                    outcome.deletion.failed += 1;
-                    outcome.deletion.targets[index].state = if target.directory {
-                        outcome.deletion.uncertain += 1;
+                    deletion.failed += 1;
+                    deletion.targets[index].state = if target.directory {
+                        deletion.uncertain += 1;
                         FinishTargetState::UnknownExtent
                     } else {
                         FinishTargetState::Failed
@@ -1587,24 +1620,17 @@ fn finish_operation(
                 }
             }
             // Preserve actual effects before either an observer or stdout can fail.
-            progress(&outcome.deletion.event());
+            progress(&deletion.event());
             mode.removed(&path, &removed)?;
         }
         anyhow::ensure!(
-            outcome.deletion.failed == 0,
+            deletion.failed == 0,
             "{} file(s) not deleted",
-            outcome.deletion.failed
+            deletion.failed
         );
         Ok(())
     })();
-    match result {
-        Ok(()) => Ok(outcome),
-        Err(cause) => Err(FinishFailure {
-            outcome: Box::new(outcome),
-            code: failure_code(&cause, code),
-            cause,
-        }),
-    }
+    (code, result)
 }
 
 /// v1's runtime files in the home, spec 7.4's list (what ~/.oboete held on WSL on 2026-09-25):
