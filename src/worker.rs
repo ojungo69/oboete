@@ -119,7 +119,7 @@ fn maintenance_failure(
     }
 }
 
-struct IndexReport<'a> {
+pub(crate) struct IndexReport<'a> {
     receipt: &'a mut IndexReceipt,
     committed: &'a mut dyn FnMut(&MaintenanceCommit),
 }
@@ -138,7 +138,25 @@ fn report_backup(home: &Path, raw: &Raw, report: &mut Option<&mut IndexReport<'_
     }
 }
 impl IndexReport<'_> {
-    fn changed(&mut self, stage: &'static str) {
+    pub(crate) fn drain(
+        &mut self,
+        home: &Path,
+        raw: &Raw,
+        k: &mut Connection,
+        consumers: &mut [Box<dyn Consumer>],
+        proof: &crate::executable::CommandHome,
+    ) -> Result<()> {
+        self.receipt.state = IndexState::Failed;
+        loop {
+            proof.check(home)?;
+            if !pass_report(raw, k, consumers, &mut Some(&mut *self))? {
+                break;
+            }
+        }
+        self.receipt.state = IndexState::Complete;
+        Ok(())
+    }
+    pub(crate) fn changed(&mut self, stage: &'static str) {
         self.receipt.stores_changed = true;
         (self.committed)(&MaintenanceCommit::Effect { stage });
     }
@@ -476,6 +494,8 @@ thread_local! {
     static REBUILD_STATUS_BLOCKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_CARRY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BEFORE_STORE_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    /// One-shot capture after planning, while preparation still owns the worker lock.
+    pub(crate) static AFTER_PREPARATION_PLAN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
 /// How long a command waits for a worker to step aside.
@@ -538,6 +558,165 @@ pub fn drained(home: &Path, ask: bool) -> Result<Option<Lock>> {
     checkpoint::rewind(&raw, &k, &mut consumers)?;
     drain(&raw, &mut k, &mut consumers)?;
     Ok(Some(held))
+}
+
+/// Owned, no-inference preparation for a caller whose plan needs the drained stores.
+/// Finish the default drain before return; config and original-home proof survive for the key.
+pub(crate) fn prepare_report<T>(
+    home: &Path,
+    caller: crate::executable::CommandCaller,
+    committed: &mut impl FnMut(&MaintenanceCommit),
+    inspect: impl FnOnce(&Raw, &Connection) -> Result<T>,
+) -> (
+    IndexReceipt,
+    Result<(T, std::fs::File, crate::executable::CommandHome)>,
+) {
+    with_prepared_report(
+        home,
+        caller,
+        committed,
+        |_| Ok(()),
+        inspect,
+        |value, _, _, _, _, _| Ok(value),
+    )
+}
+
+/// Validate closed-store consent, plan, then operate without releasing worker admission.
+/// Every Result after worker/config admission completes the reported no-inference tail drain.
+pub(crate) fn with_prepared_report<T, U>(
+    home: &Path,
+    caller: crate::executable::CommandCaller,
+    committed: &mut impl FnMut(&MaintenanceCommit),
+    validate: impl Fn(&crate::executable::CommandHome) -> Result<()>,
+    inspect: impl FnOnce(&Raw, &Connection) -> Result<T>,
+    operate: impl FnOnce(
+        T,
+        &mut Raw,
+        &mut Connection,
+        &mut [Box<dyn Consumer>],
+        &crate::executable::CommandHome,
+        &mut IndexReport<'_>,
+    ) -> Result<U>,
+) -> (
+    IndexReceipt,
+    Result<(U, std::fs::File, crate::executable::CommandHome)>,
+) {
+    let mut receipt = IndexReceipt::default();
+    let result = (|| {
+        let command = crate::executable::CommandHome::new(home, caller)?;
+        // Refuse already-stale consent before asking an active worker to exit.
+        validate(&command)?;
+        command.check(home)?;
+        let held = lock_asking_for(home, Some(&command))?;
+        let proof = held
+            .2
+            .clone()
+            .expect("reported preparation retains its home");
+        proof.check(home)?;
+        let config = match crate::settings::config_lock(home) {
+            Ok(config) => config,
+            Err(error) => {
+                // A hook saw the worker hold even when config admission failed. Keep this
+                // caller's original home proof for the same reported completion drain.
+                proof.check(home)?;
+                validate(&proof)?;
+                proof.check(home)?;
+                return match drain_holding_report(home, held, &mut receipt, committed) {
+                    Ok(()) => Err(error.into()),
+                    Err(cleanup) => Err(error)
+                        .with_context(|| format!("operation cleanup also failed: {cleanup:#}")),
+                };
+            }
+        };
+        proof.check(home)?;
+        // Stale consent refuses before any store work, including the completion drain.
+        validate(&proof)?;
+        proof.check(home)?;
+        let value: Result<U> = (|| {
+            receipt.state = IndexState::Failed;
+            let mut report = IndexReport {
+                receipt: &mut receipt,
+                committed,
+            };
+            check_reported_stores(home)?;
+            let changed = &mut report.receipt.stores_changed;
+            let mut raw = crate::backup::open_raw_report(
+                home,
+                &mut report.receipt.raw_recovery,
+                Some(&proof),
+                &mut |stage| {
+                    if stage == "stores_changed" {
+                        *changed = true;
+                    }
+                    (report.committed)(&MaintenanceCommit::Effect { stage });
+                },
+            )?;
+            proof.check(home)?;
+            let mut k = crate::backup::open_knowledge_report(home, Some(&proof), &mut |stage| {
+                report.changed(stage)
+            })?;
+            let mut consumers = consumers(home);
+            checkpoint::rewind_report(
+                &raw,
+                &k,
+                &mut consumers,
+                &mut |consumer, ops, checkpoint| {
+                    report.receipt.consumer_commits += 1;
+                    (report.committed)(&MaintenanceCommit::Index {
+                        consumer,
+                        unit: if ops {
+                            CheckpointUnit::Ops
+                        } else {
+                            CheckpointUnit::Records
+                        },
+                        checkpoint,
+                    });
+                },
+            )?;
+            proof.check(home)?;
+            report_backup(home, &raw, &mut Some(&mut report), true);
+            let reconciled =
+                crate::forget::reconcile_report(home, &mut raw, &mut |stage, applied| {
+                    report.receipt.forget_requests_applied += applied as u64;
+                    report.changed(stage);
+                })?;
+            report.receipt.forget_log_warnings += reconciled.problems.len() as u64;
+            report.drain(home, &raw, &mut k, &mut consumers, &proof)?;
+            proof.check(home)?;
+            // The planner/request builder also calls claims::schema. Keep any fresh/legacy
+            // schema change in this owned transaction and report it only after commit.
+            let tx = k.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let changes = tx.total_changes();
+            let schema: i64 = tx.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
+            crate::claims::schema(&tx)?;
+            let value = inspect(&raw, &tx)?;
+            let changed = tx.total_changes() != changes
+                || tx.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0))? != schema;
+            tx.commit()?;
+            if changed {
+                report.changed("stores_changed");
+            }
+            // No planner transaction survives into provider admission or network work.
+            operate(value, &mut raw, &mut k, &mut consumers, &proof, &mut report)
+        })();
+        #[cfg(test)]
+        if let Some(after) = AFTER_PREPARATION_PLAN.take() {
+            after(home);
+        }
+        // A hook that found this hold started no worker. The existing completion drain
+        // releases admission and checks again, retaining this caller's original home proof.
+        let drained = drain_holding_report(home, held, &mut receipt, committed);
+        let value = match (value, drained) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => {
+                Err(error).with_context(|| format!("operation cleanup also failed: {cleanup:#}"))
+            }
+        }?;
+        proof.check(home)?;
+        Ok((value, config, proof))
+    })();
+    (receipt, result)
 }
 
 /// How often a worker looks for new records while it waits.
@@ -1821,10 +2000,17 @@ fn run_once_holding_report(
     committed: &mut impl FnMut(&MaintenanceCommit),
 ) -> (IndexReceipt, Result<()>) {
     let mut receipt = IndexReceipt::default();
-    let mut report = IndexReport {
-        receipt: &mut receipt,
-        committed,
-    };
+    let result = drain_holding_report(home, held, &mut receipt, committed);
+    (receipt, result)
+}
+
+fn drain_holding_report(
+    home: &Path,
+    held: Lock,
+    receipt: &mut IndexReceipt,
+    committed: &mut impl FnMut(&MaintenanceCommit),
+) -> Result<()> {
+    let mut report = IndexReport { receipt, committed };
     let result = run_holding_report(
         home,
         0,
@@ -1834,12 +2020,12 @@ fn run_once_holding_report(
         Phases::default(),
         &mut Some(&mut report),
     );
-    receipt.state = if result.is_ok() {
+    report.receipt.state = if result.is_ok() {
         IndexState::Complete
     } else {
         IndexState::Failed
     };
-    (receipt, result)
+    result
 }
 
 pub fn run_once(home: &Path) -> Result<()> {
@@ -1865,6 +2051,98 @@ mod tests {
     use super::*;
     use crate::knowledge;
     use crate::raw;
+
+    #[test]
+    fn w5c_config_lock_failure_drains_records_captured_while_worker_held() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(
+            p.join("config.toml"),
+            "providers = []\n[summary]\ncurate = false\n",
+        )
+        .unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic initial configuration failure"))
+            .unwrap();
+        run_once(p).unwrap();
+        assert_eq!(backlog(p).unwrap(), 0);
+        if p.join("providers.db").exists() {
+            std::fs::remove_file(p.join("providers.db")).unwrap();
+        }
+        std::fs::create_dir(p.join("state/config.lock")).unwrap();
+        AFTER_OPEN.set(Some(|home| {
+            AFTER_OPEN.set(None);
+            assert!(lock(home).unwrap().is_none());
+            raw::open(home)
+                .unwrap()
+                .append(&raw::test_event("synthetic 尾刻"))
+                .unwrap();
+        }));
+        let (index, result) = crate::curate::prepare_report(
+            p,
+            &crate::curate::RecurationScope::Queued {},
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        );
+        AFTER_OPEN.set(None);
+        assert!(result.is_err());
+        assert_eq!(index.state, IndexState::Complete);
+        assert_eq!(backlog(p).unwrap(), 0);
+        assert_eq!(crate::search::raw(p, "尾刻", None, 5).unwrap().len(), 1);
+        assert!(!p.join("providers.db").exists());
+    }
+
+    #[test]
+    fn w5c_config_lock_failure_keeps_stale_recuration_without_a_drain() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(
+            p.join("config.toml"),
+            "providers = []\n[summary]\ncurate = false\n",
+        )
+        .unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic original recuration"))
+            .unwrap();
+        let scope = crate::curate::RecurationScope::Queued {};
+        let (_, prepared) = crate::curate::prepare_report(
+            p,
+            &scope,
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        );
+        let (_, consent) = prepared.unwrap();
+        std::fs::remove_file(p.join("state/config.lock")).unwrap();
+        std::fs::create_dir(p.join("state/config.lock")).unwrap();
+        AFTER_OPEN.set(Some(|home| {
+            AFTER_OPEN.set(None);
+            raw::open(home)
+                .unwrap()
+                .append(&raw::test_event("synthetic 異帆"))
+                .unwrap();
+        }));
+        let (receipt, result) = crate::curate::recurate_report(
+            p,
+            &scope,
+            &consent,
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        );
+        AFTER_OPEN.set(None);
+        assert_eq!(receipt.index.state, IndexState::NotStarted);
+        assert!(matches!(
+            result
+                .unwrap_err()
+                .downcast_ref::<crate::backup::MaintenanceCode>(),
+            Some(crate::backup::MaintenanceCode::Stale)
+        ));
+        assert_eq!(backlog(p).unwrap(), 1);
+        assert_eq!(receipt.providers.sent, 0);
+        assert!(crate::search::raw(p, "異帆", None, 5).unwrap().is_empty());
+        assert!(!p.join("providers.db").exists());
+    }
 
     #[test]
     fn w5b_a_failed_store_inspection_keeps_the_restore_request() {

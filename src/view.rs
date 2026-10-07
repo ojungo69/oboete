@@ -1166,24 +1166,28 @@ impl Viewer {
     }
 
     fn maintenance_preview(&self, body: &[u8]) -> Response {
-        saved(self.maintenance.preview(&self.home, body))
+        saved(
+            self.maintenance
+                .preview(self.maintenance_caller(), &self.home, body),
+        )
+    }
+
+    fn maintenance_caller(&self) -> Option<crate::executable::CommandCaller> {
+        match &self.token {
+            Token::Run(_) => Some(crate::executable::CommandCaller::Worker),
+            Token::File => self.home_lock.map(crate::executable::CommandCaller::Viewer),
+        }
     }
 
     fn maintenance_start(&self, body: &[u8]) -> Response {
         // The caller's original connection Slot remains held through native completion,
         // including when the peer disconnects; status reads use another short-lived Slot.
-        let caller = match &self.token {
-            Token::Run(_) => crate::executable::CommandCaller::Worker,
-            Token::File => match self.home_lock {
-                Some(identity) => crate::executable::CommandCaller::Viewer(identity),
-                None => {
-                    return saved(Err(crate::settings::Refusal {
-                        status: 422,
-                        code: "maintenance_busy",
-                        field: String::new(),
-                    }));
-                }
-            },
+        let Some(caller) = self.maintenance_caller() else {
+            return saved(Err(crate::settings::Refusal {
+                status: 422,
+                code: "maintenance_busy",
+                field: String::new(),
+            }));
         };
         saved(self.maintenance.start(caller, &self.home, body))
     }
@@ -1243,7 +1247,7 @@ impl Viewer {
         }
         if name == "maintenance" {
             return if q.is_empty() {
-                Response::json(&self.maintenance.show())
+                Response::json(&self.maintenance.show(&self.home))
             } else {
                 Response::text(400, "status carries no query")
             };
@@ -1901,6 +1905,196 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn w5c_preparation_refuses_unpinned_and_replaced_resident_homes() {
+        use std::os::unix::fs::PermissionsExt;
+        let (port, home, started) = listening();
+        let p = home.path();
+        crate::raw::open(p)
+            .unwrap()
+            .append(&crate::raw::test_event("synthetic original home"))
+            .unwrap();
+        crate::worker::run_once(p).unwrap();
+        let operation = json!({"kind":"recurate","scope":{"kind":"queued"}});
+        let detached = Viewer::new(p, None, port, Token::File);
+        let before = crate::backup::tests::w5b_files(p);
+        let readonly = w5b_post(
+            &detached,
+            "/api/maintenance/preview",
+            json!({"operation":{"kind":"rebuild"}}),
+        );
+        assert_eq!(readonly.status, 200);
+        assert_eq!(crate::backup::tests::w5b_files(p), before);
+        let unpinned = w5b_post(
+            &detached,
+            "/api/maintenance/preview",
+            json!({"operation":operation}),
+        );
+        assert_eq!(unpinned.status, 422);
+        assert_eq!(crate::backup::tests::w5b_files(p), before);
+
+        let retired = tempfile::tempdir().unwrap();
+        std::fs::rename(p, retired.path().join("previous")).unwrap();
+        std::fs::create_dir(p).unwrap();
+        std::fs::write(
+            p.join("config.toml"),
+            format!("providers = []\n[summary]\ncurate = false\n[view]\nport = {port}\n"),
+        )
+        .unwrap();
+        crate::raw::open(p)
+            .unwrap()
+            .append(&crate::raw::test_event("synthetic replacement home"))
+            .unwrap();
+        crate::worker::run_once(p).unwrap();
+        std::fs::set_permissions(p.join("state"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(p.join("state/view.lock"), "replacement viewer authority").unwrap();
+        ensure_token(p).unwrap();
+        let before = crate::backup::tests::w5b_files(p);
+        let slot = Slot::take(&started.viewer).unwrap();
+        let response = w5b_post(
+            &started.viewer,
+            "/api/maintenance/preview",
+            json!({"operation":operation}),
+        );
+        drop(slot);
+        assert_eq!(response.status, 200);
+        let response: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(response["preview_key"], Value::Null);
+        assert_eq!(response["preparation"]["last"]["phase"], "failed");
+        assert_eq!(response["preparation"]["last"]["committed"], false);
+        assert_eq!(crate::backup::tests::w5b_files(p), before);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w5c_confirmed_maintenance_keeps_the_original_resident_home_after_a_hardlinked_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for kind in ["recurate", "finish"] {
+            let (_, home, started) = listening();
+            let p = home.path();
+            crate::raw::open(p)
+                .unwrap()
+                .append(&crate::raw::test_event("synthetic original queued home"))
+                .unwrap();
+            crate::worker::run_once(p).unwrap();
+            if kind == "finish" {
+                drop(crate::db::open(p).unwrap());
+            }
+            let files = if kind == "finish" {
+                vec!["config.toml", "raw.db", "knowledge.db", "oboete.db"]
+            } else {
+                vec!["config.toml", "raw.db", "knowledge.db"]
+            };
+            let operation = if kind == "finish" {
+                json!({"kind":"finish"})
+            } else {
+                json!({"kind":"recurate","scope":{"kind":"queued"}})
+            };
+            let preview = w5b_post(
+                &started.viewer,
+                "/api/maintenance/preview",
+                json!({"operation":operation}),
+            );
+            assert_eq!(preview.status, 200);
+            let preview: Value = serde_json::from_slice(&preview.body).unwrap();
+            assert_eq!(preview["kind"], kind);
+            assert_eq!(preview["no_model_request"], true);
+            if kind == "recurate" {
+                assert_eq!(preview["preparation"]["last"]["phase"], "prepared");
+            }
+            assert!(
+                preview["preview_key"]
+                    .as_str()
+                    .is_some_and(|key| key.len() == 64)
+            );
+
+            // Preserve each operation's consent bytes and file identities so that
+            // refusal must come from the original Viewer proof, not physical staleness.
+            for name in &files {
+                assert!(p.join(name).is_file(), "missing {name} before replacement");
+            }
+            for name in [
+                "raw.db-wal",
+                "knowledge.db-wal",
+                "oboete.db-wal",
+                "oboete.db-shm",
+                "forget.log",
+            ] {
+                assert!(!p.join(name).exists(), "{name} would change consent");
+            }
+            assert!(!crate::backup::dir(p).unwrap().join("forget.log").exists());
+            assert!(!p.join("providers.db").exists());
+            let original_lock =
+                crate::worker::file_id(std::fs::metadata(p.join("state/view.lock")));
+            assert!(original_lock.is_some());
+            let original_token = file_token(p).unwrap();
+
+            let retired = tempfile::tempdir().unwrap();
+            let previous = retired.path().join("previous");
+            std::fs::rename(p, &previous).unwrap();
+            std::fs::create_dir(p).unwrap();
+            for name in &files {
+                let old = previous.join(name);
+                let replacement = p.join(name);
+                std::fs::hard_link(&old, &replacement).unwrap();
+                assert_eq!(
+                    crate::db::store_file(&old),
+                    crate::db::store_file(&replacement)
+                );
+                assert!(!crate::db::store_file(&old).is_empty());
+                assert_eq!(
+                    crate::migrate::file_version(&old).unwrap(),
+                    crate::migrate::file_version(&replacement).unwrap()
+                );
+            }
+            std::fs::create_dir(p.join("state")).unwrap();
+            std::fs::set_permissions(p.join("state"), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            std::fs::write(p.join("state/view.lock"), "replacement authority").unwrap();
+            ensure_token(p).unwrap();
+            assert_ne!(file_token(p).unwrap(), original_token);
+            assert_ne!(
+                crate::worker::file_id(std::fs::metadata(p.join("state/view.lock"))),
+                original_lock
+            );
+            for name in [
+                "raw.db-wal",
+                "knowledge.db-wal",
+                "oboete.db-wal",
+                "oboete.db-shm",
+                "forget.log",
+            ] {
+                assert!(!p.join(name).exists(), "replacement introduced {name}");
+            }
+            assert!(!crate::backup::dir(p).unwrap().join("forget.log").exists());
+            let before = crate::backup::tests::w5b_files(p);
+
+            // The replacement token authenticates the guarded handler, while the
+            // Viewer still carries the old view.lock identity from its original home.
+            let slot = Slot::take(&started.viewer).unwrap();
+            let response = w5b_post(
+                &started.viewer,
+                "/api/maintenance/start",
+                json!({
+                    "operation":operation,
+                    "preview_key":preview["preview_key"],
+                    "operation_id":"c".repeat(64),
+                    "confirmed":true,
+                }),
+            );
+            drop(slot);
+            assert_eq!(response.status, 200);
+            let response: Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(response["last"]["phase"], "failed");
+            assert_eq!(response["last"]["committed"], false);
+            assert_eq!(crate::backup::tests::w5b_files(p), before);
+            assert!(!p.join("providers.db").exists());
+            assert!(!previous.join("providers.db").exists());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn w5b_a_fifo_view_lock_is_refused_without_blocking_or_replacing_it() {
         use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
         let (_, home, started) = listening();
@@ -2035,6 +2229,217 @@ mod tests {
         assert!(!dir.join("config.toml").exists());
         assert!(!dir.join("state").exists());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn w5c_recuration_preparation_is_typed_stable_and_sends_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(
+            p.join("config.toml"),
+            r#"[[providers]]
+kind = "openai"
+name = "synthetic-paid"
+base_url = "http://127.0.0.1:9/v1"
+model = "synthetic"
+limits = { usd_per_mtok_in = 0.0, usd_per_mtok_out = 1000.0, max_output_tokens = 2000 }
+[summary]
+curate = false
+"#,
+        )
+        .unwrap();
+        let mut raw = crate::raw::open(p).unwrap();
+        let mut event = crate::raw::test_event(r#"{"prompt":"We use tabs."}"#);
+        event.kind = "prompt".into();
+        raw.append(&event).unwrap();
+        raw.append_ops(&[(
+            crate::raw::OpKind::Window,
+            json!({"from_seq":1,"from_offset":null,"to_seq":1,"to_offset":null,
+                "outcome":"curated","elided":[]}),
+        )])
+        .unwrap();
+        drop(raw);
+        let v = Viewer::new(p, Some(p.to_path_buf()), 4321, Token::Run("t0k".into()));
+        let operation = json!({"kind":"recurate","scope":{"kind":"records","from":1,"to":1}});
+        let body = serde_json::to_vec(&json!({"operation":operation})).unwrap();
+        let length = body.len().to_string();
+        let prepare = || {
+            request(
+                &v,
+                "POST",
+                "/api/maintenance/preview",
+                &[
+                    HOST,
+                    TOKEN,
+                    ("Origin", "http://127.0.0.1:4321"),
+                    ("Content-Type", "application/json"),
+                    ("Content-Length", &length),
+                ],
+                &body,
+            )
+        };
+        let first = prepare();
+        assert_eq!(
+            first.status, 200,
+            "typed recuration preparation is unavailable"
+        );
+        let first: Value = serde_json::from_slice(&first.body).unwrap();
+        assert_eq!(first["kind"], "recurate");
+        assert_eq!(first["scope"], operation["scope"]);
+        assert_eq!(first["no_model_request"], true);
+        assert_eq!(first["local_preparation"], true);
+        assert_eq!(first["plan"]["windows"], 1);
+        assert_eq!(first["plan"]["worst_paid_usd"], 2.0);
+        assert_eq!(first["preparation"]["last"]["phase"], "prepared");
+        assert_eq!(
+            first["preparation"]["last"]["result"]["outcome"]["index"]["state"],
+            "complete"
+        );
+        assert_eq!(first["preview_key"].as_str().unwrap().len(), 64);
+        assert!(
+            !p.join("providers.db").exists(),
+            "preparation opened the paid ledger"
+        );
+        let second = prepare();
+        assert_eq!(second.status, 200);
+        let second: Value = serde_json::from_slice(&second.body).unwrap();
+        assert_eq!(
+            second["preview_key"], first["preview_key"],
+            "unchanged preparation changed consent"
+        );
+        assert!(!p.join("providers.db").exists());
+    }
+
+    #[test]
+    fn w5c_confirmation_requires_its_prepared_scope_and_unchanged_sources() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(
+            p.join("config.toml"),
+            "providers = []\n[summary]\ncurate = false\n[embedding]\nprovider = 'none'\n",
+        )
+        .unwrap();
+        crate::raw::open(p)
+            .unwrap()
+            .append(&crate::raw::test_event("synthetic first record"))
+            .unwrap();
+        let viewer = || Viewer::new(p, None, 4321, Token::Run("t0k".into()));
+        let v = viewer();
+        let post = |v: &Viewer, route: &str, value: Value| {
+            let body = serde_json::to_vec(&value).unwrap();
+            let length = body.len().to_string();
+            request(
+                v,
+                "POST",
+                route,
+                &[
+                    HOST,
+                    TOKEN,
+                    ("Origin", "http://127.0.0.1:4321"),
+                    ("Content-Type", "application/json"),
+                    ("Content-Length", &length),
+                ],
+                &body,
+            )
+        };
+        let operation = json!({"kind":"recurate","scope":{"kind":"queued"}});
+        let shown = post(
+            &v,
+            "/api/maintenance/preview",
+            json!({"operation":operation}),
+        );
+        assert_eq!(shown.status, 200);
+        let shown: Value = serde_json::from_slice(&shown.body).unwrap();
+        let body = json!({"operation":operation, "preview_key":shown["preview_key"],
+            "operation_id":"a".repeat(64), "confirmed":true});
+        let before = crate::backup::tests::w5b_files(p);
+        let mut wrong_scope = body.clone();
+        wrong_scope["operation"]["scope"] = json!({"kind":"skipped"});
+        assert_eq!(post(&v, "/api/maintenance/start", wrong_scope).status, 409);
+        assert_eq!(
+            post(&viewer(), "/api/maintenance/start", body.clone()).status,
+            409,
+            "a restarted viewer accepted consent it never prepared"
+        );
+        assert_eq!(crate::backup::tests::w5b_files(p), before);
+        assert!(get(&v, "/api/maintenance")["last"].get("consent").is_none());
+
+        crate::raw::open(p)
+            .unwrap()
+            .append(&crate::raw::test_event("synthetic later record"))
+            .unwrap();
+        let changed = crate::backup::tests::w5b_files(p);
+        let refused = post(&v, "/api/maintenance/start", body);
+        assert_eq!(refused.status, 200);
+        let refused: Value = serde_json::from_slice(&refused.body).unwrap();
+        assert_eq!(refused["last"]["phase"], "failed");
+        assert_eq!(refused["last"]["result"]["code"], "maintenance_stale");
+        assert_eq!(refused["last"]["committed"], false);
+        assert_eq!(
+            crate::backup::tests::w5b_files(p),
+            changed,
+            "already-stale consent changed stores or native admission state"
+        );
+        assert!(!p.join("providers.db").exists());
+    }
+
+    #[test]
+    fn w5c_preparation_indexes_a_hook_record_appended_while_its_lock_was_held() {
+        fn append_while_busy(home: &Path) {
+            assert!(crate::worker::lock(home).unwrap().is_none());
+            let mut raw = crate::raw::open(home).unwrap();
+            let mut event = crate::raw::test_event(r#"{"prompt":"lateprepneedle"}"#);
+            event.kind = "prompt".into();
+            raw.append(&event).unwrap();
+        }
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(
+            p.join("config.toml"),
+            "providers = []\n[summary]\ncurate = false\n[embedding]\nprovider = 'none'\n",
+        )
+        .unwrap();
+        let mut raw = crate::raw::open(p).unwrap();
+        raw.append(&crate::raw::test_event("first synthetic record"))
+            .unwrap();
+        drop(raw);
+        let v = Viewer::new(p, Some(p.to_path_buf()), 4321, Token::Run("t0k".into()));
+        let body = br#"{"operation":{"kind":"recurate","scope":{"kind":"queued"}}}"#;
+        let length = body.len().to_string();
+        crate::worker::AFTER_PREPARATION_PLAN.set(Some(append_while_busy));
+        let response = request(
+            &v,
+            "POST",
+            "/api/maintenance/preview",
+            &[
+                HOST,
+                TOKEN,
+                ("Origin", "http://127.0.0.1:4321"),
+                ("Content-Type", "application/json"),
+                ("Content-Length", &length),
+            ],
+            body,
+        );
+        let unused = crate::worker::AFTER_PREPARATION_PLAN.take();
+        assert!(
+            unused.is_none(),
+            "the late capture boundary was not exercised"
+        );
+        assert_eq!(response.status, 200);
+        let status = get(&v, "/api/maintenance");
+        assert_eq!(status["active"], Value::Null);
+        assert_eq!(
+            status["last"]["result"]["outcome"]["index"]["state"], "complete",
+            "late-capture receipt: {}",
+            status["last"]["result"]
+        );
+        let found = get(&v, "/api/search?q=lateprepneedle&all=1");
+        assert_eq!(
+            found["hits"].as_array().unwrap().len(),
+            1,
+            "a hook that found preparation busy was left unindexed"
+        );
+        assert!(!p.join("providers.db").exists());
     }
 
     #[cfg(unix)]

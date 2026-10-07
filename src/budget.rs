@@ -2,7 +2,7 @@
 //! and tokens, a paid entry's share of the month's USD cap, and a request's size against the
 //! provider's own ceiling, in estimated tokens. A refused call uploads nothing and costs nothing.
 
-use crate::provider::Skip;
+use crate::provider::{AttemptEvent, AttemptOutcome, Skip};
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -74,6 +74,11 @@ pub(crate) struct Reservation {
 }
 
 impl Reservation {
+    /// The ledger row is unique while this reservation is pending, across chain instances.
+    pub(crate) fn id(&self) -> i64 {
+        self.id
+    }
+
     /// Actual reported usage, with the admission-time bounds for any missing part.
     pub(crate) fn cost(&self, p: &Provider, usage: Usage, billed: bool) -> Option<f64> {
         (billed && p.limits().is_paid()).then(|| {
@@ -174,6 +179,40 @@ impl Reservation {
         }
         tx.commit()?;
         Ok(updated)
+    }
+    /// A terminal observation follows this reservation's successful cancellation only.
+    /// A failure or unwind leaves the observer's pending allowance unchanged.
+    pub(crate) fn cancel_report(
+        self,
+        db: &Connection,
+        observer: &mut impl FnMut(&AttemptEvent),
+    ) -> Result<()> {
+        let attempt = self.id;
+        self.cancel(db)?;
+        observer(&AttemptEvent::Cancelled { attempt });
+        Ok(())
+    }
+
+    /// Keep native accounting authoritative and publish its own committed result.
+    pub(crate) fn settle_report(
+        self,
+        db: &Connection,
+        call: &providers_db::Call<'_>,
+        rate: Option<providers_db::RateLeft>,
+        next: impl FnOnce(providers_db::State) -> providers_db::State,
+        sent: bool,
+        observer: &mut impl FnMut(&AttemptEvent),
+    ) -> Result<providers_db::State> {
+        let attempt = self.id;
+        let state = self.settle(db, call, rate, next)?;
+        observer(&AttemptEvent::Settled {
+            attempt,
+            outcome: AttemptOutcome::from_ledger(call.outcome),
+            sent,
+            usd: call.usd,
+            usage_unknown: sent && (call.usage.prompt.is_none() || call.usage.completion.is_none()),
+        });
+        Ok(state)
     }
 }
 
@@ -555,19 +594,35 @@ fn reservation_retry_at(db: &Connection, provider: Option<&str>, now: i64) -> Re
 /// the chain goes on to the next): each entry's calibrated input, and its largest answer each
 /// time. `None` when no entry is paid (`oboete recurate`'s estimate, Task 11).
 pub fn most_usd(
-    db: &Connection,
+    db: Option<&Connection>,
     providers: &[Provider],
     tokens: u32,
     calls: usize,
 ) -> Result<Option<f64>> {
+    most_usd_calibrated(db, providers, tokens, calls).map(|(usd, _)| usd)
+}
+
+/// The estimate and the exact per-entry factors used for its confirmation key.
+pub(crate) fn most_usd_calibrated(
+    db: Option<&Connection>,
+    providers: &[Provider],
+    tokens: u32,
+    calls: usize,
+) -> Result<(Option<f64>, Vec<f64>)> {
     let mut most: Option<f64> = None;
+    let mut calibrations = Vec::new();
     for p in providers.iter().filter(|p| p.limits().is_paid()) {
-        let input = f64::from(tokens) * factor(db, p.name())?;
+        let calibration = match db {
+            Some(db) => factor(db, p.name())?,
+            None => 1.0,
+        };
+        calibrations.push(calibration);
+        let input = f64::from(tokens) * calibration;
         let output = calls as f64 * f64::from(largest_output(p));
         let usd = p.limits().usd(input, output);
         most = Some(most.unwrap_or(0.0) + usd);
     }
-    Ok(most)
+    Ok((most, calibrations))
 }
 
 /// The answer a request may get at most: its declared output, or the entry's output cap.
@@ -697,10 +752,10 @@ mod tests {
         };
         let all = [free.clone(), priced("cheap", 1.0), priced("dear", 3.0)];
         // 10,000 tokens in, two answers of 1,000 at twice the input price, on each paid entry.
-        let most = most_usd(&db, &all, 10_000, 2).unwrap().unwrap();
+        let most = most_usd(Some(&db), &all, 10_000, 2).unwrap().unwrap();
         let each = |usd: f64| (10_000.0 * usd + 2_000.0 * 2.0 * usd) / 1e6;
         assert!((most - (each(1.0) + each(3.0))).abs() < 1e-12);
-        assert_eq!(most_usd(&db, &[free], 10_000, 2).unwrap(), None);
+        assert_eq!(most_usd(Some(&db), &[free], 10_000, 2).unwrap(), None);
     }
 
     /// A call to paid entry `p` with its cost stored, as the chain records one.

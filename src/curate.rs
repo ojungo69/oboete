@@ -1813,37 +1813,135 @@ pub enum Again {
     Span(String, Span),
 }
 
-/// `oboete recurate`: the spans of `source`, the windows they are cut into and an estimate; with
-/// `send`, each window curated again through the curator chain, then the consumers run. What it
-/// did, to print.
-pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<String> {
-    // The worker's lock, with the consumers drained under it (#192): a recuration appended before
-    // a crash or a failed run has left the queue, and no worker or other recuration moves the
-    // queue between the plan and its sending. Sending needs it: no curation phase sends at the
-    // same time (the month's cap is read before each call and written after it), and no consumer
-    // changes the claims a window retracts from. A list is made without it while a worker runs.
-    let held = crate::worker::drained(home, send)?;
-    let out = planned(home, source, send);
-    // Released as a worker releases it: a hook that appended while it was held started no
-    // worker, so the consumers run once more, sent or not.
-    if let Some(held) = held {
-        drop(held);
-        crate::worker::run_once(home)?;
+/// The viewer may select only this home's supported native recuration scopes.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RecurationScope {
+    Queued {},
+    Skipped {},
+    Imported { source: ImportedSource },
+    Records { from: i64, to: i64 },
+}
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ImportedSource {
+    V1,
+    Transcripts,
+}
+impl RecurationScope {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if let Self::Records { from, to } = self {
+            anyhow::ensure!(
+                *from > 0 && *to >= *from && *to < i64::MAX,
+                "invalid recuration range"
+            );
+        }
+        Ok(())
     }
-    out
+    fn native(&self, raw: &Raw) -> Again {
+        match self {
+            Self::Queued {} => Again::Queued,
+            Self::Skipped {} => Again::Skipped,
+            Self::Imported { source } => Again::Source(
+                match source {
+                    ImportedSource::V1 => "oboete-v1",
+                    ImportedSource::Transcripts => "transcript",
+                }
+                .into(),
+            ),
+            Self::Records { from, to } => {
+                Again::Span(raw.device().into(), Span::records(*from, *to))
+            }
+        }
+    }
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct LongSession {
+    pub label: String,
+    pub characters: usize,
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct PlanSummary {
+    pub spans: usize,
+    pub windows: usize,
+    pub tokens: u32,
+    pub kept_back: usize,
+    pub unparked_records: u64,
+    pub worst_paid_usd: Option<f64>,
+    pub long_sessions: Vec<LongSession>,
+    pub long_sessions_total: usize,
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct Preview {
+    pub key: String,
+    pub scope: RecurationScope,
+    pub plan: PlanSummary,
 }
 
-/// `recurate`'s plan, and with `send` its sending, under the worker's lock when sending.
-fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> {
-    let cfg = crate::config::load_chain(home)?;
-    let rules = crate::capture::Settings::load(home)?.rules;
-    // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
-    let mut raw = crate::raw::open(home)?;
-    let mut k = crate::knowledge::open(home)?;
-    crate::claims::schema(&k)?;
+/// Only bounded digests/identities cross the confirmation gap; never stores or history.
+#[derive(Clone, Debug)]
+pub(crate) struct Consent {
+    key: String,
+    scope: RecurationScope,
+    logical: String,
+    sources: Vec<RecurationSourceVersion>,
+}
+impl Consent {
+    pub(crate) fn matches(&self, scope: &RecurationScope, key: &str) -> bool {
+        &self.scope == scope && self.key == key
+    }
+    fn check_sources(&self, home: &std::path::Path) -> Result<()> {
+        anyhow::ensure!(
+            self.sources == recuration_sources(home)?,
+            crate::backup::MaintenanceCode::Stale
+        );
+        Ok(())
+    }
+    fn check_config(&self, home: &std::path::Path) -> Result<()> {
+        let path = home.join("config.toml");
+        let expected = self.sources.iter().find(|(p, _)| *p == path);
+        anyhow::ensure!(
+            expected
+                .is_some_and(|(_, version)| recuration_source(&path)
+                    .is_ok_and(|current| current == *version)),
+            crate::backup::MaintenanceCode::Stale
+        );
+        Ok(())
+    }
+}
+
+struct RecurationPlan {
+    spans: Vec<(Span, Vec<Window>)>,
+    windows: usize,
+    kept_back: usize,
+    other_devices: i64,
+    curated: i64,
+    imported_source: Option<String>,
+}
+impl RecurationPlan {
+    fn unparked(&self, raw: &Raw) -> Result<Option<u64>> {
+        let Some(source) = &self.imported_source else {
+            return Ok(None);
+        };
+        let from = self
+            .curated
+            .checked_add(1)
+            .context("curation checkpoint exhausted")?;
+        Ok(raw
+            .imported_counts(raw.device(), &[(from, i64::MAX)])?
+            .get(source)
+            .map(|n| *n as u64))
+    }
+}
+fn recuration_plan(
+    raw: &Raw,
+    k: &Connection,
+    summary: &Summary,
+    rules: &Rules,
+    source: Again,
+) -> Result<RecurationPlan> {
     let device = raw.device().to_owned();
-    let curated = curated_through(&raw)?;
-    let mut out = String::new();
+    let curated = curated_through(raw)?;
     // The exclusion list as the windows are cut with it (spec 5.5), and the records they read
     // (D6): an imported source, whatever a queued span holds (it was curated before), or live.
     let reads = match &source {
@@ -1851,20 +1949,15 @@ fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> 
         Again::Queued => Reads::Any,
         Again::Skipped | Again::Span(..) => Reads::Live,
     };
-    let v1 = reads == Reads::Source("oboete-v1".into());
-    let reading = Reading::now(&raw, reads)?;
+    let reading = Reading::now(raw, reads)?;
+    let mut other_devices = 0;
     let spans = match source {
         Again::Queued => {
-            let others: i64 = k.query_row(
+            other_devices = k.query_row(
                 "SELECT count(DISTINCT device) FROM recurate WHERE device <> ?1",
                 [&device],
                 |r| r.get(0),
             )?;
-            if others > 0 {
-                out.push_str(&format!(
-                    "{others} other device(s) have spans queued: run oboete recurate there\n"
-                ));
-            }
             k.prepare(
                 "SELECT DISTINCT from_seq, to_seq FROM recurate WHERE device = ?1
                  ORDER BY from_seq, to_seq",
@@ -1872,8 +1965,8 @@ fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> 
             .query_map([&device], |r| Ok(Span::records(r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?
         }
-        Again::Skipped => skipped_spans(&raw)?,
-        Again::Source(s) => parked_spans(&raw, &s)?,
+        Again::Skipped => skipped_spans(raw)?,
+        Again::Source(s) => parked_spans(raw, &s)?,
         Again::Span(of, span) => {
             // A device curates only its own records (its window ops hold its checkpoint).
             if of != device {
@@ -1894,7 +1987,7 @@ fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> 
     // are curated.
     let mut plan = Vec::new();
     for span in spans {
-        let windows = span_windows(&raw, &span, cfg.summary.cut(), &rules, &reading)?;
+        let windows = span_windows(raw, &span, summary.cut(), rules, &reading)?;
         // A recuration covers its span whole, so records it would set aside would leave their
         // parking unread (D6).
         if let Some(w) = windows.iter().find(|w| w.aside.is_some()) {
@@ -1919,35 +2012,526 @@ fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> 
         .filter(|w| w.kept_back())
         .count();
     let windows = plan.iter().map(|(_, w)| w.len()).sum::<usize>() - kept_back;
-    if windows == 0 {
+    Ok(RecurationPlan {
+        spans: plan,
+        windows,
+        kept_back,
+        other_devices,
+        curated,
+        imported_source: match reading.reads {
+            Reads::Source(source) => Some(source),
+            _ => None,
+        },
+    })
+}
+
+/// Use the native request itself for both the token estimate and the confirmed input digest.
+fn plan_inputs(
+    raw: &Raw,
+    k: &Connection,
+    rules: &Rules,
+    summary: &Summary,
+    plan: &RecurationPlan,
+) -> Result<(u32, String)> {
+    use sha2::{Digest, Sha256};
+    let mut tokens = 0u32;
+    let mut hash = Sha256::new();
+    for w in plan
+        .spans
+        .iter()
+        .flat_map(|(_, ws)| ws)
+        .filter(|w| !w.kept_back())
+    {
+        let req = request(raw, k, rules, summary, w)?;
+        tokens = tokens.saturating_add(crate::budget::estimate(&req.prompt));
+        hash.update((req.prompt.len() as u64).to_le_bytes());
+        hash.update(req.prompt.as_bytes());
+    }
+    Ok((tokens, format!("{:x}", hash.finalize())))
+}
+
+/// Full content only: timestamps/SHM/worker status are not recuration inputs.
+type RecurationSourceVersion = (std::path::PathBuf, Option<(String, String)>);
+
+fn recuration_sources(home: &std::path::Path) -> Result<Vec<RecurationSourceVersion>> {
+    let mut paths: Vec<_> = [
+        "config.toml",
+        "raw.db",
+        "raw.db-wal",
+        "knowledge.db",
+        "knowledge.db-wal",
+        "forget.log",
+    ]
+    .into_iter()
+    .map(|name| home.join(name))
+    .collect();
+    paths.push(crate::backup::dir(home)?.join("forget.log"));
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| {
+            let version = recuration_source(&path)?;
+            Ok((path, version))
+        })
+        .collect()
+}
+
+fn recuration_source(path: &std::path::Path) -> Result<Option<(String, String)>> {
+    let version = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.is_file(),
+                "recuration source is not a regular file"
+            );
+            let identity = crate::db::store_file(path);
+            anyhow::ensure!(
+                !identity.is_empty(),
+                "recuration source identity unavailable"
+            );
+            Some((identity, crate::migrate::file_version(path)?))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    Ok(version)
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct ProviderReceipt {
+    pub reserved: u64,
+    pub sent: u64,
+    pub settled: u64,
+    pub cancelled: u64,
+    pub pending: u64,
+    /// Own ledger amount, including pending bounds; not a provider invoice.
+    pub accounted_usd: f64,
+    pub uncertain: u64,
+    pub usage_unknown: u64,
+    // Chain is sequential and returns immediately when a terminal ledger write fails.
+    #[serde(skip)]
+    pending_usd: f64,
+}
+impl ProviderReceipt {
+    fn record(&mut self, event: &crate::provider::AttemptEvent) {
+        use crate::provider::AttemptEvent;
+        match *event {
+            AttemptEvent::Reserved { usd_bound, .. } => {
+                self.reserved += 1;
+                self.pending += 1;
+                self.pending_usd = usd_bound.unwrap_or(0.0);
+                self.accounted_usd += self.pending_usd;
+            }
+            AttemptEvent::Sent { .. } => self.sent += 1,
+            AttemptEvent::Settled {
+                usd, usage_unknown, ..
+            } => {
+                self.settled += 1;
+                self.pending -= 1;
+                self.accounted_usd =
+                    (self.accounted_usd - self.pending_usd + usd.unwrap_or(0.0)).max(0.0);
+                self.pending_usd = 0.0;
+                self.usage_unknown += u64::from(usage_unknown);
+            }
+            AttemptEvent::Cancelled { .. } => {
+                self.cancelled += 1;
+                self.pending -= 1;
+                self.accounted_usd = (self.accounted_usd - self.pending_usd).max(0.0);
+                self.pending_usd = 0.0;
+            }
+        }
+        self.uncertain = self.pending;
+    }
+}
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct WindowReceipt {
+    pub committed: u64,
+    pub claims: u64,
+    pub retracted: u64,
+    pub kept_back: u64,
+    pub failed: u64,
+    pub stopped: u64,
+}
+impl WindowReceipt {
+    fn record(&mut self, event: &WindowCommit) {
+        match *event {
+            WindowCommit::Committed { claims, retracted } => {
+                self.committed += 1;
+                self.claims += claims;
+                self.retracted += retracted;
+            }
+            WindowCommit::KeptBack { windows } => self.kept_back += windows,
+            WindowCommit::Failed => self.failed += 1,
+            WindowCommit::Stopped => self.stopped += 1,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub(crate) enum WindowCommit {
+    Committed { claims: u64, retracted: u64 },
+    KeptBack { windows: u64 },
+    Failed,
+    Stopped,
+}
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum RecurationCommit {
+    Index {
+        index: crate::worker::MaintenanceCommit,
+    },
+    Provider {
+        providers: ProviderReceipt,
+    },
+    Window {
+        windows: WindowReceipt,
+    },
+}
+impl RecurationCommit {
+    pub(crate) fn native_index(&self) -> Option<&crate::worker::MaintenanceCommit> {
+        match self {
+            Self::Index { index } => Some(index),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct RecurationReceipt {
+    pub operation: &'static str,
+    pub index: crate::worker::IndexReceipt,
+    pub providers: ProviderReceipt,
+    pub windows: WindowReceipt,
+    #[serde(skip)]
+    finished: bool,
+}
+impl Default for RecurationReceipt {
+    fn default() -> Self {
+        Self {
+            operation: "recurate",
+            index: Default::default(),
+            providers: Default::default(),
+            windows: Default::default(),
+            finished: false,
+        }
+    }
+}
+impl RecurationReceipt {
+    pub(crate) fn committed(&self) -> bool {
+        self.windows.committed != 0
+            || self.providers.reserved != 0
+            || self.index.consumer_commits != 0
+            || self.index.stores_changed
+            || self.index.backup_files_written != 0
+            || self.index.backup_files_quarantined != 0
+            || self.index.forget_requests_applied != 0
+            || self
+                .index
+                .raw_recovery
+                .as_ref()
+                .is_some_and(|r| r.effects.committed())
+    }
+    pub(crate) fn complete(&self) -> bool {
+        self.finished
+            && self.index.state == crate::worker::IndexState::Complete
+            && self.providers.pending == 0
+            && self.windows.failed == 0
+            && self.windows.stopped == 0
+    }
+}
+
+struct RecurationPreparation {
+    native: RecurationPlan,
+    plan: PlanSummary,
+    logical: String,
+    cfg: crate::config::Config,
+    rules: Rules,
+}
+
+fn prepare_native(
+    home: &std::path::Path,
+    scope: &RecurationScope,
+    raw: &Raw,
+    k: &Connection,
+) -> Result<RecurationPreparation> {
+    let cfg = crate::config::load_chain(home)?;
+    let rules = crate::capture::Settings::load(home)?.rules;
+    let before = recuration_sources(home)?;
+    let native = recuration_plan(raw, k, &cfg.summary, &rules, scope.native(raw))?;
+    let (tokens, input) = plan_inputs(raw, k, &rules, &cfg.summary, &native)?;
+    let unparked_records = native.unparked(raw)?.unwrap_or(0);
+    let long = if native.windows != 0 && native.imported_source.as_deref() == Some("oboete-v1") {
+        long_sessions(raw, &native.spans)?
+    } else {
+        Vec::new()
+    };
+    let ledger = providers_db::read_only(home)?;
+    let (worst_paid_usd, calibration) = crate::budget::most_usd_calibrated(
+        ledger.as_ref(),
+        &cfg.providers,
+        tokens,
+        native.windows,
+    )?;
+    anyhow::ensure!(
+        worst_paid_usd.is_none_or(|usd| usd.is_finite() && usd >= 0.0),
+        "recuration estimate is not finite"
+    );
+    let summary = PlanSummary {
+        spans: native.spans.len(),
+        windows: native.windows,
+        tokens,
+        kept_back: native.kept_back,
+        unparked_records,
+        worst_paid_usd,
+        long_sessions_total: long.len(),
+        long_sessions: long
+            .into_iter()
+            .take(10)
+            .map(|(label, characters)| LongSession {
+                label: crate::redact::outbound_with(&label, &rules)
+                    .chars()
+                    .take(256)
+                    .collect(),
+                characters,
+            })
+            .collect(),
+    };
+    anyhow::ensure!(
+        before == recuration_sources(home)?,
+        "recuration source changed during planning"
+    );
+    let logical = crate::migrate::preview_key(
+        home,
+        &(
+            "oboete:recuration-logical:v1",
+            scope,
+            &summary,
+            input,
+            calibration,
+            format!("{cfg:?}"),
+            rules.version(),
+        ),
+    )?;
+    Ok(RecurationPreparation {
+        native,
+        plan: summary,
+        logical,
+        cfg,
+        rules,
+    })
+}
+
+/// Explicit no-send preparation. Effects are retained even when planning/key creation fails.
+pub(crate) fn prepare_report(
+    home: &std::path::Path,
+    scope: &RecurationScope,
+    caller: crate::executable::CommandCaller,
+    committed: &mut impl FnMut(&crate::worker::MaintenanceCommit),
+) -> (crate::worker::IndexReceipt, Result<(Preview, Consent)>) {
+    if let Err(error) = scope.validate() {
+        return (crate::worker::IndexReceipt::default(), Err(error));
+    }
+    let (receipt, prepared) = crate::worker::prepare_report(home, caller, committed, |raw, k| {
+        let prepared = prepare_native(home, scope, raw, k)?;
+        Ok((prepared.plan, prepared.logical))
+    });
+    let preview = prepared.and_then(|((plan, logical), _config, proof)| {
+        // Own close-time checkpoints are complete before the physical consent is captured.
+        proof.check(home)?;
+        let sources = recuration_sources(home)?;
+        let key = crate::migrate::preview_key(
+            home,
+            &("oboete:recuration-preview:v2", &logical, &sources),
+        )?;
+        let consent = Consent {
+            key: key.clone(),
+            scope: scope.clone(),
+            logical,
+            sources,
+        };
+        consent.check_sources(home)?;
+        proof.check(home)?;
+        Ok((
+            Preview {
+                key,
+                scope: scope.clone(),
+                plan,
+            },
+            consent,
+        ))
+    });
+    (receipt, preview)
+}
+
+/// Confirmed viewer operation through the same native plan, Chain and append fences as CLI.
+/// Keep causal effects outside the Result so a later failure cannot erase them.
+pub(crate) fn recurate_report(
+    home: &std::path::Path,
+    scope: &RecurationScope,
+    consent: &Consent,
+    caller: crate::executable::CommandCaller,
+    committed: &mut impl FnMut(&RecurationCommit),
+) -> (RecurationReceipt, Result<()>) {
+    let mut receipt = RecurationReceipt::default();
+    if let Err(error) = scope.validate() {
+        return (receipt, Err(error));
+    }
+    if &consent.scope != scope {
+        return (receipt, Err(crate::backup::MaintenanceCode::Stale.into()));
+    }
+    // The operation is synchronous; callbacks only borrow this briefly, never across I/O.
+    let committed = std::cell::RefCell::new(committed);
+    let (index, result) = crate::worker::with_prepared_report(
+        home,
+        caller,
+        &mut |event| {
+            (committed.borrow_mut())(&RecurationCommit::Index {
+                index: event.clone(),
+            });
+        },
+        |proof| {
+            consent.check_sources(home)?;
+            proof.check(home)?;
+            consent.check_sources(home)
+        },
+        |raw, k| {
+            let prepared = prepare_native(home, scope, raw, k)?;
+            anyhow::ensure!(
+                prepared.logical == consent.logical,
+                crate::backup::MaintenanceCode::Stale
+            );
+            Ok(prepared)
+        },
+        |prepared, raw, k, consumers, proof, index| {
+            proof.check(home)?;
+            consent.check_config(home)?;
+            let RecurationPreparation {
+                native, cfg, rules, ..
+            } = prepared;
+            if native.windows == 0 {
+                if native.kept_back != 0 {
+                    let event = WindowCommit::KeptBack {
+                        windows: native.kept_back as u64,
+                    };
+                    receipt.windows.record(&event);
+                    (committed.borrow_mut())(&RecurationCommit::Window {
+                        windows: receipt.windows.clone(),
+                    });
+                }
+                return Ok(());
+            }
+            let db = providers_db::open_report(home, &mut |stage| index.changed(stage))?;
+            let mut curator = |span: &str, prompt: &str, check: &AnswerCheck, gate: &Gate| {
+                let checked_gate = || {
+                    proof.check(home)?;
+                    consent.check_config(home)?;
+                    let admission = gate()?;
+                    // Admission may have waited for a privacy writer. Recheck after the wait.
+                    proof.check(home)?;
+                    consent.check_config(home)?;
+                    Ok(admission)
+                };
+                crate::provider::Chain::new(&cfg.providers, &db)
+                    .paid_cap(cfg.paid_usd_per_month)
+                    .check(check)
+                    .gate(&checked_gate)
+                    .run_report("curator", span, prompt, &schema(), &mut |event| {
+                        receipt.providers.record(event);
+                        (committed.borrow_mut())(&RecurationCommit::Provider {
+                            providers: receipt.providers.clone(),
+                        });
+                    })
+            };
+            let sent = send_plan_report(
+                raw,
+                k,
+                &db,
+                &rules,
+                &cfg.summary,
+                &mut curator,
+                &native.spans,
+                &|| {
+                    proof.check(home)?;
+                    consent.check_config(home)
+                },
+                &mut |raw, k| index.drain(home, raw, k, consumers, proof),
+                &mut |event| {
+                    receipt.windows.record(event);
+                    (committed.borrow_mut())(&RecurationCommit::Window {
+                        windows: receipt.windows.clone(),
+                    });
+                },
+            )?;
+            anyhow::ensure!(
+                sent.failed.is_empty() && sent.stopped.is_none(),
+                crate::backup::MaintenanceCode::Failed
+            );
+            Ok(())
+        },
+    );
+    receipt.index = index;
+    let result = result.map(|((), _config, _proof)| ());
+    receipt.finished = result.is_ok();
+    (receipt, result)
+}
+
+/// `oboete recurate`: the spans of `source`, the windows they are cut into and an estimate; with
+/// `send`, each window curated again through the curator chain, then the consumers run. What it
+/// did, to print.
+pub fn recurate(home: &std::path::Path, source: Again, send: bool) -> Result<String> {
+    // The worker's lock, with the consumers drained under it (#192): a recuration appended before
+    // a crash or a failed run has left the queue, and no worker or other recuration moves the
+    // queue between the plan and its sending. Sending needs it: no curation phase sends at the
+    // same time (the month's cap is read before each call and written after it), and no consumer
+    // changes the claims a window retracts from. A list is made without it while a worker runs.
+    let held = crate::worker::drained(home, send)?;
+    let out = planned(home, source, send);
+    // Released as a worker releases it: a hook that appended while it was held started no
+    // worker, so the consumers run once more, sent or not.
+    if let Some(held) = held {
+        drop(held);
+        crate::worker::run_once(home)?;
+    }
+    out
+}
+
+/// `recurate`'s plan, and with `send` its sending, under the worker's lock when sending.
+fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> {
+    let cfg = crate::config::load_chain(home)?;
+    let rules = crate::capture::Settings::load(home)?.rules;
+    let mut raw = crate::raw::open(home)?;
+    let mut k = crate::knowledge::open(home)?;
+    crate::claims::schema(&k)?;
+    let plan = recuration_plan(&raw, &k, &cfg.summary, &rules, source)?;
+    let mut out = String::new();
+    if plan.other_devices > 0 {
+        out.push_str(&format!(
+            "{} other device(s) have spans queued: run oboete recurate there\n",
+            plan.other_devices
+        ));
+    }
+    if plan.windows == 0 {
         out.push_str("nothing to curate again\n");
-        if kept_back > 0 {
+        if plan.kept_back > 0 {
             out.push_str(&format!(
-                "{kept_back} window(s) of sessions that touched an excluded repository wait for \
-                 `oboete exclude --undo`\n"
+                "{} window(s) of sessions that touched an excluded repository wait for \
+                 `oboete exclude --undo`\n",
+                plan.kept_back
             ));
         }
-        // A source's records the phase has not reached are not parked yet (D6, Codex on #304).
-        if let Reads::Source(s) = &reading.reads
-            && let Some(n) = raw
-                .imported_counts(&device, &[(curated + 1, i64::MAX)])?
-                .get(s)
+        if let Some(source) = &plan.imported_source
+            && let Some(n) = plan.unparked(&raw)?
         {
             out.push_str(&format!(
-                "{n} records of {s} are past the curation checkpoint: the curation phase sets \
+                "{n} records of {source} are past the curation checkpoint: the curation phase sets \
                  them aside {}, and a run after that curates them\n",
                 reaches(cfg.summary.curate)
             ));
         }
         return Ok(out);
     }
-    let mut tokens = 0u32;
-    for w in plan.iter().flat_map(|(_, w)| w).filter(|w| !w.kept_back()) {
-        let req = request(&raw, &k, &rules, &cfg.summary, w)?;
-        tokens = tokens.saturating_add(crate::budget::estimate(&req.prompt));
-    }
-    if v1 {
-        let long = long_sessions(&raw, &plan)?;
+    let (tokens, _) = plan_inputs(&raw, &k, &rules, &cfg.summary, &plan)?;
+    if plan.imported_source.as_deref() == Some("oboete-v1") {
+        let long = long_sessions(&raw, &plan.spans)?;
         if !long.is_empty() {
             out.push_str(&format!(
                 "{} session(s) whose text passes 16,000 characters, of which v1 read only the \
@@ -1959,11 +2543,16 @@ fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> 
             }
         }
     }
-    let db = providers_db::open(home)?;
-    let most = crate::budget::most_usd(&db, &cfg.providers, tokens, windows)?;
+    let db = if send {
+        Some(providers_db::open(home)?)
+    } else {
+        providers_db::read_only(home)?
+    };
+    let most = crate::budget::most_usd(db.as_ref(), &cfg.providers, tokens, plan.windows)?;
+    let windows = plan.windows;
     out.push_str(&format!(
         "{} span(s) in {windows} window(s), about {tokens} tokens; {}\n",
-        plan.len(),
+        plan.spans.len(),
         match most {
             Some(usd) => format!("at most USD {usd:.2} if every paid entry bills every window"),
             None => "no paid entry in the chain".into(),
@@ -1973,6 +2562,7 @@ fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> 
         out.push_str("nothing sent: run it again with --yes to curate them\n");
         return Ok(out);
     }
+    let db = db.expect("sending opened the provider ledger");
     let mut curator = |span: &str, prompt: &str, check: &AnswerCheck, gate: &Gate| {
         crate::provider::Chain::new(&cfg.providers, &db)
             .paid_cap(cfg.paid_usd_per_month)
@@ -1989,7 +2579,7 @@ fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> 
         &rules,
         &cfg.summary,
         &mut curator,
-        &plan,
+        &plan.spans,
     )?;
     out.push_str(&format!(
         "{} window(s) curated again: {} claim(s), {} retracted\n",
@@ -2076,6 +2666,33 @@ pub fn send_plan(
     curator: &mut Curator,
     plan: &[(Span, Vec<Window>)],
 ) -> Result<Sent> {
+    send_plan_report(
+        raw,
+        k,
+        db,
+        rules,
+        summary,
+        curator,
+        plan,
+        &|| Ok(()),
+        &mut |raw, k| crate::worker::drain(raw, k, consumers),
+        &mut |_| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_plan_report(
+    raw: &mut Raw,
+    k: &mut Connection,
+    db: &Connection,
+    rules: &Rules,
+    summary: &Summary,
+    curator: &mut Curator,
+    plan: &[(Span, Vec<Window>)],
+    validate: &impl Fn() -> Result<()>,
+    drain: &mut impl FnMut(&Raw, &mut Connection) -> Result<()>,
+    progress: &mut impl FnMut(&WindowCommit),
+) -> Result<Sent> {
     let mut sent = Sent::default();
     let changed = |sent: &mut Sent, e: anyhow::Error| {
         sent.stopped = Some(format!("{e}: run oboete recurate again"));
@@ -2099,15 +2716,18 @@ pub fn send_plan(
             };
             // The egress gate (spec 5.5): a window cut under another list, or before a session
             // touched an excluded repository, may hold what the list now keeps back.
+            validate()?;
             match w.reading.still(raw) {
                 Err(e) if e.is::<ListChanged>() => {
                     changed(&mut sent, e);
+                    progress(&WindowCommit::Stopped);
                     return Ok(sent);
                 }
                 r => r?,
             }
             if w.kept_back() {
                 sent.kept_back += 1;
+                progress(&WindowCommit::KeptBack { windows: 1 });
                 restart(&mut from);
                 continue;
             }
@@ -2124,18 +2744,37 @@ pub fn send_plan(
             };
             // Milestone 5 D1 rule 12: a forget since the last drain is read in first.
             if lagging(raw, k)? {
-                crate::worker::drain(raw, k, consumers)?;
+                drain(raw, k)?;
             }
-            match recurate_window(raw, k, db, rules, summary, curator, w, Some(&through)) {
+            match recurate_window_checked(
+                raw,
+                k,
+                db,
+                rules,
+                summary,
+                curator,
+                w,
+                Some(&through),
+                validate,
+            ) {
                 Err(e) if e.is::<ListChanged>() => {
                     changed(&mut sent, e);
+                    progress(&WindowCommit::Stopped);
                     return Ok(sent);
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    progress(&WindowCommit::Failed);
+                    return Err(e);
+                }
                 Ok(Ok((c, r))) => {
                     sent.windows += 1;
                     (sent.claims, sent.retracted) = (sent.claims + c, sent.retracted + r);
-                    crate::worker::drain(raw, k, consumers).with_context(|| {
+                    // append_ops_fenced already committed; a later index failure keeps this.
+                    progress(&WindowCommit::Committed {
+                        claims: c as u64,
+                        retracted: r as u64,
+                    });
+                    drain(raw, k).with_context(|| {
                         format!(
                             "records {}-{} were curated again ({} window(s) in this run), but \
                              their claims were not read in",
@@ -2145,6 +2784,7 @@ pub fn send_plan(
                     restart(&mut from);
                 }
                 Ok(Err(why)) => {
+                    progress(&WindowCommit::Failed);
                     sent.failed
                         .push(format!("{}-{}: {why}", w.from_seq, w.to_seq));
                     break;
@@ -2315,6 +2955,7 @@ pub(crate) fn curated_parts(op: &Value, range: &Value) -> Vec<Span> {
 /// through this window, from the span's start: that part is off the queue and no longer skipped,
 /// whatever windows it took, and a later run sends only the rest.
 /// How many claims and retractions it wrote, or why every provider went past.
+#[cfg(test)] // Single-window fixtures; production uses the shared reported send loop.
 #[allow(clippy::too_many_arguments)]
 pub fn recurate_window(
     raw: &mut Raw,
@@ -2326,6 +2967,22 @@ pub fn recurate_window(
     w: &Window,
     covers: Option<&Span>,
 ) -> Result<std::result::Result<(usize, usize), String>> {
+    recurate_window_checked(raw, k, db, rules, summary, curator, w, covers, &|| Ok(()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recurate_window_checked(
+    raw: &mut Raw,
+    k: &Connection,
+    db: &Connection,
+    rules: &Rules,
+    summary: &Summary,
+    curator: &mut Curator,
+    w: &Window,
+    covers: Option<&Span>,
+    validate: &impl Fn() -> Result<()>,
+) -> Result<std::result::Result<(usize, usize), String>> {
+    validate()?;
     crate::claims::schema(k)?;
     if let Some(kind) = &w.aside {
         anyhow::bail!(
@@ -2417,6 +3074,7 @@ pub fn recurate_window(
             .map(|c| (OpKind::Claim, c)),
     );
     // Milestone 5 D1 rule 12: `ListChanged` after a forget since the window was cut.
+    validate()?;
     raw.append_ops_fenced(&ops, w.reading.denied)?;
     Ok(Ok(counts))
 }
@@ -6882,6 +7540,37 @@ mod tests {
         config("[chain]\noff = [\"paid\"]\n");
         let off = recurate(home.path(), span, false).unwrap();
         assert!(off.contains("no paid entry in the chain"), "{off}");
+    }
+
+    #[test]
+    fn w5c_no_send_prices_without_initializing_the_provider_ledger() {
+        let (home, mut raw, device) = store();
+        raw.append(&prompt("We use tabs.")).unwrap();
+        curated_so_far(&mut raw);
+        drop(raw);
+        std::fs::write(
+            home.path().join("config.toml"),
+            r#"[[providers]]
+kind = "openai"
+name = "synthetic-paid"
+base_url = "http://127.0.0.1:9/v1"
+model = "synthetic"
+limits = { usd_per_mtok_in = 0.0, usd_per_mtok_out = 1000.0, max_output_tokens = 2000 }
+[summary]
+curate = false
+"#,
+        )
+        .unwrap();
+        assert!(!home.path().join("providers.db").exists());
+        let listed =
+            recurate(home.path(), Again::Span(device, Span::records(1, 1)), false).unwrap();
+        assert!(listed.contains("1 span(s) in 1 window(s)"));
+        assert!(listed.contains("at most USD 2.00"));
+        assert!(listed.contains("nothing sent"));
+        assert!(
+            !home.path().join("providers.db").exists(),
+            "no-send preparation initialized the provider ledger"
+        );
     }
 
     /// Task 11: an event a window split is recurated part by part: a part retracts only the
