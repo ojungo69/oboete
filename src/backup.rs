@@ -937,6 +937,7 @@ fn damage(seg: &Path) -> Option<String> {
 /// `<name>` (and its -wal and -shm, which SQLite binds to the name) moved aside as
 /// `<name>.quarantined-<ms>`, its sidecars under the names SQLite looks for beside that (`...-wal`,
 /// `...-shm`), so the kept file opens with its last commits. Returns the new name of the main file.
+#[cfg(test)]
 pub(crate) fn quarantine(home: &Path, name: &str) -> Result<PathBuf> {
     quarantine_report(home, name, None, &mut |_| Ok(()))
 }
@@ -1012,7 +1013,7 @@ fn quarantine_report(
                 })();
                 if let Err(back) = put_back {
                     return Err(error)
-                        .context(format!("quarantine put-back also failed: {back:#}"));
+                        .with_context(|| format!("quarantine put-back also failed: {back:#}"));
                 }
                 return Err(error).with_context(|| format!("quarantine {}", from.display()));
             }
@@ -1135,10 +1136,12 @@ pub(crate) fn restore_report_holding(
         if let Some(before) = BEFORE_REOPEN.with(|hook| hook.borrow_mut().take()) {
             before();
         }
-        match raw::open_report(home, guard, &mut || {
-            receipt.effects.stopped_restore_finished = true;
-            receipt.effects.raw_swapped = true;
-            effect("stopped_restore_finished", committed)
+        match raw::open_report(home, guard, &mut |stage| {
+            if stage == "stopped_restore_finished" {
+                receipt.effects.stopped_restore_finished = true;
+                receipt.effects.raw_swapped = true;
+            }
+            effect(stage, committed)
         })
         .and_then(|mut raw| {
             if let Some(guard) = guard {
@@ -1453,11 +1456,13 @@ pub(crate) fn open_raw_report(
     committed: &mut impl FnMut(&'static str),
 ) -> Result<Raw> {
     // Only complete reported commands use this entry; they retain config.lock across the drain.
-    match raw::open_report(home, guard, &mut || {
-        let receipt = receipt.get_or_insert_with(RestoreReceipt::default);
-        receipt.effects.stopped_restore_finished = true;
-        receipt.effects.raw_swapped = true;
-        effect("stopped_restore_finished", committed)
+    match raw::open_report(home, guard, &mut |stage| {
+        if stage == "stopped_restore_finished" {
+            let receipt = receipt.get_or_insert_with(RestoreReceipt::default);
+            receipt.effects.stopped_restore_finished = true;
+            receipt.effects.raw_swapped = true;
+        }
+        effect(stage, committed)
     })
     .and_then(|r| r.quick_check().map(|()| r))
     {
@@ -1474,11 +1479,13 @@ pub(crate) fn open_raw_report(
                     return Err(failure.cause);
                 }
             }
-            raw::open_report(home, guard, &mut || {
-                let receipt = receipt.get_or_insert_with(RestoreReceipt::default);
-                receipt.effects.stopped_restore_finished = true;
-                receipt.effects.raw_swapped = true;
-                effect("stopped_restore_finished", committed)
+            raw::open_report(home, guard, &mut |stage| {
+                if stage == "stopped_restore_finished" {
+                    let receipt = receipt.get_or_insert_with(RestoreReceipt::default);
+                    receipt.effects.stopped_restore_finished = true;
+                    receipt.effects.raw_swapped = true;
+                }
+                effect(stage, committed)
             })
         }
         Err(e) => Err(e),
@@ -1488,19 +1495,37 @@ pub(crate) fn open_raw_report(
 /// knowledge.db for the worker: a damaged one is quarantined and started empty. Every consumer
 /// then rebuilds from seq 0 (spec 1.7); raw.db and the segments are not touched.
 pub fn open_knowledge(home: &Path) -> Result<rusqlite::Connection> {
-    let checked = crate::knowledge::open(home).and_then(|k| {
-        crate::db::quick_check_without_vtabs(&home.join("knowledge.db"), "knowledge.db").map(|()| k)
-    });
+    open_knowledge_report(home, None, &mut |_| {})
+}
+
+pub(crate) fn open_knowledge_report(
+    home: &Path,
+    guard: Option<&crate::executable::CommandHome>,
+    committed: &mut impl FnMut(&'static str),
+) -> Result<rusqlite::Connection> {
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
+    let checked = crate::knowledge::open_report(home, &mut || effect("stores_changed", committed))
+        .and_then(|k| {
+            crate::db::quick_check_without_vtabs(&home.join("knowledge.db"), "knowledge.db")
+                .map(|()| k)
+        });
     match checked {
         Ok(k) => Ok(k),
         Err(e) if damaged(&e) => {
-            let kept = quarantine(home, "knowledge.db")?;
+            let kept = quarantine_report(home, "knowledge.db", guard, &mut |_| {
+                effect("stores_changed", committed)
+            })?;
             eprintln!(
                 "oboete: knowledge.db: {e:#}; kept as {} and rebuilt from raw.db",
                 kept.display()
             );
             // Its vectors, when they still read, come with the embedding phase's first poll.
-            crate::knowledge::open(home)
+            if let Some(guard) = guard {
+                guard.check(home)?;
+            }
+            crate::knowledge::open_report(home, &mut || effect("stores_changed", committed))
         }
         Err(e) => Err(e),
     }
@@ -1651,7 +1676,7 @@ pub(crate) mod tests {
         files
     }
 
-    fn w5b_log_change(p: &Path) -> (Vec<u8>, Vec<u8>) {
+    pub(crate) fn w5b_log_change(p: &Path) -> (Vec<u8>, Vec<u8>) {
         let mut raw = raw::open(p).unwrap();
         let mut event = raw::test_event(r#"{"prompt":"synthetic confirmed log canary"}"#);
         event.source = "transcript".into();
@@ -1897,6 +1922,8 @@ pub(crate) mod tests {
                 crate::executable::CommandCaller::Worker,
                 &mut |_| {},
             );
+            BEFORE_REOPEN.with_borrow_mut(|hook| *hook = None);
+            raw::SWAP_BLOCKED.with_borrow_mut(|hook| *hook = None);
             assert_eq!(
                 w5b_files(&home),
                 before,

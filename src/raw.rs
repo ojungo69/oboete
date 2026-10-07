@@ -669,20 +669,20 @@ pub fn open(home: &Path) -> Result<Raw> {
 /// Open with one lock-wait budget for restore, WAL, schema, column and device initialization.
 /// Hooks pass 2 s so a failed open reaches MUST-M16's marker before the agent kills the hook.
 pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
-    open_within_report(home, wait, None, &mut || Ok(()))
+    open_within_report(home, wait, None, &mut |_| Ok(()))
 }
 pub(crate) fn open_report(
     home: &Path,
     guard: Option<&crate::executable::CommandHome>,
-    stopped: &mut impl FnMut() -> Result<()>,
+    committed: &mut impl FnMut(&'static str) -> Result<()>,
 ) -> Result<Raw> {
-    open_within_report(home, crate::db::OPEN_WRITE_WAIT, guard, stopped)
+    open_within_report(home, crate::db::OPEN_WRITE_WAIT, guard, committed)
 }
 fn open_within_report(
     home: &Path,
     wait: std::time::Duration,
     guard: Option<&crate::executable::CommandHome>,
-    stopped: &mut impl FnMut() -> Result<()>,
+    committed: &mut impl FnMut(&'static str) -> Result<()>,
 ) -> Result<Raw> {
     if let Some(guard) = guard {
         guard.check(home)?;
@@ -702,7 +702,7 @@ fn open_within_report(
     // one in: `raw.db.restored` is only ever a whole rebuild (it gets that name once its records
     // are committed), so the rename is finished here instead of creating an empty store.
     if finish_stopped_restore(home)? {
-        stopped()?;
+        committed("stopped_restore_finished")?;
     }
     // Give first creation the same nonempty identity witness as an existing file. This is
     // after stopped-restore recovery and under the swap hold; an interrupted empty creation is
@@ -715,7 +715,7 @@ fn open_within_report(
         create.mode(0o600);
     }
     match create.open(&path) {
-        Ok(_) => {}
+        Ok(_) => committed("stores_changed")?,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e).with_context(|| format!("create {}", path.display())),
     }
@@ -729,35 +729,50 @@ fn open_within_report(
     crate::db::wal_until(&conn, "FULL", deadline)?;
     #[cfg(target_os = "macos")]
     conn.execute_batch("PRAGMA fullfsync=ON;")?;
-    crate::db::ensure_schema_until(&conn, &schema_for_file(&conn, &path)?, deadline)
-        .context("raw schema")?;
+    if crate::db::ensure_schema_until(&conn, &schema_for_file(&conn, &path)?, deadline)
+        .context("raw schema")?
+    {
+        committed("stores_changed")?;
+    }
     // A raw.db from before the ledger named its field (milestone 2 Task 1's schema).
-    crate::db::ensure_column_until(
+    if crate::db::ensure_column_until(
         &mut conn,
         "ledger",
         "field",
         "TEXT NOT NULL DEFAULT ''",
         deadline,
     )
-    .context("migrate ledger")?;
-    crate::db::ensure_column_until(
+    .context("migrate ledger")?
+    {
+        committed("stores_changed")?;
+    }
+    if crate::db::ensure_column_until(
         &mut conn,
         "import_origins",
         "native_session",
         "TEXT",
         deadline,
     )
-    .context("migrate import session identity")?;
-    crate::db::ensure_column_until(
+    .context("migrate import session identity")?
+    {
+        committed("stores_changed")?;
+    }
+    if crate::db::ensure_column_until(
         &mut conn,
         "import_origins",
         "ambiguous",
         "INTEGER NOT NULL DEFAULT 1",
         deadline,
     )
-    .context("migrate import identity confidence")?;
-    crate::db::ensure_column_until(&mut conn, "records", "deny_origin", "TEXT", deadline)
-        .context("migrate forget control identity")?;
+    .context("migrate import identity confidence")?
+    {
+        committed("stores_changed")?;
+    }
+    if crate::db::ensure_column_until(&mut conn, "records", "deny_origin", "TEXT", deadline)
+        .context("migrate forget control identity")?
+    {
+        committed("stores_changed")?;
+    }
     for file in ["raw.db", "raw.db-wal", "raw.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -780,20 +795,24 @@ fn open_within_report(
     };
     let seed_home = |id: &str| {
         crate::db::retry_busy(&conn, deadline, || {
-            conn.execute(
+            let changed = conn.execute(
                 "INSERT OR IGNORE INTO meta(key, value) VALUES('home_id', ?1)",
                 [id],
             )?;
-            Ok(())
+            Ok(changed != 0)
         })
     };
     // Seed before changing a copied store's device, so two simultaneous opens cannot choose
     // the new device as its lineage in the gap between the two writes.
-    if let Some(id) = &previous_device {
-        seed_home(id)?;
+    if let Some(id) = &previous_device
+        && seed_home(id)?
+    {
+        committed("stores_changed")?;
     }
     bound &= crate::db::store_file(&path) == file_before;
-    crate::db::ensure_device_until(&conn, &path, deadline).context("device id")?;
+    if crate::db::ensure_device_until(&conn, &path, deadline).context("device id")? {
+        committed("stores_changed")?;
+    }
     let file_identity: String =
         conn.query_row("SELECT value FROM meta WHERE key='store_file'", [], |r| {
             r.get(0)
@@ -807,8 +826,8 @@ fn open_within_report(
     let home_id = match known_home {
         Some(id) => id,
         None => {
-            if previous_device.is_none() {
-                seed_home(&device)?;
+            if previous_device.is_none() && seed_home(&device)? {
+                committed("stores_changed")?;
             }
             conn.query_row("SELECT value FROM meta WHERE key='home_id'", [], |r| {
                 r.get(0)
@@ -845,6 +864,7 @@ const SWAP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 thread_local! {
+    // One-shot for the next blocked shared or exclusive wait; callers reset an unused hook.
     pub(crate) static SWAP_BLOCKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 

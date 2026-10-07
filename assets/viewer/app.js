@@ -1543,6 +1543,7 @@ async function refreshMaintenance(d = maintenanceDraft) {
 function maintenanceSection(f) {
   const d=f.maintenance;
   const native=d.kind==='rebuild'||d.kind==='restore';
+  const prefix=native?'maintenance_native_':'maintenance_';
   const busy=maintenanceBlocked(d);
   const invalidate=()=>{
     d.preview=null;d.confirmed=false;d.operationId=null;d.error=null;
@@ -1568,7 +1569,7 @@ function maintenanceSection(f) {
   agent.addEventListener('change',()=>{d.agent=agent.value;invalidate();});
   const from=input('text',d.from,'','maintenance.from',value=>{d.from=value;invalidate();});
   from.disabled=busy;
-  const preview=el('button','quiet small',t(native?'maintenance_native_preview':'maintenance_preview'));
+  const preview=el('button','quiet small',t(prefix+'preview'));
   preview.dataset.action='maintenance.preview';
   preview.type='button';preview.disabled=busy;
   preview.addEventListener('click',async()=>{
@@ -1583,7 +1584,7 @@ function maintenanceSection(f) {
   });
   const confirm=checkbox(d.confirmed,value=>{d.confirmed=value;renderMaintenance(d);});
   confirm.dataset.field='maintenance.confirmed';confirm.disabled=busy || !d.preview;
-  const start=el('button','quiet small',t(native?'maintenance_native_start':'maintenance_start'));
+  const start=el('button','quiet small',t(prefix+'start'));
   start.dataset.action='maintenance.start';
   start.type='button';start.disabled=busy || !d.preview || !d.confirmed;
   start.addEventListener('click',async()=>{
@@ -1610,48 +1611,56 @@ function maintenanceSection(f) {
       renderMaintenance(d);
     }
   });
-  const refresh=el('button','quiet small',t(native?'maintenance_native_refresh':'maintenance_refresh'));
+  const refresh=el('button','quiet small',t(prefix+'refresh'));
   refresh.dataset.action='maintenance.refresh';
   refresh.type='button';refresh.addEventListener('click',()=>{void refreshMaintenance(d);});
-  const another=el('button','quiet small',t(native?'maintenance_native_another':'maintenance_another'));
+  const another=el('button','quiet small',t(prefix+'another'));
   another.dataset.action='maintenance.another';
   another.type='button';another.disabled=d.previewing || d.sending || Boolean(d.status?.active);
   another.addEventListener('click',()=>{
     if(d.sending||d.status?.active)return;
     d.unknown=false;invalidate();renderMaintenance(d);
   });
-  const previewDetails=d.preview ? maintenancePreview(d.preview) : null;
+  const scope={transcripts:['maintenance_agent',agent],v1:['maintenance_source_path',from]}[d.kind];
+  const scopeControl=scope ? el('label','field',el('span',null,t(scope[0])),scope[1]) : null;
+  const hintKey={v1:'maintenance_source_default',transcripts:'maintenance_native_roots'}[d.kind] ?? `maintenance_${d.kind}_hint`;
+  const consentKey={rebuild:'maintenance_rebuild_consent',restore:'maintenance_restore_consent'}[d.kind] ?? 'maintenance_consent';
+  const previewDetails=[];
+  if(d.preview)previewDetails.push(maintenancePreview(d.preview),el('label','check',confirm,t(consentKey)));
   const active=d.status?.active,last=d.status?.last;
   return el('section','maintenance',el('h3',null,t('maintenance_h')),el('p','desc',t('maintenance_desc')),
     el('label','field',el('span',null,t('maintenance_kind')),kind),
-    d.kind==='transcripts' ? el('label','field',el('span',null,t('maintenance_agent')),agent)
-      : d.kind==='v1' ? el('label','field',el('span',null,t('maintenance_source_path')),from) : null,
-    el('p','desc',t(d.kind==='v1'?'maintenance_source_default':d.kind==='transcripts'?'maintenance_native_roots':`maintenance_${d.kind}_hint`)),
-    preview,previewDetails,d.preview ? el('label','check',confirm,t(native?`maintenance_${d.kind}_consent`:'maintenance_consent')) : null,
+    scopeControl,el('p','desc',t(hintKey)),preview,...previewDetails,
     start,d.previewing ? el('p','desc',t('loading')) : null,
     d.error ? el('p','desc text maintenance-error',t(d.error)) : null,
-    d.unknown ? el('p','desc',t(native?'maintenance_native_unknown_hint':'maintenance_unknown_hint')) : null,
+    d.unknown ? el('p','desc',t(prefix+'unknown_hint')) : null,
     active ? maintenanceStatus(active) : null,last ? maintenanceStatus(last) : null,
     d.status && !d.status.available ? el('p','desc',t('maintenance_no_receipt')) : null,
     refresh,d.operationId && !d.status?.active ? another : null,
-    el('p','desc',t(native?'maintenance_native_settings_hint':'maintenance_settings_hint')),
+    el('p','desc',t(prefix+'settings_hint')),
     native ? null : el('p','desc',t('maintenance_other_unavailable')));
+}
+function maintenanceNativePreview(p) {
+  const rows=[];
+  rows.push(el('p','desc',p.raw ? t('maintenance_current_records',p.raw) : t('maintenance_current_unknown')),
+    el('p','desc',t('maintenance_cached',{count:p.cached_vectors ?? t('maintenance_unknown_count'),files:p.kept_files})),
+    el('p','desc',t('maintenance_forget_requests',{count:p.forget_requests})),
+    el('p','desc',t('maintenance_cache_limit')));
+  if(p.staged_partial)rows.push(el('p','desc',t('maintenance_staged_partial')));
+  if(p.backup)rows.push(el('p','text',p.backup_label),
+    el('p','desc',t('maintenance_backup_candidates',{bytes:p.backup.compressed_bytes,
+      records:p.backup.record_segments,ops:p.backup.op_segments,
+      skipped:p.backup.invalid_record_segments+p.backup.skipped_op_segments})),
+    el('p','desc',t('maintenance_backup_work',{records:p.backup.record_lines ?? t('maintenance_unknown_count'),
+      ops:p.backup.op_lines ?? t('maintenance_unknown_count')})));
+  if(p.forget_log_warnings)rows.push(el('p','desc',t('maintenance_forget_warnings',{count:p.forget_log_warnings})));
+  return rows;
 }
 function maintenancePreview(p) {
   const rows=[];
-  if(p.kind==='rebuild'||p.kind==='restore') {
-    rows.push(el('p','desc',p.raw ? t('maintenance_current_records',p.raw) : t('maintenance_current_unknown')),
-      el('p','desc',t('maintenance_cached',{count:p.cached_vectors ?? t('maintenance_unknown_count'),files:p.kept_files})),
-      el('p','desc',t('maintenance_forget_requests',{count:p.forget_requests})),
-      el('p','desc',t('maintenance_cache_limit')));
-    if(p.staged_partial)rows.push(el('p','desc',t('maintenance_staged_partial')));
-    if(p.backup)rows.push(el('p','text',p.backup_label),
-      el('p','desc',t('maintenance_backup_candidates',{bytes:p.backup.compressed_bytes,
-        records:p.backup.record_segments,ops:p.backup.op_segments,
-        skipped:p.backup.invalid_record_segments+p.backup.skipped_op_segments})),
-      el('p','desc',t('maintenance_backup_work',{records:p.backup.record_lines ?? t('maintenance_unknown_count'),
-        ops:p.backup.op_lines ?? t('maintenance_unknown_count')})));
-    if(p.forget_log_warnings)rows.push(el('p','desc',t('maintenance_forget_warnings',{count:p.forget_log_warnings})));
+  const native=p.kind==='rebuild'||p.kind==='restore';
+  if(native) {
+    rows.push(...maintenanceNativePreview(p));
   } else if(p.kind==='v1') {
     rows.push(el('p','text',p.source),maintenanceV1(p.candidates,p.settings,true));
   } else {
@@ -1663,7 +1672,7 @@ function maintenancePreview(p) {
     if(p.v1)rows.push(el('p','desc',t('maintenance_conditional_v1')),
       maintenanceV1(p.v1.candidates,p.v1.settings,true));
   }
-  return el('div','maintenance-preview',el('h4',null,t(p.kind==='rebuild'||p.kind==='restore'?'maintenance_native_preview_h':'maintenance_preview_h')),...rows);
+  return el('div','maintenance-preview',el('h4',null,t(native?'maintenance_native_preview_h':'maintenance_preview_h')),...rows);
 }
 function maintenanceV1(s,settings,candidate=false) {
   return el('div',null,el('p','desc',t(candidate?'maintenance_v1_candidates':'maintenance_v1_actual',{
@@ -1688,31 +1697,32 @@ function maintenanceRestoreReceipt(receipt,recovery=false) {
   if(receipt.forget_log_warnings)rows.push(el('p','desc',t('maintenance_forget_warnings',{count:receipt.forget_log_warnings})));
   return rows;
 }
+function maintenanceNativeOutcome(out) {
+  const effects=out.effects;
+  const rows=[el('p','desc',t('maintenance_index_'+out.index.state)),
+    el('p','desc',t('maintenance_carried_cache',{count:out.cached_vectors_carried})),
+    el('p','desc',t('maintenance_cache_limit'))];
+  if(out.restore)rows.push(...maintenanceRestoreReceipt(out.restore));
+  if(effects.knowledge_put_back)rows.push(el('p','desc',t('maintenance_put_back')));
+  if(effects.raw_put_back)rows.push(el('p','desc',t('maintenance_raw_put_back')));
+  if(out.old_knowledge_kept)rows.push(el('p','desc',t('maintenance_old_knowledge_kept')));
+  if(effects.stopped_restore_finished)rows.push(el('p','desc',t('maintenance_stopped_restore_finished')));
+  if(effects.raw_files_quarantined)rows.push(el('p','desc',t('maintenance_quarantined_records',{count:effects.raw_files_quarantined})));
+  if(effects.segments_quarantined)rows.push(el('p','desc',t('maintenance_quarantined_segments',{count:effects.segments_quarantined})));
+  if(out.index.raw_recovery) {
+    const recovery=out.index.raw_recovery;
+    if(recovery.effects.raw_swapped&&!recovery.effects.stopped_restore_finished)rows.push(el('p','desc',t('maintenance_raw_recovery')));
+    rows.push(...maintenanceRestoreReceipt(recovery,true));
+  }
+  for(const [key,count] of [['cleanup',out.cleanup_warnings],['backup',out.index.backup_warnings],
+    ['forget',out.index.forget_log_warnings]]) {
+    if(count)rows.push(el('p','desc',t(`maintenance_${key}_warnings`,{count})));
+  }
+  return rows;
+}
 function maintenanceOutcome(out) {
   if(!out)return [];
-  if(out.operation==='rebuild'||out.operation==='restore') {
-    const effects=out.effects;
-    const rows=[el('p','desc',t('maintenance_index_'+out.index.state)),
-      el('p','desc',t('maintenance_carried_cache',{count:out.cached_vectors_carried})),
-      el('p','desc',t('maintenance_cache_limit'))];
-    if(out.restore)rows.push(...maintenanceRestoreReceipt(out.restore));
-    if(effects.knowledge_put_back)rows.push(el('p','desc',t('maintenance_put_back')));
-    if(effects.raw_put_back)rows.push(el('p','desc',t('maintenance_raw_put_back')));
-    if(out.old_knowledge_kept)rows.push(el('p','desc',t('maintenance_old_knowledge_kept')));
-    if(effects.stopped_restore_finished)rows.push(el('p','desc',t('maintenance_stopped_restore_finished')));
-    if(effects.raw_files_quarantined)rows.push(el('p','desc',t('maintenance_quarantined_records',{count:effects.raw_files_quarantined})));
-    if(effects.segments_quarantined)rows.push(el('p','desc',t('maintenance_quarantined_segments',{count:effects.segments_quarantined})));
-    if(out.index.raw_recovery) {
-      const recovery=out.index.raw_recovery;
-      if(recovery.effects.raw_swapped&&!recovery.effects.stopped_restore_finished)rows.push(el('p','desc',t('maintenance_raw_recovery')));
-      rows.push(...maintenanceRestoreReceipt(recovery,true));
-    }
-    for(const [key,count] of [['cleanup',out.cleanup_warnings],['backup',out.index.backup_warnings],
-      ['forget',out.index.forget_log_warnings]]) {
-      if(count)rows.push(el('p','desc',t(`maintenance_${key}_warnings`,{count})));
-    }
-    return rows;
-  }
+  if(out.operation==='rebuild'||out.operation==='restore')return maintenanceNativeOutcome(out);
   const rows=[];
   if(out.transcripts)for(const [agent,s] of Object.entries(out.transcripts)) {
     if(s)rows.push(el('p','desc',t('maintenance_transcript_actual',{
@@ -1726,13 +1736,15 @@ function maintenanceOutcome(out) {
 function maintenanceStatus(run) {
   const p=run.progress;
   const native=run.kind==='rebuild'||run.kind==='restore';
-  const rows=[el('p','desc',native ? p.native?.kind==='index'
-    ? t('maintenance_index_progress',{consumer:t('maintenance_consumer_'+p.native.consumer),
-      checkpoint:p.native.checkpoint,unit:t('maintenance_unit_'+p.native.unit)})
-    : t('maintenance_native_progress',{stage:t('maintenance_stage_'+run.stage)})
-    : t('maintenance_progress',{
+  let progressText;
+  if(!native)progressText=t('maintenance_progress',{
     stage:t('maintenance_stage_'+run.stage),records:p.v1_records,repos:p.v1_repositories,
-    documents:p.v1_documents,claude:p.claude.events,codex:p.codex.events}))];
+    documents:p.v1_documents,claude:p.claude.events,codex:p.codex.events});
+  else if(p.native?.kind==='index')progressText=t('maintenance_index_progress',{
+    consumer:t('maintenance_consumer_'+p.native.consumer),checkpoint:p.native.checkpoint,
+    unit:t('maintenance_unit_'+p.native.unit)});
+  else progressText=t('maintenance_native_progress',{stage:t('maintenance_stage_'+run.stage)});
+  const rows=[el('p','desc',progressText)];
   if(run.result?.code)rows.push(el('p','desc text',t(run.result.code)));
   if(run.phase==='partial' && run.committed)rows.push(el('p','desc',t(native?'maintenance_native_committed_boundary':'maintenance_committed_boundary')));
   rows.push(...maintenanceOutcome(run.result?.outcome));

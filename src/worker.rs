@@ -138,11 +138,9 @@ fn report_backup(home: &Path, raw: &Raw, report: &mut Option<&mut IndexReport<'_
     }
 }
 impl IndexReport<'_> {
-    fn changed(&mut self, before: &str, after: &str, stage: &'static str) {
-        if before != after {
-            self.receipt.stores_changed = true;
-            (self.committed)(&MaintenanceCommit::Effect { stage });
-        }
+    fn changed(&mut self, stage: &'static str) {
+        self.receipt.stores_changed = true;
+        (self.committed)(&MaintenanceCommit::Effect { stage });
     }
     fn backup(&mut self, stage: &'static str) {
         if stage == "backup_written" {
@@ -153,8 +151,7 @@ impl IndexReport<'_> {
         (self.committed)(&MaintenanceCommit::Effect { stage });
     }
 }
-fn store_stamp(home: &Path) -> Result<String> {
-    let mut states = Vec::new();
+fn check_reported_stores(home: &Path) -> Result<()> {
     for name in [
         "raw.db",
         "raw.db.restored",
@@ -164,49 +161,24 @@ fn store_stamp(home: &Path) -> Result<String> {
     ] {
         let path = home.join(name);
         match std::fs::metadata(&path) {
-            Ok(metadata) if !name.ends_with("-wal") || metadata.len() > 32 => {
+            Ok(metadata) => {
                 anyhow::ensure!(
                     metadata.is_file(),
                     "maintenance store is not a regular file"
                 );
                 #[cfg(test)]
                 if name.ends_with("-wal")
-                    && let Some(before) = BEFORE_WAL_HASH.take()
+                    && metadata.len() > 32
+                    && let Some(before) = BEFORE_STORE_OPEN.take()
                 {
                     before(&path);
                 }
-                let identity = crate::db::store_file(&path);
-                let version = match crate::migrate::file_version(&path) {
-                    Ok(version) => version,
-                    Err(error)
-                        if name.ends_with("-wal")
-                            && error
-                                .downcast_ref::<std::io::Error>()
-                                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
-                    {
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-                states.push((name, identity, version));
             }
-            Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(crate::forget::hash(&serde_json::to_vec(&states)?))
-}
-fn log_stamp(home: &Path) -> String {
-    let mut logs = vec![home.join("forget.log")];
-    if let Ok(dir) = crate::backup::dir(home) {
-        logs.push(dir.join("forget.log"));
-    }
-    let versions: Vec<_> = logs
-        .into_iter()
-        .map(|path| crate::migrate::file_version(&path).ok())
-        .collect();
-    crate::forget::hash(&serde_json::to_vec(&versions).expect("log versions serialize"))
+    Ok(())
 }
 
 /// One derived view of raw.db. `step` processes what `device` holds after `after` and returns its
@@ -480,12 +452,13 @@ thread_local! {
     static AFTER_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
     /// A one-shot test seam: the pathname changes after SQLite opened raw.db.
     static AFTER_RAW_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    static AFTER_KNOWLEDGE_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
     /// A one-shot test seam: the pathname changes between the last check and the next round.
     static BEFORE_ROUND: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
     /// A synchronous one-shot fixture action after a rebuild meets a shared status probe.
     static REBUILD_STATUS_BLOCKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_CARRY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    static BEFORE_WAL_HASH: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    static BEFORE_STORE_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
 /// How long a command waits for a worker to step aside.
@@ -804,30 +777,27 @@ fn serve(
     let before = file_id(std::fs::metadata(home.join("raw.db")));
     // Task 8: a damaged raw.db is restored from the backups, a damaged knowledge.db rebuilt.
     let opened = (|| {
-        let stamp = if report.is_some() {
-            Some(store_stamp(home)?)
-        } else {
-            None
-        };
+        if report.is_some() {
+            check_reported_stores(home)?;
+        }
         let opened = if let Some(report) = report.as_deref_mut() {
+            let changed = &mut report.receipt.stores_changed;
             crate::backup::open_raw_report(
                 home,
                 &mut report.receipt.raw_recovery,
                 holding.command.as_ref(),
-                &mut |stage| (report.committed)(&MaintenanceCommit::Effect { stage }),
+                &mut |stage| {
+                    if stage == "stores_changed" {
+                        *changed = true;
+                    }
+                    (report.committed)(&MaintenanceCommit::Effect { stage });
+                },
             )
         } else {
             crate::backup::open_raw(home)
         };
         if gone(home, holding) {
             return Err(Gone.into());
-        }
-        if let Some(report) = report.as_deref_mut() {
-            report.changed(
-                stamp.as_deref().expect("reported stamp"),
-                &store_stamp(home)?,
-                "stores_changed",
-            );
         }
         opened
     })();
@@ -859,64 +829,42 @@ fn serve(
         let now = file_id(std::fs::metadata(home.join("raw.db")));
         held.is_some() && now.is_some() && now != held
     };
-    let stamp = if report.is_some() {
-        Some(store_stamp(home)?)
+    let opened = if let Some(report) = report.as_deref_mut() {
+        crate::backup::open_knowledge_report(home, holding.command.as_ref(), &mut |stage| {
+            report.changed(stage)
+        })
     } else {
-        None
+        crate::backup::open_knowledge(home)
     };
-    let opened = crate::backup::open_knowledge(home);
-    if let Some(report) = report.as_deref_mut() {
-        report.changed(
-            stamp.as_deref().expect("reported stamp"),
-            &store_stamp(home)?,
-            "stores_changed",
-        );
+    #[cfg(test)]
+    if let Some(after) = AFTER_KNOWLEDGE_OPEN.take() {
+        after(home);
     }
     let mut k = opened?;
-    let stamp = if report.is_some() {
-        Some(store_stamp(home)?)
-    } else {
-        None
-    };
-    let rewound = checkpoint::rewind(&raw, &k, consumers);
     if let Some(report) = report.as_deref_mut() {
-        report.changed(
-            stamp.as_deref().expect("reported stamp"),
-            &store_stamp(home)?,
-            "stores_changed",
-        );
-        if let Ok(moved) = &rewound {
-            for (name, _, to) in moved {
-                if let Some(consumer) = consumers.iter().find(|c| c.name() == name) {
-                    report.receipt.consumer_commits += 1;
-                    (report.committed)(&MaintenanceCommit::Index {
-                        consumer: consumer.name(),
-                        unit: if consumer.reads_ops() {
-                            CheckpointUnit::Ops
-                        } else {
-                            CheckpointUnit::Records
-                        },
-                        checkpoint: *to,
-                    });
-                }
-            }
-        }
+        checkpoint::rewind_report(&raw, &k, consumers, &mut |consumer, ops, checkpoint| {
+            report.receipt.consumer_commits += 1;
+            (report.committed)(&MaintenanceCommit::Index {
+                consumer,
+                unit: if ops {
+                    CheckpointUnit::Ops
+                } else {
+                    CheckpointUnit::Records
+                },
+                checkpoint,
+            });
+        })?;
+    } else {
+        checkpoint::rewind(&raw, &k, consumers)?;
     }
-    rewound?;
     report_backup(home, &raw, report, true);
     // Milestone 5 D1 rule 7: the forget request logs after the segments are checked, before any
     // consumer runs and before the export.
     if let Some(report) = report.as_deref_mut() {
-        let before = (store_stamp(home)?, log_stamp(home));
-        let reconciled = crate::forget::reconcile(home, &mut raw);
-        let after = (store_stamp(home)?, log_stamp(home));
-        report.changed(
-            &format!("{}:{}", before.0, before.1),
-            &format!("{}:{}", after.0, after.1),
-            "forget_reconciled",
-        );
-        let reconciled = reconciled?;
-        report.receipt.forget_requests_applied += reconciled.applied as u64;
+        let reconciled = crate::forget::reconcile_report(home, &mut raw, &mut |stage, applied| {
+            report.receipt.forget_requests_applied += applied as u64;
+            report.changed(stage);
+        })?;
         report.receipt.forget_log_warnings += reconciled.problems.len() as u64;
         for problem in reconciled.problems {
             eprintln!("oboete: forget request log: {problem}");
@@ -1496,6 +1444,51 @@ pub fn rebuild(home: &Path) -> Result<()> {
     .map_err(MaintenanceFailure::into_cause)
 }
 
+fn carry_rebuild_vectors(
+    home: &Path,
+    name: &str,
+    proof: &crate::executable::CommandHome,
+    outcome: &mut MaintenanceOutcome,
+    committed: &mut impl FnMut(&MaintenanceCommit),
+) -> Result<()> {
+    let kept = home.join(name);
+    if kept.exists() {
+        let carried =
+            crate::knowledge::open(home).and_then(|k| crate::embed_phase::carry(&k, &kept));
+        #[cfg(test)]
+        if let Some(after) = AFTER_CARRY.with(|hook| hook.borrow_mut().take()) {
+            after();
+        }
+        match carried {
+            Ok(count) => {
+                outcome.cached_vectors_carried = count as u64;
+                crate::backup::effect("vectors_carried", &mut |stage| {
+                    committed(&MaintenanceCommit::Effect { stage })
+                })?;
+            }
+            Err(error) => {
+                match put_back(home, name, proof) {
+                    Ok(()) => {
+                        outcome.effects.knowledge_put_back = true;
+                        outcome.old_knowledge_kept = false;
+                        crate::backup::effect("knowledge_put_back", &mut |stage| {
+                            committed(&MaintenanceCommit::Effect { stage })
+                        })?;
+                    }
+                    Err(back) => {
+                        return Err(error)
+                            .with_context(|| format!("rebuild put-back also failed: {back:#}"));
+                    }
+                }
+                return Err(error).context(
+                    "rebuild: the vectors of knowledge.db could not be read; nothing was changed",
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn rebuild_report(
     home: &Path,
     expected: Option<&str>,
@@ -1558,38 +1551,7 @@ pub(crate) fn rebuild_report(
             )?;
             proof.check(home)?;
             outcome.old_knowledge_kept = kept.exists();
-            if kept.exists() {
-                let carried =
-                    crate::knowledge::open(home).and_then(|k| crate::embed_phase::carry(&k, &kept));
-                #[cfg(test)]
-                if let Some(after) = AFTER_CARRY.with(|hook| hook.borrow_mut().take()) {
-                    after();
-                }
-                match carried {
-                    Ok(count) => {
-                        outcome.cached_vectors_carried = count as u64;
-                        crate::backup::effect("vectors_carried", &mut |stage| {
-                            committed(&MaintenanceCommit::Effect { stage })
-                        })?;
-                    }
-                    Err(error) => {
-                        match put_back(home, &name, &proof) {
-                            Ok(()) => {
-                                outcome.effects.knowledge_put_back = true;
-                                outcome.old_knowledge_kept = false;
-                                crate::backup::effect("knowledge_put_back", &mut |stage| {
-                                    committed(&MaintenanceCommit::Effect { stage })
-                                })?;
-                            }
-                            Err(back) => {
-                                return Err(error)
-                                    .context(format!("rebuild put-back also failed: {back:#}"));
-                            }
-                        }
-                        return Err(error).context("rebuild: the vectors of knowledge.db could not be read; nothing was changed");
-                    }
-                }
-            }
+            carry_rebuild_vectors(home, &name, &proof, &mut outcome, committed)?;
             let (index, result) = run_once_holding_report(home, held, committed);
             outcome.index = index;
             result.with_context(|| {
@@ -1926,7 +1888,7 @@ mod tests {
         std::fs::create_dir_all(replacement.join("state")).unwrap();
         std::fs::write(replacement.join("state/worker.lock"), "other home").unwrap();
         std::fs::write(replacement.join("canary"), "synthetic unrelated home").unwrap();
-        BEFORE_WAL_HASH.set(Some(|path| {
+        BEFORE_STORE_OPEN.set(Some(|path| {
             let home = path.parent().unwrap().to_owned();
             let held = raw::lock_for_swap(&home).unwrap();
             raw::SWAP_BLOCKED.with_borrow_mut(|hook| {
@@ -1937,14 +1899,15 @@ mod tests {
                 }));
             });
         }));
-        let failure = restore_report(
+        let result = restore_report(
             &home,
             None,
             crate::executable::CommandCaller::Worker,
             &mut |_| {},
-        )
-        .unwrap_err();
-        BEFORE_WAL_HASH.set(None);
+        );
+        BEFORE_STORE_OPEN.set(None);
+        raw::SWAP_BLOCKED.with_borrow_mut(|hook| *hook = None);
+        let failure = result.unwrap_err();
         assert_eq!(failure.outcome.index.state, IndexState::Failed);
         assert!(
             !crate::backup::restore_requested(&home),
@@ -2053,6 +2016,230 @@ mod tests {
     }
 
     #[test]
+    fn w5b_owned_initialization_progress_survives_a_later_open_failure() {
+        for setup in ["new_raw", "raw_schema", "raw_identity", "knowledge_schema"] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            if setup != "new_raw" {
+                drop(raw::open(p).unwrap());
+                drop(knowledge::open(p).unwrap());
+                let (file, sql) = match setup {
+                    "raw_schema" => ("raw.db", "DROP TABLE ledger"),
+                    "raw_identity" => ("raw.db", "DELETE FROM meta WHERE key='store_file'"),
+                    _ => ("knowledge.db", "DROP TABLE rewinds"),
+                };
+                Connection::open(p.join(file))
+                    .unwrap()
+                    .execute_batch(sql)
+                    .unwrap();
+            }
+            crate::backup::FAIL_AFTER.set(Some("stores_changed"));
+            let failure = restore_report(
+                p,
+                None,
+                crate::executable::CommandCaller::Worker,
+                &mut |_| {},
+            )
+            .unwrap_err();
+            crate::backup::FAIL_AFTER.set(None);
+            assert!(
+                failure.cause.to_string().contains(if setup == "new_raw" {
+                    "no backup segments"
+                } else {
+                    "no usable backup segment"
+                }),
+                "{setup}"
+            );
+            assert!(
+                failure
+                    .index_cause
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("stores_changed"),
+                "{setup}"
+            );
+            assert_eq!(failure.outcome.index.consumer_commits, 0, "{setup}");
+            assert!(failure.outcome.index.stores_changed, "{setup}");
+            assert!(failure.outcome.committed(), "{setup}");
+        }
+    }
+
+    #[test]
+    fn w5b_a_rewind_commit_is_reported_before_a_later_rewind_fails() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("synthetic rewind receipt"))
+            .unwrap();
+        let device = raw.device().to_owned();
+        drop(raw);
+        run_once(p).unwrap();
+        std::fs::remove_dir_all(p.join("backups")).unwrap();
+        let k = knowledge::open(p).unwrap();
+        for consumer in ["rescan", "fts"] {
+            checkpoint::set_in(&k, checkpoint::SEQS, consumer, &device, 2).unwrap();
+        }
+        k.execute_batch(
+            "CREATE TRIGGER stop_fts_rewind BEFORE UPDATE ON checkpoints
+                         WHEN OLD.consumer='fts'
+                         BEGIN SELECT RAISE(ABORT, 'synthetic failed rewind'); END;",
+        )
+        .unwrap();
+        drop(k);
+        let mut commits = Vec::new();
+        let failure = restore_report(
+            p,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |event| commits.push(event.clone()),
+        )
+        .unwrap_err();
+        assert!(
+            failure
+                .index_cause
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("synthetic failed rewind")
+        );
+        assert_eq!(failure.outcome.index.consumer_commits, 1);
+        assert!(!failure.outcome.index.stores_changed);
+        assert!(failure.outcome.committed());
+        assert!(matches!(
+            commits.as_slice(),
+            [MaintenanceCommit::Index {
+                consumer: "rescan",
+                checkpoint: 1,
+                unit: CheckpointUnit::Records
+            }]
+        ));
+    }
+
+    #[test]
+    fn w5b_a_repaired_forget_log_is_progress_without_a_consumer_commit() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let (original, _) = crate::backup::tests::w5b_log_change(p);
+        run_once(p).unwrap();
+        for entry in std::fs::read_dir(p.join("backups")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().unwrap() != "forget.log" {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        std::fs::remove_file(p.join("forget.log")).unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic pending log repair"))
+            .unwrap();
+        knowledge::open(p)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER stop_log_repair_drain BEFORE UPDATE ON checkpoints
+             BEGIN SELECT RAISE(ABORT, 'synthetic stopped log repair drain'); END;",
+            )
+            .unwrap();
+        let mut commits = Vec::new();
+        let failure = restore_report(
+            p,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |event| commits.push(event.clone()),
+        )
+        .unwrap_err();
+        assert!(
+            failure
+                .index_cause
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("synthetic stopped log repair drain")
+        );
+        assert_eq!(failure.outcome.index.consumer_commits, 0);
+        assert_eq!(failure.outcome.index.forget_requests_applied, 0);
+        assert!(failure.outcome.committed());
+        assert_eq!(std::fs::read(p.join("forget.log")).unwrap(), original);
+        assert!(matches!(
+            commits.as_slice(),
+            [MaintenanceCommit::Effect {
+                stage: "forget_reconciled"
+            }]
+        ));
+    }
+
+    #[test]
+    fn w5b_concurrent_records_are_not_reported_as_this_failed_restores_progress() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic already indexed record"))
+            .unwrap();
+        run_once(p).unwrap();
+        std::fs::remove_dir_all(p.join("backups")).unwrap();
+        knowledge::open(p)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER stop_receipt_checkpoint BEFORE UPDATE ON checkpoints
+                 BEGIN SELECT RAISE(ABORT, 'synthetic blocked checkpoint'); END;",
+            )
+            .unwrap();
+        AFTER_RAW_OPEN.set(Some(|home| {
+            raw::open(home)
+                .unwrap()
+                .append(&raw::test_event("synthetic concurrent first record"))
+                .unwrap();
+            AFTER_KNOWLEDGE_OPEN.set(Some(|home| {
+                raw::open(home)
+                    .unwrap()
+                    .append(&raw::test_event("synthetic concurrent second record"))
+                    .unwrap();
+            }));
+        }));
+        let mut commits = Vec::new();
+        let failure = restore_report(
+            p,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |event| commits.push(event.clone()),
+        )
+        .unwrap_err();
+        AFTER_RAW_OPEN.set(None);
+        AFTER_KNOWLEDGE_OPEN.set(None);
+        assert!(
+            failure
+                .cause
+                .to_string()
+                .contains("no usable backup segment")
+        );
+        assert!(
+            failure
+                .index_cause
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("synthetic blocked checkpoint")
+        );
+        assert_eq!(raw::open(p).unwrap().max_seq().unwrap(), 3);
+        assert_eq!(failure.outcome.index.consumer_commits, 0);
+        assert!(
+            !failure
+                .outcome
+                .restore
+                .as_ref()
+                .unwrap()
+                .effects
+                .committed()
+        );
+        assert!(
+            !failure.outcome.committed(),
+            "concurrent writes were attributed to the failed restore"
+        );
+        assert!(commits.is_empty(), "uncommitted restore emitted progress");
+    }
+
+    #[test]
     fn w5b_a_disappearing_wal_does_not_abort_the_required_restore_drain() {
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
@@ -2063,7 +2250,7 @@ mod tests {
         assert!(wal.len() > 32);
         drop(raw);
         std::fs::write(p.join("raw.db-wal"), wal).unwrap();
-        BEFORE_WAL_HASH.set(Some(|path| std::fs::remove_file(path).unwrap()));
+        BEFORE_STORE_OPEN.set(Some(|path| std::fs::remove_file(path).unwrap()));
         let failure = restore_report(
             p,
             None,
@@ -2071,7 +2258,7 @@ mod tests {
             &mut |_| {},
         )
         .unwrap_err();
-        BEFORE_WAL_HASH.set(None);
+        BEFORE_STORE_OPEN.set(None);
         assert_eq!(failure.outcome.index.state, IndexState::Complete);
         assert!(failure.index_cause.is_none());
         assert_eq!(

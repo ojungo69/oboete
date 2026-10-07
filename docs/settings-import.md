@@ -76,7 +76,7 @@ Resident maintenance retains the identity of the viewer's held lock from startup
 including before its first binary restart. A changed or non-regular lock is
 refused without replacing it or waiting on a FIFO. Inspection/open failures keep
 a pending restore request only while the original home proof remains valid.
-The [resident R3 path-check limits](resident.md#limits) still apply.
+The [resident R3 path-check limits](resident.md#limits-to-state-in-the-docs-the-owners-words-are-in-the-review-result-verdictlimits) still apply.
 
 Progress reports actual native effect/consumer boundaries. Its records/ops
 checkpoint is an absolute position, not a number of new records or an ETA. Known
@@ -86,7 +86,11 @@ visible. Existing one-active/one-last, exact-ID replay, guarded routes and unkno
 completion handling apply to these operations too.
 
 A consumer transaction counts as committed progress when it changes data,
-schema or a checkpoint. An empty transaction does not itself make a failed
+schema or a checkpoint. Store initialization, recovery, committed rewind steps
+and deletion-log repairs report their own effects even before a later failure.
+Another connection's writes and SQLite storage housekeeping do not count as this
+operation's progress. Receipt reporting does not hash whole stores. An empty
+transaction does not itself make a failed
 restore partial. Quarantined segment counts count each logical segment once;
 kept-file counts also include its checksum file.
 
