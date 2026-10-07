@@ -11,7 +11,9 @@ use sha2::{Digest, Sha256};
 
 use crate::config;
 
+mod doctor;
 mod readiness;
+pub(crate) use doctor::doctor_report;
 pub(crate) use readiness::{launch_found, readiness};
 
 pub const AGENTS: [&str; 7] = ["claude", "codex", "grok", "agy", "opencode", "pi", "cursor"];
@@ -1866,11 +1868,7 @@ pub fn doctor(home: &Path) -> Result<()> {
                     Err(e) => return Err(e),
                 }
                 // MUST-M14: raw lost commits that a consumer had processed; its output was rewound.
-                let (n, last): (i64, Option<String>) = k.query_row(
-                    "SELECT COUNT(*), strftime('%Y-%m-%d %H:%M', MAX(ts) / 1000, 'unixepoch', 'localtime') FROM rewinds",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
+                let (n, _, last) = crate::knowledge::rewind_facts(&k)?;
                 if let Some(last) = last {
                     println!("  rewound after lost commits: {n} time(s), last {last}");
                 }
@@ -1939,11 +1937,7 @@ pub fn doctor(home: &Path) -> Result<()> {
                 let conn = crate::migrate::open_v1(&db_path)?;
                 // A table that cannot be read makes the section unhealthy, not a count of 0; the
                 // readable counts and the calls below are still shown.
-                let counts = ["sessions", "events", "observations", "summaries"].map(|t| {
-                    conn.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| {
-                        r.get::<_, i64>(0)
-                    })
-                });
+                let counts = crate::migrate::legacy_counts_in(&conn);
                 let shown = counts
                     .each_ref()
                     .map(|c| c.as_ref().map_or("unreadable".into(), i64::to_string));
@@ -1951,20 +1945,18 @@ pub fn doctor(home: &Path) -> Result<()> {
                     "  sessions {} | raw events {} | observations {} | summaries {}",
                     shown[0], shown[1], shown[2], shown[3]
                 );
-                let mut stmt = conn.prepare(
-                    "SELECT provider, outcome, ms, COALESCE(detail,'') FROM provider_calls ORDER BY id DESC LIMIT 5",
-                )?;
-                let rows: Vec<String> = stmt
-                    .query_map([], |r| {
-                        Ok(format!(
+                let rows: Vec<String> = crate::migrate::legacy_call_rows_in(&conn)?
+                    .into_iter()
+                    .map(|row| {
+                        format!(
                             "{} {} {}ms {}",
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, i64>(2)?,
-                            r.get::<_, String>(3)?.chars().take(60).collect::<String>()
-                        ))
-                    })?
-                    .collect::<Result<_, _>>()?;
+                            row.provider,
+                            row.outcome,
+                            row.ms,
+                            row.detail.chars().take(60).collect::<String>()
+                        )
+                    })
+                    .collect();
                 if !rows.is_empty() {
                     println!("  last provider calls:");
                     for r in rows {
@@ -2304,28 +2296,581 @@ fn diagnostic_metadata(path: &Path) -> std::io::Result<std::fs::Metadata> {
     }
 }
 
+/// A regular-file reader: refuse reparses on Windows and never block on a Unix FIFO.
+fn diagnostic_read_file(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    let file = diagnostic_file(path, true)?;
+    #[cfg(not(windows))]
+    let file = {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        options.open(path)?
+    };
+    if !file.metadata()?.is_file() {
+        return Err(std::io::ErrorKind::Unsupported.into());
+    }
+    Ok(file)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntryKind {
+    Directory,
+    Symlink,
+    File,
+    Other,
+}
+
+/// Metadata only: neither this value nor its constructors read file contents.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EntryMetadata {
+    kind: EntryKind,
+    identity: String,
+    bytes: u64,
+    modified: std::time::SystemTime,
+}
+
+#[cfg(windows)]
+impl EntryMetadata {
+    fn from_file(file: &std::fs::File) -> std::io::Result<Self> {
+        let metadata = file.metadata()?;
+        let kind = if metadata.file_type().is_symlink() {
+            EntryKind::Symlink
+        } else if metadata.is_dir() {
+            EntryKind::Directory
+        } else if metadata.is_file() {
+            EntryKind::File
+        } else {
+            EntryKind::Other
+        };
+        Ok(Self {
+            kind,
+            identity: crate::db::store_file_from(file)?,
+            bytes: metadata.len(),
+            modified: metadata.modified()?,
+        })
+    }
+}
+
+fn diagnostic_leaf(leaf: &std::ffi::OsStr) -> std::io::Result<()> {
+    let mut parts = Path::new(leaf).components();
+    if !matches!(parts.next(), Some(std::path::Component::Normal(name)) if name == leaf)
+        || parts.next().is_some()
+        || leaf.as_encoded_bytes().contains(&0)
+    {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    #[cfg(windows)]
+    if leaf.as_encoded_bytes().contains(&b':') {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    Ok(())
+}
+
+/// One admitted directory. Membership and child data never reopen its pathname.
+/// Doctor owns selection, stamping and end-of-report invalidation separately.
+struct DiagnosticDirectory {
+    file: std::fs::File,
+    resolved: PathBuf,
+}
+
+impl DiagnosticDirectory {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[allow(clippy::useless_conversion)] // statvfs integer widths vary by platform.
+    fn available_bytes(&self) -> std::io::Result<u64> {
+        use std::os::fd::AsRawFd;
+        let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: live directory fd; writable stats.
+        if unsafe { libc::fstatvfs(self.file.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: successful fstatvfs initialized the whole statvfs value.
+        let stats = unsafe { stats.assume_init() };
+        let unit = u64::try_from(stats.f_frsize).map_err(|_| std::io::ErrorKind::InvalidData)?;
+        let available =
+            u64::try_from(stats.f_bavail).map_err(|_| std::io::ErrorKind::InvalidData)?;
+        if unit == 0 {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+        available
+            .checked_mul(unit)
+            .ok_or(std::io::ErrorKind::InvalidData.into())
+    }
+    #[cfg(windows)]
+    fn available_bytes(&self) -> std::io::Result<u64> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::{
+            Wdk::{
+                Storage::FileSystem::{FileFsFullSizeInformation, NtQueryVolumeInformationFile},
+                System::SystemServices::FILE_FS_FULL_SIZE_INFORMATION,
+            },
+            Win32::{
+                Foundation::{RtlNtStatusToDosError, STATUS_SUCCESS},
+                System::IO::IO_STATUS_BLOCK,
+            },
+        };
+        let mut size = FILE_FS_FULL_SIZE_INFORMATION::default();
+        let mut iosb = IO_STATUS_BLOCK::default();
+        // SAFETY: live directory handle and correctly sized writable outputs.
+        let status = unsafe {
+            NtQueryVolumeInformationFile(
+                self.file.as_raw_handle(),
+                &mut iosb,
+                (&mut size as *mut FILE_FS_FULL_SIZE_INFORMATION).cast(),
+                std::mem::size_of::<FILE_FS_FULL_SIZE_INFORMATION>() as u32,
+                FileFsFullSizeInformation,
+            )
+        };
+        if status != STATUS_SUCCESS {
+            // SAFETY: status is the native result returned by the failed query.
+            return Err(std::io::Error::from_raw_os_error(
+                unsafe { RtlNtStatusToDosError(status) } as i32,
+            ));
+        }
+        if iosb.Information < std::mem::size_of::<FILE_FS_FULL_SIZE_INFORMATION>()
+            || size.SectorsPerAllocationUnit == 0
+            || size.BytesPerSector == 0
+        {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+        let available = u64::try_from(size.CallerAvailableAllocationUnits)
+            .map_err(|_| std::io::ErrorKind::InvalidData)?;
+        available
+            .checked_mul(u64::from(size.SectorsPerAllocationUnit))
+            .and_then(|n| n.checked_mul(u64::from(size.BytesPerSector)))
+            .ok_or(std::io::ErrorKind::InvalidData.into())
+    }
+}
+
+impl DiagnosticDirectory {
+    /// Own metadata by default. Following a Unix link is only for eval's initial type check.
+    fn entry_metadata(
+        &self,
+        leaf: &std::ffi::OsStr,
+        follow_link: bool,
+    ) -> std::io::Result<EntryMetadata> {
+        diagnostic_leaf(leaf)?;
+        #[cfg(windows)]
+        {
+            let _ = follow_link;
+            let file = diagnostic_relative_file(
+                &self.file,
+                leaf,
+                DiagnosticAccess::Metadata,
+                0x0040 | 0x1000,
+            )?;
+            EntryMetadata::from_file(&file)
+        }
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        {
+            use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+            use std::time::{Duration, UNIX_EPOCH};
+            let leaf = std::ffi::CString::new(leaf.as_bytes())
+                .map_err(|_| std::io::ErrorKind::InvalidInput)?;
+            let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+            let flags = if follow_link {
+                0
+            } else {
+                libc::AT_SYMLINK_NOFOLLOW
+            };
+            // SAFETY: the parent FD and NUL-terminated single leaf are live; the output
+            // storage has stat's layout. fstatat only obtains metadata and initializes it on success.
+            let status = unsafe {
+                libc::fstatat(
+                    self.file.as_raw_fd(),
+                    leaf.as_ptr(),
+                    metadata.as_mut_ptr(),
+                    flags,
+                )
+            };
+            if status < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: successful fstatat initialized the stat fields.
+            let metadata = unsafe { metadata.assume_init() };
+            let kind = match metadata.st_mode & libc::S_IFMT {
+                libc::S_IFDIR => EntryKind::Directory,
+                libc::S_IFLNK => EntryKind::Symlink,
+                libc::S_IFREG => EntryKind::File,
+                _ => EntryKind::Other,
+            };
+            let bytes =
+                u64::try_from(metadata.st_size).map_err(|_| std::io::ErrorKind::InvalidData)?;
+            // libc 0.2.189 exposes these names on both release Unix families.
+            let seconds = i128::from(metadata.st_mtime);
+            let nanos = u32::try_from(metadata.st_mtime_nsec)
+                .map_err(|_| std::io::ErrorKind::InvalidData)?;
+            if nanos >= 1_000_000_000 {
+                return Err(std::io::ErrorKind::InvalidData.into());
+            }
+            let magnitude = u64::try_from(seconds.unsigned_abs())
+                .map_err(|_| std::io::ErrorKind::InvalidData)?;
+            let seconds = if seconds < 0 {
+                UNIX_EPOCH.checked_sub(Duration::from_secs(magnitude))
+            } else {
+                UNIX_EPOCH.checked_add(Duration::from_secs(magnitude))
+            };
+            let modified = seconds
+                .and_then(|time| time.checked_add(Duration::from_nanos(u64::from(nanos))))
+                .ok_or(std::io::ErrorKind::InvalidData)?;
+            // Darwin dev_t is signed; match MetadataExt::dev()'s u64 encoding.
+            #[cfg(target_vendor = "apple")]
+            let device = metadata.st_dev as u64;
+            #[cfg(not(target_vendor = "apple"))]
+            let device = metadata.st_dev;
+            Ok(EntryMetadata {
+                kind,
+                identity: format!("{}:{}", device, metadata.st_ino),
+                bytes,
+                modified,
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux", target_vendor = "apple")))]
+        {
+            let _ = follow_link;
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+    }
+
+    /// Descend only through a real child directory. Never follow a child symlink/reparse.
+    fn open_directory(&self, leaf: &std::ffi::OsStr) -> Result<Self> {
+        diagnostic_leaf(leaf)?;
+        #[cfg(windows)]
+        let file = diagnostic_relative_file(
+            &self.file,
+            leaf,
+            DiagnosticAccess::Directory,
+            0x0040 | 0x1000,
+        )?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::{
+                fd::{AsRawFd, FromRawFd},
+                unix::ffi::OsStrExt,
+            };
+            let leaf = std::ffi::CString::new(leaf.as_bytes())
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            // SAFETY: the parent FD and terminated leaf are live. These flags neither create
+            // nor write; O_DIRECTORY/O_NOFOLLOW refuse a swapped link or special-file target.
+            let fd = unsafe {
+                libc::openat(
+                    self.file.as_raw_fd(),
+                    leaf.as_ptr(),
+                    libc::O_RDONLY
+                        | libc::O_DIRECTORY
+                        | libc::O_CLOEXEC
+                        | libc::O_NONBLOCK
+                        | libc::O_NOFOLLOW,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            // SAFETY: successful openat returned a new owned FD, transferred once.
+            unsafe { std::fs::File::from_raw_fd(fd) }
+        };
+        #[cfg(not(any(unix, windows)))]
+        let file: std::fs::File =
+            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported).into());
+        anyhow::ensure!(
+            file.metadata()?.is_dir(),
+            std::io::Error::from(std::io::ErrorKind::Unsupported)
+        );
+        #[cfg(windows)]
+        let resolved = diagnostic_file_name(&file)?;
+        #[cfg(not(windows))]
+        let resolved = self.resolved.join(leaf);
+        // The Unix path is a label only. No canonicalize/path reopen can replace the parent FD.
+        Ok(Self { file, resolved })
+    }
+
+    fn open(path: &Path) -> Result<Self> {
+        #[cfg(windows)]
+        let (file, resolved) = {
+            let file = diagnostic_file_mode(path, DiagnosticAccess::Directory)?;
+            let resolved = diagnostic_file_name(&file)?;
+            (file, resolved)
+        };
+        #[cfg(unix)]
+        let (file, resolved) = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let open = |path: &Path| {
+                // Follow Unix symlinks, but refuse non-directories without blocking on a FIFO.
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK)
+                    .open(path)
+            };
+            let file = open(path)?;
+            let resolved = path.canonicalize()?;
+            let binding = open(&resolved)?;
+            anyhow::ensure!(
+                crate::db::store_file_from(&file)? == crate::db::store_file_from(&binding)?,
+                crate::migrate::PreviewCopyError::Changed
+            );
+            (file, resolved)
+        };
+        #[cfg(not(any(unix, windows)))]
+        let (file, resolved): (std::fs::File, PathBuf) =
+            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported).into());
+        if !file.metadata()?.is_dir() {
+            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported).into());
+        }
+        Ok(Self { file, resolved })
+    }
+
+    fn identity(&self) -> std::io::Result<String> {
+        crate::db::store_file_from(&self.file)
+    }
+
+    /// A label from the admitted handle/binding; names and child opens never use this path.
+    fn resolved_path(&self) -> &Path {
+        &self.resolved
+    }
+
+    /// A fresh scan; mutable access prevents concurrent cursors on the same directory.
+    fn names(&mut self) -> std::io::Result<Vec<std::ffi::OsString>> {
+        diagnostic_directory_names(&mut self.file)
+    }
+
+    /// Exactly one native leaf; Unix symlinks stay allowed, Windows reparses do not.
+    fn open_file(&self, leaf: &std::ffi::OsStr) -> std::io::Result<std::fs::File> {
+        diagnostic_leaf(leaf)?;
+        #[cfg(windows)]
+        let file = {
+            diagnostic_relative_file(&self.file, leaf, DiagnosticAccess::File, 0x0040 | 0x1000)?
+        };
+        #[cfg(unix)]
+        let file = {
+            use std::os::{
+                fd::{AsRawFd, FromRawFd},
+                unix::ffi::OsStrExt,
+            };
+            let leaf = std::ffi::CString::new(leaf.as_bytes())
+                .map_err(|_| std::io::ErrorKind::InvalidInput)?;
+            let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: the admitted directory FD and terminated leaf are live; metadata is
+            // writable for one stat. flags=0 retains the existing Unix symlink semantics.
+            let status = unsafe {
+                libc::fstatat(
+                    self.file.as_raw_fd(),
+                    leaf.as_ptr(),
+                    metadata.as_mut_ptr(),
+                    0,
+                )
+            };
+            if status < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: successful fstatat initialized metadata. Known special files never
+            // reach a data open; openat and the opened-FD check still handle later replacement.
+            let metadata = unsafe { metadata.assume_init() };
+            if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
+                return Err(std::io::ErrorKind::Unsupported.into());
+            }
+            // SAFETY: the directory FD is live; leaf is a terminated single component.
+            // No create/truncate flags are used. Following a Unix leaf symlink is intentional.
+            let fd = unsafe {
+                libc::openat(
+                    self.file.as_raw_fd(),
+                    leaf.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: successful openat returned a new FD, transferred exactly once.
+            unsafe { std::fs::File::from_raw_fd(fd) }
+        };
+        #[cfg(not(any(unix, windows)))]
+        let file: std::fs::File = return Err(std::io::ErrorKind::Unsupported.into());
+        if !file.metadata()?.is_file() {
+            return Err(std::io::ErrorKind::Unsupported.into());
+        }
+        Ok(file)
+    }
+}
+
+#[cfg(unix)]
+fn diagnostic_directory_names(
+    file: &mut std::fs::File,
+) -> std::io::Result<Vec<std::ffi::OsString>> {
+    use std::os::{
+        fd::{AsRawFd, IntoRawFd},
+        unix::ffi::OsStringExt,
+    };
+
+    // Release targets use glibc/musl or Apple's libc; other errno ABIs are unavailable.
+    #[cfg(target_os = "linux")]
+    // SAFETY: libc returns this thread's live errno slot.
+    let errno = unsafe { libc::__errno_location() };
+    #[cfg(target_vendor = "apple")]
+    // SAFETY: libc returns this thread's live errno slot.
+    let errno = unsafe { libc::__error() };
+    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+    let errno = std::ptr::null_mut::<libc::c_int>();
+    if errno.is_null() {
+        return Err(std::io::ErrorKind::Unsupported.into());
+    }
+    struct Stream(*mut libc::DIR);
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            // SAFETY: Stream owns the successful fdopendir result and its FD.
+            unsafe { libc::closedir(self.0) };
+        }
+    }
+    let owned = file.try_clone()?;
+    // SAFETY: owned is an open directory FD. It remains Rust-owned on failure.
+    let stream = unsafe { libc::fdopendir(owned.as_raw_fd()) };
+    if stream.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    // fdopendir owns this duplicate only after success; Stream closes it on every exit.
+    let _ = owned.into_raw_fd();
+    let stream = Stream(stream);
+    // SAFETY: this stream is exclusively owned. A duplicate FD shares the offset, so reset it.
+    unsafe { libc::rewinddir(stream.0) };
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: errno is this thread's libc error slot; stream remains exclusively owned.
+        // Clear immediately before readdir, whose null return otherwise conflates EOF/error.
+        let (entry, error) = unsafe {
+            *errno = 0;
+            let entry = libc::readdir(stream.0);
+            (entry, *errno)
+        };
+        if entry.is_null() {
+            return if error == 0 {
+                Ok(names)
+            } else {
+                Err(std::io::Error::from_raw_os_error(error))
+            };
+        }
+        // SAFETY: readdir provides a NUL-terminated d_name valid until the next stream call.
+        // Do not use sizeof(d_name): POSIX permits a flexible tail longer than the C field.
+        let name = unsafe { std::ffi::CStr::from_ptr(std::ptr::addr_of!((*entry).d_name).cast()) };
+        let name = name.to_bytes();
+        if name != b"." && name != b".." {
+            names.push(std::ffi::OsString::from_vec(name.to_vec()));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn diagnostic_directory_names(
+    file: &mut std::fs::File,
+) -> std::io::Result<Vec<std::ffi::OsString>> {
+    use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
+    use windows_sys::Win32::{
+        Foundation::ERROR_NO_MORE_FILES,
+        Storage::FileSystem::{
+            FILE_ID_BOTH_DIR_INFO, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
+            GetFileInformationByHandleEx,
+        },
+    };
+    #[repr(align(8))]
+    struct Buffer([u8; 64 * 1024]);
+    let mut buffer = Box::new(Buffer([0; 64 * 1024]));
+    let mut class = FileIdBothDirectoryRestartInfo;
+    let mut names = Vec::new();
+    loop {
+        buffer.0.fill(0);
+        // SAFETY: file is a live directory handle. The initialized, 8-byte-aligned output
+        // buffer is writable for the exact stated byte count and outlives this synchronous call.
+        let found = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                class,
+                buffer.0.as_mut_ptr().cast(),
+                buffer.0.len() as u32,
+            )
+        };
+        if found == 0 {
+            let error = std::io::Error::last_os_error();
+            return if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                Ok(names)
+            } else {
+                Err(error)
+            };
+        }
+        class = FileIdBothDirectoryInfo;
+        let mut rest = buffer.0.as_slice();
+        loop {
+            let field = |offset: usize| -> std::io::Result<usize> {
+                let bytes: [u8; 4] = rest
+                    .get(offset..offset + 4)
+                    .ok_or(std::io::ErrorKind::InvalidData)?
+                    .try_into()
+                    .map_err(|_| std::io::ErrorKind::InvalidData)?;
+                Ok(u32::from_ne_bytes(bytes) as usize)
+            };
+            let next = field(std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, NextEntryOffset))?;
+            let length = field(std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileNameLength))?;
+            let start = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
+            let end = start
+                .checked_add(length)
+                .ok_or(std::io::ErrorKind::InvalidData)?;
+            let entry_end = if next == 0 { rest.len() } else { next };
+            if length == 0 || length % 2 != 0 || end > entry_end || entry_end > rest.len() {
+                return Err(std::io::ErrorKind::InvalidData.into());
+            }
+            let name: Vec<u16> = rest
+                .get(start..end)
+                .ok_or(std::io::ErrorKind::InvalidData)?
+                .chunks_exact(2)
+                .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+                .collect();
+            // Entry offsets are documented as aligned; byte parsing does not assume that.
+            let name = std::ffi::OsString::from_wide(&name);
+            if name != "." && name != ".." {
+                names.push(name);
+            }
+            if next == 0 {
+                break;
+            }
+            rest = rest.get(next..).ok_or(std::io::ErrorKind::InvalidData)?;
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn diagnostic_directory_names(_: &mut std::fs::File) -> std::io::Result<Vec<std::ffi::OsString>> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+enum DiagnosticAccess {
+    Metadata,
+    File,
+    Directory,
+}
+
 #[cfg(windows)]
 fn diagnostic_file(path: &Path, read: bool) -> std::io::Result<std::fs::File> {
-    use std::os::windows::{
-        ffi::OsStrExt,
-        fs::OpenOptionsExt,
-        io::{AsRawHandle, FromRawHandle},
-    };
-    use windows_sys::{
-        Wdk::{
-            Foundation::OBJECT_ATTRIBUTES,
-            Storage::FileSystem::{FILE_SYNCHRONOUS_IO_NONALERT, NtOpenFile},
+    diagnostic_file_mode(
+        path,
+        if read {
+            DiagnosticAccess::File
+        } else {
+            DiagnosticAccess::Metadata
         },
-        Win32::{
-            Foundation::{RtlNtStatusToDosError, STATUS_REPARSE_POINT_ENCOUNTERED, UNICODE_STRING},
-            Storage::FileSystem::{
-                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-                GetDriveTypeW,
-            },
-            System::IO::IO_STATUS_BLOCK,
-        },
+    )
+}
+
+#[cfg(windows)]
+fn diagnostic_file_mode(path: &Path, mode: DiagnosticAccess) -> std::io::Result<std::fs::File> {
+    use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, GetDriveTypeW,
     };
-    // Lexical absolutization does no filesystem I/O, including for a UNC cwd.
+    // Keep the existing lexical drive parsing, including ordinary/verbatim and mixed separators.
     let absolute = std::path::absolute(path)?;
     diagnostic_path_with(&absolute, true, |path, attributes| {
         let mut parts = path.components();
@@ -2343,63 +2888,97 @@ fn diagnostic_file(path: &Path, read: bool) -> std::io::Result<std::fs::File> {
         let root_wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
         // SAFETY: root_wide is a terminated drive-root string; this queries its drive type.
         let kind = unsafe { GetDriveTypeW(root_wide.as_ptr()) };
-        // Decline remote, unknown and absent drives before opening their root.
         if !matches!(kind, 2 | 3 | 5 | 6) {
             return Err(std::io::ErrorKind::Unsupported.into());
         }
+        let relative = parts.as_path();
+        // Only a selected drive root needs listing access on the root itself. Parent-root
+        // handles for ordinary metadata/text reads retain the original attributes-only access.
+        let listing_root =
+            relative.as_os_str().is_empty() && matches!(mode, DiagnosticAccess::Directory);
         let root = std::fs::OpenOptions::new()
-            .access_mode(FILE_READ_ATTRIBUTES)
+            .access_mode(FILE_READ_ATTRIBUTES | if listing_root { FILE_LIST_DIRECTORY } else { 0 })
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(root)?;
-        let relative = parts.as_path();
         if relative.as_os_str().is_empty() {
-            return if read {
+            return if matches!(mode, DiagnosticAccess::File) {
                 Err(std::io::ErrorKind::InvalidInput.into())
             } else {
                 Ok(root)
             };
         }
-        let mut name_buffer: Vec<u16> = relative.as_os_str().encode_wide().collect();
-        if name_buffer.contains(&0) {
-            return Err(std::io::ErrorKind::InvalidInput.into());
-        }
-        let length = name_buffer
-            .len()
-            .checked_mul(2)
-            .and_then(|length| u16::try_from(length).ok())
-            .ok_or(std::io::ErrorKind::InvalidInput)?;
-        let name = UNICODE_STRING {
-            Length: length,
-            MaximumLength: length,
-            Buffer: name_buffer.as_mut_ptr(),
-        };
-        let object = OBJECT_ATTRIBUTES {
-            Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
-            RootDirectory: root.as_raw_handle(),
-            ObjectName: &name,
-            Attributes: attributes,
-            ..Default::default()
-        };
-        let mut handle = std::ptr::null_mut();
-        let mut status_block = IO_STATUS_BLOCK::default();
-        // SYNCHRONIZE + attributes; file data and non-directory access only for text reads.
-        let access = 0x0010_0000 | FILE_READ_ATTRIBUTES | u32::from(read);
-        let options = FILE_SYNCHRONOUS_IO_NONALERT | if read { 0x40 } else { 0 };
-        // SAFETY: all buffers and the root handle live through this synchronous open. The
-        // full relative name is parsed with OBJ_DONT_REPARSE, including every parent.
-        let status =
-            unsafe { NtOpenFile(&mut handle, access, &object, &mut status_block, 7, options) };
-        if status < 0 {
-            return Err(if status == STATUS_REPARSE_POINT_ENCOUNTERED {
-                std::io::ErrorKind::Unsupported.into()
-            } else {
-                // SAFETY: status is the NT status returned by the failed native call.
-                std::io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32)
-            });
-        }
-        // SAFETY: successful NtOpenFile returned a new owned handle, transferred exactly once.
-        Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+        diagnostic_relative_file(&root, relative.as_os_str(), mode, attributes)
     })
+}
+
+#[cfg(windows)]
+fn diagnostic_relative_file(
+    root: &std::fs::File,
+    relative: &std::ffi::OsStr,
+    mode: DiagnosticAccess,
+    attributes: u32,
+) -> std::io::Result<std::fs::File> {
+    use std::os::windows::{
+        ffi::OsStrExt,
+        io::{AsRawHandle, FromRawHandle},
+    };
+    use windows_sys::{
+        Wdk::{
+            Foundation::OBJECT_ATTRIBUTES,
+            Storage::FileSystem::{
+                FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_SYNCHRONOUS_IO_NONALERT,
+                NtOpenFile,
+            },
+        },
+        Win32::{
+            Foundation::{RtlNtStatusToDosError, STATUS_REPARSE_POINT_ENCOUNTERED, UNICODE_STRING},
+            Storage::FileSystem::{FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA},
+            System::IO::IO_STATUS_BLOCK,
+        },
+    };
+    let mut name_buffer: Vec<u16> = relative.encode_wide().collect();
+    if name_buffer.is_empty() || name_buffer.contains(&0) {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let length = name_buffer
+        .len()
+        .checked_mul(2)
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or(std::io::ErrorKind::InvalidInput)?;
+    let name = UNICODE_STRING {
+        Length: length,
+        MaximumLength: length,
+        Buffer: name_buffer.as_mut_ptr(),
+    };
+    let object = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: root.as_raw_handle(),
+        ObjectName: &name,
+        Attributes: attributes,
+        ..Default::default()
+    };
+    let mut handle = std::ptr::null_mut();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let (data_access, kind) = match mode {
+        DiagnosticAccess::Metadata => (0, 0),
+        DiagnosticAccess::File => (FILE_READ_DATA, FILE_NON_DIRECTORY_FILE),
+        DiagnosticAccess::Directory => (FILE_LIST_DIRECTORY, FILE_DIRECTORY_FILE),
+    };
+    let access = 0x0010_0000 | FILE_READ_ATTRIBUTES | data_access;
+    let options = FILE_SYNCHRONOUS_IO_NONALERT | kind;
+    // SAFETY: all buffers and root live through this synchronous open. Both callers supply
+    // OBJ_DONT_REPARSE; initial paths retain parent checks and child names stay relative.
+    let status = unsafe { NtOpenFile(&mut handle, access, &object, &mut status_block, 7, options) };
+    if status < 0 {
+        return Err(if status == STATUS_REPARSE_POINT_ENCOUNTERED {
+            std::io::ErrorKind::Unsupported.into()
+        } else {
+            // SAFETY: status is the NT status returned by the failed native call.
+            std::io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32)
+        });
+    }
+    // SAFETY: successful NtOpenFile returned a new owned handle, transferred exactly once.
+    Ok(unsafe { std::fs::File::from_raw_handle(handle) })
 }
 
 fn diagnostic_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
@@ -2409,28 +2988,33 @@ fn diagnostic_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
-        use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
         let file = diagnostic_file(path, false)?;
-        let mut name = vec![0u16; 32768];
-        // SAFETY: file is owned and the bounded output buffer is writable for its stated size.
-        let length = unsafe {
-            GetFinalPathNameByHandleW(
-                file.as_raw_handle(),
-                name.as_mut_ptr(),
-                name.len() as u32,
-                0,
-            )
-        };
-        if length == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if length as usize >= name.len() {
-            return Err(std::io::ErrorKind::InvalidData.into());
-        }
-        name.truncate(length as usize);
-        Ok(PathBuf::from(std::ffi::OsString::from_wide(&name)))
+        diagnostic_file_name(&file)
     }
+}
+
+#[cfg(windows)]
+fn diagnostic_file_name(file: &std::fs::File) -> std::io::Result<PathBuf> {
+    use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+    let mut name = vec![0u16; 32768];
+    // SAFETY: file is live and the bounded output buffer is writable for its stated size.
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            file.as_raw_handle(),
+            name.as_mut_ptr(),
+            name.len() as u32,
+            0,
+        )
+    };
+    if length == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if length as usize >= name.len() {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    name.truncate(length as usize);
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(&name)))
 }
 
 fn launcher_files(dir: &Path, bin: &str) -> Vec<PathBuf> {

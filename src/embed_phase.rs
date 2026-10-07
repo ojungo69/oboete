@@ -130,7 +130,7 @@ pub struct Answer {
 
 /// The requests of `daily_requests` kept for query vectors: batches stop this short (Global
 /// Constraints).
-const KEPT_FOR_QUERIES: u32 = 40;
+pub(crate) const KEPT_FOR_QUERIES: u32 = 40;
 /// Workers AI's free neurons a UTC day, bge-m3's neurons per million input tokens, and the price
 /// past the allowance in USD per 1,000 neurons (Step 7).
 const FREE_NEURONS: f64 = 10_000.0;
@@ -701,6 +701,81 @@ impl Phase {
     }
 }
 
+pub(crate) struct DoctorFacts {
+    pub(crate) generation: Result<Option<String>>,
+    pub(crate) claims: Result<i64>,
+    pub(crate) imports: Result<i64>,
+    pub(crate) records: Result<i64>,
+    pub(crate) skipped: Result<Vec<(String, i64)>>,
+}
+
+/// Native SELECTs only: no schema, key read, reservation or provider call.
+pub(crate) fn doctor_facts_in(k: &Connection, embedder: &str) -> DoctorFacts {
+    let generation = k
+        .query_row(
+            "SELECT state FROM vec_generation WHERE embedder = ?1",
+            [embedder],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(Into::into);
+    let count = |sql: &str| -> Result<i64> { Ok(k.query_row(sql, [embedder], |r| r.get(0))?) };
+    let claims = count(
+        "SELECT count(*) FROM active a WHERE NOT EXISTS (SELECT 1 FROM vector_keys v
+           WHERE v.embedder = ?1 AND v.kind = 'c' AND v.key = a.uid)",
+    );
+    let imports = count(
+        "SELECT count(*) FROM imported i
+         WHERE i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
+           AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
+             AND v.kind IN ('k', 'p') AND v.key = i.uid)",
+    );
+    let records = count(
+        "SELECT count(*) FROM raw_docs d WHERE NOT EXISTS (SELECT 1 FROM vector_keys v
+           WHERE v.embedder = ?1 AND v.kind = 'r' AND v.key = d.device || ':' || d.seq)",
+    );
+    let skipped = (|| -> Result<Vec<(String, i64)>> {
+        Ok(k.prepare(
+            "SELECT skipped, count(*) FROM vector_keys WHERE embedder = ?1 AND skipped IS NOT NULL
+             GROUP BY skipped ORDER BY skipped",
+        )?
+        .query_map([embedder], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?)
+    })();
+    DoctorFacts {
+        generation,
+        claims,
+        imports,
+        records,
+        skipped,
+    }
+}
+
+/// Latest error in the native embedding accounting-name pool, without opening a store.
+/// The CLI alone formats detail; public projections use only ts and a fixed role code.
+pub(crate) struct LastEmbeddingError {
+    pub(crate) ts: i64,
+    pub(crate) role: String,
+    detail: Option<String>,
+}
+
+pub(crate) fn last_embedding_error_in(db: &Connection) -> Result<Option<LastEmbeddingError>> {
+    Ok(db
+        .query_row(
+            "SELECT ts, role, detail FROM provider_calls WHERE provider = ?1 AND outcome = 'error'
+             ORDER BY id DESC LIMIT 1",
+            [crate::embed::CALLS],
+            |r| {
+                Ok(LastEmbeddingError {
+                    ts: r.get(0)?,
+                    role: r.get(1)?,
+                    detail: r.get(2)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
 /// Doctor's lines (Step 11): the embedder and its generation, the documents still waiting per kind,
 /// those passed over per reason, the requests and USD against the caps, a rest, the last error.
 pub fn doctor_lines(home: &Path, k: &Connection) -> Result<Vec<String>> {
@@ -713,45 +788,20 @@ pub fn doctor_lines(home: &Path, k: &Connection) -> Result<Vec<String>> {
     crate::claims::schema(k)?;
     crate::consumer::imported::schema(k)?;
     crate::consumer::fts::schema(k)?;
-    let state: Option<String> = k
-        .query_row(
-            "SELECT state FROM vec_generation WHERE embedder = ?1",
-            [embedder],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let count = |sql: &str| -> Result<i64> { Ok(k.query_row(sql, [embedder], |r| r.get(0))?) };
-    let claims = count(
-        "SELECT count(*) FROM active a WHERE NOT EXISTS (SELECT 1 FROM vector_keys v
-           WHERE v.embedder = ?1 AND v.kind = 'c' AND v.key = a.uid)",
-    )?;
-    let imports = count(
-        "SELECT count(*) FROM imported i
-         WHERE i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
-           AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
-             AND v.kind IN ('k', 'p') AND v.key = i.uid)",
-    )?;
-    let records = count(
-        "SELECT count(*) FROM raw_docs d WHERE NOT EXISTS (SELECT 1 FROM vector_keys v
-           WHERE v.embedder = ?1 AND v.kind = 'r' AND v.key = d.device || ':' || d.seq)",
-    )?;
+    let facts = doctor_facts_in(k, embedder);
+    let state = facts.generation?;
+    let claims = facts.claims?;
+    let imports = facts.imports?;
+    let records = facts.records?;
     let mut lines = vec![format!(
         "embeddings: {embedder} ({}), waiting: {claims} claims, {imports} imported, {records} records",
         state.as_deref().unwrap_or("nothing embedded yet")
     )];
-    let skipped: Vec<String> = k
-        .prepare(
-            "SELECT skipped, count(*) FROM vector_keys WHERE embedder = ?1 AND skipped IS NOT NULL
-             GROUP BY skipped ORDER BY skipped",
-        )?
-        .query_map([embedder], |r| {
-            Ok(format!(
-                "{} {}",
-                r.get::<_, i64>(1)?,
-                r.get::<_, String>(0)?
-            ))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+    let skipped: Vec<String> = facts
+        .skipped?
+        .into_iter()
+        .map(|(reason, count)| format!("{count} {reason}"))
+        .collect();
     if !skipped.is_empty() {
         lines.push(format!("  passed over: {}", skipped.join(", ")));
     }
@@ -771,15 +821,7 @@ pub fn doctor_lines(home: &Path, k: &Connection) -> Result<Vec<String>> {
     if rest > crate::db::now_ms() {
         lines.push(format!("  resting until {}", crate::db::utc(rest)));
     }
-    let last: Option<(i64, String, Option<String>)> = db
-        .query_row(
-            "SELECT ts, role, detail FROM provider_calls WHERE provider = ?1 AND outcome = 'error'
-             ORDER BY id DESC LIMIT 1",
-            [calls],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    if let Some((ts, role, detail)) = last {
+    if let Some(LastEmbeddingError { ts, role, detail }) = last_embedding_error_in(&db)? {
         lines.push(format!(
             "  last error ({role}, {}): {}",
             crate::db::utc(ts),

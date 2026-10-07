@@ -108,7 +108,7 @@ enum Head {
     Body(usize, Save),
 }
 
-/// A typed write that takes a request's body.
+/// A typed operation that takes a request's body.
 type Save = fn(&Viewer, &[u8]) -> Response;
 
 #[derive(Debug)]
@@ -290,10 +290,11 @@ fn fresh_token() -> Result<String> {
 }
 
 /// The outcome of a resident start on a filesystem whose modes keep no file its owner's alone.
-const NOT_PRIVATE: &str = "this home's filesystem cannot keep the page's token to its owner";
+pub(crate) const NOT_PRIVATE: &str =
+    "this home's filesystem cannot keep the page's token to its owner";
 
 /// The outcome of a resident start whose port another program or home holds.
-const PORT_IN_USE: &str = "port in use";
+pub(crate) const PORT_IN_USE: &str = "port in use";
 
 /// How often the resident viewer looks at its home, and the worker at the viewer (R4).
 const MINUTE: Duration = Duration::from_secs(60);
@@ -321,9 +322,11 @@ fn outcome(home: &Path) -> Option<String> {
 /// R13: a read-only status, without starting a viewer, touching its token or creating a lock.
 pub(crate) fn resident_line(home: &Path, port: u16) -> String {
     let outcome = outcome(home);
-    if crate::worker::lock_held(&home.join("state/view.lock"))
-        && outcome.as_deref().map(str::trim) == Some(format!("listening {port}").as_str())
-    {
+    if resident_up(
+        outcome.as_deref(),
+        port,
+        crate::worker::lock_held(&home.join("state/view.lock")),
+    ) {
         return format!("page: http://127.0.0.1:{port} is up");
     }
     let why = match outcome.as_deref().map(str::trim) {
@@ -332,6 +335,10 @@ pub(crate) fn resident_line(home: &Path, port: u16) -> String {
         _ => "it has not started".to_owned(),
     };
     format!("page: not running: {why}; run `oboete view`")
+}
+
+pub(crate) fn resident_up(outcome: Option<&str>, port: u16, held: bool) -> bool {
+    held && outcome.map(str::trim) == Some(format!("listening {port}").as_str())
 }
 
 /// Before a viewer is started: the outcome one that is gone left is not the new one's (Codex on
@@ -978,9 +985,10 @@ impl Viewer {
         send(&mut stream, &resp.bytes(head_only), ANSWER_TIME);
     }
 
-    /// Typed writes go through `save_gate`; every other request is answered by `route`.
+    /// Typed operations with a body go through `save_gate`; other requests use `route`.
     fn head(&self, method: &str, target: &str, headers: &[(&str, &str)]) -> Head {
         let (cap, save): (usize, Save) = match (method, target) {
+            ("POST", "/api/doctor") => (MAX_BODY, Self::doctor),
             ("POST", "/api/settings") => (MAX_BODY, Self::save),
             ("POST", "/api/providers") => (MAX_BODY, Self::save_provider),
             ("POST", "/api/providers/key") => (MAX_KEY_BODY, Self::save_provider_key),
@@ -1055,6 +1063,16 @@ impl Viewer {
             return Err(Response::text(413, "a save's body is over its cap"));
         }
         Ok(len)
+    }
+
+    fn doctor(&self, body: &[u8]) -> Response {
+        if !matches!(
+            serde_json::from_slice::<serde_json::Map<String, Value>>(body),
+            Ok(fields) if fields.is_empty()
+        ) {
+            return Response::text(400, "doctor takes an empty JSON object");
+        }
+        Response::json(&json!(crate::setup::doctor_report(&self.home)))
     }
 
     /// The settings as saved.
@@ -2193,6 +2211,336 @@ mod tests {
             other => other.unwrap(),
         };
         assert!(status.success(), "readonly registrations UI check failed");
+    }
+
+    #[test]
+    fn w6d_doctor_uses_the_exact_legacy_checkpoint_across_raw_devices() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = crate::raw::open(p).unwrap();
+        raw.append_ops(&[
+            (
+                crate::raw::OpKind::Migration,
+                json!({"key":"oboete-v1:private-v1","through":1}),
+            ),
+            (
+                crate::raw::OpKind::Migration,
+                json!({"key":"oboete-v1:private-v1","through":3}),
+            ),
+            (
+                crate::raw::OpKind::Migration,
+                json!({"key":"oboete-v1:private-v1:suffix","through":99}),
+            ),
+        ])
+        .unwrap();
+        let writer = rusqlite::Connection::open(p.join("raw.db")).unwrap();
+        writer
+            .execute(
+                "UPDATE ops SET device='private-remote-device' WHERE op_seq=2",
+                [],
+            )
+            .unwrap();
+        let v1 = rusqlite::Connection::open(p.join("oboete.db")).unwrap();
+        v1.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE meta(key TEXT,value TEXT);
+             INSERT INTO meta VALUES('device_id','private-v1');
+             CREATE TABLE sessions(id INTEGER);
+             CREATE TABLE events(id INTEGER);
+             INSERT INTO events VALUES(1),(3),(5),(9);
+             CREATE TABLE observations(id INTEGER);
+             CREATE TABLE summaries(id INTEGER);
+             CREATE TABLE provider_calls(id INTEGER PRIMARY KEY,provider TEXT,outcome TEXT,ms INTEGER,detail TEXT);"
+        ).unwrap();
+        let before = crate::backup::tests::w5b_files(p);
+        let v = Viewer::new(p, None, 4321, Token::Run("t0k".into()));
+        let headers = [
+            HOST,
+            TOKEN,
+            ("Origin", "http://127.0.0.1:4321"),
+            ("Content-Type", "application/json"),
+            ("Content-Length", "2"),
+        ];
+        let answer = request(&v, "POST", "/api/doctor", &headers, b"{}");
+        let report = json_of(&answer);
+        assert_eq!(
+            report["checks"]["legacy"]["remaining_events"]["value"], 2,
+            "Doctor did not use the native exact checkpoint on all Raw devices"
+        );
+        assert_eq!(
+            report["checks"]["legacy"]["remaining_events"]["state"],
+            "known"
+        );
+        assert_eq!(report["checks"]["legacy"]["events"]["value"], 4);
+        let text = String::from_utf8(answer.body).unwrap();
+        assert!(!text.contains("private-v1") && !text.contains("private-remote-device"));
+        assert_eq!(crate::backup::tests::w5b_files(p), before);
+    }
+
+    #[test]
+    fn w6d_doctor_reads_legacy_counts_and_keeps_call_details_private() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let v1 = rusqlite::Connection::open(p.join("oboete.db")).unwrap();
+        v1.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE sessions(id INTEGER);
+             CREATE TABLE events(id INTEGER);
+             CREATE TABLE observations(id INTEGER);
+             CREATE TABLE summaries(id INTEGER);
+             CREATE TABLE provider_calls(id INTEGER PRIMARY KEY,provider TEXT,outcome TEXT,ms INTEGER,detail TEXT);
+             INSERT INTO sessions VALUES(1);
+             INSERT INTO events VALUES(1),(3),(5);
+             INSERT INTO observations VALUES(1),(2);
+             INSERT INTO summaries VALUES(1);
+             INSERT INTO provider_calls VALUES(1,'private-v1-provider-canary','ok',25,'private-v1-detail-canary');"
+        ).unwrap();
+        let before = crate::backup::tests::w5b_files(p);
+        let v = Viewer::new(p, None, 4321, Token::Run("t0k".into()));
+        let headers = [
+            HOST,
+            TOKEN,
+            ("Origin", "http://127.0.0.1:4321"),
+            ("Content-Type", "application/json"),
+            ("Content-Length", "2"),
+        ];
+        let answer = request(&v, "POST", "/api/doctor", &headers, b"{}");
+        let report = json_of(&answer);
+        let legacy = &report["checks"]["legacy"];
+        assert_eq!(
+            legacy["events"]["value"], 3,
+            "readonly Doctor has no native legacy counts"
+        );
+        for (name, count) in [
+            ("sessions", 1),
+            ("events", 3),
+            ("observations", 2),
+            ("summaries", 1),
+        ] {
+            assert_eq!(legacy[name], json!({"state":"known","value":count}));
+        }
+        assert_eq!(legacy["recent"]["calls"], json!([{"outcome":"ok","ms":25}]));
+        let text = String::from_utf8(answer.body).unwrap();
+        assert!(
+            !text.contains("private-v1-provider-canary")
+                && !text.contains("private-v1-detail-canary")
+        );
+        assert_eq!(crate::backup::tests::w5b_files(p), before);
+    }
+
+    #[test]
+    fn w6d_doctor_keeps_knowledge_facts_when_raw_is_damaged_and_gaps_are_old() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(p.join("raw.db"), b"synthetic damaged raw store").unwrap();
+        let k = rusqlite::Connection::open(p.join("knowledge.db")).unwrap();
+        k.execute_batch("CREATE TABLE rewinds(ts INTEGER); INSERT INTO rewinds VALUES(2000);")
+            .unwrap();
+        let before = crate::backup::tests::w5b_files(p);
+        let v = Viewer::new(p, None, 4321, Token::Run("t0k".into()));
+        let headers = [
+            HOST,
+            TOKEN,
+            ("Origin", "http://127.0.0.1:4321"),
+            ("Content-Type", "application/json"),
+            ("Content-Length", "2"),
+        ];
+        let report = json_of(&request(&v, "POST", "/api/doctor", &headers, b"{}"));
+        assert_eq!(report["checks"]["raw"]["integrity"], "damaged");
+        assert_eq!(report["checks"]["raw"]["max_seq"]["value"], Value::Null);
+        assert_eq!(report["checks"]["knowledge"]["integrity"], "known");
+        assert_eq!(
+            report["checks"]["knowledge"]["rewinds"]["count"]["value"],
+            1
+        );
+        assert_eq!(
+            report["checks"]["knowledge"]["gaps"]["state"],
+            "schema_missing"
+        );
+        assert_eq!(report["checks"]["knowledge"]["gaps"]["rows"], Value::Null);
+        assert_eq!(crate::backup::tests::w5b_files(p), before);
+    }
+
+    #[test]
+    fn w6d_doctor_reads_knowledge_without_exposing_stored_agent_names() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let raw = crate::raw::open(p).unwrap();
+        let k = crate::knowledge::open(p).unwrap();
+        crate::worker::Consumer::step(
+            &mut crate::consumer::gaps::Gaps::new(p),
+            &raw,
+            &k,
+            raw.device(),
+            0,
+        )
+        .unwrap();
+        k.execute_batch(
+            "INSERT INTO rewinds VALUES(1000,'claims','owned-private-device',3,1);
+             INSERT INTO rewinds VALUES(2000,'turns','owned-private-device',4,2);
+             INSERT INTO gaps VALUES('owned-private-device','claude','one',1,5,3,100);
+             INSERT INTO gaps VALUES('owned-private-device','claude','two',2,NULL,1,100);
+             INSERT INTO gaps VALUES('owned-private-device','untrusted-agent-canary','three',3,4,1,100);"
+        ).unwrap();
+        assert!(p.join("knowledge.db-wal").is_file());
+        let before = crate::backup::tests::w5b_files(p);
+        let v = Viewer::new(p, None, 4321, Token::Run("t0k".into()));
+        let headers = [
+            HOST,
+            TOKEN,
+            ("Origin", "http://127.0.0.1:4321"),
+            ("Content-Type", "application/json"),
+            ("Content-Length", "2"),
+        ];
+        let answer = request(&v, "POST", "/api/doctor", &headers, b"{}");
+        let report = json_of(&answer);
+        let knowledge = &report["checks"]["knowledge"];
+        assert_eq!(
+            knowledge["rewinds"]["count"]["value"], 2,
+            "readonly Doctor has no native Knowledge findings"
+        );
+        assert_eq!(knowledge["integrity"], "known");
+        assert_eq!(knowledge["rewinds"]["last_at_ms"], 2000);
+        let rows = knowledge["gaps"]["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 8);
+        assert_eq!(
+            rows[0],
+            json!({"agent":"claude","ended":2,"checked":1,"short":1,"missing":2})
+        );
+        assert_eq!(
+            rows[7],
+            json!({"agent":"other","ended":1,"checked":1,"short":1,"missing":3})
+        );
+        let text = String::from_utf8(answer.body).unwrap();
+        assert!(!text.contains("untrusted-agent-canary") && !text.contains("owned-private-device"));
+        assert_eq!(crate::backup::tests::w5b_files(p), before);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn w6d_doctor_refuses_a_known_fifo_without_opening_it() {
+        use std::os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::ffi::OsStrExt,
+        };
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("raw.db");
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: only an owned, NUL-terminated synthetic path is created.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        // SAFETY: flags are the supported nonblocking/close-on-exec inotify flags.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(fd >= 0);
+        // SAFETY: the successful init returned this newly owned descriptor exactly once.
+        let mut watcher = unsafe { std::fs::File::from_raw_fd(fd) };
+        // SAFETY: the live descriptor and owned path outlive this watch registration.
+        assert!(
+            unsafe { libc::inotify_add_watch(watcher.as_raw_fd(), name.as_ptr(), libc::IN_OPEN) }
+                >= 0
+        );
+        let v = Viewer::new(home.path(), None, 4321, Token::Run("t0k".into()));
+        let headers = [
+            HOST,
+            TOKEN,
+            ("Origin", "http://127.0.0.1:4321"),
+            ("Content-Type", "application/json"),
+            ("Content-Length", "2"),
+        ];
+        let report = json_of(&request(&v, "POST", "/api/doctor", &headers, b"{}"));
+        assert_eq!(report["checks"]["raw"]["integrity"], "unavailable");
+        let mut events = [0u8; 64];
+        let bytes = match watcher.read(&mut events) {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => 0,
+            other => other.unwrap(),
+        };
+        assert_eq!(bytes, 0, "Doctor opened the known FIFO before refusing it");
+    }
+
+    #[test]
+    fn w6d_doctor_reads_live_raw_wal_without_rebinding_its_device() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = crate::raw::open(p).unwrap();
+        let seq = raw
+            .append(&crate::raw::test_event("private Doctor WAL fixture"))
+            .unwrap();
+        let device = raw.device().to_owned();
+        let op_seq = raw.max_op_seq_of(&device).unwrap();
+        assert!(p.join("raw.db-wal").is_file());
+        let before = crate::backup::tests::w5b_files(p);
+        let v = Viewer::new(p, None, 4321, Token::Run("t0k".into()));
+        let headers = [
+            HOST,
+            TOKEN,
+            ("Origin", "http://127.0.0.1:4321"),
+            ("Content-Type", "application/json"),
+            ("Content-Length", "2"),
+        ];
+        let answer = request(&v, "POST", "/api/doctor", &headers, b"{}");
+        let report = json_of(&answer);
+        assert_eq!(
+            report["checks"]["raw"]["max_seq"]["value"], seq,
+            "readonly Doctor did not read the original stored device"
+        );
+        assert_eq!(report["checks"]["raw"]["max_seq"]["state"], "known");
+        assert_eq!(report["checks"]["raw"]["max_op_seq"]["value"], op_seq);
+        assert_eq!(report["checks"]["raw"]["integrity"], "known");
+        assert!(!String::from_utf8(answer.body).unwrap().contains(&device));
+        assert_eq!(crate::backup::tests::w5b_files(p), before);
+        assert_eq!(raw.device(), device);
+    }
+
+    #[test]
+    fn w6d_doctor_requires_an_explicit_empty_object_and_keeps_absence() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("absent");
+        let v = Viewer::new(&home, None, 4321, Token::Run("t0k".into()));
+        let path = "/api/doctor";
+        let headers = [
+            HOST,
+            TOKEN,
+            ("Origin", "http://127.0.0.1:4321"),
+            ("Content-Type", "application/json"),
+            ("Content-Length", "2"),
+        ];
+        let answer = request(&v, "POST", path, &headers, b"{}");
+        assert_eq!(
+            answer.status, 200,
+            "explicit readonly Doctor is unavailable"
+        );
+        let report = json_of(&answer);
+        assert_eq!(report["complete"], true);
+        assert_eq!(report["checks"]["remaining"], "none");
+        assert_eq!(report["unhealthy"], json!([]));
+        assert_eq!(report["checks"]["raw"]["integrity"], "absent");
+        assert_eq!(report["checks"]["raw"]["max_seq"]["value"], Value::Null);
+        assert_eq!(report["inventory"]["home"], "missing");
+        assert_eq!(report["inventory"]["config"], "missing");
+        assert_eq!(report["inventory"]["agents"].as_array().unwrap().len(), 7);
+        for name in ["raw", "raw_restored", "knowledge", "legacy", "providers"] {
+            assert_eq!(
+                report["stores"][name],
+                json!({"file":"absent","wal":"absent"})
+            );
+        }
+        for body in [
+            b"[]".as_slice(),
+            b"null",
+            b"0",
+            br#""{}""#,
+            br#"{"repair":true}"#,
+            b"",
+        ] {
+            let length = body.len().to_string();
+            let mut headers = headers;
+            headers[4] = ("Content-Length", length.as_str());
+            assert_eq!(request(&v, "POST", path, &headers, body).status, 400);
+        }
+        save_guards(&v, path, MAX_BODY, b"{}");
+        assert_ne!(v.route("GET", path, &[HOST, TOKEN]).status, 200);
+        assert_eq!(v.route("POST", "/api/doctor?repair", &headers).status, 405);
+        assert!(!home.exists(), "readonly Doctor created the absent home");
+        assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
     }
 
     #[test]

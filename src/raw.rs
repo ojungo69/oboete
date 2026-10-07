@@ -625,6 +625,150 @@ pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
     Ok(Some(read))
 }
 
+pub(crate) fn imported_counts_in(
+    conn: &Connection,
+    device: &str,
+    ranges: &[(i64, i64)],
+) -> Result<std::collections::BTreeMap<String, i64>> {
+    let mut st = conn.prepare(
+        "SELECT source, count(*) FROM records
+             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event' AND kind != 'touch'
+             GROUP BY source",
+    )?;
+    let mut out = std::collections::BTreeMap::<String, i64>::new();
+    for &(from, to) in ranges {
+        for row in st.query_map(params![device, from, to], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })? {
+            let (source, n) = row?;
+            if !is_live(&source) {
+                let count = out.entry(source).or_default();
+                *count = count.checked_add(n).context("imported count overflow")?;
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn ops_after_in(
+    conn: &Connection,
+    device: &str,
+    op_seq: i64,
+    limit: usize,
+) -> Result<Vec<Op>> {
+    op_rows_in(conn, device, op_seq, limit)?
+        .into_iter()
+        .map(|r| {
+            Ok(Op {
+                device: device.to_owned(),
+                op_seq: r.op_seq,
+                kind: OpKind::from_name(&r.kind)
+                    .with_context(|| format!("op {}: unknown type {:?}", r.op_seq, r.kind))?,
+                ts: r.ts,
+                body: serde_json::from_str(&r.body)
+                    .with_context(|| format!("op {}: body", r.op_seq))?,
+                batch: r.batch,
+            })
+        })
+        .collect()
+}
+
+fn op_rows_in(conn: &Connection, device: &str, op_seq: i64, limit: usize) -> Result<Vec<OpRow>> {
+    let mut st = conn.prepare(
+        "SELECT op_seq, type, ts, body, batch FROM ops WHERE device = ?1 AND op_seq > ?2
+             ORDER BY op_seq LIMIT ?3",
+    )?;
+    let rows = st.query_map(
+        params![device, op_seq, i64::try_from(limit).unwrap_or(i64::MAX)],
+        |r| {
+            Ok(OpRow {
+                op_seq: r.get(0)?,
+                kind: r.get(1)?,
+                ts: r.get(2)?,
+                body: r.get(3)?,
+                batch: r.get(4)?,
+            })
+        },
+    )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub(crate) fn curation_checkpoint_in(
+    conn: &Connection,
+    device: &str,
+) -> Result<(i64, Option<i64>)> {
+    use rusqlite::OptionalExtension;
+    let last = conn
+        .query_row(
+            "SELECT op_seq, json_extract(body, '$.to_seq'), json_extract(body, '$.to_offset')
+                 FROM ops WHERE device = ?1 AND type = 'window'
+                   AND COALESCE(json_extract(body, '$.recurate'), 0) = 0
+                 ORDER BY op_seq DESC LIMIT 1",
+            [device],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    match last {
+        None => Ok((0, None)),
+        Some((_, Some(seq), offset)) => Ok((seq, offset)),
+        Some((op_seq, None, _)) => anyhow::bail!("window op {op_seq} has no to_seq"),
+    }
+}
+
+pub(crate) fn max_seq_in(conn: &Connection, device: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(seq), 0) FROM records WHERE device = ?1",
+        [device],
+        |r| r.get(0),
+    )?)
+}
+
+pub(crate) fn max_op_seq_in(conn: &Connection, device: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
+        [device],
+        |r| r.get(0),
+    )?)
+}
+
+pub(crate) fn integrity_check_in(conn: &Connection) -> Result<()> {
+    let first: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    anyhow::ensure!(first == "ok", "raw.db integrity_check: {first}");
+    Ok(())
+}
+
+pub(crate) fn migration_checkpoints_in(
+    conn: &Connection,
+    prefix: &str,
+) -> Result<std::collections::HashMap<String, Checkpoint>> {
+    let mut statement = conn.prepare(
+        "SELECT op_seq, body FROM ops WHERE type = 'migration'
+         AND substr(json_extract(body, '$.key'), 1, length(?1)) = ?1",
+    )?;
+    let rows = statement.query_map([prefix], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut out = std::collections::HashMap::<String, Checkpoint>::new();
+    for row in rows {
+        let (op_seq, body) = row?;
+        let checkpoint: Checkpoint = serde_json::from_str(&body)
+            .with_context(|| format!("op {op_seq}: a migration body"))?;
+        if out
+            .get(&checkpoint.key)
+            .is_none_or(|kept| kept.through < checkpoint.through)
+        {
+            out.insert(checkpoint.key.clone(), checkpoint);
+        }
+    }
+    Ok(out)
+}
+
 /// The same current list for an existing read-only connection: no indexes or schema writes.
 pub(crate) fn exclusions_in(conn: &Connection) -> Result<Vec<String>> {
     // A device's ops in its own order (op_seq), its clock never going back in it, then every
@@ -1149,11 +1293,7 @@ impl Raw {
 
     /// SQLite's full `integrity_check` (every page): doctor only.
     pub fn integrity_check(&self) -> Result<()> {
-        let first: String = self
-            .conn
-            .query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
-        anyhow::ensure!(first == "ok", "raw.db integrity_check: {first}");
-        Ok(())
+        integrity_check_in(&self.conn)
     }
 
     /// Append one event as this device's next seq. The write lock taken by `BEGIN IMMEDIATE`
@@ -1430,11 +1570,7 @@ impl Raw {
 
     /// `device`'s highest seq, 0 before its first record.
     pub fn max_seq_of(&self, device: &str) -> Result<i64> {
-        Ok(self.conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) FROM records WHERE device = ?1",
-            [device],
-            |r| r.get(0),
-        )?)
+        max_seq_in(&self.conn, device)
     }
 
     /// The first prompt this device recorded in one agent's session from a source `read` takes,
@@ -2054,41 +2190,11 @@ impl Raw {
 
     /// Up to `limit` ops of `device` after `op_seq`, in op_seq order.
     pub fn ops_after(&self, device: &str, op_seq: i64, limit: usize) -> Result<Vec<Op>> {
-        self.op_rows(device, op_seq, limit)?
-            .into_iter()
-            .map(|r| {
-                Ok(Op {
-                    device: device.to_owned(),
-                    op_seq: r.op_seq,
-                    kind: OpKind::from_name(&r.kind)
-                        .with_context(|| format!("op {}: unknown type {:?}", r.op_seq, r.kind))?,
-                    ts: r.ts,
-                    body: serde_json::from_str(&r.body)
-                        .with_context(|| format!("op {}: body", r.op_seq))?,
-                    batch: r.batch,
-                })
-            })
-            .collect()
+        ops_after_in(&self.conn, device, op_seq, limit)
     }
 
     fn op_rows(&self, device: &str, op_seq: i64, limit: usize) -> Result<Vec<OpRow>> {
-        let mut st = self.conn.prepare(
-            "SELECT op_seq, type, ts, body, batch FROM ops WHERE device = ?1 AND op_seq > ?2
-             ORDER BY op_seq LIMIT ?3",
-        )?;
-        let rows = st.query_map(
-            params![device, op_seq, i64::try_from(limit).unwrap_or(i64::MAX)],
-            |r| {
-                Ok(OpRow {
-                    op_seq: r.get(0)?,
-                    kind: r.get(1)?,
-                    ts: r.get(2)?,
-                    body: r.get(3)?,
-                    batch: r.get(4)?,
-                })
-            },
-        )?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        op_rows_in(&self.conn, device, op_seq, limit)
     }
 
     /// The repositories excluded now (spec 5.5, milestone 4 D13): every device's exclusion ops in
@@ -2142,23 +2248,7 @@ impl Raw {
         device: &str,
         ranges: &[(i64, i64)],
     ) -> Result<std::collections::BTreeMap<String, i64>> {
-        let mut st = self.conn.prepare(
-            "SELECT source, count(*) FROM records
-             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event' AND kind != 'touch'
-             GROUP BY source",
-        )?;
-        let mut out = std::collections::BTreeMap::new();
-        for &(from, to) in ranges {
-            for row in st.query_map(params![device, from, to], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })? {
-                let (source, n) = row?;
-                if !is_live(&source) {
-                    *out.entry(source).or_default() += n;
-                }
-            }
-        }
-        Ok(out)
+        imported_counts_in(&self.conn, device, ranges)
     }
 
     /// The bodies of `device`'s ops of `kind` after `op_seq`, in op_seq order: what a reader checks
@@ -2190,11 +2280,7 @@ impl Raw {
 
     /// `device`'s highest op seq, 0 before its first op.
     pub fn max_op_seq_of(&self, device: &str) -> Result<i64> {
-        Ok(self.conn.query_row(
-            "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
-            [device],
-            |r| r.get(0),
-        )?)
+        max_op_seq_in(&self.conn, device)
     }
 
     /// The `source_id`s of `source`'s documents imported so far, on any device: what an import
@@ -2216,23 +2302,7 @@ impl Raw {
         &self,
         prefix: &str,
     ) -> Result<std::collections::HashMap<String, Checkpoint>> {
-        let mut st = self.conn.prepare(
-            "SELECT op_seq, body FROM ops WHERE type = 'migration'
-               AND substr(json_extract(body, '$.key'), 1, length(?1)) = ?1",
-        )?;
-        let rows = st.query_map([prefix], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })?;
-        let mut out = std::collections::HashMap::<String, Checkpoint>::new();
-        for row in rows {
-            let (op_seq, body) = row?;
-            let c: Checkpoint = serde_json::from_str(&body)
-                .with_context(|| format!("op {op_seq}: a migration body"))?;
-            if out.get(&c.key).is_none_or(|kept| kept.through < c.through) {
-                out.insert(c.key.clone(), c);
-            }
-        }
-        Ok(out)
+        migration_checkpoints_in(&self.conn, prefix)
     }
 
     /// The sessions of `source`'s records, its `touch` records left out (D6: the sessions a v1
@@ -2365,29 +2435,7 @@ impl Raw {
     /// op that is not a recuration. An offset is where the next window starts inside an event a
     /// window split; none means after the whole event. (0, None) before the first window.
     pub fn curation_checkpoint(&self, device: &str) -> Result<(i64, Option<i64>)> {
-        use rusqlite::OptionalExtension;
-        let last = self
-            .conn
-            .query_row(
-                "SELECT op_seq, json_extract(body, '$.to_seq'), json_extract(body, '$.to_offset')
-                 FROM ops WHERE device = ?1 AND type = 'window'
-                   AND COALESCE(json_extract(body, '$.recurate'), 0) = 0
-                 ORDER BY op_seq DESC LIMIT 1",
-                [device],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, Option<i64>>(1)?,
-                        r.get::<_, Option<i64>>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        match last {
-            None => Ok((0, None)),
-            Some((_, Some(seq), offset)) => Ok((seq, offset)),
-            Some((op_seq, None, _)) => anyhow::bail!("window op {op_seq} has no to_seq"),
-        }
+        curation_checkpoint_in(&self.conn, device)
     }
 
     /// The (from_seq, to_seq) of the window op appended together with `device`'s op `op_seq`:

@@ -681,6 +681,28 @@ fn name(device: &str, first: i64, last: i64, kind: Kind) -> String {
     format!("{device}-{first:012}-{last:012}{}", kind.suffix())
 }
 
+/// Native segment-name grammar, without directory or file I/O. The bool identifies ops.
+pub(crate) fn segment_name(name: &std::ffi::OsStr) -> Option<(bool, String, i64, i64)> {
+    let name = name.to_str()?;
+    for (ops, suffix) in [(false, Kind::Records.suffix()), (true, Kind::Ops.suffix())] {
+        let Some(stem) = name.strip_suffix(suffix) else {
+            continue;
+        };
+        let mut parts = stem.rsplitn(3, '-');
+        let (Some(last), Some(first), Some(device)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        return Some((
+            ops,
+            device.to_owned(),
+            first.parse().ok()?,
+            last.parse().ok()?,
+        ));
+    }
+    None
+}
+
 /// The segments of `kind` in `dir`, in (device, first seq) order; files of other names are not
 /// ours.
 fn segments(dir: &Path, kind: Kind) -> Result<Vec<Segment>> {
@@ -692,21 +714,11 @@ fn segments(dir: &Path, kind: Kind) -> Result<Vec<Segment>> {
     };
     for entry in entries {
         let path = entry?.path();
-        let Some(stem) = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_suffix(kind.suffix()))
-        else {
-            continue;
-        };
-        let mut parts = stem.rsplitn(3, '-');
-        let (Some(last), Some(first), Some(device)) = (parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        if let (Ok(first), Ok(last)) = (first.parse(), last.parse()) {
+        if let Some((ops, device, first, last)) = path.file_name().and_then(segment_name)
+            && ops == (kind == Kind::Ops)
+        {
             out.push(Segment {
-                device: device.to_owned(),
+                device,
                 first,
                 last,
                 path,
@@ -930,8 +942,11 @@ fn damage(seg: &Path) -> Option<String> {
     let Ok(data) = std::fs::read(seg) else {
         return Some("unreadable".into());
     };
-    (sum.split_whitespace().next() != Some(hex(&Sha256::digest(&data)).as_str()))
-        .then(|| "checksum mismatch".into())
+    (!checksum_matches(&sum, &hex(&Sha256::digest(&data)))).then(|| "checksum mismatch".into())
+}
+
+pub(crate) fn checksum_matches(text: &str, sha256: &str) -> bool {
+    text.split_whitespace().next() == Some(sha256)
 }
 
 /// `<name>` (and its -wal and -shm, which SQLite binds to the name) moved aside as

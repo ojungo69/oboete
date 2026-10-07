@@ -109,6 +109,30 @@ pub(crate) struct Readiness {
     pub(crate) agents: Vec<AgentReadiness>,
 }
 
+impl Readiness {
+    pub(super) fn complete(&self) -> bool {
+        let component = |component: &Component| match component.state {
+            State::Missing | State::NotApplicable | State::Partial => true,
+            State::Registered | State::Stale | State::Disabled => {
+                component.matches_current.is_some()
+            }
+            State::Invalid | State::Unreadable | State::Unavailable => false,
+        };
+        !matches!(self.home, HomeState::Unreadable)
+            && matches!(self.config, ConfigState::Missing | ConfigState::Valid)
+            && self.agents.iter().all(|agent| {
+                agent.launch_file_found.is_some()
+                    && agent.directory_found.is_some()
+                    && component(&agent.capture.component)
+                    && component(&agent.mcp)
+                    && !matches!(
+                        agent.trust,
+                        Trust::Invalid | Trust::Unreadable | Trust::Unavailable
+                    )
+            })
+    }
+}
+
 type Observed<T> = std::result::Result<Option<T>, State>;
 
 fn found(path: &Path, directory: bool) -> Option<bool> {
@@ -141,7 +165,7 @@ pub(crate) fn launch_found(bins: &[&str]) -> Option<bool> {
 }
 
 // Inventory is diagnostic: oversized files remain unavailable, never parsed as a prefix.
-const TEXT_LIMIT: u64 = 1024 * 1024;
+pub(super) const TEXT_LIMIT: u64 = 1024 * 1024;
 
 fn bounded_text(reader: impl Read) -> std::result::Result<String, State> {
     let mut bytes = Vec::new();
@@ -156,7 +180,7 @@ fn bounded_text(reader: impl Read) -> std::result::Result<String, State> {
 }
 
 /// Missing and unreadable stay distinct. Read only regular files, including dotfile symlinks.
-fn text(file: &Path) -> Observed<String> {
+pub(super) fn text(file: &Path) -> Observed<String> {
     match diagnostic_metadata(file) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
@@ -167,19 +191,7 @@ fn text(file: &Path) -> Observed<String> {
         Ok(metadata) if metadata.len() > TEXT_LIMIT => return Err(State::Unavailable),
         Ok(_) => {}
     }
-    #[cfg(not(windows))]
-    let mut options = std::fs::OpenOptions::new();
-    #[cfg(not(windows))]
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK);
-    }
-    #[cfg(not(windows))]
-    let opened = options.open(file).map_err(|_| State::Unreadable)?;
-    #[cfg(windows)]
-    let opened = super::diagnostic_file(file, true).map_err(|error| {
+    let opened = super::diagnostic_read_file(file).map_err(|error| {
         if error.kind() == std::io::ErrorKind::Unsupported {
             State::Unavailable
         } else {
@@ -679,15 +691,28 @@ fn current_command(
 }
 
 pub(crate) fn readiness(home: &Path) -> Readiness {
+    let config = text(&home.join("config.toml"));
+    readiness_from_text(
+        home,
+        config
+            .as_ref()
+            .map(|text| text.as_deref())
+            .map_err(|state| *state),
+    )
+}
+
+/// Doctor supplies the same admitted bytes used by its other configuration checks.
+/// The cheap inventory GET retains its independent file read above.
+pub(super) fn readiness_from_text(home: &Path, config: Observed<&str>) -> Readiness {
     let home_state = match diagnostic_metadata(home) {
         Ok(metadata) if metadata.is_dir() => HomeState::Present,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => HomeState::Missing,
         _ => HomeState::Unreadable,
     };
     let path = home.join("config.toml");
-    let config = match text(&path) {
+    let config = match config {
         Ok(None) => ConfigState::Missing,
-        Ok(Some(text)) if crate::settings::parsed(&path, &text).is_some() => ConfigState::Valid,
+        Ok(Some(text)) if crate::settings::parsed(&path, text).is_some() => ConfigState::Valid,
         Ok(Some(_)) | Err(State::Invalid) => ConfigState::Invalid,
         Err(_) => ConfigState::Unreadable,
     };

@@ -71,7 +71,7 @@ for(const fragment of ['Claude Code','Codex','Grok','Antigravity','OpenCode','Pi
   'not applicable','current-installation comparison unavailable','Live use: not checked',
   'Memory folder: missing','Saved configuration: invalid file',
   'Launch file: found; login and live use untested','Settings folder: found',
-  'Full doctor checks and connecting agents are not available']){
+  'Use Run diagnostics below for the current read-only checks']){
   assert(shown.includes(fragment),`fixed state visible: ${fragment}`);
 }
 assert(!shown.includes('healthy')&&!shown.includes('ready'),'file inventory does not claim live readiness');
@@ -121,4 +121,66 @@ assert.equal(text(vm.runInContext('keyState({key:"unknown"})[0]',ctx)),
 ctx.ui.setLang('ja');
 assert.equal(text(vm.runInContext('keyState({key:"unknown"})[0]',ctx)),
   'インストール状況は確認できません','unknown CLI status has a Japanese label');
-console.log('PASS: seven fixed agent rows, JA/EN, latest GET and unchanged draft');
+vm.runInContext('globalThis.doctorUi={runDoctor,redraw:renderDoctor};',ctx);
+ctx.ui.setLang('en');ctx.ui.setForm(null);ctx.ui.drawSettings();
+let diagnostics=panel.querySelector('.doctor-diagnostics');
+assert(diagnostics,'invalid configuration still offers explicit diagnostics');
+const diagnosticDraft=new Node('input');diagnosticDraft.value='keep this unsaved value';
+panel.querySelector('.settings').append(diagnosticDraft);
+const diagnosticRequests=[];
+ctx.fetch=(url,options)=>{
+  assert.equal(url,'/api/doctor');assert.equal(options.method,'POST');assert.equal(options.body,'{}');
+  return new Promise((resolve,reject)=>diagnosticRequests.push({resolve,reject}));
+};
+const count=value=>({state:'known',value});
+const absent={state:'absent',value:null};
+const diagnosticReport={complete:false,unhealthy:['raw_damaged'],inventory:report('stale'),stores:{},checks:{
+  source_stability:'known',remaining:'none',
+  raw:{integrity:'damaged',max_seq:absent,max_op_seq:absent,curated_through:absent,parking:{state:'absent'}},
+  knowledge:{integrity:'known',rewinds:{count:count(0),last_at_ms:null},gaps:{state:'known',rows:[]}},
+  legacy:{integrity:'absent'},embeddings:{state:'off'},
+  providers:{integrity:'absent'},
+  disk:{state:'known',free_bytes:0,low_space:true},
+  retained:{state:'known',categories:[{category:'memory_database',present:{state:'known',value:true},targets:count(1),bytes:count(0)}],
+    evaluation_copies:{present:{state:'known',value:false},bytes:count(0)}}
+}};
+const diagnosticResponse=(value,status=200)=>({ok:status===200,status,headers:{get:()=> 'application/json'},json:async()=>value});
+const firstDiagnostic=ctx.doctorUi.runDoctor();
+await ctx.doctorUi.runDoctor();
+assert.equal(diagnosticRequests.length,1,'a second click while running sends no second POST');
+assert(diagnostics.querySelector('button').disabled,'diagnostic button disables while pending');
+diagnosticRequests.shift().resolve(diagnosticResponse(diagnosticReport));
+await firstDiagnostic;
+shown=text(diagnostics);
+assert(shown.includes('Saved records are damaged')&&shown.includes('Available bytes 0'),
+  'known problems and an established zero remain visible');
+assert(shown.includes('logical bytes 0')&&shown.includes('present yes'),
+  'retained empty files are distinct from missing and unknown');
+assert(!shown.includes('does not implement every diagnostic'),'remaining none hides the obsolete unimplemented notice');
+assert.equal(diagnosticDraft.value,'keep this unsaved value');
+assert(panel.contains(diagnosticDraft),'diagnostics replaces only its section');
+ctx.ui.setLang('ja');ctx.doctorUi.redraw();shown=text(diagnostics);
+assert(shown.includes('保存された記録が破損')&&shown.includes('利用可能な容量0'),
+  'Japanese diagnostics displays fixed labels and known zero');
+ctx.ui.setLang('en');
+const busy=ctx.doctorUi.runDoctor();diagnosticRequests.shift().resolve(diagnosticResponse({},503));await busy;
+assert(text(diagnostics).includes('viewer is busy'),'busy response is explained');
+await new Promise(resolve=>setImmediate(resolve));
+assert.equal(diagnosticRequests.length,0,'busy response is not automatically retried');
+const lost=ctx.doctorUi.runDoctor();diagnosticRequests.shift().reject(new Error('invented transport failure'));await lost;
+assert(text(diagnostics).includes('response was lost'),'lost response is unknown');
+await new Promise(resolve=>setImmediate(resolve));
+assert.equal(diagnosticRequests.length,0,'lost response is not automatically retried');
+assert(panel.contains(diagnosticDraft),'failure paths preserve the draft node');
+const late=ctx.doctorUi.runDoctor();const beforeDoctorLeaving=text(diagnostics);
+ctx.ui.setView('records');diagnosticRequests.shift().resolve(diagnosticResponse(diagnosticReport));await late;
+assert.equal(text(diagnostics),beforeDoctorLeaving,'result after leaving Settings does not redraw');
+ctx.ui.setView('settings');
+diagnosticReport.inventory=report('matching');
+const freshInventory=ctx.doctorUi.runDoctor();
+diagnosticRequests.shift().resolve(diagnosticResponse(diagnosticReport));await freshInventory;
+assert(text(diagnostics).includes('Agent files in this diagnostic check'),
+  'the result renders its own captured agent inventory');
+assert(text(diagnostics).includes('Hook trust: matching'),
+  'the result uses the captured inventory rather than an older independent GET');
+console.log('PASS: seven fixed agent rows, JA/EN, latest GET, explicit Doctor POST, failure handling and unchanged draft');

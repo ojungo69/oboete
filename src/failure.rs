@@ -162,10 +162,15 @@ pub fn mark(home: &Path, class: Class, at: i64) {
 }
 
 pub fn since(home: &Path) -> Option<(Class, i64)> {
-    match State::parse(&std::fs::read_to_string(marker(home)).ok()?)? {
+    parse_since(&std::fs::read_to_string(marker(home)).ok()?)?
+}
+
+/// The native marker parser, retaining invalid input separately from a successful clear.
+pub(crate) fn parse_since(text: &str) -> Option<Option<(Class, i64)>> {
+    Some(match State::parse(text)? {
         State::Failed { class, first, .. } => Some((class, first)),
         State::Ok(_) => None,
-    }
+    })
 }
 
 /// After a write that succeeded when it ended at `at`, in place. Nothing when a write that ended
@@ -268,51 +273,293 @@ fn padded(text: &str) -> String {
     format!("{text:<width$}\n", width = SIZE - 1)
 }
 
-/// Free bytes where `home` lives, from `df -Pk` (Linux, macOS); `None` where that is unavailable.
-/// ponytail: `df` instead of statvfs (no unsafe, no new dependency); Windows gets none, add
-/// GetDiskFreeSpaceExW when doctor runs there.
+/// Free bytes where `home` lives, from successful `df -Pk`; unavailable data stays None.
+/// ponytail: fixed OS utility; use native filesystem queries if df availability becomes a limit.
 pub fn free_bytes(home: &Path) -> Option<u64> {
     df("df".as_ref(), home)
 }
 
 /// How long `df` gets. On a stalled network or FUSE mount it can hang, and a hook calls it after
 /// a failed write: it must never block the agent (MUST-M16).
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 const DF_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn df(program: &std::ffi::OsStr, home: &Path) -> Option<u64> {
+    use std::io::Read;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
     use std::process::{Command, Stdio};
-    let mut child = Command::new(program)
+
+    let (mut stdout, writer) = UnixStream::pair().ok()?;
+    stdout.set_nonblocking(true).ok()?;
+    let mut command = Command::new(program);
+    command
         .arg("-Pk")
         .arg(home)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = std::time::Instant::now() + DF_TIMEOUT;
-    while child.try_wait().ok()?.is_none() {
-        if std::time::Instant::now() >= deadline {
-            // Not waited for: a `df` stuck in the kernel may not die at once.
-            let _ = child.kill();
-            return None;
+        .stdout(Stdio::from(OwnedFd::from(writer)))
+        .stderr(Stdio::null());
+    let child = crate::provider::own_group(&mut command).spawn().ok()?;
+    drop(command); // Release the parent's configured stdout writer so EOF is observable.
+    df_bounded_child(child, |chunk| stdout.read(chunk))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn df_bounded_child(
+    mut child: std::process::Child,
+    mut read: impl FnMut(&mut [u8]) -> std::io::Result<usize>,
+) -> Option<u64> {
+    use std::io::ErrorKind;
+    use std::time::{Duration, Instant};
+    const OUTPUT_LIMIT: usize = 8 * 1024;
+    const CLEANUP_RESERVE: Duration = Duration::from_millis(50);
+    const POLL: Duration = Duration::from_millis(5);
+    let deadline = Instant::now() + DF_TIMEOUT;
+    let work_deadline = deadline - CLEANUP_RESERVE;
+    let mut bytes = Vec::new();
+    let mut eof = false;
+
+    'poll: loop {
+        let mut chunk = [0u8; 1024];
+        loop {
+            match read(&mut chunk) {
+                Ok(0) => {
+                    eof = true;
+                    break;
+                }
+                Ok(n)
+                    if bytes
+                        .len()
+                        .checked_add(n)
+                        .is_some_and(|len| len <= OUTPUT_LIMIT) =>
+                {
+                    bytes.extend_from_slice(&chunk[..n]);
+                }
+                Ok(_) => break 'poll, // cap exceeded: terminate owned child/group
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(_) => break 'poll,
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        if eof {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return if status.success() {
+                        parse_df_output(&bytes)
+                    } else {
+                        None
+                    };
+                }
+                Ok(None) => {}
+                Err(_) => break,
+            }
+        }
+        let now = Instant::now();
+        if now >= work_deadline {
+            break;
+        }
+        std::thread::sleep(POLL.min(work_deadline.saturating_duration_since(now)));
     }
-    let out = child.wait_with_output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let kb: u64 = text
+
+    // The child has not been reaped, so its process-group ID cannot be reused yet.
+    crate::provider::kill_tree(&mut child);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) => {
+                std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())))
+            }
+        }
+    }
+    None
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn parse_df_output(output: &[u8]) -> Option<u64> {
+    let text = String::from_utf8_lossy(output); // preserve the existing numeric-field behavior
+    let kb = text
         .lines()
         .nth(1)?
         .split_whitespace()
         .nth(3)?
-        .parse()
+        .parse::<u64>()
         .ok()?;
-    Some(kb * 1024)
+    kb.checked_mul(1024)
+}
+
+#[cfg(windows)]
+fn df_read_available(
+    stdout: &mut std::process::ChildStdout,
+    chunk: &mut [u8],
+) -> std::io::Result<usize> {
+    use std::io::{ErrorKind, Read};
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{Foundation::ERROR_BROKEN_PIPE, System::Pipes::PeekNamedPipe};
+
+    let mut available = 0u32;
+    // SAFETY: stdout owns this live read handle for the whole call. This zero-buffer
+    // peek writes only the available-byte count; no other reader consumes the pipe.
+    let ok = unsafe {
+        PeekNamedPipe(
+            stdout.as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            &mut available,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let error = std::io::Error::last_os_error();
+        return if error.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
+            Ok(0) // all writers closed: EOF
+        } else {
+            Err(error)
+        };
+    }
+    if available == 0 {
+        return Err(ErrorKind::WouldBlock.into());
+    }
+    // Peek did not consume bytes; this is the sole reader, and a request no larger
+    // than the reported queue is not waiting for future child output.
+    let count = chunk.len().min(available as usize);
+    match stdout.read(&mut chunk[..count]) {
+        Err(error) if error.kind() == ErrorKind::BrokenPipe => Ok(0),
+        result => result,
+    }
+}
+
+#[cfg(windows)]
+fn df(program: &std::ffi::OsStr, home: &Path) -> Option<u64> {
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(program);
+    command
+        .arg("-Pk")
+        .arg(home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().ok()?;
+    drop(command);
+    let Some(mut stdout) = child.stdout.take() else {
+        return df_bounded_child(child, |_| Err(std::io::ErrorKind::Other.into()));
+    };
+    df_bounded_child(child, |chunk| df_read_available(&mut stdout, chunk))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn df(_program: &std::ffi::OsStr, _home: &Path) -> Option<u64> {
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn w6d_df_windows_pipe_retains_success_and_failure_results() {
+        use std::process::{Command, Stdio};
+        let root = tempfile::tempdir().unwrap();
+        let system = std::env::var_os("SystemRoot").unwrap();
+        let exe = PathBuf::from(&system).join("System32").join("cmd.exe");
+        for (body, expected) in [
+            (
+                "echo Filesystem 1024-blocks Used Available Capacity Mounted & echo fake 100 10 4 capacity /",
+                Some(4096),
+            ),
+            (
+                "echo Filesystem 1024-blocks Used Available Capacity Mounted & echo fake 100 10 4 capacity / & exit /b 7",
+                None,
+            ),
+            ("for /L %i in (1,1,2147483647) do @rem", None),
+        ] {
+            let mut child = Command::new(&exe)
+                .env_clear()
+                .env("SystemRoot", &system)
+                .env("TEMP", root.path())
+                .env("TMP", root.path())
+                .current_dir(root.path())
+                .args(["/d", "/c", body])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut stdout = child.stdout.take().unwrap();
+            assert_eq!(
+                df_bounded_child(child, |chunk| df_read_available(&mut stdout, chunk)),
+                expected
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn w6d_df_requires_successful_output_and_a_representable_size() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("df");
+        for (status, available, expected) in [
+            (0, "4", Some(4096)),
+            (7, "4", None),
+            (0, "18446744073709551615", None),
+        ] {
+            std::fs::write(&program,format!("#!/bin/sh\nprintf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted' 'fake 100 10 {available} 1% /'\nexit {status}\n")).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(df(program.as_os_str(), dir.path()), expected);
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn w6d_df_bounds_inherited_stdout_and_excess_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("df");
+        for script in [
+            "#!/bin/sh\nprintf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted' 'fake 100 10 4 1% /'\nsleep 2 &\nexit 0\n",
+            "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 200 ]; do printf '%s\\n' 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; i=$((i+1)); done\n",
+        ] {
+            std::fs::write(&program, script).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let started = std::time::Instant::now();
+            assert_eq!(df(program.as_os_str(), dir.path()), None);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "bounded df did not return"
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn w6d_df_reaps_a_normally_killable_timed_out_child() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("df");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\necho $$ > \"$2/df.pid\"\nexec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(df(program.as_os_str(), dir.path()), None);
+        let pid = std::fs::read_to_string(dir.path().join("df.pid"))
+            .unwrap()
+            .trim()
+            .parse::<libc::pid_t>()
+            .unwrap();
+        assert!(pid > 0);
+        // SAFETY: signal zero only observes the PID recorded by this private spawned fixture.
+        let status = unsafe { libc::kill(pid, 0) };
+        let error = std::io::Error::last_os_error();
+        assert!(
+            status == -1 && error.raw_os_error() == Some(libc::ESRCH),
+            "timed-out df child was not reaped"
+        );
+    }
 
     #[test]
     fn a_marker_cut_short_is_written_whole_after_the_next_write() {
@@ -334,7 +581,7 @@ mod tests {
         assert_eq!(since(home), None);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_df_that_hangs_is_given_up_on() {
         use std::os::unix::fs::PermissionsExt;

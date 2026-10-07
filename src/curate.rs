@@ -2814,16 +2814,32 @@ pub fn parked_spans(raw: &Raw, source: &str) -> Result<Vec<Span>> {
 
 /// This device's skipped windows whose reason `keep` takes, less what later recurations covered.
 fn spans_skipped(raw: &Raw, keep: impl Fn(&str) -> bool) -> Result<Vec<Span>> {
-    let device = raw.device().to_owned();
+    spans_skipped_from(|after| raw.ops_after(raw.device(), after, 1_000), keep)
+}
+
+fn spans_skipped_from(
+    mut read: impl FnMut(i64) -> Result<Vec<crate::raw::Op>>,
+    keep: impl Fn(&str) -> bool,
+) -> Result<Vec<Span>> {
     let (mut after, mut skipped, mut recurated) = (0, Vec::new(), Vec::new());
     loop {
-        let ops = raw.ops_after(&device, after, 1_000)?;
+        let ops = read(after)?;
         let Some(last) = ops.last() else { break };
         after = last.op_seq;
         for o in ops.iter().filter(|o| o.kind == OpKind::Window) {
             let Some(span) = op_span(&o.body) else {
                 continue;
             };
+            let valid = |span: &Span| {
+                span.from > 0
+                    && span.start() <= span.end()
+                    && span.from_offset.is_none_or(|offset| offset >= 0)
+                    && span.to_offset.is_none_or(|offset| offset >= 0)
+            };
+            anyhow::ensure!(
+                valid(&span) && op_span(&o.body["covers"]).as_ref().is_none_or(valid),
+                "invalid stored window range"
+            );
             if o.body["recurate"] == true {
                 // Its window, and the part of a span curated through it, whatever windows that
                 // took.
@@ -2857,17 +2873,46 @@ fn spans_skipped(raw: &Raw, keep: impl Fn(&str) -> bool) -> Result<Vec<Span>> {
         .collect())
 }
 
+pub(crate) type ParkingCounts = (
+    std::collections::BTreeMap<String, i64>,
+    std::collections::BTreeMap<String, i64>,
+);
+
+pub(crate) fn parked_counts_in(conn: &Connection, device: &str) -> Result<ParkingCounts> {
+    parking_counts(
+        spans_skipped_from(
+            |after| crate::raw::ops_after_in(conn, device, after, 1_000),
+            |reason| reason.starts_with("imported:"),
+        )?,
+        |ranges| crate::raw::imported_counts_in(conn, device, ranges),
+        || curated_through_in(conn, device),
+    )
+}
+
+fn parking_counts(
+    skipped: Vec<Span>,
+    mut counts: impl FnMut(&[(i64, i64)]) -> Result<std::collections::BTreeMap<String, i64>>,
+    through: impl FnOnce() -> Result<i64>,
+) -> Result<ParkingCounts> {
+    let ranges: Vec<_> = skipped.into_iter().map(|s| (s.from, s.to)).collect();
+    let parked = counts(&ranges)?;
+    let next = through()?
+        .checked_add(1)
+        .context("curation checkpoint overflow")?;
+    let waiting = counts(&[(next, i64::MAX)])?;
+    Ok((parked, waiting))
+}
+
 /// Doctor's line for the imported records curation has not read (D6), per source: those the phase
 /// set aside, which `oboete recurate --source` curates, and those past its checkpoint, which the
 /// phase sets aside first (Codex on #304). None when there are none.
 pub fn parked_line(raw: &Raw, curating: bool) -> Result<Option<String>> {
     let device = raw.device().to_owned();
-    let parked: Vec<(i64, i64)> = spans_skipped(raw, |r| r.starts_with("imported:"))?
-        .into_iter()
-        .map(|s| (s.from, s.to))
-        .collect();
-    let parked = raw.imported_counts(&device, &parked)?;
-    let waiting = raw.imported_counts(&device, &[(curated_through(raw)? + 1, i64::MAX)])?;
+    let (parked, waiting) = parking_counts(
+        spans_skipped(raw, |r| r.starts_with("imported:"))?,
+        |ranges| raw.imported_counts(&device, ranges),
+        || curated_through(raw),
+    )?;
     let mut all = parked.clone();
     for (s, n) in &waiting {
         *all.entry(s.clone()).or_default() += n;
@@ -2908,8 +2953,20 @@ fn reaches(curating: bool) -> &'static str {
 /// This device's last record the curation phase has read whole: a record its checkpoint is
 /// inside of is curated only up to its offset.
 fn curated_through(raw: &Raw) -> Result<i64> {
-    let (seq, offset) = raw.curation_checkpoint(raw.device())?;
-    Ok(if offset.is_some() { seq - 1 } else { seq })
+    raw.curation_checkpoint(raw.device())
+        .and_then(whole_through)
+}
+
+pub(crate) fn curated_through_in(conn: &Connection, device: &str) -> Result<i64> {
+    crate::raw::curation_checkpoint_in(conn, device).and_then(whole_through)
+}
+
+fn whole_through((seq, offset): (i64, Option<i64>)) -> Result<i64> {
+    if offset.is_some() {
+        seq.checked_sub(1).context("curation checkpoint overflow")
+    } else {
+        Ok(seq)
+    }
 }
 
 /// A window op's range, offsets and all.

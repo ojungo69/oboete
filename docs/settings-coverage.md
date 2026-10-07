@@ -70,7 +70,7 @@ left with "—" there.
 |---|---|---|---|---|---|---|---|
 | First run: an unconfigured home, recommended presets | spec-webui | resident preset on Linux/WSL; full wizard — | settings | explicit save | all; resident Linux/WSL | `settings.rs` `resident_settings_are_read_only_until_the_visible_choice_is_saved`; native browser first-save/off/reload | resident slice 5; remaining W6 |
 | Detect agents, wire and unwire their hooks | 7.2 | Agent registrations: passive seven-agent file inventory; wire/unwire — | shared `setup::readiness`; `oboete setup` for later confirmed writes | inventory on page load or explicit Refresh; wiring later | all; private native fixtures on Linux | `w6_` public guarded GET and native-file registration matrix; private HTTP/FIFO/source-purity checks; JA/EN DOM/latest-read/unchanged-draft checks | W6 first inventory slice; wiring remains |
-| Readiness checks, as doctor reports them | 7.2, R13 | passive agent inventory page; resident status CLI; full readonly Doctor page — | `setup::readiness`; `oboete doctor` for later query extraction | inventory at once, read only; full checks remain | all; resident Linux/WSL | `w6_` invalid-config/no-store/secret-response checks; `tests/doctor_curators.rs`; `tests/resident_defaults.rs` `doctor_reads_resident_locks_and_outcomes_without_starting_or_renumbering_them` | resident slice 5; W6 inventory; full Doctor remains |
+| Readiness checks, as doctor reports them | 7.2, R13 | explicit JA/EN read-only diagnostics, with captured seven-agent inventory and independent partial results | `setup::doctor_report`, shared native queries/parsers; private CLI enrichment remains in `oboete doctor` | only an explicit Run diagnostics POST; no repair or live probe | release targets; private native/browser evidence on Linux, other targets retain CI-only labels | `w6d_` guarded empty-object, DB/WAL integrity/schema/change, cached accounting, passive locks, retained metadata/FIFO, completion and source-invalidation checks; JA/EN DOM/native/browser checks; existing CLI regressions | W6 readonly Doctor; confirmed wiring and first run remain |
 | Import claude-mem's history, with its projects mapped to repositories | 7.4, parity N1 | — | `oboete import` | when confirmed | all | — | W5 after N1 |
 | Migrate v1's store; import transcripts | 7.4 | History import: candidates/settings preview, explicit consent, committed progress and partial receipt | shared `migrate`/`transcript`, `settings/maintenance.rs` | confirmed import; later processing uses saved settings | all | maintenance preview/start/status, native CLI compatibility and JA/EN import journeys | W5A |
 | Recurate, with the list and estimate before the send | 1.7 | Typed local no-send preparation, scope/work/cost consent, own provider/window progress and partial receipt | shared native `curate::prepare_report`, `recurate_report`, ordinary Chain | explicit preparation; send only after confirmation and fresh admission | all; pinned resident caller on Linux | `w5c_` native/guarded regressions; synthetic HTTP send/replay, concurrent probe, settlement and later-index failure; actual same-PID Viewer exec and JA/EN browser consent/fractional-USD journeys | W5C |
@@ -166,8 +166,8 @@ cloud starts from a page view or a save.
   permission to execute, or live delivery. Invalid oboete configuration does not hide agent facts.
   The reader shares native paths/builders and parsed-command predicates, opens no stores and
   launches no agent. The JA/EN panel preserves unsaved inputs and discards late reads; unknown
-  response values remain unknown. Full Doctor checks, confirmed wiring and first-run completion
-  remain subsequent W6 work. Both inventory and maintenance status reject nonempty raw queries;
+  response values remain unknown. Full read-only Doctor diagnostics are available separately;
+  confirmed wiring and first-run completion remain subsequent W6 work. Both inventory and maintenance status reject nonempty raw queries;
   the existing caller's empty trailing question mark remains valid.
   Metadata failures and skipped Windows UNC/device namespaces produce unknown file flags, while
   a confirmed local launcher still produces found. Text reads stop at 1 MiB per file; larger
@@ -179,6 +179,24 @@ cloud starts from a page view or a save.
   launchers; both passive Settings consumers use the guarded scan.
   A failed default-home path comparison leaves command alignment unknown; a confirmed missing
   default home retains the native custom-home behavior.
+
+  Doctor uses an authenticated, exact empty-object POST and runs only on an explicit click.
+  Its fixed report includes independent Raw/knowledge/v1 checks, cached provider and embedding
+  facts, compressed backup checksums, passive recording/resident state, handle-bound available
+  disk bytes and metadata-only retained-file/evaluation totals. Store queries inspect private
+  schema-neutral DB/WAL copies; the original files are not opened as live stores or repaired.
+  Source witnesses invalidate only affected facts. This is a set of checked observations,
+  not an atomic snapshot. Missing/off sources, a measured zero, an unreadable value and a source
+  change remain distinct. The UI displays the inventory captured by that same diagnostic result.
+
+  `complete` describes established applicable facts, while fixed `unhealthy` codes identify
+  confirmed passive problems. Neither an empty problem list nor completed observations prove
+  live readiness. Historical isolation and cached key limits are labelled; current key binding
+  stays unchecked and no agent, provider, model or download is started. Native CLI formatting
+  and its private key-budget checks retain their existing boundary. A lost response or busy
+  viewer requires an explicit new click and preserves unsaved settings. Synthetic held locks
+  and private Linux browser runs do not establish live-agent or Windows/M1 real-machine use.
+
 
 W1, W3, W5 and W6 are independent of each other once their backends exist; W2 is security scope and
 W4 waits for the local embedder.

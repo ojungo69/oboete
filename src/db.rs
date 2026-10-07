@@ -363,11 +363,28 @@ pub(crate) fn store_file(path: &Path) -> String {
 /// so a restore's swap made the restored raw.db look like another file and changed the device.
 #[cfg(windows)]
 pub(crate) fn store_file(path: &Path) -> String {
-    let Ok(info) = std::fs::File::open(path).and_then(|f| winapi_util::file::information(&f))
-    else {
-        return String::new();
-    };
-    format!("{}:{}", info.volume_serial_number(), info.file_index())
+    std::fs::File::open(path)
+        .and_then(|file| store_file_from(&file))
+        .unwrap_or_default()
+}
+
+/// Identity from the admitted descriptor, without reopening a source path.
+pub(crate) fn store_file_from(file: &std::fs::File) -> std::io::Result<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        Ok(format!("{}:{}", metadata.dev(), metadata.ino()))
+    }
+    #[cfg(windows)]
+    {
+        let info = winapi_util::file::information(file)?;
+        Ok(format!(
+            "{}:{}",
+            info.volume_serial_number(),
+            info.file_index()
+        ))
+    }
 }
 
 /// The identity a Windows store was given before #122: its creation time.
