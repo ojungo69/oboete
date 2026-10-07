@@ -1031,6 +1031,7 @@ const TEXT = {
   key_none: ['No key needed', 'キーは不要です'],
   key_on_path: ['Installed', 'インストール済み'],
   key_not_on_path: ['Not installed', 'インストールされていません'],
+  key_unknown: ['Installation could not be checked', 'インストール状況は確認できません'],
   key_file: ['Key file: {path}', 'キーのファイル: {path}'],
   key_label: ['New key for {name}', '{name} の新しいキー'],
   key_placeholder: ['Paste a new key', '新しいキーを貼り付け'],
@@ -1211,6 +1212,52 @@ const TEXT = {
   save: ['Save', '保存'],
   saved: ['Saved. Each setting takes effect at the time described beside it.', '保存しました。反映されるタイミングは各設定の説明をご確認ください。'],
   warnings_h: ['Notes on config.toml', 'config.toml についての注意'],
+  agent_inventory_h: ['Agent registrations', 'エージェントの登録状況'],
+  agent_inventory_desc: ['This checks saved files only. A launch file does not prove login, executable permissions or live use. Full doctor checks and connecting agents are not available on this page yet.', '保存されたファイルだけを確認します。起動用ファイルが見つかっても、ログイン、実行権限、実際の利用は確認できません。詳しい診断とエージェントの接続操作は、この画面ではまだ使えません。'],
+  agent_inventory_refresh: ['Refresh file inventory', '設定ファイルを再確認'],
+  agent_inventory_loading: ['Checking agent files…', 'エージェントのファイルを確認中…'],
+  agent_inventory_not_checked: ['Agent files have not been checked yet. Press Refresh.', 'エージェントのファイルはまだ確認していません。「再確認」を押してください。'],
+  agent_inventory_unavailable: ['Agent files could not be checked. Try Refresh.', 'エージェントのファイルを確認できませんでした。「再確認」をお試しください。'],
+  agent_inventory_unknown: ['Unknown', '不明'],
+  agent_inventory_home: ['Memory folder: {state}', '記憶の保存先：{state}'],
+  agent_inventory_config: ['Saved configuration: {state}', '保存済み設定：{state}'],
+  agent_inventory_agent_claude: ['Claude Code', 'Claude Code'],
+  agent_inventory_agent_codex: ['Codex', 'Codex'],
+  agent_inventory_agent_grok: ['Grok', 'Grok'],
+  agent_inventory_agent_agy: ['Antigravity', 'Antigravity'],
+  agent_inventory_agent_opencode: ['OpenCode', 'OpenCode'],
+  agent_inventory_agent_pi: ['Pi', 'Pi'],
+  agent_inventory_agent_cursor: ['Cursor', 'Cursor'],
+  agent_inventory_launch: ['Launch file: {state}', '起動用ファイル：{state}'],
+  agent_inventory_launch_found: ['found; login and live use untested', '見つかりました。ログインと実際の利用は未確認です'],
+  agent_inventory_launch_missing: ['not found', '見つかりません'],
+  agent_inventory_directory: ['Settings folder: {state}', '設定フォルダー：{state}'],
+  agent_inventory_directory_found: ['found', '見つかりました'],
+  agent_inventory_directory_missing: ['not found', '見つかりません'],
+  agent_inventory_capture: ['{kind}: {state}; {match}', '{kind}：{state}。{match}'],
+  agent_inventory_mcp: ['MCP: {state}; {match}', 'MCP：{state}。{match}'],
+  agent_inventory_trust: ['Hook trust: {state}', 'フックの信頼状態：{state}'],
+  agent_inventory_live: ['Live use: {state}', '実際の利用：{state}'],
+  agent_inventory_live_unverified: ['not checked', '未確認'],
+  agent_inventory_kind_hooks: ['Hooks', 'フック'],
+  agent_inventory_kind_plugin: ['Plugin', 'プラグイン'],
+  agent_inventory_kind_extension: ['Extension', '拡張機能'],
+  agent_inventory_state_missing: ['missing', '見つかりません'],
+  agent_inventory_state_present: ['folder present', 'フォルダーあり'],
+  agent_inventory_state_valid: ['file parses', 'ファイルの形式は有効'],
+  agent_inventory_state_registered: ['registered in file', 'ファイルに登録済み'],
+  agent_inventory_state_partial: ['partly registered', '一部のみ登録'],
+  agent_inventory_state_stale: ['out of date', '現在の内容と不一致'],
+  agent_inventory_state_disabled: ['disabled', '無効'],
+  agent_inventory_state_invalid: ['invalid file', 'ファイルが不正'],
+  agent_inventory_state_unreadable: ['unreadable', '読み取り不可'],
+  agent_inventory_state_unavailable: ['cannot assess', '確認不可'],
+  agent_inventory_state_not_applicable: ['not applicable', '対象外'],
+  agent_inventory_state_matching: ['matching', '一致'],
+  agent_inventory_match_true: ['matches this installation', '現在の導入内容と一致'],
+  agent_inventory_match_false: ['does not match this installation', '現在の導入内容と不一致'],
+  agent_inventory_match_unknown: ['current-installation comparison unavailable', '現在の導入内容との比較はできません'],
+  agent_inventory_match_not_applicable: ['no comparison applies', '比較の対象外'],
   file_error: [
     'config.toml has a mistake, so this page shows no settings. Run `oboete doctor` to see the line.',
     'config.toml に誤りがあるため、設定を表示できません。`oboete doctor` で該当する行を確認してください。',
@@ -2147,7 +2194,98 @@ function redactionSection(f) {
       input('textarea', f.redaction.hashes, '', 'redaction.allowlist', (v) => { f.redaction.hashes = v; })));
 }
 
+const AGENT_INVENTORY_IDS = ['claude','codex','grok','agy','opencode','pi','cursor'];
+let agentInventory = {report:null,loading:false,error:false,read:0,expanded:null};
+
+function agentInventoryCode(group,value) {
+  if(typeof value!=='string')return t('agent_inventory_unknown');
+  const key=`agent_inventory_${group}_${value}`;
+  return Object.hasOwn(TEXT,key) ? t(key) : t('agent_inventory_unknown');
+}
+
+function agentInventoryFlag(group,value) {
+  if(typeof value!=='boolean')return t('agent_inventory_unknown');
+  return agentInventoryCode(group,value?'found':'missing');
+}
+
+function agentInventoryMatch(component) {
+  if(component?.state==='not_applicable')return t('agent_inventory_match_not_applicable');
+  if(component?.matches_current===true)return t('agent_inventory_match_true');
+  if(component?.matches_current===false)return t('agent_inventory_match_false');
+  return t('agent_inventory_match_unknown');
+}
+
+function agentInventoryRow(id,row) {
+  if(!row)return el('li',null,el('h4',null,t('agent_inventory_agent_'+id)),
+    el('p','desc',t('agent_inventory_unknown')));
+  const capture=row?.capture;
+  const mcp=row?.mcp;
+  return el('li',null,el('h4',null,t('agent_inventory_agent_'+id)),
+    el('p','desc',t('agent_inventory_launch',{
+      state:agentInventoryFlag('launch',row.launch_file_found)})),
+    el('p','desc',t('agent_inventory_directory',{
+      state:agentInventoryFlag('directory',row.directory_found)})),
+    el('p','desc',t('agent_inventory_capture',{
+      kind:agentInventoryCode('kind',capture?.kind),state:agentInventoryCode('state',capture?.state),
+      match:agentInventoryMatch(capture)})),
+    el('p','desc',t('agent_inventory_mcp',{
+      state:agentInventoryCode('state',mcp?.state),match:agentInventoryMatch(mcp)})),
+    el('p','desc',t('agent_inventory_trust',{state:agentInventoryCode('state',row?.trust)})),
+    el('p','desc',t('agent_inventory_live',{
+      state:t(row.live_verified===false?'agent_inventory_live_unverified':'agent_inventory_unknown')})));
+}
+
+function agentInventorySection() {
+  const refresh=el('button','quiet small',t('agent_inventory_refresh'));
+  refresh.type='button';refresh.dataset.action='agent_inventory.refresh';
+  refresh.addEventListener('click',()=>void refreshAgentInventory());
+  const rows=[el('summary',null,t('agent_inventory_h')),
+    el('p','desc',t('agent_inventory_desc')),refresh];
+  const report=agentInventory.report;
+  if(agentInventory.loading)rows.push(el('p','desc',t('agent_inventory_loading')));
+  else if(agentInventory.error || (report && !Array.isArray(report.agents)))
+    rows.push(el('p','desc',t('agent_inventory_unavailable')));
+  else if(!report)rows.push(el('p','desc',t('agent_inventory_not_checked')));
+  else rows.push(
+    el('p','desc',t('agent_inventory_home',{state:agentInventoryCode('state',report.home)})),
+    el('p','desc',t('agent_inventory_config',{state:agentInventoryCode('state',report.config)})),
+    el('ul',null,...AGENT_INVENTORY_IDS.map(id=>agentInventoryRow(id,report.agents.find(row=>row?.agent===id)))));
+  const section=el('details','agent-readiness',...rows);
+  section.open=agentInventory.expanded ?? !form;
+  section.addEventListener('toggle',()=>{if(section.isConnected)agentInventory.expanded=section.open;});
+  return section;
+}
+
+function renderAgentInventory() {
+  if(view!=='settings')return;
+  const section=$('panel').querySelector('.agent-readiness');
+  if(!section)return;
+  const focused=section.contains(document.activeElement) && document.activeElement?.dataset.action==='agent_inventory.refresh';
+  section.replaceChildren(...agentInventorySection().childNodes);
+  if(focused)section.querySelector('[data-action="agent_inventory.refresh"]')?.focus({preventScroll:true});
+}
+
+async function refreshAgentInventory() {
+  const read=agentInventory.read=agentInventory.read+1;
+  agentInventory.loading=true;agentInventory.error=false;agentInventory.report=null;
+  renderAgentInventory();
+  try {
+    const report=await api('setup');
+    if(read!==agentInventory.read || view!=='settings')return;
+    agentInventory.report=report;
+  } catch {
+    if(read!==agentInventory.read || view!=='settings')return;
+    agentInventory.error=true;
+  } finally {
+    if(read===agentInventory.read && view==='settings') {
+      agentInventory.loading=false;
+      renderAgentInventory();
+    }
+  }
+}
+
 async function showSettings() {
+  void refreshAgentInventory();
   const [s, privacy] = await Promise.all([api('settings'), api('privacy').catch(privacyUnavailable)]);
   s.privacy = privacy;
   return () => {
@@ -3130,7 +3268,7 @@ function drawSettings() {
   const panel = el('div', 'settings', el('label', 'field lang', el('span', null, t('language')), pick));
   panel.lang = lang;
   if (!form) {
-    panel.append(el('p', 'text pending', t('file_error')));
+    panel.append(el('p', 'text pending', t('file_error')), agentInventorySection());
     drawIn(panel);
     return;
   }
@@ -3263,7 +3401,7 @@ function drawSettings() {
     e.preventDefault();
     void saveSettings(save);
   });
-  panel.append(el('p', 'lead', t('lead')), formEl, preferenceSection(f), maintenanceSection(f));
+  panel.append(el('p', 'lead', t('lead')), formEl, preferenceSection(f), agentInventorySection(), maintenanceSection(f));
   drawIn(panel);
 }
 

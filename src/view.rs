@@ -1245,8 +1245,15 @@ impl Viewer {
         if name == "privacy" {
             return Response::json(&crate::settings::privacy::show(&self.home));
         }
+        if name == "setup" {
+            return if query.is_empty() {
+                Response::json(&json!(crate::setup::readiness(&self.home)))
+            } else {
+                Response::text(400, "inventory carries no query")
+            };
+        }
         if name == "maintenance" {
-            return if q.is_empty() {
+            return if query.is_empty() {
                 Response::json(&self.maintenance.show(&self.home))
             } else {
                 Response::text(400, "status carries no query")
@@ -2172,6 +2179,98 @@ mod tests {
     }
 
     #[test]
+    fn w6_agent_registrations_ui_preserves_drafts_and_reads_without_posts() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let result = std::process::Command::new("node")
+            .arg(root.join("src/testdata/viewer-readiness/test.mjs"))
+            .arg(root.join("assets/viewer/app.js"))
+            .status();
+        let status = match result {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("readiness UI harness skipped: node is not installed");
+                return;
+            }
+            other => other.unwrap(),
+        };
+        assert!(status.success(), "readonly registrations UI check failed");
+    }
+
+    #[test]
+    fn w6_setup_inventory_is_authenticated_and_keeps_an_absent_home_absent() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("missing");
+        let v = Viewer::new(&home, None, 4321, Token::Run("t0k".into()));
+        let target = "/api/setup";
+        assert_eq!(v.route("GET", target, &[HOST]).status, 401);
+        assert_eq!(
+            v.route("GET", target, &[("Host", "elsewhere:4321"), TOKEN])
+                .status,
+            403
+        );
+        assert_eq!(v.route("POST", target, &[HOST, TOKEN]).status, 405);
+        let answer = v.route("GET", target, &[HOST, TOKEN]);
+        assert_eq!(
+            answer.status, 200,
+            "query-only agent inventory is unavailable"
+        );
+        let value: Value = serde_json::from_slice(&answer.body).unwrap();
+        let agents = value["agents"].as_array().unwrap();
+        assert_eq!(
+            agents
+                .iter()
+                .map(|row| row["agent"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["claude", "codex", "grok", "agy", "opencode", "pi", "cursor"]
+        );
+        assert!(agents.iter().all(|row| row["live_verified"] == false));
+        for target in [
+            "/api/setup?extra=1",
+            "/api/setup?extra",
+            "/api/setup?extra&ignored",
+        ] {
+            assert_eq!(v.route("GET", target, &[HOST, TOKEN]).status, 400);
+        }
+        assert!(!home.exists(), "inventory initialized the absent home");
+        assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn w6_setup_inventory_classifies_config_without_opening_stores_or_echoing_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        let secret = "SyntheticReadinessPrivateValue";
+        let untouched = ["raw.db", "knowledge.db", "providers.db"];
+        for name in untouched {
+            std::fs::write(home.join(name), b"not a store; must remain untouched").unwrap();
+        }
+        let v = Viewer::new(home, None, 4321, Token::Run("t0k".into()));
+        for (config, expected) in [
+            (
+                "providers = []\n[worker]\nresident = false\n".to_owned(),
+                "valid",
+            ),
+            (format!("private_value = '{secret}"), "invalid"),
+        ] {
+            std::fs::write(home.join("config.toml"), &config).unwrap();
+            let answer = v.route("GET", "/api/setup", &[HOST, TOKEN]);
+            assert_eq!(answer.status, 200);
+            let value: Value = serde_json::from_slice(&answer.body).unwrap();
+            assert_eq!(value["home"], "present");
+            assert_eq!(value["config"], expected);
+            assert_eq!(value["agents"].as_array().unwrap().len(), 7);
+            assert!(!String::from_utf8(answer.body).unwrap().contains(secret));
+            assert!(std::fs::read_to_string(home.join("config.toml")).unwrap() == config);
+            for name in untouched {
+                assert!(
+                    std::fs::read(home.join(name)).unwrap()
+                        == b"not a store; must remain untouched"
+                );
+            }
+            assert_eq!(std::fs::read_dir(home).unwrap().count(), 4);
+        }
+    }
+
+    #[test]
     fn maintenance_status_is_authenticated_bounded_and_opens_no_store() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("missing");
@@ -2190,11 +2289,13 @@ mod tests {
             serde_json::from_slice::<Value>(&answer.body).unwrap(),
             json!({"available":false,"active":null,"last":null})
         );
-        assert_eq!(
-            v.route("GET", "/api/maintenance?extra=1", &[HOST, TOKEN])
-                .status,
-            400
-        );
+        for target in [
+            "/api/maintenance?extra=1",
+            "/api/maintenance?extra",
+            "/api/maintenance?extra&ignored",
+        ] {
+            assert_eq!(v.route("GET", target, &[HOST, TOKEN]).status, 400);
+        }
         assert!(!home.exists(), "status initialized the absent destination");
         assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
     }

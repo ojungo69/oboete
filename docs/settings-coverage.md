@@ -69,8 +69,8 @@ left with "—" there.
 | Setting or operation | Spec | Now | Backend | Takes effect | OS | Test | Slice |
 |---|---|---|---|---|---|---|---|
 | First run: an unconfigured home, recommended presets | spec-webui | resident preset on Linux/WSL; full wizard — | settings | explicit save | all; resident Linux/WSL | `settings.rs` `resident_settings_are_read_only_until_the_visible_choice_is_saved`; native browser first-save/off/reload | resident slice 5; remaining W6 |
-| Detect agents, wire and unwire their hooks | 7.2 | — | `oboete setup` | the agent's next session | all | — | W6 |
-| Readiness checks, as doctor reports them | 7.2, R13 | resident status CLI; full page — | `oboete doctor` | at once, read only | all; resident Linux/WSL | `tests/resident_defaults.rs` `doctor_reads_resident_locks_and_outcomes_without_starting_or_renumbering_them` | resident slice 5; remaining W6 |
+| Detect agents, wire and unwire their hooks | 7.2 | Agent registrations: passive seven-agent file inventory; wire/unwire — | shared `setup::readiness`; `oboete setup` for later confirmed writes | inventory on page load or explicit Refresh; wiring later | all; private native fixtures on Linux | `w6_` public guarded GET and native-file registration matrix; private HTTP/FIFO/source-purity checks; JA/EN DOM/latest-read/unchanged-draft checks | W6 first inventory slice; wiring remains |
+| Readiness checks, as doctor reports them | 7.2, R13 | passive agent inventory page; resident status CLI; full readonly Doctor page — | `setup::readiness`; `oboete doctor` for later query extraction | inventory at once, read only; full checks remain | all; resident Linux/WSL | `w6_` invalid-config/no-store/secret-response checks; `tests/doctor_curators.rs`; `tests/resident_defaults.rs` `doctor_reads_resident_locks_and_outcomes_without_starting_or_renumbering_them` | resident slice 5; W6 inventory; full Doctor remains |
 | Import claude-mem's history, with its projects mapped to repositories | 7.4, parity N1 | — | `oboete import` | when confirmed | all | — | W5 after N1 |
 | Migrate v1's store; import transcripts | 7.4 | History import: candidates/settings preview, explicit consent, committed progress and partial receipt | shared `migrate`/`transcript`, `settings/maintenance.rs` | confirmed import; later processing uses saved settings | all | maintenance preview/start/status, native CLI compatibility and JA/EN import journeys | W5A |
 | Recurate, with the list and estimate before the send | 1.7 | Typed local no-send preparation, scope/work/cost consent, own provider/window progress and partial receipt | shared native `curate::prepare_report`, `recurate_report`, ordinary Chain | explicit preparation; send only after confirmation and fresh admission | all; pinned resident caller on Linux | `w5c_` native/guarded regressions; synthetic HTTP send/replay, concurrent probe, settlement and later-index failure; actual same-PID Viewer exec and JA/EN browser consent/fractional-USD journeys | W5C |
@@ -157,8 +157,28 @@ cloud starts from a page view or a save.
   labels while keeping IDs and effects. Loading saved settings clears preview/consent and cached
   display text, preserving unknown operations and counts until the next status GET. Late replies
   cannot restore discarded consent; a matching C2 status only refreshes an existing preview.
+
 - **W6, first run and agents.** The first-run presets, the agents' wiring, the readiness checks, and
   the resident worker's and viewer's switches with resident.md's slice 2.
+
+  W6's first inventory is an authenticated query-only GET, with seven independent native agent
+  rows and fixed state codes. Finding a launcher or a matching registration does not prove login,
+  permission to execute, or live delivery. Invalid oboete configuration does not hide agent facts.
+  The reader shares native paths/builders and parsed-command predicates, opens no stores and
+  launches no agent. The JA/EN panel preserves unsaved inputs and discards late reads; unknown
+  response values remain unknown. Full Doctor checks, confirmed wiring and first-run completion
+  remain subsequent W6 work. Both inventory and maintenance status reject nonempty raw queries;
+  the existing caller's empty trailing question mark remains valid.
+  Metadata failures and skipped Windows UNC/device namespaces produce unknown file flags, while
+  a confirmed local launcher still produces found. Text reads stop at 1 MiB per file; larger
+  files are unavailable and never parsed as a truncated registration. Windows also declines
+  remote/unknown drives and reparses in any path component, using one native no-reparse open
+  for metadata, content and canonical path observations. Unix dotfile symlinks remain supported.
+  The native open starts from a trusted local drive-root handle; changing DOS drive mappings
+  concurrently is outside that bootstrap guarantee. Explicit CLI actions retain local-link
+  launchers; both passive Settings consumers use the guarded scan.
+  A failed default-home path comparison leaves command alignment unknown; a confirmed missing
+  default home retains the native custom-home behavior.
 
 W1, W3, W5 and W6 are independent of each other once their backends exist; W2 is security scope and
 W4 waits for the local embedder.

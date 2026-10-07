@@ -87,7 +87,10 @@ fn utf8(bytes: Option<&[u8]>) -> Option<&str> {
 
 /// The file as every reader of it parses it, or none when one of them would refuse it: the
 /// curators, capture and its redaction rules, injection, and backups (Codex on #270).
-fn parsed(path: &Path, text: &str) -> Option<(config::Config, config::Capture, config::Inject)> {
+pub(crate) fn parsed(
+    path: &Path,
+    text: &str,
+) -> Option<(config::Config, config::Capture, config::Inject)> {
     let capture = config::parse_capture(Some(text)).ok()?;
     crate::redact::Rules::new(&capture.redaction).ok()?;
     crate::backup::location(text).ok()?;
@@ -210,6 +213,14 @@ fn range(r: std::ops::RangeInclusive<usize>) -> [usize; 2] {
     [*r.start(), *r.end()]
 }
 
+fn cli_path_state(cli: &str) -> &'static str {
+    match crate::setup::launch_found(&[cli]) {
+        Some(true) => "on-path",
+        Some(false) => "not-on-path",
+        None => "unknown",
+    }
+}
+
 fn tool_output(t: ToolOutput) -> &'static str {
     match t {
         ToolOutput::Full => "full",
@@ -315,9 +326,7 @@ fn provider_row(
             ..
         } => json!({
             "kind": "cli", "cli": cli, "model": model, "timeout_s": timeout_s,
-            "subscription": true, "key": if crate::setup::on_path(cli) {
-                "on-path"
-            } else { "not-on-path" },
+            "subscription": true, "key": cli_path_state(cli),
         }),
     };
     let limits = saved.limits();
@@ -370,11 +379,7 @@ fn entry(
             ..
         } => (
             "cli",
-            if crate::setup::on_path(cli) {
-                "on-path"
-            } else {
-                "not-on-path"
-            },
+            cli_path_state(cli),
             None,
             model.as_deref(),
             *timeout_s,
