@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::config;
 
 mod readiness;
-pub(crate) use readiness::readiness;
+pub(crate) use readiness::{launch_found, readiness};
 
 pub const AGENTS: [&str; 7] = ["claude", "codex", "grok", "agy", "opencode", "pi", "cursor"];
 const BACKUP_SUFFIX: &str = ".oboete.bak";
@@ -331,13 +331,19 @@ struct HookCommand {
 
 impl HookCommand {
     fn current(home: &Path) -> Result<Self> {
-        let exe = std::env::current_exe()?.canonicalize()?;
+        Self::current_with(home, |path| path.canonicalize())
+    }
+
+    fn current_with(
+        home: &Path,
+        canonicalize: impl Fn(&Path) -> std::io::Result<PathBuf>,
+    ) -> Result<Self> {
+        let exe = canonicalize(&std::env::current_exe()?)?;
         // Hooks run from the agent's working directory: a custom home is stored absolute.
-        let home = home
-            .canonicalize()
-            .with_context(|| format!("resolve home {}", home.display()))?;
+        let home =
+            canonicalize(home).with_context(|| format!("resolve home {}", home.display()))?;
         let default_home = config::home_dir().join(".oboete");
-        let home = (Some(&home) != default_home.canonicalize().ok().as_ref())
+        let home = (Some(&home) != canonicalize(&default_home).ok().as_ref())
             .then(|| home.to_string_lossy().into_owned());
         Ok(Self {
             exe: exe.to_string_lossy().into_owned(),
@@ -2252,18 +2258,20 @@ pub fn doctor(home: &Path) -> Result<()> {
 }
 
 pub(crate) fn on_path(bin: &str) -> bool {
+    // Explicit native CLI actions retain symlink-backed launchers. Passive viewer
+    // observations use launch_found and never follow Windows reparses.
     std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths)
             .flat_map(|dir| launcher_files(&dir, bin))
-            .any(|file| diagnostic_metadata(&file).is_ok_and(|metadata| metadata.is_file()))
+            .any(|file| file.is_file())
     })
 }
 
-fn diagnostic_metadata_with(
+fn diagnostic_path_with<T>(
     path: &Path,
     windows: bool,
-    probe: impl FnOnce(&Path) -> std::io::Result<std::fs::Metadata>,
-) -> std::io::Result<std::fs::Metadata> {
+    probe: impl FnOnce(&Path, u32) -> std::io::Result<T>,
+) -> std::io::Result<T> {
     if windows {
         let bytes = path.as_os_str().as_encoded_bytes();
         // UNC and device namespaces can authenticate remotely during a metadata lookup.
@@ -2280,16 +2288,149 @@ fn diagnostic_metadata_with(
             return Err(std::io::ErrorKind::Unsupported.into());
         }
     }
-    probe(path)
+    // OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE. The native open rejects intermediate
+    // reparses atomically rather than checking a path and following it a second time.
+    probe(path, if windows { 0x0040 | 0x1000 } else { 0 })
 }
 
 fn diagnostic_metadata(path: &Path) -> std::io::Result<std::fs::Metadata> {
-    // On Windows a relative PATH entry can resolve under a UNC working directory.
     #[cfg(windows)]
+    {
+        diagnostic_file(path, false)?.metadata()
+    }
+    #[cfg(not(windows))]
+    {
+        diagnostic_path_with(path, false, |path, _| std::fs::metadata(path))
+    }
+}
+
+#[cfg(windows)]
+fn diagnostic_file(path: &Path, read: bool) -> std::io::Result<std::fs::File> {
+    use std::os::windows::{
+        ffi::OsStrExt,
+        fs::OpenOptionsExt,
+        io::{AsRawHandle, FromRawHandle},
+    };
+    use windows_sys::{
+        Wdk::{
+            Foundation::OBJECT_ATTRIBUTES,
+            Storage::FileSystem::{FILE_SYNCHRONOUS_IO_NONALERT, NtOpenFile},
+        },
+        Win32::{
+            Foundation::{RtlNtStatusToDosError, STATUS_REPARSE_POINT_ENCOUNTERED, UNICODE_STRING},
+            Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+                GetDriveTypeW,
+            },
+            System::IO::IO_STATUS_BLOCK,
+        },
+    };
+    // Lexical absolutization does no filesystem I/O, including for a UNC cwd.
     let absolute = std::path::absolute(path)?;
+    diagnostic_path_with(&absolute, true, |path, attributes| {
+        let mut parts = path.components();
+        let drive = match parts.next() {
+            Some(std::path::Component::Prefix(prefix)) => match prefix.kind() {
+                std::path::Prefix::Disk(drive) | std::path::Prefix::VerbatimDisk(drive) => drive,
+                _ => return Err(std::io::ErrorKind::Unsupported.into()),
+            },
+            _ => return Err(std::io::ErrorKind::Unsupported.into()),
+        };
+        if parts.next() != Some(std::path::Component::RootDir) {
+            return Err(std::io::ErrorKind::Unsupported.into());
+        }
+        let root = PathBuf::from(format!(r"\\?\{}:\", char::from(drive)));
+        let root_wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: root_wide is a terminated drive-root string; this queries its drive type.
+        let kind = unsafe { GetDriveTypeW(root_wide.as_ptr()) };
+        // Decline remote, unknown and absent drives before opening their root.
+        if !matches!(kind, 2 | 3 | 5 | 6) {
+            return Err(std::io::ErrorKind::Unsupported.into());
+        }
+        let root = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(root)?;
+        let relative = parts.as_path();
+        if relative.as_os_str().is_empty() {
+            return if read {
+                Err(std::io::ErrorKind::InvalidInput.into())
+            } else {
+                Ok(root)
+            };
+        }
+        let mut name_buffer: Vec<u16> = relative.as_os_str().encode_wide().collect();
+        if name_buffer.contains(&0) {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        let length = name_buffer
+            .len()
+            .checked_mul(2)
+            .and_then(|length| u16::try_from(length).ok())
+            .ok_or(std::io::ErrorKind::InvalidInput)?;
+        let name = UNICODE_STRING {
+            Length: length,
+            MaximumLength: length,
+            Buffer: name_buffer.as_mut_ptr(),
+        };
+        let object = OBJECT_ATTRIBUTES {
+            Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+            RootDirectory: root.as_raw_handle(),
+            ObjectName: &name,
+            Attributes: attributes,
+            ..Default::default()
+        };
+        let mut handle = std::ptr::null_mut();
+        let mut status_block = IO_STATUS_BLOCK::default();
+        // SYNCHRONIZE + attributes; file data and non-directory access only for text reads.
+        let access = 0x0010_0000 | FILE_READ_ATTRIBUTES | u32::from(read);
+        let options = FILE_SYNCHRONOUS_IO_NONALERT | if read { 0x40 } else { 0 };
+        // SAFETY: all buffers and the root handle live through this synchronous open. The
+        // full relative name is parsed with OBJ_DONT_REPARSE, including every parent.
+        let status =
+            unsafe { NtOpenFile(&mut handle, access, &object, &mut status_block, 7, options) };
+        if status < 0 {
+            return Err(if status == STATUS_REPARSE_POINT_ENCOUNTERED {
+                std::io::ErrorKind::Unsupported.into()
+            } else {
+                // SAFETY: status is the NT status returned by the failed native call.
+                std::io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32)
+            });
+        }
+        // SAFETY: successful NtOpenFile returned a new owned handle, transferred exactly once.
+        Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+    })
+}
+
+fn diagnostic_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(not(windows))]
+    {
+        path.canonicalize()
+    }
     #[cfg(windows)]
-    let path = absolute.as_path();
-    diagnostic_metadata_with(path, cfg!(windows), |path| std::fs::metadata(path))
+    {
+        use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+        let file = diagnostic_file(path, false)?;
+        let mut name = vec![0u16; 32768];
+        // SAFETY: file is owned and the bounded output buffer is writable for its stated size.
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                name.as_mut_ptr(),
+                name.len() as u32,
+                0,
+            )
+        };
+        if length == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if length as usize >= name.len() {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+        name.truncate(length as usize);
+        Ok(PathBuf::from(std::ffi::OsString::from_wide(&name)))
+    }
 }
 
 fn launcher_files(dir: &Path, bin: &str) -> Vec<PathBuf> {
@@ -2317,22 +2458,48 @@ mod tests {
             r"\\?\GLOBALROOT\Device\Mup\server\share",
         ] {
             let calls = Cell::new(0);
-            let result = diagnostic_metadata_with(Path::new(path), true, |_| {
-                calls.set(calls.get() + 1);
-                Err(std::io::ErrorKind::NotFound.into())
-            });
+            let result: std::io::Result<std::fs::Metadata> =
+                diagnostic_path_with(Path::new(path), true, |_, _| {
+                    calls.set(calls.get() + 1);
+                    Err(std::io::ErrorKind::NotFound.into())
+                });
             assert_eq!(calls.get(), 0, "UNC/device path reached metadata");
             assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
         }
         for path in [r"C:\agents\codex.exe", r"\\?\C:\agents\codex.exe"] {
             let calls = Cell::new(0);
-            let result = diagnostic_metadata_with(Path::new(path), true, |_| {
-                calls.set(calls.get() + 1);
-                Err(std::io::ErrorKind::NotFound.into())
-            });
+            let result: std::io::Result<std::fs::Metadata> =
+                diagnostic_path_with(Path::new(path), true, |_, _| {
+                    calls.set(calls.get() + 1);
+                    Err(std::io::ErrorKind::NotFound.into())
+                });
             assert_eq!(calls.get(), 1);
             assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
         }
+    }
+
+    #[test]
+    fn w6_windows_parent_reparse_refuses_before_remote_resolution() {
+        let remote_resolutions = std::cell::Cell::new(0);
+        let result: std::io::Result<()> = diagnostic_path_with(
+            Path::new(r"C:\private\link\codex.exe"),
+            true,
+            |_, attributes| {
+                if attributes & 0x1000 != 0 {
+                    // OBJ_DONT_REPARSE: decline any parent reparse.
+                    Err(std::io::ErrorKind::Unsupported.into())
+                } else {
+                    remote_resolutions.set(remote_resolutions.get() + 1);
+                    Err(std::io::ErrorKind::NotFound.into())
+                }
+            },
+        );
+        assert_eq!(
+            remote_resolutions.get(),
+            0,
+            "parent link attempted remote resolution"
+        );
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
     }
 
     #[test]

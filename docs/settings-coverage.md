@@ -171,8 +171,14 @@ cloud starts from a page view or a save.
   the existing caller's empty trailing question mark remains valid.
   Metadata failures and skipped Windows UNC/device namespaces produce unknown file flags, while
   a confirmed local launcher still produces found. Text reads stop at 1 MiB per file; larger
-  files are unavailable and never parsed as a truncated registration. This namespace guard does
-  not establish that mapped drives or local symlinks resolve to local storage.
+  files are unavailable and never parsed as a truncated registration. Windows also declines
+  remote/unknown drives and reparses in any path component, using one native no-reparse open
+  for metadata, content and canonical path observations. Unix dotfile symlinks remain supported.
+  The native open starts from a trusted local drive-root handle; changing DOS drive mappings
+  concurrently is outside that bootstrap guarantee. Explicit CLI actions retain local-link
+  launchers; both passive Settings consumers use the guarded scan.
+  A failed default-home path comparison leaves command alignment unknown; a confirmed missing
+  default home retains the native custom-home behavior.
 
 W1, W3, W5 and W6 are independent of each other once their backends exist; W2 is security scope and
 W4 waits for the local embedder.

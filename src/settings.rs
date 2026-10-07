@@ -318,7 +318,7 @@ fn provider_row(
             ..
         } => json!({
             "kind": "cli", "cli": cli, "model": model, "timeout_s": timeout_s,
-            "subscription": true, "key": if crate::setup::on_path(cli) {
+            "subscription": true, "key": if crate::setup::launch_found(&[cli]) == Some(true) {
                 "on-path"
             } else { "not-on-path" },
         }),
@@ -373,7 +373,7 @@ fn entry(
             ..
         } => (
             "cli",
-            if crate::setup::on_path(cli) {
+            if crate::setup::launch_found(&[cli]) == Some(true) {
                 "on-path"
             } else {
                 "not-on-path"

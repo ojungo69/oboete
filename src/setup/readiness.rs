@@ -3,11 +3,11 @@
 use super::{
     AGENTS, HookCommand, MCP_NAME, PI_MARKER, agy_dir, agy_spec, claude_dir, claude_groups,
     claude_mcp_paths, claude_settings_file, codex_groups, codex_home, codex_trust_keys, cursor_dir,
-    cursor_hook_spec, diagnostic_metadata, grok_config_file, grok_groups, has_ours, is_our_handler,
-    launcher_files, mcp_command_in_json, mcp_command_in_toml, mcp_disabled_in_json,
-    mcp_disabled_in_toml, opencode_dir, opencode_plugin, pi_dir, pi_extension,
+    cursor_hook_spec, diagnostic_canonicalize, diagnostic_metadata, grok_config_file, grok_groups,
+    has_ours, is_our_handler, launcher_files, mcp_command_in_json, mcp_command_in_toml,
+    mcp_disabled_in_json, mcp_disabled_in_toml, opencode_dir, opencode_plugin, pi_dir,
+    pi_extension,
 };
-use crate::config;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::io::Read;
@@ -122,7 +122,7 @@ fn found(path: &Path, directory: bool) -> Option<bool> {
     }
 }
 
-fn launch_found(bins: &[&str]) -> Option<bool> {
+pub(crate) fn launch_found(bins: &[&str]) -> Option<bool> {
     let Some(paths) = std::env::var_os("PATH") else {
         return Some(false);
     };
@@ -166,14 +166,25 @@ fn text(file: &Path) -> Observed<String> {
         Ok(metadata) if metadata.len() > TEXT_LIMIT => return Err(State::Unavailable),
         Ok(_) => {}
     }
+    #[cfg(not(windows))]
     let mut options = std::fs::OpenOptions::new();
+    #[cfg(not(windows))]
     options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK);
     }
+    #[cfg(not(windows))]
     let opened = options.open(file).map_err(|_| State::Unreadable)?;
+    #[cfg(windows)]
+    let opened = super::diagnostic_file(file, true).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::Unsupported {
+            State::Unavailable
+        } else {
+            State::Unreadable
+        }
+    })?;
     let metadata = opened.metadata().map_err(|_| State::Unreadable)?;
     if !metadata.is_file() || metadata.len() > TEXT_LIMIT {
         return Err(State::Unavailable);
@@ -639,6 +650,27 @@ fn row(agent: &'static str, want: Option<&HookCommand>) -> AgentReadiness {
     }
 }
 
+fn current_command(
+    home: &Path,
+    canonicalize: impl Fn(&Path) -> std::io::Result<std::path::PathBuf>,
+) -> Option<HookCommand> {
+    let unavailable = std::cell::Cell::new(false);
+    // The CLI deliberately defaults an unresolvable default home to custom-home args.
+    // Passive alignment must retain errors from the actual comparison, not a prior probe.
+    let command = HookCommand::current_with(home, |path| {
+        let result = canonicalize(path);
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() != std::io::ErrorKind::NotFound)
+        {
+            unavailable.set(true);
+        }
+        result
+    })
+    .ok();
+    command.filter(|_| !unavailable.get())
+}
+
 pub(crate) fn readiness(home: &Path) -> Readiness {
     let home_state = match diagnostic_metadata(home) {
         Ok(metadata) if metadata.is_dir() => HomeState::Present,
@@ -652,12 +684,8 @@ pub(crate) fn readiness(home: &Path) -> Readiness {
         Ok(Some(_)) | Err(State::Invalid) => ConfigState::Invalid,
         Err(_) => ConfigState::Unreadable,
     };
-    let want = if matches!(home_state, HomeState::Present)
-        && std::env::current_exe().is_ok_and(|exe| diagnostic_metadata(&exe).is_ok())
-        && !diagnostic_metadata(&config::home_dir().join(".oboete"))
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::Unsupported)
-    {
-        HookCommand::current(home).ok()
+    let want = if matches!(home_state, HomeState::Present) {
+        current_command(home, diagnostic_canonicalize)
     } else {
         None
     };
@@ -677,6 +705,31 @@ mod tests {
     use crate::setup as native;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn w6_current_command_retains_actual_comparison_errors() {
+        let private = tempfile::tempdir().unwrap();
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+        ] {
+            let calls = std::cell::Cell::new(0);
+            let command = current_command(private.path(), |path| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 3 {
+                    Err(kind.into())
+                } else {
+                    Ok(path.to_owned())
+                }
+            });
+            assert_eq!(calls.get(), 3, "actual default comparison was not observed");
+            assert_eq!(
+                command.is_some(),
+                kind == std::io::ErrorKind::NotFound,
+                "actual default comparison error became a known command"
+            );
+        }
+    }
 
     #[test]
     fn w6_inventory_refuses_oversized_text_without_truncating() {
@@ -805,6 +858,8 @@ mod tests {
                 .env("TEMP", root.join("tmp"))
                 .env("PATH", root.join("bin"))
                 .current_dir(root.join("cwd"));
+            #[cfg(windows)]
+            command.env("SystemRoot", std::env::var_os("SystemRoot").unwrap());
             // Keep only explicitly supplied instrumentation output, outside child cleanup.
             if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
                 let profile = PathBuf::from(profile);
@@ -1100,6 +1155,31 @@ mod tests {
         );
         #[cfg(unix)]
         {
+            let default_home = root.join("owner/.oboete");
+            std::os::unix::fs::symlink(".oboete", &default_home).unwrap();
+            let before = snapshot(&root);
+            let unknown = serde_json::to_value(native::readiness(&home)).unwrap();
+            assert!(
+                snapshot(&root) == before,
+                "unknown default home changed private files"
+            );
+            for row in unknown["agents"].as_array().unwrap() {
+                assert!(
+                    row["capture"]["matches_current"].is_null()
+                        && row["mcp"]["matches_current"].is_null(),
+                    "unreadable default home claimed current-command alignment"
+                );
+            }
+            let legacy = native::HookCommand::current(&home).unwrap();
+            assert!(
+                legacy.exe == current.exe && legacy.home == current.home,
+                "native CLI default-home fallback changed"
+            );
+            std::fs::remove_file(default_home).unwrap();
+            assert!(
+                inspect() == changed,
+                "default-home inspection did not recover"
+            );
             // A symlink loop returns a real metadata error even under a privileged test user.
             // It must not become "not found". Only this child's private roots are changed.
             let dir = native::claude_dir();
@@ -1134,6 +1214,65 @@ mod tests {
             assert_eq!(launch_found(&["cursor-agent", "agent"]), None);
             std::fs::write(root.join("bin/agent"), b"inert, never executed").unwrap();
             assert_eq!(launch_found(&["cursor-agent", "agent"]), Some(true));
+        }
+        #[cfg(windows)]
+        {
+            // A local junction exercises the kernel's parent-reparse refusal without ever
+            // naming or contacting a remote share. cmd is the fixed OS junction creator.
+            let junction = |link: &Path, target: &Path, failure: &str| {
+                let cmd =
+                    PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
+                let output = std::process::Command::new(cmd)
+                    .args(["/d", "/c", "mklink", "/J"])
+                    .arg(link)
+                    .arg(target)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{failure}");
+            };
+            let dir = native::claude_dir();
+            let kept = root.join("claude-before-junction");
+            std::fs::rename(&dir, &kept).unwrap();
+            junction(&dir, &kept, "private local junction fixture failed");
+            assert!(
+                std::fs::metadata(dir.join("settings.json"))
+                    .unwrap()
+                    .is_file(),
+                "junction control did not resolve to a local file"
+            );
+            let link = std::fs::read_link(&dir).unwrap();
+            let bytes = std::fs::read(kept.join("settings.json")).unwrap();
+            let shown = serde_json::to_value(native::readiness(&home)).unwrap();
+            let claude = agent(&shown, "claude");
+            assert!(
+                claude["directory_found"].is_null() && claude["capture"]["state"] == "unavailable",
+                "Windows diagnostics followed a parent junction"
+            );
+            assert!(
+                std::fs::read_link(&dir).unwrap() == link
+                    && std::fs::read(kept.join("settings.json")).unwrap() == bytes,
+                "junction inspection changed its target or source bytes"
+            );
+            for name in ["codex", "grok", "agy", "opencode", "pi", "cursor"] {
+                assert!(
+                    agent(&shown, name) == agent(&changed, name),
+                    "junction failure changed an independent row"
+                );
+            }
+            let bin = root.join("bin");
+            let kept_bin = root.join("bin-before-junction");
+            std::fs::rename(&bin, &kept_bin).unwrap();
+            std::fs::write(kept_bin.join("grok"), b"inert, never executed").unwrap();
+            junction(&bin, &kept_bin, "private launcher junction fixture failed");
+            assert!(
+                native::on_path("grok"),
+                "native CLI lost its local-link launcher"
+            );
+            assert_eq!(
+                native::launch_found(&["grok"]),
+                None,
+                "passive launcher probe followed a junction"
+            );
         }
         std::fs::write(root.join("matrix-complete"), b"passed").unwrap();
     }
