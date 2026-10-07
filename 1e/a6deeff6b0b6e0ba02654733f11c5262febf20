@@ -1,0 +1,34 @@
+src/raw.rs
+  s_b993208c852846::t_c4db6bd42f4c41 2623,2625-2628
+  s_b993208c852846::t_ae8b9fd8a7bd30 2629-2634,2682,2691-2693
+src/consumer/compress.rs
+  s_b993208c852846::t_9510a852ec8885 16-27
+  s_b993208c852846::t_6eac68aae0eff2 42
+src/forget.rs
+  s_b993208c852846::t_08bdd924cd0fc7 402,408,448-468,470,515
+src/worker.rs
+  s_b993208c852846::t_180d3e704e6b6e 2035-2090,2237,2383
+  s_b993208c852846::t_c6b6b326e4c98f 221-231,291-295
+  s_b993208c852846::t_c14cecc813e8de 2091-2153,2156-2157,2170,2200-2201,2203,2217,2392,2394
+  s_b993208c852846::t_cf30accfe138fd 296-297,2154-2155,2158-2169,2171-2199,2202,2204-2216,2218-2236,2238-2249,2353,2355-2371,2373-2382,2384-2391,2393,2395-2417
+src/consumer/rescan.rs
+  s_b993208c852846::t_fed4fb959d431a 43-54,92-95,104
+docs/settings-import.md
+  s_b993208c852846::t_527730fdfe0c18 91-92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1ea6deeff6b0b6e0ba02654733f11c5262febf20",
+  "prompts": {},
+  "sessions": {
+    "s_b993208c852846": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11376-f4a3-7023-a53e-863d60579723",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
