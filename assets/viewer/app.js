@@ -3152,8 +3152,10 @@ function drawSettings() {
   cap.step = 'any';
   cap.inputMode = 'decimal';
   const usd = (v) => new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', maximumFractionDigits: 6 }).format(v);
-  const spending = f.usd_this_month === null ? t('spend_unavailable')
-    : f.usd_this_month === 0 ? t('no_spend') : t('month_spend', { usd: usd(f.usd_this_month) });
+  let spending;
+  if (f.usd_this_month === null) spending = t('spend_unavailable');
+  else if (f.usd_this_month === 0) spending = t('no_spend');
+  else spending = t('month_spend', { usd: usdValue(f.usd_this_month) });
   const geminiOptions = { none: 'gemini_none', 'before-subscriptions': 'gemini_before', 'after-subscriptions': 'gemini_after' };
   const gemini = el('select', null, ...Object.entries(geminiOptions).map(([value, key]) => {
     const option = el('option', null, t(key));

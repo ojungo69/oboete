@@ -1470,10 +1470,10 @@ fn finish_operation(
             outcome.effects.forget_log_warnings = report.problems.len() as u64;
             if !report.problems.is_empty() {
                 progress(&FinishCommit::Effects(outcome.effects.clone()));
-                if matches!(&mode, FinishMode::Cli { .. }) {
-                    for problem in &report.problems {
-                        eprintln!("oboete: forget request log: {problem}");
-                    }
+            }
+            if matches!(&mode, FinishMode::Cli { .. }) {
+                for problem in &report.problems {
+                    eprintln!("oboete: forget request log: {problem}");
                 }
             }
             proof.check(home)?;
