@@ -2690,8 +2690,10 @@ function providerKeyField(provider) {
 }
 
 function usdValue(value) {
-  return value === null || value === undefined ? t('provider_test_unknown_cost')
-    : new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', maximumSignificantDigits: 6 }).format(value);
+  if (value === null || value === undefined) return t('provider_test_unknown_cost');
+  const precision = Math.abs(value) < 1
+    ? { maximumSignificantDigits: 6 } : { maximumFractionDigits: 6 };
+  return new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', ...precision }).format(value);
 }
 
 function providerPreviewMatches(preview, provider, version) {
