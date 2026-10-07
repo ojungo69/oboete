@@ -1,0 +1,19 @@
+src/setup/readiness.rs
+  s_b993208c852846::t_93192c7359dc16 897-899
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0cca77654c06f6c32950f0d53cc3ef16e22bfa6d",
+  "prompts": {},
+  "sessions": {
+    "s_b993208c852846": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11376-f4a3-7023-a53e-863d60579723",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
