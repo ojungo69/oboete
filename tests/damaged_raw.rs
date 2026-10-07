@@ -244,6 +244,7 @@ fn w5b_restore_with_a_temporary_directory_inside_home_uses_the_complete_native_c
         .query_row("SELECT COUNT(*) FROM raw_fts_docsize", [], |r| r.get(0))
         .unwrap();
     assert_eq!(indexed, 3);
+    drop(knowledge);
     let searched = run(&["search", "zebra"], "");
     assert!(String::from_utf8_lossy(&searched.stdout).contains("zebra crossing"));
     assert!(!h.join("providers.db").exists());

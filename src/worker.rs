@@ -164,11 +164,32 @@ fn store_stamp(home: &Path) -> Result<String> {
     ] {
         let path = home.join(name);
         match std::fs::metadata(&path) {
-            Ok(metadata) if !name.ends_with("-wal") || metadata.len() > 32 => states.push((
-                name,
-                crate::db::store_file(&path),
-                crate::migrate::file_version(&path)?,
-            )),
+            Ok(metadata) if !name.ends_with("-wal") || metadata.len() > 32 => {
+                anyhow::ensure!(
+                    metadata.is_file(),
+                    "maintenance store is not a regular file"
+                );
+                #[cfg(test)]
+                if name.ends_with("-wal")
+                    && let Some(before) = BEFORE_WAL_HASH.take()
+                {
+                    before(&path);
+                }
+                let identity = crate::db::store_file(&path);
+                let version = match crate::migrate::file_version(&path) {
+                    Ok(version) => version,
+                    Err(error)
+                        if name.ends_with("-wal")
+                            && error
+                                .downcast_ref::<std::io::Error>()
+                                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                states.push((name, identity, version));
+            }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -277,14 +298,24 @@ fn pass_report(
             // another writer moved meanwhile (a search creating its table in a fresh knowledge.db)
             // fails its first write with SQLITE_BUSY at once, which stopped the worker.
             let tx = k.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let changes = tx.total_changes();
+            let schema: i64 = if report.is_some() {
+                tx.query_row("PRAGMA schema_version", [], |r| r.get(0))?
+            } else {
+                0
+            };
             let at = checkpoint::get_in(&tx, c.checkpoints(), c.name(), &device)?;
             let next = c.step(raw, &tx, &device, at)?;
             if next != at {
                 checkpoint::set_in(&tx, c.checkpoints(), c.name(), &device, next)?;
                 advanced = true;
             }
+            let changed = report.is_some()
+                && (tx.total_changes() != changes
+                    || tx.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0))?
+                        != schema);
             tx.commit()?;
-            if let Some(report) = report.as_deref_mut() {
+            if changed && let Some(report) = report.as_deref_mut() {
                 report.receipt.consumer_commits += 1;
                 (report.committed)(&MaintenanceCommit::Index {
                     consumer: c.name(),
@@ -454,6 +485,7 @@ thread_local! {
     /// A synchronous one-shot fixture action after a rebuild meets a shared status probe.
     static REBUILD_STATUS_BLOCKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_CARRY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_WAL_HASH: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
 /// How long a command waits for a worker to step aside.
@@ -771,30 +803,36 @@ fn serve(
     let asked = crate::backup::take_restore_request(home);
     let before = file_id(std::fs::metadata(home.join("raw.db")));
     // Task 8: a damaged raw.db is restored from the backups, a damaged knowledge.db rebuilt.
-    let stamp = if report.is_some() {
-        Some(store_stamp(home)?)
-    } else {
-        None
-    };
-    let opened = if let Some(report) = report.as_deref_mut() {
-        crate::backup::open_raw_report(
-            home,
-            &mut report.receipt.raw_recovery,
-            holding.command.as_ref(),
-            &mut |stage| (report.committed)(&MaintenanceCommit::Effect { stage }),
-        )
-    } else {
-        crate::backup::open_raw(home)
-    };
-    if let Some(report) = report.as_deref_mut() {
-        report.changed(
-            stamp.as_deref().expect("reported stamp"),
-            &store_stamp(home)?,
-            "stores_changed",
-        );
-    }
+    let opened = (|| {
+        let stamp = if report.is_some() {
+            Some(store_stamp(home)?)
+        } else {
+            None
+        };
+        let opened = if let Some(report) = report.as_deref_mut() {
+            crate::backup::open_raw_report(
+                home,
+                &mut report.receipt.raw_recovery,
+                holding.command.as_ref(),
+                &mut |stage| (report.committed)(&MaintenanceCommit::Effect { stage }),
+            )
+        } else {
+            crate::backup::open_raw(home)
+        };
+        if gone(home, holding) {
+            return Err(Gone.into());
+        }
+        if let Some(report) = report.as_deref_mut() {
+            report.changed(
+                stamp.as_deref().expect("reported stamp"),
+                &store_stamp(home)?,
+                "stores_changed",
+            );
+        }
+        opened
+    })();
     let mut raw = opened.inspect_err(|_| {
-        if asked {
+        if asked && !gone(home, holding) {
             crate::backup::request_restore(home);
         }
     })?;
@@ -1448,15 +1486,20 @@ fn check_preview(
 }
 
 pub fn rebuild(home: &Path) -> Result<()> {
-    rebuild_report(home, None, crate::executable::Role::Worker, &mut |_| {})
-        .map(|_| ())
-        .map_err(MaintenanceFailure::into_cause)
+    rebuild_report(
+        home,
+        None,
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    )
+    .map(|_| ())
+    .map_err(MaintenanceFailure::into_cause)
 }
 
 pub(crate) fn rebuild_report(
     home: &Path,
     expected: Option<&str>,
-    caller: crate::executable::Role,
+    caller: crate::executable::CommandCaller,
     committed: &mut impl FnMut(&MaintenanceCommit),
 ) -> std::result::Result<MaintenanceOutcome, MaintenanceFailure> {
     use crate::backup::{MaintenanceCode as Code, MaintenanceOperation as Operation};
@@ -1590,19 +1633,24 @@ pub(crate) fn rebuild_report(
 
 /// The CLI's complete restore: one admission, mandatory drain even on restore failure.
 pub fn restore(home: &Path) -> Result<String> {
-    restore_report(home, None, crate::executable::Role::Worker, &mut |_| {})
-        .map(|outcome| {
-            outcome
-                .restore
-                .expect("successful restore has a receipt")
-                .note
-        })
-        .map_err(MaintenanceFailure::into_cause)
+    restore_report(
+        home,
+        None,
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    )
+    .map(|outcome| {
+        outcome
+            .restore
+            .expect("successful restore has a receipt")
+            .note
+    })
+    .map_err(MaintenanceFailure::into_cause)
 }
 pub(crate) fn restore_report(
     home: &Path,
     expected: Option<&str>,
-    caller: crate::executable::Role,
+    caller: crate::executable::CommandCaller,
     committed: &mut impl FnMut(&MaintenanceCommit),
 ) -> std::result::Result<MaintenanceOutcome, MaintenanceFailure> {
     use crate::backup::{MaintenanceCode as Code, MaintenanceOperation as Operation};
@@ -1693,6 +1741,12 @@ fn set_aside_report(
 ) -> Result<Vec<std::path::PathBuf>> {
     use anyhow::Context;
     crate::backup::before_swap();
+    if let Some(guard) = guard {
+        guard.check(home)?;
+    }
+    if let Some(consent) = consent {
+        consent.check_logs()?;
+    }
     let _swap = crate::raw::lock_for_swap(home)?;
     if let Some(guard) = guard {
         guard.check(home)?;
@@ -1833,6 +1887,254 @@ mod tests {
     use crate::knowledge;
     use crate::raw;
 
+    #[test]
+    fn w5b_a_failed_store_inspection_keeps_the_restore_request() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        drop(raw::open(p).unwrap());
+        std::fs::create_dir(p.join("knowledge.db")).unwrap();
+        crate::backup::request_restore(p);
+        let failure = restore_report(
+            p,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(failure.outcome.index.state, IndexState::Failed);
+        assert!(failure.index_cause.is_some());
+        assert!(
+            crate::backup::restore_requested(p),
+            "inspection lost the pending restore request"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn w5b_a_rejected_home_does_not_receive_a_restore_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("memory");
+        let replacement = home.with_extension("replacement");
+        std::fs::create_dir(&home).unwrap();
+        let mut raw = raw::open(&home).unwrap();
+        raw.append(&raw::test_event("synthetic restore retry"))
+            .unwrap();
+        let wal = std::fs::read(home.join("raw.db-wal")).unwrap();
+        drop(raw);
+        std::fs::write(home.join("raw.db-wal"), wal).unwrap();
+        crate::backup::request_restore(&home);
+        std::fs::create_dir_all(replacement.join("state")).unwrap();
+        std::fs::write(replacement.join("state/worker.lock"), "other home").unwrap();
+        std::fs::write(replacement.join("canary"), "synthetic unrelated home").unwrap();
+        BEFORE_WAL_HASH.set(Some(|path| {
+            let home = path.parent().unwrap().to_owned();
+            let held = raw::lock_for_swap(&home).unwrap();
+            raw::SWAP_BLOCKED.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    std::fs::rename(&home, home.with_extension("retired")).unwrap();
+                    std::fs::rename(home.with_extension("replacement"), &home).unwrap();
+                    drop(held);
+                }));
+            });
+        }));
+        let failure = restore_report(
+            &home,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        BEFORE_WAL_HASH.set(None);
+        assert_eq!(failure.outcome.index.state, IndexState::Failed);
+        assert!(
+            !crate::backup::restore_requested(&home),
+            "the rejected home got a retry marker"
+        );
+        assert!(!home.join("raw.lock").exists());
+        assert!(!home.join("raw.db").exists());
+        assert_eq!(
+            std::fs::read(home.join("canary")).unwrap(),
+            b"synthetic unrelated home"
+        );
+    }
+
+    #[test]
+    fn w5b_consumer_progress_counts_durable_changes_and_not_empty_transactions() {
+        struct ReceiptConsumer(&'static str);
+        impl Consumer for ReceiptConsumer {
+            fn name(&self) -> &'static str {
+                "receipt-fixture"
+            }
+            fn top(&self, _: &Raw, _: &str) -> Result<i64> {
+                Ok(i64::from(self.0 == "checkpoint"))
+            }
+            fn step(&mut self, _: &Raw, k: &Connection, _: &str, after: i64) -> Result<i64> {
+                match self.0 {
+                    "checkpoint" => return Ok(1),
+                    "row" => {
+                        k.execute("INSERT INTO receipt_rows VALUES(73)", [])?;
+                    }
+                    "schema" => {
+                        k.execute("CREATE TABLE receipt_schema(value)", [])?;
+                    }
+                    _ => {}
+                }
+                Ok(after)
+            }
+            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+                Ok(())
+            }
+        }
+        for (mode, expected) in [("noop", 0), ("checkpoint", 1), ("row", 1), ("schema", 1)] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            raw::open(p)
+                .unwrap()
+                .append(&raw::test_event("synthetic receipt checkpoint"))
+                .unwrap();
+            knowledge::open(p)
+                .unwrap()
+                .execute("CREATE TABLE receipt_rows(value)", [])
+                .unwrap();
+            let mut receipt = IndexReceipt::default();
+            let mut commits = Vec::new();
+            {
+                let mut callback = |event: &MaintenanceCommit| commits.push(event.clone());
+                let mut report = IndexReport {
+                    receipt: &mut receipt,
+                    committed: &mut callback,
+                };
+                run_holding_report(
+                    p,
+                    0,
+                    vec![Box::new(ReceiptConsumer(mode))],
+                    || {},
+                    None,
+                    Phases::default(),
+                    &mut Some(&mut report),
+                )
+                .unwrap();
+            }
+            assert_eq!(receipt.consumer_commits, expected, "{mode}");
+            assert_eq!(
+                commits
+                    .iter()
+                    .filter(|event| matches!(event, MaintenanceCommit::Index { .. }))
+                    .count(),
+                expected as usize,
+                "{mode}"
+            );
+            let k = knowledge::open(p).unwrap();
+            if mode == "checkpoint" {
+                let raw = raw::open(p).unwrap();
+                assert_eq!(
+                    checkpoint::get_in(&k, checkpoint::SEQS, "receipt-fixture", raw.device())
+                        .unwrap(),
+                    1
+                );
+            } else if mode == "row" {
+                assert_eq!(
+                    k.query_row("SELECT value FROM receipt_rows", [], |r| r.get::<_, i64>(0))
+                        .unwrap(),
+                    73
+                );
+            } else if mode == "schema" {
+                assert_eq!(
+                    k.query_row(
+                        "SELECT count(*) FROM sqlite_master WHERE name='receipt_schema'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn w5b_a_disappearing_wal_does_not_abort_the_required_restore_drain() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("synthetic disappearing WAL"))
+            .unwrap();
+        let wal = std::fs::read(p.join("raw.db-wal")).unwrap();
+        assert!(wal.len() > 32);
+        drop(raw);
+        std::fs::write(p.join("raw.db-wal"), wal).unwrap();
+        BEFORE_WAL_HASH.set(Some(|path| std::fs::remove_file(path).unwrap()));
+        let failure = restore_report(
+            p,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        BEFORE_WAL_HASH.set(None);
+        assert_eq!(failure.outcome.index.state, IndexState::Complete);
+        assert!(failure.index_cause.is_none());
+        assert_eq!(
+            crate::search::raw(p, "disappearing WAL", None, 5)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn w5b_viewer_commands_require_a_readable_original_view_lock() {
+        for operation in ["rebuild", "restore"] {
+            for unusable in ["missing", "directory", "unreadable"] {
+                let home = tempfile::tempdir().unwrap();
+                let p = home.path();
+                drop(raw::open(p).unwrap());
+                run_once(p).unwrap();
+                let lock = p.join("state/view.lock");
+                let viewer = std::fs::File::create(&lock).unwrap();
+                let identity = file_id(viewer.metadata()).unwrap();
+                if unusable != "unreadable" {
+                    std::fs::remove_file(&lock).unwrap();
+                }
+                if unusable == "directory" {
+                    std::fs::create_dir(&lock).unwrap();
+                } else if unusable == "unreadable" {
+                    std::fs::write(&lock, "").unwrap();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o0))
+                            .unwrap();
+                    }
+                }
+                let generation = std::fs::read(p.join("state/worker-gen")).unwrap();
+                let result = if operation == "rebuild" {
+                    rebuild_report(
+                        p,
+                        None,
+                        crate::executable::CommandCaller::Viewer(identity),
+                        &mut |_| {},
+                    )
+                } else {
+                    restore_report(
+                        p,
+                        None,
+                        crate::executable::CommandCaller::Viewer(identity),
+                        &mut |_| {},
+                    )
+                };
+                let failure = result.expect_err("viewer without its home proof was admitted");
+                assert!(!failure.outcome.committed(), "{operation}: {unusable}");
+                assert_eq!(
+                    std::fs::read(p.join("state/worker-gen")).unwrap(),
+                    generation,
+                    "{operation}: {unusable} borrowed the worker lock"
+                );
+            }
+        }
+    }
+
     // This R3/R9 proof needs Unix device/inode identity and renaming a home with open locks.
     // Windows rejects that fixture's rename before the rollback guard is reached.
     #[cfg(unix)]
@@ -1863,7 +2165,7 @@ mod tests {
         let failed = rebuild_report(
             &home,
             Some(&shown.key),
-            crate::executable::Role::Worker,
+            crate::executable::CommandCaller::Worker,
             &mut |_| {},
         )
         .unwrap_err();
@@ -1908,7 +2210,7 @@ mod tests {
         let result = rebuild_report(
             &home,
             Some(&shown.key),
-            crate::executable::Role::Viewer,
+            crate::executable::CommandCaller::Viewer(original.unwrap()),
             &mut |_| {},
         );
         assert!(result.is_ok(), "borrowed viewer command: {result:?}");
@@ -1925,7 +2227,7 @@ mod tests {
         let failed = rebuild_report(
             &home,
             Some(&shown.key),
-            crate::executable::Role::Viewer,
+            crate::executable::CommandCaller::Viewer(original.unwrap()),
             &mut |_| {},
         )
         .unwrap_err();
@@ -1985,9 +2287,12 @@ mod tests {
             .append(&raw::test_event("synthetic pending FTS record"))
             .unwrap();
         let mut commits = Vec::new();
-        let failure = restore_report(p, None, crate::executable::Role::Worker, &mut |event| {
-            commits.push(event.clone())
-        })
+        let failure = restore_report(
+            p,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |event| commits.push(event.clone()),
+        )
         .unwrap_err();
         assert!(
             failure
@@ -1998,7 +2303,7 @@ mod tests {
         assert_eq!(failure.outcome.index.state, IndexState::Complete);
         assert!(failure.outcome.index.stores_changed);
         assert!(failure.outcome.committed());
-        assert!(failure.outcome.index.consumer_commits >= 10);
+        assert!(failure.outcome.index.consumer_commits > 0);
         assert!(commits.iter().any(|event| matches!(
             event,
             MaintenanceCommit::Index {
@@ -2026,7 +2331,7 @@ mod tests {
         let failure = restore_report(
             home.path(),
             None,
-            crate::executable::Role::Worker,
+            crate::executable::CommandCaller::Worker,
             &mut |_| {},
         )
         .unwrap_err();
@@ -2062,7 +2367,7 @@ mod tests {
             let result = rebuild_report(
                 p,
                 Some(&shown.key),
-                crate::executable::Role::Worker,
+                crate::executable::CommandCaller::Worker,
                 &mut |_| {},
             );
             crate::backup::FAIL_AFTER.set(None);
@@ -2107,7 +2412,7 @@ mod tests {
         let failed = rebuild_report(
             p,
             Some(&shown.key),
-            crate::executable::Role::Worker,
+            crate::executable::CommandCaller::Worker,
             &mut |_| {},
         )
         .unwrap_err();

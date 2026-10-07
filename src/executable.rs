@@ -22,12 +22,42 @@ pub(crate) enum Role {
     Viewer,
 }
 
+/// Resident commands keep the identity of the viewer's actual held lock.
+#[derive(Clone, Copy)]
+pub(crate) enum CommandCaller {
+    Worker,
+    Viewer((u64, u64)),
+}
+
 impl Role {
     fn lock(self) -> &'static str {
         match self {
             Self::Worker => "worker.lock",
             Self::Viewer => "view.lock",
         }
+    }
+
+    fn identity(self, home: &Path) -> std::io::Result<crate::worker::FileId> {
+        let path = home.join("state").join(self.lock());
+        let metadata = if self == Self::Viewer {
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::custom_flags(
+                &mut options,
+                libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            );
+            let metadata = options.open(path)?.metadata()?;
+            if !metadata.is_file() {
+                return Err(std::io::Error::other(
+                    "the viewer's home proof is not a file",
+                ));
+            }
+            Ok(metadata)
+        } else {
+            std::fs::metadata(path)
+        };
+        Ok(crate::worker::file_id(metadata))
     }
 }
 
@@ -124,26 +154,35 @@ pub(crate) struct CommandHome {
     worker: crate::worker::FileId,
 }
 impl CommandHome {
-    pub(crate) fn new(home: &Path, role: Role) -> std::io::Result<Self> {
+    pub(crate) fn new(home: &Path, caller: CommandCaller) -> std::io::Result<Self> {
+        let (role, pinned) = match caller {
+            CommandCaller::Worker => (Role::Worker, None),
+            CommandCaller::Viewer(identity) => (Role::Viewer, Some(identity)),
+        };
         check_home(home, Some(role))?;
+        let original = role.identity(home)?;
+        check_lock(Some(role), original)?;
+        if pinned.is_some_and(|identity| original != Some(identity)) {
+            return Err(std::io::Error::other(
+                "the maintenance caller's home changed",
+            ));
+        }
         Ok(Self {
             role,
-            original: expected(Some(role))?.or_else(|| {
-                crate::worker::file_id(std::fs::metadata(home.join("state").join(role.lock())))
-            }),
+            original: pinned.or(expected(Some(role))?).or(original),
             worker: None,
         })
     }
     pub(crate) fn check(&self, home: &Path) -> std::io::Result<()> {
         check_home(home, Some(self.role))?;
-        for (name, expected) in [
-            (self.role.lock(), self.original),
-            ("worker.lock", self.worker),
+        for (observed, expected) in [
+            (self.role.identity(home)?, self.original),
+            (
+                crate::worker::file_id(std::fs::metadata(home.join("state/worker.lock"))),
+                self.worker,
+            ),
         ] {
-            if expected.is_some()
-                && crate::worker::file_id(std::fs::metadata(home.join("state").join(name)))
-                    != expected
-            {
+            if expected.is_some() && observed != expected {
                 return Err(std::io::Error::other(
                     "the maintenance caller's home changed",
                 ));

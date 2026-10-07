@@ -843,6 +843,11 @@ impl std::error::Error for Restoring {}
 const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 const SWAP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SWAP_BLOCKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Task 8: every open of raw.db holds `<home>/raw.lock` shared; a restore holds it exclusively
 /// while it moves the damaged file aside and renames the rebuilt one in, so no writer keeps the
 /// old file across the swap and loses its event there.
@@ -873,6 +878,10 @@ fn wait_for_swap(
         match tried {
             Ok(()) => return Ok(f),
             Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                #[cfg(test)]
+                if let Some(blocked) = SWAP_BLOCKED.with(|hook| hook.borrow_mut().take()) {
+                    blocked();
+                }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(std::fs::TryLockError::WouldBlock) if exclusive => anyhow::bail!(

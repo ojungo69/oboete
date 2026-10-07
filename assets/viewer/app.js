@@ -1297,7 +1297,7 @@ const TEXT = {
   maintenance_old_knowledge_kept: ["Previous search files are preserved for recovery.", "復旧確認に使えるよう、以前の検索用保存ファイルを保持しています。"],
   maintenance_stopped_restore_finished: ["A previously interrupted restore was completed before continuing.", "続行する前に、以前中断した復元を完了しました。"],
   maintenance_quarantined_records: ["Previous record files preserved: {count}.", "保持した以前の記録ファイル：{count}個。"],
-  maintenance_quarantined_segments: ["Damaged backup files preserved: {count}.", "保持した壊れたバックアップファイル：{count}個。"],
+  maintenance_quarantined_segments: ["Backup segments preserved: {count}.", "保持したバックアップ区間：{count}。"],
   maintenance_raw_recovery: ["Saved records were also recovered from backup.", "保存記録のバックアップからの復元も行いました。"],
   maintenance_native_progress: ["Stage: {stage}.", "進行段階：{stage}。"],
   maintenance_index_progress: ["Saved update: {consumer}; processed position {checkpoint} ({unit}). This is a checkpoint, not a count of new records.", "保存した更新：{consumer}、処理済み位置{checkpoint}（{unit}）。新しく作った記録の件数ではありません。"],
@@ -1635,7 +1635,7 @@ function maintenanceSection(f) {
     d.status && !d.status.available ? el('p','desc',t('maintenance_no_receipt')) : null,
     refresh,d.operationId && !d.status?.active ? another : null,
     el('p','desc',t(native?'maintenance_native_settings_hint':'maintenance_settings_hint')),
-    el('p','desc',t('maintenance_other_unavailable')));
+    native ? null : el('p','desc',t('maintenance_other_unavailable')));
 }
 function maintenancePreview(p) {
   const rows=[];

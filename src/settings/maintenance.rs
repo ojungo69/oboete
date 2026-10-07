@@ -196,7 +196,12 @@ impl Maintenance {
             }
         }
     }
-    pub(crate) fn start(&self, home: &Path, body: &[u8]) -> Result<Value, Refusal> {
+    pub(crate) fn start(
+        &self,
+        caller: executable::CommandCaller,
+        home: &Path,
+        body: &[u8],
+    ) -> Result<Value, Refusal> {
         let request: StartRequest =
             serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
         request.operation.validate()?;
@@ -254,13 +259,13 @@ impl Maintenance {
                     Operation::Rebuild { .. } => worker::rebuild_report(
                         home,
                         Some(&request.preview_key),
-                        executable::Role::Viewer,
+                        caller,
                         &mut committed,
                     ),
                     _ => worker::restore_report(
                         home,
                         Some(&request.preview_key),
-                        executable::Role::Viewer,
+                        caller,
                         &mut committed,
                     ),
                 };
@@ -482,7 +487,9 @@ mod tests {
             .unwrap();
         let body = serde_json::to_vec(&json!({"operation":operation,"preview_key":preview["preview_key"],"operation_id":"1".repeat(64),"confirmed":true})).unwrap();
         assert_eq!(
-            maintenance.start(&home, &body).unwrap()["last"]["phase"],
+            maintenance
+                .start(executable::CommandCaller::Worker, &home, &body)
+                .unwrap()["last"]["phase"],
             "complete"
         );
         crate::worker::run_once(&home).unwrap();
@@ -505,7 +512,9 @@ mod tests {
             assert_eq!(preview["hybrid_ready"], false);
             assert_eq!(preview["raw"]["records"], 8);
             let body = serde_json::to_vec(&json!({"operation":operation,"preview_key":preview["preview_key"],"operation_id":if index==0 {"2".repeat(64)} else {"3".repeat(64)},"confirmed":true})).unwrap();
-            let receipt = maintenance.start(&home, &body).unwrap();
+            let receipt = maintenance
+                .start(executable::CommandCaller::Worker, &home, &body)
+                .unwrap();
             assert_eq!(receipt["last"]["kind"], kind);
             assert_eq!(receipt["last"]["phase"], "complete");
             assert_eq!(
@@ -513,7 +522,12 @@ mod tests {
                 "complete"
             );
             assert_eq!(receipt["last"]["result"]["outcome"]["hybrid_ready"], false);
-            assert_eq!(maintenance.start(&home, &body).unwrap(), receipt);
+            assert_eq!(
+                maintenance
+                    .start(executable::CommandCaller::Worker, &home, &body)
+                    .unwrap(),
+                receipt
+            );
         }
     }
 
@@ -539,7 +553,9 @@ mod tests {
             )
             .unwrap();
             let request = serde_json::to_vec(&json!({"operation":operation,"preview_key":preview["preview_key"],"operation_id":if kind=="rebuild" {"4".repeat(64)} else {"5".repeat(64)},"confirmed":true})).unwrap();
-            let receipt = maintenance.start(&home, &request).unwrap();
+            let receipt = maintenance
+                .start(executable::CommandCaller::Worker, &home, &request)
+                .unwrap();
             assert_eq!(receipt["last"]["phase"], "failed");
             assert_eq!(receipt["last"]["result"]["code"], "maintenance_stale");
             assert_eq!(receipt["last"]["committed"], false);
@@ -584,7 +600,9 @@ mod tests {
             "preview_key":preview["preview_key"],"operation_id":"a".repeat(64),
             "confirmed":true}))
         .unwrap();
-        let result = maintenance.start(&home, &request).unwrap();
+        let result = maintenance
+            .start(executable::CommandCaller::Worker, &home, &request)
+            .unwrap();
         assert_eq!(result["last"]["phase"], "complete");
         assert_eq!(
             result["last"]["result"]["outcome"]["transcripts"]["codex"]["events"],
@@ -599,7 +617,12 @@ mod tests {
         drop(raw);
         // A replay must return its receipt without reparsing a now-unreadable source.
         std::fs::write(source, "not a transcript").unwrap();
-        assert_eq!(maintenance.start(&home, &request).unwrap(), result);
+        assert_eq!(
+            maintenance
+                .start(executable::CommandCaller::Worker, &home, &request)
+                .unwrap(),
+            result
+        );
         let raw = crate::raw::read_only(&home).unwrap().unwrap();
         let after: i64 = raw
             .conn
@@ -627,7 +650,9 @@ mod tests {
             "preview_key":preview["preview_key"],"operation_id":"b".repeat(64),
             "confirmed":true}))
         .unwrap();
-        let result = maintenance.start(&home, &request).unwrap();
+        let result = maintenance
+            .start(executable::CommandCaller::Worker, &home, &request)
+            .unwrap();
         assert_eq!(result["last"]["phase"], "failed");
         assert_eq!(result["last"]["result"]["code"], "maintenance_stale");
         assert_eq!(result["last"]["committed"], false);
@@ -680,7 +705,7 @@ mod tests {
             // The two preview parses and first execution parse precede the real first commit.
             panic_after_parse(if earlier_commit { 3 } else { 0 });
             let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                maintenance.start(&home, &original)
+                maintenance.start(executable::CommandCaller::Worker, &home, &original)
             }));
             assert!(unwind.is_err());
             let shown = maintenance.show();
@@ -693,10 +718,19 @@ mod tests {
                 shown["last"]["progress"]["codex"]["events"],
                 if earlier_commit { 8 } else { 0 }
             );
-            assert_eq!(maintenance.start(&home, &original).unwrap(), shown);
+            assert_eq!(
+                maintenance
+                    .start(executable::CommandCaller::Worker, &home, &original)
+                    .unwrap(),
+                shown
+            );
             let fresh = maintenance.preview(&home, &preview_request).unwrap();
             let finished = maintenance
-                .start(&home, &request(&fresh["preview_key"], 'd'))
+                .start(
+                    executable::CommandCaller::Worker,
+                    &home,
+                    &request(&fresh["preview_key"], 'd'),
+                )
                 .unwrap();
             assert_eq!(finished["last"]["phase"], "complete");
             assert_eq!(finished["last"]["progress"]["codex"]["events"], 8);
@@ -727,14 +761,18 @@ mod tests {
             )
             .unwrap()
         };
-        maintenance.start(&home, &prepare('c')).unwrap();
+        maintenance
+            .start(executable::CommandCaller::Worker, &home, &prepare('c'))
+            .unwrap();
         let old_id = "c".repeat(64);
         // Delay the first normal guard drop until another receipt evicts its ID.
         let old = ActiveRun {
             maintenance: &maintenance,
             id: &old_id,
         };
-        maintenance.start(&home, &prepare('d')).unwrap();
+        maintenance
+            .start(executable::CommandCaller::Worker, &home, &prepare('d'))
+            .unwrap();
         let reused = prepare('c');
         let (ready, observed) = std::sync::mpsc::channel();
         let (release, waiting) = std::sync::mpsc::channel();
@@ -746,7 +784,7 @@ mod tests {
                     waiting.recv().unwrap();
                 }));
             });
-            running.start(&home, &reused)
+            running.start(executable::CommandCaller::Worker, &home, &reused)
         });
         observed
             .recv_timeout(std::time::Duration::from_secs(20))
