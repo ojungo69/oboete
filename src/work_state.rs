@@ -356,8 +356,16 @@ impl Raw {
             }
         }
         let runs = redact::merged_runs(runs);
-        let shown =
-            |r: &Range<usize>| gated(&redact::masked_part(&self.text, r.clone(), &runs), rules);
+        let shown = |r: &Range<usize>| {
+            // Only the runs that reach into the line, found in the sorted runs: applying all of
+            // them to every line is quadratic (Codex's security review of #408).
+            let from = runs.partition_point(|&(_, e)| e <= r.start);
+            let to = from + runs[from..].partition_point(|&(s, _)| s < r.end);
+            gated(
+                &redact::masked_part(&self.text, r.clone(), &runs[from..to]),
+                rules,
+            )
+        };
         Some(self.lines.iter().map(shown).collect())
     }
 }

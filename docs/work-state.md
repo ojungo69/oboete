@@ -205,6 +205,8 @@ with their times, before claude-mem is removed.
 - Every open line is gated before the cut, so the time grows with the open lines (about 50 µs a
   line: 50 ms for 1,000), and lines the gate finds too much in (`redact::hidden`'s limits) are
   shown as a mask alone, a session start's as the count line.
+- The egress gate trims what it scans, so a rule added later that is anchored on a value's outer
+  spaces does not match it on the way out, where the capture gate's would (#415, every egress path).
 - A value written under an older name of its list or task, which a rule added later masks alike, is
   read beside the latest name: a rule that both masks the names and needs the older one around the
   value can miss it (#414).
