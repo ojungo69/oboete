@@ -1303,10 +1303,16 @@ fn call(
                     extra.insert("max_tokens".into(), cap.into());
                 }
             }
-            // The Messages API requires `max_tokens`: what the entry may send, when `extra` names
-            // none (`Provider::declared_output`).
-            if *api == Api::Anthropic && !extra.contains_key("max_tokens") {
-                extra.insert("max_tokens".into(), limits.max_output_tokens.into());
+            // The Messages API requires `max_tokens` and knows no `max_completion_tokens`: an
+            // entry's `max_completion_tokens` is sent as its `max_tokens` (what
+            // `Provider::declared_output` counted), else what the entry may send (CodeRabbit on
+            // #409).
+            if *api == Api::Anthropic {
+                let completion = extra.remove("max_completion_tokens");
+                if !extra.contains_key("max_tokens") {
+                    let n = completion.unwrap_or_else(|| limits.max_output_tokens.into());
+                    extra.insert("max_tokens".into(), n);
+                }
             }
             http_call(
                 *api,
@@ -6870,6 +6876,27 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             "",
         );
         assert_eq!(e.cool_until, None);
+    }
+
+    /// CodeRabbit on #409: an unpriced Messages entry's `max_completion_tokens`, which the API does
+    /// not know, is sent as its `max_tokens`, the output `declared_output` counted.
+    #[test]
+    fn a_messages_entry_sends_max_completion_tokens_as_max_tokens() {
+        let answer = json!({"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "{\"summary\":\"s\"}"}],
+            "usage": {"input_tokens": 12, "output_tokens": 4}});
+        let (url, request) = serve_once(answer.to_string().into_bytes(), "");
+        let mut p = stub(url);
+        if let Provider::Openai { api, extra, .. } = &mut p {
+            *api = Api::Anthropic;
+            extra.insert("max_completion_tokens".into(), 900.into());
+        }
+        assert_eq!(p.declared_output(), 900);
+        call(&p, "p", &json!({"type": "object"}), None).unwrap();
+        let req = request.recv().unwrap();
+        let body: Value = serde_json::from_str(req.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["max_tokens"], 900);
+        assert!(body.get("max_completion_tokens").is_none(), "{body}");
     }
 
     /// The connection test of a Messages entry: the fixed probe at its own endpoint, with the

@@ -3902,11 +3902,12 @@ function providerLimitGrid(draft, unsupported) {
   const grid = el('div', 'grid');
   const outputField = el('label', 'field');
   const syncOutput = () => {
-    // Normal dispatch enforces this maximum only for priced HTTP. Keep other entries' saved
-    // estimates in the typed draft without offering an ineffective generation-limit control.
-    const paidHttp = draft.kind === 'openai'
-      && (Number(draft.limits.usd_per_mtok_in) > 0 || Number(draft.limits.usd_per_mtok_out) > 0);
-    if (paidHttp) {
+    // Normal dispatch enforces this maximum for priced HTTP and for every Anthropic Messages entry,
+    // which always sends it. Keep other entries' saved estimates in the typed draft without
+    // offering an ineffective generation-limit control.
+    const capped = draft.kind === 'openai' && (draft.api === 'anthropic'
+      || Number(draft.limits.usd_per_mtok_in) > 0 || Number(draft.limits.usd_per_mtok_out) > 0);
+    if (capped) {
       if (outputField.parentElement !== grid) grid.append(outputField);
     } else outputField.remove();
   };
@@ -3926,6 +3927,7 @@ function providerLimitGrid(draft, unsupported) {
     if (key !== 'max_output_tokens') grid.append(label);
   }
   syncOutput();
+  grid.syncOutput = syncOutput;
   return grid;
 }
 
@@ -3949,10 +3951,13 @@ function providerEditor(draft, provider, card) {
   api.value = draft.api;
   api.dataset.field = 'providers.api';
   api.disabled = Boolean(unsupported);
-  api.addEventListener('change', () => { draft.api = api.value; });
+  api.addEventListener('change', () => { draft.api = api.value; grid.syncOutput(); });
   // An endpoint on Anthropic's own host preselects its API; the choice stays the user's.
   endpoint?.querySelector('input').addEventListener('input', () => {
-    if (/^https:\/\/api\.anthropic\.com(\/|$)/i.test(draft.base_url.trim())) api.value = draft.api = 'anthropic';
+    if (/^https:\/\/api\.anthropic\.com(\/|$)/i.test(draft.base_url.trim())) {
+      api.value = draft.api = 'anthropic';
+      grid.syncOutput();
+    }
   });
   const main = el('div', 'grid', field('name', 'provider_name'), endpoint,
     http ? el('label', 'field', el('span', null, t('provider_api')), api, note(t('provider_api_desc'))) : null,

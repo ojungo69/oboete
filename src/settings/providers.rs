@@ -174,6 +174,7 @@ impl Draft {
                     timeout_s: timeout,
                     subscription: sub,
                     limits: cap,
+                    extra: more,
                     ..
                 } = &mut result
                 else {
@@ -188,6 +189,11 @@ impl Draft {
                 n.clone_from(name);
                 *on = *enabled;
                 url.clone_from(base_url);
+                // An entry's `extra` speaks its API: one switched to the other API sends none of
+                // it (Codex on #409: OpenAI-only fields are refused by the Messages API).
+                if *speaks != *api {
+                    more.clear();
+                }
                 *speaks = *api;
                 m.clone_from(model);
                 *budget = *daily_budget;
@@ -392,6 +398,8 @@ fn edit(table: &mut dyn TableLike, old: &Provider, new: &Provider) -> Result<(),
         "daily_budget",
         "timeout_s",
         "subscription",
+        // Only ever cleared here, when the API changes (`Draft`): the page shows no extra.
+        "extra",
     ];
     for key in fields {
         let a = old_table.get(key);
@@ -1659,6 +1667,39 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
             changed
+        );
+    }
+
+    /// Codex on #409: an entry switched to the other API keeps none of its `extra`, which speaks
+    /// the API it had; an edit that keeps the API keeps it.
+    #[test]
+    fn switching_an_entrys_api_drops_its_extra() {
+        let home = home(
+            "[[providers]]\nkind = \"openai\"\nname = \"proxy\"\n\
+             base_url = \"https://example.invalid/v1\"\nmodel = \"synthetic\"\n\
+             extra = { chat_template_kwargs = { enable_thinking = false } }\n",
+        );
+        let selector = show(home.path())["providers"][0]["selector"].clone();
+        let text = || std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        let entry = http("proxy", "https://example.invalid/v1");
+        send(
+            home.path(),
+            json!({"op": "edit", "selector": selector, "entry": entry}),
+        )
+        .unwrap();
+        assert!(text().contains("chat_template_kwargs"), "{}", text());
+        let selector = show(home.path())["providers"][0]["selector"].clone();
+        let mut entry = http("proxy", "https://example.invalid/v1");
+        entry["api"] = json!("anthropic");
+        send(
+            home.path(),
+            json!({"op": "edit", "selector": selector, "entry": entry}),
+        )
+        .unwrap();
+        assert!(
+            text().contains("api = \"anthropic\"") && !text().contains("chat_template_kwargs"),
+            "{}",
+            text()
         );
     }
 
