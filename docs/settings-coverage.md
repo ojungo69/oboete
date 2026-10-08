@@ -79,7 +79,7 @@ left with "—" there.
 | Finish v1 migration and remove old files | 7.4, 7.5 | Read-only exact-target preview, final-import/deletion consent, causal counts and inspection of partial/uncertain results | shared CLI/HTTP `migrate::finish_report` | final import before confirmed deletion | all; pinned resident caller on Linux | `w5c_` pure/WAL/link/FIFO/backup/identity/self-stale/partial tests; actual HTTP complete/replay/current-rule label gates and permission-failure receipt; JA/EN browser complete/partial and saved-rule display journeys | W5C |
 | Update check and update | 7.3 | — | `oboete update` (milestone 7) | when confirmed | all | — | after the switch, with milestone 7; W5 shows it as not built |
 | The resident worker and viewer: on or off | 1.8, A111 | page; setup fills absent defaults | `[worker] resident` | on: next hook or `oboete view`; off: worker idle, viewer minute tick without requests | Linux/WSL | `settings.rs` `resident_settings_are_read_only_until_the_visible_choice_is_saved`, `resident_saves_reject_wrong_types_stale_versions_and_invalid_runtime_settings`, `a_settings_save_waits_for_the_other_config_writer_then_refuses_its_stale_body`; `migrate.rs` `migrated_settings_wait_for_the_config_writer_and_keep_its_choice`; `tests/resident_defaults.rs`; native browser first-save/off/reload | resident slice 5 |
-| Resident page port and a new page token | 1.8, 6.6 | CLI; page — | `[view] port`, `oboete view --new-token` | port: viewer's next start; token: at once | Linux/WSL; other OS token storage waits for #281 | resident.md slice 3 CLI tests; page — | remaining W6 |
+| Resident page port and a new page token | 1.8, 6.6 | page: the port with its saved value; on the resident page a confirmed new token; on a foreground run of a home saved resident, starting the resident page (R7) | `[view] port` through the shared save; `view::rotate`, shared with `oboete view --new-token`; `bring_up`, shared with `oboete view` | resident page: at once, the page following the viewer to its new address; a foreground run: the resident viewer's next start, or at once with its start button, after which the run ends | Linux/WSL; other OS token storage waits for #281 | `settings.rs` `w6p_view_port_save_is_shared_and_older_payloads_preserve_it`, `w6p_invalid_or_stale_view_ports_keep_the_saved_configuration`; `view.rs` `w6p_a_saved_port_moves_the_resident_page_there_at_once`, `w6p_a_new_token_moves_the_resident_page_and_ends_the_old_one`, `w6p_a_foreground_run_keeps_its_token_and_its_port`, `w6p_a_foreground_run_hands_its_page_to_the_resident_viewer_and_ends`, and the CLI's `a_new_token_*`; `testdata/viewer-readiness/test.mjs`'s page-address part | W6 port and token |
 
 ### Sync and devices (after the switch, milestone 6)
 
@@ -236,7 +236,7 @@ cloud starts from a page view or a save.
   consent. Private seven-agent HTTP checks, injected CLI failure/retarget/busy controls and a
   resident API lifecycle test cover these boundaries; browser recovery injections are distinct
   from actual native commits. Guided presets/recovery are the next vertical slice below;
-  port/token activation remains subsequent W6 work. #94 remains open.
+  port/token activation is the paragraph below. #94 remains open.
 
   The guided curation tiers update only the existing draft curation switch, chain on/off and
   paid monthly cap before explicit Save. None leaves the chain intact and stops new summaries;
@@ -265,6 +265,30 @@ cloud starts from a page view or a save.
   records and agent files retained. A separately labelled browser transport failure exercises
   first-listing/503 Retry with exactly one all-repository search, not a native data commit.
   Shipping also requires the full checks, final-head CI and two-axis/external reviews.
+
+  The page's address. The port is a field of the ordinary save. On the resident page a saved port
+  other than the viewer's own is bound before anything is written (a port it cannot bind is
+  refused, `port_unavailable`), and the viewer moves onto it in the same process: its accept loop
+  takes the new listener and closes the old one, so the old address stops answering. The move
+  comes with a new token, written under `state/config.lock` as `rotate` writes one, so the old
+  bookmark, whose port another program may take now, holds a token that no longer works; the page
+  follows the address in the save's `view_runtime`. A new token is `oboete view
+  --new-token`'s two steps (`rotate`: the next free port, saved, then the token file), with the
+  port's listener kept and served at once; the answer is the new address, and the page goes on only
+  to a `127.0.0.1` address with a 32-character token. A foreground run's token belongs to its run
+  (spec 6.6), so it has none to replace, and a port saved there is the resident viewer's: when
+  that port differs from the saved one and a token file exists, the file gets a new token under
+  the same hold, since the resident viewer comes back on that port at its tick. When its
+  home is saved resident, the run's page offers R7's bring-up: the worker and the resident viewer
+  start as `oboete view` starts them, the answer is the resident address with the file's token,
+  and the run takes no more connections and ends once that answer is sent. The arriving page asks
+  for the bookmark to be replaced. The limit: when the viewer goes before its answer reaches the
+  page (the process ends in between), the page cannot learn the new address; `oboete view` prints
+  it. A design that handed the listener to a successor process over inherited descriptors, with a
+  prepare/commit protocol and pre-issued credentials for that case, was built on 2026-10-07/08 and
+  dropped on 2026-10-09 for this one: it needed `pre_exec`/descriptor adoption in `main` and an
+  owner-only home that a first run's ordinary home creation does not make, and the in-process
+  move covers every other case.
 
 W1, W3, W5 and W6 are independent of each other once their backends exist; W2 is security scope and
 W4 waits for the local embedder.

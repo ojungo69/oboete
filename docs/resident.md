@@ -143,7 +143,7 @@ starts another. After an outcome of "port in use" it tries again only every 10 m
 `oboete view` does the same and always tries at once. Hooks do not: their cost stays as it is.
 The viewer has a once-a-minute tick of its own. On it, it leaves when config.toml loads and does
 not say `resident = true` (and no request arrived since the last tick), when its home is gone
-(`state/view.lock` by identity, as R3), when `[view] port` differs from the port it bound, or for a
+(`state/view.lock` by identity, as R3), when `[view] port` differs from the port it serves on, or for a
 new binary (R9). It leaves only while no connection is live and no save is running.
 
 R5. **Fixed address.** `[view] port` (default 17373, to be checked against what listens on the
@@ -154,6 +154,12 @@ failed start writes its reason there instead ("port in use" among them). A secon
 machine sets its own port: the switch runbook writes `[view] port = 17374` into the dogfood home
 before `resident = true` is written there. Setup and doctor print the address to bookmark; for a
 "port in use" outcome they say that another program or another oboete home holds port N.
+A port saved on the resident viewer's own page is bound by the viewer before the save is written
+and served at once with a new token (R6): its accept loop takes the new listener,
+`state/view-outcome` names the new port, and the old address and the old token stop working
+(docs/settings-coverage.md, W6). A port saved on a foreground run's page replaces the token file
+too, as the resident viewer comes back on that port at its tick; one changed by hand keeps the
+token (Limits).
 
 R6. **A token that outlives a restart.** `state/view-token`: 32 lowercase hex characters from the
 OS generator, mode 0600. One function reads it, and returns it only when the mode check passes (not
@@ -166,7 +172,16 @@ resident viewer does not start and `oboete view` serves in the foreground as tod
 `oboete view --new-token` replaces the file the same way and, in a resident home, also writes the
 next free port into `[view] port`, so the viewer comes back on a new address; it prints that address
 and one line telling the owner to delete the old bookmark. The new address is what ends a page a
-squatter left in the browser under the old one. The token is never replaced automatically.
+squatter left in the browser under the old one. The page's New page token makes the same two steps
+inside the resident viewer, which serves the new port at once and answers with the new address.
+A port saved on the page comes with a new token as well: under one hold of `state/config.lock` the
+viewer checks the request's token, binds the port, stages the new token, writes the settings, puts
+the token in place and only then moves, so a failure before the move leaves the old port with its
+old token. New tokens are made one at a time under that lock, by the command and the page alike.
+Every write from the page checks the token its request brought again once its body is in, and a
+settings save and a new token check it again under that lock, so a request that waited while a new
+token was made does nothing, not even put back the port the new token moved from; the moves take
+effect in the order they were written. The token is never replaced on its own.
 What the token may do is an owner decision (below). The local HTTP API and the bot adapter get
 their own credential and never reuse `state/view-token`.
 
@@ -176,7 +191,10 @@ nothing to the port: ready means `state/view.lock` is held and `state/view-outco
 `listening` on the configured port, waited for up to 3 s. Then it prints the address (`--open` opens
 it through the owner-only opener page, as today) and returns. Otherwise it says why and serves in
 the foreground on a free port with a token for this run, as today, never opening the fixed address.
-`--port N` asks for the foreground viewer. The resident viewer removes `view-open-<its port>.html`
+`--port N` asks for the foreground viewer. The page of such a foreground run, once its home is saved
+resident, offers the same bring-up; on success it answers with the resident address and the run ends
+once that answer is sent. Both read the address's port and token as one pair under
+`state/config.lock`, so a new token made meanwhile never goes out with the old port. The resident viewer removes `view-open-<its port>.html`
 by name when a request with the token arrives, so spec 6.6's "the first request with the token
 removes the page" stays true.
 
@@ -335,6 +353,9 @@ left as a setting to add before a public release.
   can read the token from the address. `oboete view` itself sends the token nowhere.
 - A suspected squat is ended by `oboete view --new-token`, which changes the token and the address;
   the old bookmark is deleted by hand.
+- A port changed by hand in config.toml keeps the token, so the old bookmark's port is free for
+  another program while its token still works: delete the old bookmark, and run
+  `oboete view --new-token` if another program may have taken the old port.
 - Under choice (a), whoever knows the token can change settings and replace keys from this machine
   until `--new-token`; what they changed is not put back by it.
 - The page opens only while WSL runs; right after a boot it opens once the first hook, `oboete view`
