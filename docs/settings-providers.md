@@ -7,7 +7,8 @@ and current budget readiness; a separate button sends one bounded HTTP request.
 
 ## Individual configuration
 
-The page supports OpenAI-compatible HTTP entries and the existing Claude and Codex CLI adapters.
+The page supports HTTP entries, OpenAI-compatible or Anthropic's Messages API (`api`, which an
+endpoint on api.anthropic.com preselects), and the existing Claude and Codex CLI adapters.
 It edits name, model, timeout, on/off, token limits and HTTP prices, and provides add, remove and
 ordering actions. Only priced HTTP calls enforce a normal output cap, so that control appears
 only when an HTTP price is positive. The page explains the existing unforced estimate for other

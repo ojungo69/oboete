@@ -147,7 +147,7 @@ The other checked items in RD/constraints-synthesis.md (the "2. Inherited constr
   - local: Ollama;
   - subscription CLIs: any of claude, codex, agy, each with its model. agy stays skipped until its no-tool mode passes (section 6);
   - API-key subscriptions: OpenCode Go (owner decision 25);
-  - paid APIs, if allowed (monthly cap).
+  - paid APIs, if allowed (monthly cap). Anthropic's is called through its own Messages API (`api = "anthropic"` on a `kind = "openai"` entry), as its OpenAI-compatible endpoint ignores the schema; the default chain lists it, with Claude Haiku 5.5 and its prices, after OpenCode Go and before the subscription CLIs: the owner's account gets monthly credits (the owner, 2026-10-09; docs/research/anthropic-messages-2026-10-09.md).
 - Any provider entry can be marked subscription, including a `kind = "openai"` entry (docs/research/curator-providers-2026-09-25.md §3.4 item 3) (Claude; overrulable).
 - Subscriptions use cheap models, as claude-mem does: claude with Haiku 4.5 (`--model haiku`), codex with `gpt-6-luna` at low reasoning effort. Milestone 3's M3 lines decide whether their quality is enough (the curator spike's gate-quality part, §8.3); the cheapest model that passes is the default (owner decision 26).
 - OpenCode Go: the owner already subscribes. It is called as an API: `kind = "openai"`, base URL https://opencode.ai/zen/go/v1, model `glm-5.3-flash` (not used for training, 0-day retention per the OpenCode Go page). It is marked subscription, so the public setup rule for subscriptions (7.2, owner decision 28) applies to it, as for subscription CLIs. It is a curator provider and may serve the judge and digest chains (owner decision 25; docs/research/curator-providers-2026-09-25.md §3.3).
