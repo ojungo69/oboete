@@ -1536,6 +1536,7 @@ mod tests {
                     result => panic!("private test connection: {result:?}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                 .unwrap();

@@ -801,23 +801,22 @@ impl Bundle {
             {
                 let before = resources.observe(path);
                 let backup = resources.observe(&backup_path(path));
-                if !backup.available {
+                let retained = resources
+                    .get(&backup.path)
+                    .is_some_and(files::Input::present_entry);
+                if !backup.available || (retained && before.text.is_some() && backup.text.is_none())
+                {
                     backups.insert(path.clone(), None);
                 } else {
                     backups.insert(
                         path.clone(),
-                        Some(
-                            if resources
-                                .get(&backup.path)
-                                .is_some_and(files::Input::present_entry)
-                            {
-                                Backup::Kept
-                            } else if before.text.is_some() {
-                                Backup::Create
-                            } else {
-                                Backup::None
-                            },
-                        ),
+                        Some(if retained {
+                            Backup::Kept
+                        } else if before.text.is_some() {
+                            Backup::Create
+                        } else {
+                            Backup::None
+                        }),
                     );
                 }
             }

@@ -373,6 +373,36 @@ fn seven_agent_preview_apply_replay_stale_manual_and_unwire() {
     assert_eq!(fs::read(&codex).unwrap(), external);
     assert_eq!(fs::read_to_string(&log).unwrap(), "add\n");
 
+    let backup = codex.with_file_name("config.toml.oboete.bak");
+    let retained_backup = codex.with_file_name("retained-backup");
+    fs::rename(&backup, &retained_backup).unwrap();
+    let missing_recovery = root.join("missing-recovery");
+    symlink(&missing_recovery, &backup).unwrap();
+    let needs_update = String::from_utf8(external.clone())
+        .unwrap()
+        .replace(env!("CARGO_BIN_EXE_oboete"), "/old/oboete")
+        .into_bytes();
+    assert_ne!(needs_update, external);
+    fs::write(&codex, &needs_update).unwrap();
+    let unsafe_preview = preview(root, port, "wire", &["codex"]);
+    let (status, refused) = start(root, port, &unsafe_preview, &["codex"], &"f".repeat(64));
+    assert_eq!(status, 200);
+    assert_eq!(
+        fs::read(&codex).unwrap(),
+        needs_update,
+        "original changed without a recoverable backup"
+    );
+    assert_eq!(refused["phase"], "failed");
+    assert_eq!(
+        step(&unsafe_preview, "codex", "mcp")["effect"],
+        "unavailable"
+    );
+    assert!(backup.is_symlink() && !missing_recovery.exists());
+    assert_eq!(fs::read_to_string(&log).unwrap(), "add\n");
+    fs::remove_file(&backup).unwrap();
+    fs::rename(retained_backup, backup).unwrap();
+    fs::write(&codex, &external).unwrap();
+
     let claude = root.join("owner/claude/.claude.json");
     let existing = json!({"mcpServers":{"foreign":{"command":"foreign","args":[]},
         "oboete":{"type":"stdio","command":"foreign-old",

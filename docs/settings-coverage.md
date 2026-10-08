@@ -211,6 +211,8 @@ cloud starts from a page view or a save.
   approvals. Direct file replacements are staged before backups; only a completed
   backup is published without replacing an earlier backup or alias. Per-step receipts retain
   established changes after a later failure; several files are not one atomic transaction.
+  A detected missing or unreadable retained copy blocks changes to an existing source while
+  preserving the backup entry; an earlier readable copy, including an empty file, is retained.
 
   Claude MCP registration uses the agent's own bounded local CLI. A new registration uses only
   the current generated command. An exact match needs no command, and unwire uses fixed remove

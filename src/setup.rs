@@ -582,11 +582,25 @@ fn backup_once(file: &Path) -> Result<()> {
         return Ok(());
     }
     match std::fs::symlink_metadata(&bak) {
-        Ok(_) => return Ok(()), // An existing alias is a retained backup too, including dangling.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            copy_first_backup(file, &bak).with_context(|| format!("backup {}", file.display()))?;
+        }
         Err(error) => return Err(error.into()),
     }
-    copy_first_backup(file, &bak).with_context(|| format!("backup {}", file.display()))
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let backup = options.open(&bak)?;
+    anyhow::ensure!(
+        backup.metadata()?.is_file(),
+        "retained backup is not a readable regular file"
+    );
+    Ok(())
 }
 
 fn copy_first_backup(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -3422,16 +3436,44 @@ mod tests {
         let target = root.path().join("must-stay-missing");
         std::fs::write(&source, "original private configuration").unwrap();
         std::os::unix::fs::symlink(&target, &backup).unwrap();
-        backup_once(&source).unwrap();
+        assert!(
+            backup_once(&source).is_err(),
+            "a missing recovery copy was accepted"
+        );
         assert!(
             !target.exists(),
             "first backup followed and wrote through an existing alias"
         );
         assert!(backup.is_symlink());
         assert_eq!(
-            std::fs::read_to_string(source).unwrap(),
+            std::fs::read_to_string(&source).unwrap(),
             "original private configuration"
         );
+        // An empty, readable earlier copy remains valid; retain its alias and bytes.
+        std::fs::write(&target, "").unwrap();
+        backup_once(&source).unwrap();
+        assert!(backup.is_symlink());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn w6a_native_edit_refuses_a_missing_retained_recovery_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("config.toml");
+        let backup = root.path().join("config.toml.oboete.bak");
+        let missing = root.path().join("missing-recovery");
+        let original = "[mcp_servers.foreign]\ncommand = 'foreign'\n";
+        std::fs::write(&source, original).unwrap();
+        std::os::unix::fs::symlink(&missing, &backup).unwrap();
+        let command = HookCommand {
+            exe: "/tools/oboete".into(),
+            home: None,
+        };
+        assert!(toml_mcp(&source, &command, false).is_err());
+        assert_eq!(std::fs::read_to_string(source).unwrap(), original);
+        assert!(backup.is_symlink());
+        assert!(!missing.exists());
     }
 
     #[test]
