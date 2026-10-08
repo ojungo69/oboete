@@ -103,13 +103,15 @@ fn schema(k: &Connection) -> Result<()> {
 }
 
 /// What SessionStart shows (`text`), and the claims it shows (spec 4.7, 4.8).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Start {
     pub text: String,
     pub shown: Vec<Shown>,
     /// How many cards and session summary rows it shows (docs/cards.md S1, docs/summaries.md
     /// S7): the recent work the terminal line names.
     pub cards: usize,
+    /// The work state section, which comes before the manifest (docs/work-state.md L7).
+    pub work: Option<crate::work_state::Section>,
 }
 
 /// A claim shown to a session: a later injection need not repeat its body, and a correction names
@@ -214,6 +216,7 @@ pub fn text(
         text,
         shown,
         cards: n + n_s,
+        work: None,
     }))
 }
 
@@ -2111,6 +2114,58 @@ extra_rules = [
                 .contains("rebuilding-")
         });
         assert!(!left);
+    }
+
+    /// docs/work-state.md L4: work state ops among the claims are no knowledge: the claims are the
+    /// ones they would be without them, a rebuild gives the same, and the ops stay.
+    #[test]
+    fn work_state_ops_are_no_knowledge() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let said = |ts: i64, text: &str| {
+            ev(
+                "prompt",
+                "s3",
+                ts,
+                cwd.path(),
+                serde_json::json!({"prompt": text}),
+            )
+        };
+        let (tabs, _) = claimed(
+            &mut store,
+            said(1, "Use tabs."),
+            "decision",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[tabs]).unwrap();
+        let phase = serde_json::json!({"phase": "rc2"});
+        store
+            .work_state("r", "release", phase.as_object().unwrap())
+            .unwrap();
+        let (flaky, _) = claimed(
+            &mut store,
+            said(2, "The CI test is flaky."),
+            "open item",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[flaky]).unwrap();
+        let entries = store.work_state_entries("r", None).unwrap();
+        drop(store);
+        worker::run_once(home.path()).unwrap();
+        let claims = || {
+            let k = rusqlite::Connection::open(home.path().join("knowledge.db")).unwrap();
+            crate::claims::current(&k, "r").unwrap()
+        };
+        let before = claims();
+        assert_eq!(before.len(), 2);
+        worker::rebuild(home.path()).unwrap();
+        assert_eq!(claims(), before);
+        let store = raw::open(home.path()).unwrap();
+        assert_eq!(store.work_state_entries("r", None).unwrap(), entries);
     }
 
     /// Spec 4.4, 4.9: the repository's delivered decisions and open items, the newest first, read

@@ -2917,6 +2917,30 @@ pub(crate) mod tests {
         assert!(note.contains("10 record(s) and 2 op(s)"), "{note}");
     }
 
+    /// docs/work-state.md L4: work state is in the op log, so a restore brings it back as it was.
+    #[test]
+    fn work_state_survives_a_backup_and_restore() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 10, 10);
+        let mut raw = raw::open(p).unwrap();
+        let fields = |v: serde_json::Value| v.as_object().unwrap().clone();
+        let state = fields(serde_json::json!({"phase": "rc2"}));
+        raw.work_state("github.com/o/r", "release", &state).unwrap();
+        let task = fields(serde_json::json!({"task": "notes", "status": "doing"}));
+        raw.work_state("github.com/o/r", "release", &task).unwrap();
+        let before = raw.work_state_entries("github.com/o/r", None).unwrap();
+        drop(raw);
+        export(p).unwrap();
+        damage_raw(p);
+        crate::worker::run_once(p).unwrap();
+        let restored = raw::open(p).unwrap();
+        assert_eq!(
+            restored.work_state_entries("github.com/o/r", None).unwrap(),
+            before
+        );
+    }
+
     #[test]
     fn an_op_appended_after_its_records_were_backed_up_is_exported() {
         let home = tempfile::tempdir().unwrap();

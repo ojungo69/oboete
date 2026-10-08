@@ -46,6 +46,7 @@ mod shortlist;
 mod transcript;
 mod turns;
 mod view;
+mod work_state;
 mod worker;
 
 use std::path::PathBuf;

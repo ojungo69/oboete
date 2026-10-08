@@ -1752,12 +1752,13 @@ impl Viewer {
             let settings = crate::capture::Settings::load(&self.home)?;
             let raw = crate::raw::open(&self.home)?;
             let session = crate::hook::own_session("unknown".into(), &raw);
-            crate::hook::start_text_read(&self.home, &raw, &repo, &branch, &session, &settings)?
-                .map(|s| s.text)
+            crate::hook::start_text_read(
+                &self.home, &raw, &repo, &branch, &session, &settings, true,
+            )?
         } else {
             None
         };
-        let text = crate::hook::joined(&self.home, manifest.as_deref());
+        let text = crate::hook::joined(&self.home, manifest.as_ref());
         Ok(json!({
             "repo": redact::outbound(&repo),
             "branch": redact::outbound(&branch),

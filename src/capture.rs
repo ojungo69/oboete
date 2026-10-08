@@ -326,6 +326,34 @@ pub fn directive(text: &str, ts: i64, settings: &Settings) -> Captured {
     c
 }
 
+/// A work state write's list name and fields (docs/work-state.md L5) through the same gate as
+/// every stored string, keys and values alike, a closed opt-out block taken out of each first (as
+/// labels). Its ledger is not kept: an op has none.
+pub fn work_state(
+    list: &str,
+    fields: &Map<String, Value>,
+    settings: &Settings,
+) -> (String, Map<String, Value>) {
+    let mut gate = Gate::new(settings);
+    let cap = gate.cap;
+    let list = gate.text("list", &without_blocks(list, false), cap);
+    let fields = fields
+        .iter()
+        .map(|(k, v)| {
+            let v = match v {
+                Value::String(s) => Value::String(without_blocks(s, false)),
+                v => v.clone(),
+            };
+            (without_blocks(k, false), v)
+        })
+        .collect();
+    let fields = match gate.value("", Value::Object(fields), cap) {
+        Value::Object(fields) => fields,
+        _ => Map::new(),
+    };
+    (list, fields)
+}
+
 /// The one gate every stored string passes (spec 2.2): `redact::scan_capped` over its whole
 /// length (head and tail above the cap), each finding kept with the field it is in.
 struct Gate<'a> {

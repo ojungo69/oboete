@@ -75,6 +75,8 @@ CREATE INDEX IF NOT EXISTS ops_exclusions ON ops(device, op_seq) WHERE type = 'e
 -- The curation checkpoint, which SessionStart reads (Task 8, MUST-M9): the last window op without
 -- a scan of the ops after it (178,370 imports took 136 ms).
 CREATE INDEX IF NOT EXISTS ops_windows ON ops(device, op_seq) WHERE type = 'window';
+-- docs/work-state.md L4: the agents' work state, read at each session start from its own ops.
+CREATE INDEX IF NOT EXISTS ops_work_state ON ops(device, op_seq) WHERE type = 'work_state';
 -- Milestone 5 D1 (docs/milestone-5-plan.md): what forget denies, by the record's import origin,
 -- the one identity (rule 5); `device` and `seq` are where it was when it was forgotten, `ts` its
 -- time only when it counted toward the transcript cut (rule 10), `session` its labels' hash.
@@ -232,6 +234,8 @@ pub enum OpKind {
     Migration,
     /// A turn's summary (docs/summaries.md): a `turns::TurnOp`.
     Turn,
+    /// One write of an agent's work state (docs/work-state.md L4): `{repo, list, fields, clock}`.
+    WorkState,
 }
 
 impl OpKind {
@@ -245,6 +249,7 @@ impl OpKind {
             OpKind::Import => "import",
             OpKind::Migration => "migration",
             OpKind::Turn => "turn",
+            OpKind::WorkState => "work_state",
         }
     }
     fn from_name(name: &str) -> Option<Self> {
@@ -257,6 +262,7 @@ impl OpKind {
             Self::Import,
             Self::Migration,
             Self::Turn,
+            Self::WorkState,
         ]
         .into_iter()
         .find(|k| k.name() == name)
@@ -770,6 +776,50 @@ pub(crate) fn migration_checkpoints_in(
 }
 
 /// The same current list for an existing read-only connection: no indexes or schema writes.
+/// docs/work-state.md L4: `repo`'s work state writes (one list's when `list` names it), in the
+/// order they were written: a device's in its own order, its clock never going back in it, then
+/// every device's by that clock, as `exclusions_in` orders exclusions.
+pub(crate) fn work_state_in(
+    conn: &Connection,
+    repo: &str,
+    list: Option<&str>,
+) -> Result<Vec<crate::work_state::Entry>> {
+    let mut st = conn.prepare(
+        "SELECT device, ts, body FROM main.ops WHERE type = 'work_state' ORDER BY device, op_seq",
+    )?;
+    let mut writes = Vec::new();
+    let (mut device, mut clock) = (String::new(), i64::MIN);
+    let rows = st.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    for (i, row) in rows.enumerate() {
+        let (from, ts, body) = row?;
+        let v: serde_json::Value = serde_json::from_str(&body)?;
+        if from != device {
+            (device, clock) = (from.clone(), i64::MIN);
+        }
+        clock = clock.max(v["clock"].as_i64().unwrap_or(ts));
+        if v["repo"] != repo || list.is_some_and(|l| v["list"] != l) {
+            continue;
+        }
+        let (Some(name), Some(fields)) = (v["list"].as_str(), v["fields"].as_object()) else {
+            continue;
+        };
+        let entry = crate::work_state::Entry {
+            list: name.to_owned(),
+            fields: fields.clone(),
+            ts,
+        };
+        writes.push((clock, from, i, entry));
+    }
+    writes.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
+    Ok(writes.into_iter().map(|w| w.3).collect())
+}
+
 pub(crate) fn exclusions_in(conn: &Connection) -> Result<Vec<String>> {
     // A device's ops in its own order (op_seq), its clock never going back in it, then every
     // device's by that clock: a clock set back never puts a newer op first, and an op
@@ -2219,6 +2269,36 @@ impl Raw {
         let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
         let op = serde_json::json!({ "repo": repo, "undo": undo, "clock": clock });
         Ok(self.append_ops(&[(OpKind::Exclusion, op)])?[0])
+    }
+
+    /// docs/work-state.md L4: one write of an agent's work state, `{repo, list, fields, clock}`,
+    /// as this device's next op; `list` and `fields` have passed the gate (L5). Its clock is one
+    /// past every work state clock the store holds and at least now, as an exclusion's. No
+    /// dispatch lock: a work state write orders against no provider call.
+    pub fn work_state(
+        &mut self,
+        repo: &str,
+        list: &str,
+        fields: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<i64> {
+        let seen: Option<i64> = self.conn.query_row(
+            "SELECT MAX(COALESCE(json_extract(body, '$.clock'), ts)) FROM ops
+             WHERE type = 'work_state'",
+            [],
+            |r| r.get(0),
+        )?;
+        let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
+        let op = serde_json::json!({"repo": repo, "list": list, "fields": fields, "clock": clock});
+        Ok(self.append_ops(&[(OpKind::WorkState, op)])?[0])
+    }
+
+    /// `work_state_in` on this store.
+    pub fn work_state_entries(
+        &self,
+        repo: &str,
+        list: Option<&str>,
+    ) -> Result<Vec<crate::work_state::Entry>> {
+        work_state_in(&self.conn, repo, list)
     }
 
     /// The sessions, as `agent` NUL `session`, with a record in one of `repos`: what an excluded
@@ -3974,6 +4054,42 @@ mod tests {
         let mut other = open(copy.path()).unwrap();
         other.exclude("x", false).unwrap();
         assert_eq!(other.exclusions().unwrap(), ["x"]);
+    }
+
+    /// docs/work-state.md L4: work state folds in its clock's order: a write on a copied store
+    /// (another device) comes after every write it holds, even when the old device's clock ran
+    /// ahead of the new one's.
+    #[test]
+    fn work_state_writes_fold_in_clock_order_across_devices() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let phase = |v: &str| {
+            serde_json::json!({ "phase": v })
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        raw.work_state("r", "release", &phase("one")).unwrap();
+        raw.work_state("r", "release", &phase("two")).unwrap();
+        raw.conn
+            .execute(
+                "UPDATE ops SET ts = ts + 3600000,
+                   body = json_set(body, '$.clock', json_extract(body, '$.clock') + 3600000)",
+                [],
+            )
+            .unwrap();
+        drop(raw);
+        let copy = tempfile::tempdir().unwrap();
+        std::fs::copy(home.path().join("raw.db"), copy.path().join("raw.db")).unwrap();
+        let mut other = open(copy.path()).unwrap();
+        other.work_state("r", "release", &phase("three")).unwrap();
+        let phases: Vec<_> = other
+            .work_state_entries("r", None)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.fields["phase"].clone())
+            .collect();
+        assert_eq!(phases, ["one", "two", "three"]);
     }
 
     fn import_doc(id: usize, body: String) -> ImportDoc {

@@ -42,10 +42,9 @@ fn a_replay_and_its_spawned_hooks_record_no_hook_record() {
 }
 
 /// Milestone 4 Task 0 (OpenCodeReview on #301): `--read-sample` runs both arms through the hooks
-/// it spawns, as `run` wires them: the cold arm shows nothing for the checkout, and the warm arm,
-/// after the drain, shows its manifest from the spawned SessionStart and from the in-process read.
-/// With no write samples, the samples' checkout has nothing to show, so a SessionStart sent there
-/// prints nothing.
+/// it spawns, as `run` wires them: the cold arm shows no memory for the checkout, only the work
+/// state section, and the warm arm, after the drain, shows its manifest too, from the spawned
+/// SessionStart and from the in-process read.
 #[test]
 fn the_read_arms_run_through_the_spawned_hooks() {
     let home = tempfile::tempdir().unwrap();
@@ -69,12 +68,13 @@ fn the_read_arms_run_through_the_spawned_hooks() {
     );
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let (cold, warm) = (&report["read"]["cold"], &report["read"]["warm"]);
-    assert_eq!(
-        (&cold["read_chars"], &cold["session_start_printed_bytes"]),
-        (&0.into(), &0.into())
-    );
-    assert!(warm["read_chars"].as_u64().unwrap() > 0);
-    assert!(warm["session_start_printed_bytes"].as_u64().unwrap() > 0);
+    for measure in ["read_chars", "session_start_printed_bytes"] {
+        let (cold, warm) = (cold[measure].as_u64(), warm[measure].as_u64());
+        assert!(
+            Some(0) < cold && cold < warm,
+            "{measure}: {cold:?} {warm:?}"
+        );
+    }
     assert_eq!(warm["session_start_ms"]["n"], 2);
 }
 
