@@ -97,8 +97,9 @@ with a damaged segment, which drops every op after the first window past the rec
 (`raw::Rebuild::finish`), work state among them, as it drops exclusions. No lock beyond raw.db's own is
 taken: a work state write orders against no provider call (the dispatch lock's purpose).
 
-L5. **Redaction.** The list name and every key and string value pass the gate every stored string
-passes (2.2) before the op is written. Every answer and the session start section pass the egress
+L5. **Redaction.** The list name and every key and value pass the gate every stored string passes
+(2.2) before the op is written, a number or a boolean as the text it shows as (kept as it is where
+the gate leaves that text). Every answer and the session start section pass the egress
 gate with the rules as they are then (6.4), so a rule added later hides a value written before it.
 The lines are built from the text as stored, and the gate reads them in several views, each as
 written: all the lines together, each line, each name, key and value alone (a rule anchored to a
@@ -110,7 +111,8 @@ body), and a key is hidden where the assignment's mask starts in it, found by po
 masked text can spell the key again. Only then are the lines cut to their room; each shown line
 passes the gate once more, and the section's lines as a whole. A list, a task and a key are folded
 under their names as the gate shows them now, so a rule added later that masks one leaves one that
-a later write replaces or clears; each shows the text it was first written with. The keys `task`
+a later write replaces or clears. A key shows as it was written with the value it holds, and a list
+and a task with the name last written. The keys `task`
 and `status`, claude-mem's own, are stored as they are wherever a rule matches them, their values
 gated, so a rule never turns a task into the list's state. The capture gate
 scans a value beside its key as well, as written (a rule that masks the key leaves the context):
@@ -180,7 +182,8 @@ with their times, before claude-mem is removed.
   and status are hidden by a rule that needs their key. A rule added later still has the context
   that a rule masking a key or a list's name alone would take, that a line the cut leaves out
   holds, and that a line holds where another rule masks part of a value (#411); a key whose masked
-  assignment spells it again is hidden, at capture and when shown.
+  assignment spells it again is hidden, at capture and when shown; two keys a rule masks alike are
+  one key, shown as written with its value; a number that a rule finds is stored masked.
 - No size puts recorded text outside the fence; every cut fits its limit with its count line.
 - The session start: the section first, the rule outside the fence and the lines inside it, the
   manifest's room smaller by the section, `Nothing open yet.` with no fence, the 3,000-character
@@ -202,6 +205,9 @@ with their times, before claude-mem is removed.
 - Every open line is gated before the cut, so the time grows with the open lines (about 50 µs a
   line: 50 ms for 1,000), and lines the gate finds too much in (`redact::hidden`'s limits) are
   shown as a mask alone, a session start's as the count line.
+- A value written under an older name of its list or task, which a rule added later masks alike, is
+  read beside the latest name: a rule that both masks the names and needs the older one around the
+  value can miss it (#414).
 - A key that only a rule on its assignment masks (the rule needs the value to name the key) is
   stored masked when written with such a value: a write before the rule and one after show as two
   keys, both masked, and a null, which has no value to match, clears only the one under the key's

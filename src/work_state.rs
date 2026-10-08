@@ -90,7 +90,7 @@ pub fn check(list: &str, fields: &Map<String, Value>) -> Result<String, String> 
 }
 
 /// JavaScript's `String(value)` of a field's value.
-fn text(v: &Value) -> String {
+pub(crate) fn text(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         // JavaScript writes an integral number without its fraction.
@@ -102,22 +102,50 @@ fn text(v: &Value) -> String {
     }
 }
 
-/// One list folded: the latest value of each key wins.
+/// A list's state or a task's fields folded: the latest value of each key wins.
+#[derive(Default)]
+struct Fields {
+    /// Each value under its key's name as the gate shows it now (`fold`), in the order the keys
+    /// first came, as a key keeps its place in a JavaScript object.
+    values: Map<String, Value>,
+    /// Each key as it was written with the value it holds, which the gate reads beside the value
+    /// (Codex's security review of #408).
+    keys: HashMap<String, String>,
+}
+
+impl Fields {
+    fn put(&mut self, key: &str, value: &Value, id: &mut impl FnMut(&str) -> String) {
+        let id = id(key);
+        self.keys.insert(id.clone(), key.to_owned());
+        self.values.insert(id, value.clone());
+    }
+
+    /// The fields a line shows, each with its key as written: not those in `omit`, nor those a
+    /// null cleared.
+    fn visible<'a>(&'a self, omit: &'a [&str]) -> impl Iterator<Item = (&'a str, &'a Value)> + 'a {
+        self.values
+            .iter()
+            .filter(|(id, v)| !omit.contains(&id.as_str()) && !v.is_null())
+            .map(|(id, v)| (self.keys[id].as_str(), v))
+    }
+}
+
+/// One list folded.
 #[derive(Default)]
 struct Folded {
     /// What was written without a task.
-    state: Map<String, Value>,
+    state: Fields,
     state_ts: Option<i64>,
     /// Each task's name, its fields and the time of its last write, in the order the tasks first
     /// came.
-    tasks: Vec<(String, Map<String, Value>, i64)>,
+    tasks: Vec<(String, Fields, i64)>,
 }
 
 /// claude-mem's fold of one list's entries, in the order they were written: an entry without a
 /// `task` (absent, null or empty) goes into the list's state, one with a `task` into that task. A
 /// task and a key are one where `task` and `key` name them alike, so that one a rule added later
 /// masks is still one: a later write replaces or clears what was written under it (Codex on
-/// #408). Each keeps the text it was first written with, for the gate to read in its context.
+/// #408). Each shows the text it was last written with.
 fn fold<'a>(
     entries: impl IntoIterator<Item = &'a Entry>,
     task: &mut impl FnMut(&str) -> String,
@@ -138,31 +166,20 @@ fn fold<'a>(
             }
             Some(t) => {
                 let i = *at.entry(task(&t)).or_insert_with(|| {
-                    f.tasks.push((t, Map::new(), e.ts));
+                    f.tasks.push((String::new(), Fields::default(), e.ts));
                     f.tasks.len() - 1
                 });
-                let (_, kept, ts) = &mut f.tasks[i];
+                let (name, kept, ts) = &mut f.tasks[i];
+                *name = t;
                 *ts = e.ts;
                 kept
             }
         };
         for (k, v) in &e.fields {
-            put(kept, k, v, key);
+            kept.put(k, v, key);
         }
     }
     f
-}
-
-/// `fields` with `key` set to `value`, under a key `id` names alike when there is one.
-fn put(
-    fields: &mut Map<String, Value>,
-    key: &str,
-    value: &Value,
-    id: &mut impl FnMut(&str) -> String,
-) {
-    let same = id(key);
-    let at = fields.keys().find(|k| id(k) == same).cloned();
-    fields.insert(at.unwrap_or_else(|| key.to_owned()), value.clone());
 }
 
 /// A `status` of `done` or `dropped`, in any case.
@@ -170,16 +187,6 @@ fn closed(status: Option<&Value>) -> bool {
     status.is_some_and(|s| {
         !s.is_null() && matches!(text(s).to_lowercase().as_str(), "done" | "dropped")
     })
-}
-
-/// The fields a line shows: not those in `omit`, nor those a null cleared.
-fn visible<'a>(
-    fields: &'a Map<String, Value>,
-    omit: &'a [&str],
-) -> impl Iterator<Item = (&'a String, &'a Value)> + 'a {
-    fields
-        .iter()
-        .filter(|(k, v)| !omit.contains(&k.as_str()) && !v.is_null())
 }
 
 /// claude-mem's `describeDuration`.
@@ -206,7 +213,7 @@ struct Lists {
 /// `renderWorkStateList`): a closed list hides its state line and still shows a task left open in
 /// it; `all` shows everything. Lists, tasks and keys are told apart as the egress gate shows them
 /// now (a task's name beside its key), so the writes before and after a rule that masks part of a
-/// name are one list, or one task (Codex on #408); each shows the name first written.
+/// name are one list, or one task (Codex on #408); each shows the name last written.
 fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lists {
     let gate = |s: &str| gated(s, rules);
     let mut names: HashMap<&str, String> = HashMap::new();
@@ -236,8 +243,10 @@ fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lis
         }
         match at.get(&name) {
             Some(&j) => {
-                written[j].1.push(e);
-                written[j].2 = i;
+                let w = &mut written[j];
+                w.0 = &e.list;
+                w.1.push(e);
+                w.2 = i;
             }
             None => {
                 at.insert(name, written.len());
@@ -253,10 +262,10 @@ fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lis
     for (name, entries, _) in written {
         let f = fold(entries, &mut task, &mut key);
         let state = f.state_ts.is_some()
-            && visible(&f.state, &["task"]).next().is_some()
-            && (all || !closed(f.state.get("status")));
+            && f.state.visible(&["task"]).next().is_some()
+            && (all || !closed(f.state.values.get("status")));
         let shown: Vec<usize> = (0..f.tasks.len())
-            .filter(|&t| all || !closed(f.tasks[t].1.get("status")))
+            .filter(|&t| all || !closed(f.tasks[t].1.values.get("status")))
             .collect();
         if !state && shown.is_empty() {
             continue;
@@ -385,20 +394,20 @@ fn render(raw: &mut Raw, l: &Lists, (list, task): (usize, Option<usize>), now: i
             raw.part(name);
             if *state {
                 raw.push(": ");
-                pairs(raw, visible(&f.state, &["task"]));
+                pairs(raw, f.state.visible(&["task"]));
                 raw.push(&updated(f.state_ts.unwrap_or(now)));
             }
         }
         Some(t) => {
             let (task, fields, ts) = &f.tasks[t];
             raw.push("  - ");
-            if let Some(s) = fields.get("status").filter(|s| !s.is_null()) {
+            if let Some(s) = fields.values.get("status").filter(|s| !s.is_null()) {
                 raw.push("[");
                 raw.pair("status", &text(s), false);
                 raw.push("] ");
             }
             raw.pair("task", task, false);
-            let mut details = visible(fields, &["task", "status"]).peekable();
+            let mut details = fields.visible(&["task", "status"]).peekable();
             if details.peek().is_some() {
                 raw.push(" (");
                 pairs(raw, details);
@@ -410,7 +419,7 @@ fn render(raw: &mut Raw, l: &Lists, (list, task): (usize, Option<usize>), now: i
 }
 
 /// `key=value` pairs.
-fn pairs<'a>(raw: &mut Raw, fields: impl Iterator<Item = (&'a String, &'a Value)>) {
+fn pairs<'a>(raw: &mut Raw, fields: impl Iterator<Item = (&'a str, &'a Value)>) {
     for (i, (k, v)) in fields.enumerate() {
         if i > 0 {
             raw.push(", ");
@@ -883,6 +892,15 @@ mod tests {
             !open.contains("teal-1234") && !open.contains("FOO"),
             "{open}"
         );
+        // Two keys a rule masks alike are one key, shown as written with its value, which a rule
+        // that needs that key then sees (Codex's security review of #408).
+        let both = user(r#"{ id = "b", regex = '^key[12]$|key2 = "teal-[0-9]{4}"' }"#);
+        let entries = [
+            entry("l", json!({"key1": "harmless"}), 0),
+            entry("l", json!({"key2": "teal-1234"}), 0),
+        ];
+        let text = read(None, false, "r", &entries, 0, &both);
+        assert!(!text.contains("teal-1234"), "{text}");
         let spoof = user(
             r#"{ id = "s", regex = '^(\[REDACTED\]teal-[0-9]{4} = ")teal-[0-9]{4} = "private"$', secret_group = 1 }"#,
         );

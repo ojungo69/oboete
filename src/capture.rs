@@ -341,9 +341,15 @@ pub fn work_state(
     let list = gate.text("list", &without_blocks(list, false), cap);
     let mut stored = Map::new();
     for (k, v) in fields {
-        let v = match v {
-            Value::String(s) => Value::String(without_blocks(s, false)),
-            v => v.clone(),
+        // A number or a boolean is text where it is shown: gated as that text, and kept as it is
+        // where the gate leaves it (Codex's security review of #408).
+        let (v, as_text) = match v {
+            Value::String(s) => (Value::String(without_blocks(s, false)), None),
+            Value::Number(_) | Value::Bool(_) => {
+                let text = crate::work_state::text(v);
+                (Value::String(text.clone()), Some((text, v)))
+            }
+            v => (v.clone(), None),
         };
         let one = Map::from_iter([(without_blocks(k, false), v)]);
         let Value::Object(one) = gate.value("", Value::Object(one), cap) else {
@@ -355,6 +361,10 @@ pub fn work_state(
             let key = match k.as_str() {
                 "task" | "status" => k.clone(),
                 _ => key,
+            };
+            let v = match &as_text {
+                Some((text, was)) if v.as_str() == Some(text.as_str()) => (*was).clone(),
+                _ => v,
             };
             stored.insert(key, v);
         }
@@ -875,6 +885,17 @@ mod tests {
         let v = events("claude", "SessionEnd", &payload, 0, &s);
         assert!(!format!("{:?}", v[0]).contains(&secret), "{:?}", v[0]);
         assert_eq!(body(&v[0].event)["reason"]["[REDACTED]"], "[REDACTED]");
+    }
+
+    /// Codex's security review of #408: a number or a boolean is gated as the text it shows as,
+    /// and kept as it is where the gate leaves that text.
+    #[test]
+    fn a_work_state_number_is_gated_as_its_text() {
+        let fields = json!({"authorization": 7_319_462_805u64, "pr": 7, "draft": true});
+        let (_, stored) = work_state("l", fields.as_object().unwrap(), &Settings::default());
+        let stored = Value::Object(stored);
+        assert!(!stored.to_string().contains("7319462805"), "{stored}");
+        assert_eq!((&stored["pr"], &stored["draft"]), (&json!(7), &json!(true)));
     }
 
     /// Codex on #408: claude-mem's keys stay where a rule matches them, their values gated.
