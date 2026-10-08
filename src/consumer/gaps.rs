@@ -207,8 +207,9 @@ impl Write for Count<'_> {
     }
 }
 
-/// Doctor's lines: per agent, the ended sessions short of their transcript, and those not checked.
-pub fn doctor(k: &Connection) -> Vec<String> {
+pub(crate) type DoctorRow = (String, i64, i64, i64, i64);
+
+pub(crate) fn doctor_rows(k: &Connection) -> Result<Vec<DoctorRow>> {
     let rows = k
         .prepare(
             "SELECT agent, COUNT(*), COUNT(transcript_turns),
@@ -227,9 +228,14 @@ pub fn doctor(k: &Connection) -> Vec<String> {
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        // No table yet: the worker has seen no session end.
-        .unwrap_or_default();
+        });
+    Ok(rows?)
+}
+
+/// Doctor's lines: per agent, the ended sessions short of their transcript, and those not checked.
+pub fn doctor(k: &Connection) -> Vec<String> {
+    // Preserve native best-effort formatting; typed checks retain the query failure.
+    let rows = doctor_rows(k).unwrap_or_default();
     rows.into_iter()
         .map(|(agent, ended, checked, short, missing)| {
             if checked == 0 {

@@ -1213,7 +1213,7 @@ const TEXT = {
   saved: ['Saved. Each setting takes effect at the time described beside it.', '保存しました。反映されるタイミングは各設定の説明をご確認ください。'],
   warnings_h: ['Notes on config.toml', 'config.toml についての注意'],
   agent_inventory_h: ['Agent registrations', 'エージェントの登録状況'],
-  agent_inventory_desc: ['This checks saved files only. A launch file does not prove login, executable permissions or live use. Full doctor checks and connecting agents are not available on this page yet.', '保存されたファイルだけを確認します。起動用ファイルが見つかっても、ログイン、実行権限、実際の利用は確認できません。詳しい診断とエージェントの接続操作は、この画面ではまだ使えません。'],
+  agent_inventory_desc: ['This checks saved files only. A launch file does not prove login, executable permissions or live use. Use Run diagnostics below for the current read-only checks; connecting agents is not available here yet.', 'ここでは保存されたファイルだけを確認します。起動用ファイルが見つかっても、ログイン、実行権限、実際の利用は確認できません。現在使える読み取り専用の確認は下の「診断を実行」で行えます。エージェントの接続操作はまだ使えません。'],
   agent_inventory_refresh: ['Refresh file inventory', '設定ファイルを再確認'],
   agent_inventory_loading: ['Checking agent files…', 'エージェントのファイルを確認中…'],
   agent_inventory_not_checked: ['Agent files have not been checked yet. Press Refresh.', 'エージェントのファイルはまだ確認していません。「再確認」を押してください。'],
@@ -1258,9 +1258,156 @@ const TEXT = {
   agent_inventory_match_false: ['does not match this installation', '現在の導入内容と不一致'],
   agent_inventory_match_unknown: ['current-installation comparison unavailable', '現在の導入内容との比較はできません'],
   agent_inventory_match_not_applicable: ['no comparison applies', '比較の対象外'],
+  doctor_h: ['Run diagnostics', '診断を実行'],
+  doctor_desc: ['Run these read-only checks only when you choose. They do not repair files, contact agents or call a model.', '選んだときだけ読み取り専用の診断を実行します。ファイルの修復、エージェントへの接続、モデルの呼び出しは行いません。'],
+  doctor_run: ['Run diagnostics now', '今すぐ診断'],
+  doctor_running: ['Checking saved data…', '保存済みデータを確認中…'],
+  doctor_not_run: ['No diagnostics have run in this viewer session.', 'このビューアのセッションでは、まだ診断を実行していません。'],
+  doctor_busy: ['The viewer is busy. No diagnostic result was returned. Try again after the current operation finishes.', 'ビューアは別の処理中です。診断結果は返っていません。現在の処理が終わってから再実行してください。'],
+  doctor_failed: ['Diagnostics could not be completed. No result is available.', '診断を完了できませんでした。結果はありません。'],
+  doctor_unknown: ['The response was lost. No result is available; the check will not restart automatically.', '応答が失われたため結果は不明です。診断は自動では再実行されません。'],
+  doctor_incomplete: ['These diagnostics are incomplete. They do not say the system is healthy.', 'この診断には未確認の項目があります。システム全体が正常という意味ではありません。'],
+  doctor_remaining: ['This version does not implement every diagnostic check.', 'この版では、まだ実装されていない診断項目があります。'],
+  doctor_unhealthy_h: ['Confirmed issues', '確認された問題'],
+  doctor_unhealthy_recording_failed: ['Recording failed', '記録に失敗しています'],
+  doctor_unhealthy_worker_failed: ['The resident worker last failed', '常駐ワーカーの直近の処理が失敗しました'],
+  doctor_unhealthy_low_free_space: ['Available storage is low', '空き容量が少なくなっています'],
+  doctor_unhealthy_raw_damaged: ['Saved records are damaged', '保存された記録が破損しています'],
+  doctor_unhealthy_knowledge_damaged: ['Search information is damaged', '検索用情報が破損しています'],
+  doctor_unhealthy_legacy_damaged: ['Older history is damaged', '旧版の履歴が破損しています'],
+  doctor_unhealthy_providers_damaged: ['Provider history is damaged', '要約役の利用履歴が破損しています'],
+  doctor_unhealthy_backup_checksum_missing: ['A backup checksum is missing', 'バックアップの照合情報が欠けています'],
+  doctor_unhealthy_backup_checksum_mismatch: ['A backup checksum does not match', 'バックアップの照合情報が一致しません'],
+  doctor_unhealthy_config_invalid: ['Saved configuration is invalid', '保存済み設定が不正です'],
+  doctor_unhealthy_other: ['Another confirmed issue was reported', 'その他の確認済みの問題があります'],
+  doctor_source_changed: ['Saved sources changed during this check. The numbers may describe different moments. Run diagnostics again explicitly after activity settles.', '診断中に保存データが変わりました。件数が異なる時点のものかもしれません。処理が落ち着いてから明示的に再実行してください。'],
+  doctor_source: ['Sources during this check: {state}', '診断中の保存データ：{state}'],
+  doctor_agents_h: ['Agent files in this diagnostic check', '今回の診断で確認したエージェント設定'],
+  doctor_files_h: ['Saved files', '保存ファイル'],
+  doctor_file: ['{name}: main file {file}; pending changes file {wal}.', '{name}：本体{file}、未統合の変更ファイル{wal}。'],
+  doctor_file_raw: ['Current records', '現在の記録'],
+  doctor_file_raw_restored: ['Retained record recovery copy', '保持された記録の復旧用コピー'],
+  doctor_file_knowledge: ['Search information', '検索用情報'],
+  doctor_file_legacy: ['Older history', '旧版の履歴'],
+  doctor_file_providers: ['Provider history', '要約役の利用履歴'],
+  doctor_raw_h: ['Recorded activity', '記録された活動'],
+  doctor_raw: ['Record checks: {state}. Highest record position {records}; highest change position {ops}; curated through {curated}.', '記録の確認：{state}。レコードの最終位置{records}、変更履歴の最終位置{ops}、要約処理済み位置{curated}。'],
+  doctor_parking: ['{source}: kept aside {parked}; waiting {waiting}.', '{source}：送信せず保持{parked}件、待機中{waiting}件。'],
+  doctor_parking_unknown: ['Import waiting state: {state}', '取り込み履歴の待機状態：{state}'],
+  doctor_source_v1: ['Older oboete history', '旧 oboete の履歴'],
+  doctor_source_transcript: ['Agent transcripts', 'エージェントの会話履歴'],
+  doctor_source_other: ['Other sources', 'その他の元データ'],
+  doctor_knowledge_h: ['Search information', '検索用情報'],
+  doctor_knowledge: ['Search checks: {state}. Prior rewinds {rewinds}; missing session coverage {missing}; shortened coverage {short}.', '検索用情報の確認：{state}。以前の巻き戻し{rewinds}回、欠けたセッション範囲{missing}件、短くなった範囲{short}件。'],
+  doctor_rewind_time: ['Most recent rewind: {time}', '最後の巻き戻し：{time}'],
+  doctor_time_none: ['none recorded', '記録なし'],
+  doctor_gap_row: ['{agent}: ended {ended}, checked {checked}, shortened {short}, missing {missing}.', '{agent}：終了{ended}件、確認済み{checked}件、短縮{short}件、欠落{missing}件。'],
+  doctor_gap_other: ['Other agents', 'その他のエージェント'],
+  doctor_legacy_h: ['Older history', '旧版の履歴'],
+  doctor_legacy: ['Older history checks: {state}. Sessions {sessions}; events {events}; observations {observations}; summaries {summaries}; events still to import {remaining}.', '旧版履歴の確認：{state}。セッション{sessions}件、イベント{events}件、観測{observations}件、要約{summaries}件、未取り込みイベント{remaining}件。'],
+  doctor_legacy_recent: ['Recent older call records: {count}', '旧版の最近の呼び出し記録：{count}件'],
+  doctor_recent_row: ['Result {outcome}; duration {ms} ms.', '結果{outcome}、所要時間{ms}ミリ秒。'],
+  doctor_outcome_ok: ['completed', '完了'],
+  doctor_outcome_error: ['error', 'エラー'],
+  doctor_outcome_invalid: ['invalid answer', '不正な応答'],
+  doctor_outcome_wait: ['waited', '待機'],
+  doctor_outcome_empty: ['empty answer', '空の応答'],
+  doctor_outcome_timeout: ['timed out', '時間切れ'],
+  doctor_outcome_sent: ['sent; settlement unknown', '送信済み・精算不明'],
+  doctor_outcome_reserved: ['reserved', '予約済み'],
+  doctor_outcome_prose: ['unusable prose', '利用できない文章'],
+  doctor_outcome_shape: ['invalid format', '形式が不正'],
+  doctor_outcome_over_cap: ['output limit exceeded', '出力上限超過'],
+  doctor_outcome_unanchored: ['evidence missing', '根拠が不足'],
+  doctor_outcome_budget: ['budget refused', '予算により拒否'],
+  doctor_outcome_gate: ['privacy gate refused', 'プライバシー確認で拒否'],
+  doctor_outcome_too_big: ['request too large', '要求が大きすぎます'],
+  doctor_outcome_other: ['other result', 'その他の結果'],
+  doctor_embedding_h: ['Embedding work', '埋め込み処理'],
+  doctor_embedding: ['Embedding checks: {state}. Generation {generation}; waiting claims {claims}, imported items {imports}, records {records}; skipped items {skipped}.', '埋め込み処理の確認：{state}。世代{generation}、待機中の記憶{claims}件・取り込み項目{imports}件・記録{records}件、処理を見送った項目{skipped}件。'],
+  doctor_skipped_row: ['{reason}: {count} skipped.', '{reason}：見送り{count}件。'],
+  doctor_skip_excluded: ['excluded', '除外'],
+  doctor_skip_held: ['held back', '保留'],
+  doctor_skip_refused: ['refused', '拒否'],
+  doctor_skip_empty: ['empty', '空'],
+  doctor_skip_other: ['other reason', 'その他の理由'],
+  doctor_generation_active: ['active', '使用中'],
+  doctor_generation_other: ['another state', '別の状態'],
+  doctor_generation_none: ['none recorded', '記録なし'],
+  doctor_providers_h: ['Provider history', '要約役の利用履歴'],
+  doctor_providers: ['Provider history checks: {state}. Recorded curation amount {curation}, including the pending reservation bound {reserved}; embedding/search amount {embedding}; waiting requests {pending}. Do not add the reservation bound again.', '要約役の利用履歴の確認：{state}。記録された要約処理の金額{curation}には、保留中の予約上限額{reserved}が含まれます。埋め込み・検索の金額{embedding}、待機中の要求{pending}件。予約額をもう一度加算しないでください。'],
+  doctor_provider_usage: ['In the last 24 hours: recorded calls {calls}, recorded tokens {tokens}, reserved calls {reserved}, reserved token bounds {reserved_tokens}. Cached key-limit entries: {key_cache}.', '過去24時間：記録された呼び出し{calls}回、記録されたトークン{tokens}、予約中の呼び出し{reserved}回、予約中トークンの上限{reserved_tokens}。保存済みキー上限の履歴：{key_cache}件。'],
+  doctor_key_unchecked: ['The cached key limits are historical. Association with current keys was not checked.', '保存済みのキー上限は過去の情報です。現在のキーとの対応は確認していません。'],
+  doctor_key_unknown: ['Current key association could not be confirmed.', '現在のキーとの対応は確認できません。'],
+  doctor_provider_holds: ['Provider holds: owner {owner}; temporary {resting}. Recent call records {recent}.', '要約役の停止：利用者による停止{owner}件、一時停止{resting}件。最近の呼び出し記録{recent}件。'],
+  doctor_isolation: ['Past isolated-run records: passed {passed}; failed {failed}. These are history, not a current isolation test.', '過去の分離実行記録：成功{passed}件、失敗{failed}件。履歴であり、現在の分離状態のテストではありません。'],
+  doctor_isolation_unknown: ['Current isolation was not checked.', '現在の分離状態は確認していません。'],
+  doctor_backup_h: ['Backups', 'バックアップ'],
+  doctor_backup: ['Backup checks: {state}. Record segments {records}; change-history segments {ops}; covered through record {through}; change position {through_ops}.', 'バックアップの確認：{state}。記録区間{records}件、変更履歴区間{ops}件、対象レコードの最終位置{through}、変更履歴の最終位置{through_ops}。'],
+  doctor_backup_checksums: ['Missing checksums {missing}; mismatches {mismatch}. Known counts can remain visible even when another backup check fails.', '照合情報の欠落{missing}件、不一致{mismatch}件。別のバックアップ確認に失敗しても、確認済みの件数は表示します。'],
+  doctor_runtime_h: ['Recording and resident processes', '記録と常駐処理'],
+  doctor_runtime_state: ['Runtime-file checks: {state}', '実行状態ファイルの確認：{state}'],
+  doctor_recording_clear: ['No current recording failure marker was found.', '現在の記録失敗マーカーは見つかりません。'],
+  doctor_recording_failed: ['A recording failure was recorded: {cause}. First seen around {since}.', '記録失敗が報告されています：{cause}。最初の記録はおよそ{since}。'],
+  doctor_recording_unknown: ['Recording failure state: {state}', '記録失敗の状態：{state}'],
+  doctor_failure_disk_full: ['storage full', '空き容量不足'],
+  doctor_failure_io: ['read/write error', '読み書きの失敗'],
+  doctor_failure_busy: ['store busy', '保存先が使用中'],
+  doctor_failure_other: ['other failure', 'その他の失敗'],
+  doctor_worker: ['Resident worker: saved choice {configured}; supported {supported}; running {running}; last report {last}.', '常駐ワーカー：保存済みの選択{configured}、対応{supported}、稼働中{running}、直近の結果{last}。'],
+  doctor_viewer: ['Resident viewer: saved port {configured}; running {running}; observed port {actual}; last report {last}.', '常駐ビューア：保存済みポート{configured}、稼働中{running}、確認できたポート{actual}、直近の結果{last}。'],
+  doctor_restore_note: ['Restore note present: {value}', '復元の記録：{value}'],
+  doctor_yes: ['yes', 'はい'],
+  doctor_no: ['no', 'いいえ'],
+  doctor_last_clean: ['completed cleanly', '正常に終了'],
+  doctor_last_running: ['in progress', '処理中'],
+  doctor_last_interrupted: ['interrupted', '中断'],
+  doctor_last_failed: ['failed', '失敗'],
+  doctor_last_up: ['reported listening', '待ち受けを報告'],
+  doctor_last_other_port: ['another port', '別のポート'],
+  doctor_last_stopped: ['stopped', '停止'],
+  doctor_last_starting: ['starting', '起動中'],
+  doctor_last_port_in_use: ['port in use', 'ポートが使用中'],
+  doctor_last_not_private: ['not private', '非公開設定ではありません'],
+  doctor_disk_h: ['Free space', '空き容量'],
+  doctor_disk: ['Free-space check: {state}. Available bytes {bytes}; low-space warning {low}.', '空き容量の確認：{state}。利用可能な容量{bytes}バイト、空き容量不足の注意{low}。'],
+  doctor_quota_h: ['Embedding request limits', '埋め込み要求の上限'],
+  doctor_quota: ['Saved/local quota facts: {state}. Document requests per day {documents}; query requests per day {queries}; monthly spending limit {cap}; recorded calls in the last 24 hours {calls}. No live provider quota was queried.', '保存済み・ローカルの上限情報：{state}。文書の1日あたりの要求上限{documents}件、検索の要求上限{queries}件、月間金額上限{cap}、過去24時間の記録済み呼び出し{calls}件。要約役の実際の残量は照会していません。'],
+  doctor_quota_history: ['Cached pause: {rest}; last recorded embedding error: {error}.', '保存済みの一時停止状態：{rest}、最後に記録された埋め込みエラー：{error}。'],
+  doctor_rest_ready: ['no pause recorded', '停止記録なし'],
+  doctor_rest_resting: ['temporarily paused', '一時停止中'],
+  doctor_rest_owner_hold: ['held by the owner', '利用者が停止中'],
+  doctor_error_none: ['none recorded', '記録なし'],
+  doctor_error_embed: ['document embedding', '文書の埋め込み'],
+  doctor_error_query: ['search query', '検索要求'],
+  doctor_error_other: ['other request', 'その他の要求'],
+  doctor_error_at: ['{role} around {time}', '{time}頃の{role}'],
+  doctor_retained_h: ['Retained older files and evaluation copies', '保持された旧ファイルと評価用コピー'],
+  doctor_retained: ['Retained-file metadata: {state}. File contents were not read for this summary.', '保持ファイルの情報：{state}。この概要ではファイル内容を読み取っていません。'],
+  doctor_retained_row: ['{name}: present {present}; top-level targets {targets}; logical bytes {bytes}.', '{name}：存在{present}、最上位の対象{targets}件、論理サイズ{bytes}バイト。'],
+  doctor_retained_eval: ['Evaluation copies: present {present}; logical bytes {bytes}.', '評価用コピー：存在{present}、論理サイズ{bytes}バイト。'],
+  doctor_retained_v1_database: ['Older oboete database', '旧 oboete データベース'],
+  doctor_retained_memory_database: ['Older memory database', '旧版の記憶データベース'],
+  doctor_retained_snapshot: ['Older snapshots', '旧版のスナップショット'],
+  doctor_retained_rollout_directory: ['Older rollout folders', '旧版の処理フォルダー'],
+  doctor_retained_spool: ['Older spool', '旧版の一時保存'],
+  doctor_retained_cache: ['Older cache', '旧版のキャッシュ'],
+  doctor_retained_logs: ['Older logs', '旧版のログ'],
+  doctor_state_known: ['measured', '確認済み'],
+  doctor_state_off: ['turned off', '無効'],
+  doctor_state_invalid: ['invalid', '不正'],
+  doctor_state_absent: ['absent', 'なし'],
+  doctor_state_schema_missing: ['data format unavailable', '必要なデータ形式がありません'],
+  doctor_state_damaged: ['damaged', '破損'],
+  doctor_state_unreadable: ['unreadable', '読み取り不可'],
+  doctor_state_busy: ['busy', '使用中で確認不可'],
+  doctor_state_changed: ['changed during check', '確認中に変更'],
+  doctor_state_unavailable: ['unavailable', '確認不可'],
+  doctor_state_present: ['present', 'あり'],
+  doctor_state_unknown: ['unknown', '不明'],
   file_error: [
-    'config.toml has a mistake, so this page shows no settings. Run `oboete doctor` to see the line.',
-    'config.toml に誤りがあるため、設定を表示できません。`oboete doctor` で該当する行を確認してください。',
+    'Saved configuration has a mistake, so settings cannot be edited here. Use Run diagnostics below for fixed read-only facts; it does not repair the file.',
+    '保存済み設定に誤りがあるため、この画面では編集できません。下の「診断を実行」で読み取り専用の決まった項目を確認できますが、ファイルは修復されません。',
   ],
   stale: [
     'config.toml was changed elsewhere. The page now shows its current values; please make your change again.',
@@ -2284,6 +2431,302 @@ async function refreshAgentInventory() {
   }
 }
 
+let doctorDraft={sending:false,report:null,error:null,read:0};
+function doctorCode(group,value) {
+  const key=`doctor_${group}_${value}`;
+  return Object.hasOwn(TEXT,key) ? t(key) : t('doctor_state_unknown');
+}
+function doctorState(state) {
+  return doctorCode('state',state);
+}
+function doctorNumber(value) {
+  return Number.isSafeInteger(value) && value>=0 ? value.toLocaleString(lang) : t('doctor_state_unknown');
+}
+function doctorMoney(value) {
+  return typeof value==='number' && Number.isFinite(value) && value>=0
+    ? usdValue(value) : t('doctor_state_unknown');
+}
+function doctorFlag(fact) {
+  if(fact?.state==='known')return typeof fact.value==='boolean'
+    ? t(fact.value?'doctor_yes':'doctor_no') : t('doctor_state_unknown');
+  return doctorState(fact?.state);
+}
+function doctorDate(milliseconds) {
+  if(typeof milliseconds!=='number' || !Number.isFinite(milliseconds) || milliseconds<0)
+    return t('doctor_state_unknown');
+  const date=new Date(milliseconds);
+  return Number.isNaN(date.getTime()) ? t('doctor_state_unknown') : date.toLocaleString(lang);
+}
+function doctorSince(sinceNs) {
+  // Recording markers use Unix nanoseconds; Date expects milliseconds.
+  return doctorDate(typeof sinceNs==='number' ? Math.floor(sinceNs/1_000_000) : null);
+}
+function doctorLast(last) {
+  return last?.state==='known' ? doctorCode('last',last.kind) : doctorState(last?.state);
+}
+function doctorRecording(recording) {
+  if(recording?.state!=='known')return t('doctor_recording_unknown',{state:doctorState(recording?.state)});
+  if(recording.failed===false)return t('doctor_recording_clear');
+  if(recording.failed===true)return t('doctor_recording_failed',{
+    cause:doctorCode('failure',recording.class),since:doctorSince(recording.since_ns)});
+  return t('doctor_recording_unknown',{state:t('doctor_state_unknown')});
+}
+function doctorMeasure(fact,money=false) {
+  if(fact?.state!=='known')return doctorState(fact?.state);
+  return money ? doctorMoney(fact.value) : doctorNumber(fact.value);
+}
+function doctorDecimal(fact) {
+  if(fact?.state==='known' && typeof fact.value==='number' && Number.isFinite(fact.value)
+    && fact.value>=0)return fact.value.toLocaleString(lang,{maximumSignificantDigits:15});
+  return fact?.state==='known' ? t('doctor_state_unknown') : doctorState(fact?.state);
+}
+function doctorRowsTotal(fact,key) {
+  const rows=fact?.rows;
+  if(fact?.state!=='known')return doctorState(fact?.state);
+  if(!Array.isArray(rows))return t('doctor_state_unknown');
+  if(!rows.every(row=>Number.isSafeInteger(row?.[key]) && row[key]>=0))return t('doctor_state_unknown');
+  const total=rows.reduce((sum,row)=>sum+row[key],0);
+  return Number.isSafeInteger(total) ? total.toLocaleString(lang) : t('doctor_state_unknown');
+}
+function doctorRecent(recent) {
+  if(recent?.state!=='known')return doctorState(recent?.state);
+  return Array.isArray(recent.calls) ? recent.calls.length.toLocaleString(lang) : t('doctor_state_unknown');
+}
+function doctorRecentRows(recent) {
+  if(recent?.state!=='known' || !Array.isArray(recent.calls))return [];
+  return recent.calls.slice(0,5).map(call=>{
+    const key=`doctor_outcome_${call?.outcome}`;
+    return el('p','desc',t('doctor_recent_row',{
+      outcome:t(Object.hasOwn(TEXT,key)?key:'doctor_outcome_other'),ms:doctorNumber(call?.ms)}));
+  });
+}
+function doctorRewindTime(rewinds) {
+  if(rewinds?.count?.state!=='known')return doctorState(rewinds?.count?.state);
+  if(rewinds.last_at_ms===null)return rewinds.count.value===0
+    ? t('doctor_time_none') : t('doctor_state_unknown');
+  return doctorDate(rewinds.last_at_ms);
+}
+function doctorGapRows(gaps) {
+  if(gaps?.state!=='known' || !Array.isArray(gaps.rows))return [];
+  return [...AGENT_INVENTORY_IDS,'other'].map(agent=>{
+    const row=gaps.rows.find(item=>item?.agent===agent);
+    return el('p','desc',t('doctor_gap_row',{
+      agent:agent==='other' ? t('doctor_gap_other') : t('agent_inventory_agent_'+agent),
+      ended:doctorNumber(row?.ended),checked:doctorNumber(row?.checked),
+      short:doctorNumber(row?.short),missing:doctorNumber(row?.missing)}));
+  });
+}
+function doctorSkippedRows(skipped) {
+  if(skipped?.state!=='known' || !Array.isArray(skipped.rows))return [];
+  return ['excluded','held','refused','empty','other'].map(reason=>{
+    const row=skipped.rows.find(item=>item?.reason===reason);
+    return el('p','desc',t('doctor_skipped_row',{
+      reason:t('doctor_skip_'+reason),count:doctorNumber(row?.count)}));
+  });
+}
+function doctorGeneration(generation) {
+  if(generation?.state!=='known')return doctorState(generation?.state);
+  const labels={active:'doctor_generation_active',other:'doctor_generation_other'};
+  const key=Object.hasOwn(labels,generation.value) ? labels[generation.value] : null;
+  return generation.value===null ? t('doctor_generation_none')
+    : key ? t(key) : t('doctor_state_unknown');
+}
+function doctorGroup(heading,...rows) {
+  return el('section',null,el('h4',null,t(heading)),...rows);
+}
+function doctorParking(parking) {
+  if(parking?.state!=='known')
+    return [el('p','desc',t('doctor_parking_unknown',{state:doctorState(parking?.state)}))];
+  if(!Array.isArray(parking.rows) || !parking.rows.every(row=>row && typeof row==='object'))
+    return [el('p','desc',t('doctor_parking_unknown',{state:t('doctor_state_unknown')}))];
+  const source={oboete_v1:'doctor_source_v1',transcript:'doctor_source_transcript',other:'doctor_source_other'};
+  return parking.rows.map(row=>el('p','desc',t('doctor_parking',{
+    source:t(source[row.source] || 'doctor_source_other'),
+    parked:doctorNumber(row.parked),
+    waiting:doctorNumber(row.waiting)})));
+}
+function doctorStores(stores) {
+  return doctorGroup('doctor_files_h',...['raw','raw_restored','knowledge','legacy','providers'].map(name=>
+    el('p','desc',t('doctor_file',{name:t('doctor_file_'+name),
+      file:doctorState(stores?.[name]?.file),wal:doctorState(stores?.[name]?.wal)}))));
+}
+function doctorBackups(backups) {
+  return doctorGroup('doctor_backup_h',
+    el('p','desc',t('doctor_backup',{state:doctorState(backups.state),
+      records:doctorMeasure(backups.record_segments),ops:doctorMeasure(backups.op_segments),
+      through:doctorMeasure(backups.through_seq),through_ops:doctorMeasure(backups.through_op_seq)})),
+    el('p','desc',t('doctor_backup_checksums',{
+      missing:doctorMeasure(backups.verification?.missing_checksum),
+      mismatch:doctorMeasure(backups.verification?.checksum_mismatch)})));
+}
+function doctorRuntime(runtime) {
+  const worker=runtime.worker || {},viewer=runtime.resident_viewer || {};
+  return doctorGroup('doctor_runtime_h',
+    el('p','desc',t('doctor_runtime_state',{state:doctorState(runtime.state)})),
+    el('p','desc',doctorRecording(runtime.recording)),
+    el('p','desc',t('doctor_worker',{configured:doctorFlag(worker.configured_resident),
+      supported:typeof worker.resident_supported==='boolean'
+        ? t(worker.resident_supported?'doctor_yes':'doctor_no') : t('doctor_state_unknown'),
+      running:doctorFlag(worker.running),last:doctorLast(worker.last)})),
+    el('p','desc',t('doctor_viewer',{configured:doctorMeasure(viewer.configured_port),
+      running:doctorFlag(viewer.running),actual:doctorNumber(viewer.actual_port),
+      last:doctorLast(viewer.last)})),
+    el('p','desc',t('doctor_restore_note',{value:doctorFlag(runtime.restore_note)})));
+}
+function doctorDisk(disk) {
+  const low=disk.state==='known' && typeof disk.low_space==='boolean'
+    ? t(disk.low_space?'doctor_yes':'doctor_no')
+    : disk.state==='known' ? t('doctor_state_unknown') : doctorState(disk.state);
+  return doctorGroup('doctor_disk_h',el('p','desc',t('doctor_disk',{
+    state:doctorState(disk.state),bytes:disk.state==='known'
+      ? doctorNumber(disk.free_bytes) : doctorState(disk.state),low})));
+}
+function doctorQuotaRest(rest) {
+  return rest?.state==='known' ? doctorCode('rest',rest.kind) : doctorState(rest?.state);
+}
+function doctorQuotaError(last) {
+  if(last?.state!=='known')return doctorState(last?.state);
+  if(last.at_ms===null)return t('doctor_error_none');
+  return t('doctor_error_at',{role:doctorCode('error',last.role),time:doctorDate(last.at_ms)});
+}
+function doctorQuota(quota) {
+  return doctorGroup('doctor_quota_h',
+    el('p','desc',t('doctor_quota',{state:doctorState(quota.state),
+      documents:doctorNumber(quota.document_daily_requests),
+      queries:doctorNumber(quota.query_daily_requests),cap:doctorMoney(quota.monthly_usd_cap),
+      calls:doctorMeasure(quota.calls_last_day)})),
+    el('p','desc',t('doctor_quota_history',{
+      rest:doctorQuotaRest(quota.rest),error:doctorQuotaError(quota.last_error)})));
+}
+function doctorRetained(retained) {
+  const categories=['v1_database','memory_database','snapshot','rollout_directory','spool','cache','logs'];
+  const rows=Array.isArray(retained.categories) ? retained.categories : [];
+  const listed=categories.map(category=>{
+    const row=rows.find(item=>item?.category===category);
+    return el('p','desc',t('doctor_retained_row',{
+      name:t('doctor_retained_'+category),present:doctorFlag(row?.present),
+      targets:doctorMeasure(row?.targets),bytes:doctorMeasure(row?.bytes)}));
+  });
+  return doctorGroup('doctor_retained_h',
+    el('p','desc',t('doctor_retained',{state:doctorState(retained.state)})),...listed,
+    el('p','desc',t('doctor_retained_eval',{
+      present:doctorFlag(retained.evaluation_copies?.present),
+      bytes:doctorMeasure(retained.evaluation_copies?.bytes)})));
+}
+function doctorUnhealthy(codes) {
+  if(!Array.isArray(codes) || !codes.length)return null;
+  return doctorGroup('doctor_unhealthy_h',el('ul',null,...codes.map(code=>{
+    const key=`doctor_unhealthy_${code}`;
+    return el('li',null,t(Object.hasOwn(TEXT,key)?key:'doctor_unhealthy_other'));
+  })));
+}
+function doctorInventory(inventory) {
+  const agents=Array.isArray(inventory?.agents) ? inventory.agents : [];
+  return doctorGroup('doctor_agents_h',
+    el('p','desc',t('agent_inventory_home',{state:agentInventoryCode('state',inventory?.home)})),
+    el('p','desc',t('agent_inventory_config',{state:agentInventoryCode('state',inventory?.config)})),
+    el('ul',null,...AGENT_INVENTORY_IDS.map(id=>agentInventoryRow(id,agents.find(row=>row?.agent===id)))));
+}
+function doctorReport(report) {
+  const c=report.checks;
+  const raw=c.raw,knowledge=c.knowledge,legacy=c.legacy,embeddings=c.embeddings,providers=c.providers;
+  const usage=providers.usage || {};
+  const rows=[];
+  if(report.complete!==true)rows.push(el('p','desc',t('doctor_incomplete')));
+  const unhealthy=doctorUnhealthy(report.unhealthy);
+  if(unhealthy)rows.push(unhealthy);
+  rows.push(el('p','desc',t('doctor_source',{state:doctorState(c.source_stability)})));
+  if(c.source_stability==='changed')rows.push(el('p','desc',t('doctor_source_changed')));
+  if(c.remaining==='not_checked')rows.push(el('p','desc',t('doctor_remaining')));
+  rows.push(doctorInventory(report.inventory),doctorStores(report.stores),
+    doctorGroup('doctor_raw_h',
+      el('p','desc',t('doctor_raw',{state:doctorState(raw.integrity),
+        records:doctorMeasure(raw.max_seq),ops:doctorMeasure(raw.max_op_seq),
+        curated:doctorMeasure(raw.curated_through)})),...doctorParking(raw.parking)),
+    doctorGroup('doctor_knowledge_h',
+      el('p','desc',t('doctor_knowledge',{state:doctorState(knowledge.integrity),
+        rewinds:doctorMeasure(knowledge.rewinds?.count),
+        missing:doctorRowsTotal(knowledge.gaps,'missing'),short:doctorRowsTotal(knowledge.gaps,'short')})),
+      el('p','desc',t('doctor_rewind_time',{time:doctorRewindTime(knowledge.rewinds)})),
+      ...doctorGapRows(knowledge.gaps)),
+    doctorGroup('doctor_legacy_h',
+      el('p','desc',t('doctor_legacy',{state:doctorState(legacy.integrity),
+        sessions:doctorMeasure(legacy.sessions),events:doctorMeasure(legacy.events),
+        observations:doctorMeasure(legacy.observations),summaries:doctorMeasure(legacy.summaries),
+        remaining:doctorMeasure(legacy.remaining_events)})),
+      el('p','desc',t('doctor_legacy_recent',{count:doctorRecent(legacy.recent)})),
+      ...doctorRecentRows(legacy.recent)),
+    doctorGroup('doctor_embedding_h',
+      el('p','desc',t('doctor_embedding',{state:doctorState(embeddings.state),
+        generation:doctorGeneration(embeddings.generation),
+        claims:doctorMeasure(embeddings.waiting?.claims),imports:doctorMeasure(embeddings.waiting?.imports),
+        records:doctorMeasure(embeddings.waiting?.records),skipped:doctorRowsTotal(embeddings.skipped,'count')})),
+      ...doctorSkippedRows(embeddings.skipped)),
+    doctorGroup('doctor_providers_h',
+      el('p','desc',t('doctor_providers',{state:doctorState(providers.integrity),
+        curation:doctorMeasure(providers.spend?.curation_usd,true),
+        embedding:doctorMeasure(providers.spend?.embed_query_usd,true),
+        reserved:doctorMeasure(providers.spend?.reserved_usd,true),pending:doctorMeasure(providers.pending)})),
+      el('p','desc',t('doctor_provider_usage',{calls:doctorMeasure(usage.daily_calls),
+        tokens:doctorMeasure(usage.tokens),reserved:doctorMeasure(usage.reserved_calls),
+        reserved_tokens:doctorDecimal(usage.reserved_tokens),key_cache:doctorMeasure(usage.key_cache_rows)})),
+      el('p','desc',t(usage.key_binding==='unchecked'?'doctor_key_unchecked':'doctor_key_unknown')),
+      el('p','desc',t('doctor_provider_holds',{owner:doctorMeasure(providers.stopped?.owner),
+        resting:doctorMeasure(providers.stopped?.resting),recent:doctorRecent(providers.recent)})),
+      ...doctorRecentRows(providers.recent),
+      el('p','desc',providers.isolation?.historical===true
+        ? t('doctor_isolation',{passed:doctorMeasure(providers.isolation?.passed),
+          failed:doctorMeasure(providers.isolation?.failed)}) : t('doctor_isolation_unknown'))));
+  if(providers.embedding_quota)rows.push(doctorQuota(providers.embedding_quota));
+  if(c.backups)rows.push(doctorBackups(c.backups));
+  if(c.runtime)rows.push(doctorRuntime(c.runtime));
+  if(c.disk)rows.push(doctorDisk(c.disk));
+  if(c.retained)rows.push(doctorRetained(c.retained));
+  const result=el('div','doctor-result',...rows);
+  result.setAttribute('role','status');
+  return result;
+}
+function doctorSection() {
+  const button=el('button','quiet small',t('doctor_run'));
+  button.type='button';button.dataset.action='doctor.run';button.disabled=doctorDraft.sending;
+  button.addEventListener('click',()=>void runDoctor());
+  const status=doctorDraft.sending ? el('p','desc',t('doctor_running'))
+    : doctorDraft.error ? el('p','desc text error',t(doctorDraft.error))
+      : doctorDraft.report ? doctorReport(doctorDraft.report)
+        : el('p','desc',t('doctor_not_run'));
+  status.setAttribute('role','status');
+  return el('section','doctor-diagnostics',el('h3',null,t('doctor_h')),
+    el('p','desc',t('doctor_desc')),button,status);
+}
+function renderDoctor() {
+  if(view!=='settings')return;
+  const section=$('panel').querySelector('.doctor-diagnostics');
+  if(!section)return;
+  const focused=section.contains(document.activeElement) && document.activeElement?.dataset.action==='doctor.run';
+  section.replaceChildren(...doctorSection().childNodes);
+  if(focused)section.querySelector('[data-action="doctor.run"]')?.focus({preventScroll:true});
+}
+async function runDoctor() {
+  if(doctorDraft.sending)return;
+  const read=doctorDraft.read=doctorDraft.read+1;
+  doctorDraft.sending=true;doctorDraft.report=null;doctorDraft.error=null;
+  renderDoctor();
+  try {
+    const {res,answer}=await memoryWrite('doctor',{});
+    if(read!==doctorDraft.read)return;
+    if(!res.ok)doctorDraft.error=res.status===503?'doctor_busy':'doctor_failed';
+    else if(answer && typeof answer==='object' && answer.stores && answer.checks
+      && answer.inventory && Array.isArray(answer.inventory.agents)
+      && ['raw','knowledge','legacy','embeddings','providers'].every(key=>answer.checks[key]))
+      doctorDraft.report=answer;
+    else doctorDraft.error='doctor_failed';
+  } catch {
+    if(read===doctorDraft.read)doctorDraft.error='doctor_unknown';
+  } finally {
+    if(read===doctorDraft.read){doctorDraft.sending=false;renderDoctor();}
+  }
+}
+
 async function showSettings() {
   void refreshAgentInventory();
   const [s, privacy] = await Promise.all([api('settings'), api('privacy').catch(privacyUnavailable)]);
@@ -3268,7 +3711,7 @@ function drawSettings() {
   const panel = el('div', 'settings', el('label', 'field lang', el('span', null, t('language')), pick));
   panel.lang = lang;
   if (!form) {
-    panel.append(el('p', 'text pending', t('file_error')), agentInventorySection());
+    panel.append(el('p', 'text pending', t('file_error')), agentInventorySection(), doctorSection());
     drawIn(panel);
     return;
   }
@@ -3401,7 +3844,7 @@ function drawSettings() {
     e.preventDefault();
     void saveSettings(save);
   });
-  panel.append(el('p', 'lead', t('lead')), formEl, preferenceSection(f), agentInventorySection(), maintenanceSection(f));
+  panel.append(el('p', 'lead', t('lead')), formEl, preferenceSection(f), agentInventorySection(), doctorSection(), maintenanceSection(f));
   drawIn(panel);
 }
 

@@ -1476,7 +1476,7 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
 }
 
 /// A run's outcome until it ends.
-const STOPPED: &str = "it stopped before it finished (killed or crashed); the next worker a hook \
+pub(crate) const STOPPED: &str = "it stopped before it finished (killed or crashed); the next worker a hook \
                        starts goes on from where it stopped";
 
 /// A worker a hook started writes its stderr nowhere: its last failure is kept for doctor, and a
@@ -1521,8 +1521,12 @@ fn note(home: &Path, last: u64, why: &str) {
 /// why it stopped with an error (empty when it ended well).
 fn outcome(home: &Path) -> Option<(u64, String)> {
     let text = std::fs::read_to_string(home.join("state").join("worker-outcome")).ok()?;
-    let (number, why) = text.split_once('\n').unwrap_or((&text, ""));
-    Some((number.trim().parse().ok()?, why.to_owned()))
+    parse_outcome(&text).map(|(number, why)| (number, why.to_owned()))
+}
+
+pub(crate) fn parse_outcome(text: &str) -> Option<(u64, &str)> {
+    let (number, why) = text.split_once('\n').unwrap_or((text, ""));
+    Some((number.trim().parse().ok()?, why))
 }
 
 /// Why the last `oboete worker` stopped with an error, if it did.
@@ -1553,7 +1557,7 @@ pub(crate) fn lock_held(path: &Path) -> bool {
     file.open(path).is_ok_and(|file| {
         file.metadata().is_ok_and(|metadata| metadata.is_file())
             && matches!(
-                try_lock_with(&file, std::fs::File::try_lock_shared),
+                try_lock_shared(&file),
                 Err(std::fs::TryLockError::WouldBlock)
             )
     })
@@ -1566,6 +1570,10 @@ pub(crate) fn lock_held(path: &Path) -> bool {
 /// forks from another thread while it takes or releases the lock, so outside tests nothing waits.
 pub(crate) fn try_lock(f: &std::fs::File) -> Result<(), std::fs::TryLockError> {
     try_lock_with(f, std::fs::File::try_lock)
+}
+
+pub(crate) fn try_lock_shared(f: &std::fs::File) -> Result<(), std::fs::TryLockError> {
+    try_lock_with(f, std::fs::File::try_lock_shared)
 }
 
 fn try_lock_with(

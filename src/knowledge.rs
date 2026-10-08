@@ -10,6 +10,15 @@ pub fn open(home: &Path) -> Result<Connection> {
     open_report(home, &mut || Ok(()))
 }
 
+pub(crate) fn rewind_facts(conn: &Connection) -> Result<(i64, Option<i64>, Option<String>)> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*), CASE WHEN typeof(MAX(ts))='integer' THEN MAX(ts) END,
+         strftime('%Y-%m-%d %H:%M', MAX(ts) / 1000, 'unixepoch', 'localtime') FROM rewinds",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?)
+}
+
 pub(crate) fn open_report(
     home: &Path,
     committed: &mut impl FnMut() -> Result<()>,

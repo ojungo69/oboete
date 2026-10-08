@@ -378,32 +378,48 @@ pub fn set_key_limit(
     Ok(())
 }
 
-/// The newest `n` calls, one line each, for doctor.
-pub fn last_calls(conn: &Connection, n: u32) -> Result<Vec<String>> {
+pub(crate) struct LastCall {
+    pub(crate) provider: String,
+    pub(crate) role: String,
+    pub(crate) outcome: String,
+    pub(crate) ms: i64,
+    pub(crate) detail: String,
+}
+
+pub(crate) fn last_call_rows(conn: &Connection, n: u32) -> Result<Vec<LastCall>> {
     let mut stmt = conn.prepare(
         "SELECT provider, role, outcome, ms, COALESCE(detail, '') FROM provider_calls
          ORDER BY id DESC LIMIT ?1",
     )?;
-    let rows = stmt
+    Ok(stmt
         .query_map([n], |r| {
-            let outcome: String = r.get(2)?;
-            let detail: String = r.get(4)?;
-            let shown = if outcome == "reserved" {
+            Ok(LastCall {
+                provider: r.get(0)?,
+                role: r.get(1)?,
+                outcome: r.get(2)?,
+                ms: r.get(3)?,
+                detail: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// The newest `n` calls, one line each, for doctor.
+pub fn last_calls(conn: &Connection, n: u32) -> Result<Vec<String>> {
+    Ok(last_call_rows(conn, n)?
+        .into_iter()
+        .map(|row| {
+            let shown = if row.outcome == "reserved" {
                 "allowance reserved"
             } else {
-                visible_detail(&detail)
+                visible_detail(&row.detail)
             };
-            Ok(format!(
+            format!(
                 "{} {} {} {}ms {}",
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                outcome,
-                r.get::<_, i64>(3)?,
-                shown
-            ))
-        })?
-        .collect::<Result<_, _>>()?;
-    Ok(rows)
+                row.provider, row.role, row.outcome, row.ms, shown
+            )
+        })
+        .collect())
 }
 
 pub const DAY_MS: i64 = 86_400_000;

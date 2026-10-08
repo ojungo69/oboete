@@ -463,18 +463,117 @@ fn absolute_identity(path: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn file_version(path: &Path) -> Result<String> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
+    file_version_in(std::fs::File::open(path)?)
+}
+
+pub(crate) fn file_version_in(mut reader: impl std::io::Read) -> Result<String> {
     let mut hash = Sha256::new();
     let mut buf = [0; 64 * 1024];
     loop {
-        let n = file.read(&mut buf)?;
+        let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
         hash.update(&buf[..n]);
     }
     Ok(format!("{:x}", hash.finalize()))
+}
+
+pub(crate) type SourceStamp = (PathBuf, String, u64, std::time::SystemTime, String);
+
+#[derive(Debug)]
+pub(crate) enum PreviewCopyError {
+    Changed,
+    Cleanup,
+}
+
+impl std::fmt::Display for PreviewCopyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Changed => "v1 changed during preview",
+            Self::Cleanup => "remove the private v1 preview copy",
+        })
+    }
+}
+
+impl std::error::Error for PreviewCopyError {}
+
+pub(crate) struct OpenedSource {
+    pub(crate) file: std::fs::File,
+    pub(crate) stamp: SourceStamp,
+}
+
+impl OpenedSource {
+    pub(crate) fn new(path: PathBuf, file: std::fs::File) -> Result<Self> {
+        Self::bounded(path, file, u64::MAX)
+    }
+
+    pub(crate) fn bounded(path: PathBuf, mut file: std::fs::File, limit: u64) -> Result<Self> {
+        use std::io::Read;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() > limit {
+            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported).into());
+        }
+        let id = crate::db::store_file_from(&file)?;
+        let hash = file_version_in((&mut file).take(metadata.len().saturating_add(1)))?;
+        let after = file.metadata()?;
+        if metadata.len() != after.len() || metadata.modified()? != after.modified()? {
+            return Err(PreviewCopyError::Changed.into());
+        }
+        Ok(Self {
+            file,
+            stamp: (path, id, metadata.len(), metadata.modified()?, hash),
+        })
+    }
+}
+
+/// Copies admitted descriptors only. The caller owns source selection and outside-home admission.
+pub(crate) fn with_preview_files<T>(
+    db: OpenedSource,
+    wal: Option<OpenedSource>,
+    inspect: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    use std::io::{Read, Seek};
+    let scratch = crate::provider::scratch_dir()
+        .map_err(|_| anyhow::anyhow!("cannot create a private v1 preview directory"))?;
+    let result = (|| {
+        for (index, mut source) in std::iter::once(db).chain(wal).enumerate() {
+            let path = scratch.0.join(if index == 0 {
+                "oboete.db"
+            } else {
+                "oboete.db-wal"
+            });
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut copy = options.open(&path)?;
+            source.file.rewind()?;
+            let bytes = std::io::copy(
+                &mut (&mut source.file).take(source.stamp.2.saturating_add(1)),
+                &mut copy,
+            )
+            .context("copy v1 for preview")?;
+            drop(copy);
+            let metadata = source.file.metadata()?;
+            if bytes != source.stamp.2
+                || metadata.len() != source.stamp.2
+                || metadata.modified()? != source.stamp.3
+                || crate::db::store_file_from(&source.file)? != source.stamp.1
+                || file_version(&path)? != source.stamp.4
+            {
+                return Err(PreviewCopyError::Changed.into());
+            }
+        }
+        let conn = open_v1(&scratch.0.join("oboete.db"))?;
+        conn.execute_batch("BEGIN")?;
+        inspect(&conn)
+    })();
+    std::fs::remove_dir_all(&scratch.0).context(PreviewCopyError::Cleanup)?;
+    result
 }
 
 /// SQLite may create sidecars even on a read-only open. Only open a stable private DB/WAL copy.
@@ -492,52 +591,48 @@ pub(crate) fn with_preview_v1<T>(
         !std::env::temp_dir().canonicalize()?.starts_with(parent),
         "preview needs a temporary directory outside the oboete home"
     );
-    let scratch = crate::provider::scratch_dir()
-        .map_err(|_| anyhow::anyhow!("cannot create a private v1 preview directory"))?;
-    let result = (|| {
-        let source = from.canonicalize()?;
-        let mut wal = source.as_os_str().to_owned();
-        wal.push("-wal");
-        let wal = PathBuf::from(wal);
-        type SourceStamp = (PathBuf, String, u64, std::time::SystemTime, String);
-        let versions = || -> Result<Vec<SourceStamp>> {
-            let mut paths = vec![source.clone()];
-            if wal.try_exists()? {
-                paths.push(wal.clone());
-            }
-            paths
-                .into_iter()
-                .map(|p| {
-                    let m = std::fs::metadata(&p)?;
-                    Ok((
-                        p.clone(),
-                        crate::db::store_file(&p),
-                        m.len(),
-                        m.modified()?,
-                        file_version(&p)?,
-                    ))
-                })
-                .collect()
-        };
-        let before = versions()?;
-        for (i, (path, _, _, _, hash)) in before.iter().enumerate() {
-            let copy = scratch
-                .0
-                .join(if i == 0 { "oboete.db" } else { "oboete.db-wal" });
-            std::fs::copy(path, &copy).context("copy v1 for preview")?;
-            anyhow::ensure!(file_version(&copy)? == *hash, "v1 changed during preview");
+    let source = from.canonicalize()?;
+    let mut wal = source.as_os_str().to_owned();
+    wal.push("-wal");
+    let wal = PathBuf::from(wal);
+    let versions = || -> Result<Vec<SourceStamp>> {
+        let mut paths = vec![source.clone()];
+        if wal.try_exists()? {
+            paths.push(wal.clone());
         }
+        paths
+            .into_iter()
+            .map(|p| {
+                let m = std::fs::metadata(&p)?;
+                Ok((
+                    p.clone(),
+                    crate::db::store_file(&p),
+                    m.len(),
+                    m.modified()?,
+                    file_version(&p)?,
+                ))
+            })
+            .collect()
+    };
+    let before = versions()?;
+    let opened = before
+        .iter()
+        .map(|stamp| OpenedSource::new(stamp.0.clone(), std::fs::File::open(&stamp.0)?))
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        opened.iter().map(|s| &s.stamp).eq(before.iter()),
+        "v1 changed during preview"
+    );
+    let version = crate::forget::hash(&serde_json::to_vec(&before)?);
+    let mut opened = opened.into_iter();
+    let db = opened.next().context("missing preview database")?;
+    with_preview_files(db, opened.next(), |conn| {
         anyhow::ensure!(
             before == versions()? && from.canonicalize()? == source,
             "v1 changed during preview"
         );
-        let version = crate::forget::hash(&serde_json::to_vec(&before)?);
-        let conn = open_v1(&scratch.0.join("oboete.db"))?;
-        conn.execute_batch("BEGIN")?;
-        inspect(&conn, &version)
-    })();
-    std::fs::remove_dir_all(&scratch.0).context("remove the private v1 preview copy")?;
-    result
+        inspect(conn, &version)
+    })
 }
 
 pub(crate) fn config_bytes(home: &Path) -> Result<Option<Vec<u8>>> {
@@ -1249,6 +1344,56 @@ fn copy_config(home: &Path, bytes: &[u8]) -> Result<bool> {
     result
 }
 
+pub(crate) fn legacy_counts_in(conn: &Connection) -> [rusqlite::Result<i64>; 4] {
+    ["sessions", "events", "observations", "summaries"].map(|table| {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+    })
+}
+
+pub(crate) struct LegacyCall {
+    pub(crate) provider: String,
+    pub(crate) outcome: String,
+    pub(crate) ms: i64,
+    pub(crate) detail: String,
+}
+
+pub(crate) fn legacy_call_rows_in(conn: &Connection) -> Result<Vec<LegacyCall>> {
+    let mut statement = conn.prepare(
+        "SELECT provider, outcome, ms, COALESCE(detail,'') FROM provider_calls ORDER BY id DESC LIMIT 5",
+    )?;
+    Ok(statement
+        .query_map([], |row| {
+            Ok(LegacyCall {
+                provider: row.get(0)?,
+                outcome: row.get(1)?,
+                ms: row.get(2)?,
+                detail: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+pub(crate) fn legacy_key_in(conn: &Connection) -> Result<Option<String>> {
+    let device: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'device_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(device.map(|device| format!("{SOURCE}:{device}")))
+}
+
+pub(crate) fn legacy_remaining_in(conn: &Connection, through: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT count(*) FROM events WHERE id > ?1",
+        [through],
+        |row| row.get(0),
+    )?)
+}
+
 /// Doctor's lines on the cut-over (spec 7.4): v1's events not migrated yet, v1's old files until
 /// `--finish`, and `eval/`, whose evaluation copies forget does not reach.
 pub fn doctor(home: &Path) -> Result<Vec<String>> {
@@ -1256,13 +1401,7 @@ pub fn doctor(home: &Path) -> Result<Vec<String>> {
     let store = home.join("oboete.db");
     if store.exists() {
         let v1 = open_v1(&store)?;
-        let device: Option<String> = v1
-            .query_row("SELECT value FROM meta WHERE key = 'device_id'", [], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        if let Some(device) = device {
-            let key = format!("{SOURCE}:{device}");
+        if let Some(key) = legacy_key_in(&v1)? {
             let through = if crate::raw::exists(home) {
                 let raw = crate::raw::open(home)?;
                 raw.migration_checkpoints(&key)?
@@ -1271,11 +1410,7 @@ pub fn doctor(home: &Path) -> Result<Vec<String>> {
             } else {
                 0
             };
-            let waiting: i64 = v1.query_row(
-                "SELECT count(*) FROM events WHERE id > ?1",
-                [through],
-                |r| r.get(0),
-            )?;
+            let waiting = legacy_remaining_in(&v1, through)?;
             lines.push(format!(
                 "v1 events not migrated yet: {waiting} (`oboete migrate` imports them)"
             ));
@@ -1651,21 +1786,62 @@ fn old_files(home: &Path) -> Result<Vec<(std::path::PathBuf, u64)>> {
     Ok(files)
 }
 
-fn old_name(name: &str, dir: bool) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OldFileCategory {
+    V1Database,
+    MemoryDatabase,
+    Snapshot,
+    RolloutDirectory,
+    Spool,
+    Cache,
+    Logs,
+}
+
+impl OldFileCategory {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::V1Database,
+        Self::MemoryDatabase,
+        Self::Snapshot,
+        Self::RolloutDirectory,
+        Self::Spool,
+        Self::Cache,
+        Self::Logs,
+    ];
+}
+
+/// The native retained-file selector. `dir` is the entry's own, non-followed type.
+/// A symlink is not a directory here, even when its target is one.
+pub(crate) fn old_category(name: &str, dir: bool) -> Option<OldFileCategory> {
+    if dir {
+        return match name {
+            "spool" => Some(OldFileCategory::Spool),
+            "cache" => Some(OldFileCategory::Cache),
+            "logs" => Some(OldFileCategory::Logs),
+            name if name.starts_with("pre-rollout-") => Some(OldFileCategory::RolloutDirectory),
+            _ => None,
+        };
+    }
     let db = |stem: &str| {
         ["", "-wal", "-shm"]
             .iter()
             .any(|end| name == format!("{stem}{end}"))
     };
-    let snapshot = name.starts_with("pre-")
+    if db("oboete.db") {
+        return Some(OldFileCategory::V1Database);
+    }
+    if db("memory.db") {
+        return Some(OldFileCategory::MemoryDatabase);
+    }
+    (name.starts_with("pre-")
         && [".db", ".db-wal", ".db-shm"]
             .iter()
-            .any(|end| name.ends_with(end));
-    if dir {
-        name.starts_with("pre-rollout-") || ["spool", "cache", "logs"].contains(&name)
-    } else {
-        db("oboete.db") || db("memory.db") || snapshot
-    }
+            .any(|end| name.ends_with(end)))
+    .then_some(OldFileCategory::Snapshot)
+}
+
+fn old_name(name: &str, dir: bool) -> bool {
+    old_category(name, dir).is_some()
 }
 
 fn size(path: &Path) -> Result<u64> {
@@ -1994,6 +2170,36 @@ mod tests {
     use crate::raw::{self, Event, Item, OpKind};
     use rusqlite::params;
     use std::path::PathBuf;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6d_preview_releases_original_descriptors_before_its_callback() {
+        let source = tempfile::tempdir().unwrap();
+        let path = source.path().join("source.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE fixture(value INTEGER); INSERT INTO fixture VALUES(1);")
+            .unwrap();
+        drop(conn);
+        let identity = crate::worker::file_id(std::fs::metadata(&path));
+        assert!(identity.is_some());
+        with_preview_v1(&path, |copy, _| {
+            let held = std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(std::result::Result::ok)
+                .filter(|entry| crate::worker::file_id(std::fs::metadata(entry.path())) == identity)
+                .count();
+            assert_eq!(
+                held, 0,
+                "preview still held a source descriptor during its callback"
+            );
+            assert_eq!(
+                copy.query_row("SELECT value FROM fixture", [], |row| row.get::<_, i64>(0))?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
 
     #[test]
     fn w5c_confirmed_finish_creates_raw_without_invalidating_its_own_consent() {

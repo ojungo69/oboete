@@ -159,24 +159,45 @@ fn version(exe: &Path, cwd: &Path) -> Option<String> {
     (out.status.success() && !v.is_empty()).then_some(v)
 }
 
-/// The newest stored result per CLI, one line each, for doctor.
-pub fn doctor(db: &Connection) -> Result<Vec<String>> {
+pub(crate) struct DoctorRow {
+    pub(crate) cli: String,
+    pub(crate) version: String,
+    pub(crate) passed: bool,
+    pub(crate) detail: String,
+}
+
+pub(crate) fn doctor_rows(db: &Connection) -> Result<Vec<DoctorRow>> {
     let mut stmt = db.prepare(
         "SELECT cli, version, passed, detail FROM isolation i
          WHERE ts = (SELECT MAX(ts) FROM isolation WHERE cli = i.cli) ORDER BY cli",
     )?;
-    let rows = stmt
+    Ok(stmt
         .query_map([], |r| {
-            let (cli, version, passed, detail): (String, String, bool, String) =
-                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-            Ok(if passed {
-                format!("{cli} ({version}): cannot act, curates")
-            } else {
-                format!("{cli} ({version}): skipped as a curator: {detail}")
+            Ok(DoctorRow {
+                cli: r.get(0)?,
+                version: r.get(1)?,
+                passed: r.get(2)?,
+                detail: r.get(3)?,
             })
         })?
-        .collect::<Result<_, _>>()?;
-    Ok(rows)
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// The newest stored result per CLI, one line each, for doctor.
+pub fn doctor(db: &Connection) -> Result<Vec<String>> {
+    Ok(doctor_rows(db)?
+        .into_iter()
+        .map(|row| {
+            if row.passed {
+                format!("{} ({}): cannot act, curates", row.cli, row.version)
+            } else {
+                format!(
+                    "{} ({}): skipped as a curator: {}",
+                    row.cli, row.version, row.detail
+                )
+            }
+        })
+        .collect())
 }
 
 /// The curator's profile widened by one read grant, codex's own install, without which no command
