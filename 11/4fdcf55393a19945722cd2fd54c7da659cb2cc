@@ -1,0 +1,25 @@
+src/testdata/viewer-readiness/test.mjs
+  s_b993208c852846::t_4f25407ae699b6 295-299,303-307,309-316
+  s_b993208c852846::t_f4c092e078314d 300-302,308
+docs/settings-coverage.md
+  s_b993208c852846::t_f4c092e078314d 229-232
+assets/viewer/app.js
+  s_b993208c852846::t_e0da6ecbda83d7 2592
+  s_b993208c852846::t_f4c092e078314d 1282-1283,2524,2573-2577,2622,2653,2667-2670,2731-2738,2758
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "114fdcf55393a19945722cd2fd54c7da659cb2cc",
+  "prompts": {},
+  "sessions": {
+    "s_b993208c852846": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11376-f4a3-7023-a53e-863d60579723",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
