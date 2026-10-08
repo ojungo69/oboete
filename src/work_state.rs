@@ -156,7 +156,10 @@ fn pairs(fields: &Map<String, Value>, omit: &[&str], gate: &impl Fn(&str) -> Str
     fields
         .iter()
         .filter(|(k, v)| !omit.contains(&k.as_str()) && !v.is_null())
-        .map(|(k, v)| format!("{}={}", gate(k), field(k, &text(v), gate)))
+        .map(|(k, v)| {
+            let (k, v) = pair(k, &text(v), gate);
+            format!("{k}={v}")
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -168,16 +171,27 @@ fn pairs(fields: &Map<String, Value>, omit: &[&str], gate: &impl Fn(&str) -> Str
 /// needs; when both change it, differently, or the gate changed the pair's shape, the value shows
 /// masked whole. The capture gate keeps a value so (`capture::Gate::both`).
 fn field(key: &str, value: &str, gate: &impl Fn(&str) -> String) -> String {
+    pair(key, value, gate).1
+}
+
+/// `key` and `value` as `gate` shows them as a pair: the value as `field` shows it, the key alone,
+/// or masked whole when the pair's mask reaches into it (Codex's security review of #408).
+fn pair(key: &str, value: &str, gate: &impl Fn(&str) -> String) -> (String, String) {
     let alone = gate(value);
     let head = format!("{key} = \"");
-    match gate(&format!("{head}{value}\""))
-        .strip_prefix(&head)
-        .and_then(|v| v.strip_suffix('"'))
-    {
+    let probe = gate(&format!("{head}{value}\""));
+    let mask = || crate::redact::MASK.to_owned();
+    let shown = match probe.strip_prefix(&head).and_then(|v| v.strip_suffix('"')) {
         Some(v) if v == value || v == alone => alone,
         Some(v) if alone == value => v.to_owned(),
-        _ => crate::redact::MASK.to_owned(),
-    }
+        _ => mask(),
+    };
+    let key = if probe.starts_with(&head) {
+        gate(key)
+    } else {
+        mask()
+    };
+    (key, shown)
 }
 
 /// claude-mem's `describeDuration`.
@@ -400,7 +414,9 @@ pub fn section(
     // The newline after the rule, the one the fence puts before its close, and the one that
     // joins the section to what follows (`Section::units`).
     let room = limit.saturating_sub(units(RULE) + 3 + units(&crate::manifest::fence(OPEN, "")));
-    let open = fit("", n, |i| render(&l, l.rows[i], now, &gate), room);
+    // Each line is gated, then the lines as a whole, for a rule that spans them (Codex's security
+    // review of #408).
+    let open = gate(&fit("", n, |i| render(&l, l.rows[i], now, &gate), room));
     // A limit with no room for the fence (`session_start_chars` near its least) holds how many
     // lines there are, after the rule: a count made from the number alone, never recorded text,
     // since the rule stands outside every fence (Codex's security review of #408).

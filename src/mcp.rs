@@ -1664,7 +1664,8 @@ mod tests {
 
     /// Codex's security review of #408: a rule that needs a value's key before it (gitleaks'
     /// generic-api-key, or one added later) or the whole value (an anchored rule added later)
-    /// matches it as it is stored and as it is shown.
+    /// matches it as it is stored and as it is shown; one whose match takes in the key hides the
+    /// key too.
     #[test]
     fn rules_see_a_value_with_its_key_and_whole() {
         let s = Store::new();
@@ -1691,7 +1692,7 @@ mod tests {
         let read = read_state(&server, json!({}));
         assert!(
             read.contains(
-                "api_key=[REDACTED], auth_token=[REDACTED], colour=[REDACTED], tag=[REDACTED]"
+                "api_key=[REDACTED], auth_token=[REDACTED], [REDACTED]=[REDACTED], tag=[REDACTED]"
             ),
             "{read}"
         );
@@ -1699,7 +1700,8 @@ mod tests {
 
     /// Codex's security review of #408: rules added after a write each see a value as written,
     /// alone or beside its key, so one does not take the context another needs; a task's name and
-    /// its status are values beside their keys too. A read of a name no write takes is refused.
+    /// its status are values beside their keys too, and a key a pair's mask reaches is hidden. A
+    /// read of a name no write takes is refused.
     #[test]
     fn rules_added_later_see_each_value_as_written() {
         let s = Store::new();
@@ -1707,16 +1709,19 @@ mod tests {
         write_state(&server, "notes", json!({"note": "alpha teal-1234"}));
         write_state(&server, "tasks", json!({"task": "violet"}));
         write_state(&server, "tasks", json!({"task": "x", "status": "plum"}));
+        // A rule that needs a key beside its value hides the key.
+        write_state(&server, "keys", json!({"amber-5678": "private"}));
         std::fs::write(
             s.home.path().join("config.toml"),
             "[redaction]\nextra_rules = [{ id = \"a\", regex = '^alpha' }, \
              { id = \"b\", regex = 'note = \"alpha (teal-[0-9]{4})\"', secret_group = 1 }, \
              { id = \"c\", regex = 'task = \"(violet)\"', secret_group = 1 }, \
-             { id = \"d\", regex = 'status = \"(plum)\"', secret_group = 1 }]\n",
+             { id = \"d\", regex = 'status = \"(plum)\"', secret_group = 1 }, \
+             { id = \"e\", regex = '^(amber-[0-9]{4}) = \"private\"$', secret_group = 1 }]\n",
         )
         .unwrap();
         let read = read_state(&server, json!({}));
-        for secret in ["teal-1234", "violet", "plum"] {
+        for secret in ["teal-1234", "violet", "plum", "amber-5678"] {
             assert!(!read.contains(secret), "{read}");
         }
         assert!(read.contains("- notes: note=[REDACTED]"), "{read}");

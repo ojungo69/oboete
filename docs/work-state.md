@@ -102,9 +102,12 @@ passes (2.2) before the op is written. Every answer and the session start sectio
 gate with the rules as they are then (6.4), so a rule added later hides a value written before it:
 each name, key and value alone, so that a rule anchored to a whole field matches it, each value
 (a task's name and its status among them) in the assignment `key = "value"` too, which the rules
-that look for a key before a secret (gitleaks' generic-api-key) need, and last each line. Both
-scans of a value look at it as written, so neither takes the context the other needs; a value
-both change, differently, or whose pair the gate changed past the value, is masked whole. The
+that look for a key before a secret (gitleaks' generic-api-key) need, then each line, and last the
+section's lines as a whole, for a rule that spans them. Both scans of a value look at it as
+written, so neither takes the context the other needs; a value both change, differently, or whose
+pair the gate changed past the value, is masked whole, and a key the pair's mask reaches into is
+masked too. A key is folded under its name as the gate shows it now, so a rule added later that
+masks a key leaves one key that a later write replaces or clears. The
 capture gate scans the same two ways, a value beside its key as written (a rule that masks the
 key leaves the context): every value of a work state write, and a string value of up to 256 bytes
 in any other stored JSON.
@@ -191,6 +194,9 @@ with their times, before claude-mem is removed.
 - The last pass over a shown line sees it after its fields were masked: a rule written against the
   line's own format (`key=value`) can lose its context to another rule that masked part of a value
   (#411, which builds the lines as the manifest's are).
+- The repository is the checkout's key as the capture gate labels it, as for every store: a rule
+  added later that matches a repository key splits its history, and one that masks the part two
+  keys differ in joins them (#412).
 - SQLite reads the repository of every work state op at each read (about 30 ms for 10,000 ops of
   2,000 characters, measured on SQLite 3.45 alone): a repository index would break 1.6.
 - While claude-mem and oboete both run (a rehearsal), the agent gets two rules naming two tools of

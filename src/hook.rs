@@ -4624,6 +4624,17 @@ mod tests {
             !masked.contains("teal-1234") && masked.contains("- release: phase=rc2, note="),
             "{masked}"
         );
+        // A rule that spans lines matches the section as a whole (Codex's security review of
+        // #408).
+        config(
+            "[redaction]\nextra_rules = [{ id = \"lines\", \
+             regex = '(?s)- release: phase=.*?\\n  - \\[doing\\] (changelog)', secret_group = 1 }]\n",
+        );
+        let lines = start("b2");
+        assert!(
+            !lines.contains("changelog") && lines.contains("- release: phase=rc2"),
+            "{lines}"
+        );
         // The memory's fence is outside the size, as it always was (`manifest::text`).
         config("[inject]\nsession_start_chars = 1000\n");
         let least = start("c");

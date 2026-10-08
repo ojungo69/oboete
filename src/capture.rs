@@ -402,18 +402,19 @@ impl<'a> Gate<'a> {
     /// a secret (gitleaks' generic-api-key) need and neither part matches alone (Codex's security
     /// review of #408). Both look at the value as written, so neither takes the context the other
     /// needs; when both hide something, differently, or a mask reaches past the value, the value
-    /// is hidden whole, its findings at its start.
-    fn both(&mut self, field: &str, key: &str, value: &str, cap: usize) -> String {
+    /// is hidden whole, its findings at its start. A mask that reaches into the key hides the key
+    /// too (the second of the pair).
+    fn both(&mut self, field: &str, key: &str, value: &str, cap: usize) -> (String, bool) {
         let mark = self.ledger.len();
         let alone = self.text(field, value, cap);
         let head = format!("{key} = \"");
         let (masked, found) = redact::scan(&format!("{head}{value}\""), self.rules);
         if found.is_empty() {
-            return alone;
+            return (alone, false);
         }
         let shown = masked.strip_prefix(&head).and_then(|v| v.strip_suffix('"'));
         let (kept, offset) = match shown {
-            Some(v) if v == alone => return alone,
+            Some(v) if v == alone => return (alone, false),
             Some(v) if alone == value => (v.to_owned(), head.len()),
             _ => {
                 for (_, f) in &mut self.ledger[mark..] {
@@ -426,7 +427,7 @@ impl<'a> Gate<'a> {
             let offset = f.offset.saturating_sub(offset);
             (field.to_owned(), redact::Finding { offset, ..f })
         }));
-        kept
+        (kept, !masked.starts_with(&head))
     }
 
     /// Every string and key of `v`, at its JSON pointer. Blocks are gone by now: stripping here
@@ -453,16 +454,26 @@ impl<'a> Gate<'a> {
                         };
                         // The pointer is built from the stored key, so it never holds a secret.
                         let key = self.text(&format!("{path}#key"), &k, self.cap);
-                        let child = format!("{path}/{}", segment(&key));
-                        // Beside the key as written: a rule that masks the key itself leaves the
-                        // context generic-api-key needs (Codex's security review of #408).
-                        let x = match x {
+                        match x {
+                            // Beside the key as written: a rule that masks the key itself leaves
+                            // the context generic-api-key needs, and a mask the pair puts on the
+                            // key hides it (Codex's security review of #408).
                             Value::String(s) if s.len() <= self.paired => {
-                                Value::String(self.both(&child, &k, &s, cap))
+                                let mark = self.ledger.len();
+                                let (x, hidden) = self.both("", &k, &s, cap);
+                                let key = if hidden { redact::MASK.to_owned() } else { key };
+                                let child = format!("{path}/{}", segment(&key));
+                                for (field, _) in &mut self.ledger[mark..] {
+                                    field.clone_from(&child);
+                                }
+                                (key, Value::String(x))
                             }
-                            x => self.value(&child, x, cap),
-                        };
-                        (key, x)
+                            x => {
+                                let child = format!("{path}/{}", segment(&key));
+                                let x = self.value(&child, x, cap);
+                                (key, x)
+                            }
+                        }
                     })
                     .collect(),
             ),
@@ -805,14 +816,16 @@ mod tests {
         assert_eq!((field.as_str(), f.offset), ("/reason/api_key", 2));
         assert_eq!(body(&v[0].event)["reason"]["api_key"], "  [REDACTED]");
         assert_eq!(body(&v[0].event)["reason"]["note"], "violet");
-        // A mask that reaches past the value masks the value whole.
+        // A mask that reaches past the value masks the value whole, and one that reaches into the
+        // key the key too, its ledger pointer with it.
         let s = with("[[redaction.extra_rules]]\nid = \"v\"\nregex = 'note = \"violet\"'\n");
         let v = events("claude", "SessionEnd", &payload, 0, &s);
-        assert_eq!(body(&v[0].event)["reason"]["note"], "[REDACTED]");
+        assert!(body(&v[0].event)["reason"].get("note").is_none());
+        assert_eq!(body(&v[0].event)["reason"]["[REDACTED]"], "[REDACTED]");
         assert!(
             v[0].ledger
                 .iter()
-                .any(|(field, f)| field == "/reason/note" && f.offset == 0)
+                .any(|(field, f)| field == "/reason/[REDACTED]" && f.offset == 0)
         );
         // Each scan looks at the value as written: a rule anchored to the whole value still finds
         // what follows the secret that generic-api-key masks beside its key, and the value two
@@ -825,6 +838,15 @@ mod tests {
         let v = events("claude", "SessionEnd", &payload, 0, &s);
         assert_eq!(body(&v[0].event)["reason"]["api_key"], "[REDACTED]");
         assert!(v[0].ledger.len() >= 2 && v[0].ledger.iter().all(|(_, f)| f.offset == 0));
+        // A mask the pair puts on the key hides the key, its pointer in the ledger too.
+        let s = with(
+            "[[redaction.extra_rules]]\nid = \"p\"\nregex = '^(teal-[0-9]{4}) = \"private\"$'\n\
+             secret_group = 1\n",
+        );
+        let payload = json!({"reason": {"teal-1234": "private"}});
+        let v = events("claude", "SessionEnd", &payload, 0, &s);
+        assert!(!format!("{:?}", v[0]).contains("teal-1234"), "{:?}", v[0]);
+        assert!(body(&v[0].event)["reason"].get("[REDACTED]").is_some());
         // A rule that masks the key leaves the value's scan beside the key as written.
         let s = with("[[redaction.extra_rules]]\nid = \"k\"\nregex = '^api_key$'\n");
         let payload = json!({"reason": {"api_key": secret.clone()}});
