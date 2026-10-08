@@ -50,12 +50,23 @@ fn units(s: &str) -> usize {
     s.encode_utf16().count()
 }
 
-/// L3, claude-mem's checks: the list's name trimmed, or what is wrong with the write.
-pub fn check(list: &str, fields: &Map<String, Value>) -> Result<String, String> {
+/// `s`'s size in its fence, closing tags quoted (`manifest::quote`).
+fn fenced_units(s: &str) -> usize {
+    units(&crate::manifest::quote(s))
+}
+
+/// L3: a list's name trimmed, or why it is none: a read is checked by it as a write is.
+pub fn name(list: &str) -> Result<String, String> {
     let list = list.trim();
     if list.is_empty() || units(list) > MAX_LIST {
         return Err(format!("list must be 1 to {MAX_LIST} characters"));
     }
+    Ok(list.to_owned())
+}
+
+/// L3, claude-mem's checks: the list's name trimmed, or what is wrong with the write.
+pub fn check(list: &str, fields: &Map<String, Value>) -> Result<String, String> {
+    let list = name(list)?;
     if fields
         .iter()
         .any(|(k, v)| k.is_empty() || matches!(v, Value::Array(_) | Value::Object(_)))
@@ -72,7 +83,7 @@ pub fn check(list: &str, fields: &Map<String, Value>) -> Result<String, String> 
             "fields must be at most {MAX_FIELDS} characters as JSON"
         ));
     }
-    Ok(list.to_owned())
+    Ok(list)
 }
 
 /// JavaScript's `String(value)` of a field's value.
@@ -148,18 +159,21 @@ fn pairs(fields: &Map<String, Value>, omit: &[&str], gate: &impl Fn(&str) -> Str
 }
 
 /// `value` as `gate` shows it beside its `key`: alone, so that a rule anchored to the field
-/// matches it, then in the assignment `key = "value"`, which the rules that look for a key before
+/// matches it, and in the assignment `key = "value"`, which the rules that look for a key before
 /// a secret (gitleaks' generic-api-key) need and neither part matches alone (Codex's security
-/// review of #408). A pair whose shape the gate changed shows the value masked whole.
+/// review of #408). Both look at the value as written, so neither takes the context the other
+/// needs; when both change it, differently, or the gate changed the pair's shape, the value shows
+/// masked whole. The capture gate keeps a value so (`capture::Gate::both`).
 fn field(key: &str, value: &str, gate: &impl Fn(&str) -> String) -> String {
-    let value = gate(value);
+    let alone = gate(value);
     let head = format!("{key} = \"");
     match gate(&format!("{head}{value}\""))
         .strip_prefix(&head)
         .and_then(|v| v.strip_suffix('"'))
     {
-        Some(v) => v.to_owned(),
-        None => crate::redact::MASK.to_owned(),
+        Some(v) if v == value || v == alone => alone,
+        Some(v) if alone == value => v.to_owned(),
+        _ => crate::redact::MASK.to_owned(),
     }
 }
 
@@ -185,9 +199,9 @@ struct Lists {
 
 /// The lists of `entries` (only `list` when it names one), as `render` shows them (claude-mem's
 /// `renderWorkStateList`): a closed list hides its state line and still shows a task left open in
-/// it; `all` shows everything. A list and a task are named as `gate` shows their names now, so the
-/// writes before and after a rule that masks part of a name are one list, or one task (Codex on
-/// #408).
+/// it; `all` shows everything. A list and a task are named as `gate` shows their names now (a
+/// task's beside its key, as `field` shows it), so the writes before and after a rule that masks
+/// part of a name are one list, or one task (Codex on #408).
 fn lists(
     entries: &[Entry],
     list: Option<&str>,
@@ -196,7 +210,12 @@ fn lists(
 ) -> Lists {
     let mut names: HashMap<&str, String> = HashMap::new();
     let mut tasks: HashMap<String, String> = HashMap::new();
-    let mut task = |t: String| tasks.entry(t).or_insert_with_key(|t| gate(t)).clone();
+    let mut task = |t: String| {
+        tasks
+            .entry(t)
+            .or_insert_with_key(|t| field("task", t, gate))
+            .clone()
+    };
     let wanted = list.map(gate);
     let mut written: Vec<(String, Vec<&Entry>, usize)> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
@@ -263,7 +282,7 @@ fn render(
             let (task, fields, ts) = &f.tasks[t];
             let status = match fields.get("status") {
                 None | Some(Value::Null) => String::new(),
-                Some(s) => format!("[{}] ", gate(&text(s))),
+                Some(s) => format!("[{}] ", field("status", &text(s), gate)),
             };
             let details = match pairs(fields, &["task", "status"], gate) {
                 d if d.is_empty() => d,
@@ -297,7 +316,9 @@ fn more(left: usize, joint: &str) -> String {
 /// `heading`, then as many of the `n` lines `line` gives as fit in `limit` UTF-16 units, then how
 /// many were left out (claude-mem's `fitWorkStateLines`). A line is made only when it is
 /// measured, and the room kept for the last line is the room it takes after the newline before
-/// it, so the whole stays within `limit` unless not even that line fits after `heading`.
+/// it, so the whole stays within `limit` unless not even that line fits after `heading`. The text
+/// is measured as its fence will hold it, a quoted closing tag longer than the tag (Codex's
+/// security review of #408).
 pub fn fit(heading: &str, n: usize, mut line: impl FnMut(usize) -> String, limit: usize) -> String {
     let mut text = heading.to_owned();
     for i in 0..n {
@@ -308,7 +329,7 @@ pub fn fit(heading: &str, n: usize, mut line: impl FnMut(usize) -> String, limit
         } else {
             0
         };
-        if units(&candidate) + room > limit {
+        if fenced_units(&candidate) + room > limit {
             return text + &more(n - i, joint);
         }
         text = candidate;
@@ -374,7 +395,7 @@ pub fn section(
     // A limit with no room for the fence (`session_start_chars` near its least) holds how many
     // lines there are, after the rule: a count made from the number alone, never recorded text,
     // since the rule stands outside every fence (Codex's security review of #408).
-    if units(&open) > room {
+    if fenced_units(&open) > room {
         return Section {
             rule: format!("{RULE}\n\n{}", more(n, "")),
             open: None,
@@ -594,6 +615,23 @@ mod tests {
             let cut = fit("", 5, limit);
             assert!(units(&cut) <= limit || cut == more(5, ""), "{limit}: {cut}");
         }
+    }
+
+    /// Codex's security review of #408: the section is measured as its fence holds it, so closing
+    /// tags the fence quotes, which are longer then, never take it past its limit.
+    #[test]
+    fn quoted_closing_tags_keep_the_section_within_its_limit() {
+        let tags = "</oboete-memory>".repeat(100);
+        let e: Vec<Entry> = (0..3)
+            .map(|i| entry(&format!("l{i}"), json!({"note": tags}), 0))
+            .collect();
+        for limit in [1_000, 2_000, SECTION] {
+            let s = section(&e, 0, limit, str::to_owned);
+            assert!(s.units() <= limit, "{} > {limit}", s.units());
+        }
+        // A line too long once quoted is left out, and the count of lines stays in the fence.
+        let s = section(&e, 0, SECTION, str::to_owned);
+        assert_eq!(s.open.as_deref(), Some(more(3, "").as_str()));
     }
 
     /// Codex's security review of #408: at every size around the cut, recorded text stays inside

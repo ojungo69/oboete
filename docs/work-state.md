@@ -100,11 +100,13 @@ taken: a work state write orders against no provider call (the dispatch lock's p
 L5. **Redaction.** The list name and every key and string value pass the gate every stored string
 passes (2.2) before the op is written. Every answer and the session start section pass the egress
 gate with the rules as they are then (6.4), so a rule added later hides a value written before it:
-each name, key and value alone, so that a rule anchored to a whole field matches it, then each
-value in the assignment `key = "value"` too, which the rules that look for a key before a secret
-(gitleaks' generic-api-key) need, and last each line. The capture gate scans a string value of up
-to 256 bytes in that assignment as well, for any stored JSON; a mask that reaches past the value
-masks the value whole.
+each name, key and value alone, so that a rule anchored to a whole field matches it, each value
+(a task's name and its status among them) in the assignment `key = "value"` too, which the rules
+that look for a key before a secret (gitleaks' generic-api-key) need, and last each line. Both
+scans of a value look at it as written, so neither takes the context the other needs; a value
+both change, differently, or whose pair the gate changed past the value, is masked whole. The
+capture gate scans the same two ways: every value of a work state write, and a string value of up
+to 256 bytes in any other stored JSON.
 Ops keep no ledger rows; the masks are in the text. A list is named as the egress gate shows its
 name now, wherever lists are told apart: a rule added later that masks part of a list's name leaves
 one list, whose next write is stored under the masked name.
@@ -112,7 +114,8 @@ one list, whose next write is stored under the masked name.
 L6. **Fold, lines and answers.** claude-mem's, with "repository" for "project" and oboete's
 repository key as the name; "updated <N> ago" counts from the op's time when the text is read. A
 read's lines are cut at 20,000 characters, with how many were left out, where claude-mem's are
-not cut.
+not cut, and a read of a list name over 200 characters, which no write takes, is refused as the
+write is, not echoed.
 
 L7. **Session start.** Wherever the manifest is shown, the section comes first and comes out of
 `[inject] session_start_chars`; the manifest is fitted to what it leaves. Off with
@@ -137,8 +140,8 @@ What agents wrote in this repository with work_state_write and is still open. It
 With nothing open, `Nothing open yet.` follows the rule and there is no fence. Lines that do not
 fit are cut as claude-mem cuts them; a `session_start_chars` near its least, which leaves no room
 for the fence, gets the count line alone after the rule (`- ...<N> more lines; read them with
-work_state_read`, no recorded text). The memory's own fence stays outside the size, as it always
-was. The viewer's Context page and `oboete inject` show the same text, the page also for a home
+work_state_read`, no recorded text). Lines are measured as the fence holds them, a closing tag
+quoted and so longer. The memory's own fence stays outside the size, as it always was. The viewer's Context page and `oboete inject` show the same text, the page also for a home
 with no store yet (which it does not create). Pi gets no section: its
 extension has no MCP client, so neither tool, and its manifest keeps the whole size.
 
@@ -162,8 +165,10 @@ with their times, before claude-mem is removed.
   key, an object or an array as a value, fields of 2,001 characters as JSON.
 - A secret in a list name, a key and a value is masked in the op and in the answers; a rule added
   after the write hides the value in the read and in the session start section; a secret that
-  only generic-api-key's key context finds is masked in the op, and a rule added later that needs
-  the key, or anchors to the whole value, hides it in the read.
+  only generic-api-key's key context finds is masked in the op, however long the value; a rule
+  added later that needs the key, or anchors to the whole value, hides it in the read; two rules
+  added later, one anchored to the value and one needing its key, each find theirs; a task's name
+  and status are hidden by a rule that needs their key.
 - No size puts recorded text outside the fence; every cut fits its limit with its count line.
 - The session start: the section first, the rule outside the fence and the lines inside it, the
   manifest's room smaller by the section, `Nothing open yet.` with no fence, the 3,000-character
@@ -181,8 +186,7 @@ with their times, before claude-mem is removed.
 - Until milestone 5's forget, nothing removes a list but closing it, and a list closed stays in
   `includeClosed` for good.
 - A value is masked by the rules of the time it was written; a rule added later hides it in every
-  answer and section, not in the stored op. A value over 256 bytes is scanned beside its key only
-  when it is shown.
+  answer and section, not in the stored op.
 - SQLite reads the repository of every work state op at each read (about 30 ms for 10,000 ops of
   2,000 characters, measured on SQLite 3.45 alone): a repository index would break 1.6.
 - While claude-mem and oboete both run (a rehearsal), the agent gets two rules naming two tools of

@@ -335,6 +335,8 @@ pub fn work_state(
     settings: &Settings,
 ) -> (String, Map<String, Value>) {
     let mut gate = Gate::new(settings);
+    // Every value beside its key, however long: the fields are at most 2,000 characters (L3).
+    gate.paired = usize::MAX;
     let cap = gate.cap;
     let list = gate.text("list", &without_blocks(list, false), cap);
     let fields = fields
@@ -362,6 +364,8 @@ struct Gate<'a> {
     cap: usize,
     /// The cap of a tool's `/output`: `cap`, or `HEAD_TAIL_BYTES` by the settings.
     output_cap: usize,
+    /// The longest string value also scanned beside its key (`Gate::both`), in bytes.
+    paired: usize,
     ledger: Vec<(String, redact::Finding)>,
     /// The full size of the strings that were cut, when any was.
     cut: Option<i64>,
@@ -377,6 +381,7 @@ impl<'a> Gate<'a> {
                 crate::config::ToolOutput::Full => cap,
                 crate::config::ToolOutput::HeadTail => HEAD_TAIL_BYTES,
             },
+            paired: PAIRED,
             ledger: Vec::new(),
             cut: None,
         }
@@ -392,26 +397,36 @@ impl<'a> Gate<'a> {
         stored
     }
 
-    /// `value` with what the assignment `key = "value"` hides in it hidden, those findings in the
-    /// ledger at `field`: the rules that look for a key before a secret (gitleaks'
-    /// generic-api-key) match neither a key nor a value scanned apart (Codex's security review of
-    /// #408). A mask that reaches past the value hides the value whole.
-    fn paired(&mut self, field: &str, key: &str, value: &str) -> String {
+    /// A string `value` beside its `key`, stored as the gate keeps it: scanned alone, as every
+    /// string is, and in the assignment `key = "value"`, which the rules that look for a key before
+    /// a secret (gitleaks' generic-api-key) need and neither part matches alone (Codex's security
+    /// review of #408). Both look at the value as written, so neither takes the context the other
+    /// needs; when both hide something, differently, or a mask reaches past the value, the value
+    /// is hidden whole, its findings at its start.
+    fn both(&mut self, field: &str, key: &str, value: &str, cap: usize) -> String {
+        let mark = self.ledger.len();
+        let alone = self.text(field, value, cap);
         let head = format!("{key} = \"");
         let (masked, found) = redact::scan(&format!("{head}{value}\""), self.rules);
         if found.is_empty() {
-            return value.to_owned();
+            return alone;
         }
         let shown = masked.strip_prefix(&head).and_then(|v| v.strip_suffix('"'));
-        let offset = |o: usize| shown.map_or(0, |_| o.saturating_sub(head.len()));
+        let (kept, offset) = match shown {
+            Some(v) if v == alone => return alone,
+            Some(v) if alone == value => (v.to_owned(), head.len()),
+            _ => {
+                for (_, f) in &mut self.ledger[mark..] {
+                    f.offset = 0;
+                }
+                (redact::MASK.to_owned(), usize::MAX)
+            }
+        };
         self.ledger.extend(found.into_iter().map(|f| {
-            let f = redact::Finding {
-                offset: offset(f.offset),
-                ..f
-            };
-            (field.to_owned(), f)
+            let offset = f.offset.saturating_sub(offset);
+            (field.to_owned(), redact::Finding { offset, ..f })
         }));
-        shown.map_or_else(|| redact::MASK.to_owned(), str::to_owned)
+        kept
     }
 
     /// Every string and key of `v`, at its JSON pointer. Blocks are gone by now: stripping here
@@ -440,12 +455,11 @@ impl<'a> Gate<'a> {
                         let key = self.text(&format!("{path}#key"), &k, self.cap);
                         let child = format!("{path}/{}", segment(&key));
                         let x = match x {
-                            Value::String(s) if s.len() <= PAIRED => {
-                                Value::String(self.paired(&child, &key, &s))
+                            Value::String(s) if s.len() <= self.paired => {
+                                Value::String(self.both(&child, &key, &s, cap))
                             }
-                            x => x,
+                            x => self.value(&child, x, cap),
                         };
-                        let x = self.value(&child, x, cap);
                         (key, x)
                     })
                     .collect(),
@@ -455,8 +469,9 @@ impl<'a> Gate<'a> {
     }
 }
 
-/// The longest string value scanned beside its key too (`Gate::paired`): gitleaks'
-/// generic-api-key takes a secret of at most 150 characters.
+/// The longest string value of a captured event scanned beside its key too (`Gate::both`):
+/// gitleaks' generic-api-key takes a secret of at most 150 characters. A work state write's are
+/// scanned so whatever their length.
 const PAIRED: usize = 256;
 
 /// A key as one JSON pointer segment (`~0`, `~1` escaped). A key over 128 bytes is named by
@@ -797,6 +812,17 @@ mod tests {
                 .iter()
                 .any(|(field, f)| field == "/reason/note" && f.offset == 0)
         );
+        // Each scan looks at the value as written: a rule anchored to the whole value still finds
+        // what follows the secret that generic-api-key masks beside its key, and the value two
+        // different masks hide is hidden whole.
+        let s = with(
+            "[[redaction.extra_rules]]\nid = \"t\"\nregex = '^[A-Za-z0-9]{20} (teal-[0-9]{4})$'\n\
+             secret_group = 1\n",
+        );
+        let payload = json!({"reason": {"api_key": format!("{secret} teal-1234")}});
+        let v = events("claude", "SessionEnd", &payload, 0, &s);
+        assert_eq!(body(&v[0].event)["reason"]["api_key"], "[REDACTED]");
+        assert!(v[0].ledger.len() >= 2 && v[0].ledger.iter().all(|(_, f)| f.offset == 0));
     }
 
     #[test]

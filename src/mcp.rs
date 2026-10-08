@@ -335,14 +335,18 @@ impl Oboete {
         &self,
         Parameters(a): Parameters<WorkStateReadArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        // A name no write takes is refused as a write's is, not echoed back (Codex's security
+        // review of #408).
+        let list = match a.list.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
+            Some(l) => match crate::work_state::name(l) {
+                Ok(l) => Some(l),
+                Err(m) => return failed(m),
+            },
+            None => None,
+        };
         let (repo, settings) = self.checkout()?;
         // Named as it was stored: through the gate its writes passed.
-        let list = a
-            .list
-            .as_deref()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(|l| crate::capture::work_state(l, &Default::default(), &settings).0);
+        let list = list.map(|l| crate::capture::work_state(&l, &Default::default(), &settings).0);
         let entries = match crate::raw::read_only(&self.home).map_err(internal)? {
             Some(raw) => crate::raw::work_state_in(&raw.conn, &repo).map_err(internal)?,
             None => Vec::new(),
@@ -1666,7 +1670,11 @@ mod tests {
         let s = Store::new();
         let server = Oboete::new(s.home.path(), &checkout(&s, "r"));
         let secret = format!("R8m2V5p9{}", "Q1s4H7c0N6x3");
-        let fields = json!({"api_key": secret, "colour": "violet", "tag": "teal-5678"});
+        // A value past the 256 bytes an event's is scanned beside its key up to: a work state
+        // write's is scanned so whatever its length.
+        let padded = format!("{secret}{}", " ".repeat(300));
+        let fields = json!({"api_key": secret, "auth_token": padded, "colour": "violet",
+            "tag": "teal-5678"});
         let answer = body(write_state(&server, "keys", fields));
         let stored = s.raw.work_state_entries("github.com/o/r").unwrap();
         let stored = format!("{answer} {:?}", stored[0].fields);
@@ -1682,9 +1690,43 @@ mod tests {
         .unwrap();
         let read = read_state(&server, json!({}));
         assert!(
-            read.contains("api_key=[REDACTED], colour=[REDACTED], tag=[REDACTED]"),
+            read.contains(
+                "api_key=[REDACTED], auth_token=[REDACTED], colour=[REDACTED], tag=[REDACTED]"
+            ),
             "{read}"
         );
+    }
+
+    /// Codex's security review of #408: rules added after a write each see a value as written,
+    /// alone or beside its key, so one does not take the context another needs; a task's name and
+    /// its status are values beside their keys too. A read of a name no write takes is refused.
+    #[test]
+    fn rules_added_later_see_each_value_as_written() {
+        let s = Store::new();
+        let server = Oboete::new(s.home.path(), &checkout(&s, "r"));
+        write_state(&server, "notes", json!({"note": "alpha teal-1234"}));
+        write_state(&server, "tasks", json!({"task": "violet"}));
+        write_state(&server, "tasks", json!({"task": "x", "status": "plum"}));
+        std::fs::write(
+            s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"a\", regex = '^alpha' }, \
+             { id = \"b\", regex = 'note = \"alpha (teal-[0-9]{4})\"', secret_group = 1 }, \
+             { id = \"c\", regex = 'task = \"(violet)\"', secret_group = 1 }, \
+             { id = \"d\", regex = 'status = \"(plum)\"', secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let read = read_state(&server, json!({}));
+        for secret in ["teal-1234", "violet", "plum"] {
+            assert!(!read.contains(secret), "{read}");
+        }
+        assert!(read.contains("- notes: note=[REDACTED]"), "{read}");
+        let long = server
+            .work_state_read(Parameters(
+                serde_json::from_value(json!({"list": "l".repeat(201)})).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(long.is_error, Some(true));
+        assert!(!body(long).contains("lll"));
     }
 
     /// Codex on #408: a rule added later that masks part of a list's name leaves it one list: the
