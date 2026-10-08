@@ -208,7 +208,7 @@ struct Lists {
 /// now (a task's name beside its key), so the writes before and after a rule that masks part of a
 /// name are one list, or one task (Codex on #408); each shows the name first written.
 fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lists {
-    let gate = |s: &str| redact::outbound_with(s, rules);
+    let gate = |s: &str| gated(s, rules);
     let mut names: HashMap<&str, String> = HashMap::new();
     let mut tasks: HashMap<String, String> = HashMap::new();
     let mut task = |t: &str| {
@@ -318,7 +318,7 @@ impl Raw {
     }
 
     /// Each line as the gate shows it: what it hides in any view hidden, then the line through the
-    /// gate, its indent kept (the gate trims what it gates). `None` when it hides the lines whole.
+    /// gate (`gated`). `None` when it hides the lines whole.
     fn shown(&self, rules: &Rules) -> Option<Vec<String>> {
         let mut runs = redact::hidden(&self.text, rules)?;
         let alone = |r: &Range<usize>| match redact::hidden(&self.text[r.clone()], rules) {
@@ -347,14 +347,24 @@ impl Raw {
             }
         }
         let runs = redact::merged_runs(runs);
-        let shown = |r: &Range<usize>| {
-            let line = redact::masked_part(&self.text, r.clone(), &runs);
-            let text = line.trim_start();
-            let indent = &line[..line.len() - text.len()];
-            format!("{indent}{}", redact::outbound_with(text, rules))
-        };
+        let shown =
+            |r: &Range<usize>| gated(&redact::masked_part(&self.text, r.clone(), &runs), rules);
         Some(self.lines.iter().map(shown).collect())
     }
+}
+
+/// `s` through the egress gate, the spaces around it kept: the gate trims what it gates, and a line
+/// keeps its indent, and a name its spaces, which claude-mem keeps (Codex on #408).
+fn gated(s: &str, rules: &Rules) -> String {
+    let body = s.trim();
+    let start = s.len() - s.trim_start().len();
+    let end = start + body.len();
+    format!(
+        "{}{}{}",
+        &s[..start],
+        redact::outbound_with(body, rules),
+        &s[end..]
+    )
 }
 
 /// `value` as the gate shows it beside `key`, out of any line.
@@ -659,6 +669,24 @@ mod tests {
         assert_eq!(
             lines(&state, 0, false),
             ["- l: k=1, j=true, updated 1 minute ago"]
+        );
+    }
+
+    /// Codex on #408: names and keys that differ only in the spaces around them are as many as
+    /// claude-mem keeps.
+    #[test]
+    fn names_differing_in_spaces_stay_apart() {
+        let entries = [
+            entry("l", json!({"task": "ship", "status": "todo"}), 0),
+            entry("l", json!({"task": " ship ", "status": "done"}), 0),
+            entry("l", json!({"a": 1, " a": 2}), 0),
+        ];
+        assert_eq!(
+            lines(&entries, 0, false),
+            [
+                "- l: a=1,  a=2, updated 1 minute ago",
+                "  - [todo] ship, updated 1 minute ago"
+            ]
         );
     }
 
