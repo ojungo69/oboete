@@ -1729,6 +1729,33 @@ mod tests {
         assert!(!body(long).contains("lll"));
     }
 
+    /// Codex on #408: a key a rule added later masks is still one key: the next write, stored
+    /// under the masked key, replaces what was written under it before the rule, and a null clears
+    /// it.
+    #[test]
+    fn a_key_a_rule_masks_later_is_still_one_key() {
+        let s = Store::new();
+        let server = Oboete::new(s.home.path(), &checkout(&s, "r"));
+        write_state(&server, "release", json!({"phase": "rc1", "owner": "me"}));
+        std::fs::write(
+            s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"k\", regex = '^phase$' }]\n",
+        )
+        .unwrap();
+        write_state(&server, "release", json!({"phase": "rc2"}));
+        let read = read_state(&server, json!({}));
+        assert!(
+            read.contains("- release: [REDACTED]=rc2, owner=me,") && !read.contains("rc1"),
+            "{read}"
+        );
+        write_state(&server, "release", json!({"phase": null}));
+        let read = read_state(&server, json!({}));
+        assert!(
+            read.contains("- release: owner=me,") && !read.contains("rc2"),
+            "{read}"
+        );
+    }
+
     /// Codex on #408: a rule added later that masks part of a list's name leaves it one list: the
     /// next write to it, stored under the masked name, and a read of it by its old name find the
     /// writes from before the rule.

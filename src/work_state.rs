@@ -111,10 +111,12 @@ struct Folded {
 
 /// claude-mem's fold of one list's entries, in the order they were written: an entry without a
 /// `task` (absent, null or empty) goes into the list's state, one with a `task` into the task
-/// `name` calls it.
+/// `name` calls it, each field under the key `key` calls it, so that a key a rule added later masks
+/// is still one key: a later write replaces or clears what was written under it (Codex on #408).
 fn fold<'a>(
     entries: impl IntoIterator<Item = &'a Entry>,
     name: &mut impl FnMut(String) -> String,
+    key: &mut impl FnMut(&str) -> String,
 ) -> Folded {
     let mut f = Folded::default();
     let mut at: HashMap<String, usize> = HashMap::new();
@@ -124,8 +126,9 @@ fn fold<'a>(
             Some(Value::String(s)) if s.is_empty() => None,
             Some(task) => Some(name(text(task))),
         };
+        let fields = e.fields.iter().map(|(k, v)| (key(k), v.clone()));
         let Some(task) = task else {
-            f.state.extend(e.fields.clone());
+            f.state.extend(fields);
             f.state_ts = Some(e.ts);
             continue;
         };
@@ -133,8 +136,8 @@ fn fold<'a>(
             f.tasks.push((task, Map::new(), e.ts));
             f.tasks.len() - 1
         });
-        let (_, fields, ts) = &mut f.tasks[i];
-        fields.extend(e.fields.clone());
+        let (_, kept, ts) = &mut f.tasks[i];
+        kept.extend(fields);
         *ts = e.ts;
     }
     f
@@ -216,6 +219,12 @@ fn lists(
             .or_insert_with_key(|t| field("task", t, gate))
             .clone()
     };
+    let mut keys: HashMap<String, String> = HashMap::new();
+    // The keys claude-mem reads stay what they are: they name no recorded text.
+    let mut key = |k: &str| match k {
+        "task" | "status" => k.to_owned(),
+        k => keys.entry(k.to_owned()).or_insert_with(|| gate(k)).clone(),
+    };
     let wanted = list.map(gate);
     let mut written: Vec<(String, Vec<&Entry>, usize)> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
@@ -244,7 +253,7 @@ fn lists(
         rows: Vec::new(),
     };
     for (name, entries, _) in written {
-        let f = fold(entries, &mut task);
+        let f = fold(entries, &mut task, &mut key);
         let state = f.state_ts.is_some()
             && f.state.iter().any(|(k, v)| k != "task" && !v.is_null())
             && (all || !closed(f.state.get("status")));
