@@ -410,8 +410,14 @@ pub(crate) fn probe_provider(p: &Provider) -> std::result::Result<Provider, &'st
             }
             *timeout_s = (*timeout_s).min(30);
             limits.max_output_tokens = limits.max_output_tokens.min(128);
-            // A Messages entry's thinking counts against max_tokens: the test keeps the entry's own.
-            let thinking = extra.get("thinking").cloned();
+            // A Messages entry's thinking counts against max_tokens: the test keeps the entry's own,
+            // but a budget of thinking (`enabled`), which must be at least 1,024 tokens and less
+            // than max_tokens, cannot fit the test's 128: without it, a model that takes one does
+            // not think (Codex on #409).
+            let thinking = extra
+                .get("thinking")
+                .filter(|t| t["type"] != "enabled")
+                .cloned();
             *extra = probe_extra(limits);
             if *api == Api::Anthropic
                 && let Some(thinking) = thinking
@@ -1727,6 +1733,10 @@ fn anthropic_answer(v: &Value, rate: Option<providers_db::RateLeft>) -> Result<A
     match v["stop_reason"].as_str() {
         Some("refusal") => return Err(failed("the model refused (stop_reason refusal)")),
         Some("max_tokens") => return Err(failed("cut off at max_tokens")),
+        // The model's context window ran out: as cut off (Codex on #409).
+        Some("model_context_window_exceeded") => {
+            return Err(failed("cut off at the context window"));
+        }
         _ => {}
     }
     let text = (v["content"].as_array().into_iter().flatten())
@@ -6719,6 +6729,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         for (stop, content) in [
             ("refusal", text("{\"summary\":\"s\"}")),
             ("max_tokens", text("{\"summa")),
+            ("model_context_window_exceeded", text("{\"summary\":\"s\"}")),
             (
                 "end_turn",
                 json!([{"type": "thinking", "thinking": "", "signature": "s"}]),
@@ -6895,6 +6906,17 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         assert_eq!(body["thinking"], json!({"type": "disabled"}));
         assert!(body.get("metadata").is_none(), "{body}");
         assert_eq!(body["messages"][0]["content"], PROBE_PROMPT);
+        // A budget of thinking cannot fit the test's 128 tokens: the test sends none.
+        if let Provider::Openai { extra, .. } = &mut p {
+            extra.insert(
+                "thinking".into(),
+                json!({"type": "enabled", "budget_tokens": 2048}),
+            );
+        }
+        let Provider::Openai { extra, .. } = probe_provider(&p).unwrap() else {
+            panic!("expected an HTTP entry")
+        };
+        assert!(extra.get("thinking").is_none(), "{extra:?}");
         if let Provider::Openai { headers, .. } = &mut p {
             headers.insert("X-Api-Key".into(), "private-header-canary".into());
         }
