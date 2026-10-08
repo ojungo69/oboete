@@ -1,0 +1,25 @@
+docs/research/anthropic-messages-2026-10-09.md
+  s_047b37b8e5635e::t_e23ff2d01677da 55-61
+src/budget.rs
+  s_047b37b8e5635e::t_74ad44730c2a7a 82-85,87,90-92,1499-1511
+src/provider.rs
+  s_047b37b8e5635e::t_5f921859a9dc59 1800,1808,1812,1818,1847,4362,4377-4378,4393-4394,6702
+src/providers_db.rs
+  s_047b37b8e5635e::t_f11befd2fd8f5c 185-187
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "20525ef79903e10262c08024e1b65071b676e4bb",
+  "prompts": {},
+  "sessions": {
+    "s_047b37b8e5635e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8fa093df-349f-48f9-b963-d3e906b3722d",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
