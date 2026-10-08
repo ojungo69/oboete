@@ -454,9 +454,11 @@ impl<'a> Gate<'a> {
                         // The pointer is built from the stored key, so it never holds a secret.
                         let key = self.text(&format!("{path}#key"), &k, self.cap);
                         let child = format!("{path}/{}", segment(&key));
+                        // Beside the key as written: a rule that masks the key itself leaves the
+                        // context generic-api-key needs (Codex's security review of #408).
                         let x = match x {
                             Value::String(s) if s.len() <= self.paired => {
-                                Value::String(self.both(&child, &key, &s, cap))
+                                Value::String(self.both(&child, &k, &s, cap))
                             }
                             x => self.value(&child, x, cap),
                         };
@@ -823,6 +825,12 @@ mod tests {
         let v = events("claude", "SessionEnd", &payload, 0, &s);
         assert_eq!(body(&v[0].event)["reason"]["api_key"], "[REDACTED]");
         assert!(v[0].ledger.len() >= 2 && v[0].ledger.iter().all(|(_, f)| f.offset == 0));
+        // A rule that masks the key leaves the value's scan beside the key as written.
+        let s = with("[[redaction.extra_rules]]\nid = \"k\"\nregex = '^api_key$'\n");
+        let payload = json!({"reason": {"api_key": secret.clone()}});
+        let v = events("claude", "SessionEnd", &payload, 0, &s);
+        assert!(!format!("{:?}", v[0]).contains(&secret), "{:?}", v[0]);
+        assert_eq!(body(&v[0].event)["reason"]["[REDACTED]"], "[REDACTED]");
     }
 
     #[test]

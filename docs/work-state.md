@@ -105,8 +105,9 @@ each name, key and value alone, so that a rule anchored to a whole field matches
 that look for a key before a secret (gitleaks' generic-api-key) need, and last each line. Both
 scans of a value look at it as written, so neither takes the context the other needs; a value
 both change, differently, or whose pair the gate changed past the value, is masked whole. The
-capture gate scans the same two ways: every value of a work state write, and a string value of up
-to 256 bytes in any other stored JSON.
+capture gate scans the same two ways, a value beside its key as written (a rule that masks the
+key leaves the context): every value of a work state write, and a string value of up to 256 bytes
+in any other stored JSON.
 Ops keep no ledger rows; the masks are in the text. A list is named as the egress gate shows its
 name now, wherever lists are told apart: a rule added later that masks part of a list's name leaves
 one list, whose next write is stored under the masked name.
@@ -187,6 +188,9 @@ with their times, before claude-mem is removed.
   `includeClosed` for good.
 - A value is masked by the rules of the time it was written; a rule added later hides it in every
   answer and section, not in the stored op.
+- The last pass over a shown line sees it after its fields were masked: a rule written against the
+  line's own format (`key=value`) can lose its context to another rule that masked part of a value
+  (#411, which builds the lines as the manifest's are).
 - SQLite reads the repository of every work state op at each read (about 30 ms for 10,000 ops of
   2,000 characters, measured on SQLite 3.45 alone): a repository index would break 1.6.
 - While claude-mem and oboete both run (a rehearsal), the agent gets two rules naming two tools of
