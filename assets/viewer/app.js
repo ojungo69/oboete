@@ -1530,7 +1530,7 @@ const TEXT = {
   recovery_unavailable: ['Recovery needs a bounded regular writable file and verified owner-only Linux storage. It is unavailable for this file or platform; nothing was reset.', '復旧には上限内の通常ファイルと書き込み権限、Linux 上で確認できる本人専用の保存先が必要です。このファイルまたは環境では実行できず、初期化していません。'],
   recovery_failed: ['Recovery stopped. The current settings or their private recoverable copy are retained. Check saved settings before trying a fresh preview.', '復旧を停止しました。現在の設定、または復元可能な非公開のコピーを保持しています。保存済み設定を確認してから、改めて復旧内容を確認してください。'],
   recovery_confirmation: ['Preview recovery and agree to its effects first.', '復旧内容を確認し、その影響に同意してください。'],
-  recovery_stale: ['Settings changed after the preview. Check the current settings and prepare a fresh preview.', '確認後に設定が変わりました。現在の設定を確認し、改めて復旧内容を確認してください。'],
+  recovery_stale: ['Recovery preview is no longer current. Check the saved settings and prepare a fresh preview.', '復旧の確認内容が最新ではありません。保存済み設定を確認し、改めて復旧内容を確認してください。'],
   stale: [
     'config.toml was changed elsewhere. The page now shows its current values; please make your change again.',
     'config.toml がほかの場所で変更されました。現在の値を表示し直しましたので、もう一度変更してください。',

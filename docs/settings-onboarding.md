@@ -15,14 +15,16 @@ proves that journey without calling an agent or model. It does not replace S5's
 separate timed write/index/FTS/MCP-get-and-delete probe.
 
 Invalid configuration recovery is a fixed operation: preview current bounded
-bytes without writing, require confirmation against their version and file/home
-identity, retain a verified owner-only copy of those exact bytes, then install a
+bytes without writing, require a random confirmation bound server-side to their
+version and file/home identity, retain a verified owner-only copy of those exact bytes, then install a
 validated configuration with curation, embeddings, paid usage and resident mode
 off. Keep stores, agent files and key files. Refuse stale input, unsafe storage or
 failed backup/staging; preserve any already-created recoverable copy. No raw
 editor, arbitrary path, shell execution, model call or automatic retry is added.
 Use the shared settings lock/stager and existing private-storage checks. Platform
 support is labelled by actual private-storage support, not assumed from Unix mode.
+Only one current confirmation is kept per viewer. A fresh preview or viewer restart
+invalidates the old nonce; an admitted start consumes it before any file mutation.
 
 The public seams under test are the guarded recovery HTTP operation, the existing
 settings-save payload and the native capture → FTS → browser search journey, as

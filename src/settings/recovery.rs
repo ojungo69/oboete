@@ -20,6 +20,17 @@ struct Start {
     confirmed: bool,
 }
 
+struct Consent {
+    nonce: String,
+    fingerprint: String,
+}
+
+/// One random confirmation per viewer; recovery's witness stays in this bounded cache.
+#[derive(Default)]
+pub(crate) struct Recovery {
+    prepared: Mutex<Option<Consent>>,
+}
+
 fn unavailable() -> Refusal {
     refused(422, "recovery_unavailable", "")
 }
@@ -33,40 +44,62 @@ thread_local! {
     pub(crate) static AFTER_COMMIT: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
-pub(crate) fn preview(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
-    if serde_json::from_slice::<Value>(body).ok() != Some(json!({})) {
-        return Err(refused(400, "bad_request", ""));
-    }
-    let input = snapshot(home)?;
-    Ok(json!({"preview_key":input.key,
+impl Recovery {
+    pub(crate) fn preview(&self, home: &Path, body: &[u8]) -> Result<Value, Refusal> {
+        if serde_json::from_slice::<Value>(body).ok() != Some(json!({})) {
+            return Err(refused(400, "bad_request", ""));
+        }
+        let input = snapshot(home)?;
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).map_err(|_| unavailable())?;
+        let nonce: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        *self
+            .prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Consent {
+            nonce: nonce.clone(),
+            fingerprint: input.key,
+        });
+        Ok(json!({"preview_key":nonce,
         "replaces":"all_settings", "copy":"current_bytes", "ai":"off",
         "prompt_text":"off", "injection":"off", "other_capture":"builtin_redaction"}))
-}
+    }
 
-pub(crate) fn start(
-    caller: Option<CommandCaller>,
-    home: &Path,
-    saving: &Mutex<()>,
-    body: &[u8],
-) -> Result<Value, Refusal> {
-    if body.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
-        return Err(refused(400, "bad_request", ""));
+    pub(crate) fn start(
+        &self,
+        caller: Option<CommandCaller>,
+        home: &Path,
+        saving: &Mutex<()>,
+        body: &[u8],
+    ) -> Result<Value, Refusal> {
+        if body.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
+            return Err(refused(400, "bad_request", ""));
+        }
+        let posted: Start =
+            serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
+        if !posted.confirmed {
+            return Err(refused(422, "recovery_confirmation", ""));
+        }
+        let _saving = saving
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let input = snapshot(home).map_err(|_| stale())?;
+        let mut prepared = self
+            .prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !prepared.as_ref().is_some_and(|consent| {
+            consent.nonce == posted.preview_key && consent.fingerprint == input.key
+        }) {
+            return Err(stale());
+        }
+        // A consumed confirmation cannot replay after partial work or an uncertain response.
+        prepared.take();
+        drop(prepared);
+        let command =
+            CommandHome::new(home, caller.ok_or_else(unavailable)?).map_err(|_| unavailable())?;
+        apply(home, &input, &command)
     }
-    let posted: Start =
-        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
-    if !posted.confirmed {
-        return Err(refused(422, "recovery_confirmation", ""));
-    }
-    let _saving = saving
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let input = snapshot(home).map_err(|_| stale())?;
-    if input.key != posted.preview_key {
-        return Err(stale());
-    }
-    let command =
-        CommandHome::new(home, caller.ok_or_else(unavailable)?).map_err(|_| unavailable())?;
-    apply(home, &input, &command)
 }
 
 #[cfg(not(target_os = "linux"))]

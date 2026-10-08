@@ -55,6 +55,7 @@ struct Viewer {
     token: Token,
     /// Settings saves, one at a time.
     saving: Mutex<()>,
+    recovery: crate::settings::recovery::Recovery,
     /// One synchronous maintenance operation and its last bounded receipt.
     maintenance: crate::settings::maintenance::Maintenance,
     agents: crate::setup::agents::Agents,
@@ -881,6 +882,7 @@ impl Viewer {
             port,
             token,
             saving: Mutex::new(()),
+            recovery: crate::settings::recovery::Recovery::default(),
             maintenance: crate::settings::maintenance::Maintenance::default(),
             agents: crate::setup::agents::Agents::default(),
             opener: Mutex::new(None),
@@ -1194,16 +1196,14 @@ impl Viewer {
     }
 
     fn recovery_preview(&self, body: &[u8]) -> Response {
-        saved(crate::settings::recovery::preview(&self.home, body))
+        saved(self.recovery.preview(&self.home, body))
     }
 
     fn recovery_start(&self, body: &[u8]) -> Response {
-        saved(crate::settings::recovery::start(
-            self.maintenance_caller(),
-            &self.home,
-            &self.saving,
-            body,
-        ))
+        saved(
+            self.recovery
+                .start(self.maintenance_caller(), &self.home, &self.saving, body),
+        )
     }
 
     fn maintenance_preview(&self, body: &[u8]) -> Response {
@@ -2639,6 +2639,54 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn w6f_confirmation_is_opaque_and_expires_on_a_new_preview_or_viewer() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(p.join("config.toml"), "invalid = [").unwrap();
+        let v = Viewer::new(p, None, 4321, Token::Run("t0k".into()));
+        let first = json_of(&v.recovery_preview(b"{}"));
+        let second = json_of(&v.recovery_preview(b"{}"));
+        assert!(
+            first["preview_key"] != second["preview_key"],
+            "each preview needs an unrelated confirmation key"
+        );
+        let before = crate::backup::tests::w5b_files(p);
+        let body = |key: &Value| json!({"preview_key":key,"confirmed":true});
+        assert_eq!(
+            w6f_post(
+                &v,
+                "/api/settings/recovery/start",
+                body(&first["preview_key"])
+            )
+            .status,
+            409
+        );
+        let restarted = Viewer::new(p, None, 4321, Token::Run("t0k".into()));
+        assert_eq!(
+            w6f_post(
+                &restarted,
+                "/api/settings/recovery/start",
+                body(&second["preview_key"])
+            )
+            .status,
+            409
+        );
+        assert_eq!(crate::backup::tests::w5b_files(p), before);
+        assert_eq!(
+            w6f_post(
+                &v,
+                "/api/settings/recovery/start",
+                body(&second["preview_key"])
+            )
+            .status,
+            200
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn w6f_recovery_previews_without_writes_and_keeps_the_exact_invalid_file() {
         use std::os::unix::fs::MetadataExt;
         let home = tempfile::tempdir().unwrap();
@@ -2723,6 +2771,11 @@ mod tests {
         .unwrap();
         let result = v.recovery_start(&body);
         assert_eq!(result.status, 500);
+        assert_eq!(
+            v.recovery_start(&body).status,
+            409,
+            "a consumed confirmation must not repeat partial work"
+        );
         assert_eq!(std::fs::read(p.join("config.toml")).unwrap(), original);
         let copies: Vec<_> = std::fs::read_dir(p)
             .unwrap()
@@ -2930,8 +2983,7 @@ mod tests {
             let refused = w6f_post(&v, "/api/settings/recovery/start", body);
             assert!(
                 [409, 422].contains(&refused.status),
-                "{kind}: {}",
-                refused.status
+                "{kind}: recovery was not refused"
             );
             assert_eq!(std::fs::read(&file).unwrap(), original, "{kind}");
             assert!(!String::from_utf8_lossy(&refused.body).contains("private content"));
