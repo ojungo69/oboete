@@ -322,6 +322,19 @@ impl Provider {
             Self::Openai { enabled, .. } | Self::Cli { enabled, .. } => *enabled,
         }
     }
+    /// The most one input token may be billed, in input prices: twice for a Messages entry that
+    /// writes its prompt cache (`cache_control` in its `extra`), which Anthropic bills at up to
+    /// twice the input price, else once. A paid call reserves its input at this (Codex on #409).
+    pub fn input_weight(&self) -> f64 {
+        match self {
+            Provider::Openai {
+                api: Api::Anthropic,
+                extra,
+                ..
+            } if extra.contains_key("cache_control") => 2.0,
+            _ => 1.0,
+        }
+    }
     /// The output tokens a request reserves on top of its prompt: `max_tokens` or
     /// `max_completion_tokens` in `extra`, at most `max_output_tokens` on a paid entry (as
     /// `provider::call` sends it), or 0 when it names none. A Messages request always names one:

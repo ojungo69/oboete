@@ -302,7 +302,7 @@ pub(crate) fn reserve_with_history(
             skip: Skip::Wait(state.down_until),
         }));
     }
-    let input = f64::from(est) * factor(&tx, p.name())?;
+    let input = f64::from(est) * factor(&tx, p.name())? * p.input_weight();
     if let Some(refusal) =
         admit_with_history(&tx, (p, history), input, paid_usd_per_month, ceiling_hit)?
     {
@@ -1573,6 +1573,40 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    /// Codex on #409: a Messages entry that writes its prompt cache reserves each input token at
+    /// twice its input price, the most a cache write is billed, so a call whose usage never comes
+    /// back is still counted at no less than its bill.
+    #[test]
+    fn a_cache_writing_entry_reserves_its_input_at_twice_the_price() {
+        let limits = Limits {
+            max_output_tokens: 100,
+            usd_per_mtok_in: 1.0,
+            usd_per_mtok_out: 1.0,
+            ..Default::default()
+        };
+        let mut costs = Vec::new();
+        for cache in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let db = open(home.path()).unwrap();
+            let mut p = entry("p", limits.clone());
+            if let Provider::Openai { api, extra, .. } = &mut p {
+                *api = crate::config::Api::Anthropic;
+                if cache {
+                    extra.insert(
+                        "cache_control".into(),
+                        serde_json::json!({"type": "ephemeral"}),
+                    );
+                }
+            }
+            let reservation = reserve(&db, &p, "probe", "s", 1_000, 5.0, &[])
+                .unwrap()
+                .unwrap();
+            costs.push(reservation.cost(&p, Usage::default(), true).unwrap());
+        }
+        assert!((costs[0] - 0.0011).abs() < 1e-12, "{costs:?}");
+        assert!((costs[1] - 0.0021).abs() < 1e-12, "{costs:?}");
     }
 
     #[test]
