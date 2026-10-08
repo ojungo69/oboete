@@ -11,11 +11,21 @@
 <body>
 <header class="bar">
   <div class="top">
-    <h1>oboete</h1>
+    <h1 class="brand"><svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="mark-tile" width="32" height="32" rx="9"/><circle class="mark-ring" cx="16" cy="16" r="8.5" stroke-width="3"/><circle class="mark-dot" cx="16" cy="16" r="3"/></svg><span>oboete</span></h1>
     <span id="live" class="live" title="Checks for new memory every few seconds">Live</span>
     <button type="button" id="theme" class="quiet small" title="Follow the system, or force light or dark">Theme: auto</button>
     <button type="button" id="help" class="quiet small" aria-label="Show welcome" title="Show welcome">?</button>
   </div>
+  <nav id="tabs" aria-label="Views">
+    <button type="button" data-view="timeline" class="tab">Timeline</button>
+    <button type="button" data-view="records" class="tab">Records</button>
+    <button type="button" data-view="context" class="tab">Context</button>
+    <button type="button" data-view="stats" class="tab">Stats</button>
+    <button type="button" data-view="settings" class="tab">Settings</button>
+  </nav>
+</header>
+<main>
+  <h2 id="heading">Timeline</h2>
   <form id="controls" role="search">
     <label class="field">
       <span id="repo-label">Repository</span>
@@ -50,17 +60,7 @@
       </label>
     </div>
   </form>
-  <nav id="tabs" aria-label="Views">
-    <button type="button" data-view="timeline" class="tab">Timeline</button>
-    <button type="button" data-view="records" class="tab">Records</button>
-    <button type="button" data-view="context" class="tab">Context</button>
-    <button type="button" data-view="stats" class="tab">Stats</button>
-    <button type="button" data-view="settings" class="tab">Settings</button>
-  </nav>
-</header>
-<main>
   <output id="status" aria-live="polite"></output>
-  <h2 id="heading">Timeline</h2>
   <p id="vector" class="vector-note" hidden></p>
   <ol id="list" class="entries"></ol>
   <div id="panel"></div>
@@ -68,6 +68,7 @@
 <div id="welcome" class="welcome-backdrop" hidden>
   <article id="welcome-dialog" class="welcome-dialog" role="dialog" aria-modal="true" aria-labelledby="welcome-title" tabindex="-1">
     <header class="welcome-header">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="mark-tile" width="32" height="32" rx="9"/><circle class="mark-ring" cx="16" cy="16" r="8.5" stroke-width="3"/><circle class="mark-dot" cx="16" cy="16" r="3"/></svg>
       <h2 id="welcome-title">Welcome to oboete</h2>
       <button type="button" id="welcome-close" class="quiet" aria-label="Close welcome" title="Close (Esc)">×</button>
     </header>
