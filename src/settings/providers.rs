@@ -221,6 +221,7 @@ impl Draft {
                     return Err(refused(422, "range", "providers.model"));
                 }
                 let mut result = old.cloned().unwrap_or_else(|| Provider::Cli {
+                    credits: false,
                     name: name.clone(),
                     enabled: *enabled,
                     cli: cli.clone(),

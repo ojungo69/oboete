@@ -922,8 +922,8 @@ impl<'a> Chain<'a> {
             let started = Instant::now();
             // Allowance discovery sends no prompt and must not hold dispatch admission.
             // Forced failures preserve their previous behavior: no allowance read at all.
-            let ready = if !forced && let Provider::Cli { cli, .. } = p {
-                cli_preflight(cli)
+            let ready = if !forced && let Provider::Cli { cli, credits, .. } = p {
+                cli_preflight(cli, *credits)
             } else {
                 Ok(())
             };
@@ -1012,8 +1012,8 @@ impl<'a> Chain<'a> {
                         continue;
                     }
                 };
-                let ready = if let Provider::Cli { cli, .. } = p {
-                    cli_preflight(cli)
+                let ready = if let Provider::Cli { cli, credits, .. } = p {
+                    cli_preflight(cli, *credits)
                 } else {
                     Ok(())
                 };
@@ -2564,11 +2564,12 @@ fn claude_rest(stdout: &str) -> Option<i64> {
 }
 
 /// Read a subscription's allowance before the final raw check and dispatch admission.
-fn cli_preflight(cli: &str) -> Result<(), CallError> {
+fn cli_preflight(cli: &str, credits: bool) -> Result<(), CallError> {
     // codex's answer says nothing of its allowance (`codex exec --json`): its app server is asked
-    // before the call, and a window at its line rests codex with nothing sent (issue #166).
+    // before the call, and a window at its line rests codex with nothing sent (issue #166), unless
+    // the entry may draw on the account's credits and the account has some (#164).
     if cli == "codex"
-        && let Some(until) = codex_rest_now()
+        && let Some(until) = codex_rest_now(credits)
     {
         let e = CallError::other("codex is at its plan's usage line");
         return Err(e.unsent().resting(Some(until)));
@@ -2750,7 +2751,7 @@ const CODEX_LIMITS_EVERY_MS: i64 = 10 * 60_000;
 const CODEX_LIMITS_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[cfg(test)]
-type AllowanceRead = Box<dyn FnMut() -> Option<i64>>;
+type AllowanceRead = Box<dyn FnMut(bool) -> Option<i64>>;
 #[cfg(test)]
 type FixtureReady = Box<dyn FnOnce() -> std::io::Result<()>>;
 
@@ -2768,13 +2769,14 @@ thread_local! {
     };
 }
 
-/// Until when codex should rest before this call (issue #166). A reading under the lines is kept
-/// for `CODEX_LIMITS_EVERY_MS`; one at a line becomes the chain's cooldown, so codex is not asked
-/// again before its reset. None when the read fails: the call goes ahead.
-fn codex_rest_now() -> Option<i64> {
+/// Until when codex should rest before this call (issue #166), drawing on credits when `credits`
+/// (#164). A reading under the lines is kept for `CODEX_LIMITS_EVERY_MS`; one at a line becomes
+/// the chain's cooldown, so codex is not asked again before its reset. None when the read fails:
+/// the call goes ahead.
+fn codex_rest_now(credits: bool) -> Option<i64> {
     #[cfg(test)]
     if let Some(rest) =
-        CODEX_REST_TEST.with(|probe| probe.borrow_mut().as_mut().map(|probe| probe()))
+        CODEX_REST_TEST.with(|probe| probe.borrow_mut().as_mut().map(|probe| probe(credits)))
     {
         return rest;
     }
@@ -2785,9 +2787,14 @@ fn codex_rest_now() -> Option<i64> {
         return None;
     }
     let read = codex_limits(std::ffi::OsStr::new("codex"), CODEX_LIMITS_TIMEOUT)?;
-    let rest = codex_rest(&read, now);
+    // Only a reading under the lines without credits is kept: one that rests nothing because of
+    // them is read again before the next call, when they may be spent.
+    let rest = codex_rest(&read, now, false);
     if rest.is_none() {
         UNDER_UNTIL.store(now + CODEX_LIMITS_EVERY_MS, Ordering::Relaxed);
+    }
+    if credits {
+        return codex_rest(&read, now, true);
     }
     rest
 }
@@ -2842,11 +2849,27 @@ fn codex_limits(program: &std::ffi::OsStr, timeout: Duration) -> Option<Value> {
 /// a longer one to 93%, until that window's reset (`REST_WITHOUT_RESET` when it gives none). A
 /// reached limit, or no included usage left, would draw on paid credits: codex rests until the
 /// latest reset, or until the owner acts when none is given. At most `MAX_SUBSCRIPTION_REST` away.
-fn codex_rest(read: &Value, now: i64) -> Option<i64> {
+/// With `credits` (an entry's `credits = true`, owner decision 41), a limit whose account has
+/// credits to draw on rests nothing, as codex's own client reads it (`has_usable_workspace_credits`
+/// in its TUI): not past a workspace's spend control or a workspace limit, whose credits the
+/// account cannot use.
+fn codex_rest(read: &Value, now: i64, credits: bool) -> Option<i64> {
+    let usable = |s: &&Value| {
+        credits
+            && s["spendControlReached"] != true
+            && !s["rateLimitReachedType"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("workspace_"))
+            && (s["credits"]["hasCredits"] == true || s["credits"]["unlimited"] == true)
+    };
     let snapshots: Vec<&Value> = match read["rateLimitsByLimitId"].as_object() {
         Some(m) if !m.is_empty() => m.values().collect(),
         _ => vec![&read["rateLimits"]],
     };
+    let snapshots: Vec<&Value> = snapshots.into_iter().filter(|s| !usable(s)).collect();
+    if snapshots.is_empty() {
+        return None;
+    }
     let windows: Vec<&Value> = snapshots
         .iter()
         .flat_map(|s| [&s["primary"], &s["secondary"]])
@@ -3469,39 +3492,99 @@ mod tests {
         let window = |used: i64, mins: i64, reset: i64| json!({"usedPercent": used, "windowDurationMins": mins, "resetsAt": reset});
         let week = |used| read(json!({"primary": window(used, 10080, later)}));
         // The owner's week on 2026-09-28: 47%.
-        assert_eq!(codex_rest(&week(47), now), None);
-        assert_eq!(codex_rest(&week(92), now), None);
-        assert_eq!(codex_rest(&week(93), now), Some(later * 1000));
+        assert_eq!(codex_rest(&week(47), now, false), None);
+        assert_eq!(codex_rest(&week(92), now, false), None);
+        assert_eq!(codex_rest(&week(93), now, false), Some(later * 1000));
         let hours = |used, reset| read(json!({"primary": window(used, 300, reset)}));
-        assert_eq!(codex_rest(&hours(94, later), now), None);
-        assert_eq!(codex_rest(&hours(95, later), now), Some(later * 1000));
-        assert_eq!(codex_rest(&hours(85, soon), now), Some(soon * 1000));
-        assert_eq!(codex_rest(&hours(84, soon), now), None);
+        assert_eq!(codex_rest(&hours(94, later), now, false), None);
+        assert_eq!(
+            codex_rest(&hours(95, later), now, false),
+            Some(later * 1000)
+        );
+        assert_eq!(codex_rest(&hours(85, soon), now, false), Some(soon * 1000));
+        assert_eq!(codex_rest(&hours(84, soon), now, false), None);
         // Every limit counts, and the later reset holds.
         let both = json!({"rateLimitsByLimitId": {
             "codex": {"primary": window(10, 10080, later)},
             "other": {"primary": window(10, 300, soon), "secondary": window(96, 10080, later + 60)},
         }});
-        assert_eq!(codex_rest(&both, now), Some((later + 60) * 1000));
+        assert_eq!(codex_rest(&both, now, false), Some((later + 60) * 1000));
         let reached = json!({"rateLimits": {"primary": window(40, 10080, later),
             "rateLimitReachedType": "rate_limit_reached"}});
-        assert_eq!(codex_rest(&reached, now), Some(later * 1000));
+        assert_eq!(codex_rest(&reached, now, false), Some(later * 1000));
         let workspace = json!({"rateLimits": {"rateLimitReachedType": "workspace_member_usage_limit_reached",
             "individualLimit": {"limit": "10", "used": "10", "remainingPercent": 0, "resetsAt": later}}});
-        assert_eq!(codex_rest(&workspace, now), Some(later * 1000));
+        assert_eq!(codex_rest(&workspace, now, false), Some(later * 1000));
         let none_left = json!({"ordinaryUsageAllowed": false, "rateLimits": {}});
-        assert_eq!(codex_rest(&none_left, now), Some(providers_db::OWNER_HOLD));
+        assert_eq!(
+            codex_rest(&none_left, now, false),
+            Some(providers_db::OWNER_HOLD)
+        );
         // A reached limit with no reset holds codex, whatever reset another limit gives.
         let unknown = json!({"rateLimitsByLimitId": {
             "codex": {"primary": {"usedPercent": 100}, "rateLimitReachedType": "rate_limit_reached"},
             "other": {"primary": window(10, 300, soon)},
         }});
-        assert_eq!(codex_rest(&unknown, now), Some(providers_db::OWNER_HOLD));
-        assert_eq!(codex_rest(&json!({}), now), None);
+        assert_eq!(
+            codex_rest(&unknown, now, false),
+            Some(providers_db::OWNER_HOLD)
+        );
+        assert_eq!(codex_rest(&json!({}), now, false), None);
         // At its line with no reset: an hour, then codex is read again.
         let unset = read(json!({"primary": {"usedPercent": 97, "windowDurationMins": 10080}}));
         let hour = REST_WITHOUT_RESET.as_millis() as i64;
-        assert_eq!(codex_rest(&unset, now), Some(now + hour));
+        assert_eq!(codex_rest(&unset, now, false), Some(now + hour));
+    }
+
+    /// Owner decision 41 (#164): with `credits`, a limit whose account has credits to draw on
+    /// rests nothing, at its line or past it, as codex's own client reads the credits; a
+    /// workspace's spend control, a workspace limit and an account without credits still rest.
+    #[test]
+    fn codex_draws_on_credits_past_its_lines_when_allowed() {
+        let now = db::now_ms();
+        let later = now / 1000 + 86_400;
+        let limit = |more: Value| {
+            let mut s = json!({"primary": {"usedPercent": 100, "windowDurationMins": 10080,
+                "resetsAt": later}, "rateLimitReachedType": "rate_limit_reached",
+                "credits": {"hasCredits": true, "unlimited": false, "balance": "4"}});
+            s.as_object_mut()
+                .unwrap()
+                .extend(more.as_object().unwrap().clone());
+            json!({"rateLimits": s})
+        };
+        let reached = limit(json!({}));
+        assert_eq!(codex_rest(&reached, now, false), Some(later * 1000));
+        assert_eq!(codex_rest(&reached, now, true), None);
+        let line = limit(
+            json!({"primary": {"usedPercent": 96, "windowDurationMins": 10080,
+            "resetsAt": later}, "rateLimitReachedType": null}),
+        );
+        assert_eq!(codex_rest(&line, now, true), None);
+        let unlimited = limit(json!({"credits": {"hasCredits": false, "unlimited": true}}));
+        assert_eq!(codex_rest(&unlimited, now, true), None);
+        for still in [
+            json!({"credits": {"hasCredits": false, "unlimited": false, "balance": "0"}}),
+            json!({"credits": null}),
+            json!({"spendControlReached": true}),
+            json!({"rateLimitReachedType": "workspace_member_credits_depleted"}),
+            json!({"rateLimitReachedType": "workspace_owner_usage_limit_reached"}),
+        ] {
+            assert_eq!(
+                codex_rest(&limit(still.clone()), now, true),
+                Some(later * 1000),
+                "{still}"
+            );
+        }
+        // No included usage left: credits carry the call when every limit has them.
+        let mut none_left = limit(json!({}));
+        none_left["ordinaryUsageAllowed"] = json!(false);
+        assert_eq!(codex_rest(&none_left, now, true), None);
+        // One limit without credits is enough to rest.
+        let both = json!({"rateLimitsByLimitId": {
+            "codex": reached["rateLimits"].clone(),
+            "other": limit(json!({"credits": {"hasCredits": false}}))["rateLimits"].clone(),
+        }});
+        assert_eq!(codex_rest(&both, now, true), Some(later * 1000));
     }
 
     /// A rest codex's allowance set before a call is its own cooldown, to the millisecond: no
@@ -3518,6 +3601,50 @@ mod tests {
         };
         let s = next_state(was, &e);
         assert_eq!((s.down_until, s.fails), (soon, 1));
+    }
+
+    /// #164: an entry's `credits` reaches codex's allowance read, which draws on them only then.
+    #[test]
+    fn a_codex_entrys_credits_reach_its_allowance_read() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        for credits in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let conn = providers_db::open(home.path()).unwrap();
+            let until = db::now_ms() + 60_000;
+            let seen = Rc::new(Cell::new(None));
+            let saw = Rc::clone(&seen);
+            CODEX_REST_TEST.with(|probe| {
+                *probe.borrow_mut() = Some(Box::new(move |c| {
+                    saw.set(Some(c));
+                    Some(until)
+                }))
+            });
+            let providers = [Provider::Cli {
+                credits,
+                enabled: true,
+                name: "codex".into(),
+                cli: "codex".into(),
+                model: None,
+                daily_budget: 10,
+                timeout_s: 1,
+                limits: Default::default(),
+            }];
+            let gate = || Ok(Some(crate::dispatch::Admission::shared(home.path())?));
+            let isolation = || Ok(crate::isolation::Gate::Passed);
+            let mut chain = Chain::new(&providers, &conn).gate(&gate);
+            chain.isolation = Some(&isolation);
+            chain.forced_fail = None;
+            OFFLINE_CALL_TEST.with(|call| {
+                *call.borrow_mut() =
+                    Some(CallError::other("synthetic offline dispatch refusal").unsent())
+            });
+            let result = chain.run("curator", "preflight", "synthetic prompt", &json!({}));
+            CODEX_REST_TEST.with(|probe| probe.borrow_mut().take());
+            OFFLINE_CALL_TEST.with(|call| call.borrow_mut().take());
+            assert!(result.is_err());
+            assert_eq!(seen.get(), Some(credits));
+        }
     }
 
     /// Allowance reads carry no prompt. They must leave registration free, and a rest must
@@ -3541,7 +3668,7 @@ mod tests {
         let observed = Rc::clone(&free);
         let observed_reads = Rc::clone(&reads);
         CODEX_REST_TEST.with(|probe| {
-            *probe.borrow_mut() = Some(Box::new(move || {
+            *probe.borrow_mut() = Some(Box::new(move |_| {
                 observed_reads.set(observed_reads.get() + 1);
                 let registration = std::fs::OpenOptions::new()
                     .create(true)
@@ -3555,6 +3682,7 @@ mod tests {
             }))
         });
         let providers = [Provider::Cli {
+            credits: false,
             enabled: true,
             name: "codex".into(),
             cli: "codex".into(),
@@ -3660,7 +3788,7 @@ mod tests {
         let observed = Rc::clone(&registered);
         let path = home.path().to_owned();
         CODEX_REST_TEST.with(|probe| {
-            *probe.borrow_mut() = Some(Box::new(move || {
+            *probe.borrow_mut() = Some(Box::new(move |_| {
                 let (status, _) = crate::forget::start(&path, &preview).unwrap();
                 observed.set(status.records == 1);
                 None
@@ -3668,6 +3796,7 @@ mod tests {
         });
         let conn = providers_db::open(home.path()).unwrap();
         let providers = [Provider::Cli {
+            credits: false,
             enabled: true,
             name: "codex".into(),
             cli: "codex".into(),
@@ -3727,12 +3856,13 @@ mod tests {
         let reads = Rc::new(Cell::new(0));
         let observed = Rc::clone(&reads);
         CODEX_REST_TEST.with(|probe| {
-            *probe.borrow_mut() = Some(Box::new(move || {
+            *probe.borrow_mut() = Some(Box::new(move |_| {
                 observed.set(observed.get() + 1);
                 Some(db::now_ms() + 60_000)
             }))
         });
         let providers = [Provider::Cli {
+            credits: false,
             enabled: true,
             name: "codex".into(),
             cli: "codex".into(),
@@ -3959,7 +4089,7 @@ mod tests {
         let read = codex_limits(std::ffi::OsStr::new("codex"), CODEX_LIMITS_TIMEOUT).unwrap();
         let used = &read["rateLimits"]["primary"]["usedPercent"];
         assert!(used.is_number(), "{read}");
-        println!("codex rest: {:?}", codex_rest(&read, db::now_ms()));
+        println!("codex rest: {:?}", codex_rest(&read, db::now_ms(), false));
     }
 
     /// Live, with `--ignored`, in the dogfood user only (curator CLI tests run there): each
@@ -3973,7 +4103,7 @@ mod tests {
             [user] fix the date parser in src/ingest/csv_reader.py\n\
             [assistant] added %d.%m.%Y; 21 tests pass\n--- END ---";
         for (cli, model) in [("claude", "haiku"), ("codex", "gpt-6-luna")] {
-            cli_preflight(cli).unwrap_or_else(|e| panic!("{cli}: {}", e.message));
+            cli_preflight(cli, false).unwrap_or_else(|e| panic!("{cli}: {}", e.message));
             let a = cli_headless(cli, Some(model), 180, prompt, &schema, None)
                 .unwrap_or_else(|e| panic!("{cli}: {}", e.message));
             assert!(a.value["summary"].is_string(), "{cli}: {}", a.value);
@@ -4611,6 +4741,7 @@ print(json.dumps({"type":"result","is_error":False,"result":json.dumps({"ok":Tru
 "#).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let p = Provider::Cli {
+            credits: false,
             name: "fixture".into(),
             enabled: true,
             cli: "claude".into(),
@@ -4713,6 +4844,7 @@ print(json.dumps({"type":"result","result":'{"ok":true}',"is_error":"error" in p
             let conn = providers_db::open(home.path()).unwrap();
             let p = if reason == "forced" {
                 Provider::Cli {
+                    credits: false,
                     name: "codex".into(),
                     enabled: true,
                     cli: "codex".into(),
@@ -4750,7 +4882,7 @@ print(json.dumps({"type":"result","result":'{"ok":true}',"is_error":"error" in p
             let reads = Rc::new(Cell::new(0));
             let counted = Rc::clone(&reads);
             CODEX_REST_TEST.with(|slot| {
-                *slot.borrow_mut() = Some(Box::new(move || {
+                *slot.borrow_mut() = Some(Box::new(move |_| {
                     counted.set(counted.get() + 1);
                     None
                 }))
@@ -5147,6 +5279,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
     fn probe_preparation_rejects_cli_models_that_can_be_flags() {
         for model in ["--settings", "-p", "", "\nprivate", &"m".repeat(201)] {
             let p = Provider::Cli {
+                credits: false,
                 name: "fixture".into(),
                 enabled: true,
                 cli: "claude".into(),
@@ -6065,6 +6198,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             *key_file = Some(home.path().join("NO_SUCH_KEY.md"));
         }
         let missing_cli = Provider::Cli {
+            credits: false,
             enabled: true,
             name: "nocli".into(),
             cli: "oboete-no-such-cli".into(),
@@ -6114,6 +6248,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         let home = tempfile::tempdir().unwrap();
         let conn = crate::providers_db::open(home.path()).unwrap();
         let spent = Provider::Cli {
+            credits: false,
             enabled: true,
             name: "codex".into(),
             cli: "codex".into(),
@@ -6323,6 +6458,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         let answer = json!({"choices": [{"message": {"content": "{}"}}]}).to_string();
         let (url, _) = serve_once(answer.into_bytes(), "");
         let agy = Provider::Cli {
+            credits: false,
             enabled: true,
             name: "agy".into(),
             cli: "agy".into(),
