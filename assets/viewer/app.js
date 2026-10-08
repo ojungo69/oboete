@@ -851,6 +851,34 @@ const TEXT = {
   resident_on: ['Keep oboete running between sessions', 'セッション間も oboete を起動したままにする'],
   resident_desc: ['The worker stays ready and keeps the memory page reachable. Turn this off to let the worker exit when idle.', 'ワーカーを待機させ、記憶の画面をいつでも開けるようにします。オフにすると、ワーカーは処理がなくなった時に終了します。'],
   resident_first: ['Recommended for a new home. Save applies the choice shown here.', '新しい保存先ではオンを推奨します。保存すると、ここで選んだ設定が反映されます。'],
+  onboarding_first_h: ['Choose a starting AI tier', '最初のAI利用段階を選ぶ'],
+  onboarding_again_h: ['Adjust AI tier', 'AI利用段階を変更'],
+  onboarding_desc: ['Copy a tier into the unsaved settings below, review the named providers, then Save settings. Choosing a tier sends no request.', '利用段階を下の未保存の設定に反映し、対象の要約役を確認してから「設定を保存」を押します。段階の選択だけでは通信しません。'],
+  onboarding_tier: ['AI tier', 'AI利用段階'],
+  onboarding_choose: ['Choose a tier', '利用段階を選択'],
+  onboarding_none: ['None: record and search, no new summaries', 'なし：記録と検索のみ、新しい要約はしない'],
+  onboarding_free: ['Configured free-plan and local candidates', '無料枠候補とローカル設定'],
+  onboarding_subscription: ['Plus my subscription entries', 'サブスクリプションも使う'],
+  onboarding_paid: ['Plus priced APIs with a monthly cap', '月額上限内で有料APIも使う'],
+  onboarding_copy: ['Use this tier in draft', 'この段階を編集中の設定へ反映'],
+  onboarding_effect: ['New curation through: {names}. Monthly paid cap: USD {cap}.', '新しい要約に使う要約役：{names}。有料利用の月額上限：USD {cap}。'],
+  onboarding_no_names: ['none', 'なし'],
+  onboarding_unavailable: ['No eligible provider is configured for this tier. Applying it would leave summarizing off; inspect or add a provider below.', 'この段階で利用できる要約役は設定されていません。反映すると要約はオフになります。下で要約役を確認・追加してください。'],
+  onboarding_draft_ready: ['Draft updated. Review the controls below and Save settings explicitly.', '編集中の設定に反映しました。下の項目を確認し、明示的に「設定を保存」を押してください。'],
+  onboarding_no_assurance: ['A key file or CLI on PATH does not prove login, a free allowance or a working connection. Test a supported provider explicitly if needed; that test may send a request and incur a charge.', '鍵ファイルやCLIが見つかっても、ログイン・無料枠・接続成功は確認できません。必要なら対応する要約役を明示的に接続確認してください。その確認では通信や料金が発生する場合があります。'],
+  onboarding_providers: ['Provider entries', '要約役の設定'],
+  onboarding_save: ['Save settings', '設定を保存'],
+  onboarding_agents: ['Agent connections', 'エージェントの接続'],
+  onboarding_doctor: ['Run diagnostics', '診断を実行'],
+  onboarding_search_step: ['After saving, confirm an agent connection separately. In its next session, type a harmless unique phrase; then open Records and search for it. This checks only that session’s recording and search.', '保存後、エージェントの接続を別に確認してください。その次のセッションで害のない固有の語を入力し、「記録」で検索します。確認できるのは、そのセッションの記録と検索だけです。'],
+  onboarding_scope: ['These choices control AI summaries. Embeddings and other AI roles have separate settings. Saving starts no connection test, model download or agent session.', 'ここで選ぶのは要約用の AI です。埋め込みや他の AI の役割は個別に設定します。保存だけで接続確認・モデルのダウンロード・エージェントのセッションを開始しません。'],
+  onboarding_policy_h: ['Subscription rules and sign-in', 'サブスクリプションの規約とログイン'],
+  onboarding_policy: ['Subscription use shares your coding quota. Check your account’s limits and paid-credit settings; you are responsible for following each provider’s terms. Choose None or turn off its chain entry to stop new summaries through it. Complete login in the provider’s own flow, then return here and refresh the agent inventory or run diagnostics; registration alone is not a login check.', 'サブスクリプションは開発時と同じ利用枠を使います。アカウントの上限・有料クレジット設定を確認し、各社の規約に従って利用してください。「なし」を選ぶか、要約役をオフにするとその要約役での新しい要約を停止できます。ログインは提供元の画面で完了し、ここへ戻って登録状況を更新するか診断を実行してください。登録状況だけではログインを確認できません。'],
+  onboarding_claude_policy: ['Anthropic restricts third-party routing of users’ subscription credentials and collecting session tokens. Its policy also says:', 'Anthropic は第三者による利用者のサブスク認証の仲介やセッショントークンの収集を制限しています。同じポリシーには次の記載があります：'],
+  onboarding_go_policy: ['Go requires each user’s own key and internal use; prompts pass to upstream model providers. Its policy says:', 'Go は利用者本人のキーと内部利用を求め、入力を上流のモデル提供元へ渡します。利用ポリシーには次の記載があります：'],
+  onboarding_search_open: ['Find my test phrase', '確認用の語を検索'],
+  onboarding_search_phrase: ['The harmless phrase recorded in your agent', 'エージェントで記録した確認用の語'],
+  onboarding_prompt_off: ['Prompt text storage is off. A new typed phrase will not be searchable. Keep this privacy choice and search an existing record, or explicitly turn on “{setting}” under {section} and save before trying a new harmless phrase.', '入力文を保存しない設定です。新しく入力した語は検索できません。この選択を維持して既存の記録を検索するか、新しい確認用の語を試す前に「{section}」で「{setting}」を明示的にオンにして保存してください。'],
   resident_timing: ['The next agent hook or running oboete view starts the resident processes. Turning this off applies when the worker is idle; the resident page stops once it has no requests.', '次のエージェントのフックか oboete view の実行で常駐プロセスが起動します。オフはワーカーの待機時に反映され、常駐の画面はアクセスがなくなった後に終了します。'],
   resident_unsupported: ['Resident mode is currently available on Linux and WSL. This system keeps the worker that exits when idle.', '常駐は現在 Linux と WSL に対応しています。この環境のワーカーは、処理がなくなった時に終了します。'],
   language: ['Language', '言語'],
@@ -1488,9 +1516,21 @@ const TEXT = {
   doctor_state_present: ['present', 'あり'],
   doctor_state_unknown: ['unknown', '不明'],
   file_error: [
-    'Saved configuration has a mistake, so settings cannot be edited here. Use Run diagnostics below for fixed read-only facts; it does not repair the file.',
-    '保存済み設定に誤りがあるため、この画面では編集できません。下の「診断を実行」で読み取り専用の決まった項目を確認できますが、ファイルは修復されません。',
+    'Saved configuration has a mistake. Preview safe recovery below, or use Run diagnostics for read-only facts.',
+    '保存済み設定に誤りがあります。下で安全な復旧内容を確認するか、「診断を実行」で読み取り専用の項目を確認してください。',
   ],
+  recovery_h: ['Recover invalid settings', '壊れた設定を復旧する'],
+  recovery_desc: ['Keep a private copy of the current file, then replace all settings. Saved AI use, paid usage, resident mode, prompt text storage and memory delivery will be off. Already admitted work may finish. Other events still use built-in redaction; custom rules and other settings return to defaults. Records, agent files and saved keys are kept.', '現在のファイルを非公開のコピーに保存してから、設定全体を置き換えます。AI・有料利用・常駐・入力文の保存・記憶の配信をオフに設定します。すでに開始済みの処理は完了する場合があります。その他の記録は組み込みの秘匿ルールを使い、独自ルールや設定は初期値に戻ります。記録済みデータ・エージェントの設定・保存済みキーは保持します。'],
+  recovery_preview: ['Preview recovery', '復旧内容を確認'],
+  recovery_confirm: ['I agree to keep the current file and replace all settings as described.', '現在のファイルを保存し、説明された内容で設定全体を置き換えることに同意します。'],
+  recovery_start: ['Save a copy and recover', 'コピーを保存して復旧'],
+  recovery_copy: ['Original-copy filename (saved before replacement): {name}', '書き換え前に保存した原本コピーのファイル名：{name}'],
+  recovery_unknown: ['The result is unknown. Check the saved settings before preparing another recovery; do not resend automatically.', '結果を確認できません。自動で再送せず、保存済み設定を確認してから改めて復旧内容を確認してください。'],
+  recovery_inspect: ['Check saved settings', '保存済み設定を確認'],
+  recovery_unavailable: ['Recovery needs a bounded regular writable file and verified owner-only Linux storage. It is unavailable for this file or platform; nothing was reset.', '復旧には上限内の通常ファイルと書き込み権限、Linux 上で確認できる本人専用の保存先が必要です。このファイルまたは環境では実行できず、初期化していません。'],
+  recovery_failed: ['Recovery stopped. The current settings or their private recoverable copy are retained. Check saved settings before trying a fresh preview.', '復旧を停止しました。現在の設定、または復元可能な非公開のコピーを保持しています。保存済み設定を確認してから、改めて復旧内容を確認してください。'],
+  recovery_confirmation: ['Preview recovery and agree to its effects first.', '復旧内容を確認し、その影響に同意してください。'],
+  recovery_stale: ['Settings changed after the preview. Check the current settings and prepare a fresh preview.', '確認後に設定が変わりました。現在の設定を確認し、改めて復旧内容を確認してください。'],
   stale: [
     'config.toml was changed elsewhere. The page now shows its current values; please make your change again.',
     'config.toml がほかの場所で変更されました。現在の値を表示し直しましたので、もう一度変更してください。',
@@ -2304,7 +2344,7 @@ function formOf(s) {
   const text = (v) => (v === null || v === undefined ? '' : String(v));
   return {
     version: s.version,
-    saved: { summary: { ...s.summary }, paid_usd_per_month: s.paid_usd_per_month, gemini: s.gemini,
+    saved: { summary: { ...s.summary }, capture: { ...s.capture }, paid_usd_per_month: s.paid_usd_per_month, gemini: s.gemini,
       worker: { resident: s.worker?.resident ?? false } },
     firstRun: s.first_run === true,
     residentSupported: s.resident_supported === true,
@@ -3062,10 +3102,93 @@ async function showSettings() {
   const [s, privacy] = await Promise.all([api('settings'), api('privacy').catch(privacyUnavailable)]);
   s.privacy = privacy;
   return () => {
+    recoveryDraft.preview=null;
+    recoveryDraft.confirmed=false;
     form = formOf(s);
     drawSettings();
     setStatus('');
   };
+}
+
+let recoveryDraft = {preview:null,confirmed:false,busy:false,unknown:false,error:null,receipt:null};
+
+function recoverySection() {
+  const d=recoveryDraft;
+  if(form && !d.receipt && !d.unknown)return null;
+  const preview=el('button','quiet',t('recovery_preview'));
+  preview.type='button';preview.dataset.action='recovery.preview';
+  preview.disabled=d.busy || d.unknown || Boolean(form);
+  preview.addEventListener('click',()=>void recoveryAction('preview'));
+  const consent=checkbox(d.confirmed,value=>{d.confirmed=value;start.disabled=!value||d.busy;});
+  consent.dataset.field='recovery.confirmed';consent.disabled=!d.preview||d.busy;
+  const start=el('button','quiet',t('recovery_start'));
+  start.type='button';start.dataset.action='recovery.start';
+  start.disabled=!d.preview||!d.confirmed||d.busy;
+  start.addEventListener('click',()=>void recoveryAction('start'));
+  const inspect=el('button','quiet',t('recovery_inspect'));
+  inspect.type='button';inspect.disabled=d.busy;
+  inspect.addEventListener('click',()=>void recoveryAction('inspect'));
+  return el('section','settings-recovery',el('h3',null,t('recovery_h')),
+    !form?el('p','desc',t('recovery_desc')):null,
+    d.receipt?el('p','desc',t('recovery_copy',{name:d.receipt})):null,
+    d.unknown?el('p','pending',t('recovery_unknown')):null,
+    d.error?el('p','error',t(d.error)):null,
+    !form?preview:null,
+    !form && d.preview?el('label','check',consent,t('recovery_confirm')):null,
+    !form && d.preview?start:null,
+    d.unknown||d.error?inspect:null);
+}
+
+async function recoveryAction(action) {
+  const d=recoveryDraft;
+  if(d.busy || action==='preview' && d.unknown || action==='start' && (!d.preview || !d.confirmed))return;
+  const mine=form, mineGeneration=generation;
+  const key=d.preview?.preview_key;
+  d.busy=true;d.error=null;
+  if(action!=='start'){d.preview=null;d.confirmed=false;}
+  if(view==='settings')drawSettings();
+  try {
+    if(action==='inspect') {
+      const settings=await api('settings');
+      if(view==='settings' && form===mine && generation===mineGeneration)form=formOf(settings);
+      // This reads current configuration, without claiming the previous request succeeded.
+      d.unknown=false;
+      return;
+    }
+    const {res,answer}=await memoryWrite(`settings/recovery/${action}`,
+      action==='preview'?{}:{preview_key:key,confirmed:true});
+    if(!res.ok) {
+      d.preview=null;d.confirmed=false;
+      d.error=['recovery_unavailable','recovery_failed','recovery_confirmation','stale'].includes(answer.code)
+        ?answer.code==='stale'?'recovery_stale':answer.code:'recovery_failed';
+      return;
+    }
+    if(action==='preview') {
+      if(view==='settings' && form===mine && generation===mineGeneration
+        && typeof answer.preview_key==='string' && /^[0-9a-f]{64}$/.test(answer.preview_key)
+        && answer.replaces==='all_settings' && answer.copy==='current_bytes' && answer.ai==='off'
+        && answer.prompt_text==='off' && answer.injection==='off' && answer.other_capture==='builtin_redaction') {
+        d.preview={preview_key:answer.preview_key};d.unknown=false;
+      } else d.error='recovery_failed';
+    } else {
+      d.preview=null;d.confirmed=false;
+      const copyKnown=['complete','unknown'].includes(answer.phase)
+        && typeof answer.backup==='string' && /^config\.toml\.recovery-[0-9a-f]{32}\.bak$/.test(answer.backup);
+      if(copyKnown)d.receipt=answer.backup;
+      if(answer.phase==='complete' && copyKnown
+        && answer.settings && !answer.settings.error) {
+        d.receipt=answer.backup;d.unknown=false;
+        if(view==='settings' && form===mine && generation===mineGeneration)form=formOf(answer.settings);
+      } else d.unknown=true;
+    }
+  } catch {
+    d.preview=null;d.confirmed=false;
+    if(action==='start')d.unknown=true;
+    else d.error='recovery_failed';
+  } finally {
+    d.busy=false;
+    if(view==='settings')drawSettings();
+  }
 }
 
 function privacyUnavailable() {
@@ -3882,6 +4005,7 @@ function chainRow(r, i, redraw) {
     tr.classList.toggle('off', !v);
   });
   on.setAttribute('aria-label', `${t('col_on')}: ${r.name}`);
+  on.dataset.field=`chain.${r.name}.on`;
   const model = input('text', r.edit.model, r.effective_model ?? '', `chain.${r.name}.model`, (v) => { r.edit.model = v; });
   model.setAttribute('aria-label', `${t('col_model')}: ${r.name}`);
   // A curator with prices keeps its model; a model config.toml sets already can still be emptied.
@@ -4024,6 +4148,148 @@ async function saveSettings(button) {
   }
 }
 
+const ONBOARDING_TIERS = ['none','free','subscription','paid'];
+let onboardingForm = null, onboardingTier = '', onboardingApplied = false;
+
+function onboardingLocal(row) {
+  if(row.saved?.kind!=='openai'||typeof row.saved.base_url!=='string')return false;
+  try {
+    const url=new URL(row.saved.base_url);
+    const parts=url.hostname.split('.');
+    return ['http:','https:'].includes(url.protocol)&&(url.hostname==='[::1]'
+      ||parts.length===4&&parts[0]==='127'
+        &&parts.every(part=>/^\d+$/.test(part)&&Number(part)<=255));
+  } catch {return false;}
+}
+function onboardingClass(row) {
+  const saved=row?.saved,limits=saved?.limits;
+  if(saved?.enabled!==true)return 'disabled';
+  if(saved.kind==='openai' && (saved.endpoint_supported!==true || typeof saved.base_url!=='string'))return 'unknown';
+  if(saved.kind==='cli' && !['claude','codex'].includes(saved.cli))return 'unknown';
+  if(!['openai','cli'].includes(saved.kind))return 'unknown';
+  if(!limits||!['usd_per_mtok_in','usd_per_mtok_out'].every(key=>
+    typeof limits[key]==='number'&&Number.isFinite(limits[key])&&limits[key]>=0))return 'unknown';
+  if(limits.usd_per_mtok_in>0||limits.usd_per_mtok_out>0)return 'paid';
+  if(saved.kind==='cli')return ['claude','codex'].includes(saved.cli)?'subscription':'unknown';
+  if(saved.subscription===true)return 'subscription';
+  if(saved.kind==='openai'&&(row.selector?.source==='builtin'||onboardingLocal(row)))return 'free';
+  return 'unknown';
+}
+function onboardingGroups(f) {
+  return new Map(f.chain.map(entry=>{
+    const rows=f.providers.filter(row=>row.name===entry.name&&row.saved?.enabled===true);
+    const classes=rows.map(onboardingClass);
+    const kind=!classes.length?'disabled':classes.includes('unknown')?'unknown'
+      :classes.includes('paid')?'paid':classes.includes('subscription')?'subscription':'free';
+    return [entry.name,kind];
+  }));
+}
+function onboardingPlan(f,tier) {
+  if(!ONBOARDING_TIERS.includes(tier))return null;
+  if(tier==='none')return {available:true,curate:false,cap:'0',names:null};
+  const rank={free:1,subscription:2,paid:3};
+  const groups=onboardingGroups(f);
+  const names=f.chain.filter(entry=>rank[groups.get(entry.name)]
+    &&rank[groups.get(entry.name)]<=rank[tier]).map(entry=>entry.name);
+  const hasLevel=[...groups.values()].includes(tier);
+  if(!hasLevel||!names.length)return {available:false,curate:false,cap:f.paid_usd_per_month,names:null};
+  const current=Number(f.paid_usd_per_month);
+  return {available:true,curate:true,names,
+    cap:tier==='paid'&&Number.isFinite(current)&&current>0?f.paid_usd_per_month
+      :tier==='paid'?'5':'0'};
+}
+function applyOnboardingValues(f,plan) {
+  if(!plan)return;
+  f.summary.curate=plan.curate;
+  if(plan.available)f.paid_usd_per_month=plan.cap;
+  if(plan.names){const enabled=new Set(plan.names);for(const row of f.chain)row.edit.on=enabled.has(row.name);}
+}
+function syncOnboardingControls(f) {
+  const section=$('panel').querySelector('.settings');
+  if(!section)return;
+  const fields=[...section.querySelectorAll('[data-field]')];
+  const field=name=>fields.find(node=>node.dataset.field===name);
+  const curate=field('summary.curate');if(curate)curate.checked=f.summary.curate;
+  const cap=field('paid_usd_per_month');if(cap)cap.value=f.paid_usd_per_month;
+  for(const row of f.chain){
+    const control=field(`chain.${row.name}.on`);
+    if(control){control.checked=row.edit.on;control.closest('tr')?.classList.toggle('off',!row.edit.on);}
+  }
+}
+function renderOnboarding(f) {
+  if(view!=='settings'||form!==f)return;
+  const section=$('panel').querySelector('.onboarding');
+  if(!section)return;
+  const focused=section.contains(document.activeElement)?document.activeElement?.dataset:null;
+  section.replaceChildren(...onboardingSection(f).childNodes);
+  if(focused?.field==='onboarding.tier')section.querySelector('[data-field="onboarding.tier"]')?.focus({preventScroll:true});
+  else if(focused?.action==='onboarding.copy')section.querySelector('[data-action="onboarding.copy"]')?.focus({preventScroll:true});
+}
+function onboardingSection(f) {
+  if(onboardingForm!==f){onboardingForm=f;onboardingTier='';onboardingApplied=false;}
+  const select=el('select',null,el('option',null,t('onboarding_choose')),
+    ...ONBOARDING_TIERS.map(value=>{const option=el('option',null,t(`onboarding_${value}`));option.value=value;return option;}));
+  select.options[0].value='';select.value=onboardingTier;select.dataset.field='onboarding.tier';
+  select.addEventListener('change',()=>{
+    onboardingTier=select.value;onboardingApplied=false;renderOnboarding(f);
+  });
+  const plan=onboardingPlan(f,onboardingTier);
+  const apply=el('button','quiet small',t('onboarding_copy'));
+  apply.type='button';apply.dataset.action='onboarding.copy';apply.disabled=!plan;
+  apply.addEventListener('click',()=>{
+    if(form!==f)return;
+    applyOnboardingValues(f,onboardingPlan(f,onboardingTier));
+    syncOnboardingControls(f);onboardingApplied=true;renderOnboarding(f);
+  });
+  const jump=(selector,key)=>{
+    const button=el('button','quiet small',t(key));button.type='button';
+    button.addEventListener('click',()=>$('panel').querySelector(selector)?.scrollIntoView?.({block:'start'}));
+    return button;
+  };
+  const link=(label,href)=>{const a=el('a',null,label);a.href=href;a.target='_blank';a.rel='noopener noreferrer';return a;};
+  const phrase=input('text',f.testPhrase||'','', 'onboarding.phrase',value=>{f.testPhrase=value;search.disabled=!value.trim();});
+  const search=el('button','quiet small',t('onboarding_search_open'));
+  search.type='button';search.dataset.action='onboarding.search';search.disabled=!phrase.value.trim();
+  search.addEventListener('click',async()=>{
+    $('q').value=phrase.value.trim();$('raw').value='only';
+    $('since').value='';$('until').value='';$('history').checked=false;
+    setView('records');await refresh(false,'');
+  });
+  const destinations=plan?.names?.flatMap(name=>f.providers.filter(row=>row.name===name && row.saved?.enabled)
+    .map(row=>el('li',null,`${name}: ${row.saved.kind==='cli'?row.saved.cli:row.saved.base_url||t('agent_inventory_unknown')}`)));
+  return el('section','onboarding',
+    el('h3',null,t(f.firstRun?'onboarding_first_h':'onboarding_again_h')),
+    el('p','desc',t('onboarding_desc')),
+    el('p','desc',t('onboarding_scope')),
+    el('label','field',el('span',null,t('onboarding_tier')),select),
+    plan ? el('p','desc',plan.available
+      ? t('onboarding_effect',{names:plan.names?.join(', ')||t('onboarding_no_names'),cap:plan.cap})
+      : t('onboarding_unavailable')) : null,
+    destinations?.length?el('ul',null,...destinations):null,
+    apply,onboardingApplied?el('p','desc',t('onboarding_draft_ready')):null,
+    el('p','desc',t('onboarding_no_assurance')),
+    el('details',null,el('summary',null,t('onboarding_policy_h')),
+      el('p','desc',t('onboarding_policy')),
+      el('p','desc',t('onboarding_claude_policy')),
+      el('blockquote',null,'Nor does it prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription'),
+      link('Anthropic policy','https://code.claude.com/docs/en/legal-and-compliance'), ' · ',
+      link('Claude login','https://support.claude.com/en/articles/13189465-log-in-to-your-claude-account'), ' · ',
+      link('Codex login','https://learn.chatgpt.com/docs/auth'),
+      el('p','desc',t('onboarding_go_policy')),
+      el('blockquote',null,'OpenCode Go is designed for OpenCode and other coding agents that produce similar types of requests. Send typical coding agent traffic.'),
+      link('OpenCode Go','https://opencode.ai/docs/go/'), ' · ',
+      link('Terms','https://opencode.ai/legal/terms-of-service'), ' · ',
+      link('Privacy','https://opencode.ai/legal/privacy-policy')),
+    el('div','actions',jump('.provider-entries','onboarding_providers'),
+      jump('.settings form button.save','onboarding_save'),
+      jump('.agent-setup','onboarding_agents'),
+      jump('.doctor-diagnostics','onboarding_doctor')),
+    el('p','desc',t(f.saved?.capture?.store_prompts===false?'onboarding_prompt_off':'onboarding_search_step',
+      {section:t('capture_h'),setting:t('store_prompts')})),
+    f.saved?.capture?.store_prompts===false?jump('.capture-settings','capture_h'):null,
+    el('label','field',el('span',null,t('onboarding_search_phrase')),phrase),search);
+}
+
 function drawSettings() {
   const pick = el('select', null, ...LANGS.map((l) => {
     const o = el('option', null, l === 'ja' ? '日本語' : 'English');
@@ -4041,7 +4307,7 @@ function drawSettings() {
   const panel = el('div', 'settings', el('label', 'field lang', el('span', null, t('language')), pick));
   panel.lang = lang;
   if (!form) {
-    panel.append(el('p', 'text pending', t('file_error')), agentInventorySection(), agentSetupSection(), doctorSection());
+    panel.append(el('p', 'text pending', t('file_error')), recoverySection(), agentInventorySection(), agentSetupSection(), doctorSection());
     drawIn(panel);
     return;
   }
@@ -4050,6 +4316,8 @@ function drawSettings() {
   const resident = checkbox(f.worker.resident, (v) => { f.worker.resident = v; });
   resident.dataset.field = 'worker.resident';
   resident.disabled = !f.residentSupported;
+  const curate=checkbox(f.summary.curate,(v)=>{f.summary.curate=v;});
+  curate.dataset.field='summary.curate';
   const summaryLanguage = input('textarea', f.summary.language, 'Japanese', 'summary.language', (v) => { f.summary.language = v; });
   summaryLanguage.className = 'summary-language';
   const summarySize = (key) => {
@@ -4112,6 +4380,7 @@ function drawSettings() {
   const save = el('button', 'save', t('settings_save'));
   save.type = 'submit';
   const formEl = el('form', null,
+    onboardingSection(f),
     el('section', null,
       el('h3', null, t('resident_h')), el('p', 'desc', t('resident_desc')),
       el('label', 'check', resident, t('resident_on')),
@@ -4120,7 +4389,7 @@ function drawSettings() {
       el('p', 'desc', t(f.residentSupported ? 'resident_timing' : 'resident_unsupported'))),
     el('section', null,
       el('h3', null, t('summary_h')), el('p', 'desc', t('summary_desc')),
-      el('label', 'check', checkbox(f.summary.curate, (v) => { f.summary.curate = v; }), t('curate_on')),
+      el('label', 'check', curate, t('curate_on')),
       saved(t(f.saved.summary.curate ? 'value_on' : 'value_off')),
       el('label', 'field', el('span', null, t('summary_language')), summaryLanguage,
         saved(f.saved.summary.language), note(t('summary_language_desc'))),
@@ -4141,7 +4410,7 @@ function drawSettings() {
       el('label', 'check', terminalNote, t('session_note_on')), note(t('session_note_desc')),
       flag('per_prompt', 'per_prompt_on'), size('per_prompt_chars', 'per_prompt_chars'),
       flag('correction', 'correction_on'), size('correction_chars', 'correction_chars')),
-    el('section', null,
+    el('section', 'capture-settings',
       el('h3', null, t('capture_h')),
       el('p', 'desc', t('capture_desc')),
       el('label', 'check', checkbox(f.capture.store_prompts, (v) => { f.capture.store_prompts = v; }), t('store_prompts')),
@@ -4174,6 +4443,8 @@ function drawSettings() {
     e.preventDefault();
     void saveSettings(save);
   });
+  const recovered=recoverySection();
+  if(recovered)panel.append(recovered);
   panel.append(el('p', 'lead', t('lead')), formEl, preferenceSection(f), agentInventorySection(), agentSetupSection(), doctorSection(), maintenanceSection(f));
   drawIn(panel);
 }
@@ -4241,13 +4512,15 @@ async function loadRepos() {
   reposLoaded = true;
 }
 
-async function refresh(live = false) {
+async function refresh(live = false, selectedRepo) {
   let listed = true;
   try {
     await loadRepos();
+    // An explicit scope is applied after the initial list chooses its default checkout.
+    if(selectedRepo!==undefined)$('repo').value=selectedRepo;
   } catch (e) {
     if (view !== 'settings') {
-      showError(e, refresh);
+      showError(e, selectedRepo===undefined?refresh:()=>refresh(live,selectedRepo));
       return false;
     }
     listed = false;

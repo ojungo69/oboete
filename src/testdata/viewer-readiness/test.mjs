@@ -23,6 +23,7 @@ class Node {
   }
   contains(node){return this===node||this.children.some(child=>child&&typeof child==='object'&&child.contains(node));}
   get childNodes(){return this.children;}
+  get options(){return this.children.filter(node=>node?.tagName==='OPTION');}
   click(){for(const cb of this.listeners.click||[])cb({target:this});}
   focus(){this.focused=true;}
 }
@@ -31,7 +32,7 @@ const ids=new Map();
 const document={activeElement:null,createElement:tag=>new Node(tag),getElementById:id=>{
   if(!ids.has(id))ids.set(id,new Node());return ids.get(id);
 }};
-const ctx=vm.createContext({document,location:{hash:''},URLSearchParams,navigator:{language:'en'},
+const ctx=vm.createContext({document,location:{hash:''},URL,URLSearchParams,navigator:{language:'en'},
   localStorage:{getItem(){return null;},setItem(){}},window:{addEventListener(){}},
   setInterval(){},TextEncoder,Uint8Array,console});
 const source=fs.readFileSync(process.argv[2]||new URL('../../../assets/viewer/app.js',import.meta.url),'utf8');
@@ -319,3 +320,201 @@ assert.equal(ctx.setupUi.draft.preview,null,'unknown effects cannot be approved'
 assert(!text(integration).includes('private-effect-canary'));
 assert.equal(setupRequests.length,0,'rendering and status recovery never auto POST');
 console.log('PASS: seven agents, JA/EN, explicit Doctor, confirmed integration, off-tab completion, busy/lost recovery and unchanged drafts');
+
+vm.runInContext('globalThis.recoveryUi={draft:recoveryDraft,action:recoveryAction};',ctx);
+ctx.ui.setView('settings');ctx.ui.setForm(null);ctx.ui.setLang('en');ctx.ui.drawSettings();
+let recovery=()=>panel.querySelector('.settings-recovery');
+assert(text(recovery()).includes('custom rules and other settings return to defaults'));
+ctx.ui.setLang('ja');ctx.ui.drawSettings();
+assert(text(recovery()).includes('独自ルールや設定は初期値に戻ります'));
+const recoveryRequests=[];
+ctx.fetch=(url,options)=>new Promise((resolve,reject)=>recoveryRequests.push({url,options,resolve,reject}));
+assert.equal(recoveryRequests.length,0,'drawing recovery sends no request');
+const recoveryPreview={preview_key:'a'.repeat(64),replaces:'all_settings',copy:'current_bytes',
+  ai:'off',prompt_text:'off',injection:'off',other_capture:'builtin_redaction'};
+const previewRecovery=async(answer=recoveryPreview)=>{
+  const waiting=ctx.recoveryUi.action('preview');
+  const request=recoveryRequests.shift();
+  assert.equal(request.url,'/api/settings/recovery/preview');
+  assert.equal(request.options.body,'{}');
+  request.resolve(diagnosticResponse(answer));await waiting;
+};
+await previewRecovery();
+assert.equal(ctx.recoveryUi.draft.confirmed,false,'a fresh preview has unchecked consent');
+await ctx.recoveryUi.action('start');assert.equal(recoveryRequests.length,0);
+const recoveryConsent=()=>recovery().querySelectorAll('input').find(node=>node.dataset.field==='recovery.confirmed');
+change(recoveryConsent(),true);
+const recoveryStart=ctx.recoveryUi.action('start');
+await ctx.recoveryUi.action('start');
+assert.equal(recoveryRequests.length,1,'recovery has one explicit in-flight POST');
+const recoveryRequest=recoveryRequests.shift();
+assert.equal(recoveryRequest.url,'/api/settings/recovery/start');
+assert.deepEqual(JSON.parse(recoveryRequest.options.body),{preview_key:'a'.repeat(64),confirmed:true});
+recoveryRequest.reject(new Error('invented lost result'));await recoveryStart;
+assert.equal(ctx.recoveryUi.draft.unknown,true);
+assert.equal(ctx.recoveryUi.draft.preview,null);
+await ctx.recoveryUi.action('start');assert.equal(recoveryRequests.length,0,'a lost result is never resent');
+const blockedRecoveryPreview=ctx.recoveryUi.action('preview');
+assert.equal(recoveryRequests.length,0,'inspect saved settings before preparing another uncertain recovery');
+await blockedRecoveryPreview;
+const inspectRecovery=ctx.recoveryUi.action('inspect');
+const inspectRecoveryRequest=recoveryRequests.shift();
+assert(inspectRecoveryRequest.url.startsWith('/api/settings?'));
+assert(!inspectRecoveryRequest.options?.method,'explicit inspection only reads settings');
+inspectRecoveryRequest.resolve(response({error:'file_invalid'}));await inspectRecovery;
+assert.equal(recoveryRequests.length,0,'inspection never starts recovery');
+await previewRecovery({...recoveryPreview,other_capture:'private-recovery-canary'});
+assert.equal(ctx.recoveryUi.draft.preview,null,'unknown effects cannot receive consent');
+assert(!text(recovery()).includes('private-recovery-canary'));
+await previewRecovery();change(recoveryConsent(),true);
+const nativeUnknown=ctx.recoveryUi.action('start');
+const retainedName='config.toml.recovery-'+'b'.repeat(32)+'.bak';
+recoveryRequests.shift().resolve(diagnosticResponse({phase:'unknown',backup:retainedName}));await nativeUnknown;
+assert.equal(ctx.recoveryUi.draft.unknown,true);
+assert.equal(ctx.recoveryUi.draft.receipt,retainedName,'Unknown retains the known private copy');
+assert(text(recovery()).includes(retainedName)&&!text(recovery()).includes('Settings recovered'),
+  'a retained copy does not claim recovery completed');
+console.log('PASS: JA/EN recovery disclosure, explicit preview/consent, single POST, lost-result inspection and fixed response fields');
+
+// The guided choices use the same native Settings payload, with no separate profile.
+{
+vm.runInContext('globalThis.tier={classify:onboardingClass,groups:onboardingGroups,plan:onboardingPlan,apply:applyOnboardingValues,text:(key,language)=>{lang=language;return t(key);}};',ctx);
+const {tier} = ctx;
+const limits=(input=0,output=0)=>({usd_per_mtok_in:input,usd_per_mtok_out:output});
+const row=(name,kind='openai',extras={})=>({name,selector:{source:extras.source||'file'},
+  saved:{kind,enabled:extras.enabled??true,subscription:extras.subscription??false,
+    endpoint_supported:extras.endpoint_supported??true,
+    cli:extras.cli||'codex',base_url:extras.base_url||'https://billing.example/v1',
+    limits:limits(...(extras.price||[0,0]))}});
+const providers=[
+  row('builtin','openai',{source:'builtin',base_url:'https://api.groq.com/openai/v1'}),
+  row('local','openai',{base_url:'http://127.0.0.2:11434/v1'}),
+  row('subscription','cli'),
+  row('unsafe-cli','cli',{cli:'agy'}),
+  row('paid','openai',{price:[0.5,1]}),
+  row('remote-unknown'),
+  row('mixed','openai',{source:'builtin',base_url:'https://api.groq.com/openai/v1'}),
+  row('mixed','openai',{price:[1,2]}),
+  row('disabled','openai',{enabled:false,price:[1,2]}),
+  row('mixed-disabled','openai',{source:'builtin',base_url:'https://api.groq.com/openai/v1'}),
+  row('mixed-disabled','openai',{enabled:false,price:[1,2]}),
+];
+const names=['builtin','local','subscription','unsafe-cli','paid','remote-unknown','mixed','disabled','mixed-disabled'];
+const fixture=()=>({firstRun:true,summary:{curate:false,language:'Japanese'},paid_usd_per_month:'0',
+  chain:names.map(name=>({name,edit:{on:true,daily_budget:'7',timeout_s:'90',model:'owned'}})),
+  providers,inject:{session_start:true},backup:{edit:'owned'}});
+const namesOf=p=>p.names||[];
+
+let f=fixture();
+assert.equal(tier.classify(providers[0]),'free');
+assert.equal(tier.classify(providers[1]),'free');
+assert.equal(tier.classify(row('local-v6','openai',{base_url:'http://[::1]:11434/v1'})),'free');
+assert.equal(tier.classify(providers[2]),'subscription');
+assert.equal(tier.classify(row('go','openai',{subscription:true})),'subscription');
+assert.equal(tier.classify(row('priced-sub','openai',{subscription:true,price:[1,0]})),'paid');
+assert.equal(tier.classify(providers[3]),'unknown','unapproved CLI is not preset as a curator');
+assert.equal(tier.classify(providers[4]),'paid');
+assert.equal(tier.classify(providers[5]),'unknown');
+assert.equal(tier.classify(providers[8]),'disabled');
+assert.equal(tier.classify(row('hidden-paid','openai',{price:[1,2],endpoint_supported:false})),
+  'unknown','a hidden or unsupported destination cannot enter a preset');
+assert.equal(tier.classify(row('hidden-subscription','openai',{subscription:true,endpoint_supported:false})),
+  'unknown','subscription metadata does not override a refused destination');
+assert.equal(tier.classify(row('priced-unsafe-cli','cli',{cli:'agy',price:[1,2]})),
+  'unknown','configured prices do not authorize an unsupported CLI');
+assert.equal(tier.groups(f).get('mixed'),'paid','one priced same-name entry raises group risk');
+assert.equal(tier.groups(f).get('mixed-disabled'),'free','a disabled priced entry is not enabled');
+assert.equal(f.summary.curate,false,'planning does not reinterpret the saved default');
+assert.deepEqual(Array.from(namesOf(tier.plan(f,'free'))),['builtin','local','mixed-disabled']);
+assert.deepEqual(Array.from(namesOf(tier.plan(f,'subscription'))),['builtin','local','subscription','mixed-disabled']);
+assert.deepEqual(Array.from(namesOf(tier.plan(f,'paid'))),['builtin','local','subscription','paid','mixed','mixed-disabled']);
+assert.equal(tier.plan(f,'paid').cap,'5','paid uses the configured positive cap or USD 5 default');
+const capped=fixture();capped.paid_usd_per_month='2.75';
+assert.equal(tier.plan(capped,'paid').cap,'2.75','a positive existing cap is preserved');
+const none=tier.plan(f,'none');tier.apply(f,none);
+assert.equal(f.summary.curate,false);
+assert.equal(f.paid_usd_per_month,'0');
+assert(f.chain.every(entry=>entry.edit.on),'none keeps the chain while curation is off');
+const paid=tier.plan(f,'paid');tier.apply(f,paid);
+assert.equal(f.summary.curate,true);
+assert.equal(f.paid_usd_per_month,'5');
+assert.deepEqual(f.chain.filter(entry=>entry.edit.on).map(entry=>entry.name),namesOf(paid));
+assert.equal(f.summary.language,'Japanese');
+assert(f.chain.every(entry=>entry.edit.model==='owned'&&entry.edit.daily_budget==='7'));
+assert.equal(f.inject.session_start,true);assert.equal(f.backup.edit,'owned');
+
+const empty=fixture();empty.providers=[row('remote-unknown')];empty.chain=[empty.chain[5]];
+empty.summary.curate=true;empty.paid_usd_per_month='1';
+const unavailable=tier.plan(empty,'free');
+assert.equal(unavailable.available,false);
+tier.apply(empty,unavailable);
+assert.equal(empty.summary.curate,false);
+assert.equal(empty.paid_usd_per_month,'1');
+assert.equal(empty.chain[0].edit.on,true,'no eligible name preserves the chain');
+assert(tier.text('onboarding_first_h','en').includes('starting AI tier'));
+assert(tier.text('onboarding_first_h','ja').includes('最初のAI利用段階'));
+assert(tier.text('onboarding_again_h','ja').includes('変更'));
+f=fixture();f.saved={capture:{store_prompts:false}};f.capture={store_prompts:true};
+vm.runInContext('globalThis.onboardingPanel=onboardingSection;',ctx);
+ctx.ui.setLang('en');
+assert(text(ctx.onboardingPanel(f)).includes('A new typed phrase will not be searchable'),
+  'the journey follows saved prompt privacy, including an unsaved opt-in');
+assert.equal(f.saved.capture.store_prompts,false,'the guide never opts into prompt storage');
+ctx.ui.setLang('ja');
+assert(text(ctx.onboardingPanel(f)).includes('入力文を保存しない設定です'));
+// A first successful listing must keep the guide's explicit All scope.
+document.querySelector=selector=>selector==='main'?new Node('main'):null;
+document.querySelectorAll=()=>[];
+ctx.Option=class extends Node {
+  constructor(label,value){super('option');this.append(label);this.value=value;}
+};
+f.testPhrase='separate repository needle';ctx.ui.setForm(f);ctx.ui.setView('settings');
+vm.runInContext('reposLoaded=false;currentRepo="";',ctx);
+const queryRequests=[];
+ctx.fetch=(url,options)=>{
+  assert(!options?.method,'the record check uses only existing reads');
+  if(url.startsWith('/api/repos?'))return Promise.resolve(response({current:'owner/current',repos:[]}));
+  if(url.startsWith('/api/search?')){
+    queryRequests.push(new URL(url,'http://127.0.0.1'));
+    return Promise.resolve(response({hits:[],vector:'off',why:null}));
+  }
+  throw new Error('unexpected guided search request');
+};
+const queryButton=ctx.onboardingPanel(f).querySelectorAll('button')
+  .find(node=>node.dataset.action==='onboarding.search');
+await queryButton.listeners.click[0]({target:queryButton});
+assert.equal(queryRequests.length,1,'listing does not first search the current repository');
+assert.equal(queryRequests[0].searchParams.get('all'),'1','explicit All survives the first repository listing');
+assert.equal(queryRequests[0].searchParams.get('repo'),null);
+assert.equal(queryRequests[0].searchParams.get('raw'),'only');
+for(const alreadyLoaded of [false,true]) {
+  ctx.ui.setView('settings');
+  vm.runInContext(`reposLoaded=${alreadyLoaded};`,ctx);
+  document.getElementById('repo').value='owner/previous';
+  queryRequests.length=0;
+  let failed=false;
+  ctx.fetch=(url,options)=>{
+    assert(!options?.method);
+    if(url.startsWith('/api/repos?')) {
+      if(!failed){failed=true;return Promise.resolve(diagnosticResponse({},503));}
+      return Promise.resolve(response({current:'owner/previous',repos:[]}));
+    }
+    if(url.startsWith('/api/search?')) {
+      queryRequests.push(new URL(url,'http://127.0.0.1'));
+      return Promise.resolve(response({hits:[],vector:'off',why:null}));
+    }
+    throw new Error('unexpected search retry request');
+  };
+  await queryButton.listeners.click[0]({target:queryButton});
+  assert.equal(queryRequests.length,0,'a failed listing does not issue a scoped query');
+  const retry=document.getElementById('status').querySelectorAll('button').at(-1);
+  assert(retry,'failed listing offers an explicit retry');
+  await retry.listeners.click[0]({target:retry});
+  assert.equal(queryRequests.length,1);
+  assert.equal(queryRequests[0].searchParams.get('all'),'1','retry retains explicit All');
+  assert.equal(queryRequests[0].searchParams.get('repo'),null);
+  assert.equal(queryRequests[0].searchParams.get('raw'),'only');
+}
+console.log('PASS: four tier draft plans, source-backed grouping and unrelated drafts preserved');
+
+}

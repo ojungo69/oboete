@@ -68,7 +68,8 @@ left with "—" there.
 
 | Setting or operation | Spec | Now | Backend | Takes effect | OS | Test | Slice |
 |---|---|---|---|---|---|---|---|
-| First run: an unconfigured home, recommended presets | spec-webui | resident preset on Linux/WSL; full wizard — | settings | explicit save | all; resident Linux/WSL | `settings.rs` `resident_settings_are_read_only_until_the_visible_choice_is_saved`; native browser first-save/off/reload | resident slice 5; remaining W6 |
+| First run: an unconfigured home, recommended presets | spec-webui | JA/EN guided curation tiers, existing provider/agent/diagnostic controls and record/search continuation | existing validated settings save, provider editor and native agent operations | tier choice edits the draft; separate Save, agent consent and connection tests | release targets; private native/browser acceptance on Linux; other targets retain CI-only labels | first-save/off/reload; Node four-tier/name-group/privacy and first-load/503 Retry scope controls; generated native hook and JA/EN browser journey | W6 first-run slice; S5 and real-agent acceptance remain |
+| Recover an invalid configuration | spec-webui | fixed preview and explicit all-settings replacement after retaining the exact original bytes | `settings/recovery`, shared config lock/stager and private-storage checks | confirmed operation; admitted work may finish | verified private Linux storage; other platforms unavailable pending #281 | `w6f_` no-write/typed/stale/alias/large/missing/valid/mode refusals, private-copy-before-write and post-copy/post-commit faults; Node loss/Unknown and JA/EN native/browser recovery | W6 first-run slice; native storage support on other targets remains |
 | Detect agents, wire and unwire their hooks | 7.2 | Passive seven-agent inventory; selected wire/unwire with preview and separate consent | shared `setup::readiness`, `setup::agents` and native `oboete setup` builders | inventory on page load/Refresh; approved file changes now, agent activation on its next start | release targets; private native/browser and lifecycle evidence on Linux, other targets retain CI-only labels | `w6_` guarded inventory; `w6a_` typed write guards, input/alias witnesses, backup and native-child failures; `tests/agent_setup.rs` seven-agent API lifecycle; private HTTP/fault and JA/EN browser checks | W6 confirmed wiring slice; first run and live-agent checks remain |
 | Readiness checks, as doctor reports them | 7.2, R13 | explicit JA/EN read-only diagnostics, with captured seven-agent inventory and independent partial results | `setup::doctor_report`, shared native queries/parsers; private CLI enrichment remains in `oboete doctor` | only an explicit Run diagnostics POST; no repair or live probe | release targets; private native/browser evidence on Linux, other targets retain CI-only labels | `w6d_` guarded empty-object, DB/WAL integrity/schema/change, cached accounting, passive locks, retained metadata/FIFO, completion and source-invalidation checks; JA/EN DOM/native/browser checks; existing CLI regressions | W6 readonly Doctor; first run remains |
 | Import claude-mem's history, with its projects mapped to repositories | 7.4, parity N1 | — | `oboete import` | when confirmed | all | — | W5 after N1 |
@@ -234,8 +235,36 @@ cloud starts from a page view or a save.
   Settings still reloads saved settings and clears the existing form's uncommitted edits and
   consent. Private seven-agent HTTP checks, injected CLI failure/retarget/busy controls and a
   resident API lifecycle test cover these boundaries; browser recovery injections are distinct
-  from actual native commits. Whole first-run setup, presets/recovery and port/token activation
-  remain subsequent W6 work; #94 remains open.
+  from actual native commits. Guided presets/recovery are the next vertical slice below;
+  port/token activation remains subsequent W6 work. #94 remains open.
+
+  The guided curation tiers update only the existing draft curation switch, chain on/off and
+  paid monthly cap before explicit Save. None leaves the chain intact and stops new summaries;
+  embeddings and other AI roles keep their own settings. Built-in zero-price and local entries
+  are candidates, not proof of a free allowance. Custom remote zero-price entries and unsupported
+  CLIs are not automatically selected. Duplicate names use the highest enabled risk, and
+  subscription entries gain no new daily cap. The form preserves unrelated drafts. Login and
+  policy links return to the existing inventory/diagnostics; neither registration nor saving
+  proves login or a working provider. A saved prompt-text opt-out changes the final guidance,
+  without silently changing capture. Ordinary agent-record/search acceptance does not replace
+  S5's timed write/index/FTS/MCP-get/delete and daily-worker canary obligation.
+
+  Invalid-config recovery previews bounded original bytes without returning them or creating
+  state. Confirmed replacement retains and verifies a private copy before staging fixed valid
+  settings with providers, curation, embeddings, paid spending, resident mode, prompt text and
+  injection off. Other capture uses built-in redaction; replacing custom rules/defaults is
+  disclosed before consent. Records, agent files and saved keys remain. Source/home/state/lock
+  identities and bytes are checked under the shared config lock, including an older protected
+  0755 state directory inside a private home. The existing path-based stager is not an atomic
+  compare-and-swap against an external edit after its final check. Unknown completion retains
+  any known copy filename and requires an explicit saved-settings read before a fresh preview;
+  it never automatically sends another replacement. Linux private-storage refusal is honest
+  on other platforms. The private Linux JA/EN journey proves a truly absent configuration,
+  explicit first Save with resident off, separate Codex wiring, explicit diagnostics, generated
+  native hook capture and literal raw FTS/UI search, and exact private recovery copy with old
+  records and agent files retained. A separately labelled browser transport failure exercises
+  first-listing/503 Retry with exactly one all-repository search, not a native data commit.
+  Shipping also requires the full checks, final-head CI and two-axis/external reviews.
 
 W1, W3, W5 and W6 are independent of each other once their backends exist; W2 is security scope and
 W4 waits for the local embedder.

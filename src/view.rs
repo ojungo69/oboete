@@ -992,6 +992,8 @@ impl Viewer {
         let (cap, save): (usize, Save) = match (method, target) {
             ("POST", "/api/doctor") => (MAX_BODY, Self::doctor),
             ("POST", "/api/settings") => (MAX_BODY, Self::save),
+            ("POST", "/api/settings/recovery/preview") => (MAX_BODY, Self::recovery_preview),
+            ("POST", "/api/settings/recovery/start") => (MAX_BODY, Self::recovery_start),
             ("POST", "/api/providers") => (MAX_BODY, Self::save_provider),
             ("POST", "/api/providers/key") => (MAX_KEY_BODY, Self::save_provider_key),
             ("POST", "/api/providers/test/preview") => (MAX_BODY, Self::preview_provider_test),
@@ -1189,6 +1191,19 @@ impl Viewer {
         if let Some(page) = page {
             let _ = std::fs::remove_file(page);
         }
+    }
+
+    fn recovery_preview(&self, body: &[u8]) -> Response {
+        saved(crate::settings::recovery::preview(&self.home, body))
+    }
+
+    fn recovery_start(&self, body: &[u8]) -> Response {
+        saved(crate::settings::recovery::start(
+            self.maintenance_caller(),
+            &self.home,
+            &self.saving,
+            body,
+        ))
     }
 
     fn maintenance_preview(&self, body: &[u8]) -> Response {
@@ -2602,6 +2617,333 @@ mod tests {
         assert_eq!(v.route("POST", "/api/doctor?repair", &headers).status, 405);
         assert!(!home.exists(), "readonly Doctor created the absent home");
         assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn w6f_post(v: &Viewer, route: &str, value: Value) -> Response {
+        let body = serde_json::to_vec(&value).unwrap();
+        request(
+            v,
+            "POST",
+            route,
+            &[
+                HOST,
+                TOKEN,
+                ("Origin", "http://127.0.0.1:4321"),
+                ("Content-Type", "application/json"),
+                ("Content-Length", &body.len().to_string()),
+            ],
+            &body,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6f_recovery_previews_without_writes_and_keeps_the_exact_invalid_file() {
+        use std::os::unix::fs::MetadataExt;
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::set_permissions(p, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let path = p.join("config.toml");
+        let original = b"private-recovery-canary = [\xff\n";
+        std::fs::write(&path, original).unwrap();
+        // Existing settings saves can leave a 0755 state directory inside the private home.
+        std::fs::create_dir(p.join("state")).unwrap();
+        std::fs::set_permissions(
+            p.join("state"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let v = Viewer::new(p, None, 4321, Token::Run("t0k".into()));
+        let before = crate::backup::tests::w5b_files(p);
+        let preview_path = "/api/settings/recovery/preview";
+        let start_path = "/api/settings/recovery/start";
+        for body in [b"[]".as_slice(), b"null", br#"{"path":"other.toml"}"#] {
+            assert_eq!(v.recovery_preview(body).status, 400);
+        }
+        for route in [preview_path, start_path] {
+            save_guards(&v, route, MAX_BODY, b"{}");
+        }
+        let shown = w6f_post(&v, preview_path, json!({}));
+        assert_eq!(
+            shown.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&shown.body)
+        );
+        let shown: Value = serde_json::from_slice(&shown.body).unwrap();
+        assert_eq!(crate::backup::tests::w5b_files(p), before);
+        assert!(!shown.to_string().contains("private-recovery-canary"));
+        let body = json!({"preview_key":shown["preview_key"],"confirmed":true});
+        let mut unconfirmed = body.clone();
+        unconfirmed["confirmed"] = json!(false);
+        assert_eq!(w6f_post(&v, start_path, unconfirmed).status, 422);
+        let mut arbitrary = body.clone();
+        arbitrary["path"] = json!("other.toml");
+        assert_eq!(w6f_post(&v, start_path, arbitrary).status, 400);
+        let mut stale = body.clone();
+        stale["preview_key"] = json!("0".repeat(64));
+        assert_eq!(w6f_post(&v, start_path, stale).status, 409);
+        assert_eq!(crate::backup::tests::w5b_files(p), before);
+        let recovered = w6f_post(&v, start_path, body.clone());
+        assert_eq!(recovered.status, 200);
+        let recovered: Value = serde_json::from_slice(&recovered.body).unwrap();
+        let copy = p.join(recovered["backup"].as_str().unwrap());
+        assert_eq!(std::fs::read(&copy).unwrap(), original);
+        assert_eq!(std::fs::metadata(&copy).unwrap().mode() & 0o777, 0o600);
+        let settings = get(&v, "/api/settings");
+        assert_eq!(settings["summary"]["curate"], false);
+        assert_eq!(settings["worker"]["resident"], false);
+        assert_eq!(settings["paid_usd_per_month"].as_f64(), Some(0.0));
+        assert!(settings["providers"].as_array().unwrap().is_empty());
+        assert_eq!(crate::config::load(p).unwrap().embedding.provider, "none");
+        assert!(!p.join("raw.db").exists() && !p.join("providers.db").exists());
+        assert_eq!(w6f_post(&v, start_path, body).status, 409);
+        assert_eq!(std::fs::read(copy).unwrap(), original);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6f_a_failed_stage_keeps_the_original_and_its_verified_private_copy() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let original = b"stage failure private canary = [";
+        std::fs::write(p.join("config.toml"), original).unwrap();
+        // An unrelated directory at the existing stager's fixed scratch name refuses stage.
+        let collision = p.join(format!(".config.toml.{}.oboete-tmp", std::process::id()));
+        std::fs::create_dir(&collision).unwrap();
+        let v = Viewer::new(p, None, 4321, Token::Run("t0k".into()));
+        let preview = v.recovery_preview(b"{}");
+        assert_eq!(preview.status, 200);
+        let body = serde_json::to_vec(
+            &json!({"preview_key":json_of(&preview)["preview_key"],"confirmed":true}),
+        )
+        .unwrap();
+        let result = v.recovery_start(&body);
+        assert_eq!(result.status, 500);
+        assert_eq!(std::fs::read(p.join("config.toml")).unwrap(), original);
+        let copies: Vec<_> = std::fs::read_dir(p)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .contains(".recovery-")
+            })
+            .collect();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(std::fs::read(&copies[0]).unwrap(), original);
+        assert_eq!(
+            std::fs::metadata(&copies[0]).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(collision.is_dir());
+        assert!(!p.join("raw.db").exists());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn w6f_recovery_waits_for_native_private_storage_proof() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(p.join("config.toml"), "invalid = [").unwrap();
+        let v = Viewer::new(p, None, 4321, Token::Run("t0k".into()));
+        let before = crate::backup::tests::w5b_files(p);
+        let result = v.recovery_preview(b"{}");
+        assert_eq!(result.status, 422);
+        let answer: Value = serde_json::from_slice(&result.body).unwrap();
+        assert_eq!(answer["code"], "recovery_unavailable");
+        assert_eq!(crate::backup::tests::w5b_files(p), before);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6f_recovery_leaves_valid_missing_large_and_unsafe_homes_unchanged() {
+        use std::os::unix::fs::PermissionsExt;
+        for kind in [
+            "valid",
+            "missing",
+            "missing_home",
+            "large",
+            "directory",
+            "shared_home",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let p = root.path();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let home = if kind == "missing_home" {
+                p.join("missing")
+            } else {
+                p.to_path_buf()
+            };
+            let file = home.join("config.toml");
+            match kind {
+                "valid" => std::fs::write(&file, "[summary]\ncurate = false\n").unwrap(),
+                "large" => std::fs::write(&file, vec![b'x'; 1024 * 1024 + 1]).unwrap(),
+                "directory" => std::fs::create_dir(&file).unwrap(),
+                "shared_home" => {
+                    std::fs::write(&file, "invalid = [").unwrap();
+                    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o777)).unwrap();
+                }
+                _ => {}
+            }
+            let before = crate::backup::tests::w5b_files(p);
+            let v = Viewer::new(&home, None, 4321, Token::Run("t0k".into()));
+            let result = v.recovery_preview(b"{}");
+            assert_eq!(result.status, 422, "{kind}");
+            let answer: Value = serde_json::from_slice(&result.body).unwrap();
+            assert_eq!(answer["code"], "recovery_unavailable");
+            assert_eq!(crate::backup::tests::w5b_files(p), before, "{kind}");
+            assert!(!home.join("state").exists(), "{kind}");
+            if kind == "missing_home" {
+                assert!(!home.exists());
+            }
+            if kind == "directory" {
+                assert!(file.is_dir());
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6f_private_copy_refusal_precedes_bytes_and_postcommit_failure_is_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        fn untrusted_copy(_home: &Path) {
+            crate::keyfile::fake_fs(Some(0x0102_1997));
+        }
+        fn replace_committed(home: &Path) {
+            std::fs::write(home.join("config.toml"), "later owner edit = [").unwrap();
+        }
+        for after_commit in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let original = b"private destination refusal canary = [";
+            std::fs::write(p.join("config.toml"), original).unwrap();
+            let v = Viewer::new(p, None, 4321, Token::Run("t0k".into()));
+            let preview = v.recovery_preview(b"{}");
+            assert_eq!(preview.status, 200);
+            let body = serde_json::to_vec(
+                &json!({"preview_key":json_of(&preview)["preview_key"],"confirmed":true}),
+            )
+            .unwrap();
+            if after_commit {
+                crate::settings::recovery::AFTER_COMMIT.set(Some(replace_committed));
+            } else {
+                crate::settings::recovery::BEFORE_COPY_WRITE.set(Some(untrusted_copy));
+            }
+            let result = v.recovery_start(&body);
+            crate::keyfile::fake_fs(None);
+            assert!(
+                crate::settings::recovery::BEFORE_COPY_WRITE
+                    .take()
+                    .is_none()
+            );
+            assert!(crate::settings::recovery::AFTER_COMMIT.take().is_none());
+            let copies: Vec<_> = std::fs::read_dir(p)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .contains(".recovery-")
+                })
+                .collect();
+            assert_eq!(copies.len(), 1);
+            if after_commit {
+                assert_eq!(result.status, 200);
+                assert_eq!(json_of(&result)["phase"], "unknown");
+                assert_eq!(std::fs::read(&copies[0]).unwrap(), original);
+                assert_eq!(
+                    std::fs::read(p.join("config.toml")).unwrap(),
+                    b"later owner edit = ["
+                );
+            } else {
+                assert_eq!(result.status, 422);
+                assert_eq!(std::fs::read(&copies[0]).unwrap(), b"");
+                assert_eq!(std::fs::read(p.join("config.toml")).unwrap(), original);
+            }
+            assert!(
+                !String::from_utf8_lossy(&result.body)
+                    .contains("private destination refusal canary")
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6f_recovery_refuses_changed_or_unsafe_settings_without_replacing_them() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
+        for kind in [
+            "edit",
+            "same_bytes_new_file",
+            "symlink",
+            "hardlink",
+            "readonly",
+            "state_alias",
+            "lock_alias",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let file = p.join("config.toml");
+            std::fs::write(&file, "invalid = [").unwrap();
+            let v = Viewer::new(p, None, 4321, Token::Run("t0k".into()));
+            let shown = w6f_post(&v, "/api/settings/recovery/preview", json!({}));
+            assert_eq!(shown.status, 200, "{kind}");
+            let shown = json_of(&shown);
+            let body = json!({"preview_key":shown["preview_key"],"confirmed":true});
+            match kind {
+                "edit" => std::fs::write(&file, "later private content = [").unwrap(),
+                "same_bytes_new_file" => {
+                    // Keep the old inode alive, so this proves identity and not inode reuse.
+                    std::fs::rename(&file, p.join("previous")).unwrap();
+                    std::fs::write(&file, "invalid = [").unwrap();
+                }
+                "symlink" => {
+                    std::fs::rename(&file, p.join("previous")).unwrap();
+                    symlink(p.join("previous"), &file).unwrap();
+                }
+                "hardlink" => std::fs::hard_link(&file, p.join("other")).unwrap(),
+                "readonly" => {
+                    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).unwrap()
+                }
+                "state_alias" => {
+                    std::fs::create_dir(p.join("other-state")).unwrap();
+                    symlink(p.join("other-state"), p.join("state")).unwrap();
+                }
+                "lock_alias" => {
+                    std::fs::DirBuilder::new()
+                        .mode(0o700)
+                        .create(p.join("state"))
+                        .unwrap();
+                    std::fs::write(p.join("other-lock"), "unchanged lock canary").unwrap();
+                    symlink(p.join("other-lock"), p.join("state/config.lock")).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let original = std::fs::read(&file).unwrap();
+            let refused = w6f_post(&v, "/api/settings/recovery/start", body);
+            assert!(
+                [409, 422].contains(&refused.status),
+                "{kind}: {}",
+                refused.status
+            );
+            assert_eq!(std::fs::read(&file).unwrap(), original, "{kind}");
+            assert!(!String::from_utf8_lossy(&refused.body).contains("private content"));
+            assert!(
+                !std::fs::read_dir(p).unwrap().any(|e| e
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".recovery-")),
+                "{kind}"
+            );
+        }
     }
 
     #[test]
@@ -4748,6 +5090,8 @@ curate = false
         let cl = ("Content-Length", len.as_str());
         for (path, cap) in [
             ("/api/settings", MAX_BODY),
+            ("/api/settings/recovery/preview", MAX_BODY),
+            ("/api/settings/recovery/start", MAX_BODY),
             ("/api/key", MAX_KEY_BODY),
             ("/api/providers", MAX_BODY),
             ("/api/providers/key", MAX_KEY_BODY),
@@ -4764,6 +5108,8 @@ curate = false
         for t in [
             "/api/repos",
             "/api/settings?x=1",
+            "/api/settings/recovery/preview?x=1",
+            "/api/settings/recovery/start?x=1",
             "/api/key?x=1",
             "/api/providers?x=1",
             "/api/providers/key?x=1",
