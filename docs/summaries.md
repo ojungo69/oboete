@@ -9,7 +9,7 @@ and shown with them at session start. It replaces the digest (spec 3.4, 4.4).
 claude-mem 13.28.0 (`src/sdk/parser.ts`, `src/services/worker/`, `plugin/modes/code.json` at
 039c6160) asks its observer for a summary at each Stop of the main agent: `request`,
 `investigated`, `learned`, `completed`, `next_steps` and `notes`. A summary with none of the first
-five is invalid; `<skip_summary />` stores none; a session gets one per turn, appended. Session
+five is invalid (13.34.2 takes notes alone: T4); `<skip_summary />` stores none; a session gets one per turn, appended. Session
 start lists the ten newest as `S<id> <request> (<date time>)` rows among the observations and ends
 with the newest one's investigated, learned, completed and next steps; the page shows them as
 session cards. 13.34.2 shows notes after them, there and on the page, and takes a summary of
@@ -144,8 +144,8 @@ and its ops stay in the log, unread; the spec's sections that named it (1.1, 1.4
 3. The prompt holds the turn's prompts, its session's cards of the windows that hold the turn, and
    the reply, gated; not another session's cards, nor a card of a window that holds none of the
    turn's records.
-4. An answer with none of the five fields is refused and the next entry asked; a skip is an op
-   with no fields.
+4. An answer with none of the six fields is refused and the next entry asked, and one with notes
+   alone is kept (#403); a skip is an op with no fields.
 5. A field over its cap is dropped, never cut.
 6. T7: a removal from the turn's prompt, from a record of a window whose card it read outside the
    turn, or from that window's goal hides the summary; one its op lists does not.
