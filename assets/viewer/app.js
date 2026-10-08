@@ -4221,7 +4221,8 @@ async function saveSettings(button) {
       credentials: 'omit',
     });
     const answer = (res.headers.get('content-type') || '').startsWith('application/json') ? await res.json() : {};
-    const current = res.status === 409 ? await api('settings') : null;
+    // Only a stale version reloads; another refusal (a port in use) keeps what was typed.
+    const current = res.status === 409 && answer.code === 'stale' ? await api('settings') : null;
     // Moved to another tab, or the values were loaded again, while saving: what is shown stays.
     if (view !== 'settings' || form !== mine) return;
     if (res.ok || current) {

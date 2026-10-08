@@ -16,6 +16,7 @@ class Node {
   removeAttribute(name){delete this.attrs[name];}
   querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
   querySelectorAll(selector){
+    if(selector.includes(','))return selector.split(',').flatMap(part=>this.querySelectorAll(part.trim()));
     const tag=selector.toUpperCase();
     return this.children.filter(node=>node&&typeof node==='object').flatMap(node=>[
       ...(node.tagName===tag||selector.startsWith('.')&&node.className.split(' ').includes(selector.slice(1))?[node]:[]),
@@ -26,6 +27,12 @@ class Node {
   get options(){return this.children.filter(node=>node?.tagName==='OPTION');}
   click(){for(const cb of this.listeners.click||[])cb({target:this});}
   focus(){this.focused=true;}
+  closest(selector){
+    for(let node=this;node;node=node.parentElement){
+      if(node.tagName===selector.toUpperCase()||selector.startsWith('.')&&node.className.split(' ').includes(selector.slice(1)))return node;
+    }
+    return null;
+  }
 }
 
 const ids=new Map();
@@ -578,6 +585,15 @@ w6.applySavedSettings(settings('resident',{view:{port:80},view_runtime:{port:80,
 assert.equal(ctx.location.replaced.length,0,'a save on port 80 stays where it is');
 assert(!document.getElementById('status').textContent.includes('run oboete view'),'a save on port 80 is not a lost move');
 ctx.location.port='17373';
+
+// A port another program holds is refused as such: no stale reload, and what was typed stays.
+f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
+f.view.port='17400';
+answers=[json({code:'port_unavailable',field:'view.port'},409)];
+for(const cb of panel.querySelector('form').listeners.submit||[])cb({preventDefault(){}});
+await settle();
+assert(document.getElementById('status').textContent.includes('This port cannot be used'),'the refusal is shown, not a stale save');
+assert.equal(f.view.port,'17400','the port typed is kept');
 
 // A new token: confirmed first, then the page goes on only at a vetted address.
 f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
