@@ -599,7 +599,7 @@ fn check(v: &Value, rules: &Rules) -> Option<&'static str> {
 }
 
 /// The answer's fields as the op keeps them (T4): trimmed, through the egress gate as a claim
-/// body is, and dropped, never cut, when over the cap.
+/// body is, and dropped, never cut, when over the cap or left empty by the gate.
 fn kept(v: &Value, rules: &Rules) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for f in FIELDS {
@@ -608,7 +608,8 @@ fn kept(v: &Value, rules: &Rules) -> BTreeMap<String, String> {
             continue;
         }
         let text = crate::redact::outbound_with(text, rules);
-        if text.chars().count() <= cap(f) {
+        // What the gate empties (a closed private block) is no field (#402).
+        if !text.trim().is_empty() && text.chars().count() <= cap(f) {
             out.insert(f.to_owned(), text);
         }
     }
@@ -873,6 +874,12 @@ mod tests {
 
     /// `run` under `rules`.
     fn run_with(home: &Path, answer: &Value, rules: &Rules) -> (Phase, Vec<String>) {
+        chain_with(home, std::slice::from_ref(answer), rules)
+    }
+
+    /// `run_with` for a chain whose entries answer in order: the first answer the turn's check
+    /// takes is the chain's, as `provider` takes only a caller-approved answer.
+    fn chain_with(home: &Path, answers: &[Value], rules: &Rules) -> (Phase, Vec<String>) {
         let mut raw = crate::raw::open(home).unwrap();
         let k = crate::knowledge::open(home).unwrap();
         let db = crate::providers_db::open(home).unwrap();
@@ -883,7 +890,8 @@ mod tests {
                               _: &crate::provider::Gate|
          -> Result<ChainResult> {
             sent.borrow_mut().push(p.to_owned());
-            assert_eq!(check(answer), None, "{answer}");
+            let answer = (answers.iter().find(|a| check(a).is_none()))
+                .unwrap_or_else(|| panic!("no entry's answer passes the check: {answers:?}"));
             Ok(ChainResult {
                 provider: "fake".into(),
                 output: answer.clone(),
@@ -1645,6 +1653,58 @@ mod tests {
         assert!(ops[0].skipped && ops[0].fields.is_empty());
         assert_eq!(run(home.path(), &skip).1.len(), 0);
         assert!(shown(home.path(), &rules).is_empty());
+    }
+
+    /// #402 (T4): a first-five field the outbound gate empties (a closed private block) counts as
+    /// empty: an answer left with none of them is refused, a note beside it included, and a public
+    /// field beside it is kept alone.
+    #[test]
+    fn a_field_the_gate_empties_counts_as_none() {
+        let rules = Rules::default();
+        let private = "<private>synthetic</private>";
+        assert_eq!(crate::redact::outbound_with(private, &rules), "");
+        let answer = |more: Value| {
+            let mut v = json!({"skip": false, "request": private, "investigated": "",
+                "learned": "", "completed": "", "next_steps": "", "notes": ""});
+            v.as_object_mut()
+                .unwrap()
+                .extend(more.as_object().unwrap().clone());
+            v
+        };
+        assert!(kept(&answer(json!({})), &rules).is_empty());
+        assert_eq!(check(&answer(json!({})), &rules), Some("empty"));
+        assert_eq!(
+            check(&answer(json!({"notes": "A note."})), &rules),
+            Some("empty")
+        );
+        let public = answer(json!({"completed": "Built the parser."}));
+        assert_eq!(check(&public, &rules), None);
+        assert_eq!(
+            kept(&public, &rules).keys().collect::<Vec<_>>(),
+            ["completed"]
+        );
+    }
+
+    /// #402: the chain's next entry answers a turn whose first entry's answer was private only, and
+    /// the turn's op holds its fields: no blank summary is kept.
+    #[test]
+    fn a_private_only_answer_leaves_the_turn_to_the_next_entry() {
+        let home = home(
+            &[said("s1", "prompt", "ok?"), said("s1", "reply", "Yes.")],
+            &[window(1, 2, "Asked.", &[])],
+        );
+        let private = json!({"skip": false, "request": "<private>synthetic</private>",
+            "investigated": "", "learned": "", "completed": "", "next_steps": "", "notes": ""});
+        chain_with(
+            home.path(),
+            &[private, completed("Built.")],
+            &Rules::default(),
+        );
+        let ops = turn_ops(home.path());
+        assert_eq!(ops.len(), 1);
+        assert!(!ops[0].skipped);
+        assert_eq!(ops[0].fields["completed"], "Built.");
+        assert!(ops[0].fields.values().all(|v| !v.trim().is_empty()));
     }
 
     /// Test 5 (T4): a field over its cap is dropped, never cut.
