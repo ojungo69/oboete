@@ -9,8 +9,9 @@ made to the API.
 ## Why the Messages API
 
 Anthropic's OpenAI-compatible endpoint ignores `response_format` and `strict`, and its page says it
-"is not considered a long-term or production-ready solution"
-(https://platform.claude.com/docs/en/api/openai-sdk). oboete needs JSON that follows the schema,
+"is not considered a long-term or production-ready solution for most use cases"
+(https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk, where
+https://platform.claude.com/docs/en/api/openai-sdk leads). oboete needs JSON that follows the schema,
 so an entry speaks the native Messages API instead.
 
 ## The request
@@ -75,8 +76,11 @@ Errors (https://platform.claude.com/docs/en/api/errors): the body is
 - Spent credits: a 400 `invalid_request_error` whose message says the credit balance is too low.
   oboete reads only the error's own message for that, keeps the vetted code with "(credits
   spent)", and rests the entry until the next month (UTC), as a spent month's paid budget does. A
-  402 `billing_error` rests it the same way.
+  402 `billing_error` rests it the same way. `oboete resume anthropic` ends the rest at once, after
+  a top-up.
 - 529 rests the entry as a 503 does (ten minutes).
+- ureq drops `Authorization` on a redirect but keeps other headers, `x-api-key` among them, so a
+  Messages entry follows no redirect.
 - Rate limits (https://platform.claude.com/docs/en/api/rate-limits): a 429 carries `retry-after`
   in seconds, read as Groq's is. The `anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-{limit,remaining,reset}`
   headers give resets as RFC 3339 times, and tokens remaining rounded to the nearest thousand; the

@@ -1503,6 +1503,9 @@ fn http_call(
 ) -> Result<Answer, CallError> {
     let body = request(api, model, prompt, schema, extra);
     let url = endpoint(base_url, api);
+    // ureq drops `Authorization` on a redirect, not the Messages API's `x-api-key`: none is
+    // followed, so the key reaches no host but `base_url`'s.
+    let redirects = if api == Api::Anthropic { 0 } else { redirects };
     let mut req = admitted_agent(
         &url,
         Duration::from_secs(timeout_s),
@@ -6896,5 +6899,32 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             headers.insert("X-Api-Key".into(), "private-header-canary".into());
         }
         assert_eq!(probe_provider(&p).unwrap_err(), "unsafe_headers");
+    }
+
+    /// ureq keeps an `x-api-key` header on a redirect: a Messages entry follows none, so its key
+    /// reaches no other host.
+    #[test]
+    fn a_messages_entry_follows_no_redirect_with_its_key() {
+        let home = tempfile::tempdir().unwrap();
+        let key_file = home.path().join("TEST_KEY.md");
+        std::fs::write(&key_file, "# synthetic only\nredirect-test-key\n").unwrap();
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let to = leak(format!(
+            "Location: http://{}/elsewhere\r\n",
+            target.local_addr().unwrap()
+        ));
+        let (url, _) = serve("302 Found", Vec::new(), to);
+        let mut p = stub(url);
+        if let Provider::Openai {
+            api, key_file: k, ..
+        } = &mut p
+        {
+            *api = Api::Anthropic;
+            *k = Some(key_file);
+        }
+        let e = call(&p, "p", &json!({"type": "object"}), None).unwrap_err();
+        assert_eq!((e.status, e.message.as_str()), (Some(302), "http 302"));
+        assert!(matches!(target.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
     }
 }
