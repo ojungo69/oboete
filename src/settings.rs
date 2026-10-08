@@ -308,6 +308,7 @@ fn provider_row(
     let fields = |p: &Provider| match p {
         Provider::Openai {
             base_url,
+            api,
             key_file,
             model,
             daily_budget,
@@ -316,7 +317,7 @@ fn provider_row(
             subscription,
             ..
         } => json!({
-            "kind": "openai", "base_url": endpoint_supported(base_url).then_some(base_url),
+            "kind": "openai", "api": api, "base_url": endpoint_supported(base_url).then_some(base_url),
             "endpoint_supported": endpoint_supported(base_url), "model": model,
             "daily_budget": daily_budget, "timeout_s": timeout_s, "retry_429": retry_429,
             "subscription": subscription, "key_file": key_file,

@@ -77,6 +77,9 @@ enum Draft {
         name: String,
         enabled: bool,
         base_url: String,
+        /// Absent from an older page: the OpenAI-compatible API.
+        #[serde(default)]
+        api: config::Api,
         model: String,
         daily_budget: Option<u32>,
         timeout_s: u64,
@@ -133,6 +136,7 @@ impl Draft {
                 name,
                 enabled,
                 base_url,
+                api,
                 model,
                 daily_budget,
                 timeout_s,
@@ -149,6 +153,7 @@ impl Draft {
                     name: name.clone(),
                     enabled: *enabled,
                     base_url: base_url.clone(),
+                    api: *api,
                     key_file: None,
                     model: model.clone(),
                     daily_budget: None,
@@ -163,6 +168,7 @@ impl Draft {
                     name: n,
                     enabled: on,
                     base_url: url,
+                    api: speaks,
                     model: m,
                     daily_budget: budget,
                     timeout_s: timeout,
@@ -182,6 +188,7 @@ impl Draft {
                 n.clone_from(name);
                 *on = *enabled;
                 url.clone_from(base_url);
+                *speaks = *api;
                 m.clone_from(model);
                 *budget = *daily_budget;
                 *timeout = *timeout_s;
@@ -379,6 +386,7 @@ fn edit(table: &mut dyn TableLike, old: &Provider, new: &Provider) -> Result<(),
         "name",
         "enabled",
         "base_url",
+        "api",
         "model",
         "cli",
         "daily_budget",
@@ -768,11 +776,12 @@ pub(super) fn preview(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
     let (destination, model, max_output, possible_charge) = match &p {
         Provider::Openai {
             base_url,
+            api,
             model,
             limits,
             ..
         } => (
-            format!("{}/chat/completions", base_url.trim_end_matches('/')),
+            crate::provider::endpoint(base_url, *api),
             Some(model.as_str()),
             Some(limits.max_output_tokens),
             limits.is_paid() || !crate::provider::is_loopback(base_url),
@@ -1651,5 +1660,49 @@ mod tests {
             std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
             changed
         );
+    }
+
+    /// The owner, 2026-10-09: an HTTP entry's API is chosen on the page and saved as `api`, left
+    /// out for the OpenAI-compatible default; its test previews the Messages endpoint.
+    #[test]
+    fn an_entrys_api_is_saved_shown_and_previewed() {
+        let home = home("providers = []\n");
+        let mut entry = http("claude", "https://api.anthropic.com/v1");
+        entry["api"] = json!("anthropic");
+        let saved = send(home.path(), json!({"op": "create", "entry": entry})).unwrap();
+        assert_eq!(saved["providers"][0]["saved"]["api"], "anthropic");
+        let text = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        assert!(text.contains("api = \"anthropic\""), "{text}");
+        let body = serde_json::to_vec(
+            &json!({"version": saved["version"], "selector": saved["providers"][0]["selector"]}),
+        )
+        .unwrap();
+        let shown = preview(home.path(), &body).unwrap();
+        assert_eq!(
+            shown["destination"],
+            "https://api.anthropic.com/v1/messages"
+        );
+        let mut entry = http("claude", "https://api.anthropic.com/v1");
+        entry["api"] = json!("openai");
+        let selector = &saved["providers"][0]["selector"];
+        let saved = send(
+            home.path(),
+            json!({"op": "edit", "selector": selector, "entry": entry}),
+        )
+        .unwrap();
+        assert_eq!(saved["providers"][0]["saved"]["api"], "openai");
+        let text = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        assert!(!text.contains("api = "), "{text}");
+        // An unknown API is refused with the file kept; an older page's entry, without one, is
+        // OpenAI-compatible.
+        let before = bytes(home.path()).unwrap();
+        let mut entry = http("other", "https://example.invalid/v1");
+        entry["api"] = json!("anthropic-ish");
+        let refused = send(home.path(), json!({"op": "create", "entry": entry})).unwrap_err();
+        assert_eq!((refused.status, refused.code), (400, "bad_request"));
+        assert_eq!(bytes(home.path()).unwrap(), before);
+        let entry = http("old", "https://example.invalid/v1");
+        let saved = send(home.path(), json!({"op": "create", "entry": entry})).unwrap();
+        assert_eq!(saved["providers"][1]["saved"]["api"], "openai");
     }
 }

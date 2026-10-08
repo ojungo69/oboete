@@ -666,6 +666,7 @@ mod tests {
             enabled: true,
             name: name.into(),
             base_url: "http://127.0.0.1:9".into(),
+            api: Default::default(),
             key_file: None,
             model: "m".into(),
             daily_budget: Some(10),

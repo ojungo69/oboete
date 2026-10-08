@@ -18,7 +18,7 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 
 use crate::budget;
-use crate::config::{self, Provider};
+use crate::config::{self, Api, Provider};
 use crate::providers_db::{self, Usage};
 use crate::{db, hook};
 
@@ -286,8 +286,17 @@ fn probe_extra(limits: &config::Limits) -> serde_json::Map<String, Value> {
 /// make its schema/envelope/system instructions free. This performs no file or network read.
 pub(crate) fn probe_estimate(p: &Provider) -> u32 {
     match p {
-        Provider::Openai { model, limits, .. } => budget::estimate(
-            &openai_request(model, PROBE_PROMPT, &probe_schema(), &probe_extra(limits)).to_string(),
+        Provider::Openai {
+            api, model, limits, ..
+        } => budget::estimate(
+            &request(
+                *api,
+                model,
+                PROBE_PROMPT,
+                &probe_schema(),
+                &probe_extra(limits),
+            )
+            .to_string(),
         ),
         Provider::Cli { .. } => budget::estimate(&format!(
             "{CURATOR_SYSTEM}\n{}\n{PROBE_PROMPT}",
@@ -365,6 +374,7 @@ pub(crate) fn probe_provider(p: &Provider) -> std::result::Result<Provider, &'st
     match &mut p {
         Provider::Openai {
             base_url,
+            api,
             headers,
             extra,
             timeout_s,
@@ -380,6 +390,7 @@ pub(crate) fn probe_provider(p: &Provider) -> std::result::Result<Provider, &'st
                     || matches!(
                         name.to_ascii_lowercase().as_str(),
                         "authorization"
+                            | "x-api-key"
                             | "proxy-authorization"
                             | "host"
                             | "cookie"
@@ -399,7 +410,14 @@ pub(crate) fn probe_provider(p: &Provider) -> std::result::Result<Provider, &'st
             }
             *timeout_s = (*timeout_s).min(30);
             limits.max_output_tokens = limits.max_output_tokens.min(128);
+            // A Messages entry's thinking counts against max_tokens: the test keeps the entry's own.
+            let thinking = extra.get("thinking").cloned();
             *extra = probe_extra(limits);
+            if *api == Api::Anthropic
+                && let Some(thinking) = thinking
+            {
+                extra.insert("thinking".into(), thinking);
+            }
         }
         Provider::Cli {
             cli,
@@ -621,13 +639,15 @@ fn probe_send(
     match p {
         Provider::Openai {
             base_url,
+            api,
             key_file,
             model,
             timeout_s,
             extra,
             headers,
             ..
-        } => openai_compat_redirects(
+        } => http_call(
+            *api,
             base_url,
             key_file.as_deref(),
             model,
@@ -1252,6 +1272,7 @@ fn call(
     match p {
         Provider::Openai {
             base_url,
+            api,
             key_file,
             model,
             timeout_s,
@@ -1276,7 +1297,13 @@ fn call(
                     extra.insert("max_tokens".into(), cap.into());
                 }
             }
-            openai_compat(
+            // The Messages API requires `max_tokens`: what the entry may send, when `extra` names
+            // none (`Provider::declared_output`).
+            if *api == Api::Anthropic && !extra.contains_key("max_tokens") {
+                extra.insert("max_tokens".into(), limits.max_output_tokens.into());
+            }
+            http_call(
+                *api,
                 base_url,
                 key_file.as_deref(),
                 model,
@@ -1286,6 +1313,7 @@ fn call(
                 prompt,
                 schema,
                 admission,
+                10,
             )
         }
         Provider::Cli {
@@ -1429,6 +1457,8 @@ fn agent_config(url: &str, timeout: Duration, redirects: u32) -> ureq::config::C
     config.build()
 }
 
+/// An OpenAI-compatible call, as the tests make it.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, as the tests pass them
 fn openai_compat(
     base_url: &str,
@@ -1441,13 +1471,25 @@ fn openai_compat(
     schema: &Value,
     admission: Option<crate::dispatch::Guard>,
 ) -> Result<Answer, CallError> {
-    openai_compat_redirects(
-        base_url, key_file, model, timeout_s, extra, headers, prompt, schema, admission, 10,
+    http_call(
+        Api::Openai,
+        base_url,
+        key_file,
+        model,
+        timeout_s,
+        extra,
+        headers,
+        prompt,
+        schema,
+        admission,
+        10,
     )
 }
 
-#[allow(clippy::too_many_arguments)] // same fixed adapter with a caller-selected redirect policy
-fn openai_compat_redirects(
+/// One call to an HTTP entry in the API it speaks, with a caller-selected redirect policy.
+#[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, and the policy
+fn http_call(
+    api: Api,
     base_url: &str,
     key_file: Option<&Path>,
     model: &str,
@@ -1459,8 +1501,8 @@ fn openai_compat_redirects(
     admission: Option<crate::dispatch::Guard>,
     redirects: u32,
 ) -> Result<Answer, CallError> {
-    let body = openai_request(model, prompt, schema, extra);
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let body = request(api, model, prompt, schema, extra);
+    let url = endpoint(base_url, api);
     let mut req = admitted_agent(
         &url,
         Duration::from_secs(timeout_s),
@@ -1474,7 +1516,13 @@ fn openai_compat_redirects(
     if let Some(key_file) = key_file {
         let key =
             config::read_key(key_file).map_err(|e| CallError::other(format!("{e:#}")).unsent())?;
-        req = req.header("Authorization", &format!("Bearer {key}"));
+        req = match api {
+            Api::Openai => req.header("Authorization", &format!("Bearer {key}")),
+            Api::Anthropic => req.header("x-api-key", &key),
+        };
+    }
+    if api == Api::Anthropic {
+        req = req.header("anthropic-version", ANTHROPIC_VERSION);
     }
     let mut resp = match &admission {
         Some(admission) => crate::dispatch::json(req, &body, admission),
@@ -1523,6 +1571,12 @@ fn openai_compat_redirects(
         if moderation(&text) {
             message.push_str(" (moderation)");
         }
+        // Spent credits are not luck: the entry rests as a spent month's budget does.
+        let spent =
+            api == Api::Anthropic && (status == 402 || status == 400 && credits_spent(&text));
+        if spent {
+            message.push_str(" (credits spent)");
+        }
         let retry_after_s = retry_after_s.or_else(|| retry_after_in_error(status, &text));
         if let Some(s) = retry_after_s {
             message.push_str(&format!(", retry in {s:.0}s"));
@@ -1533,12 +1587,15 @@ fn openai_compat_redirects(
             message,
             usage: Usage::default(),
             sent: true,
-            cool_until: None,
+            cool_until: spent.then(providers_db::next_month),
             rate,
         });
     }
     let v: Value = serde_json::from_str(&text)
         .map_err(|_| CallError::other("invalid output: response is not JSON").rated(rate))?;
+    if api == Api::Anthropic {
+        return anthropic_answer(&v, rate);
+    }
     let usage = usage_openai(&v);
     let content = v["choices"][0]["message"]["content"]
         .as_str()
@@ -1549,6 +1606,132 @@ fn openai_compat_redirects(
         })?;
     Ok(Answer {
         value: answer_value(content),
+        usage,
+        cool_until: None,
+        rate,
+    })
+}
+
+/// Where an entry's calls go: the chat completions of an OpenAI-compatible root, or the Messages
+/// endpoint of Anthropic's.
+pub(crate) fn endpoint(base_url: &str, api: Api) -> String {
+    let base = base_url.trim_end_matches('/');
+    match api {
+        Api::Openai => format!("{base}/chat/completions"),
+        Api::Anthropic => format!("{base}/messages"),
+    }
+}
+
+fn request(
+    api: Api,
+    model: &str,
+    prompt: &str,
+    schema: &Value,
+    extra: &serde_json::Map<String, Value>,
+) -> Value {
+    match api {
+        Api::Openai => openai_request(model, prompt, schema, extra),
+        Api::Anthropic => anthropic_request(model, prompt, schema, extra),
+    }
+}
+
+/// The Messages API version whose answers `anthropic_answer` reads.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// A Messages request with structured outputs (GA, no beta header;
+/// docs/research/anthropic-messages-2026-10-09.md). No `temperature`: Haiku 5.5 refuses any but
+/// its default with a 400, and newer models refuse the field, so `extra` sets one for a model that
+/// takes it. `max_tokens`, which the API requires, comes in `extra` (`call`, `probe_extra`).
+fn anthropic_request(
+    model: &str,
+    prompt: &str,
+    schema: &Value,
+    extra: &serde_json::Map<String, Value>,
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "output_config": {"format": {"type": "json_schema", "schema": anthropic_schema(schema)}}
+    });
+    for (k, v) in extra {
+        body[k] = v.clone();
+    }
+    body
+}
+
+/// Keywords the Messages API refuses in a schema with a 400: numeric and string bounds, and array
+/// bounds other than a `minItems` of 0 or 1.
+const ANTHROPIC_REFUSED: [&str; 9] = [
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minLength",
+    "maxLength",
+    "maxItems",
+    "uniqueItems",
+];
+
+/// `schema` as the Messages API takes it: without the keywords it refuses, and with
+/// `additionalProperties: false` on every object, which it requires. Only the copy sent changes:
+/// the answer is still checked against `schema`.
+fn anthropic_schema(schema: &Value) -> Value {
+    fn adapt(s: &mut Value) {
+        let Some(o) = s.as_object_mut() else {
+            return;
+        };
+        for k in ANTHROPIC_REFUSED {
+            o.remove(k);
+        }
+        if o.get("minItems")
+            .and_then(Value::as_u64)
+            .is_some_and(|n| n > 1)
+        {
+            o.remove("minItems");
+        }
+        if o.get("type").and_then(Value::as_str) == Some("object") {
+            o.insert("additionalProperties".into(), false.into());
+        }
+        for (k, v) in o.iter_mut() {
+            match (k.as_str(), v) {
+                ("properties" | "$defs" | "definitions", Value::Object(m)) => {
+                    m.values_mut().for_each(adapt)
+                }
+                ("items" | "anyOf" | "allOf" | "oneOf", Value::Array(a)) => {
+                    a.iter_mut().for_each(adapt)
+                }
+                ("items", v) => adapt(v),
+                _ => {}
+            }
+        }
+    }
+    let mut s = schema.clone();
+    adapt(&mut s);
+    s
+}
+
+/// A Messages answer: the JSON is the text of its first text block (a thinking block can come
+/// before it). A refusal, which is billed and need not match the schema, and an answer cut off at
+/// `max_tokens` are failures.
+fn anthropic_answer(v: &Value, rate: Option<providers_db::RateLeft>) -> Result<Answer, CallError> {
+    let usage = usage_anthropic(&v["usage"]);
+    let failed = |why: &str| {
+        CallError::other(format!("invalid output: {why}"))
+            .with_usage(usage)
+            .rated(rate)
+    };
+    match v["stop_reason"].as_str() {
+        Some("refusal") => return Err(failed("the model refused (stop_reason refusal)")),
+        Some("max_tokens") => return Err(failed("cut off at max_tokens")),
+        _ => {}
+    }
+    let text = (v["content"].as_array().into_iter().flatten())
+        .find(|b| b["type"] == "text")
+        .and_then(|b| b["text"].as_str())
+        .ok_or_else(|| failed("no text block"))?;
+    Ok(Answer {
+        value: answer_value(text),
         usage,
         cool_until: None,
         rate,
@@ -1589,6 +1772,22 @@ fn usage_openai(v: &Value) -> Usage {
     }
 }
 
+/// An Anthropic `usage`, the Messages API's or claude's: the prompt is every input token, those
+/// written to and read from its cache too.
+fn usage_anthropic(u: &Value) -> Usage {
+    let cache_read = tokens(&u["cache_read_input_tokens"]);
+    Usage {
+        // A sum that does not fit is not a count: dropped, never wrapped.
+        prompt: tokens(&u["input_tokens"]).and_then(|n| {
+            n.checked_add(tokens(&u["cache_creation_input_tokens"]).unwrap_or(0))?
+                .checked_add(cache_read.unwrap_or(0))
+        }),
+        completion: tokens(&u["output_tokens"]),
+        cached: cache_read,
+        reasoning: None,
+    }
+}
+
 /// Usage from a CLI's own output: claude's JSON result, codex's `turn.completed` event (`--json`).
 fn usage_cli(cli: &str, stdout: &str) -> Usage {
     match cli {
@@ -1600,18 +1799,7 @@ fn usage_cli(cli: &str, stdout: &str) -> Usage {
                 .filter_map(|l| serde_json::from_str::<Value>(l).ok())
                 .find(|v| v["type"] == "result" || v.get("usage").is_some())
                 .unwrap_or_default();
-            let u = &v["usage"];
-            let cache_read = tokens(&u["cache_read_input_tokens"]);
-            Usage {
-                // A sum that does not fit is not a count: dropped, never wrapped.
-                prompt: tokens(&u["input_tokens"]).and_then(|n| {
-                    n.checked_add(tokens(&u["cache_creation_input_tokens"]).unwrap_or(0))?
-                        .checked_add(cache_read.unwrap_or(0))
-                }),
-                completion: tokens(&u["output_tokens"]),
-                cached: cache_read,
-                reasoning: None,
-            }
+            usage_anthropic(&v["usage"])
         }
         "codex" => stdout
             .lines()
@@ -1692,11 +1880,22 @@ fn moderation(body: &str) -> bool {
     }
 }
 
+/// Whether an Anthropic 400 says the account's credits are spent ("Your credit balance is too low
+/// to access the Anthropic API"). Only the error's own message is read, as `moderation` reads it.
+fn credits_spent(body: &str) -> bool {
+    error_body(body).is_some_and(|v| {
+        v["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.to_ascii_lowercase().contains("credit balance is too low"))
+    })
+}
+
 /// Error codes kept from a provider's error body: only these known names, never a value the body
 /// makes up (a provider can put user data in `code`, issue #91).
 const KNOWN_CODES: &[&str] = &[
     "api_error",
     "authentication_error",
+    "billing_error",
     "context_length_exceeded",
     "insufficient_quota",
     "internal_server_error",
@@ -1836,21 +2035,37 @@ fn go_duration(mut rest: &str) -> Option<f64> {
 }
 
 /// Groq's `x-ratelimit-remaining-*` and `x-ratelimit-reset-*` headers (tokens a minute, requests
-/// a day; console.groq.com/docs/rate-limits), with the resets as Unix ms. None without them.
+/// a day; console.groq.com/docs/rate-limits), resets as durations, or Anthropic's
+/// `anthropic-ratelimit-{tokens,requests}-*` (the tokens of the most restrictive limit in effect;
+/// platform.claude.com/docs/en/api/rate-limits), resets as RFC 3339 times; the resets as Unix ms.
+/// None without them.
 fn rate_left(h: &ureq::http::HeaderMap) -> Option<providers_db::RateLeft> {
     let get = |name: &str| h.get(name).and_then(|v| v.to_str().ok()).map(str::trim);
     let left = |name: &str| get(name).and_then(|v| v.parse::<i64>().ok());
-    let at = |name: &str| {
+    let now = db::now_ms();
+    let after = |name: &str| {
         get(name)
             .and_then(go_duration)
             .filter(|s| s.is_finite() && *s >= 0.0 && *s < MAX_COOLDOWN.as_secs_f64())
-            .map(|s| db::now_ms() + (s * 1000.0) as i64)
+            .map(|s| now + (s * 1000.0) as i64)
     };
+    // A time already past is a limit already replenished.
+    let at = |name: &str| {
+        get(name)
+            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+            .map(|t| t.timestamp_millis().max(now))
+            .filter(|&t| t - now < MAX_COOLDOWN.as_millis() as i64)
+    };
+    let anthropic = |what: &str| format!("anthropic-ratelimit-{what}");
     let rate = providers_db::RateLeft {
-        tokens: left("x-ratelimit-remaining-tokens"),
-        tokens_reset_at: at("x-ratelimit-reset-tokens"),
-        requests: left("x-ratelimit-remaining-requests"),
-        requests_reset_at: at("x-ratelimit-reset-requests"),
+        tokens: left("x-ratelimit-remaining-tokens")
+            .or_else(|| left(&anthropic("tokens-remaining"))),
+        tokens_reset_at: after("x-ratelimit-reset-tokens")
+            .or_else(|| at(&anthropic("tokens-reset"))),
+        requests: left("x-ratelimit-remaining-requests")
+            .or_else(|| left(&anthropic("requests-remaining"))),
+        requests_reset_at: after("x-ratelimit-reset-requests")
+            .or_else(|| at(&anthropic("requests-reset"))),
     };
     (rate != providers_db::RateLeft::default()).then_some(rate)
 }
@@ -5462,6 +5677,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             enabled: true,
             name: name.into(),
             base_url,
+            api: Default::default(),
             key_file: None,
             model: "m".into(),
             daily_budget: Some(10),
@@ -5519,6 +5735,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             enabled: true,
             name: "stub".into(),
             base_url: url,
+            api: Default::default(),
             key_file: None,
             model: "m".into(),
             daily_budget: Some(10),
@@ -5549,6 +5766,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             enabled: true,
             name: "stub".into(),
             base_url: url,
+            api: Default::default(),
             key_file: None,
             model: "m".into(),
             daily_budget: Some(10),
@@ -6383,5 +6601,300 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             extract_structured("grok", "{\"text\":\"plain\"}").unwrap(),
             json!("plain")
         );
+    }
+
+    /// An RFC 3339 time `ms` from now, as Anthropic writes its resets.
+    fn rfc3339_in(ms: i64) -> String {
+        chrono::DateTime::from_timestamp_millis(db::now_ms() + ms)
+            .unwrap()
+            .to_rfc3339()
+    }
+
+    fn leak(text: String) -> &'static str {
+        Box::leak(text.into_boxed_str())
+    }
+
+    /// The owner, 2026-10-09: an entry with `api = "anthropic"` speaks the Messages API: its key
+    /// in `x-api-key` and never in `Authorization`, the version header, the schema in
+    /// `output_config.format` without the keywords the API refuses, no temperature, and always a
+    /// `max_tokens`. Its answer is its first text block, unfenced as an OpenAI answer is, with its
+    /// cache in the usage and its rate headers kept.
+    #[test]
+    fn a_messages_entry_sends_its_own_request_and_reads_its_answer() {
+        let home = tempfile::tempdir().unwrap();
+        let key_file = home.path().join("TEST_KEY.md");
+        std::fs::write(&key_file, "# synthetic only\nmessages-test-key\n").unwrap();
+        let reset = rfc3339_in(30_000);
+        let headers = leak(format!(
+            "anthropic-ratelimit-tokens-remaining: 3000\r\nanthropic-ratelimit-tokens-reset: {reset}\r\n\
+             anthropic-ratelimit-requests-remaining: 49\r\nanthropic-ratelimit-requests-reset: {reset}\r\n"
+        ));
+        let answer = json!({"type": "message", "stop_reason": "end_turn",
+            "content": [{"type": "thinking", "thinking": "", "signature": "s"},
+                {"type": "text", "text": "```json\n{\"summary\":\"s\"}\n```"}],
+            "usage": {"input_tokens": 100, "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 5, "output_tokens": 30}});
+        let (url, request) = serve_once(answer.to_string().into_bytes(), headers);
+        let mut p = stub(url);
+        if let Provider::Openai {
+            api,
+            key_file: k,
+            extra,
+            limits,
+            ..
+        } = &mut p
+        {
+            *api = Api::Anthropic;
+            *k = Some(key_file);
+            extra.insert("thinking".into(), json!({"type": "disabled"}));
+            limits.usd_per_mtok_out = 0.5;
+            limits.max_output_tokens = 3000;
+        }
+        let schema = json!({"type": "object", "properties": {
+            "summary": {"type": "string", "maxLength": 50},
+            "minimum": {"type": "integer", "minimum": 1, "maximum": 9, "multipleOf": 1},
+            "tags": {"type": "array", "minItems": 2, "maxItems": 5, "uniqueItems": true,
+                "items": {"type": "object", "properties": {"t": {"type": "string", "minLength": 1}}}},
+            "notes": {"type": "array", "minItems": 1, "items": {"type": "string"}}},
+            "required": ["summary"], "additionalProperties": true});
+        let a = call(&p, "p", &schema, None).unwrap();
+        assert_eq!(a.value, json!({"summary": "s"}));
+        let want = Usage {
+            prompt: Some(125),
+            completion: Some(30),
+            cached: Some(5),
+            reasoning: None,
+        };
+        assert_eq!(a.usage, want);
+        let rate = a.rate.unwrap();
+        assert_eq!((rate.tokens, rate.requests), (Some(3000), Some(49)));
+        let left = rate.tokens_reset_at.unwrap() - db::now_ms();
+        assert!((28_000..=30_000).contains(&left), "{left}");
+        assert_eq!(rate.requests_reset_at, rate.tokens_reset_at);
+        let req = request.recv().unwrap();
+        let (head, body) = req.split_once("\r\n\r\n").unwrap();
+        let head = head.to_lowercase();
+        assert!(head.starts_with("post /messages "), "{head}");
+        assert!(head.contains("x-api-key: messages-test-key\r\n"), "{head}");
+        assert!(head.contains("anthropic-version: 2023-06-01\r\n"), "{head}");
+        assert!(!head.contains("authorization"), "{head}");
+        let body: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["max_tokens"], 3000);
+        assert_eq!(body["thinking"], json!({"type": "disabled"}));
+        for absent in ["temperature", "response_format"] {
+            assert!(body.get(absent).is_none(), "{absent}: {body}");
+        }
+        assert_eq!(body["messages"], json!([{"role": "user", "content": "p"}]));
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        // A keyword the API refuses leaves the copy it gets; a property of that name stays.
+        let sent = json!({"type": "object", "properties": {
+            "summary": {"type": "string"},
+            "minimum": {"type": "integer"},
+            "tags": {"type": "array", "items": {"type": "object",
+                "properties": {"t": {"type": "string"}}, "additionalProperties": false}},
+            "notes": {"type": "array", "minItems": 1, "items": {"type": "string"}}},
+            "required": ["summary"], "additionalProperties": false});
+        assert_eq!(body["output_config"]["format"]["schema"], sent);
+        // An unpriced entry still names its answer's size, which the Messages API requires.
+        let (url, request) = serve_once(answer.to_string().into_bytes(), "");
+        let mut p = stub(url);
+        if let Provider::Openai { api, .. } = &mut p {
+            *api = Api::Anthropic;
+        }
+        call(&p, "p", &json!({"type": "object"}), None).unwrap();
+        let req = request.recv().unwrap();
+        let body: Value = serde_json::from_str(req.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["max_tokens"], 4000);
+        assert_eq!(p.declared_output(), 4000);
+    }
+
+    /// A refusal (billed, and it need not match the schema), an answer cut off at max_tokens and
+    /// one with no text are failures that keep the tokens they billed.
+    #[test]
+    fn a_messages_refusal_or_cut_off_answer_fails_with_its_billed_tokens() {
+        let text = |t: &str| json!([{"type": "text", "text": t}]);
+        for (stop, content) in [
+            ("refusal", text("{\"summary\":\"s\"}")),
+            ("max_tokens", text("{\"summa")),
+            (
+                "end_turn",
+                json!([{"type": "thinking", "thinking": "", "signature": "s"}]),
+            ),
+        ] {
+            let answer = json!({"stop_reason": stop, "content": content,
+                "usage": {"input_tokens": 12, "output_tokens": 4}});
+            let (url, _) = serve_once(answer.to_string().into_bytes(), "");
+            let e = http_call(
+                Api::Anthropic,
+                &url,
+                None,
+                "m",
+                10,
+                &Default::default(),
+                &Default::default(),
+                "p",
+                &json!({}),
+                None,
+                0,
+            )
+            .unwrap_err();
+            assert!(e.invalid() && e.status.is_none(), "{stop}: {}", e.message);
+            assert_eq!(
+                (e.usage.prompt, e.usage.completion),
+                (Some(12), Some(4)),
+                "{stop}"
+            );
+            assert!(!e.message.contains("summa"), "{}", e.message);
+        }
+    }
+
+    /// Anthropic's errors as the chain reads them: a 429 by its retry-after and rate headers, a
+    /// 529 as a 503, and spent credits resting the entry until the month's end, as the paid
+    /// budget's month does. No error body is kept.
+    #[test]
+    fn messages_errors_rest_the_entry_as_their_kind_says() {
+        let body = |kind: &str, message: &str| {
+            json!({"type": "error", "error": {"type": kind, "message": message},
+                "request_id": "req_canary"})
+            .to_string()
+            .into_bytes()
+        };
+        let send = |api: Api, status: &'static str, body: Vec<u8>, headers: &'static str| {
+            let (url, _) = serve(status, body, headers);
+            http_call(
+                api,
+                &url,
+                None,
+                "m",
+                10,
+                &Default::default(),
+                &Default::default(),
+                "p",
+                &json!({}),
+                None,
+                0,
+            )
+            .unwrap_err()
+        };
+        let headers = leak(format!(
+            "retry-after: 30\r\nanthropic-ratelimit-requests-remaining: 0\r\n\
+             anthropic-ratelimit-requests-reset: {}\r\n",
+            rfc3339_in(30_000)
+        ));
+        let e = send(
+            Api::Anthropic,
+            "429 Too Many Requests",
+            body("rate_limit_error", "canary: over your rate limit"),
+            headers,
+        );
+        assert_eq!(
+            (e.status, e.retry_after_s, e.message.as_str()),
+            (
+                Some(429),
+                Some(30.0),
+                "http 429: rate_limit_error, retry in 30s"
+            )
+        );
+        let rate = e.rate.unwrap();
+        assert_eq!(rate.requests, Some(0));
+        assert!(rate.requests_reset_at.unwrap() > db::now_ms());
+        let e = send(
+            Api::Anthropic,
+            "529 Overloaded",
+            body("overloaded_error", "Overloaded"),
+            "",
+        );
+        assert_eq!(
+            (e.status, e.message.as_str()),
+            (Some(529), "http 529: overloaded_error")
+        );
+        let unavailable = CallError {
+            status: Some(503),
+            ..CallError::other("http 503")
+        };
+        assert_eq!(cooldown_for(&e), cooldown_for(&unavailable));
+        assert_eq!(cooldown_for(&e), Some(COOLDOWN_OUTAGE));
+        for (status, kind, message) in [
+            (
+                "400 Bad Request",
+                "invalid_request_error",
+                "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+            ),
+            (
+                "402 Payment Required",
+                "billing_error",
+                "canary: an issue with your billing",
+            ),
+        ] {
+            let e = send(Api::Anthropic, status, body(kind, message), "");
+            assert_eq!(
+                e.message,
+                format!("http {}: {kind} (credits spent)", &status[..3])
+            );
+            assert_eq!(e.cool_until, Some(providers_db::next_month()));
+            let rested = next_state(providers_db::State::default(), &e);
+            assert_eq!(rested.down_until, providers_db::next_month());
+        }
+        // Another 400 is the answer's own; an OpenAI-compatible entry's says nothing of credits.
+        let e = send(
+            Api::Anthropic,
+            "400 Bad Request",
+            body(
+                "invalid_request_error",
+                "canary: minLength is not supported",
+            ),
+            "",
+        );
+        assert_eq!(
+            (e.message.as_str(), e.cool_until),
+            ("http 400: invalid_request_error", None)
+        );
+        let e = send(
+            Api::Openai,
+            "400 Bad Request",
+            body("invalid_request_error", "Your credit balance is too low"),
+            "",
+        );
+        assert_eq!(e.cool_until, None);
+    }
+
+    /// The connection test of a Messages entry: the fixed probe at its own endpoint, with the
+    /// test's bounds and the entry's own thinking, no other extra, and no key header of the
+    /// entry's.
+    #[test]
+    fn a_messages_entry_is_tested_with_the_fixed_probe_and_its_own_thinking() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let answer = json!({"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "{\"ok\":true}"}],
+            "usage": {"input_tokens": 12, "output_tokens": 4}});
+        let (url, request) = serve_once(answer.to_string().into_bytes(), "");
+        let mut p = stub(url);
+        if let Provider::Openai { api, extra, .. } = &mut p {
+            *api = Api::Anthropic;
+            extra.insert("thinking".into(), json!({"type": "disabled"}));
+            extra.insert("metadata".into(), json!({"user_id": "private-canary"}));
+        }
+        let result = probe(&conn, &p, 5.0, &|| Ok(None)).unwrap();
+        assert_eq!(
+            (result["status"].as_str(), result["http_status"].as_u64()),
+            (Some("ok"), Some(200)),
+            "{result}"
+        );
+        let req = request.recv().unwrap();
+        let (head, body) = req.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("POST /messages "), "{head}");
+        let body: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            (body["max_tokens"].as_u64(), body["stream"].as_bool()),
+            (Some(128), Some(false))
+        );
+        assert_eq!(body["thinking"], json!({"type": "disabled"}));
+        assert!(body.get("metadata").is_none(), "{body}");
+        assert_eq!(body["messages"][0]["content"], PROBE_PROMPT);
+        if let Provider::Openai { headers, .. } = &mut p {
+            headers.insert("X-Api-Key".into(), "private-header-canary".into());
+        }
+        assert_eq!(probe_provider(&p).unwrap_err(), "unsafe_headers");
     }
 }
