@@ -79,11 +79,17 @@ impl Reservation {
         self.id
     }
 
-    /// Actual reported usage, with the admission-time bounds for any missing part.
+    /// Actual reported usage, with the admission-time bounds for any missing part. A token written
+    /// to the provider's cache counts twice, the most Anthropic bills a cache write (twice the
+    /// input price, for an hour's cache), and one read from it once, so what is counted is never
+    /// less than the bill (Codex on #409).
     pub(crate) fn cost(&self, p: &Provider, usage: Usage, billed: bool) -> Option<f64> {
+        let written = usage.written.unwrap_or(0);
         (billed && p.limits().is_paid()).then(|| {
             p.limits().usd(
-                usage.prompt.map_or(self.input, |n| n as f64),
+                usage
+                    .prompt
+                    .map_or(self.input, |n| n.saturating_add(written) as f64),
                 usage.completion.map_or(self.output, |n| n as f64),
             )
         })
@@ -1488,6 +1494,19 @@ mod tests {
                     ..Default::default()
                 },
                 0.00003,
+                30,
+            ),
+            // Codex on #409: of the 20 prompt tokens, 10 written to the cache count twice.
+            (
+                true,
+                true,
+                Usage {
+                    prompt: Some(20),
+                    completion: Some(10),
+                    written: Some(10),
+                    ..Default::default()
+                },
+                0.00004,
                 30,
             ),
         ] {

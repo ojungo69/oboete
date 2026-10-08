@@ -52,6 +52,13 @@ The default entry is Haiku 5.5, the cheaper Haiku with structured outputs. It is
 first row, with `max_request_tokens = 100000`, so no prompt reaches the second; a curation window
 is about 6,000 tokens. Its prices put it inside `paid_usd_per_month` with every other paid entry.
 
+A prompt cache (`cache_control` in an entry's `extra`) is billed at 1.25 times the input price for
+a token written to a 5-minute cache, 2 times for a 1-hour cache, and 0.1 times for a token read
+from it (0.05 or 0.025 times on some models; the same page, "Prompt caching"). The usage reports
+the written tokens (`cache_creation_input_tokens`) and the read ones apart, so oboete counts a
+written token at twice the entry's input price and a read one at once: what it counts toward
+`paid_usd_per_month` is never less than the bill.
+
 The Haiku 5.5 migration guide (https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide):
 
 - A request that includes `temperature` must send `1`; any other value is a 400, as is any

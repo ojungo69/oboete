@@ -182,6 +182,9 @@ pub struct Usage {
     pub completion: Option<i64>,
     pub cached: Option<i64>,
     pub reasoning: Option<i64>,
+    /// Of `prompt`, the tokens written to the provider's cache, which it bills above its input
+    /// price (Anthropic's cache writes).
+    pub written: Option<i64>,
 }
 
 /// One row of `provider_calls`.

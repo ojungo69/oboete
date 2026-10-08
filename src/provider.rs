@@ -1797,6 +1797,7 @@ fn usage_openai(v: &Value) -> Usage {
         completion: tokens(&u["completion_tokens"]),
         cached: tokens(&u["prompt_tokens_details"]["cached_tokens"]),
         reasoning: tokens(&u["completion_tokens_details"]["reasoning_tokens"]),
+        written: None,
     }
 }
 
@@ -1804,15 +1805,17 @@ fn usage_openai(v: &Value) -> Usage {
 /// written to and read from its cache too.
 fn usage_anthropic(u: &Value) -> Usage {
     let cache_read = tokens(&u["cache_read_input_tokens"]);
+    let written = tokens(&u["cache_creation_input_tokens"]);
     Usage {
         // A sum that does not fit is not a count: dropped, never wrapped.
         prompt: tokens(&u["input_tokens"]).and_then(|n| {
-            n.checked_add(tokens(&u["cache_creation_input_tokens"]).unwrap_or(0))?
+            n.checked_add(written.unwrap_or(0))?
                 .checked_add(cache_read.unwrap_or(0))
         }),
         completion: tokens(&u["output_tokens"]),
         cached: cache_read,
         reasoning: None,
+        written,
     }
 }
 
@@ -1841,6 +1844,7 @@ fn usage_cli(cli: &str, stdout: &str) -> Usage {
                     completion: tokens(&u["output_tokens"]),
                     cached: tokens(&u["cached_input_tokens"]),
                     reasoning: tokens(&u["reasoning_output_tokens"]),
+                    written: None,
                 }
             })
             .unwrap_or_default(),
@@ -4355,6 +4359,7 @@ child.wait()
             completion: Some(254),
             cached: Some(1024),
             reasoning: Some(75),
+            written: None,
         };
         assert_eq!(usage_openai(&http), want);
         // A provider's own numbers, but only as numbers: nothing else is kept.
@@ -4369,7 +4374,8 @@ child.wait()
                 prompt: Some(5516),
                 completion: Some(1353),
                 cached: Some(200),
-                reasoning: None
+                reasoning: None,
+                written: Some(5306),
             }
         );
         let codex = [
@@ -4384,7 +4390,8 @@ child.wait()
                 prompt: Some(8990),
                 completion: Some(88),
                 cached: Some(2816),
-                reasoning: Some(12)
+                reasoning: Some(12),
+                written: None,
             }
         );
         assert!(!codex_searched(&codex));
@@ -6692,6 +6699,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             completion: Some(30),
             cached: Some(5),
             reasoning: None,
+            written: Some(20),
         };
         assert_eq!(a.usage, want);
         let rate = a.rate.unwrap();
