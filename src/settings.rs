@@ -18,6 +18,7 @@ pub(crate) mod claims;
 pub(crate) mod maintenance;
 pub(crate) mod privacy;
 mod providers;
+pub(crate) mod recovery;
 
 /// Why a save was refused: an HTTP status, a code the page puts in words, and the field it is
 /// about ("chain.groq.timeout_s"), empty when it is about the whole request.

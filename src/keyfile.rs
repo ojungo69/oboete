@@ -163,6 +163,20 @@ pub(crate) fn private_fs(file: &std::fs::File) -> bool {
     }
 }
 
+/// A held, existing owner-only directory for the invalid-config recovery copy.
+pub(crate) fn private_recovery_dir(path: &Path) -> Result<std::fs::File, Refused> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::check_dirs(path)?;
+        linux::private_dir(path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        Err(Refused::Unsupported)
+    }
+}
+
 /// The filesystem magic `private_fs` sees on this thread instead of the real one; `None`, the
 /// real one.
 #[cfg(test)]
@@ -687,7 +701,7 @@ mod linux {
         Ok((dest, folder, durable))
     }
 
-    fn private_dir(path: &Path) -> Result<std::fs::File, Refused> {
+    pub(super) fn private_dir(path: &Path) -> Result<std::fs::File, Refused> {
         let folder = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
