@@ -12,7 +12,8 @@ claude-mem 13.28.0 (`src/sdk/parser.ts`, `src/services/worker/`, `plugin/modes/c
 five is invalid; `<skip_summary />` stores none; a session gets one per turn, appended. Session
 start lists the ten newest as `S<id> <request> (<date time>)` rows among the observations and ends
 with the newest one's investigated, learned, completed and next steps; the page shows them as
-session cards.
+session cards. 13.34.2 shows notes after them, there and on the page, and takes a summary of
+notes alone (#403).
 
 oboete's digest is another thing: lines that cite claims, one per session and repository after the
 idle time, shown only while every claim it cites is current. It says what was decided, which the
@@ -64,8 +65,9 @@ As C1a for cards: the summary is about the turn shown, never what was known befo
 
 T4. **What is kept.** A skip is an op with no fields. Otherwise each field is trimmed, and one over
 its cap (`request` 300 characters, the others 2,000) is dropped, never cut: nothing is cut before
-the gate (K6). An answer left with none of the first five fields is refused, as claude-mem's
-parser refuses it, and the next entry is asked.
+the gate (K6). An answer left with none of its fields is refused, as claude-mem's parser
+refuses it, and the next entry is asked. Notes alone are a summary (#403; claude-mem 13.34.2's
+parser takes them, and 13.28.0's refused them).
 
 T5. **The op.** Kind `turn`: `agent`, `session`, `repo` (K2: the one repository of the turn's
 records, or none), `through` (the reply's seq), `from` (the turn's first record), `read` (the
@@ -94,8 +96,9 @@ or `Session started` with no request, among the cards by their own time; another
 moves it; oboete does not.
 
 S8. **The newest one's fields** after the timeline, `**Investigated**: …`, `**Learned**: …`,
-`**Completed**: …`, `**Next Steps**: …`, when it is not older than the newest card shown
-(claude-mem's rule). The legend gains `🎯session`.
+`**Completed**: …`, `**Next Steps**: …`, `**Notes**: …`, when it is not older than the newest card
+shown (claude-mem's rule; Notes since #403, as claude-mem 13.34.2 shows them: a qualification the
+summary role put in notes, such as "the agent says it was not verified", reaches the session). The legend gains `🎯session`.
 
 S9. **Fitting.** claude-mem's order: the fields go first, then the rows are halved, then the cards.
 
@@ -110,8 +113,8 @@ and its ops stay in the log, unread; the spec's sections that named it (1.1, 1.4
 1. The block shows the newest summaries among the cards by their own time, after a card of the
    same time, `S<op seq>` (another device's with its device), `Session started` without a
    request, and the legend starts with `🎯session`.
-2. The newest summary's four fields follow the timeline when it is not older than the newest card
-   shown, and not otherwise; `notes` is not shown.
+2. The newest summary's fields, notes last, follow the timeline when it is not older than the
+   newest card shown, and not otherwise.
 3. Session start shows the repository's summaries and the newest one's fields in the block.
 4. When the block does not fit: the fields go first, then the summary rows halve, the newest
    kept, then the cards.

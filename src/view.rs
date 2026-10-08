@@ -1942,8 +1942,7 @@ fn feed(home: &Path, repo: Option<&str>, mut cursor: FeedCursor, limit: usize) -
             }),
         ));
     }
-    for mut s in summaries {
-        s.fields.remove("notes");
+    for s in summaries {
         let (ts, device, seq) = s.position();
         rows.push((
             1,
@@ -3928,7 +3927,7 @@ curate = false
                 ("learned", text),
                 ("completed", text),
                 ("next_steps", text),
-                ("notes", "Not displayed."),
+                ("notes", text),
             ]
             .into_iter()
             .map(|(f, t)| (f.to_owned(), t.to_owned()))
@@ -4214,10 +4213,10 @@ curate = false
         assert_eq!(page["items"][1]["fields"]["request"], "invented-[REDACTED]");
         assert_eq!(page["items"][2]["text"], "invented-[REDACTED]");
         let answer = page.to_string();
-        for text in ["FERN", "MOSS", "REED", "Not displayed."] {
+        for text in ["FERN", "MOSS", "REED"] {
             assert!(!answer.contains(text));
         }
-        assert!(page["items"][1]["fields"].get("notes").is_none());
+        assert_eq!(page["items"][1]["fields"]["notes"], "invented-[REDACTED]");
     }
 
     /// Codex on #373: a page's cursor is its own state of ids and times, passed back as it came:

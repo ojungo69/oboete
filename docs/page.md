@@ -68,8 +68,9 @@ P6. **The cards.** claude-mem's observation card:
 
 P7. **The session summaries.** claude-mem's summary card: a `Session summary` badge, the agent,
 the repository; the request as the headline (none when empty); then `Investigated`, `Learned`,
-`Completed` and `Next steps`, each only when it has text, newlines kept; the footer `S<op seq>`
-(`S<device>.<op seq>`) and the local time. `notes` is not shown, as claude-mem does not show it.
+`Completed`, `Next steps` and `Notes`, each only when it has text, newlines kept; the footer
+`S<op seq>` (`S<device>.<op seq>`) and the local time. Notes since #403, as claude-mem 13.34.2's
+card shows them.
 
 P8. **The prompts.** claude-mem's prompt card: a `Prompt` badge, the agent, the repository; the
 text, newlines kept, at most 2,000 characters with `…` past them (the whole text through `get`);

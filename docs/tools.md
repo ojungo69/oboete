@@ -44,7 +44,7 @@ gated as every hit is, and the answer is fenced (spec 6.5).
 
 Q4. **The full-text index of cards and summaries.** What a card shows (title, subtitle, narrative,
 facts, concepts, files) and what a summary shows (request, investigated, learned, completed, next
-steps; not `notes`, which nothing shows) are indexed as claims are (FTS5 trigram, Unicode case
+steps and, since #403, notes) are indexed as claims are (FTS5 trigram, Unicode case
 folding) and searched with the same query terms (`search::terms`, its short-word rule included).
 The rows are written in the transaction that
 writes the card or summary, replaced and removed with it, and rebuilt with it (`rebuild`). The text

@@ -586,7 +586,8 @@ pub fn answer_schema() -> Value {
 }
 
 /// The chain's check of an answer (T4): `shape` when it is no object, `empty` when it is no skip
-/// and keeps none of the first five fields under the active `rules`.
+/// and keeps none of its fields under the active `rules`, as claude-mem 13.34.2's parser refuses
+/// a summary with none (#403).
 fn check(v: &Value, rules: &Rules) -> Option<&'static str> {
     if !v.is_object() {
         return Some("shape");
@@ -595,7 +596,7 @@ fn check(v: &Value, rules: &Rules) -> Option<&'static str> {
         return None;
     }
     let fields = kept(v, rules);
-    (!FIELDS[..5].iter().any(|f| fields.contains_key(*f))).then_some("empty")
+    fields.is_empty().then_some("empty")
 }
 
 /// The answer's fields as the op keeps them (T4): trimmed, through the egress gate as a claim
@@ -1633,14 +1634,17 @@ mod tests {
         assert_eq!(turn_ops(home.path())[0].read, vec![(3, 4), (2, 2)]);
     }
 
-    /// Test 4 (T4): an answer with none of the first five fields is refused; a skip is kept as
-    /// an op with no fields, and the turn is not asked again.
+    /// Test 4 (T4): an answer with none of its fields is refused, one with notes alone is kept
+    /// (#403); a skip is kept as an op with no fields, and the turn is not asked again.
     #[test]
-    fn an_answer_with_none_of_the_five_fields_is_refused_and_a_skip_is_kept() {
+    fn an_answer_with_none_of_its_fields_is_refused_and_a_skip_is_kept() {
         let rules = Rules::default();
+        let none = json!({"skip": false, "request": " ", "investigated": "", "learned": "",
+            "completed": "", "next_steps": "", "notes": ""});
+        assert_eq!(check(&none, &rules), Some("empty"));
         let notes = json!({"skip": false, "request": " ", "investigated": "", "learned": "",
             "completed": "", "next_steps": "", "notes": "Only a note."});
-        assert_eq!(check(&notes, &rules), Some("empty"));
+        assert_eq!(check(&notes, &rules), None);
         assert_eq!(check(&json!("text"), &rules), Some("shape"));
         let home = home(
             &[said("s1", "prompt", "ok?"), said("s1", "reply", "Yes.")],
@@ -1655,9 +1659,9 @@ mod tests {
         assert!(shown(home.path(), &rules).is_empty());
     }
 
-    /// #402 (T4): a first-five field the outbound gate empties (a closed private block) counts as
-    /// empty: an answer left with none of them is refused, a note beside it included, and a public
-    /// field beside it is kept alone.
+    /// #402 (T4): a field the outbound gate empties (a closed private block) counts as empty: an
+    /// answer left with none is refused, and a public field beside it, a note too (#403), is kept
+    /// alone.
     #[test]
     fn a_field_the_gate_empties_counts_as_none() {
         let rules = Rules::default();
@@ -1673,10 +1677,9 @@ mod tests {
         };
         assert!(kept(&answer(json!({})), &rules).is_empty());
         assert_eq!(check(&answer(json!({})), &rules), Some("empty"));
-        assert_eq!(
-            check(&answer(json!({"notes": "A note."})), &rules),
-            Some("empty")
-        );
+        let note = answer(json!({"notes": "A note."}));
+        assert_eq!(check(&note, &rules), None);
+        assert_eq!(kept(&note, &rules).keys().collect::<Vec<_>>(), ["notes"]);
         let public = answer(json!({"completed": "Built the parser."}));
         assert_eq!(check(&public, &rules), None);
         assert_eq!(
