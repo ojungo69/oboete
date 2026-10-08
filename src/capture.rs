@@ -339,21 +339,27 @@ pub fn work_state(
     gate.paired = usize::MAX;
     let cap = gate.cap;
     let list = gate.text("list", &without_blocks(list, false), cap);
-    let fields = fields
-        .iter()
-        .map(|(k, v)| {
-            let v = match v {
-                Value::String(s) => Value::String(without_blocks(s, false)),
-                v => v.clone(),
+    let mut stored = Map::new();
+    for (k, v) in fields {
+        let v = match v {
+            Value::String(s) => Value::String(without_blocks(s, false)),
+            v => v.clone(),
+        };
+        let one = Map::from_iter([(without_blocks(k, false), v)]);
+        let Value::Object(one) = gate.value("", Value::Object(one), cap) else {
+            continue;
+        };
+        for (key, v) in one {
+            // claude-mem's own keys name no recorded text: one a rule matches stays, or a task
+            // would fold as the list's state and a status as a field (Codex on #408).
+            let key = match k.as_str() {
+                "task" | "status" => k.clone(),
+                _ => key,
             };
-            (without_blocks(k, false), v)
-        })
-        .collect();
-    let fields = match gate.value("", Value::Object(fields), cap) {
-        Value::Object(fields) => fields,
-        _ => Map::new(),
-    };
-    (list, fields)
+            stored.insert(key, v);
+        }
+    }
+    (list, stored)
 }
 
 /// The one gate every stored string passes (spec 2.2): `redact::scan_capped` over its whole
@@ -869,6 +875,21 @@ mod tests {
         let v = events("claude", "SessionEnd", &payload, 0, &s);
         assert!(!format!("{:?}", v[0]).contains(&secret), "{:?}", v[0]);
         assert_eq!(body(&v[0].event)["reason"]["[REDACTED]"], "[REDACTED]");
+    }
+
+    /// Codex on #408: claude-mem's keys stay where a rule matches them, their values gated.
+    #[test]
+    fn a_work_state_write_keeps_task_and_status() {
+        let s = with(
+            "[[redaction.extra_rules]]\nid = \"k\"\nregex = '^(?:task|status|note)$'\n\n\
+             [[redaction.extra_rules]]\nid = \"v\"\nregex = 'teal-[0-9]{4}'\n",
+        );
+        let fields = json!({"task": "teal-1234", "status": "done", "note": "x"});
+        let (_, stored) = work_state("l", fields.as_object().unwrap(), &s);
+        assert_eq!(
+            Value::Object(stored),
+            json!({"task": "[REDACTED]", "status": "done", "[REDACTED]": "x"})
+        );
     }
 
     #[test]

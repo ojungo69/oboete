@@ -110,7 +110,9 @@ body), and a key is hidden where the assignment's mask starts in it, found by po
 masked text can spell the key again. Only then are the lines cut to their room; each shown line
 passes the gate once more, and the section's lines as a whole. A list, a task and a key are folded
 under their names as the gate shows them now, so a rule added later that masks one leaves one that
-a later write replaces or clears; each shows the text it was first written with. The capture gate
+a later write replaces or clears; each shows the text it was first written with. The keys `task`
+and `status`, claude-mem's own, are stored as they are wherever a rule matches them, their values
+gated, so a rule never turns a task into the list's state. The capture gate
 scans a value beside its key as well, as written (a rule that masks the key leaves the context):
 every value of a work state write, and a string value of up to 256 bytes in any other stored JSON;
 a mask that starts in the key, or in the ` = "` after it, hides the key and the value whole.
@@ -200,6 +202,10 @@ with their times, before claude-mem is removed.
 - Every open line is gated before the cut, so the time grows with the open lines (about 50 µs a
   line: 50 ms for 1,000), and lines the gate finds too much in (`redact::hidden`'s limits) are
   shown as a mask alone, a session start's as the count line.
+- A key that only a rule on its assignment masks (the rule needs the value to name the key) is
+  stored masked when written with such a value: a write before the rule and one after show as two
+  keys, both masked, and a null, which has no value to match, clears only the one under the key's
+  own name.
 - The repository is the checkout's key as the capture gate labels it, as for every store: a rule
   added later that matches a repository key splits its history, and one that masks the part two
   keys differ in joins them (#412).
