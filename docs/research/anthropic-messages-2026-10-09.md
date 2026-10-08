@@ -62,7 +62,10 @@ The Haiku 5.5 migration guide (https://platform.claude.com/docs/en/models/haiku-
   accepted at effort `low`, `medium` (the default) and `high`
   (https://platform.claude.com/docs/en/api/errors, "Thinking cannot be disabled"). The default
   entry turns thinking off in its `extra`, as nim's reasoning is turned off, so an answer is not
-  cut short at its 4,000 tokens. The connection test keeps the entry's own `thinking`.
+  cut short at its 4,000 tokens. The connection test keeps the entry's own `thinking`. A manual
+  budget (`{"type": "enabled", "budget_tokens": N}`) must be less than `max_tokens`
+  (https://platform.claude.com/docs/en/build-with-claude/extended-thinking), so where a paid
+  entry's cap lowers `max_tokens` to its budget or below, the call goes without that thinking.
 
 ## Errors and limits
 

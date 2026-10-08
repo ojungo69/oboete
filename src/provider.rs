@@ -1313,6 +1313,15 @@ fn call(
                     let n = completion.unwrap_or_else(|| limits.max_output_tokens.into());
                     extra.insert("max_tokens".into(), n);
                 }
+                // Anthropic refuses a thinking budget of `max_tokens` or more: a budget the cap
+                // leaves no room for is not sent, nor the thinking it asks for (Codex on #409).
+                let room = extra.get("max_tokens").and_then(Value::as_u64);
+                let budget = extra
+                    .get("thinking")
+                    .and_then(|t| t["budget_tokens"].as_u64());
+                if budget.is_some_and(|b| room.is_some_and(|r| b >= r)) {
+                    extra.remove("thinking");
+                }
             }
             http_call(
                 *api,
@@ -6897,6 +6906,39 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         let body: Value = serde_json::from_str(req.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["max_tokens"], 900);
         assert!(body.get("max_completion_tokens").is_none(), "{body}");
+    }
+
+    /// Codex on #409: Anthropic refuses a thinking budget of `max_tokens` or more, so a paid
+    /// Messages entry whose cap leaves no room for its budget is sent without that thinking, and
+    /// one whose cap holds it keeps it.
+    #[test]
+    fn a_messages_entry_sends_no_thinking_budget_its_cap_cannot_hold() {
+        let answer = json!({"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "{\"summary\":\"s\"}"}],
+            "usage": {"input_tokens": 12, "output_tokens": 4}});
+        for (cap, kept) in [(1_000, false), (2_048, false), (4_000, true)] {
+            let (url, request) = serve_once(answer.to_string().into_bytes(), "");
+            let mut p = stub(url);
+            let thinking = json!({"type": "enabled", "budget_tokens": 2_048});
+            if let Provider::Openai {
+                api, extra, limits, ..
+            } = &mut p
+            {
+                *api = Api::Anthropic;
+                extra.insert("thinking".into(), thinking.clone());
+                limits.usd_per_mtok_out = 1.0;
+                limits.max_output_tokens = cap;
+            }
+            call(&p, "p", &json!({"type": "object"}), None).unwrap();
+            let req = request.recv().unwrap();
+            let body: Value = serde_json::from_str(req.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["max_tokens"], cap, "{body}");
+            assert_eq!(
+                body.get("thinking") == Some(&thinking),
+                kept,
+                "{cap}: {body}"
+            );
+        }
     }
 
     /// The connection test of a Messages entry: the fixed probe at its own endpoint, with the
