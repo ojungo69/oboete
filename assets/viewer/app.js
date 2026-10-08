@@ -881,6 +881,28 @@ const TEXT = {
   onboarding_prompt_off: ['Prompt text storage is off. A new typed phrase will not be searchable. Keep this privacy choice and search an existing record, or explicitly turn on “{setting}” under {section} and save before trying a new harmless phrase.', '入力文を保存しない設定です。新しく入力した語は検索できません。この選択を維持して既存の記録を検索するか、新しい確認用の語を試す前に「{section}」で「{setting}」を明示的にオンにして保存してください。'],
   resident_timing: ['The next agent hook or running oboete view starts the resident processes. Turning this off applies when the worker is idle; the resident page stops once it has no requests.', '次のエージェントのフックか oboete view の実行で常駐プロセスが起動します。オフはワーカーの待機時に反映され、常駐の画面はアクセスがなくなった後に終了します。'],
   resident_unsupported: ['Resident mode is currently available on Linux and WSL. This system keeps the worker that exits when idle.', '常駐は現在 Linux と WSL に対応しています。この環境のワーカーは、処理がなくなった時に終了します。'],
+  view_h: ['Page address', '画面のアドレス'],
+  view_port: ['Port of the resident page', '常駐の画面のポート'],
+  view_port_resident: ['Saving another port moves this page there at once with a new token, so the old bookmark stops working. Bookmark the new address afterwards and delete the old bookmark.', '別のポートを保存すると、この画面は新しいトークンとともにすぐにそのポートへ移り、古いブックマークは使えなくなります。移った後は新しいアドレスをブックマークし、古いブックマークを削除してください。'],
+  view_port_foreground: ['The resident page uses this port when “Keep oboete running between sessions” is on. Saving another port also gives the resident page a new token, so its old bookmark stops working. This page keeps its own address until it closes.', '「セッション間も oboete を起動したままにする」がオンのとき、常駐の画面がこのポートを使います。別のポートを保存すると常駐の画面のトークンも新しくなり、古いブックマークは使えなくなります。この画面は閉じるまで今のアドレスのままです。'],
+  view_moved: ['This is the new address of oboete’s page. Bookmark it and delete the old bookmark.', 'oboete の画面の新しいアドレスです。ブックマークし直し、古いブックマークは削除してください。'],
+  view_token_h: ['New page token', '画面のトークンを新しくする'],
+  view_token_desc: ['Makes a new token and moves this page to another port. The old bookmark, and any page still open at the old address, stop working. Use it when someone else may have seen the address.', '新しいトークンを作り、この画面を別のポートへ移します。古いブックマークと、古いアドレスで開いたままの画面は使えなくなります。アドレスを他人に見られた可能性があるときに使います。'],
+  view_token_confirm: ['I understand that the old bookmark stops working.', '古いブックマークが使えなくなることを理解しました。'],
+  view_token_go: ['Make a new token', '新しいトークンを作る'],
+  view_token_unchanged: ['The token was not replaced, and the address is unchanged.', 'トークンは変わっていません。アドレスもそのままです。'],
+  view_token_unsure: ['The page moved, but replacing the token did not finish. Open the new address below, then make a new token again.', '画面は移りましたが、トークンの置き換えが完了しませんでした。下の新しいアドレスを開き、もう一度新しいトークンを作ってください。'],
+  view_open_new: ['Open the new address', '新しいアドレスを開く'],
+  view_lost: ['The answer did not arrive. If this page stops working, run oboete view in a terminal to see the current address.', '応答が届きませんでした。この画面が使えなくなった場合は、ターミナルで oboete view を実行すると現在のアドレスが表示されます。'],
+  view_resident_h: ['Run in the background', 'バックグラウンドで動かす'],
+  view_resident_desc: ['Starts oboete in the background: the worker, and its page at a fixed address (port {port}). Both keep running after this window closes, and the worker records and summarizes with the saved settings. This page then moves to that address, and this run ends.', 'oboete をバックグラウンドで起動します。ワーカーと、固定アドレス(ポート {port})の画面です。どちらもこのウィンドウを閉じても動き続け、ワーカーは保存済みの設定で記録と要約を行います。その後この画面はそのアドレスへ移り、今の起動は終了します。'],
+  view_resident_go: ['Start in the background now', '今すぐバックグラウンドで起動'],
+  view_port_in_use: ['Another program uses port {port}. Choose another port above, save, and try again. This page keeps working.', 'ポート {port} は別のプログラムが使っています。上で別のポートを選んで保存し、もう一度試してください。この画面はそのまま使えます。'],
+  view_not_private: ['This folder cannot keep the page’s token readable by you alone, so the resident page cannot run here. This page keeps working.', 'このフォルダではトークンを本人だけが読める形で保存できないため、常駐の画面は使えません。この画面はそのまま使えます。'],
+  view_not_started: ['The resident page did not start. “Run diagnostics now” below shows why. This page keeps working.', '常駐の画面が起動しませんでした。理由は下の「今すぐ診断」で確認できます。この画面はそのまま使えます。'],
+  view_not_resident: ['Save “Keep oboete running between sessions” first.', '先に「セッション間も oboete を起動したままにする」を保存してください。'],
+  port_unavailable: ['This port cannot be used: another program may hold it. Choose another.', 'このポートは使えません。別のプログラムが使っている可能性があります。別のポートを選んでください。'],
+  token_replaced: ['The settings were not saved, but the resident page’s token was already replaced. Run oboete view in a terminal to see its address.', '設定は保存されませんでしたが、常駐の画面のトークンはすでに新しくなっています。ターミナルで oboete view を実行すると、その画面のアドレスが表示されます。'],
   language: ['Language', '言語'],
   lead: [
     'Choose the settings below. Each save applies its own section; individual provider checkboxes and arrows save immediately. Recording and memory delivery read them at their next use; the background summarizer reads them before its next window, even while it stays running. This page cannot tell which values a running request has loaded. Opening this page or saving sends nothing to a provider.',
@@ -2345,10 +2367,13 @@ function formOf(s) {
   return {
     version: s.version,
     saved: { summary: { ...s.summary }, capture: { ...s.capture }, paid_usd_per_month: s.paid_usd_per_month, gemini: s.gemini,
-      worker: { resident: s.worker?.resident ?? false } },
+      worker: { resident: s.worker?.resident ?? false }, view: { port: s.view?.port } },
     firstRun: s.first_run === true,
     residentSupported: s.resident_supported === true,
     worker: { resident: s.first_run && s.resident_supported ? true : s.worker?.resident ?? false },
+    view: { port: String(s.view?.port ?? '') },
+    // A save's answer says where this page serves; other operations' answers keep what was known.
+    viewRuntime: s.view_runtime ?? form?.viewRuntime ?? null,
     summary: { ...s.summary, window_tokens: String(s.summary.window_tokens), idle_minutes: String(s.summary.idle_minutes) },
     paid_usd_per_month: String(s.paid_usd_per_month),
     gemini: s.gemini ?? 'none',
@@ -3112,6 +3137,60 @@ async function showSettings() {
 
 let recoveryDraft = {preview:null,confirmed:false,busy:false,unknown:false,error:null,receipt:null};
 
+// The page goes on only at an address the viewer gave: 127.0.0.1, a port and a token.
+const PAGE_URL = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/#t=[0-9a-f]{32}$/;
+function movePage(url) {
+  const port = Number(PAGE_URL.exec(url)?.[1]);
+  if (Number.isNaN(port) || port > 65535) return false;
+  location.replace(`${url}&moved=1`);
+  return true;
+}
+
+let viewDraft = {confirmed:false,busy:false,error:null,status:null,url:null};
+
+// The resident page's new token, or a foreground run's way to the resident page.
+function viewSection(f) {
+  const d=viewDraft, mode=f.viewRuntime?.mode;
+  const resident=mode==='resident';
+  if(!resident && !(mode==='foreground' && f.residentSupported && f.saved.worker.resident))return null;
+  const go=el('button','quiet',t(resident?'view_token_go':'view_resident_go'));
+  go.type='button';go.dataset.action=resident?'view.token':'view.resident';
+  go.disabled=d.busy||resident&&!d.confirmed;
+  go.addEventListener('click',()=>void viewAction(resident?'token':'resident'));
+  let consent=null;
+  if(resident) {
+    consent=checkbox(d.confirmed,value=>{d.confirmed=value;go.disabled=!value||d.busy;});
+    consent.dataset.field='view.confirmed';consent.disabled=d.busy;
+  }
+  let open=null;
+  if(d.url){open=el('a',null,t('view_open_new'));open.href=d.url;}
+  return el('section','view-address',el('h3',null,t(resident?'view_token_h':'view_resident_h')),
+    el('p','desc',t(resident?'view_token_desc':'view_resident_desc',{port:f.saved.view.port})),
+    consent?el('label','check',consent,t('view_token_confirm')):null,go,
+    d.error?el('p','error',t(d.error,{port:f.saved.view.port,status:d.status})):null,open);
+}
+
+const VIEW_CODES={unchanged:'view_token_unchanged',token_unsure:'view_token_unsure',port_in_use:'view_port_in_use',
+  not_private:'view_not_private',not_started:'view_not_started',not_resident:'view_not_resident'};
+
+async function viewAction(kind) {
+  const d=viewDraft;
+  if(d.busy || kind==='token' && !d.confirmed)return;
+  d.busy=true;d.error=null;d.url=null;
+  if(view==='settings')drawSettings();
+  try {
+    const {res,answer}=await memoryWrite(`view/${kind}`,{});
+    if(res.ok && movePage(answer.url))return;
+    d.error=VIEW_CODES[answer.code]||'memory_action_failed';d.status=res.status;
+    if(answer.code==='token_unsure' && PAGE_URL.test(answer.url||''))d.url=answer.url;
+  } catch {
+    d.error='view_lost';
+  } finally {
+    d.busy=false;d.confirmed=false;
+    if(view==='settings')drawSettings();
+  }
+}
+
 function recoverySection() {
   const d=recoveryDraft;
   if(form && !d.receipt && !d.unknown)return null;
@@ -3526,7 +3605,7 @@ function providerValidation(draft) {
 // and name-group edits stay local. Physical selectors are remapped only by the operation's raw
 // index changes, never by the first entry with a matching name.
 function preserveSettingsDrafts(next, mine) {
-  for (const key of ['worker', 'summary', 'paid_usd_per_month', 'inject', 'capture', 'backup', 'redaction']) next[key] = mine[key];
+  for (const key of ['worker', 'view', 'summary', 'paid_usd_per_month', 'inject', 'capture', 'backup', 'redaction']) next[key] = mine[key];
   next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
   const groups = new Map(next.chain.map((r) => [r.name, r]));
   next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {
@@ -4040,6 +4119,8 @@ function saveBody() {
   const redaction = redactionBody();
   if (!redaction.value) return { field: redaction.field };
   const whole = (v, min, max) => (/^\d+$/.test(v.trim()) && Number(v) >= min && Number(v) <= max ? Number(v) : Number.NaN);
+  const port = whole(form.view.port, ...form.ranges.view_port);
+  if (Number.isNaN(port)) return { field: 'view.port' };
   const sizes = {};
   for (const key of SIZES) {
     sizes[key] = whole(form.inject[key], ...form.ranges[key]);
@@ -4074,6 +4155,7 @@ function saveBody() {
     body: {
       version: form.version,
       worker: { resident: form.worker.resident },
+      ...(port === form.saved.view.port ? {} : { view: { port } }),
       summary,
       paid_usd_per_month: cap,
       gemini: form.gemini === 'none' ? null : form.gemini,
@@ -4103,10 +4185,18 @@ function markInvalid(field, root = document) {
 }
 
 function applySavedSettings(answer, mine, current) {
+  // The resident viewer moved onto the saved port with a new token: the page goes on to the
+  // address in the answer and reads nothing more from the old one, which no longer answers.
+  const runtime = current ? null : answer.view_runtime;
+  // An address on port 80 shows no port.
+  const moved = runtime?.mode === 'resident' && runtime.port !== (Number(location.port) || 80);
+  if (moved && movePage(runtime.url || '')) return;
   form = current ? formOf(current) : mergeProviderSettings(answer, mine, { op: 'settings' });
   if (form) form.privacy = privacyUnavailable();
   drawSettings();
-  setStatus(t(current ? 'stale' : 'saved'), Boolean(current), lang);
+  let status = current ? 'stale' : 'saved';
+  if (moved) status = 'view_lost';
+  setStatus(t(status), Boolean(current) || moved, lang);
   if (form) void refreshPrivacy(form);
 }
 
@@ -4134,7 +4224,8 @@ async function saveSettings(button) {
       credentials: 'omit',
     });
     const answer = (res.headers.get('content-type') || '').startsWith('application/json') ? await res.json() : {};
-    const current = res.status === 409 ? await api('settings') : null;
+    // Only a stale version reloads; another refusal (a port in use) keeps what was typed.
+    const current = res.status === 409 && answer.code === 'stale' ? await api('settings') : null;
     // Moved to another tab, or the values were loaded again, while saving: what is shown stays.
     if (view !== 'settings' || form !== mine) return;
     if (res.ok || current) {
@@ -4325,6 +4416,8 @@ function drawSettings() {
   const resident = checkbox(f.worker.resident, (v) => { f.worker.resident = v; });
   resident.dataset.field = 'worker.resident';
   resident.disabled = !f.residentSupported;
+  const pagePort = input('number', f.view.port, '', 'view.port', (v) => { f.view.port = v; });
+  [pagePort.min, pagePort.max] = f.ranges.view_port;
   const curate=checkbox(f.summary.curate,(v)=>{f.summary.curate=v;});
   curate.dataset.field='summary.curate';
   const summaryLanguage = input('textarea', f.summary.language, 'Japanese', 'summary.language', (v) => { f.summary.language = v; });
@@ -4397,6 +4490,10 @@ function drawSettings() {
       f.firstRun && f.residentSupported ? el('p', 'desc', t('resident_first')) : null,
       el('p', 'desc', t(f.residentSupported ? 'resident_timing' : 'resident_unsupported'))),
     el('section', null,
+      el('h3', null, t('view_h')),
+      el('label', 'field', el('span', null, t('view_port')), pagePort, saved(f.saved.view.port)),
+      el('p', 'desc', t(f.viewRuntime?.mode === 'resident' ? 'view_port_resident' : 'view_port_foreground'))),
+    el('section', null,
       el('h3', null, t('summary_h')), el('p', 'desc', t('summary_desc')),
       el('label', 'check', curate, t('curate_on')),
       saved(t(f.saved.summary.curate ? 'value_on' : 'value_off')),
@@ -4454,7 +4551,7 @@ function drawSettings() {
   });
   const recovered=recoverySection();
   if(recovered)panel.append(recovered);
-  panel.append(el('p', 'lead', t('lead')), formEl, preferenceSection(f), agentInventorySection(), agentSetupSection(), doctorSection(), maintenanceSection(f));
+  panel.append(...present([el('p', 'lead', t('lead')), formEl, viewSection(f), preferenceSection(f), agentInventorySection(), agentSetupSection(), doctorSection(), maintenanceSection(f)]));
   drawIn(panel);
 }
 
@@ -4581,6 +4678,14 @@ async function poll() {
 }
 
 async function start() {
+  // Arrived from the page's own move (`movePage`): the bookmark is to change. The mark leaves the
+  // address, so a bookmark made now holds the token alone; the welcome was seen at the old one.
+  const arrived = new URLSearchParams(location.hash.slice(1));
+  const moved = arrived.get('moved') === '1';
+  if (moved) {
+    arrived.delete('moved');
+    history.replaceState(null, '', `#${arrived}`);
+  }
   applyLanguage();
   setView(view);
   $('help').addEventListener('click', openWelcome);
@@ -4592,7 +4697,7 @@ async function start() {
   document.addEventListener('focusin', (event) => {
     if (!$('welcome').hidden && !$('welcome-dialog').contains(event.target)) $('welcome-close').focus();
   });
-  if (recall('oboete-welcome-dismissed', '') !== 'true') openWelcome();
+  if (!moved && recall('oboete-welcome-dismissed', '') !== 'true') openWelcome();
   $('controls').addEventListener('submit', (e) => {
     e.preventDefault();
     void show();
@@ -4622,6 +4727,7 @@ async function start() {
   document.addEventListener('visibilitychange', () => void poll());
   setInterval(poll, 3000);
   await poll();
+  if (moved) setStatus(t('view_moved'), false, lang);
 }
 
 // Pasting a restarted viewer's address changes its fragment without reloading the page.

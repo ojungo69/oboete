@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -51,10 +51,16 @@ struct Viewer {
     /// caller (`checkout`). The resident viewer has none, and every repository is its default
     /// scope (docs/resident.md R8).
     cwd: Option<PathBuf>,
-    port: u16,
+    /// The port it takes connections on: the resident viewer's moves onto another (`move_to`).
+    port: AtomicU16,
+    /// What the accept loop does at its next connection.
+    next: Mutex<Option<Next>>,
     token: Token,
     /// Settings saves, one at a time.
     saving: Mutex<()>,
+    /// A port saved and the listener moved onto it, one at a time, a page's new token's too: the
+    /// moves take effect in the order their ports were written (Codex on W6).
+    moving: Mutex<()>,
     recovery: crate::settings::recovery::Recovery,
     /// One synchronous maintenance operation and its last bounded receipt.
     maintenance: crate::settings::maintenance::Maintenance,
@@ -78,6 +84,17 @@ enum Token {
     /// The resident viewer's: `state/view-token`, read for each request (`file_token`), so it
     /// outlives a restart and a file that changed is never trusted from before (R6).
     File,
+}
+
+/// What the accept loop does instead of serving its next connection (`Viewer::wake`): that
+/// connection, the one that woke it, reached the old address and is closed unread.
+enum Next {
+    /// Take connections on this listener, of this port, from now on: the resident viewer moves
+    /// at once (a saved port, a new token), and the old address stops answering.
+    Move(u16, TcpListener),
+    /// Take no more and return once the live connections are done: a foreground run whose page
+    /// went on to the resident viewer.
+    End,
 }
 
 /// One of `MAX_CONNECTIONS`, given back when its connection's thread ends, however it ends.
@@ -104,14 +121,15 @@ impl Drop for Slot {
 }
 
 /// What a request's head leads to: an answer, or a save whose body of this many bytes is read
-/// first and handed to it.
+/// first and handed to it, with the token its request brought (`Viewer::take`).
 enum Head {
     Answer(Response),
-    Body(usize, Save),
+    Body(usize, Save, String),
 }
 
-/// A typed operation that takes a request's body.
-type Save = fn(&Viewer, &[u8]) -> Response;
+/// A typed operation that takes a request's body and the token it brought: one that moves the
+/// page's address checks that token again under its lock (R6).
+type Save = fn(&Viewer, &[u8], &str) -> Response;
 
 #[derive(Debug)]
 struct Response {
@@ -193,7 +211,7 @@ pub fn run(home: &Path, port: Option<u16>, open: bool) -> Result<()> {
     if open {
         viewer.open(home, &url, open_browser);
     }
-    accept(&listener, &viewer);
+    accept(listener, &viewer);
     Ok(())
 }
 
@@ -247,8 +265,9 @@ fn bring_up(home: &Path, wait: Duration) -> std::result::Result<u16, String> {
 /// The resident viewer's address, with the token of its file, and `--open` through the opener
 /// page, which the viewer removes when the browser brings the token (R7).
 fn show_resident(home: &Path, port: u16, open: bool) -> Result<()> {
-    let token = file_token(home).ok_or_else(|| anyhow!("the resident viewer's token file"))?;
-    let url = format!("http://127.0.0.1:{port}/#t={token}");
+    let url = resident_address(home, port).ok_or_else(|| {
+        anyhow!("the resident viewer moved or its token file cannot be read; run this again")
+    })?;
     println!("{url}\n(the resident viewer: bookmark this address; it stays up)");
     if open {
         match opener_page(home, port, &url) {
@@ -259,29 +278,52 @@ fn show_resident(home: &Path, port: u16, open: bool) -> Result<()> {
     Ok(())
 }
 
+/// The resident viewer's address once `bring_up` saw it listen on `port`: the port and the token
+/// read as one pair under config.lock, where every move writes the port before the token, so a
+/// new token made in between never goes out with the old port (Codex on W6). None when the saved
+/// port is another by then, or the token file cannot be read.
+fn resident_address(home: &Path, port: u16) -> Option<String> {
+    let _held = crate::settings::config_lock(home).ok()?;
+    let token = file_token(home)
+        .filter(|_| crate::config::view(home).is_ok_and(|v| v.port.get() == port))?;
+    Some(format!("http://127.0.0.1:{port}/#t={token}"))
+}
+
 /// `oboete view --new-token` (R6): a new token file and, in a resident home, the next free port
 /// in `[view] port`, so the viewer comes back on a new address: the old one's tick sees the port
 /// change and it leaves, and the worker starts it again. Whether the port moved, and the address
 /// to bookmark. The move comes first: one that fails changes nothing, and the old bookmark keeps
 /// working; a token write that fails after it is mended by running the command again.
 pub fn new_token(home: &Path) -> Result<(bool, String)> {
+    let _config = crate::settings::config_lock(home)?;
+    let (port, listener, written) = rotate(home)?;
+    written?;
+    let token = file_token(home).ok_or_else(|| anyhow!("the new token file"))?;
+    Ok((
+        listener.is_some(),
+        format!("http://127.0.0.1:{port}/#t={token}"),
+    ))
+}
+
+/// `new_token`'s two steps, the port's listener kept: the page's new token serves on it at once
+/// (`Viewer::view_token`), the command lets it go. An error changed nothing; the token write's
+/// own result comes after the move it follows. The caller holds config.lock, so new tokens are
+/// made one at a time, by the command and the page alike.
+fn rotate(home: &Path) -> Result<(u16, Option<TcpListener>, Result<()>)> {
     std::fs::create_dir_all(home.join("state"))?;
     anyhow::ensure!(owner_only(home), NOT_PRIVATE);
     let from = crate::config::view(home)?.port.get();
-    let moved = resident_home(home);
-    let port = if moved {
-        let port = (from..=u16::MAX)
+    let (port, listener) = if resident_home(home) {
+        let (port, listener) = (from..=u16::MAX)
             .skip(1)
-            .find(|&p| TcpListener::bind(("127.0.0.1", p)).is_ok())
+            .find_map(|p| Some((p, TcpListener::bind(("127.0.0.1", p)).ok()?)))
             .ok_or_else(|| anyhow!("no free port after {from}"))?;
         crate::settings::set_view_port(home, port)?;
-        port
+        (port, Some(listener))
     } else {
-        from
+        (from, None)
     };
-    write_token(home)?;
-    let token = file_token(home).ok_or_else(|| anyhow!("the new token file"))?;
-    Ok((moved, format!("http://127.0.0.1:{port}/#t={token}")))
+    Ok((port, listener, write_token(home)))
 }
 
 /// 16 bytes of the OS generator, in lower-case hex.
@@ -544,7 +586,7 @@ pub fn resident(home: &Path) -> Result<()> {
             }
         }
     });
-    accept(&listener, &viewer);
+    accept(listener, &viewer);
     drop(lock);
     Ok(())
 }
@@ -717,11 +759,18 @@ fn ensure_token(home: &Path) -> Result<()> {
     write_token(home)
 }
 
-/// A new token file: staged with mode 0600 under a name of this process's (a viewer's start and
-/// `--new-token` may write at once), synced, renamed over the old one, and its folder synced.
+/// A new token file: staged (`stage_token`), then put in place (`put_token`).
 fn write_token(home: &Path) -> Result<()> {
-    let state = home.join("state");
-    let staged = state.join(format!("view-token.{}.tmp", std::process::id()));
+    let (staged, _) = stage_token(home)?;
+    put_token(home, &staged)
+}
+
+/// A new token in a file beside the token file, with mode 0600 under a name of this process's (a
+/// viewer's start and `--new-token` may write at once), and synced: the file and the token.
+fn stage_token(home: &Path) -> Result<(PathBuf, String)> {
+    let staged = home
+        .join("state")
+        .join(format!("view-token.{}.tmp", std::process::id()));
     // Made anew, so it has this mode and is no link planted before.
     clear(&staged)?;
     let mut file = std::fs::OpenOptions::new();
@@ -732,16 +781,41 @@ fn write_token(home: &Path) -> Result<()> {
     // The umask takes bits from the mode asked for, the owner's own read among them.
     #[cfg(unix)]
     file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-    file.write_all(fresh_token()?.as_bytes())?;
+    let token = fresh_token()?;
+    file.write_all(token.as_bytes())?;
     file.sync_all()?;
-    std::fs::rename(&staged, state.join("view-token"))?;
+    Ok((staged, token))
+}
+
+/// The staged token renamed over the token file, and its folder synced.
+fn put_token(home: &Path, staged: &Path) -> Result<()> {
+    let state = home.join("state");
+    std::fs::rename(staged, state.join("view-token"))?;
     std::fs::File::open(&state)?.sync_all()?;
     Ok(())
 }
 
-fn accept(listener: &TcpListener, viewer: &Arc<Viewer>) {
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
+fn accept(mut listener: TcpListener, viewer: &Arc<Viewer>) {
+    loop {
+        let Ok((stream, _)) = listener.accept() else {
+            continue;
+        };
+        // The connection that woke it for a move or an end, and any other that reached the old
+        // address before it, is closed unread.
+        match viewer
+            .next
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            Some(Next::Move(port, to)) => {
+                listener = to;
+                viewer.port.store(port, Ordering::SeqCst);
+                continue;
+            }
+            Some(Next::End) => break,
+            None => {}
+        }
         // Over the cap, the connection is dropped here: closed before a byte is read.
         let Some(slot) = Slot::take(viewer) else {
             continue;
@@ -749,6 +823,11 @@ fn accept(listener: &TcpListener, viewer: &Arc<Viewer>) {
         // A browser keeps idle pre-connected sockets open; one thread each keeps them from
         // stalling the rest.
         std::thread::spawn(move || slot.0.serve(stream));
+    }
+    drop(listener);
+    // The request that ended it is answered before the run returns.
+    while viewer.live.load(Ordering::SeqCst) != 0 {
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -873,15 +952,34 @@ fn saved(result: std::result::Result<Value, crate::settings::Refusal>) -> Respon
     }
 }
 
+/// `saved`'s refusal, from the viewer's own operations.
+fn refused(status: u16, code: &'static str, field: &str) -> Response {
+    saved(Err(crate::settings::Refusal {
+        status,
+        code,
+        field: field.into(),
+    }))
+}
+
+/// A body that must be `{}`: an operation that takes no input says so.
+fn empty_object(body: &[u8]) -> bool {
+    matches!(
+        serde_json::from_slice::<serde_json::Map<String, Value>>(body),
+        Ok(fields) if fields.is_empty()
+    )
+}
+
 impl Viewer {
     fn new(home: &Path, cwd: Option<PathBuf>, port: u16, token: Token) -> Self {
         Self {
             home: home.to_path_buf(),
             home_lock: None,
             cwd,
-            port,
+            port: AtomicU16::new(port),
+            next: Mutex::new(None),
             token,
             saving: Mutex::new(()),
+            moving: Mutex::new(()),
             recovery: crate::settings::recovery::Recovery::default(),
             maintenance: crate::settings::maintenance::Maintenance::default(),
             agents: crate::setup::agents::Agents::default(),
@@ -890,6 +988,26 @@ impl Viewer {
             requests: AtomicUsize::new(0),
             closing: AtomicBool::new(false),
         }
+    }
+
+    fn port(&self) -> u16 {
+        self.port.load(Ordering::SeqCst)
+    }
+
+    /// The accept loop takes connections on `listener`, of `port`, from its next one on, and the
+    /// old address stops answering. A move asked again before the loop took one replaces it. The
+    /// outcome names the new port first (R5), as `oboete view` and doctor read it: the listener is
+    /// bound, so a connection to it waits for the loop.
+    fn move_to(&self, port: u16, listener: TcpListener) {
+        let _ = say(&self.home, &format!("listening {port}"));
+        self.wake(Next::Move(port, listener));
+    }
+
+    /// A connection to the port the loop waits on wakes it.
+    fn wake(&self, next: Next) {
+        *self.next.lock().unwrap_or_else(PoisonError::into_inner) = Some(next);
+        let at = std::net::SocketAddr::from(([127, 0, 0, 1], self.port()));
+        let _ = TcpStream::connect_timeout(&at, Duration::from_secs(1));
     }
 
     fn replace(&self, exec: impl FnOnce() -> std::io::Result<()>) {
@@ -920,7 +1038,7 @@ impl Viewer {
         if crate::worker::file_id(std::fs::metadata(state.join("view.lock"))) != lock {
             return Some(Leaving::Gone);
         }
-        if crate::config::view(&self.home).is_ok_and(|v| v.port.get() != self.port) {
+        if crate::config::view(&self.home).is_ok_and(|v| v.port.get() != self.port()) {
             return Some(Leaving::Moved);
         }
         (quiet && crate::config::worker(&self.home).is_ok_and(|w| !w.resident))
@@ -974,17 +1092,20 @@ impl Viewer {
                 _ => break (Head::Answer(Response::text(400, "bad request")), 0, false),
             }
         };
+        let len = match &head {
+            Head::Answer(_) => 0,
+            Head::Body(len, ..) => *len,
+        };
+        // Read only once the head has passed every check (`save_gate`).
+        while buf.len() < at + len {
+            if !more(&mut stream, &mut buf) {
+                return;
+            }
+        }
+        let body = &buf[at..at + len];
         let resp = match head {
             Head::Answer(r) => r,
-            // Read only once the head has passed every check (`save_gate`).
-            Head::Body(len, save) => {
-                while buf.len() < at + len {
-                    if !more(&mut stream, &mut buf) {
-                        return;
-                    }
-                }
-                save(self, &buf[at..at + len])
-            }
+            Head::Body(_, save, given) => self.take(save, body, &given),
         };
         send(&mut stream, &resp.bytes(head_only), ANSWER_TIME);
     }
@@ -992,30 +1113,51 @@ impl Viewer {
     /// Typed operations with a body go through `save_gate`; other requests use `route`.
     fn head(&self, method: &str, target: &str, headers: &[(&str, &str)]) -> Head {
         let (cap, save): (usize, Save) = match (method, target) {
-            ("POST", "/api/doctor") => (MAX_BODY, Self::doctor),
+            ("POST", "/api/doctor") => (MAX_BODY, |v, b, _| v.doctor(b)),
             ("POST", "/api/settings") => (MAX_BODY, Self::save),
-            ("POST", "/api/settings/recovery/preview") => (MAX_BODY, Self::recovery_preview),
-            ("POST", "/api/settings/recovery/start") => (MAX_BODY, Self::recovery_start),
-            ("POST", "/api/providers") => (MAX_BODY, Self::save_provider),
-            ("POST", "/api/providers/key") => (MAX_KEY_BODY, Self::save_provider_key),
-            ("POST", "/api/providers/test/preview") => (MAX_BODY, Self::preview_provider_test),
-            ("POST", "/api/providers/test") => (MAX_BODY, Self::test_provider),
-            ("POST", "/api/key") => (MAX_KEY_BODY, Self::save_key),
-            ("POST", "/api/resume") => (MAX_BODY, Self::resume),
-            ("POST", "/api/privacy/exclude") => (MAX_BODY, Self::exclude),
-            ("POST", "/api/claims/correct") => (MAX_BODY, Self::claim_correct),
-            ("POST", "/api/claims/mute") => (MAX_BODY, Self::claim_mute),
-            ("POST", "/api/preferences") => (MAX_BODY, Self::preference),
-            ("POST", "/api/maintenance/preview") => (MAX_BODY, Self::maintenance_preview),
-            ("POST", "/api/setup/preview") => (MAX_BODY, Self::agent_preview),
-            ("POST", "/api/setup/start") => (MAX_BODY, Self::agent_start),
-            ("POST", "/api/maintenance/start") => (MAX_BODY, Self::maintenance_start),
+            ("POST", "/api/settings/recovery/preview") => {
+                (MAX_BODY, |v, b, _| v.recovery_preview(b))
+            }
+            ("POST", "/api/settings/recovery/start") => (MAX_BODY, |v, b, _| v.recovery_start(b)),
+            ("POST", "/api/providers") => (MAX_BODY, |v, b, _| v.save_provider(b)),
+            ("POST", "/api/providers/key") => (MAX_KEY_BODY, |v, b, _| v.save_provider_key(b)),
+            ("POST", "/api/providers/test/preview") => {
+                (MAX_BODY, |v, b, _| v.preview_provider_test(b))
+            }
+            ("POST", "/api/providers/test") => (MAX_BODY, |v, b, _| v.test_provider(b)),
+            ("POST", "/api/key") => (MAX_KEY_BODY, |v, b, _| v.save_key(b)),
+            ("POST", "/api/resume") => (MAX_BODY, |v, b, _| v.resume(b)),
+            ("POST", "/api/privacy/exclude") => (MAX_BODY, |v, b, _| v.exclude(b)),
+            ("POST", "/api/claims/correct") => (MAX_BODY, |v, b, _| v.claim_correct(b)),
+            ("POST", "/api/claims/mute") => (MAX_BODY, |v, b, _| v.claim_mute(b)),
+            ("POST", "/api/preferences") => (MAX_BODY, |v, b, _| v.preference(b)),
+            ("POST", "/api/maintenance/preview") => (MAX_BODY, |v, b, _| v.maintenance_preview(b)),
+            ("POST", "/api/setup/preview") => (MAX_BODY, |v, b, _| v.agent_preview(b)),
+            ("POST", "/api/setup/start") => (MAX_BODY, |v, b, _| v.agent_start(b)),
+            ("POST", "/api/maintenance/start") => (MAX_BODY, |v, b, _| v.maintenance_start(b)),
+            ("POST", "/api/view/resident") => (MAX_BODY, |v, b, _| v.view_resident(b)),
+            ("POST", "/api/view/token") => (MAX_BODY, Self::view_token),
             _ => return Head::Answer(self.route(method, target, headers)),
         };
+        // `save_gate` passes a request with exactly one, the viewer's.
+        let given = headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case("x-oboete-token"))
+            .map_or("", |(_, t)| t);
         match self.save_gate(headers, cap) {
-            Ok(len) => Head::Body(len, save),
+            Ok(len) => Head::Body(len, save, given.to_owned()),
             Err(r) => Head::Answer(r),
         }
+    }
+
+    /// A save once its body is in, only while the token its request brought is still this
+    /// viewer's: the head was checked before the body, which the client may send up to the
+    /// request's deadline later, after a new token (R6).
+    fn take(&self, save: Save, body: &[u8], given: &str) -> Response {
+        if !self.token_ok(Some(given)) {
+            return Response::text(401, "missing or wrong token");
+        }
+        save(self, body, given)
     }
 
     /// Spec 6.6 for the writes with a body, all on the head, before any byte of the body is
@@ -1074,10 +1216,7 @@ impl Viewer {
     }
 
     fn doctor(&self, body: &[u8]) -> Response {
-        if !matches!(
-            serde_json::from_slice::<serde_json::Map<String, Value>>(body),
-            Ok(fields) if fields.is_empty()
-        ) {
+        if !empty_object(body) {
             return Response::text(400, "doctor takes an empty JSON object");
         }
         // Reuse the viewer's operation gate so simultaneous clients cannot multiply copies.
@@ -1087,9 +1226,178 @@ impl Viewer {
         Response::json(&json!(crate::setup::doctor_report(&self.home)))
     }
 
-    /// The settings as saved.
-    fn save(&self, body: &[u8]) -> Response {
-        saved(crate::settings::save(&self.home, &self.saving, body))
+    /// The settings as saved. The resident viewer binds a saved port other than its own first
+    /// and moves onto it at once with a new token, so the page goes on at the new address and the
+    /// old bookmark, whose port another program may take now, holds a token that no longer works
+    /// (R5, R6); a port it cannot bind is refused before anything is written. A foreground run
+    /// keeps its own port: `[view] port` is the resident viewer's.
+    fn save(&self, body: &[u8], given: &str) -> Response {
+        let _moving = self.moving.lock().unwrap_or_else(PoisonError::into_inner);
+        let _saving = self.saving.lock().unwrap_or_else(PoisonError::into_inner);
+        let Ok(_config) = crate::settings::config_lock(&self.home) else {
+            return refused(500, "write_failed", "");
+        };
+        // Checked again under the hold new tokens are made under: a save that waited behind one
+        // brought the old token and changes nothing, not even a port the new token moved from.
+        if !self.token_ok(Some(given)) {
+            return Response::text(401, "missing or wrong token");
+        }
+        let was = crate::config::view(&self.home).map(|v| v.port.get());
+        // The resident address changes: the resident page moves now, or, saved on a foreground
+        // run's page, the resident viewer comes back there at its tick (R4). Its token goes with
+        // the old address either way.
+        let moves = |port: &u16| match self.token {
+            Token::File => *port != self.port(),
+            Token::Run(_) => file_token(&self.home).is_some() && was.as_ref().ok() != Some(port),
+        };
+        let posted = serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|posted| posted["view"]["port"].as_u64())
+            .and_then(|port| u16::try_from(port).ok())
+            .filter(|&port| port != 0);
+        match posted.filter(moves) {
+            Some(port) => self.save_with_new_token(body, port),
+            None => saved(
+                crate::settings::save_held(&self.home, body)
+                    .map(|report| self.runtime(report, self.port())),
+            ),
+        }
+    }
+
+    /// A resident port saved with a new token, still under `save`'s hold of config.lock, where
+    /// new tokens are made: the resident page's new port bound, the settings checked and staged,
+    /// a new token staged and put in place, the settings written, and only then the resident page
+    /// moved. A refusal or a failure before the token is in place changes nothing (the staged
+    /// settings go when dropped); settings that cannot follow it leave the old port with a token
+    /// that no page holds (Codex and CodeRabbit on W6). A foreground run moves nothing and answers
+    /// no address: the token is the resident viewer's, which its page starts or `oboete view`
+    /// prints.
+    fn save_with_new_token(&self, body: &[u8], port: u16) -> Response {
+        let listener = match self.token {
+            Token::File => match TcpListener::bind(("127.0.0.1", port)) {
+                Ok(listener) => Some(listener),
+                Err(_) => return refused(409, "port_unavailable", "view.port"),
+            },
+            Token::Run(_) => None,
+        };
+        let settings = match crate::settings::stage_held(&self.home, body) {
+            Ok(settings) => settings,
+            Err(refusal) => return saved(Err(refusal)),
+        };
+        let Ok((staged, token)) = stage_token(&self.home) else {
+            return refused(500, "write_failed", "");
+        };
+        // A folder that is not synced after the rename still has the token in place.
+        if put_token(&self.home, &staged).is_err() && file_token(&self.home) != Some(token.clone())
+        {
+            let _ = clear(&staged);
+            return refused(500, "write_failed", "");
+        }
+        if settings.is_some_and(|s| s.commit().is_err()) {
+            return refused(500, "token_replaced", "");
+        }
+        let report = crate::settings::show(&self.home);
+        let Some(listener) = listener else {
+            return saved(Ok(self.runtime(report, self.port())));
+        };
+        self.move_to(port, listener);
+        let mut report = self.runtime(report, port);
+        report["view_runtime"]["url"] = json!(format!("http://127.0.0.1:{port}/#t={token}"));
+        saved(Ok(report))
+    }
+
+    /// The settings with this viewer's own state beside them: the port it serves on, or moves to
+    /// with this answer (then with the address, which carries the new token), and whether it is
+    /// the resident viewer or a foreground run.
+    fn runtime(&self, mut report: Value, port: u16) -> Value {
+        if report.get("error").is_none() {
+            let mode = match self.token {
+                Token::Run(_) => "foreground",
+                Token::File => "resident",
+            };
+            report["view_runtime"] = json!({"port": port, "mode": mode});
+        }
+        report
+    }
+
+    /// The page's `oboete view --new-token` (R6): a new token and, in a resident home, the next
+    /// free port, which this viewer serves on at once, so the old bookmark and every page still on
+    /// the old address stop working. The answer is the new address. A foreground run's token is
+    /// its own and ends with it (spec 6.6): it has none to replace. `given` is the token the
+    /// request brought: one that waited while another new token was made (here or by the command)
+    /// brought the old one, and makes none (Codex on W6).
+    fn view_token(&self, body: &[u8], given: &str) -> Response {
+        if !empty_object(body) {
+            return Response::text(400, "a new token takes an empty JSON object");
+        }
+        if matches!(self.token, Token::Run(_)) {
+            return refused(409, "foreground", "");
+        }
+        let _moving = self.moving.lock().unwrap_or_else(PoisonError::into_inner);
+        let Ok(_config) = crate::settings::config_lock(&self.home) else {
+            return refused(503, "unchanged", "");
+        };
+        if !self.token_ok(Some(given)) {
+            return Response::text(401, "missing or wrong token");
+        }
+        let Ok((port, listener, written)) = rotate(&self.home) else {
+            return refused(503, "unchanged", "");
+        };
+        if let Some(listener) = listener {
+            self.move_to(port, listener);
+        }
+        // What the file holds now: a write that failed after its rename has replaced it anyway.
+        let Some(token) = file_token(&self.home) else {
+            return refused(500, "unknown", "");
+        };
+        let url = format!("http://127.0.0.1:{port}/#t={token}");
+        match written {
+            Ok(()) => Response::json(&json!({"url": url})),
+            // The move stands; the address carries the token that works there.
+            Err(_) => Response::new(
+                500,
+                "application/json",
+                serde_json::to_vec(&json!({"code": "token_unsure", "url": url}))
+                    .unwrap_or_default(),
+            ),
+        }
+    }
+
+    /// R7 from the page: a foreground run in a home now saved resident brings up the worker and
+    /// the resident viewer as `oboete view` does there, answers with the resident address, and
+    /// ends once its connections are done, as the page goes on to that address.
+    fn view_resident(&self, body: &[u8]) -> Response {
+        if !empty_object(body) {
+            return Response::text(
+                400,
+                "starting the resident viewer takes an empty JSON object",
+            );
+        }
+        if matches!(self.token, Token::File) {
+            return refused(409, "resident", "");
+        }
+        if !resident_home(&self.home) {
+            return refused(409, "not_resident", "");
+        }
+        let up = bring_up(&self.home, Duration::from_secs(3));
+        let address = up
+            .as_ref()
+            .ok()
+            .and_then(|&port| Some((port, resident_address(&self.home, port)?)));
+        let Some((port, url)) = address else {
+            let why = match &up {
+                Err(why) if why.trim() == PORT_IN_USE => "port_in_use",
+                Err(why) if why.trim() == NOT_PRIVATE => "not_private",
+                _ => "not_started",
+            };
+            return refused(503, why, "");
+        };
+        println!(
+            "(the page went on to the resident viewer at http://127.0.0.1:{port}; this run ends)"
+        );
+        // The accept loop takes no more connections, and returns once the live ones are done.
+        self.wake(Next::End);
+        Response::json(&json!({"url": url}))
     }
 
     fn save_provider(&self, body: &[u8]) -> Response {
@@ -1160,10 +1468,11 @@ impl Viewer {
     /// DNS rebinding: a page on another name that resolves to 127.0.0.1 sends its own Host.
     /// Browsers leave port 80 out of Host.
     fn host_ok(&self, host: Option<&str>) -> bool {
+        let port = self.port();
         host.is_some_and(|h| {
-            h == format!("127.0.0.1:{}", self.port)
-                || h == format!("localhost:{}", self.port)
-                || (self.port == 80 && (h == "127.0.0.1" || h == "localhost"))
+            h == format!("127.0.0.1:{port}")
+                || h == format!("localhost:{port}")
+                || (port == 80 && (h == "127.0.0.1" || h == "localhost"))
         })
     }
 
@@ -1183,7 +1492,7 @@ impl Viewer {
     /// The resident viewer removes its port's page by name: `oboete view --open` wrote it (R7).
     fn token_arrived(&self) {
         let page = match self.token {
-            Token::File => Some(opener_path(&self.home, self.port)),
+            Token::File => Some(opener_path(&self.home, self.port())),
             Token::Run(_) => self
                 .opener
                 .lock()
@@ -1250,7 +1559,7 @@ impl Viewer {
 
     /// `--open`: the page for the browser, registered before `launch` starts the opener.
     fn open(&self, home: &Path, url: &str, launch: impl FnOnce(&Path)) {
-        match opener_page(home, self.port, url) {
+        match opener_page(home, self.port(), url) {
             Ok(page) => {
                 *self.opener.lock().unwrap_or_else(PoisonError::into_inner) = Some(page.clone());
                 launch(&page);
@@ -1296,7 +1605,7 @@ impl Viewer {
         let name = &path["/api/".len()..];
         // config.toml, not the stores: no error text in the answer.
         if name == "settings" {
-            return Response::json(&crate::settings::show(&self.home));
+            return Response::json(&self.runtime(crate::settings::show(&self.home), self.port()));
         }
         if name == "privacy" {
             return Response::json(&crate::settings::privacy::show(&self.home));
@@ -1896,7 +2205,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn w5b_post(v: &Viewer, target: &str, value: Value) -> Response {
         let body = serde_json::to_vec(&value).unwrap();
-        let host = format!("127.0.0.1:{}", v.port);
+        let host = format!("127.0.0.1:{}", v.port());
         let origin = format!("http://{host}");
         let token = file_token(&v.home).unwrap();
         let length = body.len().to_string();
@@ -4059,7 +4368,9 @@ curate = false
         home
     }
 
-    /// Rows 53-1 and 53-4: every store route asks for the token and this viewer's Host.
+    /// Rows 53-1 and 53-4: every `/api` route asks for the token and this viewer's Host, the
+    /// ones that only read included; the page's own files come without it, as a URL fragment
+    /// never reaches the server (#374).
     #[test]
     fn every_api_route_answers_401_without_the_token_and_403_for_a_foreign_host() {
         let (_s, v, x) = seeded();
@@ -4073,12 +4384,19 @@ curate = false
             "/api/version".into(),
             "/api/stats".into(),
             "/api/settings".into(),
+            "/api/privacy".into(),
+            "/api/setup".into(),
+            "/api/setup/operation".into(),
+            "/api/maintenance".into(),
         ];
         for route in &routes {
             assert_eq!(v.route("GET", route, &[HOST]).status, 401, "{route}");
             let foreign = [("Host", "evil.example:4321"), TOKEN];
             assert_eq!(v.route("GET", route, &foreign).status, 403, "{route}");
             assert_eq!(v.route("GET", route, &[HOST, TOKEN]).status, 200, "{route}");
+        }
+        for page in ["/", "/app.js", "/app.css"] {
+            assert_eq!(v.route("GET", page, &[HOST]).status, 200, "{page}");
         }
         assert_eq!(
             v.route("GET", "/api/claim?id=nope", &[HOST, TOKEN]).status,
@@ -4257,7 +4575,7 @@ curate = false
         assert_eq!(status("GET", "/", &[]), 403);
         assert_eq!(status("GET", "/", &[("Host", "127.0.0.1")]), 403);
         let (dir80, mut v80) = viewer("guards80");
-        v80.port = 80;
+        v80.port = 80.into();
         assert_eq!(v80.route("GET", "/", &[("Host", "127.0.0.1")]).status, 200);
         assert_eq!(
             v80.route("GET", "/", &[("Host", "localhost:80")]).status,
@@ -4278,8 +4596,8 @@ curate = false
     /// The viewer on a socket of its own, answering `n` connections: its port and its thread.
     fn serving(mut v: Viewer, n: usize) -> (u16, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        v.port = listener.local_addr().unwrap().port();
-        let port = v.port;
+        v.port = listener.local_addr().unwrap().port().into();
+        let port = v.port();
         let server = std::thread::spawn(move || {
             for _ in 0..n {
                 let (s, _) = listener.accept().unwrap();
@@ -4945,7 +5263,7 @@ curate = false
     fn open_registers_the_page_then_launches_the_opener_with_its_path() {
         let (dir, mut v) = viewer("open");
         // Its own port: on Windows every test's page is in the one %LOCALAPPDATA%.
-        v.port = 4323;
+        v.port = 4323.into();
         let mut launched = None;
         v.open(&dir, "http://127.0.0.1:4323/#t=t0k", |p| {
             assert_eq!(v.opener.lock().unwrap().as_deref(), Some(p));
@@ -4982,9 +5300,9 @@ curate = false
     ) -> Response {
         match v.head(method, target, headers) {
             Head::Answer(r) => r,
-            Head::Body(len, save) => {
+            Head::Body(len, save, given) => {
                 assert_eq!(len, body.len());
-                save(v, body)
+                v.take(save, body, &given)
             }
         }
     }
@@ -5263,7 +5581,7 @@ curate = false
             json_type,
             ("Content-Length", at_cap.as_str()),
         ];
-        assert!(matches!(v.head("POST", path, &at_cap), Head::Body(l, _) if l == cap));
+        assert!(matches!(v.head("POST", path, &at_cap), Head::Body(l, ..) if l == cap));
         let over = (cap + 1).to_string();
         let over = [
             HOST,
@@ -5335,8 +5653,8 @@ curate = false
     fn a_save_is_read_only_after_its_head_passes() {
         let (dir, mut v) = viewer("save-socket");
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        v.port = listener.local_addr().unwrap().port();
-        let port = v.port;
+        v.port = listener.local_addr().unwrap().port().into();
+        let port = v.port();
         let home = dir.clone();
         let server = std::thread::spawn(move || {
             for _ in 0..2 {
@@ -5381,8 +5699,8 @@ curate = false
     fn a_head_over_the_cap_is_refused_however_its_reads_fall() {
         let (dir, mut v) = viewer("head-cap");
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        v.port = listener.local_addr().unwrap().port();
-        let port = v.port;
+        v.port = listener.local_addr().unwrap().port().into();
+        let port = v.port();
         let server = std::thread::spawn(move || {
             let (s, _) = listener.accept().unwrap();
             v.serve(s);
@@ -5413,11 +5731,11 @@ curate = false
     fn connections_past_the_cap_are_closed_and_their_slots_come_back() {
         let (dir, mut v) = viewer("conn-cap");
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        v.port = listener.local_addr().unwrap().port();
-        let port = v.port;
+        v.port = listener.local_addr().unwrap().port().into();
+        let port = v.port();
         let v = Arc::new(v);
         let server = Arc::clone(&v);
-        std::thread::spawn(move || accept(&listener, &server));
+        std::thread::spawn(move || accept(listener, &server));
         let until = |held: usize| {
             let started = Instant::now();
             while v.live.load(Ordering::SeqCst) != held {
@@ -5501,8 +5819,8 @@ curate = false
         };
         let (dir, mut v) = viewer("interrupted");
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        v.port = listener.local_addr().unwrap().port();
-        let port = v.port;
+        v.port = listener.local_addr().unwrap().port().into();
+        let port = v.port();
         // The request's read, interrupted before the client sends it.
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let (s, _) = listener.accept().unwrap();
@@ -6256,5 +6574,581 @@ curate = false
         let p = params("q=a+b%20c&repo=%2Fhome%2Fx&x");
         assert_eq!((p["q"].as_str(), p["repo"].as_str()), ("a b c", "/home/x"));
         assert!(!p.contains_key("x"));
+    }
+
+    /// One request to `port` as the page sends it, over a socket: the status and the JSON answer
+    /// (`Null` when there is none).
+    fn w6p_call(
+        port: u16,
+        method: &str,
+        path: &str,
+        token: &str,
+        body: Option<&Value>,
+    ) -> (u16, Value) {
+        let body = body
+            .map(|b| serde_json::to_vec(b).unwrap())
+            .unwrap_or_default();
+        let mut head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Oboete-Token: {token}\r\n"
+        );
+        if method == "POST" {
+            head.push_str(&format!(
+                "Origin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\n",
+                body.len()
+            ));
+        }
+        let mut raw = format!("{head}\r\n").into_bytes();
+        raw.extend_from_slice(&body);
+        let answer = ask(port, &raw);
+        let status = answer.get(9..12).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let json = (answer.split_once("\r\n\r\n"))
+            .and_then(|(_, b)| serde_json::from_str(b).ok())
+            .unwrap_or(Value::Null);
+        (status, json)
+    }
+
+    /// A POST from the page of `v`, without a socket.
+    fn w6p_post(v: &Viewer, token: &str, target: &str, value: &Value) -> (u16, Value) {
+        let body = serde_json::to_vec(value).unwrap();
+        let host = format!("127.0.0.1:{}", v.port());
+        let origin = format!("http://{host}");
+        let length = body.len().to_string();
+        let headers = [
+            ("Host", host.as_str()),
+            ("Origin", &origin),
+            ("X-Oboete-Token", token),
+            ("Content-Type", "application/json"),
+            ("Content-Length", &length),
+        ];
+        let r = request(v, "POST", target, &headers, &body);
+        (
+            r.status,
+            serde_json::from_slice(&r.body).unwrap_or(Value::Null),
+        )
+    }
+
+    /// Whether nothing answers on `port` any more, looked at for up to 2 s.
+    fn w6p_closed(port: u16) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if TcpStream::connect(("127.0.0.1", port)).is_err() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// A resident home's resident viewer, serving over sockets on a thread of its own, its token
+    /// and itself.
+    #[cfg(target_os = "linux")]
+    fn w6p_resident() -> (tempfile::TempDir, u16, String, Arc<Viewer>) {
+        let (port, home, started) = listening();
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!("[worker]\nresident = true\n[view]\nport = {port}\n"),
+        )
+        .unwrap();
+        let token = file_token(home.path()).unwrap();
+        let Resident {
+            lock,
+            listener,
+            viewer,
+        } = started;
+        let serving = Arc::clone(&viewer);
+        std::thread::spawn(move || {
+            accept(listener, &serving);
+            drop(lock);
+        });
+        (home, port, token, viewer)
+    }
+
+    /// W6: a port saved on the resident viewer's page is bound first and served at once with a new
+    /// token, and the old address and token stop working; one another program holds is refused
+    /// before anything is written.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6p_a_saved_port_moves_the_resident_page_there_at_once() {
+        let (home, port, token, _) = w6p_resident();
+        let (status, shown) = w6p_call(port, "GET", "/api/settings", &token, None);
+        assert_eq!(status, 200, "{shown}");
+        assert_eq!(
+            shown["view_runtime"],
+            json!({"port": port, "mode": "resident"})
+        );
+        let mut body: Value = serde_json::from_slice(&save_body(&shown)).unwrap();
+        let held = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let config = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        body["view"] = json!({"port": held.local_addr().unwrap().port()});
+        let (status, refusal) = w6p_call(port, "POST", "/api/settings", &token, Some(&body));
+        assert_eq!(
+            (status, refusal["code"].as_str()),
+            (409, Some("port_unavailable"))
+        );
+        let file = || std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        assert_eq!(file(), config);
+        // A test running alongside may take the free port first: another is tried then.
+        let (to, saved) = (0..5)
+            .find_map(|_| {
+                let to = free_port();
+                body["view"] = json!({"port": to});
+                let (status, saved) = w6p_call(port, "POST", "/api/settings", &token, Some(&body));
+                (status == 200).then_some((to, saved))
+            })
+            .expect("no port stayed free in five tries");
+        let new = file_token(home.path()).unwrap();
+        assert_ne!(new, token);
+        assert_eq!(
+            saved["view_runtime"],
+            json!({"port": to, "mode": "resident", "url": format!("http://127.0.0.1:{to}/#t={new}")})
+        );
+        assert_eq!(saved["view"]["port"], to);
+        assert_eq!(crate::config::view(home.path()).unwrap().port.get(), to);
+        let (status, shown) = w6p_call(to, "GET", "/api/settings", &new, None);
+        assert_eq!((status, &shown["view_runtime"]["port"]), (200, &json!(to)));
+        // The old bookmark's token ends with its address.
+        assert_eq!(w6p_call(to, "GET", "/api/settings", &token, None).0, 401);
+        assert_eq!(view_outcome(home.path()), format!("listening {to}"));
+        assert!(w6p_closed(port), "the old address still answers");
+    }
+
+    /// W6: a new token from the resident viewer's page (R6): the next free port, served at once,
+    /// and a new token in the file; the old token and the old address stop working. A move that
+    /// cannot be made changes nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6p_a_new_token_moves_the_resident_page_and_ends_the_old_one() {
+        let (home, port, old, _) = w6p_resident();
+        let call = |body: Value| w6p_call(port, "POST", "/api/view/token", &old, Some(&body));
+        assert_eq!(call(json!({"rotate": true})).0, 400);
+        let path = home.path().join("config.toml");
+        let config = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, "[worker]\nresident = true\n[view]\nport = 65535\n").unwrap();
+        let (status, refusal) = call(json!({}));
+        assert_eq!((status, refusal["code"].as_str()), (503, Some("unchanged")));
+        assert_eq!(file_token(home.path()).unwrap(), old);
+        std::fs::write(&path, &config).unwrap();
+
+        let (status, answer) = call(json!({}));
+        assert_eq!(status, 200, "{answer}");
+        let new = file_token(home.path()).unwrap();
+        let to = crate::config::view(home.path()).unwrap().port.get();
+        assert!(to > port && new != old, "{to} after {port}");
+        assert_eq!(answer["url"], format!("http://127.0.0.1:{to}/#t={new}"));
+        assert_eq!(w6p_call(to, "GET", "/api/settings", &new, None).0, 200);
+        assert_eq!(w6p_call(to, "GET", "/api/settings", &old, None).0, 401);
+        assert_eq!(view_outcome(home.path()), format!("listening {to}"));
+        assert!(w6p_closed(port), "the old address still answers");
+    }
+
+    /// W6 (Codex on its security review): a request for a new token whose head passed with the
+    /// old token, and whose body came after another new token was made, on the page or by
+    /// `oboete view --new-token`, makes none: the token it brought is checked again under the
+    /// lock, so a holder of an old token cannot outlast its replacement.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6p_a_new_token_asked_with_a_replaced_token_makes_none() {
+        let (home, port, old, v) = w6p_resident();
+        let head = |token: &str| {
+            let host = format!("127.0.0.1:{}", v.port());
+            let origin = format!("http://{host}");
+            let h = [
+                ("Host", host.as_str()),
+                ("Origin", &origin),
+                ("X-Oboete-Token", token),
+                ("Content-Type", "application/json"),
+                ("Content-Length", "2"),
+            ];
+            match v.head("POST", "/api/view/token", &h) {
+                Head::Body(2, _, given) => given,
+                _ => panic!("the head did not pass"),
+            }
+        };
+        // Replaced on the page while the request waits for its body.
+        let waiting = head(&old);
+        let (status, answer) = w6p_call(port, "POST", "/api/view/token", &old, Some(&json!({})));
+        assert_eq!(status, 200, "{answer}");
+        let new = file_token(home.path()).unwrap();
+        let to = crate::config::view(home.path()).unwrap().port.get();
+        assert_eq!(v.view_token(b"{}", &waiting).status, 401);
+        assert_eq!(file_token(home.path()).unwrap(), new);
+        assert_eq!(crate::config::view(home.path()).unwrap().port.get(), to);
+        assert_eq!(w6p_call(to, "GET", "/api/settings", &new, None).0, 200);
+        // Replaced by the command while the request waits for its body.
+        let waiting = head(&new);
+        new_token(home.path()).unwrap();
+        let newer = file_token(home.path()).unwrap();
+        let moved = crate::config::view(home.path()).unwrap().port.get();
+        assert_eq!(v.view_token(b"{}", &waiting).status, 401);
+        assert_eq!(file_token(home.path()).unwrap(), newer);
+        assert_eq!(crate::config::view(home.path()).unwrap().port.get(), moved);
+    }
+
+    /// W6 (Codex on its security review): the resident address goes out with the token of its
+    /// own port: after a new token moved the page (here by the command, which leaves the running
+    /// viewer on the old port until its tick), the old port is not paired with the new token.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6p_the_resident_address_pairs_its_port_and_its_token() {
+        let (home, port, old, _v) = w6p_resident();
+        assert_eq!(
+            resident_address(home.path(), port).unwrap(),
+            format!("http://127.0.0.1:{port}/#t={old}")
+        );
+        new_token(home.path()).unwrap();
+        let new = file_token(home.path()).unwrap();
+        let to = crate::config::view(home.path()).unwrap().port.get();
+        assert_eq!(resident_address(home.path(), port), None);
+        assert_eq!(
+            resident_address(home.path(), to).unwrap(),
+            format!("http://127.0.0.1:{to}/#t={new}")
+        );
+    }
+
+    /// W6 (the commit security review): a write whose head passed with the old token, and whose
+    /// body came after a new token was made, does nothing: neither a settings save, which could
+    /// move the page off the address the new token was given, nor any other write. A save checks
+    /// the token again under the hold a new token takes, so one that knew the new version of
+    /// config.toml is refused too.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6p_a_write_that_waited_out_a_new_token_does_nothing() {
+        let (home, port, old, v) = w6p_resident();
+        let (status, shown) = w6p_call(port, "GET", "/api/settings", &old, None);
+        assert_eq!(status, 200, "{shown}");
+        let mut body: Value = serde_json::from_slice(&save_body(&shown)).unwrap();
+        body["view"] = json!({"port": free_port()});
+        let body = serde_json::to_vec(&body).unwrap();
+        let head = |path: &str, len: usize| {
+            let host = format!("127.0.0.1:{}", v.port());
+            let origin = format!("http://{host}");
+            let len = len.to_string();
+            let h = [
+                ("Host", host.as_str()),
+                ("Origin", &origin),
+                ("X-Oboete-Token", &old),
+                ("Content-Type", "application/json"),
+                ("Content-Length", &len),
+            ];
+            match v.head("POST", path, &h) {
+                Head::Body(_, save, given) => (save, given),
+                Head::Answer(_) => panic!("the head did not pass"),
+            }
+        };
+        let (save, given) = head("/api/settings", body.len());
+        let (preview, preview_given) = head("/api/settings/recovery/preview", 2);
+        let (status, answer) = w6p_call(port, "POST", "/api/view/token", &old, Some(&json!({})));
+        assert_eq!(status, 200, "{answer}");
+        let new = file_token(home.path()).unwrap();
+        let to = crate::config::view(home.path()).unwrap().port.get();
+        assert_eq!(v.take(save, &body, &given).status, 401);
+        assert_eq!(v.take(preview, b"{}", &preview_given).status, 401);
+        // One that knew the version the new token wrote.
+        let (_, shown) = w6p_call(to, "GET", "/api/settings", &new, None);
+        let mut body: Value = serde_json::from_slice(&save_body(&shown)).unwrap();
+        body["view"] = json!({"port": free_port()});
+        assert_eq!(
+            v.save(&serde_json::to_vec(&body).unwrap(), &old).status,
+            401
+        );
+        assert_eq!(crate::config::view(home.path()).unwrap().port.get(), to);
+        assert_eq!(file_token(home.path()).unwrap(), new);
+        assert_eq!(v.port(), to);
+    }
+
+    /// W6 (Codex on its security review): a port save that passed its token's checks and then
+    /// waited for config.lock while `oboete view --new-token` held it (which wrote a port and a
+    /// token there) makes no token: it checks again under the lock, even when its body names the
+    /// version the command wrote.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6p_a_port_save_behind_the_commands_new_token_makes_none() {
+        let (home, port, old, v) = w6p_resident();
+        let held = crate::settings::config_lock(home.path()).unwrap();
+        // The command's port, under its hold; the token comes after.
+        let theirs = free_port();
+        crate::settings::set_view_port(home.path(), theirs).unwrap();
+        let shown = crate::settings::show(home.path());
+        let mut body: Value = serde_json::from_slice(&save_body(&shown)).unwrap();
+        body["view"] = json!({"port": free_port()});
+        let saver = {
+            let (v, old) = (Arc::clone(&v), old.clone());
+            std::thread::spawn(move || w6p_post(&v, &old, "/api/settings", &body))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        write_token(home.path()).unwrap();
+        let theirs_token = file_token(home.path()).unwrap();
+        drop(held);
+        let (status, answer) = saver.join().unwrap();
+        assert_eq!(status, 401, "{answer}");
+        assert_eq!(file_token(home.path()).unwrap(), theirs_token);
+        assert_eq!(crate::config::view(home.path()).unwrap().port.get(), theirs);
+        assert_eq!(v.port(), port);
+    }
+
+    /// W6 (Codex's final security review): a save that names no other port (the port it serves
+    /// on, or no `view` at all) and waited for config.lock while `oboete view --new-token` held it
+    /// changes nothing either, even with the version the command wrote: it would put the old
+    /// port back while the command hands out the new one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6p_a_plain_save_behind_the_commands_new_token_changes_nothing() {
+        let (home, port, old, v) = w6p_resident();
+        for view in [Some(json!({"port": port})), None] {
+            let held = crate::settings::config_lock(home.path()).unwrap();
+            let theirs = free_port();
+            crate::settings::set_view_port(home.path(), theirs).unwrap();
+            let mut body: Value =
+                serde_json::from_slice(&save_body(&crate::settings::show(home.path()))).unwrap();
+            match &view {
+                Some(view) => body["view"] = view.clone(),
+                None => drop(body.as_object_mut().unwrap().remove("view")),
+            }
+            let saver = {
+                let (v, old) = (Arc::clone(&v), old.clone());
+                std::thread::spawn(move || w6p_post(&v, &old, "/api/settings", &body))
+            };
+            std::thread::sleep(Duration::from_millis(300));
+            write_token(home.path()).unwrap();
+            let theirs_token = file_token(home.path()).unwrap();
+            drop(held);
+            let (status, answer) = saver.join().unwrap();
+            assert_eq!(status, 401, "{view:?}: {answer}");
+            assert_eq!(file_token(home.path()).unwrap(), theirs_token);
+            assert_eq!(crate::config::view(home.path()).unwrap().port.get(), theirs);
+            // Back to the page's token and port for the next round.
+            crate::settings::set_view_port(home.path(), port).unwrap();
+            std::fs::write(home.path().join("state/view-token"), &old).unwrap();
+        }
+    }
+
+    /// W6 (Codex on its security review): a new token that cannot be staged refuses the port save
+    /// before anything is written, so the old port keeps serving and its token stays the one that
+    /// works: no move leaves the old token behind a free port.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6p_a_port_save_whose_token_cannot_be_written_changes_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no arguments and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root writes into a read-only folder
+        }
+        let (home, port, token, _v) = w6p_resident();
+        let (status, shown) = w6p_call(port, "GET", "/api/settings", &token, None);
+        assert_eq!(status, 200, "{shown}");
+        let mut body: Value = serde_json::from_slice(&save_body(&shown)).unwrap();
+        body["view"] = json!({"port": free_port()});
+        let state = home.path().join("state");
+        let config = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        // The lock file is there already, as after any earlier save; only a new file is refused.
+        drop(crate::settings::config_lock(home.path()).unwrap());
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let (status, refusal) = w6p_call(port, "POST", "/api/settings", &token, Some(&body));
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            (status, refusal["code"].as_str()),
+            (500, Some("write_failed"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+            config
+        );
+        assert_eq!(file_token(home.path()).unwrap(), token);
+        assert_eq!(w6p_call(port, "GET", "/api/settings", &token, None).0, 200);
+    }
+
+    /// W6 (CodeRabbit): a port save's settings are written only once its new token is in place.
+    /// One the settings refuse makes no token, and one whose token cannot be put in place writes
+    /// none of its settings, the port and every other key alike.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6p_a_port_save_writes_its_settings_only_after_its_token() {
+        let (home, port, token, v) = w6p_resident();
+        let (status, shown) = w6p_call(port, "GET", "/api/settings", &token, None);
+        assert_eq!(status, 200, "{shown}");
+        let mut body: Value = serde_json::from_slice(&save_body(&shown)).unwrap();
+        let to = free_port();
+        body["view"] = json!({"port": to});
+        body["capture"]["store_prompts"] =
+            json!(!shown["capture"]["store_prompts"].as_bool().unwrap());
+        let config = || std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        let before = config();
+        let mut stale = body.clone();
+        stale["version"] = json!("another");
+        let (status, refusal) = w6p_post(&v, &token, "/api/settings", &stale);
+        assert_eq!((status, refusal["code"].as_str()), (409, Some("stale")));
+        assert_eq!(file_token(home.path()).unwrap(), token);
+        assert_eq!(w6p_call(port, "GET", "/api/settings", &token, None).0, 200);
+        // The token's place taken by a folder: the staged token cannot be renamed there.
+        let place = home.path().join("state/view-token");
+        std::fs::remove_file(&place).unwrap();
+        std::fs::create_dir(&place).unwrap();
+        let r = v.save_with_new_token(&serde_json::to_vec(&body).unwrap(), to);
+        let answer: Value = serde_json::from_slice(&r.body).unwrap();
+        assert!(r.status == 500 && answer["code"] == "write_failed");
+        assert_eq!(config(), before);
+        assert!(place.is_dir());
+        assert_eq!(v.port(), port);
+        let left = |dir: &Path| {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with("tmp"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(left(home.path()), Vec::<String>::new());
+        assert_eq!(left(&home.path().join("state")), Vec::<String>::new());
+    }
+
+    /// W6 (Codex on its security review): a saved port is bound, written and moved onto under
+    /// the hold a new token takes too, so a save that waited cannot move the page back after a new
+    /// token has answered with its own port.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6p_a_port_save_waits_while_another_move_is_made() {
+        let (home, port, token, v) = w6p_resident();
+        let (status, shown) = w6p_call(port, "GET", "/api/settings", &token, None);
+        assert_eq!(status, 200, "{shown}");
+        let mut body: Value = serde_json::from_slice(&save_body(&shown)).unwrap();
+        let to = free_port();
+        body["view"] = json!({"port": to});
+        let file = || std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        let config = file();
+        let held = v.moving.lock().unwrap();
+        let saver = {
+            let v = Arc::clone(&v);
+            std::thread::spawn(move || w6p_post(&v, &token, "/api/settings", &body))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            file(),
+            config,
+            "the save wrote while another move was being made"
+        );
+        assert_eq!(view_outcome(home.path()), format!("listening {port}"));
+        drop(held);
+        let (status, saved) = saver.join().unwrap();
+        assert_eq!(status, 200, "{saved}");
+        assert_eq!(saved["view_runtime"]["port"], to);
+        assert_eq!(view_outcome(home.path()), format!("listening {to}"));
+    }
+
+    /// W6: a foreground run's token is its own and ends with it: there is none to replace. A port
+    /// saved on its page is the resident viewer's, so the run stays where it is, and a home that is
+    /// not resident starts no resident viewer.
+    #[test]
+    fn w6p_a_foreground_run_keeps_its_token_and_its_port() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("config.toml"), "[view]\nport = 17399\n").unwrap();
+        let token = "f".repeat(32);
+        let v = Viewer::new(home.path(), None, 4323, Token::Run(token.clone()));
+        let host = "127.0.0.1:4323";
+        let got = request(
+            &v,
+            "GET",
+            "/api/settings",
+            &[("Host", host), ("X-Oboete-Token", &token)],
+            &[],
+        );
+        let shown: Value = serde_json::from_slice(&got.body).unwrap();
+        assert_eq!(
+            shown["view_runtime"],
+            json!({"port": 4323, "mode": "foreground"})
+        );
+        let (status, refusal) = w6p_post(&v, &token, "/api/view/token", &json!({}));
+        assert_eq!(
+            (status, refusal["code"].as_str()),
+            (409, Some("foreground"))
+        );
+        assert!(!home.path().join("state/view-token").exists());
+        let (status, refusal) = w6p_post(&v, &token, "/api/view/resident", &json!({}));
+        assert_eq!(
+            (status, refusal["code"].as_str()),
+            (409, Some("not_resident"))
+        );
+        let mut body: Value = serde_json::from_slice(&save_body(&shown)).unwrap();
+        body["view"] = json!({"port": 17400});
+        let (status, saved) = w6p_post(&v, &token, "/api/settings", &body);
+        assert_eq!(status, 200, "{saved}");
+        assert_eq!(
+            saved["view_runtime"],
+            json!({"port": 4323, "mode": "foreground"})
+        );
+        assert_eq!(crate::config::view(home.path()).unwrap().port.get(), 17400);
+        assert_eq!(v.port(), 4323);
+        let guarded = Viewer::new(home.path(), None, 4321, Token::Run("t0k".into()));
+        for path in ["/api/view/token", "/api/view/resident"] {
+            save_guards(&guarded, path, MAX_BODY, b"{}");
+        }
+    }
+
+    /// W6 (the commit security review): a resident port saved on a foreground run's page replaces
+    /// the token file too, since the resident viewer comes back on that port at its tick and the
+    /// old bookmark's port is free then; the run keeps its own token and port, and its answer
+    /// holds no address.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6p_a_resident_port_saved_in_the_foreground_replaces_the_token_file() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("config.toml"), "[view]\nport = 17398\n").unwrap();
+        std::fs::create_dir_all(home.path().join("state")).unwrap();
+        write_token(home.path()).unwrap();
+        let old = file_token(home.path()).unwrap();
+        let token = "e".repeat(32);
+        let v = Viewer::new(home.path(), None, 4324, Token::Run(token.clone()));
+        let shown = crate::settings::show(home.path());
+        let mut body: Value = serde_json::from_slice(&save_body(&shown)).unwrap();
+        body["view"] = json!({"port": 17399});
+        let (status, saved) = w6p_post(&v, &token, "/api/settings", &body);
+        assert_eq!(status, 200, "{saved}");
+        assert_eq!(
+            saved["view_runtime"],
+            json!({"port": 4324, "mode": "foreground"})
+        );
+        assert_eq!(crate::config::view(home.path()).unwrap().port.get(), 17399);
+        assert_ne!(file_token(home.path()).unwrap(), old);
+        // The same port again changes nothing more.
+        let new = file_token(home.path()).unwrap();
+        let mut body: Value =
+            serde_json::from_slice(&save_body(&crate::settings::show(home.path()))).unwrap();
+        body["view"] = json!({"port": 17399});
+        assert_eq!(w6p_post(&v, &token, "/api/settings", &body).0, 200);
+        assert_eq!(file_token(home.path()).unwrap(), new);
+    }
+
+    /// W6: R7 from a foreground run's page once its home is saved resident: the answer is the
+    /// address of the resident viewer that is up (here one this test started), with its file's
+    /// token, and the run takes no more connections and returns once that answer is sent.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6p_a_foreground_run_hands_its_page_to_the_resident_viewer_and_ends() {
+        let (home, port, token, _) = w6p_resident();
+        // Held here, so the bring-up starts no worker from a test.
+        let _worker = crate::worker::lock(home.path()).unwrap().unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let run = listener.local_addr().unwrap().port();
+        let mine = "r".repeat(32);
+        let v = Arc::new(Viewer::new(
+            home.path(),
+            None,
+            run,
+            Token::Run(mine.clone()),
+        ));
+        let ended = std::thread::spawn(move || accept(listener, &v));
+        let on = |port: u16, token: &str| {
+            w6p_call(port, "POST", "/api/view/resident", token, Some(&json!({})))
+        };
+        let (status, refusal) = on(port, &token);
+        assert_eq!((status, refusal["code"].as_str()), (409, Some("resident")));
+        let (status, answer) = on(run, &mine);
+        assert_eq!(status, 200, "{answer}");
+        assert_eq!(answer["url"], format!("http://127.0.0.1:{port}/#t={token}"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ended.is_finished() {
+            assert!(Instant::now() < deadline, "the run did not end");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(w6p_closed(run), "the run's address still answers");
     }
 }

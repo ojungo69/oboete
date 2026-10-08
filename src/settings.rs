@@ -117,12 +117,14 @@ pub fn show(home: &Path) -> Value {
             parsed(&path, t)?,
             alone(&path, &doc)?,
             config::parse_worker(t).ok()?,
+            config::parse_view(t).ok()?,
             provider_rows(&path, &doc)?,
             crate::backup::location(t).ok()?,
             config::parse_capture(Some(t)).ok()?.redaction,
         ))
     });
-    let Some(((cfg, capture, inject), alone, worker, providers, backup, redaction)) = read else {
+    let Some(((cfg, capture, inject), alone, worker, view, providers, backup, redaction)) = read
+    else {
         return json!({"version": version, "error": "file_invalid"});
     };
     let ledger = crate::providers_db::read_only(home);
@@ -165,6 +167,7 @@ pub fn show(home: &Path) -> Value {
         "first_run": bytes.is_none(),
         "resident_supported": cfg!(target_os = "linux"),
         "worker": {"resident": worker.resident},
+        "view": {"port": view.port.get()},
         "summary": {
             "curate": cfg.summary.curate,
             "language": cfg.summary.language,
@@ -206,6 +209,7 @@ pub fn show(home: &Path) -> Value {
             "correction_chars": range(config::CORRECTION_CHARS),
             "daily_budget": [BUDGET.start(), BUDGET.end()],
             "timeout_s": [TIMEOUT_S.start(), TIMEOUT_S.end()],
+            "view_port": [1, u16::MAX],
         },
     })
 }
@@ -450,6 +454,8 @@ struct Save {
     version: String,
     /// An older page omitting this field keeps its saved mode.
     worker: Option<WorkerIn>,
+    /// Older pages omitting this field keep the saved port.
+    view: Option<ViewIn>,
     summary: SummaryIn,
     paid_usd_per_month: f64,
     gemini: Option<config::GeminiPlace>,
@@ -474,6 +480,12 @@ struct BackupIn {
 #[serde(deny_unknown_fields)]
 struct WorkerIn {
     resident: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewIn {
+    port: std::num::NonZeroU16,
 }
 
 /// Only the summary fields the page edits; `shrink` stays as the file has it.
@@ -623,20 +635,42 @@ pub fn test_provider(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
     providers::test(home, body)
 }
 
-/// The page's save: checks the request against the file it read (`version`), writes the page's
-/// keys into it and checks the result as every reader parses it before it replaces the file, and
-/// answers the new `show`. A value that equals the entry's own is not written, so it keeps
-/// following later changes to the defaults.
+/// `save_held` with its holds taken, as the tests save.
+#[cfg(test)]
 pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
-    let posted: Save = serde_json::from_slice(body).map_err(|e| match e.classify() {
-        serde_json::error::Category::Data => refused(422, "type", ""),
-        _ => refused(400, "bad_request", ""),
-    })?;
     // Two tabs saving at once: one after the other, and the second finds the file changed.
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _config = config_lock(home).map_err(|_| refused(500, "write_failed", ""))?;
+    save_held(home, body)
+}
+
+/// The page's save: checks the request against the file it read (`version`), writes the page's
+/// keys into it and checks the result as every reader parses it before it replaces the file, and
+/// answers the new `show`. A value that equals the entry's own is not written, so it keeps
+/// following later changes to the defaults. The caller holds `saving` and config.lock, under
+/// which the viewer checks the page's token first.
+pub fn save_held(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
+    if let Some(staged) = stage_held(home, body)? {
+        staged
+            .commit()
+            .map_err(|_| refused(500, "write_failed", ""))?;
+    }
+    Ok(show(home))
+}
+
+/// `save_held` short of its rename: every refusal it gives, and the new file staged beside
+/// config.toml (`None` when nothing would change). A port saved on the resident page renames it
+/// only once the new token is in place (docs/resident.md R6).
+pub(crate) fn stage_held(
+    home: &Path,
+    body: &[u8],
+) -> Result<Option<crate::setup::Staged>, Refusal> {
+    let posted: Save = serde_json::from_slice(body).map_err(|e| match e.classify() {
+        serde_json::error::Category::Data => refused(422, "type", ""),
+        _ => refused(400, "bad_request", ""),
+    })?;
     let path = home.join("config.toml");
     let was = bytes(home).map_err(|_| invalid())?;
     if version(was.as_deref()) != posted.version {
@@ -658,6 +692,16 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
         if saved != Some(worker.resident) {
             // An explicit first off choice is a real setting too, even though off was the default.
             put(&mut doc, "worker", "resident", worker.resident.into());
+        }
+    }
+    if let Some(view) = &posted.view {
+        let port = i64::from(view.port.get());
+        let saved = doc
+            .get("view")
+            .and_then(|table| table.get("port"))
+            .and_then(toml_edit::Item::as_integer);
+        if saved != Some(port) {
+            put(&mut doc, "view", "port", port.into());
         }
     }
     if posted.paid_usd_per_month != now.paid_usd_per_month {
@@ -740,7 +784,7 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
     write_chain(&mut doc, &now.chain, reordered, chain);
     let candidate = doc.to_string();
     if candidate == text {
-        return Ok(show(home));
+        return Ok(None);
     }
     parsed(&path, &candidate).ok_or_else(invalid)?;
     let staged =
@@ -751,16 +795,13 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
     if version(bytes(home).map_err(|_| invalid())?.as_deref()) != posted.version {
         return Err(refused(409, "stale", ""));
     }
-    staged
-        .commit()
-        .map_err(|_| refused(500, "write_failed", ""))?;
-    Ok(show(home))
+    Ok(Some(staged))
 }
 
 /// `[view] port` set to `port`, the rest of config.toml as it was (`oboete view --new-token`,
 /// docs/resident.md R6); a file changed by hand between the read and the write is not overwritten.
+/// The caller holds config.lock (`view::rotate`).
 pub fn set_view_port(home: &Path, port: u16) -> anyhow::Result<()> {
-    let _config = config_lock(home)?;
     let path = home.join("config.toml");
     let was = bytes(home)?;
     let text = utf8(was.as_deref()).ok_or_else(|| anyhow::anyhow!("config.toml is not UTF-8"))?;
@@ -1711,6 +1752,52 @@ mod tests {
             text,
             "a repeated save rewrote retained comments"
         );
+    }
+
+    #[test]
+    fn w6p_view_port_save_is_shared_and_older_payloads_preserve_it() {
+        let original = "providers = []\n# retained configuration\n[view]\nport = 17374 # chosen\n";
+        let home = home_with(Some(original));
+        let shown = show(home.path());
+        assert_eq!(shown["view"]["port"], 17374);
+        assert_eq!(file(&home).as_deref(), Some(original));
+
+        let body = posted(&shown, |v| v["view"] = json!({"port": 43123}));
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(saved["view"]["port"], 43123);
+        assert_eq!(config::view(home.path()).unwrap().port.get(), 43123);
+        assert!(file(&home).unwrap().contains("# chosen"));
+        assert!(file(&home).unwrap().contains("# retained configuration"));
+
+        let body = posted(&saved, |v| v["summary"]["language"] = json!("English"));
+        let kept = save_to(&home, &body).unwrap();
+        assert_eq!(kept["view"]["port"], 43123);
+        assert_eq!(config::view(home.path()).unwrap().port.get(), 43123);
+    }
+
+    #[test]
+    fn w6p_invalid_or_stale_view_ports_keep_the_saved_configuration() {
+        let original = "providers = []\n[view]\nport = 17374\n";
+        let home = home_with(Some(original));
+        let shown = show(home.path());
+        for view in [
+            json!({}),
+            json!({"port": 0}),
+            json!({"port": 65536}),
+            json!({"port": "private-port-canary"}),
+            json!({"port": 43123, "token": "private-port-canary"}),
+        ] {
+            let refusal = save_to(&home, &posted(&shown, |v| v["view"] = view)).unwrap_err();
+            assert_eq!((refusal.status, refusal.code), (422, "type"));
+            assert!(!format!("{refusal:?}").contains("private-port-canary"));
+            assert_eq!(file(&home).as_deref(), Some(original));
+        }
+        let body = posted(&shown, |v| v["view"] = json!({"port": 43123}));
+        let edited = format!("{original}# later owner edit\n");
+        std::fs::write(home.path().join("config.toml"), &edited).unwrap();
+        let refusal = save_to(&home, &body).unwrap_err();
+        assert_eq!((refusal.status, refusal.code), (409, "stale"));
+        assert_eq!(file(&home).as_deref(), Some(edited.as_str()));
     }
 
     #[test]

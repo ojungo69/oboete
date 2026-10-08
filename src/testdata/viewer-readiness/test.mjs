@@ -16,6 +16,7 @@ class Node {
   removeAttribute(name){delete this.attrs[name];}
   querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
   querySelectorAll(selector){
+    if(selector.includes(','))return selector.split(',').flatMap(part=>this.querySelectorAll(part.trim()));
     const tag=selector.toUpperCase();
     return this.children.filter(node=>node&&typeof node==='object').flatMap(node=>[
       ...(node.tagName===tag||selector.startsWith('.')&&node.className.split(' ').includes(selector.slice(1))?[node]:[]),
@@ -26,13 +27,20 @@ class Node {
   get options(){return this.children.filter(node=>node?.tagName==='OPTION');}
   click(){for(const cb of this.listeners.click||[])cb({target:this});}
   focus(){this.focused=true;}
+  closest(selector){
+    for(let node=this;node;node=node.parentElement){
+      if(node.tagName===selector.toUpperCase()||selector.startsWith('.')&&node.className.split(' ').includes(selector.slice(1)))return node;
+    }
+    return null;
+  }
 }
 
 const ids=new Map();
 const document={activeElement:null,createElement:tag=>new Node(tag),getElementById:id=>{
   if(!ids.has(id))ids.set(id,new Node());return ids.get(id);
 }};
-const ctx=vm.createContext({document,location:{hash:''},URL,URLSearchParams,navigator:{language:'en'},
+const ctx=vm.createContext({document,location:{hash:'#t=0123456789abcdef0123456789abcdef',port:'17373',
+  replaced:[],replace(url){this.replaced.push(url);}},URL,URLSearchParams,navigator:{language:'en'},
   localStorage:{getItem(){return null;},setItem(){}},window:{addEventListener(){}},
   setInterval(){},TextEncoder,Uint8Array,console});
 const sourcePath=fs.realpathSync(process.argv[2]||new URL('../../../assets/viewer/app.js',import.meta.url));
@@ -518,4 +526,117 @@ for(const alreadyLoaded of [false,true]) {
 }
 console.log('PASS: four tier draft plans, source-backed grouping and unrelated drafts preserved');
 
+}
+
+// W6: the page's address: the saved port beside the one this page is on, a save that moves the
+// resident page, a new token, and a foreground run's way to the resident page.
+{
+const settings=(mode,extra={})=>({version:'v1',first_run:false,resident_supported:true,worker:{resident:true},view:{port:17373},
+  summary:{curate:false,language:'Japanese',window_tokens:6000,idle_minutes:10},paid_usd_per_month:0,gemini:null,usd_this_month:0,
+  stopped:null,inject:{session_start:true,session_start_note:true,per_prompt:false,correction:true,session_start_chars:6000,
+    per_prompt_chars:1500,correction_chars:800},capture:{store_prompts:false,tool_output:'full'},backup:{dir:null},
+  redaction:{extra_rules:[],allowlist:[]},chain:[],providers:[],warnings:[],key_input:null,
+  ranges:{session_start_chars:[0,20000],per_prompt_chars:[0,5000],correction_chars:[0,2000],window_tokens:[1000,100000],
+    idle_minutes:[1,120],paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535]},
+  view_runtime:{port:17373,mode},...extra});
+vm.runInContext('globalThis.w6={formOf,saveBody,applySavedSettings,viewDraft:()=>viewDraft};',ctx);
+const {w6}=ctx;
+const json=(value,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=>'application/json'},json:async()=>value});
+const posted=[];let answers=[];
+ctx.fetch=(url,options)=>{
+  if(options?.method==='POST'){posted.push({url,body:options.body});return Promise.resolve(answers.shift());}
+  return new Promise(()=>{});
+};
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+const section=()=>panel.querySelector('.view-address');
+const button=()=>section()?.querySelectorAll('button').find(node=>node.dataset.action?.startsWith('view.'));
+const field=name=>panel.querySelectorAll('input').find(node=>node.dataset.field===name);
+ctx.ui.setLang('en');ctx.ui.setView('settings');
+
+// The port field shows what is saved; a save sends a port only when it changed.
+let f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.equal(field('view.port').value,'17373');
+let shown=text(panel);
+assert(shown.includes('Saved: 17373')&&shown.includes('moves this page there at once'),'resident port field and its effect');
+assert.equal(w6.saveBody().body.view,undefined,'an unchanged port is not sent');
+f.view.port='17400';
+assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.view)),{port:17400});
+f.view.port='65536';
+assert.equal(w6.saveBody().field,'view.port','an out-of-range port is refused before sending');
+
+// A save the resident viewer answers from another port: the page follows the answer's address,
+// which carries the new token, and nothing else.
+ctx.location.replaced.length=0;
+const moved='http://127.0.0.1:17400/#t=ffeeddccbbaa99887766554433221100';
+w6.applySavedSettings(settings('resident',{view:{port:17400},view_runtime:{port:17400,mode:'resident',url:moved}}),f,null);
+assert.deepEqual(Array.from(ctx.location.replaced),[`${moved}&moved=1`]);
+ctx.location.replaced.length=0;
+for(const url of [undefined,'http://example.com:17400/#t=ffeeddccbbaa99887766554433221100']){
+  w6.applySavedSettings(settings('resident',{view:{port:17400},view_runtime:{port:17400,mode:'resident',url}}),f,null);
+  assert.equal(ctx.location.replaced.length,0,'a move without an address the page can vet is not followed');
+  assert(document.getElementById('status').textContent.includes('run oboete view'),'the page says how to find the address');
+}
+ctx.location.replaced.length=0;
+w6.applySavedSettings(settings('foreground',{view:{port:17400},view_runtime:{port:4323,mode:'foreground'}}),f,null);
+assert.equal(ctx.location.replaced.length,0,'a foreground run stays on its own address');
+// Port 80 is no port in the browser's address: a save that stays there is no move.
+ctx.location.port='';
+w6.applySavedSettings(settings('resident',{view:{port:80},view_runtime:{port:80,mode:'resident'}}),f,null);
+assert.equal(ctx.location.replaced.length,0,'a save on port 80 stays where it is');
+assert(!document.getElementById('status').textContent.includes('run oboete view'),'a save on port 80 is not a lost move');
+ctx.location.port='17373';
+
+// A port another program holds is refused as such: no stale reload, and what was typed stays.
+f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
+f.view.port='17400';
+answers=[json({code:'port_unavailable',field:'view.port'},409)];
+for(const cb of panel.querySelector('form').listeners.submit||[])cb({preventDefault(){}});
+await settle();
+assert(document.getElementById('status').textContent.includes('This port cannot be used'),'the refusal is shown, not a stale save');
+assert.equal(f.view.port,'17400','the port typed is kept');
+
+// A new token: confirmed first, then the page goes on only at a vetted address.
+f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(text(section()).includes('old bookmark'),'the effect is explained before the action');
+assert(button().disabled,'a new token waits for the confirmation');
+const consent=section().querySelectorAll('input').find(node=>node.dataset.field==='view.confirmed');
+consent.value=true;consent.checked=true;for(const cb of consent.listeners.change||[])cb({target:consent});
+assert(!button().disabled);
+answers=[json({url:'http://evil.example:80/#t=0123456789abcdef0123456789abcdef'})];
+button().click();await settle();
+assert.equal(ctx.location.replaced.length,0,'an address the page cannot vet is not followed');
+assert.deepEqual(posted.at(-1),{url:'/api/view/token',body:'{}'});
+assert(button().disabled,'the confirmation is asked for again');
+w6.viewDraft().confirmed=true;ctx.ui.drawSettings();
+const next='http://127.0.0.1:17401/#t=fedcba9876543210fedcba9876543210';
+answers=[json({url:next})];
+button().click();await settle();
+assert.deepEqual(Array.from(ctx.location.replaced),[`${next}&moved=1`]);
+ctx.location.replaced.length=0;
+w6.viewDraft().confirmed=true;ctx.ui.drawSettings();
+answers=[json({code:'unchanged',field:''},503)];
+button().click();await settle();
+assert(text(section()).includes('The token was not replaced'),'a refusal says nothing changed');
+w6.viewDraft().confirmed=true;ctx.ui.drawSettings();
+answers=[Promise.reject(new Error('invented lost answer'))];
+button().click();await settle();
+assert(text(section()).includes('oboete view'),'a lost answer names the way back');
+
+// A foreground run of a home saved resident offers the resident page; one not saved so, nothing.
+f=w6.formOf(settings('foreground'));ctx.ui.setForm(f);ctx.ui.drawSettings();
+shown=text(panel);
+assert(shown.includes('keeps its own address')&&text(section()).includes('port 17373'),'foreground effect and the fixed port');
+answers=[json({code:'port_in_use',field:''},503)];
+button().click();await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/view/resident',body:'{}'});
+assert(text(section()).includes('Another program uses port 17373'));
+answers=[json({url:'http://127.0.0.1:17373/#t=00112233445566778899aabbccddeeff'})];
+button().click();await settle();
+assert.deepEqual(Array.from(ctx.location.replaced),['http://127.0.0.1:17373/#t=00112233445566778899aabbccddeeff&moved=1']);
+f=w6.formOf(settings('foreground',{worker:{resident:false}}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.equal(section(),null,'nothing to start before the resident choice is saved');
+ctx.ui.setLang('ja');f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(text(section()).includes('古いブックマーク')&&text(panel).includes('常駐の画面のポート'),'Japanese page address');
+ctx.ui.setLang('en');
+console.log('PASS: page address, moves, new token and the resident page from a foreground run');
 }
