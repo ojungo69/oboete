@@ -1176,6 +1176,18 @@ mod tests {
         assert_eq!(ask("M5 worker")[0], cards[2]);
         assert_eq!(ask("M5"), [cards[2].clone()]);
         assert!(ask("zqxv").is_empty(), "malformed facts are not indexed");
+        // #403: an index built before notes were indexed is built again, once.
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        k.execute_batch(
+            "DELETE FROM turns_fts;
+             INSERT INTO turns_fts(rowid, text)
+               SELECT rowid, json_extract(fields, '$.request') FROM turns WHERE skipped = 0;
+             PRAGMA user_version = 0;",
+        )
+        .unwrap();
+        drop(k);
+        assert_eq!(ask("nimbus"), std::slice::from_ref(&summary));
+        assert_eq!(ask("umbra"), std::slice::from_ref(&summary));
     }
 
     /// Q3/Q5: a filtered raw leg retains the existing pending-removal rule: even a full

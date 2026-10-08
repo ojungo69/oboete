@@ -636,16 +636,22 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS turns_repo ON turns(repo, ts);
          CREATE INDEX IF NOT EXISTS turns_through ON turns(device, through);",
     )?;
-    if !crate::consumer::manifest::exists(k, "table", "turns_fts")? {
+    let fresh = !crate::consumer::manifest::exists(k, "table", "turns_fts")?;
+    // knowledge.db's `user_version` 1: `turns_fts` holds the summaries' notes (#403). An index
+    // built before them is built again, once.
+    let old = k.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 1;
+    if fresh || old {
         let tx = if k.is_autocommit() {
             Some(k.unchecked_transaction()?)
         } else {
             None
         };
         k.execute_batch(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(text, tokenize='trigram');",
+            "CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(text, tokenize='trigram');
+             DELETE FROM turns_fts;",
         )?;
         crate::consumer::fts::turns(k, None)?;
+        k.execute_batch("PRAGMA user_version = 1")?;
         if let Some(tx) = tx {
             tx.commit()?;
         }
