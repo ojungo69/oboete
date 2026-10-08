@@ -17,8 +17,10 @@ separate timed write/index/FTS/MCP-get-and-delete probe.
 Invalid configuration recovery is a fixed operation: preview current bounded
 bytes without writing, require a random confirmation bound server-side to their
 version and file/home identity, retain a verified owner-only copy of those exact bytes, then install a
-validated configuration with curation, embeddings, paid usage and resident mode
-off. Keep stores, agent files and key files. Refuse stale input, unsafe storage or
+validated configuration with curation, embeddings, paid usage, resident mode,
+prompt-text saving and memory injection off. Other capture uses built-in redaction;
+custom redaction rules and other custom settings return to defaults. Already
+admitted work may finish. Keep stores, agent files and key files. Refuse stale input, unsafe storage or
 failed backup/staging; preserve any already-created recoverable copy. No raw
 editor, arbitrary path, shell execution, model call or automatic retry is added.
 Use the shared settings lock/stager and existing private-storage checks. Platform
