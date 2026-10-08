@@ -3140,7 +3140,8 @@ let recoveryDraft = {preview:null,confirmed:false,busy:false,unknown:false,error
 // The page goes on only at an address the viewer gave: 127.0.0.1, a port and a token.
 const PAGE_URL = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/#t=[0-9a-f]{32}$/;
 function movePage(url) {
-  if (!(Number(PAGE_URL.exec(url)?.[1]) <= 65535)) return false;
+  const port = Number(PAGE_URL.exec(url)?.[1]);
+  if (Number.isNaN(port) || port > 65535) return false;
   location.replace(`${url}&moved=1`);
   return true;
 }
@@ -4193,7 +4194,9 @@ function applySavedSettings(answer, mine, current) {
   form = current ? formOf(current) : mergeProviderSettings(answer, mine, { op: 'settings' });
   if (form) form.privacy = privacyUnavailable();
   drawSettings();
-  setStatus(t(moved ? 'view_lost' : current ? 'stale' : 'saved'), Boolean(current) || moved, lang);
+  let status = current ? 'stale' : 'saved';
+  if (moved) status = 'view_lost';
+  setStatus(t(status), Boolean(current) || moved, lang);
   if (form) void refreshPrivacy(form);
 }
 
