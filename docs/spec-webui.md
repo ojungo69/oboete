@@ -59,6 +59,8 @@ Validate endpoint destinations and secret handling using the existing provider s
 
 Implement incrementally on Design B. The base settings page remains work alongside milestones 3/4; model setup, privacy operations, sync and maintenance UI follow their backing milestones. Do not move every backend into milestone 4, discard finished work, or restart the project. #94 is the umbrella completion tracker and must not close after only the original narrow form is done.
 
+For #336, the owner's October 8 order keeps W5C → W6 → local embedding/W4 → N1 → parity/M5 first, followed by A/B and their supported UI before the owner's PC cutover. The held model-evaluation conditions remain in force.
+
 Before the corresponding functionality is declared complete, verify:
 
 - [ ] A fresh user goes from initial launch to a configured agent and successful record/search round trip without hand-entered commands or config/key-file edits. Enumerate only unavoidable external steps, each with a return/resume path.

@@ -57,6 +57,7 @@ struct Viewer {
     saving: Mutex<()>,
     /// One synchronous maintenance operation and its last bounded receipt.
     maintenance: crate::settings::maintenance::Maintenance,
+    agents: crate::setup::agents::Agents,
     /// The page `--open` gave the browser opener, removed by the first request with the token.
     opener: Mutex<Option<PathBuf>>,
     /// Connections being served: at most `MAX_CONNECTIONS`.
@@ -881,6 +882,7 @@ impl Viewer {
             token,
             saving: Mutex::new(()),
             maintenance: crate::settings::maintenance::Maintenance::default(),
+            agents: crate::setup::agents::Agents::default(),
             opener: Mutex::new(None),
             live: AtomicUsize::new(0),
             requests: AtomicUsize::new(0),
@@ -1001,6 +1003,8 @@ impl Viewer {
             ("POST", "/api/claims/mute") => (MAX_BODY, Self::claim_mute),
             ("POST", "/api/preferences") => (MAX_BODY, Self::preference),
             ("POST", "/api/maintenance/preview") => (MAX_BODY, Self::maintenance_preview),
+            ("POST", "/api/setup/preview") => (MAX_BODY, Self::agent_preview),
+            ("POST", "/api/setup/start") => (MAX_BODY, Self::agent_start),
             ("POST", "/api/maintenance/start") => (MAX_BODY, Self::maintenance_start),
             _ => return Head::Answer(self.route(method, target, headers)),
         };
@@ -1194,6 +1198,21 @@ impl Viewer {
         )
     }
 
+    fn agent_preview(&self, body: &[u8]) -> Response {
+        saved(
+            self.agents
+                .preview(self.maintenance_caller(), &self.home, body),
+        )
+    }
+
+    fn agent_start(&self, body: &[u8]) -> Response {
+        // This request keeps its original Slot until the synchronous receipt is stored.
+        saved(
+            self.agents
+                .start(self.maintenance_caller(), &self.home, &self.saving, body),
+        )
+    }
+
     fn maintenance_caller(&self) -> Option<crate::executable::CommandCaller> {
         match &self.token {
             Token::Run(_) => Some(crate::executable::CommandCaller::Worker),
@@ -1272,6 +1291,13 @@ impl Viewer {
                 Response::json(&json!(crate::setup::readiness(&self.home)))
             } else {
                 Response::text(400, "inventory carries no query")
+            };
+        }
+        if name == "setup/operation" {
+            return if query.is_empty() {
+                Response::json(&self.agents.show())
+            } else {
+                Response::text(400, "status carries no query")
             };
         }
         if name == "maintenance" {
@@ -2681,6 +2707,55 @@ mod tests {
         }
         assert!(!home.exists(), "status initialized the absent destination");
         assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn w6a_agent_operations_reject_untyped_input_before_effects() {
+        let home = tempfile::tempdir().unwrap();
+        let v = Viewer::new(home.path(), None, 4321, Token::Run("t0k".into()));
+        for path in ["/api/setup/preview", "/api/setup/start"] {
+            save_guards(&v, path, MAX_BODY, b"{}");
+            for body in [
+                json!({}),
+                json!({"action":"repair","agents":["claude"]}),
+                json!({"action":"wire","agents":[]}),
+                json!({"action":"wire","agents":["claude","claude"]}),
+                json!({"action":"wire","agents":["not-an-agent"]}),
+                json!({"action":"wire","agents":["claude"],"path":"private-input-canary"}),
+                json!({"action":"wire","agents":["claude"],"command":"private-input-canary"}),
+            ] {
+                let body = body.to_string();
+                let length = body.len().to_string();
+                let answer = request(
+                    &v,
+                    "POST",
+                    path,
+                    &[
+                        HOST,
+                        TOKEN,
+                        ("Origin", "http://127.0.0.1:4321"),
+                        ("Content-Type", "application/json"),
+                        ("Content-Length", &length),
+                    ],
+                    body.as_bytes(),
+                );
+                assert_eq!(answer.status, 400);
+                assert!(
+                    !String::from_utf8(answer.body)
+                        .unwrap()
+                        .contains("private-input-canary")
+                );
+            }
+        }
+        let path = "/api/setup/operation";
+        assert_eq!(v.route("GET", path, &[HOST]).status, 401);
+        assert_eq!(
+            v.route("GET", "/api/setup/operation?extra=1", &[HOST, TOKEN])
+                .status,
+            400
+        );
+        assert_eq!(get(&v, path), json!({"active":null,"last":null}));
+        assert!(std::fs::read_dir(home.path()).unwrap().next().is_none());
     }
 
     #[test]
@@ -4409,7 +4484,7 @@ curate = false
         assert_eq!(keys(&get(&v, "/api/search?q=parser"), "hits"), before);
     }
 
-    /// D11: the page puts store text into text nodes only and deletes nothing.
+    /// D11: store text uses text nodes; page writes use fixed POST operations.
     #[test]
     fn the_page_puts_store_text_into_text_nodes_only() {
         for sink in [
@@ -4424,13 +4499,18 @@ curate = false
         ] {
             assert!(!APP_JS.contains(sink), "{sink}");
         }
-        let js = APP_JS.to_ascii_lowercase();
-        for quote in ['\'', '"', '`'] {
-            assert!(
-                !js.contains(&format!("{quote}delete{quote}")),
-                "a DELETE request"
-            );
-        }
+        let methods = regex::Regex::new(r"\bmethod\s*:\s*([^,}\r\n]+)").unwrap();
+        let fixed_methods = |js: &str| {
+            methods
+                .captures_iter(js)
+                .all(|found| matches!(found[1].trim(), "'POST'" | "\"POST\"" | "'GET'" | "\"GET\""))
+        };
+        assert!(
+            fixed_methods(APP_JS),
+            "page request uses an unsupported or dynamic method"
+        );
+        assert!(!fixed_methods("fetch('/api/x', {method: 'DELETE'})"));
+        assert!(!fixed_methods("fetch('/api/x', {method: chosenMethod})"));
     }
 
     /// #269: `--open` hands the opener an owner-only page that sends the browser on to the

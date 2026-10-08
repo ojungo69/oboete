@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config;
 
+pub(crate) mod agents;
 mod doctor;
 mod readiness;
 pub(crate) use doctor::doctor_report;
@@ -210,6 +211,15 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         }
     };
     let cmd = HookCommand::current(home)?;
+    let _integration_hold = integration_lock(home)?;
+    // A broken corpus lock must not prevent independent agent wiring. The separate
+    // per-home setup hold still serializes CLI and viewer agent edits in this case.
+    let config_hold = crate::settings::config_lock(home);
+    if let Err(error) = &config_hold {
+        eprintln!(
+            "corpus configuration lock unavailable; agent edits use their setup lock: {error}"
+        );
+    }
     let (wired, failed) = wire_each(&agents, |a| wire(a, &cmd, remove));
     if !remove && !wired.is_empty() {
         println!("Hook files are read when an agent starts: restart running sessions.");
@@ -229,6 +239,40 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         "agent wiring finished, but resident defaults were not written (see above)"
     );
     Ok(())
+}
+
+/// Agent edits remain coordinated even when the corpus's state/config.lock is damaged.
+fn integration_lock(home: &Path) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(home.join("setup.lock"))?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "setup coordination is not a regular file"
+    );
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        anyhow::ensure!(
+            metadata.file_attributes() & 0x400 == 0,
+            "setup coordination is a reparse point"
+        );
+    }
+    file.lock()?;
+    Ok(file)
 }
 
 /// Each agent in turn, whatever another's failure: one unreadable settings file must not leave
@@ -534,10 +578,121 @@ fn backup_once(file: &Path) -> Result<()> {
         "{}{BACKUP_SUFFIX}",
         file.file_name().unwrap_or_default().to_string_lossy()
     ));
-    if file.exists() && !bak.exists() {
-        std::fs::copy(file, &bak).with_context(|| format!("backup {}", file.display()))?;
+    if !file.exists() {
+        return Ok(());
     }
+    match std::fs::symlink_metadata(&bak) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            copy_first_backup(file, &bak).with_context(|| format!("backup {}", file.display()))?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let backup = options.open(&bak)?;
+    anyhow::ensure!(
+        backup.metadata()?.is_file(),
+        "retained backup is not a readable regular file"
+    );
     Ok(())
+}
+
+fn copy_first_backup(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let mut nonce = [0u8; 16];
+    getrandom::fill(&mut nonce).map_err(std::io::Error::other)?;
+    let name: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let parent = destination
+        .parent()
+        .ok_or(std::io::ErrorKind::InvalidInput)?;
+    let directory = parent.join(format!(".oboete-backup-{name}"));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&directory)?;
+    let directory = crate::provider::Scratch(directory);
+    let temporary = directory.0.join("complete");
+    copy_backup_contents(source, &temporary)?;
+    // Publish only the completed copy, without replacing an earlier backup or alias.
+    match std::fs::hard_link(&temporary, destination) {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        result => result,
+    }
+}
+
+#[cfg(not(windows))]
+fn copy_backup_contents(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::io::Read;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut source = options.open(source)?;
+    let before = source.metadata()?;
+    if !before.is_file() {
+        return Err(std::io::ErrorKind::Unsupported.into());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut backup = match options.open(destination) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let copied = std::io::copy(
+        &mut (&mut source).take(before.len().saturating_add(1)),
+        &mut backup,
+    )?;
+    let after = source.metadata()?;
+    if copied != before.len()
+        || before.len() != after.len()
+        || before.modified()? != after.modified()?
+    {
+        return Err(std::io::Error::other("backup source changed"));
+    }
+    backup.set_permissions(before.permissions())?;
+    backup.sync_all()
+}
+
+#[cfg(windows)]
+fn copy_backup_contents(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: both terminated path buffers live through the synchronous native copy.
+    // Fail-if-exists preserves an earlier backup and retains native Windows copy attributes.
+    if unsafe {
+        windows_sys::Win32::Storage::FileSystem::CopyFileW(source.as_ptr(), destination.as_ptr(), 1)
+    } != 0
+    {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        Ok(())
+    } else {
+        Err(error)
+    }
 }
 
 fn read_json_object(file: &Path) -> Result<Value> {
@@ -717,14 +872,67 @@ fn claude_mcp_paths() -> [PathBuf; 2] {
     ]
 }
 
+/// The native Claude MCP desired entry, without a process or state-file write.
+fn claude_mcp_entry(present: Option<&Value>, cmd: &HookCommand) -> Value {
+    let mut entry = present
+        .filter(|entry| entry.is_object())
+        .cloned()
+        .unwrap_or_else(|| json!({"env": {}}));
+    entry["type"] = json!("stdio");
+    entry["command"] = json!(cmd.exe);
+    entry["args"] = json!(cmd.mcp_args());
+    entry
+}
+
+/// Refuse a generated registration payload that the local command cannot safely admit.
+fn claude_mcp_arguments_fit(launcher: &Path, entry: &Value) -> bool {
+    let encoded = entry.to_string();
+    if encoded.len() > 64 * 1024 {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let shell = launcher
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("cmd"));
+        let count = launcher
+            .as_os_str()
+            .encode_wide()
+            .count()
+            .saturating_add(encoded.encode_utf16().count());
+        count
+            .saturating_mul(if shell { 4 } else { 2 })
+            .saturating_add(256)
+            <= if shell { 8 * 1024 - 1 } else { 32 * 1024 - 1 }
+    }
+    #[cfg(not(windows))]
+    {
+        let environment = crate::provider::curator_env(std::env::vars_os(), false);
+        let bytes = environment.iter().fold(0usize, |size, (key, value)| {
+            size.saturating_add(key.as_encoded_bytes().len())
+                .saturating_add(value.as_encoded_bytes().len())
+                .saturating_add(2)
+        });
+        bytes
+            .saturating_add((environment.len() + 8) * std::mem::size_of::<usize>())
+            .saturating_add(launcher.as_os_str().as_encoded_bytes().len())
+            .saturating_add(encoded.len())
+            .saturating_add(256)
+            <= 96 * 1024
+    }
+}
+
 /// That file is Claude Code's state file, rewritten all the time under its own lock; a write
 /// from outside races it (a session that reads the file mid-write "repairs" it from its cache,
 /// dropping our entry). So Claude Code's own CLI makes the change. Keys the developer added to
-/// our entry (`env`, ...) are carried over.
+/// our entry (`env`, ...) are preserved; changing an existing entry requires the
+/// agent's own setup so saved values never enter add-json process arguments.
 fn claude_mcp(cmd: &HookCommand, remove: bool) -> Result<String> {
-    if !on_path("claude") {
+    let Some(launcher) = claude_launcher() else {
         return Ok("skipped: `claude` is not on PATH".into());
-    }
+    };
     let file = claude_mcp_file();
     let entry_now = || -> Result<Option<Value>> {
         Ok(read_json_object(&file)?["mcpServers"]
@@ -735,38 +943,38 @@ fn claude_mcp(cmd: &HookCommand, remove: bool) -> Result<String> {
     if remove && present.is_none() {
         return Ok("nothing to remove".into());
     }
+    let wanted = (!remove).then(|| claude_mcp_entry(present.as_ref(), cmd));
+    if wanted == present {
+        return Ok("already configured".into());
+    }
+    anyhow::ensure!(
+        remove || present.is_none(),
+        "existing MCP registration needs the agent's own setup; existing state is preserved"
+    );
+    anyhow::ensure!(
+        wanted
+            .as_ref()
+            .into_iter()
+            .all(|entry| claude_mcp_arguments_fit(&launcher, entry)),
+        "MCP registration arguments exceed the safe command budget; existing state is preserved"
+    );
     backup_once(&file)?;
     // `add-json` refuses an existing name, so whatever sits under it goes first.
     if present.is_some() {
-        claude_cli(&["mcp", "remove", "--scope", "user", MCP_NAME])?;
+        claude_cli(&launcher, &["mcp", "remove", "--scope", "user", MCP_NAME])?;
     }
-    if !remove {
-        let old = present.filter(Value::is_object);
-        let mut entry = old.clone().unwrap_or_else(|| json!({"env": {}}));
-        entry["type"] = json!("stdio");
-        entry["command"] = json!(cmd.exe);
-        entry["args"] = json!(cmd.mcp_args());
-        let add = |e: &Value| {
-            claude_cli(&[
+    if let Some(entry) = wanted {
+        claude_cli(
+            &launcher,
+            &[
                 "mcp",
                 "add-json",
                 "--scope",
                 "user",
                 MCP_NAME,
-                &e.to_string(),
-            ])
-        };
-        if let Err(e) = add(&entry) {
-            // Put the developer's entry back rather than leave nothing registered.
-            if let Some(old) = &old
-                && let Err(r) = add(old)
-            {
-                return Err(e.context(format!(
-                    "the previous {MCP_NAME} entry is removed and could not be put back: {r:#}"
-                )));
-            }
-            return Err(e);
-        }
+                &entry.to_string(),
+            ],
+        )?;
     }
     // `claude mcp` exits 0 also when it could not save (a read-only config): check the file.
     let landed = if remove {
@@ -783,23 +991,92 @@ fn claude_mcp(cmd: &HookCommand, remove: bool) -> Result<String> {
     Ok(format!("{verb} {} (by `claude mcp`)", file.display()))
 }
 
-fn claude_cli(args: &[&str]) -> Result<()> {
-    let out = std::process::Command::new("claude")
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaudeCliExit {
+    Success,
+    Nonzero,
+    SpawnFailed,
+    Unknown,
+}
+
+impl std::fmt::Display for ClaudeCliExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Success => "claude mcp completed",
+            Self::Nonzero => "claude mcp command failed",
+            Self::SpawnFailed => "could not start claude mcp",
+            Self::Unknown => "claude mcp completion is unknown; inspect before retrying",
+        })
+    }
+}
+
+impl std::error::Error for ClaudeCliExit {}
+
+fn claude_cli_at(
+    launcher: &std::path::Path,
+    args: &[&str],
+    limit: std::time::Duration,
+) -> ClaudeCliExit {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let mut command = Command::new(launcher);
+    command
         .args(args)
-        // `claude mcp ...` runs the SessionStart hooks too; without this each call is an empty
-        // captured session.
-        .env("OBOETE_SKIP", "1")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .context("run claude")?;
-    anyhow::ensure!(
-        out.status.success(),
-        "claude {}: {}{}",
-        args[..2].join(" "),
-        String::from_utf8_lossy(&out.stderr).trim(),
-        String::from_utf8_lossy(&out.stdout).trim()
-    );
-    Ok(())
+        .env_clear()
+        .envs(crate::provider::curator_env(
+            std::env::vars_os(),
+            cfg!(windows),
+        ))
+        .env(crate::hook::SKIP_ENV, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = match crate::provider::own_group(&mut command).spawn() {
+        Ok(child) => child,
+        Err(_) => return ClaudeCliExit::SpawnFailed,
+    };
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    ClaudeCliExit::Success
+                } else {
+                    ClaudeCliExit::Nonzero
+                };
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    crate::provider::kill_tree(&mut child);
+    let cleanup = Instant::now() + Duration::from_millis(50);
+    while Instant::now() < cleanup {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    ClaudeCliExit::Unknown
+}
+
+/// Resolve once per explicit native operation; fixed remove or generated add uses this path.
+fn claude_launcher() -> Option<PathBuf> {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .flat_map(|dir| launcher_files(&dir, "claude"))
+        .find(|path| path.is_file())
+        .and_then(|path| std::path::absolute(path).ok())
+}
+
+fn claude_cli(launcher: &Path, args: &[&str]) -> std::result::Result<(), ClaudeCliExit> {
+    match claude_cli_at(launcher, args, std::time::Duration::from_secs(30)) {
+        ClaudeCliExit::Success => Ok(()),
+        other => Err(other),
+    }
 }
 
 /// Codex and Grok Build both take `[mcp_servers.<name>]` with `command` and `args` in their
@@ -809,10 +1086,18 @@ fn toml_mcp(file: &Path, cmd: &HookCommand, remove: bool) -> Result<String> {
     if remove && !file.exists() {
         return Ok("nothing to remove".into());
     }
-    let mut doc: toml_edit::DocumentMut = read_text(file)?
+    let text = toml_mcp_text(file, &read_text(file)?, cmd, remove)?;
+    backup_once(file)?;
+    write_atomic(file, &text)?;
+    let verb = if remove { "removed from" } else { "written to" };
+    Ok(format!("{verb} {}", file.display()))
+}
+
+/// The native TOML merge, also used by the no-write integration preview.
+fn toml_mcp_text(file: &Path, text: &str, cmd: &HookCommand, remove: bool) -> Result<String> {
+    let mut doc: toml_edit::DocumentMut = text
         .parse()
         .with_context(|| format!("parse {}", file.display()))?;
-    backup_once(file)?;
     let root = doc.as_table_mut();
     if remove {
         let emptied = root
@@ -862,9 +1147,7 @@ fn toml_mcp(file: &Path, cmd: &HookCommand, remove: bool) -> Result<String> {
             }
         }
     }
-    write_atomic(file, &doc.to_string())?;
-    let verb = if remove { "removed from" } else { "written to" };
-    Ok(format!("{verb} {}", file.display()))
+    Ok(doc.to_string())
 }
 
 /// The command and args registered under our name, if any: Claude's JSON or a `config.toml`.
@@ -1196,6 +1479,15 @@ fn grok_groups(cmd: &HookCommand) -> Vec<(String, Value)> {
         .collect()
 }
 
+/// Grok's native own-file deletion predicate, without filesystem I/O.
+fn grok_empty(root: &Value) -> bool {
+    root.as_object().is_some_and(|object| {
+        object.iter().all(|(key, value)| {
+            key == "hooks" && value.as_object().is_some_and(|hooks| hooks.is_empty())
+        })
+    })
+}
+
 fn grok(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     let file = crate::hook::grok_hooks_file();
     if remove && !file.exists() {
@@ -1205,11 +1497,7 @@ fn grok(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     backup_once(&file)?;
     let wanted = if remove { vec![] } else { grok_groups(cmd) };
     merge_groups(&mut root, wanted);
-    let empty = root.as_object().is_some_and(|o| {
-        o.iter()
-            .all(|(k, v)| k == "hooks" && v.as_object().is_some_and(|h| h.is_empty()))
-    });
-    if empty {
+    if grok_empty(&root) {
         if file.exists() {
             std::fs::remove_file(&file)?;
         }
@@ -1262,6 +1550,30 @@ fn agy_files(dir: &Path, cmd: &HookCommand, remove: bool, windows: bool) -> Resu
         Some(spec) => named.insert(MCP_NAME.to_string(), spec),
         None => named.remove(MCP_NAME),
     };
+    agy_merge_mcp(&mcp, &mut mcp_root, cmd, remove)?;
+
+    let mut staged = Vec::new();
+    for (file, new, old) in [
+        (&hooks, &hooks_root, &old_hooks),
+        (&mcp, &mcp_root, &old_mcp),
+    ] {
+        if new != old {
+            staged.push((file, stage(file, &json_text(new)?)?));
+        }
+    }
+    for (file, _) in &staged {
+        backup_once(file)?;
+    }
+    let mut changed = Vec::new();
+    for (file, s) in staged {
+        s.commit()?;
+        changed.push(file.display().to_string());
+    }
+    Ok(changed)
+}
+
+/// agy's native MCP entry preserves the owner's optional fields.
+fn agy_merge_mcp(mcp: &Path, mcp_root: &mut Value, cmd: &HookCommand, remove: bool) -> Result<()> {
     let root = mcp_root.as_object_mut().expect("checked JSON object");
     if remove {
         if let Some(servers) = root.get_mut("mcpServers").and_then(Value::as_object_mut) {
@@ -1282,25 +1594,7 @@ fn agy_files(dir: &Path, cmd: &HookCommand, remove: bool, windows: bool) -> Resu
         entry["command"] = json!(cmd.exe);
         entry["args"] = json!(cmd.mcp_args());
     }
-
-    let mut staged = Vec::new();
-    for (file, new, old) in [
-        (&hooks, &hooks_root, &old_hooks),
-        (&mcp, &mcp_root, &old_mcp),
-    ] {
-        if new != old {
-            staged.push((file, stage(file, &json_text(new)?)?));
-        }
-    }
-    for (file, _) in &staged {
-        backup_once(file)?;
-    }
-    let mut changed = Vec::new();
-    for (file, s) in staged {
-        s.commit()?;
-        changed.push(file.display().to_string());
-    }
-    Ok(changed)
+    Ok(())
 }
 
 fn agy_hooks_status(file: &Path, cmd: &HookCommand, windows: bool) -> String {
@@ -1377,50 +1671,57 @@ fn opencode_mcp_add(cmd: &HookCommand) -> String {
     format!("opencode mcp add oboete --global -- {args}")
 }
 
+/// A pure OpenCode MCP merge; JSONC admission remains with its fixed native reader.
+fn opencode_mcp_text(
+    mcp: &Path,
+    mut root: Value,
+    cmd: &HookCommand,
+    remove: bool,
+) -> Result<Option<String>> {
+    let old = root.clone();
+    if remove {
+        if let Some(servers) = root
+            .get_mut("mcp")
+            .and_then(|mcp| mcp.get_mut("servers"))
+            .and_then(Value::as_object_mut)
+        {
+            servers.remove(MCP_NAME);
+        }
+    } else {
+        let mcp_root = root
+            .as_object_mut()
+            .expect("checked JSON object")
+            .entry("mcp")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("{}: mcp is not a JSON object", mcp.display()))?;
+        let servers = mcp_root
+            .entry("servers")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("{}: mcp.servers is not a JSON object", mcp.display()))?;
+        let entry = servers.entry(MCP_NAME).or_insert_with(|| json!({}));
+        anyhow::ensure!(
+            entry.is_object(),
+            "{}: oboete server is not a JSON object",
+            mcp.display()
+        );
+        entry["type"] = json!("local");
+        entry["command"] = json!(
+            std::iter::once(cmd.exe.clone())
+                .chain(cmd.mcp_args())
+                .collect::<Vec<_>>()
+        );
+    }
+    (root != old).then(|| json_text(&root)).transpose()
+}
+
 /// Stage the plugin and MCP config before replacing either. Only MCP's type and command
 /// belong to us; optional fields such as disabled and timeout survive another setup.
 fn opencode_files(dir: &Path, cmd: &HookCommand, remove: bool) -> Result<(String, String)> {
     let plugin = dir.join("plugins/oboete.js");
     let mcp = dir.join("opencode.json");
-    let update = (|| -> Result<Option<String>> {
-        let mut root = opencode_config(dir)?;
-        let old = root.clone();
-        if remove {
-            if let Some(servers) = root
-                .get_mut("mcp")
-                .and_then(|mcp| mcp.get_mut("servers"))
-                .and_then(Value::as_object_mut)
-            {
-                servers.remove(MCP_NAME);
-            }
-        } else {
-            let mcp_root = root
-                .as_object_mut()
-                .expect("checked JSON object")
-                .entry("mcp")
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-                .ok_or_else(|| anyhow!("{}: mcp is not a JSON object", mcp.display()))?;
-            let servers = mcp_root
-                .entry("servers")
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-                .ok_or_else(|| anyhow!("{}: mcp.servers is not a JSON object", mcp.display()))?;
-            let entry = servers.entry(MCP_NAME).or_insert_with(|| json!({}));
-            anyhow::ensure!(
-                entry.is_object(),
-                "{}: oboete server is not a JSON object",
-                mcp.display()
-            );
-            entry["type"] = json!("local");
-            entry["command"] = json!(
-                std::iter::once(cmd.exe.clone())
-                    .chain(cmd.mcp_args())
-                    .collect::<Vec<_>>()
-            );
-        }
-        (root != old).then(|| json_text(&root)).transpose()
-    })();
+    let update = opencode_config(dir).and_then(|root| opencode_mcp_text(&mcp, root, cmd, remove));
     let verb = if remove { "removed from" } else { "written to" };
     let (mcp_text, mcp_status) = match update {
         Ok(Some(text)) => (Some(text), format!("{verb} {}", mcp.display())),
@@ -1455,6 +1756,9 @@ fn opencode_files(dir: &Path, cmd: &HookCommand, remove: bool) -> Result<(String
         .as_ref()
         .map(|text| stage(&mcp, text))
         .transpose()?;
+    if plugin_stage.is_some() || (remove && plugin_present) {
+        backup_once(&plugin)?;
+    }
     if mcp_stage.is_some() {
         backup_once(&mcp)?;
     }
@@ -3087,6 +3391,126 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn w6a_native_claude_command_is_bounded_and_discards_private_output() {
+        use std::time::{Duration, Instant};
+        let shell = Path::new("/bin/sh");
+        assert_eq!(
+            claude_cli_at(
+                shell,
+                &[
+                    "-c",
+                    "test \"$OBOETE_SKIP\" = 1 && test -z \"$(cat)\" && printf private-output-canary && printf private-error-canary >&2"
+                ],
+                Duration::from_secs(1),
+            ),
+            ClaudeCliExit::Success
+        );
+        assert_eq!(
+            claude_cli_at(shell, &["-c", "exit 23"], Duration::from_secs(1)),
+            ClaudeCliExit::Nonzero
+        );
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            claude_cli_at(
+                &root.path().join("missing-claude"),
+                &[],
+                Duration::from_secs(1)
+            ),
+            ClaudeCliExit::SpawnFailed
+        );
+        let start = Instant::now();
+        assert_eq!(
+            claude_cli_at(shell, &["-c", "sleep 2"], Duration::from_millis(30)),
+            ClaudeCliExit::Unknown
+        );
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn w6a_first_backup_preserves_a_dangling_existing_backup_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("settings.json");
+        let backup = root.path().join("settings.json.oboete.bak");
+        let target = root.path().join("must-stay-missing");
+        std::fs::write(&source, "original private configuration").unwrap();
+        std::os::unix::fs::symlink(&target, &backup).unwrap();
+        assert!(
+            backup_once(&source).is_err(),
+            "a missing recovery copy was accepted"
+        );
+        assert!(
+            !target.exists(),
+            "first backup followed and wrote through an existing alias"
+        );
+        assert!(backup.is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "original private configuration"
+        );
+        // An empty, readable earlier copy remains valid; retain its alias and bytes.
+        std::fs::write(&target, "").unwrap();
+        backup_once(&source).unwrap();
+        assert!(backup.is_symlink());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn w6a_native_edit_refuses_a_missing_retained_recovery_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("config.toml");
+        let backup = root.path().join("config.toml.oboete.bak");
+        let missing = root.path().join("missing-recovery");
+        let original = "[mcp_servers.foreign]\ncommand = 'foreign'\n";
+        std::fs::write(&source, original).unwrap();
+        std::os::unix::fs::symlink(&missing, &backup).unwrap();
+        let command = HookCommand {
+            exe: "/tools/oboete".into(),
+            home: None,
+        };
+        assert!(toml_mcp(&source, &command, false).is_err());
+        assert_eq!(std::fs::read_to_string(source).unwrap(), original);
+        assert!(backup.is_symlink());
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn w6a_failed_first_backup_never_publishes_partial_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let backup = root.path().join("settings.json.oboete.bak");
+        // This regular proc file reports zero bytes but yields data. The bounded
+        // copy must fail its source-consistency check after writing one byte.
+        assert!(copy_first_backup(Path::new("/proc/self/cmdline"), &backup).is_err());
+        assert!(
+            !backup.exists(),
+            "failed copy was published as a retained backup"
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        let source = root.path().join("settings.json");
+        std::fs::write(&source, "complete original").unwrap();
+        copy_first_backup(&source, &backup).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(backup).unwrap(),
+            "complete original"
+        );
+    }
+
+    #[test]
+    fn w6a_mcp_payload_is_checked_before_a_destructive_remove() {
+        assert!(claude_mcp_arguments_fit(
+            Path::new("claude"),
+            &json!({"command":"/tools/oboete","args":["mcp"]})
+        ));
+        assert!(!claude_mcp_arguments_fit(
+            Path::new("claude"),
+            &json!({"env":{"retained": "x".repeat(70*1024)}})
+        ));
+    }
+
+    #[test]
     fn one_agent_that_fails_leaves_the_others_wired() {
         let mut wired = Vec::new();
         let (reported, failed) = wire_each(&["claude", "codex", "grok", "pi"], |a| {
@@ -3156,6 +3580,36 @@ mod tests {
             original
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn opencode_existing_plugin_is_backed_up_once_before_replace_or_remove() {
+        let cmd = HookCommand {
+            exe: "/tools/oboete".into(),
+            home: Some("/invented-memory".into()),
+        };
+        for remove in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let plugin = dir.path().join("plugins/oboete.js");
+            let backup = dir.path().join("plugins/oboete.js.oboete.bak");
+            std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+            let original = "// existing same-name plugin\nexport default {};\n";
+            std::fs::write(&plugin, original).unwrap();
+            opencode_files(dir.path(), &cmd, remove).unwrap();
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), original);
+            if remove {
+                assert!(!plugin.exists());
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(&plugin).unwrap(),
+                    opencode_plugin(&cmd).unwrap()
+                );
+            }
+            // A later replacement/removal must retain the first recoverable copy.
+            std::fs::write(&plugin, "// later owner edit\n").unwrap();
+            opencode_files(dir.path(), &cmd, remove).unwrap();
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), original);
+        }
     }
 
     #[test]
