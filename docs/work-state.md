@@ -99,27 +99,30 @@ taken: a work state write orders against no provider call (the dispatch lock's p
 
 L5. **Redaction.** The list name and every key and string value pass the gate every stored string
 passes (2.2) before the op is written. Every answer and the session start section pass the egress
-gate with the rules as they are then (6.4), so a rule added later hides a value written before it:
-each name, key and value alone, so that a rule anchored to a whole field matches it, each value
-(a task's name and its status among them) in the assignment `key = "value"` too, which the rules
-that look for a key before a secret (gitleaks' generic-api-key) need, then each line, and last the
-section's lines as a whole, for a rule that spans them. Both scans of a value look at it as
-written, so neither takes the context the other needs; a value both change, differently, or whose
-pair the gate changed past the value, is masked whole, and a key the pair's mask reaches into is
-masked too. A key is folded under its name as the gate shows it now, so a rule added later that
-masks a key leaves one key that a later write replaces or clears. The
-capture gate scans the same two ways, a value beside its key as written (a rule that masks the
-key leaves the context): every value of a work state write, and a string value of up to 256 bytes
-in any other stored JSON.
+gate with the rules as they are then (6.4), so a rule added later hides a value written before it.
+The lines are built from the text as stored, and the gate reads them in several views, each as
+written: all the lines together, each line, each name, key and value alone (a rule anchored to a
+whole field matches it), and each value (a task's name and its status among them) in the
+assignment `key = "value"`, which the rules that look for a key before a secret (gitleaks'
+generic-api-key) need. What any view hides is hidden where the lines show it, so no view's mask
+takes the context another view's rule needs (as search gates an imported document's title and
+body), and a key is hidden where the assignment's mask starts in it, found by position, since the
+masked text can spell the key again. Only then are the lines cut to their room; each shown line
+passes the gate once more, and the section's lines as a whole. A list, a task and a key are folded
+under their names as the gate shows them now, so a rule added later that masks one leaves one that
+a later write replaces or clears; each shows the text it was first written with. The capture gate
+scans a value beside its key as well, as written (a rule that masks the key leaves the context):
+every value of a work state write, and a string value of up to 256 bytes in any other stored JSON;
+a mask that starts in the key, or in the ` = "` after it, hides the key and the value whole.
 Ops keep no ledger rows; the masks are in the text. A list is named as the egress gate shows its
 name now, wherever lists are told apart: a rule added later that masks part of a list's name leaves
 one list, whose next write is stored under the masked name.
 
 L6. **Fold, lines and answers.** claude-mem's, with "repository" for "project" and oboete's
-repository key as the name; "updated <N> ago" counts from the op's time when the text is read. A
-read's lines are cut at 20,000 characters, with how many were left out, where claude-mem's are
-not cut, and a read of a list name over 200 characters, which no write takes, is refused as the
-write is, not echoed.
+repository key as the name; "updated <N> ago" counts from the op's time when the text is read, and
+a value shows as written, its spaces kept. A read's lines are cut at 20,000 characters, with how
+many were left out, where claude-mem's are not cut, and a read of a list name over 200 characters,
+which no write takes, is refused as the write is, not echoed.
 
 L7. **Session start.** Wherever the manifest is shown, the section comes first and comes out of
 `[inject] session_start_chars`; the manifest is fitted to what it leaves. Off with
@@ -172,7 +175,10 @@ with their times, before claude-mem is removed.
   only generic-api-key's key context finds is masked in the op, however long the value; a rule
   added later that needs the key, or anchors to the whole value, hides it in the read; two rules
   added later, one anchored to the value and one needing its key, each find theirs; a task's name
-  and status are hidden by a rule that needs their key.
+  and status are hidden by a rule that needs their key. A rule added later still has the context
+  that a rule masking a key or a list's name alone would take, that a line the cut leaves out
+  holds, and that a line holds where another rule masks part of a value (#411); a key whose masked
+  assignment spells it again is hidden, at capture and when shown.
 - No size puts recorded text outside the fence; every cut fits its limit with its count line.
 - The session start: the section first, the rule outside the fence and the lines inside it, the
   manifest's room smaller by the section, `Nothing open yet.` with no fence, the 3,000-character
@@ -191,9 +197,9 @@ with their times, before claude-mem is removed.
   `includeClosed` for good.
 - A value is masked by the rules of the time it was written; a rule added later hides it in every
   answer and section, not in the stored op.
-- The last pass over a shown line sees it after its fields were masked: a rule written against the
-  line's own format (`key=value`) can lose its context to another rule that masked part of a value
-  (#411, which builds the lines as the manifest's are).
+- Every open line is gated before the cut, so the time grows with the open lines (about 50 µs a
+  line: 50 ms for 1,000), and lines the gate finds too much in (`redact::hidden`'s limits) are
+  shown as a mask alone, a session start's as the count line.
 - The repository is the checkout's key as the capture gate labels it, as for every store: a rule
   added later that matches a repository key splits its history, and one that masks the part two
   keys differ in joins them (#412).

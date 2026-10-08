@@ -703,7 +703,7 @@ pub fn start_text_read(
             &entries,
             now,
             crate::work_state::SECTION.min(inject.session_start_chars),
-            |l| crate::redact::outbound_with(l, &settings.rules),
+            &settings.rules,
         )
     });
     let manifest = match store {

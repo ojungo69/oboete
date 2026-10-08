@@ -322,7 +322,7 @@ impl Oboete {
             &repo,
             &entries,
             crate::db::now_ms(),
-            |l| crate::redact::outbound_with(l, &settings.rules),
+            &settings.rules,
         ))
     }
 
@@ -357,7 +357,7 @@ impl Oboete {
             &repo,
             &entries,
             crate::db::now_ms(),
-            |l| crate::redact::outbound_with(l, &settings.rules),
+            &settings.rules,
         ))
     }
 }
@@ -1690,12 +1690,12 @@ mod tests {
         )
         .unwrap();
         let read = read_state(&server, json!({}));
-        assert!(
-            read.contains(
-                "api_key=[REDACTED], auth_token=[REDACTED], [REDACTED]=[REDACTED], tag=[REDACTED]"
-            ),
-            "{read}"
+        // A value shows as written, its spaces kept, as claude-mem's `String(value)` shows it.
+        let line = format!(
+            "api_key=[REDACTED], auth_token=[REDACTED]{}, [REDACTED]=[REDACTED], tag=[REDACTED]",
+            " ".repeat(300)
         );
+        assert!(read.contains(&line), "{read}");
     }
 
     /// Codex's security review of #408: rules added after a write each see a value as written,

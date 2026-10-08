@@ -409,10 +409,16 @@ impl<'a> Gate<'a> {
         let alone = self.text(field, value, cap);
         let head = format!("{key} = \"");
         let (masked, found) = redact::scan(&format!("{head}{value}\""), self.rules);
-        if found.is_empty() {
+        // Where the first mask starts tells whether a mask reaches into the key: the text before
+        // it is the pair's own, where the masked text as a whole can spell the key again (a key
+        // holding the mask's text: Codex's security review of #408).
+        let Some(first) = found.iter().map(|f| f.offset).min() else {
             return (alone, false);
-        }
-        let shown = masked.strip_prefix(&head).and_then(|v| v.strip_suffix('"'));
+        };
+        let reached = first < head.len();
+        let shown = (!reached)
+            .then(|| masked[head.len()..].strip_suffix('"'))
+            .flatten();
         let (kept, offset) = match shown {
             Some(v) if v == alone => return (alone, false),
             Some(v) if alone == value => (v.to_owned(), head.len()),
@@ -427,7 +433,7 @@ impl<'a> Gate<'a> {
             let offset = f.offset.saturating_sub(offset);
             (field.to_owned(), redact::Finding { offset, ..f })
         }));
-        (kept, !masked.starts_with(&head))
+        (kept, reached)
     }
 
     /// Every string and key of `v`, at its JSON pointer. Blocks are gone by now: stripping here
@@ -847,6 +853,16 @@ mod tests {
         let v = events("claude", "SessionEnd", &payload, 0, &s);
         assert!(!format!("{:?}", v[0]).contains("teal-1234"), "{:?}", v[0]);
         assert!(body(&v[0].event)["reason"].get("[REDACTED]").is_some());
+        // Where the mask starts tells whether it reaches the key: the masked pair can spell the
+        // key again when the key holds the mask's own text (Codex's security review of #408).
+        let s = with(
+            "[[redaction.extra_rules]]\nid = \"s\"\n\
+             regex = '^(\\[REDACTED\\]teal-[0-9]{4} = \")teal-[0-9]{4} = \"private\"$'\n\
+             secret_group = 1\n",
+        );
+        let payload = json!({"reason": {"[REDACTED]teal-1234": "teal-1234 = \"private"}});
+        let v = events("claude", "SessionEnd", &payload, 0, &s);
+        assert_eq!(body(&v[0].event)["reason"]["[REDACTED]"], "[REDACTED]");
         // A rule that masks the key leaves the value's scan beside the key as written.
         let s = with("[[redaction.extra_rules]]\nid = \"k\"\nregex = '^api_key$'\n");
         let payload = json!({"reason": {"api_key": secret.clone()}});

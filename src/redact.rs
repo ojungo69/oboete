@@ -377,7 +377,11 @@ pub fn outbound_range(
 }
 
 /// `text[range]` with each of `runs` (sorted, apart) replaced by one mask where it falls in it.
-fn masked_part(text: &str, range: std::ops::Range<usize>, runs: &[(usize, usize)]) -> String {
+pub(crate) fn masked_part(
+    text: &str,
+    range: std::ops::Range<usize>,
+    runs: &[(usize, usize)],
+) -> String {
     let (mut part, mut pos) = (String::with_capacity(range.len()), range.start);
     for &(s, e) in runs {
         let (s, e) = (s.max(pos), e.min(range.end));
@@ -1451,7 +1455,7 @@ fn hidden_views(
 }
 
 /// `runs` sorted, overlapping or touching ones joined (`merged`).
-fn merged_runs(mut runs: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+pub(crate) fn merged_runs(mut runs: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
     runs.sort_unstable();
     merged(&runs.into_iter().map(|(s, e)| (s, e, 0)).collect::<Vec<_>>())
 }

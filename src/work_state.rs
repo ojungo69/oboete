@@ -3,8 +3,11 @@
 //! them, and shown by `work_state_read` and at the start of every session in the repository.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use serde_json::{Map, Value};
+
+use crate::redact::{self, Rules};
 
 /// L3: a list name's most, trimmed, in UTF-16 units as JavaScript counts (claude-mem's).
 pub const MAX_LIST: usize = 200;
@@ -105,42 +108,61 @@ struct Folded {
     /// What was written without a task.
     state: Map<String, Value>,
     state_ts: Option<i64>,
-    /// Each task's fields and the time of its last write, in the order the tasks first came.
+    /// Each task's name, its fields and the time of its last write, in the order the tasks first
+    /// came.
     tasks: Vec<(String, Map<String, Value>, i64)>,
 }
 
 /// claude-mem's fold of one list's entries, in the order they were written: an entry without a
-/// `task` (absent, null or empty) goes into the list's state, one with a `task` into the task
-/// `name` calls it, each field under the key `key` calls it, so that a key a rule added later masks
-/// is still one key: a later write replaces or clears what was written under it (Codex on #408).
+/// `task` (absent, null or empty) goes into the list's state, one with a `task` into that task. A
+/// task and a key are one where `task` and `key` name them alike, so that one a rule added later
+/// masks is still one: a later write replaces or clears what was written under it (Codex on
+/// #408). Each keeps the text it was first written with, for the gate to read in its context.
 fn fold<'a>(
     entries: impl IntoIterator<Item = &'a Entry>,
-    name: &mut impl FnMut(String) -> String,
+    task: &mut impl FnMut(&str) -> String,
     key: &mut impl FnMut(&str) -> String,
 ) -> Folded {
     let mut f = Folded::default();
     let mut at: HashMap<String, usize> = HashMap::new();
     for e in entries {
-        let task = match e.fields.get("task") {
+        let named = match e.fields.get("task") {
             None | Some(Value::Null) => None,
             Some(Value::String(s)) if s.is_empty() => None,
-            Some(task) => Some(name(text(task))),
+            Some(t) => Some(text(t)),
         };
-        let fields = e.fields.iter().map(|(k, v)| (key(k), v.clone()));
-        let Some(task) = task else {
-            f.state.extend(fields);
-            f.state_ts = Some(e.ts);
-            continue;
+        let kept = match named {
+            None => {
+                f.state_ts = Some(e.ts);
+                &mut f.state
+            }
+            Some(t) => {
+                let i = *at.entry(task(&t)).or_insert_with(|| {
+                    f.tasks.push((t, Map::new(), e.ts));
+                    f.tasks.len() - 1
+                });
+                let (_, kept, ts) = &mut f.tasks[i];
+                *ts = e.ts;
+                kept
+            }
         };
-        let i = *at.entry(task.clone()).or_insert_with(|| {
-            f.tasks.push((task, Map::new(), e.ts));
-            f.tasks.len() - 1
-        });
-        let (_, kept, ts) = &mut f.tasks[i];
-        kept.extend(fields);
-        *ts = e.ts;
+        for (k, v) in &e.fields {
+            put(kept, k, v, key);
+        }
     }
     f
+}
+
+/// `fields` with `key` set to `value`, under a key `id` names alike when there is one.
+fn put(
+    fields: &mut Map<String, Value>,
+    key: &str,
+    value: &Value,
+    id: &mut impl FnMut(&str) -> String,
+) {
+    let same = id(key);
+    let at = fields.keys().find(|k| id(k) == same).cloned();
+    fields.insert(at.unwrap_or_else(|| key.to_owned()), value.clone());
 }
 
 /// A `status` of `done` or `dropped`, in any case.
@@ -150,48 +172,14 @@ fn closed(status: Option<&Value>) -> bool {
     })
 }
 
-/// `key=value` pairs, without the keys in `omit` and those a null cleared, each key and value as
-/// `gate` shows them.
-fn pairs(fields: &Map<String, Value>, omit: &[&str], gate: &impl Fn(&str) -> String) -> String {
+/// The fields a line shows: not those in `omit`, nor those a null cleared.
+fn visible<'a>(
+    fields: &'a Map<String, Value>,
+    omit: &'a [&str],
+) -> impl Iterator<Item = (&'a String, &'a Value)> + 'a {
     fields
         .iter()
         .filter(|(k, v)| !omit.contains(&k.as_str()) && !v.is_null())
-        .map(|(k, v)| {
-            let (k, v) = pair(k, &text(v), gate);
-            format!("{k}={v}")
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// `value` as `gate` shows it beside its `key`: alone, so that a rule anchored to the field
-/// matches it, and in the assignment `key = "value"`, which the rules that look for a key before
-/// a secret (gitleaks' generic-api-key) need and neither part matches alone (Codex's security
-/// review of #408). Both look at the value as written, so neither takes the context the other
-/// needs; when both change it, differently, or the gate changed the pair's shape, the value shows
-/// masked whole. The capture gate keeps a value so (`capture::Gate::both`).
-fn field(key: &str, value: &str, gate: &impl Fn(&str) -> String) -> String {
-    pair(key, value, gate).1
-}
-
-/// `key` and `value` as `gate` shows them as a pair: the value as `field` shows it, the key alone,
-/// or masked whole when the pair's mask reaches into it (Codex's security review of #408).
-fn pair(key: &str, value: &str, gate: &impl Fn(&str) -> String) -> (String, String) {
-    let alone = gate(value);
-    let head = format!("{key} = \"");
-    let probe = gate(&format!("{head}{value}\""));
-    let mask = || crate::redact::MASK.to_owned();
-    let shown = match probe.strip_prefix(&head).and_then(|v| v.strip_suffix('"')) {
-        Some(v) if v == value || v == alone => alone,
-        Some(v) if alone == value => v.to_owned(),
-        _ => mask(),
-    };
-    let key = if probe.starts_with(&head) {
-        gate(key)
-    } else {
-        mask()
-    };
-    (key, shown)
 }
 
 /// claude-mem's `describeDuration`.
@@ -216,21 +204,17 @@ struct Lists {
 
 /// The lists of `entries` (only `list` when it names one), as `render` shows them (claude-mem's
 /// `renderWorkStateList`): a closed list hides its state line and still shows a task left open in
-/// it; `all` shows everything. A list and a task are named as `gate` shows their names now (a
-/// task's beside its key, as `field` shows it), so the writes before and after a rule that masks
-/// part of a name are one list, or one task (Codex on #408).
-fn lists(
-    entries: &[Entry],
-    list: Option<&str>,
-    all: bool,
-    gate: &impl Fn(&str) -> String,
-) -> Lists {
+/// it; `all` shows everything. Lists, tasks and keys are told apart as the egress gate shows them
+/// now (a task's name beside its key), so the writes before and after a rule that masks part of a
+/// name are one list, or one task (Codex on #408); each shows the name first written.
+fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lists {
+    let gate = |s: &str| redact::outbound_with(s, rules);
     let mut names: HashMap<&str, String> = HashMap::new();
     let mut tasks: HashMap<String, String> = HashMap::new();
-    let mut task = |t: String| {
+    let mut task = |t: &str| {
         tasks
-            .entry(t)
-            .or_insert_with_key(|t| field("task", t, gate))
+            .entry(t.to_owned())
+            .or_insert_with(|| beside("task", t, rules))
             .clone()
     };
     let mut keys: HashMap<String, String> = HashMap::new();
@@ -240,7 +224,7 @@ fn lists(
         k => keys.entry(k.to_owned()).or_insert_with(|| gate(k)).clone(),
     };
     let wanted = list.map(gate);
-    let mut written: Vec<(String, Vec<&Entry>, usize)> = Vec::new();
+    let mut written: Vec<(&str, Vec<&Entry>, usize)> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
     for (i, e) in entries.iter().enumerate() {
         let name = names
@@ -256,8 +240,8 @@ fn lists(
                 written[j].2 = i;
             }
             None => {
-                at.insert(name.clone(), written.len());
-                written.push((name, vec![e], i));
+                at.insert(name, written.len());
+                written.push((&e.list, vec![e], i));
             }
         }
     }
@@ -269,7 +253,7 @@ fn lists(
     for (name, entries, _) in written {
         let f = fold(entries, &mut task, &mut key);
         let state = f.state_ts.is_some()
-            && f.state.iter().any(|(k, v)| k != "task" && !v.is_null())
+            && visible(&f.state, &["task"]).next().is_some()
             && (all || !closed(f.state.get("status")));
         let shown: Vec<usize> = (0..f.tasks.len())
             .filter(|&t| all || !closed(f.tasks[t].1.get("status")))
@@ -280,51 +264,170 @@ fn lists(
         let at = out.lists.len();
         out.rows.push((at, None));
         out.rows.extend(shown.into_iter().map(|t| (at, Some(t))));
-        out.lists.push((name, f, state));
+        out.lists.push((name.to_owned(), f, state));
     }
     out
 }
 
-/// One line of `l` at `now`: each name, key and value as `gate` shows it, then the whole line.
-fn render(
-    l: &Lists,
-    (list, task): (usize, Option<usize>),
-    now: i64,
-    gate: &impl Fn(&str) -> String,
-) -> String {
+/// Lines made of what agents wrote, and where each name, key and value stands in them. The gate
+/// reads each as written: in all the lines, in its line, alone, and a value beside its key, so
+/// that no view's mask takes the context another view's rule needs, and what it hides in any view
+/// is hidden before the lines are cut (Codex's security reviews of #408).
+#[derive(Default)]
+struct Raw {
+    text: String,
+    lines: Vec<Range<usize>>,
+    /// Each name, key and value.
+    parts: Vec<Range<usize>>,
+    /// Each value beside its key, with the key's range where the line shows it.
+    pairs: Vec<(String, Option<Range<usize>>, Range<usize>)>,
+}
+
+impl Raw {
+    fn push(&mut self, s: &str) {
+        self.text.push_str(s);
+    }
+
+    /// `s`, a name, a key or a value.
+    fn part(&mut self, s: &str) -> Range<usize> {
+        let start = self.text.len();
+        self.text.push_str(s);
+        self.parts.push(start..self.text.len());
+        start..self.text.len()
+    }
+
+    /// `value` beside `key`, as `key=value` when `shown`, else the value alone.
+    fn pair(&mut self, key: &str, value: &str, shown: bool) {
+        let at = shown.then(|| {
+            let at = self.part(key);
+            self.push("=");
+            at
+        });
+        let value = self.part(value);
+        self.pairs.push((key.to_owned(), at, value));
+    }
+
+    /// A line that `write` writes.
+    fn line(&mut self, write: impl FnOnce(&mut Self)) {
+        if !self.lines.is_empty() {
+            self.push("\n");
+        }
+        let start = self.text.len();
+        write(self);
+        self.lines.push(start..self.text.len());
+    }
+
+    /// Each line as the gate shows it: what it hides in any view hidden, then the line through the
+    /// gate, its indent kept (the gate trims what it gates). `None` when it hides the lines whole.
+    fn shown(&self, rules: &Rules) -> Option<Vec<String>> {
+        let mut runs = redact::hidden(&self.text, rules)?;
+        let alone = |r: &Range<usize>| match redact::hidden(&self.text[r.clone()], rules) {
+            Some(h) => h.iter().map(|&(s, e)| (r.start + s, r.start + e)).collect(),
+            None => vec![(r.start, r.end)],
+        };
+        for r in self.lines.iter().chain(&self.parts) {
+            runs.extend(alone(r));
+        }
+        // A value in the assignment `key = "value"`, which the rules that look for a key before a
+        // secret (gitleaks' generic-api-key) need and neither part matches alone: what its scan
+        // hides of the key and of the value is hidden where the line shows them, found by where
+        // it is in the assignment, since the masked text can spell the key again.
+        for (key, at, value) in &self.pairs {
+            let head = format!("{key} = \"");
+            let probe = format!("{head}{}\"", &self.text[value.clone()]);
+            let (h, v) = (head.len(), value.len());
+            for (s, e) in redact::hidden(&probe, rules).unwrap_or(vec![(0, probe.len())]) {
+                if let Some(at) = at.as_ref().filter(|_| s < key.len()) {
+                    runs.push((at.start + s, at.start + e.min(key.len())));
+                }
+                let (s, e) = (s.max(h) - h, e.min(h + v).saturating_sub(h));
+                if s < e {
+                    runs.push((value.start + s, value.start + e));
+                }
+            }
+        }
+        let runs = redact::merged_runs(runs);
+        let shown = |r: &Range<usize>| {
+            let line = redact::masked_part(&self.text, r.clone(), &runs);
+            let text = line.trim_start();
+            let indent = &line[..line.len() - text.len()];
+            format!("{indent}{}", redact::outbound_with(text, rules))
+        };
+        Some(self.lines.iter().map(shown).collect())
+    }
+}
+
+/// `value` as the gate shows it beside `key`, out of any line.
+fn beside(key: &str, value: &str, rules: &Rules) -> String {
+    let mut raw = Raw::default();
+    raw.line(|raw| raw.pair(key, value, false));
+    raw.shown(rules)
+        .map_or_else(|| redact::MASK.to_owned(), |mut l| l.remove(0))
+}
+
+/// Row `(list, task)` of `l` at `now`, a line of `raw`.
+fn render(raw: &mut Raw, l: &Lists, (list, task): (usize, Option<usize>), now: i64) {
     let (name, f, state) = &l.lists[list];
-    let updated = |ts: i64| format!("updated {} ago", ago(now - ts));
-    let line = match task {
-        None if *state => format!(
-            "- {name}: {}, {}",
-            pairs(&f.state, &["task"], gate),
-            updated(f.state_ts.unwrap_or(now))
-        ),
-        None => format!("- {name}"),
+    let updated = |ts: i64| format!(", updated {} ago", ago(now - ts));
+    raw.line(|raw| match task {
+        None => {
+            raw.push("- ");
+            raw.part(name);
+            if *state {
+                raw.push(": ");
+                pairs(raw, visible(&f.state, &["task"]));
+                raw.push(&updated(f.state_ts.unwrap_or(now)));
+            }
+        }
         Some(t) => {
             let (task, fields, ts) = &f.tasks[t];
-            let status = match fields.get("status") {
-                None | Some(Value::Null) => String::new(),
-                Some(s) => format!("[{}] ", field("status", &text(s), gate)),
-            };
-            let details = match pairs(fields, &["task", "status"], gate) {
-                d if d.is_empty() => d,
-                d => format!(" ({d})"),
-            };
-            format!("  - {status}{task}{details}, {}", updated(*ts))
+            raw.push("  - ");
+            if let Some(s) = fields.get("status").filter(|s| !s.is_null()) {
+                raw.push("[");
+                raw.pair("status", &text(s), false);
+                raw.push("] ");
+            }
+            raw.pair("task", task, false);
+            let mut details = visible(fields, &["task", "status"]).peekable();
+            if details.peek().is_some() {
+                raw.push(" (");
+                pairs(raw, details);
+                raw.push(")");
+            }
+            raw.push(&updated(*ts));
         }
-    };
-    gated(&line, gate)
+    });
+}
+
+/// `key=value` pairs.
+fn pairs<'a>(raw: &mut Raw, fields: impl Iterator<Item = (&'a String, &'a Value)>) {
+    for (i, (k, v)) in fields.enumerate() {
+        if i > 0 {
+            raw.push(", ");
+        }
+        raw.pair(k, &text(v), true);
+    }
+}
+
+/// The lines of `l` at `now`, after the line `heading` writes when there is one.
+fn raw(l: &Lists, heading: Option<&dyn Fn(&mut Raw)>, now: i64) -> Raw {
+    let mut raw = Raw::default();
+    if let Some(heading) = heading {
+        raw.line(heading);
+    }
+    for &row in &l.rows {
+        render(&mut raw, l, row, now);
+    }
+    raw
 }
 
 /// Every list's lines in `entries`, as `lists` keeps and `render` writes them, with no gate.
 #[cfg(test)]
 pub fn lines(entries: &[Entry], now: i64, all: bool) -> Vec<String> {
-    let id = |s: &str| s.to_owned();
-    let l = lists(entries, None, all, &id);
-    l.rows
+    let raw = raw(&lists(entries, None, all, &Rules::default()), None, now);
+    raw.lines
         .iter()
-        .map(|&row| render(&l, row, now, &id))
+        .map(|r| raw.text[r.clone()].to_owned())
         .collect()
 }
 
@@ -336,17 +439,17 @@ fn more(left: usize, joint: &str) -> String {
     )
 }
 
-/// `heading`, then as many of the `n` lines `line` gives as fit in `limit` UTF-16 units, then how
-/// many were left out (claude-mem's `fitWorkStateLines`). A line is made only when it is
-/// measured, and the room kept for the last line is the room it takes after the newline before
-/// it, so the whole stays within `limit` unless not even that line fits after `heading`. The text
-/// is measured as its fence will hold it, a quoted closing tag longer than the tag (Codex's
-/// security review of #408).
-pub fn fit(heading: &str, n: usize, mut line: impl FnMut(usize) -> String, limit: usize) -> String {
+/// `heading`, then as many of `lines` as fit in `limit` UTF-16 units, then how many were left out
+/// (claude-mem's `fitWorkStateLines`). The room kept for the last line is the room it takes after
+/// the newline before it, so the whole stays within `limit` unless not even that line fits after
+/// `heading`. The text is measured as its fence will hold it, a quoted closing tag longer than the
+/// tag (Codex's security review of #408).
+pub fn fit(heading: &str, lines: &[String], limit: usize) -> String {
+    let n = lines.len();
     let mut text = heading.to_owned();
-    for i in 0..n {
+    for (i, line) in lines.iter().enumerate() {
         let joint = if text.is_empty() { "" } else { "\n" };
-        let candidate = format!("{text}{joint}{}", line(i));
+        let candidate = format!("{text}{joint}{line}");
         let room = if i + 1 < n {
             units(&more(n - i - 1, "\n"))
         } else {
@@ -358,12 +461,6 @@ pub fn fit(heading: &str, n: usize, mut line: impl FnMut(usize) -> String, limit
         text = candidate;
     }
     text
-}
-
-/// `gate` on a line's text, its indent kept: the egress gate trims what it gates.
-fn gated(line: &str, gate: &impl Fn(&str) -> String) -> String {
-    let text = line.trim_start();
-    format!("{}{}", &line[..line.len() - text.len()], gate(text))
 }
 
 /// The session start's section (L7): the rule, and the open lines for a fence of their own.
@@ -392,18 +489,13 @@ impl Section {
 /// What a session start begins with while nothing is open, for the tests of what shows it.
 #[cfg(test)]
 pub fn nothing_open() -> String {
-    section(&[], 0, SECTION, str::to_owned).text()
+    section(&[], 0, SECTION, &Rules::default()).text()
 }
 
-/// The section for `entries` at `now`, at most `limit` UTF-16 units: each open line passes
-/// `gate`, the egress gate, before it is measured.
-pub fn section(
-    entries: &[Entry],
-    now: i64,
-    limit: usize,
-    gate: impl Fn(&str) -> String,
-) -> Section {
-    let l = lists(entries, None, false, &gate);
+/// The section for `entries` at `now`, at most `limit` UTF-16 units, its open lines as the egress
+/// gate with `rules` shows them (`Raw::shown`) before they are cut, then cut, then gated whole.
+pub fn section(entries: &[Entry], now: i64, limit: usize, rules: &Rules) -> Section {
+    let l = lists(entries, None, false, rules);
     let n = l.rows.len();
     if n == 0 {
         return Section {
@@ -414,72 +506,73 @@ pub fn section(
     // The newline after the rule, the one the fence puts before its close, and the one that
     // joins the section to what follows (`Section::units`).
     let room = limit.saturating_sub(units(RULE) + 3 + units(&crate::manifest::fence(OPEN, "")));
-    // Each line is gated, then the lines as a whole, for a rule that spans them (Codex's security
-    // review of #408).
-    let open = gate(&fit("", n, |i| render(&l, l.rows[i], now, &gate), room));
-    // A limit with no room for the fence (`session_start_chars` near its least) holds how many
-    // lines there are, after the rule: a count made from the number alone, never recorded text,
-    // since the rule stands outside every fence (Codex's security review of #408).
-    if fenced_units(&open) > room {
-        return Section {
+    let open = raw(&l, None, now)
+        .shown(rules)
+        .map(|lines| redact::outbound_with(&fit("", &lines, room), rules));
+    match open {
+        Some(open) if fenced_units(&open) <= room => Section {
+            rule: RULE.to_owned(),
+            open: Some(open),
+        },
+        // A limit with no room for the fence (`session_start_chars` near its least), or lines the
+        // gate hides whole, leave how many lines there are, after the rule: a count made from the
+        // number alone, never recorded text, since the rule stands outside every fence (Codex's
+        // security review of #408).
+        _ => Section {
             rule: format!("{RULE}\n\n{}", more(n, "")),
             open: None,
-        };
-    }
-    Section {
-        rule: RULE.to_owned(),
-        open: Some(open),
+        },
     }
 }
 
 /// A write's answer: what is still open in its list among the repository's `entries`, cut as the
-/// section is, each line through `gate`, the egress gate.
-pub fn written(
-    list: &str,
-    repo: &str,
-    entries: &[Entry],
-    now: i64,
-    gate: impl Fn(&str) -> String,
-) -> String {
-    let saved = gate(&format!("Saved to \"{list}\" in {repo}."));
-    let l = lists(entries, Some(list), false, &gate);
-    if l.rows.is_empty() {
-        return format!("{saved} Nothing in it is open now.");
+/// section is, as the egress gate with `rules` shows it.
+pub fn written(list: &str, repo: &str, entries: &[Entry], now: i64, rules: &Rules) -> String {
+    let l = lists(entries, Some(list), false, rules);
+    let heading = |raw: &mut Raw| {
+        raw.push("Saved to \"");
+        raw.part(list);
+        raw.push("\" in ");
+        raw.part(repo);
+        raw.push(match l.rows.is_empty() {
+            true => ". Nothing in it is open now.",
+            false => ". Still open in it:",
+        });
+    };
+    match raw(&l, Some(&heading), now).shown(rules) {
+        Some(lines) => fit(&lines[0], &lines[1..], SECTION),
+        None => redact::MASK.to_owned(),
     }
-    let heading = format!("{saved} Still open in it:");
-    fit(
-        &heading,
-        l.rows.len(),
-        |i| render(&l, l.rows[i], now, &gate),
-        SECTION,
-    )
 }
 
 /// A read's answer: the lines of the repository's `entries` (one list's when `list` names it), at
-/// most `READ` UTF-16 units, or what there is not, each line through `gate`.
+/// most `READ` UTF-16 units, or what there is not, as the egress gate with `rules` shows it.
 pub fn read(
     list: Option<&str>,
     all: bool,
     repo: &str,
     entries: &[Entry],
     now: i64,
-    gate: impl Fn(&str) -> String,
+    rules: &Rules,
 ) -> String {
-    let l = lists(entries, list, all, &gate);
+    let l = lists(entries, list, all, rules);
     if !l.rows.is_empty() {
-        return fit(
-            "",
-            l.rows.len(),
-            |i| render(&l, l.rows[i], now, &gate),
-            READ,
-        );
+        // ponytail: every line is gated before the cut, so a history the gate finds too much in
+        // (`redact::hidden`'s limits) is hidden whole; a read of one list shows less.
+        return match raw(&l, None, now).shown(rules) {
+            Some(lines) => fit("", &lines, READ),
+            None => redact::MASK.to_owned(),
+        };
     }
     let named = list.map(|l| format!(" in \"{l}\"")).unwrap_or_default();
-    gate(&if all {
-        format!("Nothing recorded{named} for {repo}.")
-    } else {
-        format!("Nothing open{named} for {repo}. Pass includeClosed to see closed items.")
-    })
+    redact::outbound_with(
+        &if all {
+            format!("Nothing recorded{named} for {repo}.")
+        } else {
+            format!("Nothing open{named} for {repo}. Pass includeClosed to see closed items.")
+        },
+        rules,
+    )
 }
 
 #[cfg(test)]
@@ -617,9 +710,7 @@ mod tests {
     #[test]
     fn lines_are_cut_with_how_many_were_left_out() {
         let lines: Vec<String> = (0..5).map(|i| format!("- list{i}")).collect();
-        let fit = |heading: &str, n: usize, limit: usize| {
-            super::fit(heading, n, |i| lines[i].clone(), limit)
-        };
+        let fit = |heading: &str, n: usize, limit: usize| super::fit(heading, &lines[..n], limit);
         assert_eq!(
             fit("head", 5, 1_000),
             "head\n- list0\n- list1\n- list2\n- list3\n- list4"
@@ -651,11 +742,11 @@ mod tests {
             .map(|i| entry(&format!("l{i}"), json!({"note": tags}), 0))
             .collect();
         for limit in [1_000, 2_000, SECTION] {
-            let s = section(&e, 0, limit, str::to_owned);
+            let s = section(&e, 0, limit, &Rules::default());
             assert!(s.units() <= limit, "{} > {limit}", s.units());
         }
         // A line too long once quoted is left out, and the count of lines stays in the fence.
-        let s = section(&e, 0, SECTION, str::to_owned);
+        let s = section(&e, 0, SECTION, &Rules::default());
         assert_eq!(s.open.as_deref(), Some(more(3, "").as_str()));
     }
 
@@ -669,7 +760,7 @@ mod tests {
                 entry("release", json!({"note": "n".repeat(long)}), MIN),
             ];
             for limit in [1_000, SECTION] {
-                let s = section(&entries, MIN, limit, str::to_owned);
+                let s = section(&entries, MIN, limit, &Rules::default());
                 assert!(
                     s.rule == RULE || s.rule == format!("{RULE}\n\n{}", more(3, "")),
                     "{long} {limit}"
@@ -703,7 +794,7 @@ mod tests {
     /// and fitted, the whole within the limit.
     #[test]
     fn the_section_leads_with_the_rule() {
-        let none = section(&[], 0, SECTION, str::to_owned);
+        let none = section(&[], 0, SECTION, &Rules::default());
         assert_eq!(
             none,
             Section {
@@ -714,9 +805,14 @@ mod tests {
         let entries: Vec<Entry> = (0..200)
             .map(|i| entry(&format!("list {i}"), json!({"note": "x".repeat(40)}), i))
             .collect();
-        let s = section(&entries, 0, SECTION, |l| l.replace("list 199", "list ***"));
+        let s = section(
+            &entries,
+            0,
+            SECTION,
+            &user(r#"{ id = "n", regex = '199' }"#),
+        );
         let open = s.open.as_deref().unwrap();
-        assert!(open.starts_with("- list ***: note="), "{open}");
+        assert!(open.starts_with("- list [REDACTED]: note="), "{open}");
         assert!(
             open.ends_with("more lines; read them with work_state_read"),
             "{open}"
@@ -725,7 +821,7 @@ mod tests {
         assert!(s.units() > SECTION - 80, "{}", s.units());
         assert!(s.text().contains("<oboete-memory>\nWhat agents wrote"));
         // `session_start_chars` at its least leaves no room for the fence: the count alone.
-        let least = section(&entries, 0, 1_000, str::to_owned);
+        let least = section(&entries, 0, 1_000, &Rules::default());
         assert_eq!(
             least,
             Section {
@@ -736,17 +832,95 @@ mod tests {
         assert!(least.units() <= 1_000, "{}", least.units());
     }
 
+    fn user(extra: &str) -> Rules {
+        let toml = format!("[redaction]\nextra_rules = [{extra}]\n");
+        let capture = crate::config::parse_capture(Some(&toml)).unwrap();
+        Rules::new(&capture.redaction).unwrap()
+    }
+
+    /// Codex's security review of #408 (6eec12b): a rule added after a write sees each name, key
+    /// and value as written: a key or a list's name it masks alone still gives it the context it
+    /// needs around a value, and a mask that starts in a key hides the key even where the masked
+    /// text spells the key again.
+    #[test]
+    fn a_rule_added_later_sees_names_and_keys_as_written() {
+        let key = user(r#"{ id = "k", regex = '^phase(?: = "teal-[0-9]{4}")?$' }"#);
+        let entries = [entry("release", json!({"phase": "teal-1234"}), 0)];
+        let text = read(None, false, "r", &entries, 0, &key);
+        assert!(!text.contains("teal-1234"), "{text}");
+        let name = user(r#"{ id = "n", regex = '(?s)FOO(?:.*(teal-1234))?', secret_group = 1 }"#);
+        let entries = [entry("FOO", json!({"task": "teal-1234"}), 0)];
+        let open = section(&entries, 0, SECTION, &name).text();
+        assert!(
+            !open.contains("teal-1234") && !open.contains("FOO"),
+            "{open}"
+        );
+        let spoof = user(
+            r#"{ id = "s", regex = '^(\[REDACTED\]teal-[0-9]{4} = ")teal-[0-9]{4} = "private"$', secret_group = 1 }"#,
+        );
+        let entries = [entry(
+            "l",
+            json!({"[REDACTED]teal-1234": "teal-1234 = \"private"}),
+            0,
+        )];
+        let text = read(None, false, "r", &entries, 0, &spoof);
+        assert!(
+            text.starts_with("- l: [REDACTED]=teal-1234 = \"private,"),
+            "{text}"
+        );
+    }
+
+    /// Each line is a view of its own, as written: a rule anchored to a line's start, or written
+    /// against its `key=value`, sees it whole where another rule masks a value in it (#411).
+    #[test]
+    fn a_rule_sees_each_line_as_written() {
+        let rules = user(
+            r#"{ id = "x", regex = '^- (teal-[0-9]{4}) \(note=ZZ', secret_group = 1 }, { id = "y", regex = '^ZZ$' }"#,
+        );
+        let entries = [entry("l", json!({"task": "teal-1234", "note": "ZZ"}), 0)];
+        let text = read(None, false, "r", &entries, 0, &rules);
+        assert!(
+            !text.contains("teal-1234") && !text.contains("ZZ"),
+            "{text}"
+        );
+        // #411: a rule written against the line's `key=value` keeps its context where another
+        // masks the start of the value.
+        let rules = user(
+            r#"{ id = "a", regex = '^alpha' }, { id = "b", regex = 'note=alpha (teal-[0-9]{4})', secret_group = 1 }"#,
+        );
+        let entries = [entry("notes", json!({"note": "alpha teal-1234"}), 0)];
+        let text = read(None, false, "r", &entries, 0, &rules);
+        assert_eq!(
+            text,
+            "- notes: note=[REDACTED] [REDACTED], updated 1 minute ago"
+        );
+    }
+
+    /// Codex's security review of #408 (6eec12b): a line the cut leaves out still gives a rule
+    /// its context, since the lines are gated whole before they are cut.
+    #[test]
+    fn a_rule_sees_the_lines_a_cut_leaves_out() {
+        let rules =
+            user(r#"{ id = "f", regex = '(?s)^- (teal-[0-9]{4}).*\n.*FOLLOW', secret_group = 1 }"#);
+        let list = format!("teal-1234{}", "a".repeat(100));
+        let task = format!("FOLLOW{}", "x".repeat(1_970));
+        let entries = [entry(&list, json!({ "task": task }), 0)];
+        let open = section(&entries, 0, SECTION, &rules).open.unwrap();
+        assert!(!open.contains("FOLLOW"), "the task's line is cut: {open}");
+        assert!(!open.contains("teal-1234"), "{open}");
+    }
+
     /// The answers' words are claude-mem's, with the repository's key.
     #[test]
     fn the_answers_say_what_claude_mem_says() {
         let open = [entry("release", json!({"task": "notes"}), 0)];
         assert_eq!(
-            written("release", "github.com/o/r", &open, MIN, str::to_owned),
+            written("release", "github.com/o/r", &open, MIN, &Rules::default()),
             "Saved to \"release\" in github.com/o/r. Still open in it:\n- release\n  - notes, updated 1 minute ago"
         );
         let done = [entry("release", json!({"status": "done"}), 0)];
         assert_eq!(
-            written("release", "github.com/o/r", &done, 0, str::to_owned),
+            written("release", "github.com/o/r", &done, 0, &Rules::default()),
             "Saved to \"release\" in github.com/o/r. Nothing in it is open now."
         );
         assert_eq!(
@@ -756,16 +930,16 @@ mod tests {
                 "github.com/o/r",
                 &done,
                 0,
-                str::to_owned
+                &Rules::default()
             ),
             "Nothing open in \"release\" for github.com/o/r. Pass includeClosed to see closed items."
         );
         assert_eq!(
-            read(None, true, "github.com/o/r", &[], 0, str::to_owned),
+            read(None, true, "github.com/o/r", &[], 0, &Rules::default()),
             "Nothing recorded for github.com/o/r."
         );
         assert_eq!(
-            read(None, true, "github.com/o/r", &done, 0, str::to_owned),
+            read(None, true, "github.com/o/r", &done, 0, &Rules::default()),
             "- release: status=done, updated 1 minute ago"
         );
         // A read is cut at `READ` with how many lines were left out (Codex's security review of
@@ -773,7 +947,7 @@ mod tests {
         let long: Vec<Entry> = (0..15)
             .map(|i| entry(&format!("l{i}"), json!({"note": "n".repeat(1_900)}), 0))
             .collect();
-        let text = read(None, false, "github.com/o/r", &long, 0, str::to_owned);
+        let text = read(None, false, "github.com/o/r", &long, 0, &Rules::default());
         assert!(units(&text) <= READ, "{}", units(&text));
         assert!(text.ends_with("more lines; read them with work_state_read"));
     }
