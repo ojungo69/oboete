@@ -572,6 +572,12 @@ for(const url of [undefined,'http://example.com:17400/#t=ffeeddccbbaa99887766554
 ctx.location.replaced.length=0;
 w6.applySavedSettings(settings('foreground',{view:{port:17400},view_runtime:{port:4323,mode:'foreground'}}),f,null);
 assert.equal(ctx.location.replaced.length,0,'a foreground run stays on its own address');
+// Port 80 is no port in the browser's address: a save that stays there is no move.
+ctx.location.port='';
+w6.applySavedSettings(settings('resident',{view:{port:80},view_runtime:{port:80,mode:'resident'}}),f,null);
+assert.equal(ctx.location.replaced.length,0,'a save on port 80 stays where it is');
+assert(!document.getElementById('status').textContent.includes('run oboete view'),'a save on port 80 is not a lost move');
+ctx.location.port='17373';
 
 // A new token: confirmed first, then the page goes on only at a vetted address.
 f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();

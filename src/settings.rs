@@ -650,9 +650,23 @@ pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refus
 /// keys into it and checks the result as every reader parses it before it replaces the file, and
 /// answers the new `show`. A value that equals the entry's own is not written, so it keeps
 /// following later changes to the defaults. The caller holds `saving` and config.lock, under
-/// which the viewer checks the page's token first and writes a new one with a moved port
-/// (docs/resident.md R6).
+/// which the viewer checks the page's token first.
 pub fn save_held(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
+    if let Some(staged) = stage_held(home, body)? {
+        staged
+            .commit()
+            .map_err(|_| refused(500, "write_failed", ""))?;
+    }
+    Ok(show(home))
+}
+
+/// `save_held` short of its rename: every refusal it gives, and the new file staged beside
+/// config.toml (`None` when nothing would change). A port saved on the resident page renames it
+/// only once the new token is in place (docs/resident.md R6).
+pub(crate) fn stage_held(
+    home: &Path,
+    body: &[u8],
+) -> Result<Option<crate::setup::Staged>, Refusal> {
     let posted: Save = serde_json::from_slice(body).map_err(|e| match e.classify() {
         serde_json::error::Category::Data => refused(422, "type", ""),
         _ => refused(400, "bad_request", ""),
@@ -770,7 +784,7 @@ pub fn save_held(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
     write_chain(&mut doc, &now.chain, reordered, chain);
     let candidate = doc.to_string();
     if candidate == text {
-        return Ok(show(home));
+        return Ok(None);
     }
     parsed(&path, &candidate).ok_or_else(invalid)?;
     let staged =
@@ -781,10 +795,7 @@ pub fn save_held(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
     if version(bytes(home).map_err(|_| invalid())?.as_deref()) != posted.version {
         return Err(refused(409, "stale", ""));
     }
-    staged
-        .commit()
-        .map_err(|_| refused(500, "write_failed", ""))?;
-    Ok(show(home))
+    Ok(Some(staged))
 }
 
 /// `[view] port` set to `port`, the rest of config.toml as it was (`oboete view --new-token`,

@@ -902,6 +902,7 @@ const TEXT = {
   view_not_started: ['The resident page did not start. “Run diagnostics now” below shows why. This page keeps working.', '常駐の画面が起動しませんでした。理由は下の「今すぐ診断」で確認できます。この画面はそのまま使えます。'],
   view_not_resident: ['Save “Keep oboete running between sessions” first.', '先に「セッション間も oboete を起動したままにする」を保存してください。'],
   port_unavailable: ['This port cannot be used: another program may hold it. Choose another.', 'このポートは使えません。別のプログラムが使っている可能性があります。別のポートを選んでください。'],
+  token_replaced: ['The settings were not saved, but the resident page’s token was already replaced. Run oboete view in a terminal to see its address.', '設定は保存されませんでしたが、常駐の画面のトークンはすでに新しくなっています。ターミナルで oboete view を実行すると、その画面のアドレスが表示されます。'],
   language: ['Language', '言語'],
   lead: [
     'Choose the settings below. Each save applies its own section; individual provider checkboxes and arrows save immediately. Recording and memory delivery read them at their next use; the background summarizer reads them before its next window, even while it stays running. This page cannot tell which values a running request has loaded. Opening this page or saving sends nothing to a provider.',
@@ -4186,7 +4187,8 @@ function applySavedSettings(answer, mine, current) {
   // The resident viewer moved onto the saved port with a new token: the page goes on to the
   // address in the answer and reads nothing more from the old one, which no longer answers.
   const runtime = current ? null : answer.view_runtime;
-  const moved = runtime?.mode === 'resident' && runtime.port !== Number(location.port);
+  // An address on port 80 shows no port.
+  const moved = runtime?.mode === 'resident' && runtime.port !== (Number(location.port) || 80);
   if (moved && movePage(runtime.url || '')) return;
   form = current ? formOf(current) : mergeProviderSettings(answer, mine, { op: 'settings' });
   if (form) form.privacy = privacyUnavailable();

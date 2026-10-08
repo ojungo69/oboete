@@ -175,9 +175,11 @@ and one line telling the owner to delete the old bookmark. The new address is wh
 squatter left in the browser under the old one. The page's New page token makes the same two steps
 inside the resident viewer, which serves the new port at once and answers with the new address.
 A port saved on the page comes with a new token as well: under one hold of `state/config.lock` the
-viewer checks the request's token, binds the port, stages the new token, writes the settings, puts
-the token in place and only then moves, so a failure before the move leaves the old port with its
-old token. New tokens are made one at a time under that lock, by the command and the page alike.
+viewer checks the request's token, binds the port, checks and stages the settings and the new token,
+puts the token in place, then writes the settings and only then moves. A refusal or a failure
+before the token is in place changes nothing; settings that cannot be written after it leave the
+old port with a token that no page holds (Limits). New tokens are made one at a time under that
+lock, by the command and the page alike.
 Every write from the page checks the token its request brought again once its body is in, and a
 settings save and a new token check it again under that lock, so a request that waited while a new
 token was made does nothing, not even put back the port the new token moved from; the moves take
@@ -356,6 +358,10 @@ left as a setting to add before a public release.
 - A port changed by hand in config.toml keeps the token, so the old bookmark's port is free for
   another program while its token still works: delete the old bookmark, and run
   `oboete view --new-token` if another program may have taken the old port.
+- A port saved on the page whose settings cannot be written once its new token is in place (a
+  rename that fails just after another succeeded) leaves the page on the old port with that new
+  token, which no open page holds: the page says the settings were not saved, and `oboete view`
+  prints the address.
 - Under choice (a), whoever knows the token can change settings and replace keys from this machine
   until `--new-token`; what they changed is not put back by it.
 - The page opens only while WSL runs; right after a boot it opens once the first hook, `oboete view`

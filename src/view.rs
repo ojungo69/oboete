@@ -1256,7 +1256,7 @@ impl Viewer {
             .and_then(|port| u16::try_from(port).ok())
             .filter(|&port| port != 0);
         match posted.filter(moves) {
-            Some(port) => self.save_with_new_token(body, port, was.ok()),
+            Some(port) => self.save_with_new_token(body, port),
             None => saved(
                 crate::settings::save_held(&self.home, body)
                     .map(|report| self.runtime(report, self.port())),
@@ -1265,12 +1265,14 @@ impl Viewer {
     }
 
     /// A resident port saved with a new token, still under `save`'s hold of config.lock, where
-    /// new tokens are made: the resident page's new port bound, a new token staged, the settings
-    /// written, the token put in place, and only then the resident page moved. What fails before
-    /// that leaves the old port (`was`) with its old token (Codex on W6). A foreground run moves
-    /// nothing and answers no address: the token is the resident viewer's, which its page starts
-    /// or `oboete view` prints.
-    fn save_with_new_token(&self, body: &[u8], port: u16, was: Option<u16>) -> Response {
+    /// new tokens are made: the resident page's new port bound, the settings checked and staged,
+    /// a new token staged and put in place, the settings written, and only then the resident page
+    /// moved. A refusal or a failure before the token is in place changes nothing (the staged
+    /// settings go when dropped); settings that cannot follow it leave the old port with a token
+    /// that no page holds (Codex and CodeRabbit on W6). A foreground run moves nothing and answers
+    /// no address: the token is the resident viewer's, which its page starts or `oboete view`
+    /// prints.
+    fn save_with_new_token(&self, body: &[u8], port: u16) -> Response {
         let listener = match self.token {
             Token::File => match TcpListener::bind(("127.0.0.1", port)) {
                 Ok(listener) => Some(listener),
@@ -1278,26 +1280,23 @@ impl Viewer {
             },
             Token::Run(_) => None,
         };
+        let settings = match crate::settings::stage_held(&self.home, body) {
+            Ok(settings) => settings,
+            Err(refusal) => return saved(Err(refusal)),
+        };
         let Ok((staged, token)) = stage_token(&self.home) else {
             return refused(500, "write_failed", "");
         };
-        let report = match crate::settings::save_held(&self.home, body) {
-            Ok(report) => report,
-            Err(refusal) => {
-                let _ = clear(&staged);
-                return saved(Err(refusal));
-            }
-        };
-        // Not in place (a folder that is not synced after the rename still is): the settings
-        // take the old port back, which keeps its token.
+        // A folder that is not synced after the rename still has the token in place.
         if put_token(&self.home, &staged).is_err() && file_token(&self.home) != Some(token.clone())
         {
             let _ = clear(&staged);
-            if let Some(was) = was {
-                let _ = crate::settings::set_view_port(&self.home, was);
-            }
             return refused(500, "write_failed", "");
         }
+        if settings.is_some_and(|s| s.commit().is_err()) {
+            return refused(500, "token_replaced", "");
+        }
+        let report = crate::settings::show(&self.home);
         let Some(listener) = listener else {
             return saved(Ok(self.runtime(report, self.port())));
         };
@@ -6834,7 +6833,7 @@ curate = false
             ];
             match v.head("POST", path, &h) {
                 Head::Body(_, save, given) => (save, given),
-                Head::Answer(r) => panic!("the head did not pass: {}", r.status),
+                Head::Answer(_) => panic!("the head did not pass"),
             }
         };
         let (save, given) = head("/api/settings", body.len());
@@ -6957,6 +6956,49 @@ curate = false
         );
         assert_eq!(file_token(home.path()).unwrap(), token);
         assert_eq!(w6p_call(port, "GET", "/api/settings", &token, None).0, 200);
+    }
+
+    /// W6 (CodeRabbit): a port save's settings are written only once its new token is in place.
+    /// One the settings refuse makes no token, and one whose token cannot be put in place writes
+    /// none of its settings, the port and every other key alike.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w6p_a_port_save_writes_its_settings_only_after_its_token() {
+        let (home, port, token, v) = w6p_resident();
+        let (status, shown) = w6p_call(port, "GET", "/api/settings", &token, None);
+        assert_eq!(status, 200, "{shown}");
+        let mut body: Value = serde_json::from_slice(&save_body(&shown)).unwrap();
+        let to = free_port();
+        body["view"] = json!({"port": to});
+        body["capture"]["store_prompts"] =
+            json!(!shown["capture"]["store_prompts"].as_bool().unwrap());
+        let config = || std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        let before = config();
+        let mut stale = body.clone();
+        stale["version"] = json!("another");
+        let (status, refusal) = w6p_post(&v, &token, "/api/settings", &stale);
+        assert_eq!((status, refusal["code"].as_str()), (409, Some("stale")));
+        assert_eq!(file_token(home.path()).unwrap(), token);
+        assert_eq!(w6p_call(port, "GET", "/api/settings", &token, None).0, 200);
+        // The token's place taken by a folder: the staged token cannot be renamed there.
+        let place = home.path().join("state/view-token");
+        std::fs::remove_file(&place).unwrap();
+        std::fs::create_dir(&place).unwrap();
+        let r = v.save_with_new_token(&serde_json::to_vec(&body).unwrap(), to);
+        let answer: Value = serde_json::from_slice(&r.body).unwrap();
+        assert!(r.status == 500 && answer["code"] == "write_failed");
+        assert_eq!(config(), before);
+        assert!(place.is_dir());
+        assert_eq!(v.port(), port);
+        let left = |dir: &Path| {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with("tmp"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(left(home.path()), Vec::<String>::new());
+        assert_eq!(left(&home.path().join("state")), Vec::<String>::new());
     }
 
     /// W6 (Codex on its security review): a saved port is bound, written and moved onto under
