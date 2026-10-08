@@ -308,11 +308,15 @@ impl Oboete {
         };
         let (repo, settings) = self.checkout()?;
         let (list, fields) = crate::capture::work_state(&list, &a.fields, &settings);
+        // Checked again as it is stored: a name or a key that was only a private block is
+        // empty now (Codex on #408).
+        let list = match crate::work_state::check(&list, &fields) {
+            Ok(list) => list,
+            Err(m) => return failed(m),
+        };
         let mut raw = crate::raw::open(&self.home).map_err(internal)?;
         raw.work_state(&repo, &list, &fields).map_err(internal)?;
-        let entries = raw
-            .work_state_entries(&repo, Some(&list))
-            .map_err(internal)?;
+        let entries = raw.work_state_entries(&repo).map_err(internal)?;
         text(crate::work_state::written(
             &list,
             &repo,
@@ -340,9 +344,7 @@ impl Oboete {
             .filter(|l| !l.is_empty())
             .map(|l| crate::capture::work_state(l, &Default::default(), &settings).0);
         let entries = match crate::raw::read_only(&self.home).map_err(internal)? {
-            Some(raw) => {
-                crate::raw::work_state_in(&raw.conn, &repo, list.as_deref()).map_err(internal)?
-            }
+            Some(raw) => crate::raw::work_state_in(&raw.conn, &repo).map_err(internal)?,
             None => Vec::new(),
         };
         text(crate::work_state::read(
@@ -1603,13 +1605,7 @@ mod tests {
         ] {
             assert_eq!(write_state(&server, list, fields).is_error, Some(true));
         }
-        assert_eq!(
-            s.raw
-                .work_state_entries("github.com/o/r", None)
-                .unwrap()
-                .len(),
-            3
-        );
+        assert_eq!(s.raw.work_state_entries("github.com/o/r").unwrap().len(), 3);
         let tools = server.tool_router.list_all();
         for tool in &tools {
             let read_only = tool.annotations.as_ref().and_then(|a| a.read_only_hint);
@@ -1649,7 +1645,7 @@ mod tests {
             json!({"amber-234567": "value amber-345678"}),
         ));
         assert!(!answer.contains("amber-"), "{answer}");
-        let stored = s.raw.work_state_entries("github.com/o/r", None).unwrap();
+        let stored = s.raw.work_state_entries("github.com/o/r").unwrap();
         let stored = format!("{} {:?}", stored[0].list, stored[0].fields);
         assert!(!stored.contains("amber-"), "{stored}");
         write_state(&server, "plain", json!({"note": "teal-1234"}));
@@ -1659,6 +1655,87 @@ mod tests {
         assert!(
             !read.contains("teal-1234") && read.contains("- plain: note="),
             "{read}"
+        );
+    }
+
+    /// Codex's security review of #408: a rule that needs a value's key before it (gitleaks'
+    /// generic-api-key, or one added later) or the whole value (an anchored rule added later)
+    /// matches it as it is stored and as it is shown.
+    #[test]
+    fn rules_see_a_value_with_its_key_and_whole() {
+        let s = Store::new();
+        let server = Oboete::new(s.home.path(), &checkout(&s, "r"));
+        let secret = format!("R8m2V5p9{}", "Q1s4H7c0N6x3");
+        let fields = json!({"api_key": secret, "colour": "violet", "tag": "teal-5678"});
+        let answer = body(write_state(&server, "keys", fields));
+        let stored = s.raw.work_state_entries("github.com/o/r").unwrap();
+        let stored = format!("{answer} {:?}", stored[0].fields);
+        assert!(
+            !stored.contains(&secret) && stored.contains("violet"),
+            "{stored}"
+        );
+        std::fs::write(
+            s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"a\", regex = '^teal-[0-9]{4}$' }, \
+             { id = \"b\", regex = 'colour = \"violet\"' }]\n",
+        )
+        .unwrap();
+        let read = read_state(&server, json!({}));
+        assert!(
+            read.contains("api_key=[REDACTED], colour=[REDACTED], tag=[REDACTED]"),
+            "{read}"
+        );
+    }
+
+    /// Codex on #408: a rule added later that masks part of a list's name leaves it one list: the
+    /// next write to it, stored under the masked name, and a read of it by its old name find the
+    /// writes from before the rule.
+    #[test]
+    fn a_list_keeps_its_writes_when_a_rule_masks_its_name_later() {
+        let s = Store::new();
+        let server = Oboete::new(s.home.path(), &checkout(&s, "r"));
+        let list = "deploy teal-1234";
+        write_state(&server, list, json!({"task": "notes", "status": "doing"}));
+        std::fs::write(
+            s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"marker\", regex = 'teal-[0-9]{4}' }]\n",
+        )
+        .unwrap();
+        let answer = body(write_state(
+            &server,
+            list,
+            json!({"task": "notes", "status": "done"}),
+        ));
+        assert!(answer.contains("Nothing in it is open now."), "{answer}");
+        assert_eq!(
+            read_state(&server, json!({})),
+            search::fenced(
+                "Nothing open for github.com/o/r. Pass includeClosed to see closed items."
+            )
+        );
+        assert_eq!(
+            read_state(&server, json!({"list": list, "includeClosed": true})),
+            search::fenced("- deploy [REDACTED]\n  - [done] notes, updated 1 minute ago")
+        );
+    }
+
+    /// Codex on #408: a name or a key that is only a private block is empty once the block is
+    /// removed, and is refused as an empty one is, with nothing written.
+    #[test]
+    fn a_name_or_a_key_that_is_only_a_private_block_is_refused() {
+        let s = Store::new();
+        let server = Oboete::new(s.home.path(), &checkout(&s, "r"));
+        for (list, fields) in [
+            ("<private>release</private>", json!({"a": 1})),
+            ("release", json!({"<private>k</private>": 1})),
+        ] {
+            assert_eq!(write_state(&server, list, fields).is_error, Some(true));
+        }
+        assert!(
+            s.raw
+                .work_state_entries("github.com/o/r")
+                .unwrap()
+                .is_empty()
         );
     }
 }

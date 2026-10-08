@@ -3595,7 +3595,7 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         let settings = Settings::default();
         let shown = crate::hook::start_text_read(
             home.path(),
-            &raw,
+            Some(&raw),
             "github.com/o/r",
             "",
             "s1",
@@ -3630,7 +3630,7 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         let manifest = |raw: &Raw| {
             crate::hook::start_text_read(
                 home.path(),
-                raw,
+                Some(raw),
                 "github.com/o/r",
                 "",
                 "L",

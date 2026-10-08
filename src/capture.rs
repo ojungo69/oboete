@@ -392,6 +392,28 @@ impl<'a> Gate<'a> {
         stored
     }
 
+    /// `value` with what the assignment `key = "value"` hides in it hidden, those findings in the
+    /// ledger at `field`: the rules that look for a key before a secret (gitleaks'
+    /// generic-api-key) match neither a key nor a value scanned apart (Codex's security review of
+    /// #408). A mask that reaches past the value hides the value whole.
+    fn paired(&mut self, field: &str, key: &str, value: &str) -> String {
+        let head = format!("{key} = \"");
+        let (masked, found) = redact::scan(&format!("{head}{value}\""), self.rules);
+        if found.is_empty() {
+            return value.to_owned();
+        }
+        let shown = masked.strip_prefix(&head).and_then(|v| v.strip_suffix('"'));
+        let offset = |o: usize| shown.map_or(0, |_| o.saturating_sub(head.len()));
+        self.ledger.extend(found.into_iter().map(|f| {
+            let f = redact::Finding {
+                offset: offset(f.offset),
+                ..f
+            };
+            (field.to_owned(), f)
+        }));
+        shown.map_or_else(|| redact::MASK.to_owned(), str::to_owned)
+    }
+
     /// Every string and key of `v`, at its JSON pointer. Blocks are gone by now: stripping here
     /// again would pair an opener left in one flattened tool field with a closer in another.
     /// A string is kept up to `cap`.
@@ -417,6 +439,12 @@ impl<'a> Gate<'a> {
                         // The pointer is built from the stored key, so it never holds a secret.
                         let key = self.text(&format!("{path}#key"), &k, self.cap);
                         let child = format!("{path}/{}", segment(&key));
+                        let x = match x {
+                            Value::String(s) if s.len() <= PAIRED => {
+                                Value::String(self.paired(&child, &key, &s))
+                            }
+                            x => x,
+                        };
                         let x = self.value(&child, x, cap);
                         (key, x)
                     })
@@ -426,6 +454,10 @@ impl<'a> Gate<'a> {
         }
     }
 }
+
+/// The longest string value scanned beside its key too (`Gate::paired`): gitleaks'
+/// generic-api-key takes a secret of at most 150 characters.
+const PAIRED: usize = 256;
 
 /// A key as one JSON pointer segment (`~0`, `~1` escaped). A key over 128 bytes is named by
 /// `~sha:` and the first 16 hex digits of its sha256 instead: thousands of findings under a huge
@@ -742,6 +774,29 @@ mod tests {
             end[0].ledger
         );
         assert!(!format!("{:?}", end[0]).contains(&key));
+    }
+
+    /// Codex's security review of #408: a rule that looks for a key before a secret (gitleaks'
+    /// generic-api-key) matches a string beside its key, the ledger offset in the stored string.
+    #[test]
+    fn a_value_is_scanned_with_its_key() {
+        let secret = format!("R8m2V5p9{}", "Q1s4H7c0N6x3");
+        let payload = json!({"reason": {"api_key": format!("  {secret}"), "note": "violet"}});
+        let v = events("claude", "SessionEnd", &payload, 0, &Settings::default());
+        assert!(!format!("{:?}", v[0]).contains(&secret), "{:?}", v[0]);
+        let (field, f) = &v[0].ledger[0];
+        assert_eq!((field.as_str(), f.offset), ("/reason/api_key", 2));
+        assert_eq!(body(&v[0].event)["reason"]["api_key"], "  [REDACTED]");
+        assert_eq!(body(&v[0].event)["reason"]["note"], "violet");
+        // A mask that reaches past the value masks the value whole.
+        let s = with("[[redaction.extra_rules]]\nid = \"v\"\nregex = 'note = \"violet\"'\n");
+        let v = events("claude", "SessionEnd", &payload, 0, &s);
+        assert_eq!(body(&v[0].event)["reason"]["note"], "[REDACTED]");
+        assert!(
+            v[0].ledger
+                .iter()
+                .any(|(field, f)| field == "/reason/note" && f.offset == 0)
+        );
     }
 
     #[test]

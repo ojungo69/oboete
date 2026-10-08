@@ -775,21 +775,23 @@ pub(crate) fn migration_checkpoints_in(
     Ok(out)
 }
 
-/// The same current list for an existing read-only connection: no indexes or schema writes.
-/// docs/work-state.md L4: `repo`'s work state writes (one list's when `list` names it), in the
-/// order they were written: a device's in its own order, its clock never going back in it, then
-/// every device's by that clock, as `exclusions_in` orders exclusions.
+/// docs/work-state.md L4: `repo`'s work state writes, in the order they were written: a device's
+/// in its own order, its clock never going back in it, then every device's by that clock, as
+/// `exclusions_in` orders exclusions. Only `repo`'s ops are parsed here (Codex's security review
+/// of #408); SQLite still reads the repository of every work state op, as no index may have a
+/// repository for its root (spec 1.6), and a malformed op still fails the read.
 pub(crate) fn work_state_in(
     conn: &Connection,
     repo: &str,
-    list: Option<&str>,
 ) -> Result<Vec<crate::work_state::Entry>> {
     let mut st = conn.prepare(
-        "SELECT device, ts, body FROM main.ops WHERE type = 'work_state' ORDER BY device, op_seq",
+        "SELECT device, ts, body FROM main.ops
+         WHERE type = 'work_state' AND json_extract(body, '$.repo') = ?1
+         ORDER BY device, op_seq",
     )?;
     let mut writes = Vec::new();
     let (mut device, mut clock) = (String::new(), i64::MIN);
-    let rows = st.query_map([], |r| {
+    let rows = st.query_map([repo], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, i64>(1)?,
@@ -803,9 +805,6 @@ pub(crate) fn work_state_in(
             (device, clock) = (from.clone(), i64::MIN);
         }
         clock = clock.max(v["clock"].as_i64().unwrap_or(ts));
-        if v["repo"] != repo || list.is_some_and(|l| v["list"] != l) {
-            continue;
-        }
         let (Some(name), Some(fields)) = (v["list"].as_str(), v["fields"].as_object()) else {
             continue;
         };
@@ -820,6 +819,7 @@ pub(crate) fn work_state_in(
     Ok(writes.into_iter().map(|w| w.3).collect())
 }
 
+/// The same current list for an existing read-only connection: no indexes or schema writes.
 pub(crate) fn exclusions_in(conn: &Connection) -> Result<Vec<String>> {
     // A device's ops in its own order (op_seq), its clock never going back in it, then every
     // device's by that clock: a clock set back never puts a newer op first, and an op
@@ -2293,12 +2293,8 @@ impl Raw {
     }
 
     /// `work_state_in` on this store.
-    pub fn work_state_entries(
-        &self,
-        repo: &str,
-        list: Option<&str>,
-    ) -> Result<Vec<crate::work_state::Entry>> {
-        work_state_in(&self.conn, repo, list)
+    pub fn work_state_entries(&self, repo: &str) -> Result<Vec<crate::work_state::Entry>> {
+        work_state_in(&self.conn, repo)
     }
 
     /// The sessions, as `agent` NUL `session`, with a record in one of `repos`: what an excluded
@@ -4083,8 +4079,11 @@ mod tests {
         std::fs::copy(home.path().join("raw.db"), copy.path().join("raw.db")).unwrap();
         let mut other = open(copy.path()).unwrap();
         other.work_state("r", "release", &phase("three")).unwrap();
+        other
+            .work_state("s", "release", &phase("elsewhere"))
+            .unwrap();
         let phases: Vec<_> = other
-            .work_state_entries("r", None)
+            .work_state_entries("r")
             .unwrap()
             .into_iter()
             .map(|e| e.fields["phase"].clone())

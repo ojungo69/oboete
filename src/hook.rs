@@ -651,7 +651,7 @@ fn checkout_manifest(
     let session = own_session(session, store);
     start_text_read(
         home,
-        store,
+        Some(store),
         &repo,
         branch.as_deref().unwrap_or(""),
         &session,
@@ -665,10 +665,11 @@ fn checkout_manifest(
 /// cut to `[inject]`'s size. It writes nothing. A read error is returned: a hook logs it and says
 /// so in its line for the person, and the viewer's Context page, which shows this for any
 /// checkout, answers it (milestone 4 D11: 503 for a store a restore or a rebuild holds). With
-/// `work`, the work state section comes first (docs/work-state.md L7).
+/// `work`, the work state section comes first (docs/work-state.md L7), also for a home with no
+/// store yet, whose first session start shows it (Codex on #408).
 pub fn start_text_read(
     home: &Path,
-    store: &crate::raw::Raw,
+    store: Option<&crate::raw::Raw>,
     repo: &str,
     branch: &str,
     session: &str,
@@ -687,28 +688,39 @@ pub fn start_text_read(
     // docs/work-state.md L7: the work state section first, out of the same size, which the
     // manifest is fitted to what it leaves of.
     let now = crate::db::now_ms();
-    let work = if work {
-        Some(crate::work_state::section(
-            &store.work_state_entries(repo, None)?,
+    let entries = match work.then(|| store.map(|s| s.work_state_entries(repo)).transpose()) {
+        Some(Ok(entries)) => Some(entries.unwrap_or_default()),
+        // A work state that cannot be read hides no memory: the section is left out (CodeRabbit
+        // on #408).
+        Some(Err(e)) => {
+            eprintln!("oboete: work state not read: {e:#}");
+            None
+        }
+        None => None,
+    };
+    let work = entries.map(|entries| {
+        crate::work_state::section(
+            &entries,
             now,
             crate::work_state::SECTION.min(inject.session_start_chars),
             |l| crate::redact::outbound_with(l, &settings.rules),
-        ))
-    } else {
-        None
+        )
+    });
+    let manifest = match store {
+        Some(store) => crate::consumer::manifest::text(
+            home,
+            store,
+            repo,
+            branch,
+            session,
+            &settings.rules,
+            inject
+                .session_start_chars
+                .saturating_sub(work.as_ref().map_or(0, |w| w.units())),
+            now,
+        )?,
+        None => None,
     };
-    let manifest = crate::consumer::manifest::text(
-        home,
-        store,
-        repo,
-        branch,
-        session,
-        &settings.rules,
-        inject
-            .session_start_chars
-            .saturating_sub(work.as_ref().map_or(0, |w| w.units())),
-        now,
-    )?;
     Ok(match work {
         Some(work) => Some(Start {
             work: Some(work),
@@ -4624,6 +4636,37 @@ mod tests {
         );
         config("[inject]\nsession_start = false\n");
         assert_eq!(start("d"), "");
+    }
+
+    /// CodeRabbit on #408: a work state op that cannot be read leaves the section out and hides no
+    /// memory.
+    #[test]
+    fn a_work_state_that_cannot_be_read_hides_no_memory() {
+        let dir = tmp("work-state-unread");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        built_manifest(&dir, &dir, "earlier work");
+        let mut raw = crate::raw::open(&dir).unwrap();
+        let fields = json!({"phase": "rc2"});
+        raw.work_state(&repo::key(&dir), "release", fields.as_object().unwrap())
+            .unwrap();
+        drop(raw);
+        Connection::open(dir.join("raw.db"))
+            .unwrap()
+            .execute(
+                "UPDATE ops SET body = 'not json' WHERE type = 'work_state'",
+                [],
+            )
+            .unwrap();
+        let payload = json!({"session_id": "a", "cwd": &*dir, "source": "startup"});
+        let out: Value =
+            serde_json::from_str(&hook(&dir, "claude", "SessionStart", &payload)).unwrap();
+        let text = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(
+            text.starts_with("<oboete-memory>") && text.contains("earlier work"),
+            "{text}"
+        );
     }
 
     /// docs/work-state.md L7: Cursor's cut leaves the work state section whole and cuts the

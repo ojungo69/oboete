@@ -2929,14 +2929,14 @@ pub(crate) mod tests {
         raw.work_state("github.com/o/r", "release", &state).unwrap();
         let task = fields(serde_json::json!({"task": "notes", "status": "doing"}));
         raw.work_state("github.com/o/r", "release", &task).unwrap();
-        let before = raw.work_state_entries("github.com/o/r", None).unwrap();
+        let before = raw.work_state_entries("github.com/o/r").unwrap();
         drop(raw);
         export(p).unwrap();
         damage_raw(p);
         crate::worker::run_once(p).unwrap();
         let restored = raw::open(p).unwrap();
         assert_eq!(
-            restored.work_state_entries("github.com/o/r", None).unwrap(),
+            restored.work_state_entries("github.com/o/r").unwrap(),
             before
         );
     }

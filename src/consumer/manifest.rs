@@ -2153,7 +2153,7 @@ extra_rules = [
             vec![],
         );
         store.append_ops(&[flaky]).unwrap();
-        let entries = store.work_state_entries("r", None).unwrap();
+        let entries = store.work_state_entries("r").unwrap();
         drop(store);
         worker::run_once(home.path()).unwrap();
         let claims = || {
@@ -2165,7 +2165,7 @@ extra_rules = [
         worker::rebuild(home.path()).unwrap();
         assert_eq!(claims(), before);
         let store = raw::open(home.path()).unwrap();
-        assert_eq!(store.work_state_entries("r", None).unwrap(), entries);
+        assert_eq!(store.work_state_entries("r").unwrap(), entries);
     }
 
     /// Spec 4.4, 4.9: the repository's delivered decisions and open items, the newest first, read
