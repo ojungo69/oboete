@@ -3139,6 +3139,38 @@ function recoverySection() {
     d.unknown||d.error?inspect:null);
 }
 
+function receiveRecoveryStart(d,answer,mine,mineGeneration) {
+  d.preview=null;d.confirmed=false;
+  const copyKnown=['complete','unknown'].includes(answer.phase)
+    && typeof answer.backup==='string' && /^config\.toml\.recovery-[0-9a-f]{32}\.bak$/.test(answer.backup);
+  if(copyKnown)d.receipt=answer.backup;
+  if(answer.phase==='complete' && copyKnown
+    && answer.settings && !answer.settings.error) {
+    d.receipt=answer.backup;d.unknown=false;
+    if(view==='settings' && form===mine && generation===mineGeneration)form=formOf(answer.settings);
+  } else d.unknown=true;
+}
+
+async function requestRecovery(action,d,key,mine,mineGeneration) {
+  const {res,answer}=await memoryWrite(`settings/recovery/${action}`,
+    action==='preview'?{}:{preview_key:key,confirmed:true});
+  if(!res.ok) {
+    d.preview=null;d.confirmed=false;
+    d.error=['recovery_unavailable','recovery_failed','recovery_confirmation','stale'].includes(answer.code)
+      ?answer.code:'recovery_failed';
+    if(d.error==='stale')d.error='recovery_stale';
+    return;
+  }
+  if(action==='preview') {
+    if(view==='settings' && form===mine && generation===mineGeneration
+      && typeof answer.preview_key==='string' && /^[0-9a-f]{64}$/.test(answer.preview_key)
+      && answer.replaces==='all_settings' && answer.copy==='current_bytes' && answer.ai==='off'
+      && answer.prompt_text==='off' && answer.injection==='off' && answer.other_capture==='builtin_redaction') {
+      d.preview={preview_key:answer.preview_key};d.unknown=false;
+    } else d.error='recovery_failed';
+  } else receiveRecoveryStart(d,answer,mine,mineGeneration);
+}
+
 async function recoveryAction(action) {
   const d=recoveryDraft;
   if(d.busy || action==='preview' && d.unknown || action==='start' && (!d.preview || !d.confirmed))return;
@@ -3155,32 +3187,7 @@ async function recoveryAction(action) {
       d.unknown=false;
       return;
     }
-    const {res,answer}=await memoryWrite(`settings/recovery/${action}`,
-      action==='preview'?{}:{preview_key:key,confirmed:true});
-    if(!res.ok) {
-      d.preview=null;d.confirmed=false;
-      d.error=['recovery_unavailable','recovery_failed','recovery_confirmation','stale'].includes(answer.code)
-        ?answer.code==='stale'?'recovery_stale':answer.code:'recovery_failed';
-      return;
-    }
-    if(action==='preview') {
-      if(view==='settings' && form===mine && generation===mineGeneration
-        && typeof answer.preview_key==='string' && /^[0-9a-f]{64}$/.test(answer.preview_key)
-        && answer.replaces==='all_settings' && answer.copy==='current_bytes' && answer.ai==='off'
-        && answer.prompt_text==='off' && answer.injection==='off' && answer.other_capture==='builtin_redaction') {
-        d.preview={preview_key:answer.preview_key};d.unknown=false;
-      } else d.error='recovery_failed';
-    } else {
-      d.preview=null;d.confirmed=false;
-      const copyKnown=['complete','unknown'].includes(answer.phase)
-        && typeof answer.backup==='string' && /^config\.toml\.recovery-[0-9a-f]{32}\.bak$/.test(answer.backup);
-      if(copyKnown)d.receipt=answer.backup;
-      if(answer.phase==='complete' && copyKnown
-        && answer.settings && !answer.settings.error) {
-        d.receipt=answer.backup;d.unknown=false;
-        if(view==='settings' && form===mine && generation===mineGeneration)form=formOf(answer.settings);
-      } else d.unknown=true;
-    }
+    await requestRecovery(action,d,key,mine,mineGeneration);
   } catch {
     d.preview=null;d.confirmed=false;
     if(action==='start')d.unknown=true;
@@ -4179,8 +4186,9 @@ function onboardingGroups(f) {
   return new Map(f.chain.map(entry=>{
     const rows=f.providers.filter(row=>row.name===entry.name&&row.saved?.enabled===true);
     const classes=rows.map(onboardingClass);
-    const kind=!classes.length?'disabled':classes.includes('unknown')?'unknown'
-      :classes.includes('paid')?'paid':classes.includes('subscription')?'subscription':'free';
+    const kind=classes.length
+      ? ['unknown','paid','subscription'].find(value=>classes.includes(value))||'free'
+      : 'disabled';
     return [entry.name,kind];
   }));
 }
@@ -4194,9 +4202,10 @@ function onboardingPlan(f,tier) {
   const hasLevel=[...groups.values()].includes(tier);
   if(!hasLevel||!names.length)return {available:false,curate:false,cap:f.paid_usd_per_month,names:null};
   const current=Number(f.paid_usd_per_month);
+  let cap=tier==='paid'?'5':'0';
+  if(tier==='paid'&&Number.isFinite(current)&&current>0)cap=f.paid_usd_per_month;
   return {available:true,curate:true,names,
-    cap:tier==='paid'&&Number.isFinite(current)&&current>0?f.paid_usd_per_month
-      :tier==='paid'?'5':'0'};
+    cap};
 }
 function applyOnboardingValues(f,plan) {
   if(!plan)return;
@@ -4262,9 +4271,9 @@ function onboardingSection(f) {
     el('p','desc',t('onboarding_desc')),
     el('p','desc',t('onboarding_scope')),
     el('label','field',el('span',null,t('onboarding_tier')),select),
-    plan ? el('p','desc',plan.available
+    plan && el('p','desc',plan.available
       ? t('onboarding_effect',{names:plan.names?.join(', ')||t('onboarding_no_names'),cap:plan.cap})
-      : t('onboarding_unavailable')) : null,
+      : t('onboarding_unavailable')),
     destinations?.length?el('ul',null,...destinations):null,
     apply,onboardingApplied?el('p','desc',t('onboarding_draft_ready')):null,
     el('p','desc',t('onboarding_no_assurance')),
@@ -4512,7 +4521,7 @@ async function loadRepos() {
   reposLoaded = true;
 }
 
-async function refresh(live = false, selectedRepo) {
+async function refresh(live, selectedRepo) {
   let listed = true;
   try {
     await loadRepos();
