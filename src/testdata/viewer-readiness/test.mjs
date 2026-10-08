@@ -35,9 +35,10 @@ const document={activeElement:null,createElement:tag=>new Node(tag),getElementBy
 const ctx=vm.createContext({document,location:{hash:''},URL,URLSearchParams,navigator:{language:'en'},
   localStorage:{getItem(){return null;},setItem(){}},window:{addEventListener(){}},
   setInterval(){},TextEncoder,Uint8Array,console});
-const source=fs.readFileSync(process.argv[2]||new URL('../../../assets/viewer/app.js',import.meta.url),'utf8');
-vm.runInContext(source.replace('await start();','')+'\n'+
-  'globalThis.ui={showSettings,drawSettings,setView:v=>{view=v;},setForm:v=>{form=v;},getForm:()=>form,setLang:v=>{lang=v;}};',ctx);
+const sourcePath=fs.realpathSync(process.argv[2]||new URL('../../../assets/viewer/app.js',import.meta.url));
+const source=fs.readFileSync(sourcePath,'utf8');
+vm.runInContext(source.replace('await start();',''),ctx,{filename:sourcePath});
+vm.runInContext('globalThis.ui={showSettings,drawSettings,setView:v=>{view=v;},setForm:v=>{form=v;},getForm:()=>form,setLang:v=>{lang=v;}};',ctx);
 const text=node=>typeof node==='string'?node:(node?.children||[]).map(text).join(' ');
 const response=value=>({ok:true,status:200,json:async()=>value});
 const rows=(state)=>['claude','codex','grok','agy','opencode','pi','cursor'].map((agent,index)=>({
