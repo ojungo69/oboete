@@ -192,4 +192,108 @@ assert(text(diagnostics).includes('Agent files in this diagnostic check'),
   'the result renders its own captured agent inventory');
 assert(text(diagnostics).includes('Hook trust: matching'),
   'the result uses the captured inventory rather than an older independent GET');
-console.log('PASS: seven fixed agent rows, JA/EN, latest GET, explicit Doctor POST, failure handling and unchanged draft');
+let integration=panel.querySelector('.agent-setup');
+assert(integration,'Settings offers confirmed agent connections separately from diagnostics');
+vm.runInContext('globalThis.setupUi={draft:agentSetupDraft,preview:previewAgentSetup,start:startAgentSetup,inspect:inspectAgentSetup,render:renderAgentSetup};',ctx);
+let operationNonce=17;
+ctx.crypto={getRandomValues:bytes=>bytes.fill(operationNonce++)};
+const setupRequests=[];
+ctx.fetch=(url,options)=>new Promise((resolve,reject)=>setupRequests.push({url,options,resolve,reject}));
+const setupFields=()=>integration.querySelectorAll('input').filter(node=>node.dataset.field?.startsWith('agent_setup.agent.'));
+assert.equal(setupFields().length,7,'all seven integrations can be selected');
+const integrationDraft=new Node('input');integrationDraft.value='preserve agent-operation draft';
+panel.querySelector('.settings').append(integrationDraft);
+const change=(node,checked)=>{node.checked=checked;for(const cb of node.listeners.change||[])cb({target:node});};
+change(setupFields().find(node=>node.dataset.field.endsWith('.claude')),true);
+await ctx.setupUi.start();
+assert.equal(setupRequests.length,0,'selection alone cannot apply an integration');
+const selectedPreview={preview_key:'a'.repeat(64),action:'wire',live_verified:false,activation:'next_session',
+  agents:[{agent:'claude',steps:[{component:'mcp',effect:'native_command',backup:'none'}]}]};
+const operationReceipt=id=>({...selectedPreview,operation_id:id,phase:'complete',agents:[{agent:'claude',
+  steps:[{component:'mcp',effect:'native_command',backup:'none',kind:'native_add',outcome:'committed'}]}]});
+const prepare=async(value=selectedPreview)=>{
+  const task=ctx.setupUi.preview();
+  const pending=setupRequests.shift();assert(pending,'preview makes its explicit request');
+  assert.equal(pending.url,'/api/setup/preview');
+  assert.deepEqual(JSON.parse(pending.options.body),{action:'wire',agents:['claude']});
+  pending.resolve(diagnosticResponse(value));await task;
+};
+await prepare();
+assert.equal(ctx.setupUi.draft.confirmed,false,'a preview never checks consent');
+await ctx.setupUi.start();assert.equal(setupRequests.length,0,'a preview without consent cannot apply');
+const consent=()=>integration.querySelectorAll('input').find(node=>node.dataset.field==='agent_setup.confirmed');
+change(consent(),true);
+const completed=ctx.setupUi.start();const firstApply=setupRequests.shift();
+assert.equal(firstApply.url,'/api/setup/start');
+const firstBody=JSON.parse(firstApply.options.body);
+assert.equal(firstBody.confirmed,true);assert.equal(firstBody.operation_id,'11'.repeat(32));
+const beforeAgentLeaving=text(integration);ctx.ui.setView('records');
+firstApply.resolve(diagnosticResponse(operationReceipt(firstBody.operation_id)));await completed;
+assert.equal(text(integration),beforeAgentLeaving,'completion away from Settings does not change the current panel');
+ctx.ui.setView('settings');ctx.setupUi.render();
+assert(text(integration).includes('complete')&&text(integration).includes('Current operation'),
+  'returning retains the completed current operation');
+assert(panel.contains(integrationDraft)&&integrationDraft.value==='preserve agent-operation draft',
+  'preview and apply only replace their own section');
+ctx.ui.setLang('ja');ctx.setupUi.render();
+assert(text(integration).includes('エージェントの接続と解除')&&text(integration).includes('実際の利用は未確認'),
+  'Japanese connection and honest activation labels are shown');
+ctx.ui.setLang('en');ctx.setupUi.render();
+await prepare();change(consent(),true);
+const busyStart=ctx.setupUi.start();
+assert.equal(integration.querySelector('.agent-setup-receipt'),null,
+  'a newly admitted start does not show the previous completion');
+assert(text(integration).includes('Applying selected agent changes'),
+  'the pending start has a fixed sending label');
+setupRequests.shift().resolve(diagnosticResponse({},503));await busyStart;
+assert.equal(ctx.setupUi.draft.unknown,false,'a definite busy refusal does not become an unknown mutation');
+assert(text(integration).includes('Another operation is active'));
+await prepare();change(consent(),true);
+const lostStart=ctx.setupUi.start();setupRequests.shift().reject(new Error('invented agent response loss'));await lostStart;
+assert.equal(ctx.setupUi.draft.unknown,true);
+await ctx.setupUi.start();await ctx.setupUi.preview();
+assert.equal(setupRequests.length,0,'lost operation is neither retried nor replaced automatically');
+const priorStatus=ctx.setupUi.inspect();
+setupRequests.shift().resolve(response({active:null,last:operationReceipt('22'.repeat(32))}));await priorStatus;
+assert.equal(ctx.setupUi.draft.unknown,true,'a previous operation cannot resolve the pending one');
+assert(text(integration).includes('Previous operation')&&!text(integration).includes('Current operation'),
+  'a nonmatching last receipt is labelled as previous');
+const inspect=ctx.setupUi.inspect();const inspectRequest=setupRequests.shift();
+assert.equal(inspectRequest.url,'/api/setup/operation?');
+inspectRequest.resolve(response({active:null,last:operationReceipt(ctx.setupUi.draft.operationId)}));await inspect;
+assert.equal(ctx.setupUi.draft.unknown,false,'explicit matching status inspection recovers a lost response');
+assert(text(integration).includes('Current operation'),
+  'a matching last receipt is labelled as the current operation');
+const completedStatus=ctx.setupUi.draft.status;
+ctx.setupUi.draft.status={active:{...operationReceipt(ctx.setupUi.draft.operationId),phase:'running'},last:null};
+ctx.setupUi.render();
+assert(text(integration).includes('Current operation'),
+  'an active receipt is labelled as the current operation');
+ctx.setupUi.draft.status=completedStatus;ctx.setupUi.render();
+const priorReceipt=ctx.setupUi.draft.receipt;
+const badStatus=ctx.setupUi.inspect();setupRequests.shift().resolve(response({active:'private-state-canary',last:null}));await badStatus;
+assert.equal(ctx.setupUi.draft.receipt,priorReceipt,'malformed status retains the established receipt');
+assert(!text(integration).includes('private-state-canary'));
+for(const whileSending of [false,true]) {
+  await prepare();change(consent(),true);
+  let staleRead,staleRequest;
+  if(!whileSending){staleRead=ctx.setupUi.inspect();staleRequest=setupRequests.shift();}
+  const applying=ctx.setupUi.start();const applyRequest=setupRequests.shift();
+  const body=JSON.parse(applyRequest.options.body);
+  if(whileSending){staleRead=ctx.setupUi.inspect();staleRequest=setupRequests.shift();}
+  const completeReceipt=operationReceipt(body.operation_id);
+  applyRequest.resolve(diagnosticResponse(completeReceipt));await applying;
+  staleRequest.resolve(response(whileSending
+    ? {active:{...completeReceipt,phase:'running'},last:null}
+    : {active:null,last:priorReceipt}));
+  await staleRead;
+  assert.equal(ctx.setupUi.draft.status.last?.operation_id,body.operation_id,
+    `a late status read begun ${whileSending?'during':'before'} apply cannot replace completion`);
+  assert.equal(ctx.setupUi.draft.status.active,null,'a late running response cannot leave setup blocked');
+  assert.equal(ctx.setupUi.draft.reading,false,'invalidating a read releases its loading state');
+}
+await prepare({...selectedPreview,agents:[{agent:'claude',steps:[{component:'mcp',effect:'private-effect-canary',backup:'none'}]}]});
+assert.equal(ctx.setupUi.draft.preview,null,'unknown effects cannot be approved');
+assert(!text(integration).includes('private-effect-canary'));
+assert.equal(setupRequests.length,0,'rendering and status recovery never auto POST');
+console.log('PASS: seven agents, JA/EN, explicit Doctor, confirmed integration, off-tab completion, busy/lost recovery and unchanged drafts');

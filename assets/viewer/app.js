@@ -1213,7 +1213,7 @@ const TEXT = {
   saved: ['Saved. Each setting takes effect at the time described beside it.', '保存しました。反映されるタイミングは各設定の説明をご確認ください。'],
   warnings_h: ['Notes on config.toml', 'config.toml についての注意'],
   agent_inventory_h: ['Agent registrations', 'エージェントの登録状況'],
-  agent_inventory_desc: ['This checks saved files only. A launch file does not prove login, executable permissions or live use. Use Run diagnostics below for the current read-only checks; connecting agents is not available here yet.', 'ここでは保存されたファイルだけを確認します。起動用ファイルが見つかっても、ログイン、実行権限、実際の利用は確認できません。現在使える読み取り専用の確認は下の「診断を実行」で行えます。エージェントの接続操作はまだ使えません。'],
+  agent_inventory_desc: ['This checks saved files only. A launch file does not prove login, executable permissions or live use. Use Run diagnostics below for the current read-only checks. Review connection changes in Connect or disconnect agents.', 'ここでは保存されたファイルだけを確認します。起動用ファイルが見つかっても、ログイン、実行権限、実際の利用は確認できません。読み取り専用の確認は下の「診断を実行」で行えます。接続の変更は「エージェントの接続と解除」で確認してください。'],
   agent_inventory_refresh: ['Refresh file inventory', '設定ファイルを再確認'],
   agent_inventory_loading: ['Checking agent files…', 'エージェントのファイルを確認中…'],
   agent_inventory_not_checked: ['Agent files have not been checked yet. Press Refresh.', 'エージェントのファイルはまだ確認していません。「再確認」を押してください。'],
@@ -1258,6 +1258,86 @@ const TEXT = {
   agent_inventory_match_false: ['does not match this installation', '現在の導入内容と不一致'],
   agent_inventory_match_unknown: ['current-installation comparison unavailable', '現在の導入内容との比較はできません'],
   agent_inventory_match_not_applicable: ['no comparison applies', '比較の対象外'],
+  agent_setup_h: ['Connect or disconnect agents', 'エージェントの接続と解除'],
+  agent_setup_desc: ['Select agents, review the exact file and integration effects, then confirm. This does not test login or live use.', '対象を選び、ファイルと連携への影響を確認してから承認します。ログインや実際の利用は検証しません。'],
+  agent_setup_action: ['Action', '操作'],
+  agent_setup_wire: ['Connect', '接続'],
+  agent_setup_unwire: ['Disconnect', '解除'],
+  agent_setup_select: ['Agents', 'エージェント'],
+  agent_setup_preview: ['Preview selected changes', '選択した変更を確認'],
+  agent_setup_previewing: ['Preparing preview…', '変更内容を確認中…'],
+  agent_setup_preview_h: ['Changes to approve', '承認する変更'],
+  agent_setup_no_steps: ['No completed step has been reported for this agent', 'このエージェントで確定した処理はまだありません'],
+  agent_setup_step: ['{component}: {effect}; backup {backup}.', '{component}：{effect}。バックアップ：{backup}。'],
+  agent_setup_step_result: ['{kind}: {outcome}.', '{kind}：{outcome}。'],
+  agent_setup_activation: ['The agent reads these changes when it starts again. Disabled integrations stay disabled and required approvals remain. Live use remains unverified.', 'エージェントの次回起動時に設定が読み込まれます。無効になっている連携と承認待ちはそのままです。実際の利用は未確認です。'],
+  agent_setup_plugin_note: ['A same-name plugin replacement or manual step is shown per component; inspect it before applying.', '同名プラグインの置き換えや手動作業は項目ごとに表示します。適用前に確認してください。'],
+  agent_setup_consent: ['I approve the changes listed above.', '上に表示された変更を承認します。'],
+  agent_setup_consent_native: ['I approve the listed changes, including the local Claude Code MCP command where shown. Claude Code may run configured startup hooks, which may have their own effects or model calls. oboete does not request a model probe.', '表示されたClaude Code MCPのローカルコマンドを含め、上の変更を承認します。Claude Codeの起動時フックが実行され、独自の変更やモデル呼び出しが起こる場合があります。oboeteはモデルの動作確認を要求しません。'],
+  agent_setup_apply: ['Apply confirmed changes', '承認した変更を適用'],
+  agent_setup_sending: ['Applying selected agent changes…', '選択したエージェントの連携変更を適用中…'],
+  agent_setup_receipt_current_h: ['Current operation', '現在の操作'],
+  agent_setup_receipt_previous_h: ['Previous operation', '前回の操作'],
+  agent_setup_status: ['Inspect operation status', '操作状況を確認'],
+  agent_setup_status_loading: ['Checking operation status…', '操作状況を確認中…'],
+  agent_setup_status_none: ['No operation receipt is available.', '操作の結果はまだありません。'],
+  agent_setup_receipt_h: ['Operation receipt', '操作結果'],
+  agent_setup_receipt: ['{action}: {phase}.', '{action}：{phase}。'],
+  agent_setup_no_selection: ['Select at least one agent.', 'エージェントを1つ以上選んでください。'],
+  agent_setup_preview_failed: ['A safe preview was not available. Nothing was applied.', '安全な確認結果を得られませんでした。変更は適用していません。'],
+  agent_setup_start_failed: ['The operation did not complete. Inspect its status before trying another.', '操作を完了できませんでした。次の操作の前に状況を確認してください。'],
+  agent_setup_status_unavailable: ['Operation status could not be read.', '操作状況を読み取れませんでした。'],
+  agent_setup_stale: ['The preview is stale. Prepare a new preview.', '確認した変更内容は古くなりました。もう一度確認してください。'],
+  agent_setup_busy: ['Another operation is active. Inspect its status.', '別の操作が進行中です。状況を確認してください。'],
+  agent_setup_unknown: ['The result may have been committed. Inspect operation status; it will not retry automatically.', '変更が確定している可能性があります。操作状況を確認してください。自動では再実行しません。'],
+  agent_setup_unknown_value: ['unknown', '不明'],
+  agent_setup_component_hooks: ['Hooks', 'フック'],
+  agent_setup_component_mcp: ['MCP', 'MCP'],
+  agent_setup_component_trust: ['Hook trust', 'フックの信頼設定'],
+  agent_setup_component_plugin: ['Plugin', 'プラグイン'],
+  agent_setup_component_extension: ['Extension', '拡張機能'],
+  agent_setup_effect_create: ['create', '作成'],
+  agent_setup_effect_replace: ['replace', '置き換え'],
+  agent_setup_effect_delete: ['delete', '削除'],
+  agent_setup_effect_unchanged: ['unchanged', '変更なし'],
+  agent_setup_effect_manual: ['manual step', '手動作業'],
+  agent_setup_effect_skipped: ['skipped', '見送り'],
+  agent_setup_effect_unavailable: ['unavailable', '利用不可'],
+  agent_setup_effect_native_command: ['local command', 'ローカルコマンド'],
+  agent_setup_backup_create: ['create', '作成'],
+  agent_setup_backup_kept: ['kept', '保持'],
+  agent_setup_backup_none: ['none', 'なし'],
+  agent_setup_phase_running: ['running', '実行中'],
+  agent_setup_phase_complete: ['complete', '完了'],
+  agent_setup_phase_partial: ['partly complete', '一部完了'],
+  agent_setup_phase_failed: ['failed', '失敗'],
+  agent_setup_phase_stale: ['stale', '古い確認結果'],
+  agent_setup_phase_unknown: ['unknown', '結果不明'],
+  agent_setup_outcome_committed: ['committed', '確定'],
+  agent_setup_outcome_noop: ['no change', '変更なし'],
+  agent_setup_outcome_manual: ['manual step needed', '手動作業が必要'],
+  agent_setup_outcome_skipped: ['skipped', '見送り'],
+  agent_setup_outcome_failed: ['failed', '失敗'],
+  agent_setup_outcome_stale: ['stale', '古い状態'],
+  agent_setup_outcome_unknown: ['unknown', '結果不明'],
+  agent_setup_kind_backup: ['backup', 'バックアップ'],
+  agent_setup_kind_write: ['write', '書き込み'],
+  agent_setup_kind_delete: ['delete', '削除'],
+  agent_setup_kind_native_remove: ['local removal', 'ローカルの解除'],
+  agent_setup_kind_native_add: ['local addition', 'ローカルの追加'],
+  agent_setup_kind_readback: ['readback', '再読取'],
+  agent_setup_kind_stage: ['prepare change', '変更の準備'],
+  agent_setup_outcome_prepared: ['prepared', '準備済み'],
+  agent_setup_code_manual_jsonc: ['Commented configuration is preserved. This component needs the agent’s own setup.', 'コメント付きの設定は保持します。この項目はエージェント側の設定が必要です。'],
+  agent_setup_code_manual_json: ['The existing file could not be safely updated and is preserved.', '既存ファイルを安全に更新できないため、そのまま保持します。'],
+  agent_setup_code_foreign_extension_kept: ['The existing unmarked extension is preserved.', 'oboeteの印がない既存の拡張機能は保持します。'],
+  agent_setup_code_agent_missing: ['The agent was not found; this integration is skipped.', 'エージェントが見つからないため、この連携は見送ります。'],
+  agent_setup_code_launcher_missing: ['The Claude MCP launcher could not be verified. Hook changes are shown separately.', 'Claude MCPの起動用ファイルを確認できません。フックの変更は別に表示します。'],
+  agent_setup_code_unavailable_file: ['This file could not be assessed and is preserved.', 'このファイルは状態を確認できないため保持します。'],
+  agent_setup_code_unsupported_command: ['Antigravity and Cursor on Windows need installation and memory folder paths without spaces or shell metacharacters.', 'WindowsのAntigravityとCursorでは、インストール先と記憶フォルダーのパスに空白やシェルの特殊文字を使えません。'],
+  agent_setup_code_prior_unknown: ['An earlier local command has an unknown result. Later steps were left untouched.', '先のローカルコマンドの結果が不明なため、後続の処理は行っていません。'],
+  agent_setup_code_mcp_arguments_too_large: ['The local MCP registration command exceeds its safe size budget. Existing settings are preserved.', 'ローカルMCP登録コマンドの安全なサイズ上限を超えるため、既存設定は保持します。'],
+  agent_setup_code_manual_mcp: ['This existing Claude MCP registration is preserved. Change it in Claude’s own setup so saved credentials never enter process arguments.', '既存のClaude MCP登録は保持します。保存済みの秘密値をプロセス引数へ渡さないため、変更はClaude側の設定で行ってください。'],
   doctor_h: ['Run diagnostics', '診断を実行'],
   doctor_desc: ['Run these read-only checks only when you choose. They do not repair files, contact agents or call a model.', '選んだときだけ読み取り専用の診断を実行します。ファイルの修復、エージェントへの接続、モデルの呼び出しは行いません。'],
   doctor_run: ['Run diagnostics now', '今すぐ診断'],
@@ -2429,6 +2509,235 @@ async function refreshAgentInventory() {
       renderAgentInventory();
     }
   }
+}
+
+const AGENT_SETUP_ACTIONS = ['wire','unwire'];
+const AGENT_SETUP_COMPONENTS = ['hooks','mcp','trust','plugin','extension'];
+const AGENT_SETUP_EFFECTS = ['create','replace','delete','unchanged','manual','skipped','unavailable','native_command'];
+const AGENT_SETUP_BACKUPS = ['create','kept','none'];
+const AGENT_SETUP_PHASES = ['running','complete','partial','failed','stale','unknown'];
+const AGENT_SETUP_OUTCOMES = ['prepared','committed','noop','manual','skipped','failed','stale','unknown'];
+const AGENT_SETUP_KINDS = ['stage','backup','write','delete','native_remove','native_add','readback'];
+let agentSetupDraft = {action:'wire',selected:new Set(),preview:null,confirmed:false,
+  previewing:false,sending:false,reading:false,unknown:false,error:null,
+  operationId:null,pendingAction:null,pendingAgents:null,receipt:null,status:null,previewRead:0,statusRead:0};
+
+function agentSetupSelected(d) {
+  return AGENT_INVENTORY_IDS.filter(id=>d.selected.has(id));
+}
+function agentSetupLabel(group,value) {
+  const key=`agent_setup_${group}_${value}`;
+  return typeof value==='string'&&Object.hasOwn(TEXT,key) ? t(key) : t('agent_setup_unknown_value');
+}
+function agentSetupStepKnown(step) {
+  return step&&typeof step==='object'
+    &&AGENT_SETUP_COMPONENTS.includes(step.component)
+    &&AGENT_SETUP_EFFECTS.includes(step.effect)
+    &&AGENT_SETUP_BACKUPS.includes(step.backup)
+    &&(step.code===undefined || step.code===null || typeof step.code==='string'
+      &&Object.hasOwn(TEXT,`agent_setup_code_${step.code}`));
+}
+function agentSetupPreviewMatches(preview,d,selected) {
+  if(!preview||typeof preview!=='object'||!/^[0-9a-f]{64}$/.test(preview.preview_key||'')
+    ||preview.action!==d.action||preview.live_verified!==false
+    ||preview.activation!=='next_session'||!Array.isArray(preview.agents)
+    ||preview.agents.length!==selected.length)return false;
+  const names=preview.agents.map(row=>row?.agent);
+  return new Set(names).size===selected.length&&selected.every(id=>names.includes(id))
+    &&preview.agents.every(row=>Array.isArray(row.steps)&&row.steps.every(agentSetupStepKnown));
+}
+function agentSetupReceiptKnown(receipt) {
+  if(!receipt||typeof receipt!=='object'||!Array.isArray(receipt.agents))return false;
+  const names=receipt.agents.map(row=>row?.agent);
+  return names.length>=1&&names.length<=AGENT_INVENTORY_IDS.length
+    &&new Set(names).size===names.length
+    &&/^[0-9a-f]{64}$/.test(receipt.operation_id||'')
+    &&AGENT_SETUP_ACTIONS.includes(receipt.action)
+    &&AGENT_SETUP_PHASES.includes(receipt.phase)
+    &&receipt.live_verified===false&&receipt.activation==='next_session'
+    &&receipt.agents.every(row=>AGENT_INVENTORY_IDS.includes(row?.agent)
+      &&Array.isArray(row.steps)&&row.steps.every(step=>agentSetupStepKnown(step)
+        &&AGENT_SETUP_OUTCOMES.includes(step.outcome)&&AGENT_SETUP_KINDS.includes(step.kind)));
+}
+function agentSetupReceiptMatches(receipt,d) {
+  if(!agentSetupReceiptKnown(receipt)||!Array.isArray(d.pendingAgents))return false;
+  const names=receipt.agents.map(row=>row.agent);
+  return receipt.operation_id===d.operationId&&receipt.action===d.pendingAction
+    &&names.length===d.pendingAgents.length&&d.pendingAgents.every(id=>names.includes(id));
+}
+function agentSetupBlocked(d) {
+  return d.previewing||d.sending||d.unknown||Boolean(d.status?.active);
+}
+function invalidateAgentSetup(d) {
+  d.previewRead++;
+  d.preview=null;d.confirmed=false;d.error=null;
+}
+function renderAgentSetup() {
+  if(view!=='settings')return;
+  const section=$('panel').querySelector('.agent-setup');
+  if(!section)return;
+  const focused=section.contains(document.activeElement) ? document.activeElement : null;
+  const field=focused?.dataset.field,action=focused?.dataset.action;
+  section.replaceChildren(...agentSetupSection().childNodes);
+  const next=field ? [...section.querySelectorAll('[data-field]')].find(node=>node.dataset.field===field)
+    : action ? [...section.querySelectorAll('[data-action]')].find(node=>node.dataset.action===action) : null;
+  if(next&&!next.disabled)next.focus({preventScroll:true});
+}
+async function previewAgentSetup(d=agentSetupDraft) {
+  if(agentSetupBlocked(d)||!AGENT_SETUP_ACTIONS.includes(d.action))return;
+  const agents=agentSetupSelected(d);
+  if(!agents.length){d.error='agent_setup_no_selection';renderAgentSetup();return;}
+  invalidateAgentSetup(d);
+  const read=d.previewRead;
+  const action=d.action;
+  d.previewing=true;renderAgentSetup();
+  try {
+    const {res,answer}=await memoryWrite('setup/preview',{action,agents});
+    if(read!==d.previewRead)return;
+    if(!res.ok){d.error=res.status===503?'agent_setup_busy':'agent_setup_preview_failed';return;}
+    if(!agentSetupPreviewMatches(answer,d,agents)){d.error='agent_setup_preview_failed';return;}
+    d.preview=answer;
+  } catch {if(read===d.previewRead)d.error='agent_setup_preview_failed';}
+  finally {if(read===d.previewRead){d.previewing=false;renderAgentSetup();}}
+}
+async function startAgentSetup(d=agentSetupDraft) {
+  const agents=agentSetupSelected(d);
+  if(agentSetupBlocked(d)||!AGENT_SETUP_ACTIONS.includes(d.action)
+    ||!d.confirmed||!agentSetupPreviewMatches(d.preview,d,agents))return;
+  let bytes;
+  try {bytes=crypto.getRandomValues(new Uint8Array(32));}
+  catch {d.error='agent_setup_start_failed';renderAgentSetup();return;}
+  const operationId=[...bytes].map(byte=>byte.toString(16).padStart(2,'0')).join('');
+  const posted={action:d.action,agents,preview_key:d.preview.preview_key,
+    operation_id:operationId,confirmed:true};
+  d.operationId=operationId;d.pendingAction=posted.action;d.pendingAgents=agents;
+  d.statusRead++;d.reading=false;
+  d.preview=null;d.confirmed=false;d.error=null;d.status=null;d.receipt=null;
+  d.sending=true;renderAgentSetup();
+  let refused=false;
+  try {
+    const {res,answer}=await memoryWrite('setup/start',posted);
+    if(d.operationId!==operationId)return;
+    if(!res.ok) {
+      d.error=res.status===409||res.status===412?'agent_setup_stale'
+        :res.status===503?'agent_setup_busy':'agent_setup_start_failed';
+      refused=res.status<500||res.status===503;
+      if(!refused)d.unknown=true;
+      return;
+    }
+    if(!agentSetupReceiptMatches(answer,d)) {
+      d.unknown=true;d.error='agent_setup_unknown';return;
+    }
+    d.statusRead++;d.reading=false;
+    d.receipt=answer;
+    d.status=answer.phase==='running'?{active:answer,last:null}:{active:null,last:answer};
+    d.unknown=answer.phase==='unknown';
+  } catch {if(d.operationId===operationId){d.unknown=true;d.error='agent_setup_unknown';}}
+  finally {if(d.operationId===operationId){
+    d.sending=false;
+    if(refused){d.operationId=null;d.pendingAction=null;d.pendingAgents=null;}
+    renderAgentSetup();
+  }}
+}
+async function inspectAgentSetup(d=agentSetupDraft) {
+  if(d.reading)return;
+  const read=d.statusRead= d.statusRead+1;
+  d.reading=true;renderAgentSetup();
+  try {
+    const status=await api('setup/operation');
+    if(read!==d.statusRead)return;
+    if(!status||typeof status!=='object'||!Object.hasOwn(status,'active')
+      ||!Object.hasOwn(status,'last')
+      ||![status.active,status.last].every(row=>row===null||agentSetupReceiptKnown(row))
+      ||[status.active,status.last].some(row=>row?.operation_id===d.operationId
+        &&!agentSetupReceiptMatches(row,d)))throw new Error('invalid_status');
+    d.status=status;
+    d.error=null;
+    const match=[status.active,status.last].find(row=>agentSetupReceiptMatches(row,d));
+    if(d.unknown&&match&&match.phase!=='unknown'){
+      d.receipt=match;d.unknown=false;
+    }
+  } catch {if(read===d.statusRead)d.error='agent_setup_status_unavailable';}
+  finally {if(read===d.statusRead){d.reading=false;renderAgentSetup();}}
+}
+function agentSetupRows(agents,receipt) {
+  const rows=Array.isArray(agents)?agents:[];
+  return AGENT_INVENTORY_IDS.filter(id=>rows.some(row=>row?.agent===id)).map(id=>{
+    const row=rows.find(item=>item?.agent===id);
+    const steps=row.steps.map(step=>{
+      const summary=t('agent_setup_step',{
+        component:agentSetupLabel('component',step.component),
+        effect:agentSetupLabel('effect',step.effect),backup:agentSetupLabel('backup',step.backup)});
+      const detail=receipt?t('agent_setup_step_result',{
+        kind:agentSetupLabel('kind',step.kind),outcome:agentSetupLabel('outcome',step.outcome)}):null;
+      const code=step.code ? agentSetupLabel('code',step.code) : null;
+      return el('li',null,summary,detail ? ` ${detail}` : null,code ? ` ${code}` : null);
+    });
+    return el('li',null,el('h4',null,t('agent_inventory_agent_'+id)),
+      steps.length?el('ul',null,...steps):el('p','desc',t('agent_setup_no_steps')));
+  });
+}
+function agentSetupReceipt(receipt,heading) {
+  if(!agentSetupReceiptKnown(receipt))return null;
+  return el('div','agent-setup-receipt',el('h4',null,t(heading)),
+    el('p','desc',t('agent_setup_receipt',{
+      action:t('agent_setup_'+receipt.action),phase:agentSetupLabel('phase',receipt.phase)})),
+    el('p','desc',t('agent_setup_activation')),
+    el('ul',null,...agentSetupRows(receipt.agents,true)));
+}
+function agentSetupSection() {
+  const d=agentSetupDraft,blocked=agentSetupBlocked(d),selected=agentSetupSelected(d);
+  const action=el('select',null,...AGENT_SETUP_ACTIONS.map(value=>{
+    const option=el('option',null,t('agent_setup_'+value));option.value=value;return option;
+  }));
+  action.value=d.action;action.dataset.field='agent_setup.action';action.disabled=blocked;
+  action.addEventListener('change',()=>{d.action=action.value;invalidateAgentSetup(d);renderAgentSetup();});
+  const choices=AGENT_INVENTORY_IDS.map(id=>{
+    const box=checkbox(d.selected.has(id),checked=>{
+      if(checked)d.selected.add(id);else d.selected.delete(id);
+      invalidateAgentSetup(d);renderAgentSetup();
+    });
+    box.dataset.field=`agent_setup.agent.${id}`;box.disabled=blocked;
+    return el('label','check',box,t('agent_inventory_agent_'+id));
+  });
+  const preview=el('button','quiet small',t('agent_setup_preview'));
+  preview.type='button';preview.dataset.action='agent_setup.preview';
+  preview.disabled=blocked||!selected.length;
+  preview.addEventListener('click',()=>void previewAgentSetup(d));
+  const native=d.preview?.agents?.some(row=>row.steps.some(step=>step.effect==='native_command'));
+  const plugin=d.preview?.agents?.some(row=>row.steps.some(step=>step.component==='plugin'
+    &&['replace','manual'].includes(step.effect)));
+  const consent=checkbox(d.confirmed,checked=>{d.confirmed=checked;renderAgentSetup();});
+  consent.dataset.field='agent_setup.confirmed';consent.disabled=blocked||!d.preview;
+  const apply=el('button','quiet small',t('agent_setup_apply'));
+  apply.type='button';apply.dataset.action='agent_setup.apply';
+  apply.disabled=blocked||!d.confirmed||!agentSetupPreviewMatches(d.preview,d,selected);
+  apply.addEventListener('click',()=>void startAgentSetup(d));
+  const inspect=el('button','quiet small',t('agent_setup_status'));
+  inspect.type='button';inspect.dataset.action='agent_setup.status';inspect.disabled=d.reading;
+  inspect.addEventListener('click',()=>void inspectAgentSetup(d));
+  const previewResult=d.preview ? el('div','agent-setup-preview',el('h4',null,t('agent_setup_preview_h')),
+    el('p','desc',t('agent_setup_activation')),
+    plugin?el('p','desc',t('agent_setup_plugin_note')):null,
+    el('ul',null,...agentSetupRows(d.preview.agents,false)),
+    el('label','check',consent,t(native?'agent_setup_consent_native':'agent_setup_consent'))) : null;
+  const receipts=d.status ? [
+    [d.status.active,'agent_setup_receipt_current_h'],
+    [d.status.last,agentSetupReceiptMatches(d.status.last,d)
+      ? 'agent_setup_receipt_current_h':'agent_setup_receipt_previous_h']
+  ] : [[d.receipt,'agent_setup_receipt_current_h']];
+  return el('section','agent-setup',el('h3',null,t('agent_setup_h')),
+    el('p','desc',t('agent_setup_desc')),
+    el('label','field',el('span',null,t('agent_setup_action')),action),
+    el('fieldset',null,el('legend',null,t('agent_setup_select')),...choices),
+    preview,d.previewing?el('p','desc',t('agent_setup_previewing')):null,
+    previewResult,apply,d.sending?el('p','desc',t('agent_setup_sending')):null,
+    d.error?el('p','desc text error',t(d.error)):null,
+    d.unknown?el('p','desc',t('agent_setup_unknown')):null,
+    ...receipts.map(([receipt,heading])=>agentSetupReceipt(receipt,heading)),inspect,
+    d.reading?el('p','desc',t('agent_setup_status_loading')):null,
+    !receipts.some(([receipt])=>agentSetupReceiptKnown(receipt))&&!d.reading&&!d.sending
+      ?el('p','desc',t('agent_setup_status_none')):null);
 }
 
 let doctorDraft={sending:false,report:null,error:null,read:0};
@@ -3711,7 +4020,7 @@ function drawSettings() {
   const panel = el('div', 'settings', el('label', 'field lang', el('span', null, t('language')), pick));
   panel.lang = lang;
   if (!form) {
-    panel.append(el('p', 'text pending', t('file_error')), agentInventorySection(), doctorSection());
+    panel.append(el('p', 'text pending', t('file_error')), agentInventorySection(), agentSetupSection(), doctorSection());
     drawIn(panel);
     return;
   }
@@ -3844,7 +4153,7 @@ function drawSettings() {
     e.preventDefault();
     void saveSettings(save);
   });
-  panel.append(el('p', 'lead', t('lead')), formEl, preferenceSection(f), agentInventorySection(), doctorSection(), maintenanceSection(f));
+  panel.append(el('p', 'lead', t('lead')), formEl, preferenceSection(f), agentInventorySection(), agentSetupSection(), doctorSection(), maintenanceSection(f));
   drawIn(panel);
 }
 

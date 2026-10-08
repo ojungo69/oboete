@@ -69,8 +69,8 @@ left with "—" there.
 | Setting or operation | Spec | Now | Backend | Takes effect | OS | Test | Slice |
 |---|---|---|---|---|---|---|---|
 | First run: an unconfigured home, recommended presets | spec-webui | resident preset on Linux/WSL; full wizard — | settings | explicit save | all; resident Linux/WSL | `settings.rs` `resident_settings_are_read_only_until_the_visible_choice_is_saved`; native browser first-save/off/reload | resident slice 5; remaining W6 |
-| Detect agents, wire and unwire their hooks | 7.2 | Agent registrations: passive seven-agent file inventory; wire/unwire — | shared `setup::readiness`; `oboete setup` for later confirmed writes | inventory on page load or explicit Refresh; wiring later | all; private native fixtures on Linux | `w6_` public guarded GET and native-file registration matrix; private HTTP/FIFO/source-purity checks; JA/EN DOM/latest-read/unchanged-draft checks | W6 first inventory slice; wiring remains |
-| Readiness checks, as doctor reports them | 7.2, R13 | explicit JA/EN read-only diagnostics, with captured seven-agent inventory and independent partial results | `setup::doctor_report`, shared native queries/parsers; private CLI enrichment remains in `oboete doctor` | only an explicit Run diagnostics POST; no repair or live probe | release targets; private native/browser evidence on Linux, other targets retain CI-only labels | `w6d_` guarded empty-object, DB/WAL integrity/schema/change, cached accounting, passive locks, retained metadata/FIFO, completion and source-invalidation checks; JA/EN DOM/native/browser checks; existing CLI regressions | W6 readonly Doctor; confirmed wiring and first run remain |
+| Detect agents, wire and unwire their hooks | 7.2 | Passive seven-agent inventory; selected wire/unwire with preview and separate consent | shared `setup::readiness`, `setup::agents` and native `oboete setup` builders | inventory on page load/Refresh; approved file changes now, agent activation on its next start | release targets; private native/browser and lifecycle evidence on Linux, other targets retain CI-only labels | `w6_` guarded inventory; `w6a_` typed write guards, input/alias witnesses, backup and native-child failures; `tests/agent_setup.rs` seven-agent API lifecycle; private HTTP/fault and JA/EN browser checks | W6 confirmed wiring slice; first run and live-agent checks remain |
+| Readiness checks, as doctor reports them | 7.2, R13 | explicit JA/EN read-only diagnostics, with captured seven-agent inventory and independent partial results | `setup::doctor_report`, shared native queries/parsers; private CLI enrichment remains in `oboete doctor` | only an explicit Run diagnostics POST; no repair or live probe | release targets; private native/browser evidence on Linux, other targets retain CI-only labels | `w6d_` guarded empty-object, DB/WAL integrity/schema/change, cached accounting, passive locks, retained metadata/FIFO, completion and source-invalidation checks; JA/EN DOM/native/browser checks; existing CLI regressions | W6 readonly Doctor; first run remains |
 | Import claude-mem's history, with its projects mapped to repositories | 7.4, parity N1 | — | `oboete import` | when confirmed | all | — | W5 after N1 |
 | Migrate v1's store; import transcripts | 7.4 | History import: candidates/settings preview, explicit consent, committed progress and partial receipt | shared `migrate`/`transcript`, `settings/maintenance.rs` | confirmed import; later processing uses saved settings | all | maintenance preview/start/status, native CLI compatibility and JA/EN import journeys | W5A |
 | Recurate, with the list and estimate before the send | 1.7 | Typed local no-send preparation, scope/work/cost consent, own provider/window progress and partial receipt | shared native `curate::prepare_report`, `recurate_report`, ordinary Chain | explicit preparation; send only after confirmation and fresh admission | all; pinned resident caller on Linux | `w5c_` native/guarded regressions; synthetic HTTP send/replay, concurrent probe, settlement and later-index failure; actual same-PID Viewer exec and JA/EN browser consent/fractional-USD journeys | W5C |
@@ -167,7 +167,7 @@ cloud starts from a page view or a save.
   The reader shares native paths/builders and parsed-command predicates, opens no stores and
   launches no agent. The JA/EN panel preserves unsaved inputs and discards late reads; unknown
   response values remain unknown. Full read-only Doctor diagnostics are available separately;
-  confirmed wiring and first-run completion remain subsequent W6 work. Both inventory and
+  confirmed wiring is a separate explicit operation, while first-run completion remains W6 work. Both inventory and
   maintenance status reject nonempty raw queries;
   the existing caller's empty trailing question mark remains valid.
   Metadata failures and skipped Windows UNC/device namespaces produce unknown file flags, while
@@ -203,6 +203,34 @@ cloud starts from a page view or a save.
   and its private key-budget checks retain their existing boundary. A lost response or busy
   viewer requires an explicit new click and preserves unsaved settings. Synthetic held locks
   and private Linux browser runs do not establish live-agent or Windows/M1 real-machine use.
+
+  Confirmed wiring accepts only the seven fixed agent IDs and wire/unwire actions. Its preview
+  writes no configuration or lock files. Apply rechecks the preview's consumed bytes, file and
+  launcher identities, aliases and parent bindings under the existing writer coordination.
+  Shared native merges retain foreign entries, disabled integrations, trust and required agent
+  approvals. Direct file replacements are staged before backups; only a completed
+  backup is published without replacing an earlier backup or alias. Per-step receipts retain
+  established changes after a later failure; several files are not one atomic transaction.
+
+  Claude MCP registration uses the agent's own bounded local CLI. A new registration uses only
+  the current generated command. An exact match needs no command, and unwire uses fixed remove
+  arguments. Changing a differing existing registration is manual and preserves its saved
+  fields, including credentials and old arguments, rather than exposing them in process
+  arguments. Independent hooks and other agents remain available. OpenCode JSONC and unsafe
+  Cursor components retain their manual/unavailable results, and an unmarked Pi extension is
+  not removed. Preview and receipts never claim login or live delivery; the agent reads changes
+  on its next start.
+
+  One active and one last receipt are cached per viewer; matching operation-ID replay is limited
+  to that cache, not durable exactly-once execution. Lost or unknown results require explicit
+  status inspection and never automatically POST again. Late status reads cannot replace an
+  established completion. The JA/EN operation section preserves the current settings draft
+  during its own updates and retains completion while another tab is shown. Returning to
+  Settings still reloads saved settings and clears the existing form's uncommitted edits and
+  consent. Private seven-agent HTTP checks, injected CLI failure/retarget/busy controls and a
+  resident API lifecycle test cover these boundaries; browser recovery injections are distinct
+  from actual native commits. Whole first-run setup, presets/recovery and port/token activation
+  remain subsequent W6 work; #94 remains open.
 
 W1, W3, W5 and W6 are independent of each other once their backends exist; W2 is security scope and
 W4 waits for the local embedder.

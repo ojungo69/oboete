@@ -669,7 +669,7 @@ fn row(agent: &'static str, want: Option<&HookCommand>) -> AgentReadiness {
     }
 }
 
-fn current_command(
+pub(super) fn current_command(
     home: &Path,
     canonicalize: impl Fn(&Path) -> std::io::Result<std::path::PathBuf>,
 ) -> Option<HookCommand> {
