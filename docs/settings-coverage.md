@@ -226,7 +226,10 @@ cloud starts from a page view or a save.
   One active and one last receipt are cached per viewer; matching operation-ID replay is limited
   to that cache, not durable exactly-once execution. Lost or unknown results require explicit
   status inspection and never automatically POST again. Late status reads cannot replace an
-  established completion. The JA/EN operation section preserves the current settings draft
+  established completion. After explicit matching status confirms no managed operation is active,
+  an unknown receipt can be kept as previous while the user prepares another operation with a
+  fresh preview and consent. This does not resolve or undo the previous uncertain result.
+  The JA/EN operation section preserves the current settings draft
   during its own updates and retains completion while another tab is shown. Returning to
   Settings still reloads saved settings and clears the existing form's uncommitted edits and
   consent. Private seven-agent HTTP checks, injected CLI failure/retarget/busy controls and a

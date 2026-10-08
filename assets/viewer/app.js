@@ -1279,6 +1279,8 @@ const TEXT = {
   agent_setup_receipt_current_h: ['Current operation', '現在の操作'],
   agent_setup_receipt_previous_h: ['Previous operation', '前回の操作'],
   agent_setup_status: ['Inspect operation status', '操作状況を確認'],
+  agent_setup_prepare: ['Prepare another operation', '別の操作を準備'],
+  agent_setup_prepare_note: ['The previous result stays unknown. New changes need a fresh preview and approval; local commands may run again.', '前の操作は結果不明のまま残ります。新しい変更には再確認と承認が必要です。ローカルコマンドが再び実行される可能性があります。'],
   agent_setup_status_loading: ['Checking operation status…', '操作状況を確認中…'],
   agent_setup_status_none: ['No operation receipt is available.', '操作の結果はまだありません。'],
   agent_setup_receipt_h: ['Operation receipt', '操作結果'],
@@ -2519,7 +2521,7 @@ const AGENT_SETUP_PHASES = ['running','complete','partial','failed','stale','unk
 const AGENT_SETUP_OUTCOMES = ['prepared','committed','noop','manual','skipped','failed','stale','unknown'];
 const AGENT_SETUP_KINDS = ['stage','backup','write','delete','native_remove','native_add','readback'];
 let agentSetupDraft = {action:'wire',selected:new Set(),preview:null,confirmed:false,
-  previewing:false,sending:false,reading:false,unknown:false,error:null,
+  previewing:false,sending:false,reading:false,unknown:false,unknownInspected:false,error:null,
   operationId:null,pendingAction:null,pendingAgents:null,receipt:null,status:null,previewRead:0,statusRead:0};
 
 function agentSetupSelected(d) {
@@ -2568,6 +2570,11 @@ function agentSetupReceiptMatches(receipt,d) {
 function agentSetupBlocked(d) {
   return d.previewing||d.sending||d.unknown||Boolean(d.status?.active);
 }
+function agentSetupCanPrepare(d) {
+  return d.unknown&&d.unknownInspected&&!d.sending&&!d.reading
+    &&d.status?.active===null&&agentSetupReceiptMatches(d.status.last,d)
+    &&d.status.last.phase==='unknown';
+}
 function invalidateAgentSetup(d) {
   d.previewRead++;
   d.preview=null;d.confirmed=false;d.error=null;
@@ -2582,6 +2589,7 @@ function renderAgentSetup() {
   const next=field ? [...section.querySelectorAll('[data-field]')].find(node=>node.dataset.field===field)
     : action ? [...section.querySelectorAll('[data-action]')].find(node=>node.dataset.action===action) : null;
   if(next&&!next.disabled)next.focus({preventScroll:true});
+  else if(action==='agent_setup.prepare')section.querySelector('[data-action="agent_setup.preview"]')?.focus({preventScroll:true});
 }
 async function previewAgentSetup(d=agentSetupDraft) {
   if(agentSetupBlocked(d)||!AGENT_SETUP_ACTIONS.includes(d.action))return;
@@ -2611,6 +2619,7 @@ async function startAgentSetup(d=agentSetupDraft) {
   const posted={action:d.action,agents,preview_key:d.preview.preview_key,
     operation_id:operationId,confirmed:true};
   d.operationId=operationId;d.pendingAction=posted.action;d.pendingAgents=agents;
+  d.unknownInspected=false;
   d.statusRead++;d.reading=false;
   d.preview=null;d.confirmed=false;d.error=null;d.status=null;d.receipt=null;
   d.sending=true;renderAgentSetup();
@@ -2641,6 +2650,7 @@ async function startAgentSetup(d=agentSetupDraft) {
 }
 async function inspectAgentSetup(d=agentSetupDraft) {
   if(d.reading)return;
+  d.unknownInspected=false;
   const read=d.statusRead= d.statusRead+1;
   d.reading=true;renderAgentSetup();
   try {
@@ -2654,8 +2664,10 @@ async function inspectAgentSetup(d=agentSetupDraft) {
     d.status=status;
     d.error=null;
     const match=[status.active,status.last].find(row=>agentSetupReceiptMatches(row,d));
-    if(d.unknown&&match&&match.phase!=='unknown'){
-      d.receipt=match;d.unknown=false;
+    if(d.unknown&&match){
+      d.receipt=match;
+      if(match.phase!=='unknown')d.unknown=false;
+      else d.unknownInspected=status.active===null&&status.last===match;
     }
   } catch {if(read===d.statusRead)d.error='agent_setup_status_unavailable';}
   finally {if(read===d.statusRead){d.reading=false;renderAgentSetup();}}
@@ -2716,6 +2728,14 @@ function agentSetupSection() {
   const inspect=el('button','quiet small',t('agent_setup_status'));
   inspect.type='button';inspect.dataset.action='agent_setup.status';inspect.disabled=d.reading;
   inspect.addEventListener('click',()=>void inspectAgentSetup(d));
+  const prepare=el('button','quiet small',t('agent_setup_prepare'));
+  prepare.type='button';prepare.dataset.action='agent_setup.prepare';
+  prepare.addEventListener('click',()=>{
+    if(!agentSetupCanPrepare(d))return;
+    d.unknown=false;d.unknownInspected=false;
+    d.operationId=null;d.pendingAction=null;d.pendingAgents=null;
+    d.statusRead++;d.reading=false;invalidateAgentSetup(d);renderAgentSetup();
+  });
   const previewResult=d.preview ? el('div','agent-setup-preview',el('h4',null,t('agent_setup_preview_h')),
     el('p','desc',t('agent_setup_activation')),
     plugin?el('p','desc',t('agent_setup_plugin_note')):null,
@@ -2735,6 +2755,7 @@ function agentSetupSection() {
     d.error?el('p','desc text error',t(d.error)):null,
     d.unknown?el('p','desc',t('agent_setup_unknown')):null,
     ...receipts.map(([receipt,heading])=>agentSetupReceipt(receipt,heading)),inspect,
+    agentSetupCanPrepare(d)?el('div',null,el('p','desc',t('agent_setup_prepare_note')),prepare):null,
     d.reading?el('p','desc',t('agent_setup_status_loading')):null,
     !receipts.some(([receipt])=>agentSetupReceiptKnown(receipt))&&!d.reading&&!d.sending
       ?el('p','desc',t('agent_setup_status_none')):null);

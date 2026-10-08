@@ -292,6 +292,28 @@ for(const whileSending of [false,true]) {
   assert.equal(ctx.setupUi.draft.status.active,null,'a late running response cannot leave setup blocked');
   assert.equal(ctx.setupUi.draft.reading,false,'invalidating a read releases its loading state');
 }
+await prepare();change(consent(),true);
+const unknownStart=ctx.setupUi.start();setupRequests.shift().reject(new Error('invented unknown result'));await unknownStart;
+const prepareAnother=()=>integration.querySelectorAll('button').find(node=>node.dataset.action==='agent_setup.prepare');
+assert(!prepareAnother(),'a lost response alone cannot admit a new operation');
+const unknownReceipt={...operationReceipt(ctx.setupUi.draft.operationId),phase:'unknown'};
+const inspectActive=ctx.setupUi.inspect();
+setupRequests.shift().resolve(response({active:{...operationReceipt('ff'.repeat(32)),phase:'running'},last:unknownReceipt}));await inspectActive;
+assert(!prepareAnother(),'an active operation prevents preparing another, even after inspecting a matching unknown receipt');
+const inspectUnknown=ctx.setupUi.inspect();
+setupRequests.shift().resolve(response({active:null,last:unknownReceipt}));await inspectUnknown;
+assert.equal(ctx.setupUi.draft.receipt?.phase,'unknown','explicit inspection retains the matching unknown receipt');
+assert.equal(ctx.setupUi.draft.unknown,true,'inspection does not claim an unknown outcome is resolved');
+assert(prepareAnother()&&!prepareAnother().disabled,'confirmed inactive unknown operation offers explicit new preparation');
+prepareAnother().click();
+assert.equal(ctx.setupUi.draft.unknown,false);
+assert.equal(ctx.setupUi.draft.operationId,null);
+assert.equal(ctx.setupUi.draft.confirmed,false);
+assert.equal(ctx.setupUi.draft.preview,null);
+assert(text(integration).includes('Previous operation')&&text(integration).includes('unknown'),
+  'new preparation retains the previous uncertain result');
+assert.equal(setupRequests.length,0,'preparing another operation never automatically POSTs');
+await ctx.setupUi.start();assert.equal(setupRequests.length,0,'a fresh preview and consent are required');
 await prepare({...selectedPreview,agents:[{agent:'claude',steps:[{component:'mcp',effect:'private-effect-canary',backup:'none'}]}]});
 assert.equal(ctx.setupUi.draft.preview,null,'unknown effects cannot be approved');
 assert(!text(integration).includes('private-effect-canary'));
