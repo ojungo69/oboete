@@ -2713,7 +2713,7 @@ async function runDoctor() {
   renderDoctor();
   try {
     const {res,answer}=await memoryWrite('doctor',{});
-    if(read!==doctorDraft.read || view!=='settings')return;
+    if(read!==doctorDraft.read)return;
     if(!res.ok)doctorDraft.error=res.status===503?'doctor_busy':'doctor_failed';
     else if(answer && typeof answer==='object' && answer.stores && answer.checks
       && answer.inventory && Array.isArray(answer.inventory.agents)
@@ -2721,7 +2721,7 @@ async function runDoctor() {
       doctorDraft.report=answer;
     else doctorDraft.error='doctor_failed';
   } catch {
-    if(read===doctorDraft.read && view==='settings')doctorDraft.error='doctor_unknown';
+    if(read===doctorDraft.read)doctorDraft.error='doctor_unknown';
   } finally {
     if(read===doctorDraft.read){doctorDraft.sending=false;renderDoctor();}
   }

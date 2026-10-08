@@ -2836,8 +2836,21 @@ fn spans_skipped_from(
                     && span.from_offset.is_none_or(|offset| offset >= 0)
                     && span.to_offset.is_none_or(|offset| offset >= 0)
             };
+            let typed_offsets = |value: &Value| {
+                ["from_offset", "to_offset"].into_iter().all(|field| {
+                    value
+                        .get(field)
+                        .is_none_or(|offset| offset.is_null() || offset.as_i64().is_some())
+                })
+            };
             anyhow::ensure!(
-                valid(&span) && op_span(&o.body["covers"]).as_ref().is_none_or(valid),
+                valid(&span)
+                    && typed_offsets(&o.body)
+                    && o.body.get("covers").is_none_or(|covers| {
+                        covers.is_null()
+                            || (typed_offsets(covers)
+                                && op_span(covers).as_ref().is_some_and(valid))
+                    }),
                 "invalid stored window range"
             );
             if o.body["recurate"] == true {

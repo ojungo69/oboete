@@ -1072,6 +1072,10 @@ impl Viewer {
         ) {
             return Response::text(400, "doctor takes an empty JSON object");
         }
+        // Reuse the viewer's operation gate so simultaneous clients cannot multiply copies.
+        let Ok(_running) = self.saving.try_lock() else {
+            return Response::text(503, "the viewer is busy");
+        };
         Response::json(&json!(crate::setup::doctor_report(&self.home)))
     }
 
@@ -2488,6 +2492,37 @@ mod tests {
         assert!(!String::from_utf8(answer.body).unwrap().contains(&device));
         assert_eq!(crate::backup::tests::w5b_files(p), before);
         assert_eq!(raw.device(), device);
+    }
+
+    #[test]
+    fn w6d_busy_doctor_is_refused_before_opening_or_copying_a_store() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("absent");
+        let v = Viewer::new(&home, None, 4321, Token::Run("t0k".into()));
+        let busy = v.saving.lock().unwrap();
+        let headers = [
+            HOST,
+            TOKEN,
+            ("Origin", "http://127.0.0.1:4321"),
+            ("Content-Type", "application/json"),
+            ("Content-Length", "2"),
+        ];
+        assert_eq!(
+            request(&v, "POST", "/api/doctor", &headers, b"{}").status,
+            503
+        );
+        assert_eq!(
+            request(&v, "POST", "/api/doctor", &headers, b"[]").status,
+            400,
+            "body validation precedes the operation gate"
+        );
+        assert!(!home.exists());
+        drop(busy);
+        assert_eq!(
+            request(&v, "POST", "/api/doctor", &headers, b"{}").status,
+            200
+        );
+        assert!(!home.exists());
     }
 
     #[test]

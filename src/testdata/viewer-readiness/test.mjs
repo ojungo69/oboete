@@ -175,7 +175,16 @@ assert(panel.contains(diagnosticDraft),'failure paths preserve the draft node');
 const late=ctx.doctorUi.runDoctor();const beforeDoctorLeaving=text(diagnostics);
 ctx.ui.setView('records');diagnosticRequests.shift().resolve(diagnosticResponse(diagnosticReport));await late;
 assert.equal(text(diagnostics),beforeDoctorLeaving,'result after leaving Settings does not redraw');
-ctx.ui.setView('settings');
+ctx.ui.setView('settings');ctx.ui.drawSettings();
+diagnostics=panel.querySelector('.doctor-diagnostics');
+assert(text(diagnostics).includes('Saved records are damaged'),
+  'returning to Settings retains the completed diagnostic result');
+const lostAway=ctx.doctorUi.runDoctor();ctx.ui.setView('records');
+diagnosticRequests.shift().reject(new Error('invented off-view transport failure'));await lostAway;
+ctx.ui.setView('settings');ctx.ui.drawSettings();
+diagnostics=panel.querySelector('.doctor-diagnostics');
+assert(text(diagnostics).includes('response was lost'),
+  'returning to Settings retains the matching lost-response state');
 diagnosticReport.inventory=report('matching');
 const freshInventory=ctx.doctorUi.runDoctor();
 diagnosticRequests.shift().resolve(diagnosticResponse(diagnosticReport));await freshInventory;

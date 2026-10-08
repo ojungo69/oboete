@@ -167,7 +167,8 @@ cloud starts from a page view or a save.
   The reader shares native paths/builders and parsed-command predicates, opens no stores and
   launches no agent. The JA/EN panel preserves unsaved inputs and discards late reads; unknown
   response values remain unknown. Full read-only Doctor diagnostics are available separately;
-  confirmed wiring and first-run completion remain subsequent W6 work. Both inventory and maintenance status reject nonempty raw queries;
+  confirmed wiring and first-run completion remain subsequent W6 work. Both inventory and
+  maintenance status reject nonempty raw queries;
   the existing caller's empty trailing question mark remains valid.
   Metadata failures and skipped Windows UNC/device namespaces produce unknown file flags, while
   a confirmed local launcher still produces found. Text reads stop at 1 MiB per file; larger
@@ -186,8 +187,14 @@ cloud starts from a page view or a save.
   disk bytes and metadata-only retained-file/evaluation totals. Store queries inspect private
   schema-neutral DB/WAL copies; the original files are not opened as live stores or repaired.
   Source witnesses invalidate only affected facts. This is a set of checked observations,
-  not an atomic snapshot. Missing/off sources, a measured zero, an unreadable value and a source
+  not an atomic snapshot. Retained descendant metadata uses streaming fingerprints; top-level
+  bindings and active directory name/path buffers still scale with the selected tree.
+  Missing/off sources, a measured zero, an unreadable value and a source
   change remain distinct. The UI displays the inventory captured by that same diagnostic result.
+  Stored window ranges are validated in the shared native reader before span arithmetic;
+  corrupt ranges fail without a model send or automatic repair. Omitted/null optional coverage
+  retains its existing meaning. The viewer admits one diagnostic at a time through its
+  existing operation gate, and keeps a completed result when the user returns to Settings.
 
   `complete` describes established applicable facts, while fixed `unhealthy` codes identify
   confirmed passive problems. Neither an empty problem list nor completed observations prove
@@ -196,7 +203,6 @@ cloud starts from a page view or a save.
   and its private key-budget checks retain their existing boundary. A lost response or busy
   viewer requires an explicit new click and preserves unsaved settings. Synthetic held locks
   and private Linux browser runs do not establish live-agent or Windows/M1 real-machine use.
-
 
 W1, W3, W5 and W6 are independent of each other once their backends exist; W2 is security scope and
 W4 waits for the local embedder.

@@ -1909,10 +1909,11 @@ mod tests {
         std::fs::write(state.join("view-outcome"), "listening 23123").unwrap();
         std::fs::write(state.join("restored"), "private-restored-note").unwrap();
         let worker = std::fs::File::create(state.join("worker.lock")).unwrap();
-        worker.lock().unwrap();
         let viewer = std::fs::File::create(state.join("view.lock")).unwrap();
-        viewer.lock().unwrap();
+        // Snapshot the bytes before taking Windows' exclusive byte-range locks.
         let before = crate::backup::tests::w5b_files(p);
+        worker.lock().unwrap();
+        viewer.lock().unwrap();
         let report = serde_json::to_value(doctor_report(p)).unwrap();
         let runtime = &report["checks"]["runtime"];
         assert_eq!(
@@ -1936,10 +1937,14 @@ mod tests {
         assert_eq!(runtime["resident_viewer"]["actual_port"], 23123);
         assert_eq!(runtime["restore_note"]["value"], true);
         assert!(!report.to_string().contains("private-"));
+        worker.unlock().unwrap();
+        viewer.unlock().unwrap();
         assert!(
             before == crate::backup::tests::w5b_files(p),
             "runtime diagnosis changed files"
         );
+        worker.lock().unwrap();
+        viewer.lock().unwrap();
         let path = state.join("worker-outcome");
         AFTER_COLLECTION.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
@@ -2189,14 +2194,91 @@ mod tests {
             .unwrap();
         assert_eq!(text, "original");
         junction(&root.path().join("kept").join("child"));
-        assert_eq!(
+        // A real directory would open here; a junction must not be followed.
+        assert!(
             directory
-                .open_file(std::ffi::OsStr::new("child"))
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::Unsupported
+                .open_directory(std::ffi::OsStr::new("child"))
+                .is_err()
         );
+        assert!(directory.open_file(std::ffi::OsStr::new("child")).is_err());
         assert_eq!(std::fs::read(target.join("owned")).unwrap(), b"target");
+    }
+
+    #[test]
+    fn w6d_non_null_malformed_covers_is_not_silently_ignored() {
+        for (covers, invalid) in [
+            (None, false),
+            (Some(serde_json::Value::Null), false),
+            (Some(serde_json::json!({"from_seq":1,"to_seq":1})), false),
+            (
+                Some(
+                    serde_json::json!({"from_seq":1,"to_seq":1,"from_offset":null,"to_offset":null}),
+                ),
+                false,
+            ),
+            (
+                Some(serde_json::json!({"from_seq":1,"to_seq":1,"from_offset":"bad"})),
+                true,
+            ),
+            (
+                Some(serde_json::json!({"from_seq":1,"to_seq":1,"to_offset":1.5})),
+                true,
+            ),
+            (
+                Some(serde_json::json!({"from_seq":1,"to_seq":1,"from_offset":u64::MAX})),
+                true,
+            ),
+            (Some(serde_json::json!({"from_seq":1})), true),
+            (Some(serde_json::json!({})), true),
+            (Some(serde_json::json!("invalid")), true),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let mut raw = crate::raw::open(home.path()).unwrap();
+            let mut body = serde_json::json!({"from_seq":1,"to_seq":1,"outcome":"skipped","reason":"imported:oboete-v1"});
+            if let Some(covers) = covers {
+                body["covers"] = covers;
+            }
+            raw.append_ops(&[(crate::raw::OpKind::Window, body)])
+                .unwrap();
+            let report = serde_json::to_value(doctor_report(home.path())).unwrap();
+            assert_eq!(
+                report["checks"]["raw"]["parking"]["state"],
+                if invalid { "unavailable" } else { "known" }
+            );
+            assert_eq!(
+                crate::curate::parked_spans(&raw, "oboete-v1").is_err(),
+                invalid,
+                "native recuration must reject corrupt ranges before arithmetic or sends"
+            );
+        }
+    }
+
+    #[test]
+    fn w6d_non_null_window_offsets_require_integers() {
+        for field in ["from_offset", "to_offset"] {
+            for (offset, invalid) in [
+                (serde_json::Value::Null, false),
+                (serde_json::json!("bad"), true),
+                (serde_json::json!(1.5), true),
+                (serde_json::json!(u64::MAX), true),
+            ] {
+                let home = tempfile::tempdir().unwrap();
+                let mut raw = crate::raw::open(home.path()).unwrap();
+                let mut body = serde_json::json!({"from_seq":1,"to_seq":1,"outcome":"skipped","reason":"imported:oboete-v1"});
+                body[field] = offset;
+                raw.append_ops(&[(crate::raw::OpKind::Window, body)])
+                    .unwrap();
+                let report = serde_json::to_value(doctor_report(home.path())).unwrap();
+                assert_eq!(
+                    report["checks"]["raw"]["parking"]["state"],
+                    if invalid { "unavailable" } else { "known" }
+                );
+                assert_eq!(
+                    crate::curate::parked_spans(&raw, "oboete-v1").is_err(),
+                    invalid
+                );
+            }
+        }
     }
 
     #[test]
