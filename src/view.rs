@@ -5364,6 +5364,7 @@ curate = false
                     down_until: crate::providers_db::OWNER_HOLD,
                     fails: 3,
                     backoff: 2,
+                    ..Default::default()
                 },
             )
             .unwrap();

@@ -185,6 +185,8 @@ pub(crate) struct CallError {
     /// provider rests until then whatever else failed.
     cool_until: Option<i64>,
     rate: Option<providers_db::RateLeft>,
+    /// The rest is codex's allowance read without counting the account's credits (#164).
+    uncredited: bool,
 }
 
 /// An embedding request's failure, rested as a curator's is (milestone 4 Task 5, Step 6).
@@ -198,6 +200,7 @@ impl From<&crate::embed::Failure> for CallError {
             sent: f.sent,
             cool_until: None,
             rate: None,
+            uncredited: false,
         }
     }
 }
@@ -212,6 +215,7 @@ impl CallError {
             sent: true,
             cool_until: None,
             rate: None,
+            uncredited: false,
         }
     }
     fn with_usage(self, usage: Usage) -> Self {
@@ -226,6 +230,9 @@ impl CallError {
             cool_until: self.cool_until.max(cool_until),
             ..self
         }
+    }
+    fn uncredited(self, uncredited: bool) -> Self {
+        Self { uncredited, ..self }
     }
     /// A failure before the request or the CLI started: nothing was uploaded.
     fn unsent(self) -> Self {
@@ -824,12 +831,13 @@ impl<'a> Chain<'a> {
                 continue;
             }
             let state = providers_db::state(conn, &name)?;
-            if state.down_until == providers_db::OWNER_HOLD {
+            let holds = rest_holds(&state, p);
+            if holds && state.down_until == providers_db::OWNER_HOLD {
                 let why = format!("stopped until the owner acts (`oboete resume {name}`)");
                 skip(why, Skip::Owner);
                 continue;
             }
-            if state.down_until > db::now_ms() {
+            if holds && state.down_until > db::now_ms() {
                 let why = "cooling down after an earlier failure".into();
                 skip(why, Skip::Wait(state.down_until));
                 continue;
@@ -1216,6 +1224,14 @@ fn cooldown_for(e: &CallError) -> Option<Duration> {
 /// A 429 that names no reset doubles its cooldown each time, up to an hour: Mistral's key at
 /// 0 requests a minute refused every request that way, and a flat 45 s re-sent each window to it
 /// (2026-09-27).
+/// Whether `state`'s rest holds entry `p`. A rest codex's allowance read set without counting the
+/// account's credits does not hold an entry that may draw on them, however it came to (the page,
+/// config.toml, another entry of the same name): that entry reads the allowance again (Codex on
+/// #418).
+pub(crate) fn rest_holds(state: &providers_db::State, p: &Provider) -> bool {
+    !(state.uncredited && matches!(p, Provider::Cli { credits: true, .. }))
+}
+
 pub(crate) fn next_state(was: providers_db::State, e: &CallError) -> providers_db::State {
     // A rest its own allowance set before anything was sent (codex at its usage line) is neither
     // an outage nor a failure: only the rest, to the millisecond.
@@ -1224,6 +1240,7 @@ pub(crate) fn next_state(was: providers_db::State, e: &CallError) -> providers_d
     {
         return providers_db::State {
             down_until: until,
+            uncredited: e.uncredited,
             ..was
         };
     }
@@ -1248,6 +1265,7 @@ pub(crate) fn next_state(was: providers_db::State, e: &CallError) -> providers_d
             .max(e.cool_until.unwrap_or(0)),
         fails,
         backoff,
+        uncredited: false,
     }
 }
 
@@ -1613,6 +1631,7 @@ fn http_call(
             sent: true,
             cool_until: spent.then(providers_db::next_month),
             rate,
+            uncredited: false,
         });
     }
     let v: Value = serde_json::from_str(&text)
@@ -2484,6 +2503,7 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
             sent: true,
             cool_until: Some(providers_db::OWNER_HOLD),
             rate: None,
+            uncredited: false,
         });
     }
     let result = events
@@ -2503,6 +2523,7 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
             sent: true,
             cool_until: None,
             rate: None,
+            uncredited: false,
         });
     }
     Ok(result.to_string())
@@ -2572,7 +2593,7 @@ fn cli_preflight(cli: &str, credits: bool) -> Result<(), CallError> {
         && let Some(until) = codex_rest_now(credits)
     {
         let e = CallError::other("codex is at its plan's usage line");
-        return Err(e.unsent().resting(Some(until)));
+        return Err(e.unsent().resting(Some(until)).uncredited(!credits));
     }
     Ok(())
 }
@@ -3662,6 +3683,70 @@ mod tests {
         }
     }
 
+    /// A rest codex's allowance read set without counting credits is marked so, and does not
+    /// hold an entry that may draw on them, however it came to (the page, config.toml, another
+    /// entry of the name): it reads the allowance again. A rest read with them holds (Codex on
+    /// #418).
+    #[test]
+    fn a_rest_read_without_credits_does_not_hold_an_entry_that_draws_on_them() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        // (the entry's credits, a stored rest's mark, whether the allowance is read, the mark after)
+        for (credits, stored, read, marked) in [
+            (true, Some(true), true, false),
+            (true, Some(false), false, false),
+            (false, Some(true), false, true),
+            (false, None, true, true),
+            (true, None, true, false),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let conn = providers_db::open(home.path()).unwrap();
+            let until = db::now_ms() + 60_000;
+            if let Some(uncredited) = stored {
+                let rest = providers_db::State {
+                    down_until: until,
+                    uncredited,
+                    ..Default::default()
+                };
+                providers_db::set_state(&conn, "codex", rest).unwrap();
+            }
+            let seen = Rc::new(Cell::new(false));
+            let saw = Rc::clone(&seen);
+            CODEX_REST_TEST.with(|probe| {
+                *probe.borrow_mut() = Some(Box::new(move |_| {
+                    saw.set(true);
+                    Some(until)
+                }))
+            });
+            let providers = [Provider::Cli {
+                credits,
+                enabled: true,
+                name: "codex".into(),
+                cli: "codex".into(),
+                model: None,
+                daily_budget: 10,
+                timeout_s: 1,
+                limits: Default::default(),
+            }];
+            let gate = || Ok(Some(crate::dispatch::Admission::shared(home.path())?));
+            let isolation = || Ok(crate::isolation::Gate::Passed);
+            let mut chain = Chain::new(&providers, &conn).gate(&gate);
+            chain.isolation = Some(&isolation);
+            chain.forced_fail = None;
+            let result = chain.run("curator", "preflight", "synthetic prompt", &json!({}));
+            CODEX_REST_TEST.with(|probe| probe.borrow_mut().take());
+            let case = format!("credits {credits}, stored {stored:?}");
+            assert!(result.is_err(), "{case}");
+            assert_eq!(seen.get(), read, "{case}");
+            let after = providers_db::state(&conn, "codex").unwrap();
+            assert_eq!(
+                (after.down_until, after.uncredited),
+                (until, marked),
+                "{case}"
+            );
+        }
+    }
+
     /// Allowance reads carry no prompt. They must leave registration free, and a rest must
     /// preserve the unsent accounting without asking the final raw egress gate.
     #[test]
@@ -3725,10 +3810,12 @@ mod tests {
         let error = result.unwrap_err();
         let failed = error.downcast_ref::<ChainFailed>().unwrap();
         assert_eq!(failed.0[0].skip, Skip::Wait(until));
+        // Read without credits (the entry draws on none), so marked so.
         assert_eq!(
             providers_db::state(&conn, "codex").unwrap(),
             providers_db::State {
                 down_until: until,
+                uncredited: true,
                 ..was
             }
         );
@@ -5510,6 +5597,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 down_until: if held { providers_db::OWNER_HOLD } else { 0 },
                 fails: 1,
                 backoff: 0,
+                ..Default::default()
             };
             let gate = || {
                 providers_db::set_state(&peer, "stub", latest)?;
@@ -5542,6 +5630,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 down_until: db::now_ms() - 1,
                 fails: 1,
                 backoff: 2,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -5861,6 +5950,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             sent: true,
             cool_until: None,
             rate: None,
+            uncredited: false,
         };
         assert_eq!(cooldown_for(&flagged), None);
     }
@@ -5996,6 +6086,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             sent: true,
             cool_until: None,
             rate: None,
+            uncredited: false,
         };
         let mut s = providers_db::State::default();
         let mut waits = Vec::new();
@@ -6027,6 +6118,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             sent: true,
             cool_until: None,
             rate: None,
+            uncredited: false,
         };
         let waits = |e: &CallError| {
             let mut s = providers_db::State::default();
@@ -6656,6 +6748,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             sent: true,
             cool_until: None,
             rate: None,
+            uncredited: false,
         };
         assert_eq!(cooldown_for(&err(Some(429), "")), Some(COOLDOWN_429));
         assert_eq!(
@@ -6764,6 +6857,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             sent: true,
             cool_until: None,
             rate: None,
+            uncredited: false,
         };
         assert_eq!(cooldown_for(&e(None)), Some(COOLDOWN_429));
         assert_eq!(cooldown_for(&e(Some(10.0))), Some(COOLDOWN_429));

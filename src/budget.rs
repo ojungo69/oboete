@@ -153,9 +153,11 @@ impl Reservation {
         providers_db::freeze_unmetered(&tx, self.id, [self.input, self.output])?;
         let current = providers_db::state(&tx, &self.provider)?;
         let mut updated = next(current);
-        // An answer cannot implicitly resume an owner-held entry or shorten a concurrent rest.
-        if current.down_until > crate::db::now_ms() {
-            updated.down_until = updated.down_until.max(current.down_until);
+        // An answer cannot implicitly resume an owner-held entry or shorten a concurrent rest,
+        // which keeps its mark (`provider::rest_holds`).
+        if current.down_until > crate::db::now_ms() && current.down_until > updated.down_until {
+            updated.down_until = current.down_until;
+            updated.uncredited = current.uncredited;
         }
         if current.down_until == providers_db::OWNER_HOLD {
             updated = current;
@@ -286,7 +288,8 @@ pub(crate) fn reserve_with_history(
     }
     let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
     let state = providers_db::state(&tx, p.name())?;
-    if state.down_until == providers_db::OWNER_HOLD {
+    let holds = crate::provider::rest_holds(&state, p);
+    if holds && state.down_until == providers_db::OWNER_HOLD {
         return Ok(Err(Refusal {
             outcome: "gate",
             detail: format!(
@@ -296,7 +299,7 @@ pub(crate) fn reserve_with_history(
             skip: Skip::Owner,
         }));
     }
-    if state.down_until > crate::db::now_ms() {
+    if holds && state.down_until > crate::db::now_ms() {
         return Ok(Err(Refusal {
             outcome: "gate",
             detail: "cooling down after an earlier failure".into(),
@@ -1535,6 +1538,7 @@ mod tests {
                 down_until: providers_db::OWNER_HOLD,
                 fails: 2,
                 backoff: 3,
+                ..Default::default()
             };
             providers_db::set_state(&peer, "p", hold).unwrap();
             let state = reservation
