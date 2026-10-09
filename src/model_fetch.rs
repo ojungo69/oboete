@@ -506,6 +506,8 @@ mod tests {
                         }
                         Err(error) => panic!("stub accept: {error}"),
                     };
+                    // Windows and BSD give an accepted socket its listener's non-blocking mode.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
@@ -548,7 +550,11 @@ mod tests {
     impl Drop for Stub {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::SeqCst);
-            self.thread.take().unwrap().join().unwrap();
+            let stub = self.thread.take().unwrap().join();
+            // A second panic while a failed test unwinds would abort every test in the binary.
+            if !thread::panicking() {
+                stub.unwrap();
+            }
         }
     }
 
