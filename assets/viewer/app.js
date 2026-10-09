@@ -461,6 +461,7 @@ function updateFeedState(state) {
       : !state.keys.size ? t('feed_empty') : state.next === null ? t('feed_exhausted') : '';
   state.notice.textContent = message;
   state.notice.classList.toggle('error', Boolean(state.error) && !state.loading);
+  state.notice.classList.toggle('loading', state.loading);
   state.more.hidden = state.next === null;
   state.more.disabled = state.loading;
   state.retry.hidden = !state.error || state.loading;
@@ -908,6 +909,20 @@ const TEXT = {
     'Choose the settings below. Each save applies its own section; individual provider checkboxes and arrows save immediately. Recording and memory delivery read them at their next use; the background summarizer reads them before its next window, even while it stays running. This page cannot tell which values a running request has loaded. Opening this page or saving sends nothing to a provider.',
     'ここで設定を選べます。それぞれの保存ボタンで対象の設定を反映します。要約役の個別のチェックと矢印はすぐに保存します。記録・記憶の受け渡しには次の利用時から反映されます。要約の設定は、次のまとまりを処理する前に読み直すので、処理が動き続けていても反映されます。現在実行中の呼び出しが読み込んでいる値は、この画面では確認できません。画面を開いたり保存したりしても、要約役への送信は始まりません。',
   ],
+  group_start_h: ['Getting started', 'はじめに'],
+  group_start_desc: ['Choose how much AI to use, then check that an agent records and finds a test phrase.', 'AI をどこまで使うかを選び、エージェントで記録と検索ができることを確かめます。'],
+  group_everyday_h: ['Everyday settings', 'よく使う設定'],
+  group_everyday_desc: ['Summaries, the limit for paid calls, what agents are given and what is recorded.', '要約、有料の呼び出しの上限、エージェントに渡す記憶、記録する内容です。'],
+  group_providers_h: ['AI providers', '要約役'],
+  group_providers_desc: ['The AI services that write summaries: their order, keys and connection tests.', '要約を書く AI の接続先と、その順番、キー、接続テストです。'],
+  group_privacy_h: ['Privacy', 'プライバシー'],
+  group_privacy_desc: ['Masking sensitive values, and repositories whose records are not sent out.', '機密値のマスキングと、記録を外部に送らないリポジトリの指定です。'],
+  group_computer_h: ['This computer', 'このパソコン'],
+  group_computer_desc: ['Running between sessions, the page’s address and where backups go.', 'セッション間の常駐、画面のアドレス、バックアップの保存先です。'],
+  group_agents_h: ['Agents', 'エージェント'],
+  group_agents_desc: ['A preference for every agent, which agents are registered, and connecting agents.', 'すべてのエージェントに伝える好み、登録状況の確認、エージェントの接続です。'],
+  group_maintenance_h: ['Diagnostics and maintenance', '診断と保守'],
+  group_maintenance_desc: ['Diagnostics, importing and rebuilding history, and other occasional tasks.', '診断、履歴の取り込みや再構築など、ときどき使う操作です。'],
   summary_h: ['Summarizing recorded activity', '記録の要約'],
   summary_desc: [
     'When enabled, the background summarizer may send recorded text to the providers below. Paid calls can cost money. Turning it off keeps existing memories and stops new summaries at the next run.',
@@ -4340,10 +4355,17 @@ function onboardingSection(f) {
     if(form!==f)return;
     applyOnboardingValues(f,onboardingPlan(f,onboardingTier));
     syncOnboardingControls(f);onboardingApplied=true;renderOnboarding(f);
+    // The chain's on/off it changed is to be reviewed before saving.
+    const providers=$('panel').querySelector('.group-providers');if(providers)providers.open=true;
   });
+  // A target in a folded settings group is opened before it is scrolled to.
   const jump=(selector,key)=>{
     const button=el('button','quiet small',t(key));button.type='button';
-    button.addEventListener('click',()=>$('panel').querySelector(selector)?.scrollIntoView?.({block:'start'}));
+    button.addEventListener('click',()=>{
+      const target=$('panel').querySelector(selector);
+      for(let d=target?.closest('details');d;d=d.parentElement?.closest('details'))d.open=true;
+      target?.scrollIntoView?.({block:'start'});
+    });
     return button;
   };
   const link=(label,href)=>{const a=el('a',null,label);a.href=href;a.target='_blank';a.rel='noopener noreferrer';return a;};
@@ -4481,66 +4503,70 @@ function drawSettings() {
   }));
   const save = el('button', 'save', t('settings_save'));
   save.type = 'submit';
+  // The common settings first and open; the rest folded (docs/viewer-design.md). A new home opens
+  // its guide and the resident choice it is to save, and a waiting provider its group.
   const formEl = el('form', null,
-    onboardingSection(f),
-    el('section', null,
-      el('h3', null, t('resident_h')), el('p', 'desc', t('resident_desc')),
-      el('label', 'check', resident, t('resident_on')),
-      saved(t(f.saved.worker.resident ? 'value_on' : 'value_off')),
-      f.firstRun && f.residentSupported ? el('p', 'desc', t('resident_first')) : null,
-      el('p', 'desc', t(f.residentSupported ? 'resident_timing' : 'resident_unsupported'))),
-    el('section', null,
-      el('h3', null, t('view_h')),
-      el('label', 'field', el('span', null, t('view_port')), pagePort, saved(f.saved.view.port)),
-      el('p', 'desc', t(f.viewRuntime?.mode === 'resident' ? 'view_port_resident' : 'view_port_foreground'))),
-    el('section', null,
-      el('h3', null, t('summary_h')), el('p', 'desc', t('summary_desc')),
-      el('label', 'check', curate, t('curate_on')),
-      saved(t(f.saved.summary.curate ? 'value_on' : 'value_off')),
-      el('label', 'field', el('span', null, t('summary_language')), summaryLanguage,
-        saved(f.saved.summary.language), note(t('summary_language_desc'))),
-      el('details', null, el('summary', null, t('summary_advanced')),
-        el('div', 'grid', summarySize('window_tokens'), summarySize('idle_minutes')))),
-    el('section', null,
-      el('h3', null, t('spending_h')),
-      el('div', 'spending-cap',
-        el('label', 'field', el('span', null, t('paid_cap')), cap, saved(usd(f.saved.paid_usd_per_month))),
-        el('p', 'spend', spending)),
-      el('p', 'desc', t('paid_cap_desc')),
-      el('label', 'field', el('span', null, t('gemini_label')), gemini,
-        saved(t(geminiOptions[f.saved.gemini ?? 'none'])), note(t('gemini_desc')))),
-    el('section', null,
-      el('h3', null, t('inject_h')),
-      el('p', 'desc', t('inject_desc')),
-      flag('session_start', 'inject_on'), size('session_start_chars', 'inject_chars'),
-      el('label', 'check', terminalNote, t('session_note_on')), note(t('session_note_desc')),
-      flag('per_prompt', 'per_prompt_on'), size('per_prompt_chars', 'per_prompt_chars'),
-      flag('correction', 'correction_on'), size('correction_chars', 'correction_chars')),
-    el('section', 'capture-settings',
-      el('h3', null, t('capture_h')),
-      el('p', 'desc', t('capture_desc')),
-      el('label', 'check', checkbox(f.capture.store_prompts, (v) => { f.capture.store_prompts = v; }), t('store_prompts')),
-      el('label', 'field', el('span', null, t('tool_output')), tool)),
-    el('section', null,
-      el('h3', null, t('backup_h')),
-      el('label', 'field', el('span', null, t('backup_dir')),
-        input('text', f.backup.edit, t('backup_default'), 'backup.dir', (v) => { f.backup.edit = v; f.backup.reset = false; }),
-        saved(f.backup.dir === '' ? t('backup_home') : f.backup.dir ?? t('backup_default'))),
-      backupReset,
-      el('p', 'desc', t('backup_desc'))),
-    redactionSection(f),
-    privacySection(f),
-    providersSection(),
-    el('section', null,
-      el('h3', null, t('chain_h')),
-      el('p', 'desc', t('chain_desc')),
-      el('div', 'scroll', el('table', 'chain', el('thead', null, head), rows))),
-    el('section', null,
-      el('h3', null, t('stopped_h')), el('p', 'desc', t('stopped_desc')), stoppedState()),
+    settingsGroup('start', f.firstRun, onboardingSection(f)),
+    settingsGroup('everyday', true,
+      el('section', null,
+        el('h3', null, t('summary_h')), el('p', 'desc', t('summary_desc')),
+        el('label', 'check', curate, t('curate_on')),
+        saved(t(f.saved.summary.curate ? 'value_on' : 'value_off')),
+        el('label', 'field', el('span', null, t('summary_language')), summaryLanguage,
+          saved(f.saved.summary.language), note(t('summary_language_desc'))),
+        el('details', null, el('summary', null, t('summary_advanced')),
+          el('div', 'grid', summarySize('window_tokens'), summarySize('idle_minutes')))),
+      el('section', null,
+        el('h3', null, t('spending_h')),
+        el('div', 'spending-cap',
+          el('label', 'field', el('span', null, t('paid_cap')), cap, saved(usd(f.saved.paid_usd_per_month))),
+          el('p', 'spend', spending)),
+        el('p', 'desc', t('paid_cap_desc')),
+        el('label', 'field', el('span', null, t('gemini_label')), gemini,
+          saved(t(geminiOptions[f.saved.gemini ?? 'none'])), note(t('gemini_desc')))),
+      el('section', null,
+        el('h3', null, t('inject_h')),
+        el('p', 'desc', t('inject_desc')),
+        flag('session_start', 'inject_on'), size('session_start_chars', 'inject_chars'),
+        el('label', 'check', terminalNote, t('session_note_on')), note(t('session_note_desc')),
+        flag('per_prompt', 'per_prompt_on'), size('per_prompt_chars', 'per_prompt_chars'),
+        flag('correction', 'correction_on'), size('correction_chars', 'correction_chars')),
+      el('section', 'capture-settings',
+        el('h3', null, t('capture_h')),
+        el('p', 'desc', t('capture_desc')),
+        el('label', 'check', checkbox(f.capture.store_prompts, (v) => { f.capture.store_prompts = v; }), t('store_prompts')),
+        el('label', 'field', el('span', null, t('tool_output')), tool))),
+    settingsGroup('providers', Boolean(f.stopped?.length),
+      providersSection(),
+      el('section', null,
+        el('h3', null, t('chain_h')),
+        el('p', 'desc', t('chain_desc')),
+        el('div', 'scroll', el('table', 'chain', el('thead', null, head), rows))),
+      el('section', null,
+        el('h3', null, t('stopped_h')), el('p', 'desc', t('stopped_desc')), stoppedState())),
+    settingsGroup('privacy', false, redactionSection(f), privacySection(f)),
+    settingsGroup('computer', f.firstRun,
+      el('section', null,
+        el('h3', null, t('resident_h')), el('p', 'desc', t('resident_desc')),
+        el('label', 'check', resident, t('resident_on')),
+        saved(t(f.saved.worker.resident ? 'value_on' : 'value_off')),
+        f.firstRun && f.residentSupported ? el('p', 'desc', t('resident_first')) : null,
+        el('p', 'desc', t(f.residentSupported ? 'resident_timing' : 'resident_unsupported'))),
+      el('section', null,
+        el('h3', null, t('view_h')),
+        el('label', 'field', el('span', null, t('view_port')), pagePort, saved(f.saved.view.port)),
+        el('p', 'desc', t(f.viewRuntime?.mode === 'resident' ? 'view_port_resident' : 'view_port_foreground'))),
+      el('section', null,
+        el('h3', null, t('backup_h')),
+        el('label', 'field', el('span', null, t('backup_dir')),
+          input('text', f.backup.edit, t('backup_default'), 'backup.dir', (v) => { f.backup.edit = v; f.backup.reset = false; }),
+          saved(f.backup.dir === '' ? t('backup_home') : f.backup.dir ?? t('backup_default'))),
+        backupReset,
+        el('p', 'desc', t('backup_desc')))),
     f.warnings.length
       ? el('section', 'warnings', el('h3', null, t('warnings_h')), el('ul', null, ...f.warnings.map((w) => el('li', null, w))))
       : null,
-    save);
+    el('div', 'save-bar', save));
   formEl.noValidate = true;
   formEl.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && event.target.closest('.provider-entry') && event.target.tagName !== 'BUTTON' && event.target.tagName !== 'SUMMARY') event.preventDefault();
@@ -4551,8 +4577,22 @@ function drawSettings() {
   });
   const recovered=recoverySection();
   if(recovered)panel.append(recovered);
-  panel.append(...present([el('p', 'lead', t('lead')), formEl, viewSection(f), preferenceSection(f), agentInventorySection(), agentSetupSection(), doctorSection(), maintenanceSection(f)]));
+  panel.append(...present([el('p', 'lead', t('lead')), formEl,
+    settingsGroup('agents', false, preferenceSection(f), agentInventorySection(), agentSetupSection()),
+    settingsGroup('maintenance', false, viewSection(f), doctorSection(), maintenanceSection(f))]));
   drawIn(panel);
+}
+
+// Whether each settings group is open, kept across redraws as a provider's editor keeps its own.
+const groupOpen = new Map();
+
+function settingsGroup(key, open, ...sections) {
+  const group = el('details', `settings-group group-${key}`,
+    el('summary', null, el('span', 'group-title', t(`group_${key}_h`)), el('span', 'group-desc', t(`group_${key}_desc`))),
+    ...sections);
+  group.open = groupOpen.get(key) ?? open;
+  group.addEventListener('toggle', () => { if (group.isConnected) groupOpen.set(key, group.open); });
+  return group;
 }
 
 // The settings view in its own language, its heading included (#274).
