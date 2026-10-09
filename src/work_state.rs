@@ -81,7 +81,7 @@ pub fn check(list: &str, fields: &Map<String, Value>) -> Result<String, String> 
     if fields.is_empty() {
         return Err("fields must set at least one key".into());
     }
-    if units(&Value::Object(fields.clone()).to_string()) > MAX_FIELDS {
+    if units(&js_json(&Value::Object(fields.clone()))) > MAX_FIELDS {
         return Err(format!(
             "fields must be at most {MAX_FIELDS} characters as JSON"
         ));
@@ -125,6 +125,22 @@ pub(crate) fn text(v: &Value) -> String {
         Value::String(s) => s.clone(),
         // JavaScript holds every number as a double, so an integer past 2^53 reads as its double.
         Value::Number(n) => n.as_f64().map_or_else(|| n.to_string(), js_number),
+        other => other.to_string(),
+    }
+}
+
+/// `JSON.stringify(v)`: serde_json's JSON with each number as JavaScript writes it (`js_number`).
+fn js_json(v: &Value) -> String {
+    match v {
+        Value::Number(_) => text(v),
+        Value::Array(a) => format!("[{}]", a.iter().map(js_json).collect::<Vec<_>>().join(",")),
+        Value::Object(m) => format!(
+            "{{{}}}",
+            m.iter()
+                .map(|(k, v)| format!("{}:{}", Value::String(k.clone()), js_json(v)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         other => other.to_string(),
     }
 }
@@ -408,7 +424,12 @@ impl Raw {
                     runs.push((value.start, value.end));
                     continue;
                 }
-                let e = e.min(h + v);
+                // A mask that reaches the closing quote leaves capture no value to keep: it stores
+                // the value as [REDACTED], so the value is hidden whole (Codex on #408).
+                if e > h + v {
+                    runs.push((value.start, value.end));
+                    continue;
+                }
                 if s < e {
                     runs.push((value.start + s - h, value.start + e - h));
                 }
@@ -1029,6 +1050,54 @@ mod tests {
             text.starts_with("- release: [REDACTED]=[REDACTED],"),
             "{text}"
         );
+    }
+
+    /// A rule that masks the closing quote of `task = "…"` leaves capture no value to keep, so
+    /// a write after it stores the task as [REDACTED]; an earlier write of that task is shown the
+    /// same way, so the later `done` closes it (Codex on #408).
+    #[test]
+    fn a_mask_on_the_closing_quote_hides_the_value_whole() {
+        let rule = r#"{ id = "q", regex = 'task = "teal-[0-9]{4}(")', secret_group = 1 }"#;
+        let home = tempfile::tempdir().unwrap();
+        let config = format!("[redaction]\nextra_rules = [{rule}]\n");
+        std::fs::write(home.path().join("config.toml"), config).unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let done = json!({"task": "teal-1234", "status": "done"});
+        let (_, later) = crate::capture::work_state("l", done.as_object().unwrap(), &settings);
+        assert_eq!(later["task"], "[REDACTED]");
+        let entries = [
+            entry("l", json!({"task": "teal-1234", "status": "todo"}), 0),
+            Entry {
+                list: "l".into(),
+                fields: later,
+                ts: MIN,
+            },
+        ];
+        let text = read(None, false, "r", &entries, 2 * MIN, &user(rule));
+        assert!(
+            !text.contains("teal-1234") && !text.contains("[todo]"),
+            "{text}"
+        );
+    }
+
+    /// The fields' size is their JSON as JavaScript writes it, numbers included: `1e20` is 21
+    /// characters there and `1.0` one (Codex on #408).
+    #[test]
+    fn the_fields_are_measured_as_javascript_writes_them() {
+        let with = |pad: usize, n: Value| {
+            let mut f = Map::new();
+            f.insert("pad".into(), Value::String("x".repeat(pad)));
+            f.insert("n".into(), n);
+            check("l", &f)
+        };
+        let big: Value = serde_json::from_str("1e20").unwrap();
+        // {"pad":"…","n":100000000000000000000} is 36 units around the pad.
+        assert!(with(1_964, big.clone()).is_ok());
+        assert!(with(1_965, big).is_err());
+        // {"pad":"…","n":1} is 16.
+        let one: Value = serde_json::from_str("1.0").unwrap();
+        assert!(with(1_984, one.clone()).is_ok());
+        assert!(with(1_985, one).is_err());
     }
 
     /// Each line is a view of its own, as written: a rule anchored to a line's start, or written
