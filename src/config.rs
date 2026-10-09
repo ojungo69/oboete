@@ -264,6 +264,11 @@ pub enum Provider {
         timeout_s: u64,
         #[serde(default)]
         limits: Limits,
+        /// codex only: past its plan's limits, curation goes on while the account has credits,
+        /// drawing on them (owner decision 41, #164). Off unless set: with automatic reload on, an
+        /// account buys credits with its card.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        credits: bool,
     },
 }
 
@@ -528,6 +533,7 @@ fn gemini() -> Provider {
 
 fn cli(name: &str, model: Option<&str>) -> Provider {
     Provider::Cli {
+        credits: false,
         name: name.into(),
         enabled: true,
         cli: name.into(),

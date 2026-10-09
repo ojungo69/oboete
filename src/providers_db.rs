@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS provider_state(
   down_until INTEGER NOT NULL DEFAULT 0,  -- unix ms; 0 for none
   fails INTEGER NOT NULL DEFAULT 0,       -- failures in a row that set no cooldown (the breaker)
   backoff INTEGER NOT NULL DEFAULT 0,     -- 429s in a row that named no reset
+  uncredited INTEGER,                     -- 1: a rest codex's allowance read set without credits
   -- What the provider's last answer said is left (Groq's x-ratelimit-* headers), resets in ms.
   tokens_left INTEGER, tokens_reset_at INTEGER, requests_left INTEGER, requests_reset_at INTEGER
 );
@@ -160,6 +161,7 @@ pub(crate) fn open_report(
         "tokens_reset_at",
         "requests_left",
         "requests_reset_at",
+        "uncredited",
     ] {
         if crate::db::ensure_column_until(&mut conn, "provider_state", column, "INTEGER", deadline)?
         {
@@ -264,18 +266,23 @@ pub struct State {
     pub down_until: i64,
     pub fails: u32,
     pub backoff: u32,
+    /// The rest is one codex's allowance read set without counting the account's credits: it does
+    /// not hold an entry that may draw on them (`provider::rest_holds`, #164).
+    pub uncredited: bool,
 }
 
 pub fn state(conn: &Connection, provider: &str) -> Result<State> {
     Ok(conn
         .query_row(
-            "SELECT down_until, fails, backoff FROM provider_state WHERE provider=?1",
+            "SELECT down_until, fails, backoff, COALESCE(uncredited, 0) FROM provider_state
+             WHERE provider=?1",
             [provider],
             |r| {
                 Ok(State {
                     down_until: r.get(0)?,
                     fails: r.get(1)?,
                     backoff: r.get(2)?,
+                    uncredited: r.get(3)?,
                 })
             },
         )
@@ -285,10 +292,11 @@ pub fn state(conn: &Connection, provider: &str) -> Result<State> {
 
 pub fn set_state(conn: &Connection, provider: &str, s: State) -> Result<()> {
     conn.execute(
-        "INSERT INTO provider_state(provider, down_until, fails, backoff) VALUES(?1,?2,?3,?4)
+        "INSERT INTO provider_state(provider, down_until, fails, backoff, uncredited)
+         VALUES(?1,?2,?3,?4,?5)
          ON CONFLICT(provider) DO UPDATE SET down_until=excluded.down_until,
-           fails=excluded.fails, backoff=excluded.backoff",
-        params![provider, s.down_until, s.fails, s.backoff],
+           fails=excluded.fails, backoff=excluded.backoff, uncredited=excluded.uncredited",
+        params![provider, s.down_until, s.fails, s.backoff, s.uncredited],
     )?;
     Ok(())
 }
@@ -1026,6 +1034,7 @@ mod tests {
                 down_until: OWNER_HOLD,
                 fails: 2,
                 backoff: 1,
+                ..Default::default()
             },
         )
         .unwrap();

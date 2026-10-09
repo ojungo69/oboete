@@ -71,6 +71,8 @@ pub(crate) struct Reservation {
     span: String,
     input: f64,
     output: f64,
+    /// Made for a codex entry that draws on credits (`provider::draws_on_credits`).
+    credits: bool,
 }
 
 impl Reservation {
@@ -153,12 +155,27 @@ impl Reservation {
         providers_db::freeze_unmetered(&tx, self.id, [self.input, self.output])?;
         let current = providers_db::state(&tx, &self.provider)?;
         let mut updated = next(current);
-        // An answer cannot implicitly resume an owner-held entry or shorten a concurrent rest.
-        if current.down_until > crate::db::now_ms() {
-            updated.down_until = updated.down_until.max(current.down_until);
-        }
-        if current.down_until == providers_db::OWNER_HOLD {
-            updated = current;
+        // An answer cannot implicitly resume an owner-held entry or shorten a concurrent rest,
+        // which keeps its mark (`provider::rest_holds`). A rest codex's allowance read set
+        // without credits gives way to a call that drew on them, which read the allowance itself
+        // before it sent anything; any other call keeps it, as one may have been reserved before
+        // the rest was written (Codex on #418).
+        if !(current.uncredited && self.credits) {
+            // A rest that holds every entry outranks one an entry with credits passes: an
+            // uncredited rest kept here never takes the place of a credited one this call brings
+            // as long (a safety hold among them; Codex on #418).
+            let credited =
+                |s: &providers_db::State| !s.uncredited && s.down_until >= current.down_until;
+            if current.down_until == providers_db::OWNER_HOLD {
+                let hold = credited(&updated);
+                updated = current;
+                updated.uncredited &= !hold;
+            } else if current.down_until > crate::db::now_ms()
+                && current.down_until >= updated.down_until
+            {
+                updated.uncredited = current.uncredited && !credited(&updated);
+                updated.down_until = current.down_until;
+            }
         }
         if updated != current {
             providers_db::set_state(&tx, &self.provider, updated)?;
@@ -286,7 +303,8 @@ pub(crate) fn reserve_with_history(
     }
     let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
     let state = providers_db::state(&tx, p.name())?;
-    if state.down_until == providers_db::OWNER_HOLD {
+    let holds = crate::provider::rest_holds(&state, p);
+    if holds && state.down_until == providers_db::OWNER_HOLD {
         return Ok(Err(Refusal {
             outcome: "gate",
             detail: format!(
@@ -296,7 +314,7 @@ pub(crate) fn reserve_with_history(
             skip: Skip::Owner,
         }));
     }
-    if state.down_until > crate::db::now_ms() {
+    if holds && state.down_until > crate::db::now_ms() {
         return Ok(Err(Refusal {
             outcome: "gate",
             detail: "cooling down after an earlier failure".into(),
@@ -338,6 +356,7 @@ pub(crate) fn reserve_with_history(
         span: span.into(),
         input,
         output,
+        credits: crate::provider::draws_on_credits(p),
     }))
 }
 
@@ -1267,6 +1286,117 @@ mod tests {
         );
     }
 
+    /// A rest codex's allowance read set without credits gives way to a call that drew on them,
+    /// timed or held; a call of any other entry of the name, which may have been reserved before
+    /// the rest was written, keeps it, as it keeps any other rest and an owner hold, but never in
+    /// place of a credited rest as long that the call brings (Codex on #418).
+    #[test]
+    fn an_uncredited_rest_gives_way_only_to_a_call_that_drew_on_credits() {
+        use providers_db::{OWNER_HOLD, State};
+        let later = crate::db::now_ms() + 60_000;
+        let rest = |down_until, uncredited| State {
+            down_until,
+            uncredited,
+            ..Default::default()
+        };
+        let credited = rest(later + 60_000, false);
+        let codex = Provider::Cli {
+            credits: true,
+            enabled: true,
+            name: "p".into(),
+            cli: "codex".into(),
+            model: None,
+            daily_budget: 10,
+            timeout_s: 1,
+            limits: Limits::default(),
+        };
+        let other = entry("p", Limits::default());
+        // (the entry that settles, the stored rest, what the call leaves, the state after)
+        for (p, stored, left, after) in [
+            (
+                &codex,
+                rest(OWNER_HOLD, true),
+                State::default(),
+                State::default(),
+            ),
+            (
+                &codex,
+                rest(later, true),
+                State::default(),
+                State::default(),
+            ),
+            (&codex, rest(OWNER_HOLD, true), credited, credited),
+            (
+                &other,
+                rest(OWNER_HOLD, true),
+                State::default(),
+                rest(OWNER_HOLD, true),
+            ),
+            (
+                &other,
+                rest(later, true),
+                State::default(),
+                rest(later, true),
+            ),
+            (
+                &codex,
+                rest(later, false),
+                State::default(),
+                rest(later, false),
+            ),
+            (&codex, credited, rest(later, true), credited),
+            (
+                &codex,
+                rest(OWNER_HOLD, false),
+                credited,
+                rest(OWNER_HOLD, false),
+            ),
+            // A safety hold this call brings outranks an uncredited hold kept for it, and a
+            // credited rest as long as an uncredited one is the one kept, whichever was first.
+            (
+                &other,
+                rest(OWNER_HOLD, true),
+                rest(OWNER_HOLD, false),
+                rest(OWNER_HOLD, false),
+            ),
+            (
+                &other,
+                rest(later, true),
+                rest(later, false),
+                rest(later, false),
+            ),
+            (
+                &other,
+                rest(later, false),
+                rest(later, true),
+                rest(later, false),
+            ),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let db = open(home.path()).unwrap();
+            let reservation = reserve(&db, p, "curator", "s", 100, 5.0, &[])
+                .unwrap()
+                .unwrap();
+            providers_db::set_state(&db, "p", stored).unwrap();
+            let call = Call {
+                provider: "p",
+                role: "curator",
+                span: "s",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 1,
+                est_tokens: Some(100),
+                usage: Usage::default(),
+                usd: None,
+            };
+            let state = reservation.settle(&db, &call, None, |_| left).unwrap();
+            let case = format!("{} {stored:?}", p.name());
+            assert_eq!(state, after, "{case}");
+            assert_eq!(providers_db::state(&db, "p").unwrap(), after, "{case}");
+        }
+    }
+
     #[test]
     fn settlement_keeps_the_admission_month() {
         let home = tempfile::tempdir().unwrap();
@@ -1535,6 +1665,7 @@ mod tests {
                 down_until: providers_db::OWNER_HOLD,
                 fails: 2,
                 backoff: 3,
+                ..Default::default()
             };
             providers_db::set_state(&peer, "p", hold).unwrap();
             let state = reservation

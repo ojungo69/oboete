@@ -93,6 +93,9 @@ enum Draft {
         model: Option<String>,
         timeout_s: u64,
         limits: config::Limits,
+        /// codex only (owner decision 41). Absent from an older page: kept as saved.
+        #[serde(default)]
+        credits: Option<bool>,
     },
 }
 
@@ -209,6 +212,7 @@ impl Draft {
                 model,
                 timeout_s,
                 limits,
+                credits,
             } => {
                 if !matches!(cli.as_str(), "claude" | "codex") {
                     return Err(refused(422, "unsupported_provider", "providers.cli"));
@@ -220,7 +224,11 @@ impl Draft {
                 {
                     return Err(refused(422, "range", "providers.model"));
                 }
+                if *credits == Some(true) && cli != "codex" {
+                    return Err(refused(422, "range", "providers.credits"));
+                }
                 let mut result = old.cloned().unwrap_or_else(|| Provider::Cli {
+                    credits: false,
                     name: name.clone(),
                     enabled: *enabled,
                     cli: cli.clone(),
@@ -236,6 +244,7 @@ impl Draft {
                     model: m,
                     timeout_s: timeout,
                     limits: cap,
+                    credits: spends,
                     ..
                 } = &mut result
                 else {
@@ -247,6 +256,8 @@ impl Draft {
                 m.clone_from(model);
                 *timeout = *timeout_s;
                 *cap = limits.clone();
+                // Only codex draws on credits: an entry that is no longer codex keeps none.
+                *spends = cli == "codex" && credits.unwrap_or(*spends);
                 Ok(result)
             }
         }
@@ -398,6 +409,7 @@ fn edit(table: &mut dyn TableLike, old: &Provider, new: &Provider) -> Result<(),
         "daily_budget",
         "timeout_s",
         "subscription",
+        "credits",
         // Only ever cleared here, when the API changes (`Draft`): the page shows no extra.
         "extra",
     ];
@@ -743,9 +755,10 @@ pub(super) fn preview(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
         match &ledger {
             Some(db) => {
                 let state = crate::providers_db::state(db, p.name()).map_err(probe_failure)?;
-                if state.down_until == crate::providers_db::OWNER_HOLD {
+                let holds = crate::provider::rest_holds(&state, &p);
+                if holds && state.down_until == crate::providers_db::OWNER_HOLD {
                     code = Some("owner_hold");
-                } else if state.down_until > crate::db::now_ms() {
+                } else if holds && state.down_until > crate::db::now_ms() {
                     code = Some("cooldown");
                 } else if let Some(r) = crate::budget::admit_with_history(
                     db,
@@ -1189,6 +1202,43 @@ mod tests {
             std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
             after
         );
+    }
+
+    /// Owner decision 41 (#164): a codex entry's `credits` is a switch on the page, saved as
+    /// `credits = true` and left out when off; a page that sends none keeps it; claude has none.
+    #[test]
+    fn a_codex_entrys_credits_are_set_on_the_page() {
+        let home = home("providers = []\n");
+        let mut entry = cli("c", None, true);
+        entry["cli"] = json!("codex");
+        entry["credits"] = json!(true);
+        let saved = send(home.path(), json!({"op": "create", "entry": entry})).unwrap();
+        assert_eq!(saved["providers"][0]["saved"]["credits"], true);
+        let text = || std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        assert!(text().contains("credits = true"), "{}", text());
+        let selector = saved["providers"][0]["selector"].clone();
+        let mut older = cli("c", Some("gpt-6-luna"), true);
+        older["cli"] = json!("codex");
+        send(
+            home.path(),
+            json!({"op": "edit", "selector": selector, "entry": older.clone()}),
+        )
+        .unwrap();
+        assert!(text().contains("credits = true"), "{}", text());
+        older["credits"] = json!(false);
+        let saved = send(
+            home.path(),
+            json!({"op": "edit", "selector": selector, "entry": older}),
+        )
+        .unwrap();
+        assert_eq!(saved["providers"][0]["saved"]["credits"], false);
+        assert!(!text().contains("credits"), "{}", text());
+        let before = text();
+        let mut claude = cli("d", None, true);
+        claude["credits"] = json!(true);
+        let refused = send(home.path(), json!({"op": "create", "entry": claude})).unwrap_err();
+        assert_eq!((refused.status, refused.code), (422, "range"));
+        assert_eq!(text(), before);
     }
 
     #[test]
