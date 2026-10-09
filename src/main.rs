@@ -33,6 +33,9 @@ mod knowledge;
 mod manifest;
 mod mcp;
 mod migrate;
+// Setup starts using the model downloader in milestone 4, Task 10, Step 6.
+#[allow(dead_code)]
+mod model_fetch;
 mod provider;
 mod providers_db;
 // Design B's store: the hook writes to it; its readers come with the worker (milestone 2 Task 5).

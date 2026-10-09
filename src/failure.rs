@@ -273,10 +273,47 @@ fn padded(text: &str) -> String {
     format!("{text:<width$}\n", width = SIZE - 1)
 }
 
-/// Free bytes where `home` lives, from successful `df -Pk`; unavailable data stays None.
-/// ponytail: fixed OS utility; use native filesystem queries if df availability becomes a limit.
+/// Free bytes where `home` lives, from `GetDiskFreeSpaceExW` on Windows and successful `df -Pk`
+/// elsewhere (or where Windows refuses); unavailable data stays None. Either gets `DF_TIMEOUT`.
+/// ponytail: fixed OS utility on Unix; use native filesystem queries if df availability becomes a limit.
 pub fn free_bytes(home: &Path) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        // Asked on a thread: a stalled network volume must not hold a hook past `DF_TIMEOUT`
+        // (MUST-M16); a late answer is dropped with its thread.
+        let (send, answer) = std::sync::mpsc::channel();
+        let path = home.to_owned();
+        std::thread::spawn(move || send.send(windows_free_bytes(&path)));
+        match answer.recv_timeout(DF_TIMEOUT) {
+            Ok(Some(bytes)) => return Some(bytes),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+    }
     df("df".as_ref(), home)
+}
+
+#[cfg(windows)]
+fn windows_free_bytes(home: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let mut path: Vec<u16> = home.as_os_str().encode_wide().collect();
+    if path.contains(&0) {
+        return None;
+    }
+    path.push(0);
+    let mut available = 0u64;
+    // SAFETY: the terminated path and writable byte count stay alive throughout the call.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            path.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(available)
 }
 
 /// How long `df` gets. On a stalled network or FUSE mount it can hang, and a hook calls it after
