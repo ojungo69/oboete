@@ -263,103 +263,16 @@ fn embeddings_with(
     runtime: Option<&crate::model_fetch::Runtime>,
     confirm: impl FnOnce(&str) -> Result<()>,
 ) -> Result<()> {
-    let dir = crate::embed::local_dir(home);
-    let files: Vec<_> = model
-        .iter()
-        .copied()
-        .chain(runtime.map(|r| r.library))
-        .collect();
-    // What `local` does once answered: download what is missing, or check what is there; none
-    // when its files are verified.
-    let mut note = None;
-    let line = match choice {
-        "none" => {
-            let none = "none: search is full text only, and no text or query goes to an \
-                        embedder. The vectors made so far stay in the store.";
-            match bytes_in(&dir) {
-                0 => none.to_owned(),
-                held => format!(
-                    "{none} The local model's files stay in {} ({} MB); delete that directory \
-                     to free the space.",
-                    dir.display(),
-                    held.div_ceil(1 << 20)
-                ),
-            }
+    let consent = consent(home, choice, model, runtime)?;
+    confirm(&sentence(&consent))?;
+    if let Consent::Local { get, check, .. } = &consent {
+        if !get.is_empty() {
+            println!("downloading what is missing; run it again to resume if it stops");
+        } else if *check {
+            println!("checking each file against its pin");
         }
-        "workers-ai" => {
-            // What it would run with, before the question: no account or no token is no choice.
-            let cfg = config::load(home)?.embedding;
-            let account = cfg.account_id.as_deref().with_context(|| {
-                format!(
-                    "nothing changed: Workers AI needs your Cloudflare account's id as \
-                     [embedding] account_id in {}",
-                    home.join("config.toml").display()
-                )
-            })?;
-            config::read_key(&cfg.key_file).context("nothing changed")?;
-            format!(
-                "workers-ai: each memory's text, after the redaction rules, and each search query go \
-                 to Cloudflare Workers AI (bge-m3) under account {account}, with the token in {}; \
-                 at most {} requests a day, and USD {:.2} a month past its free allowance.",
-                cfg.key_file.display(),
-                cfg.daily_requests,
-                cfg.monthly_usd
-            )
-        }
-        "local" => {
-            if let Some(why) = crate::embed::local_unavailable() {
-                anyhow::bail!("nothing changed: {why}");
-            }
-            let runtime = runtime.context("nothing changed: no runtime for this machine")?;
-            let after = "after that, no text or query leaves this machine to be embedded.";
-            // By size: a file at its size but off its pin is downloaded again, as the line says.
-            let short = |a: &crate::model_fetch::Artifact| {
-                std::fs::metadata(dir.join(a.name)).map_or(true, |m| m.len() != a.size)
-            };
-            let model: Vec<_> = model.iter().filter(|a| short(a)).collect();
-            let mut missing = Vec::new();
-            if !model.is_empty() {
-                missing.push(format!("{} (BAAI's bge-m3, MIT)", sizes(model.into_iter())));
-            }
-            if short(&runtime.library) {
-                let archive = sizes([&runtime.archive].into_iter());
-                missing.push(format!("{archive} (Microsoft's ONNX Runtime 1.28.0, MIT)"));
-            }
-            if crate::model_fetch::marker_ok(&dir, &files) {
-                format!(
-                    "local: bge-m3 runs on this machine from the files in {}, checked when they \
-                     were downloaded; no text or query leaves this machine to be embedded.",
-                    dir.display()
-                )
-            } else if missing.is_empty() {
-                note = Some("checking each file against its pin");
-                format!(
-                    "local: bge-m3 runs on this machine from the files in {}, once each is held to \
-                     the SHA-256 this oboete pins (one that is not is downloaded again, from \
-                     huggingface.co or github.com); {after}",
-                    dir.display()
-                )
-            } else {
-                note = Some("downloading what is missing; run it again to resume if it stops");
-                format!(
-                    "local: bge-m3 runs on this machine. First, {} are downloaded into {}, each \
-                     file held to the SHA-256 this oboete pins; {after}",
-                    missing.join(" and "),
-                    dir.display()
-                )
-            }
-        }
-        other => anyhow::bail!("--embeddings {other}: use none, local or workers-ai"),
-    };
-    confirm(&line)?;
-    if let Some(note) = note {
-        let runtime = runtime.context("no runtime for this machine")?;
-        println!("{note}");
-        crate::model_fetch::fetch(&dir, model)?;
-        crate::model_fetch::fetch_runtime(&dir, runtime)?;
-        crate::model_fetch::verify(&dir, &files)?;
     }
-    let written = crate::settings::set_embedding_provider(home, choice)?;
+    let written = choose(home, &consent, model, runtime)?;
     println!(
         "[embedding] provider = \"{choice}\" {} {}",
         if written {
@@ -372,9 +285,223 @@ fn embeddings_with(
     Ok(())
 }
 
+/// What one embedder choice does, before anything changes (spec 7.1, 7.2): `setup --embeddings`
+/// says it in a sentence (`sentence`), the settings page (W4) in its own words.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "choice", rename_all = "kebab-case")]
+pub(crate) enum Consent {
+    /// Nothing leaves the machine; the local model's files stay in `dir`, `held` bytes.
+    None { dir: PathBuf, held: u64 },
+    /// Each text after redaction and each query go to Workers AI under `account`.
+    WorkersAi {
+        account: String,
+        key_file: PathBuf,
+        daily_requests: u32,
+        monthly_usd: f64,
+    },
+    /// bge-m3 on this machine from `dir`: `get` still to download, each source from its host;
+    /// with nothing to get, the files there are checked against their pins (`check`), unless
+    /// they were when downloaded.
+    Local {
+        dir: PathBuf,
+        get: Vec<Download>,
+        check: bool,
+    },
+}
+
+/// Bytes one source still needs from one host.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct Download {
+    pub host: String,
+    pub bytes: u64,
+    pub source: &'static str,
+}
+
+/// Why a choice cannot be taken now; config.toml stays as it was.
+#[derive(Debug)]
+pub(crate) enum Refused {
+    /// `workers-ai` without `[embedding] account_id` in this config.toml.
+    NoAccount(PathBuf),
+    /// `workers-ai` whose token file does not read: why.
+    NoKey(String),
+    /// `local` in a build or on a machine without it: why.
+    Unavailable(&'static str),
+}
+
+impl Refused {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Refused::NoAccount(_) => "no_account",
+            Refused::NoKey(_) => "no_key",
+            Refused::Unavailable(_) => "local_unavailable",
+        }
+    }
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::NoAccount(config) => write!(
+                f,
+                "nothing changed: Workers AI needs your Cloudflare account's id as \
+                 [embedding] account_id in {}",
+                config.display()
+            ),
+            Refused::NoKey(why) => write!(f, "nothing changed: {why}"),
+            Refused::Unavailable(why) => write!(f, "nothing changed: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// `choice`'s consent for this home: a `Refused` error when it cannot be taken now, another
+/// error when config.toml does not load or the choice does not exist.
+pub(crate) fn consent(
+    home: &Path,
+    choice: &str,
+    model: &[crate::model_fetch::Artifact],
+    runtime: Option<&crate::model_fetch::Runtime>,
+) -> Result<Consent> {
+    let dir = crate::embed::local_dir(home);
+    Ok(match choice {
+        "none" => Consent::None {
+            held: bytes_in(&dir),
+            dir,
+        },
+        "workers-ai" => {
+            // What it would run with, before the question: no account or no token is no choice.
+            let cfg = config::load(home)?.embedding;
+            let account = cfg
+                .account_id
+                .ok_or_else(|| Refused::NoAccount(home.join("config.toml")))?;
+            config::read_key(&cfg.key_file).map_err(|e| Refused::NoKey(format!("{e:#}")))?;
+            Consent::WorkersAi {
+                account,
+                key_file: cfg.key_file,
+                daily_requests: cfg.daily_requests,
+                monthly_usd: cfg.monthly_usd,
+            }
+        }
+        "local" => {
+            if let Some(why) = crate::embed::local_unavailable() {
+                return Err(Refused::Unavailable(why).into());
+            }
+            let runtime =
+                runtime.ok_or(Refused::Unavailable("no ONNX Runtime for this machine"))?;
+            let files: Vec<_> = (model.iter().copied())
+                .chain([runtime.library])
+                .collect();
+            // By size: a file at its size but off its pin is downloaded again, after the check.
+            let short = |a: &crate::model_fetch::Artifact| {
+                std::fs::metadata(dir.join(a.name)).map_or(true, |m| m.len() != a.size)
+            };
+            let mut get = downloads(model.iter().filter(|a| short(a)), "BAAI's bge-m3, MIT");
+            if short(&runtime.library) {
+                let source = "Microsoft's ONNX Runtime 1.28.0, MIT";
+                get.extend(downloads([&runtime.archive].into_iter(), source));
+            }
+            let check = get.is_empty() && !crate::model_fetch::marker_ok(&dir, &files);
+            Consent::Local { dir, get, check }
+        }
+        other => anyhow::bail!("--embeddings {other}: use none, local or workers-ai"),
+    })
+}
+
+/// The consent as `oboete setup` says it.
+fn sentence(consent: &Consent) -> String {
+    let after = "after that, no text or query leaves this machine to be embedded.";
+    match consent {
+        Consent::None { dir, held } => {
+            let none = "none: search is full text only, and no text or query goes to an \
+                        embedder. The vectors made so far stay in the store.";
+            match held {
+                0 => none.to_owned(),
+                held => format!(
+                    "{none} The local model's files stay in {} ({} MB); delete that directory \
+                     to free the space.",
+                    dir.display(),
+                    held.div_ceil(1 << 20)
+                ),
+            }
+        }
+        Consent::WorkersAi {
+            account,
+            key_file,
+            daily_requests,
+            monthly_usd,
+        } => format!(
+            "workers-ai: each memory's text, after the redaction rules, and each search query go \
+             to Cloudflare Workers AI (bge-m3) under account {account}, with the token in {}; \
+             at most {daily_requests} requests a day, and USD {monthly_usd:.2} a month past its \
+             free allowance.",
+            key_file.display()
+        ),
+        Consent::Local { dir, get, .. } if !get.is_empty() => {
+            let get: Vec<String> = (get.iter())
+                .map(|d| {
+                    format!(
+                        "{} MB from {} ({})",
+                        d.bytes.div_ceil(1 << 20),
+                        d.host,
+                        d.source
+                    )
+                })
+                .collect();
+            format!(
+                "local: bge-m3 runs on this machine. First, {} are downloaded into {}, each file \
+                 held to the SHA-256 this oboete pins; {after}",
+                get.join(" and "),
+                dir.display()
+            )
+        }
+        Consent::Local {
+            dir, check: true, ..
+        } => format!(
+            "local: bge-m3 runs on this machine from the files in {}, once each is held to the \
+             SHA-256 this oboete pins (one that is not is downloaded again, from huggingface.co \
+             or github.com); {after}",
+            dir.display()
+        ),
+        Consent::Local { dir, .. } => format!(
+            "local: bge-m3 runs on this machine from the files in {}, checked when they were \
+             downloaded; no text or query leaves this machine to be embedded.",
+            dir.display()
+        ),
+    }
+}
+
+/// The consented choice taken: `local` downloads what is missing and checks every file first
+/// (holding only the model folder's lock), then `[embedding] provider` is written under
+/// config.lock. False when it already was the provider.
+pub(crate) fn choose(
+    home: &Path,
+    consent: &Consent,
+    model: &[crate::model_fetch::Artifact],
+    runtime: Option<&crate::model_fetch::Runtime>,
+) -> Result<bool> {
+    let choice = match consent {
+        Consent::None { .. } => "none",
+        Consent::WorkersAi { .. } => "workers-ai",
+        Consent::Local { dir, get, check } => {
+            if !get.is_empty() || *check {
+                let runtime = runtime.context("no ONNX Runtime for this machine")?;
+                let files: Vec<_> = (model.iter().copied())
+                    .chain([runtime.library])
+                    .collect();
+                crate::model_fetch::fetch(dir, model)?;
+                crate::model_fetch::fetch_runtime(dir, runtime)?;
+                crate::model_fetch::verify(dir, &files)?;
+            }
+            "local"
+        }
+    };
+    crate::settings::set_embedding_provider(home, choice)
+}
+
 /// The bytes of the files under `dir`, partial downloads and archives included; links are not
 /// followed.
-fn bytes_in(dir: &Path) -> u64 {
+pub(crate) fn bytes_in(dir: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
@@ -388,20 +515,24 @@ fn bytes_in(dir: &Path) -> u64 {
         .sum()
 }
 
-/// "N MB from host", per host of the `artifacts`' URLs, in their order.
-fn sizes<'a>(artifacts: impl Iterator<Item = &'a crate::model_fetch::Artifact>) -> String {
-    let mut hosts: Vec<(&str, u64)> = Vec::new();
+/// The bytes `artifacts` still need from each of their hosts, in their order, for `source`.
+fn downloads<'a>(
+    artifacts: impl Iterator<Item = &'a crate::model_fetch::Artifact>,
+    source: &'static str,
+) -> Vec<Download> {
+    let mut hosts: Vec<Download> = Vec::new();
     for a in artifacts {
         let host = a.url.split('/').nth(2).unwrap_or(a.url);
-        match hosts.iter_mut().find(|(h, _)| *h == host) {
-            Some((_, size)) => *size += a.size,
-            None => hosts.push((host, a.size)),
+        match hosts.iter_mut().find(|d| d.host == host) {
+            Some(d) => d.bytes += a.size,
+            None => hosts.push(Download {
+                host: host.to_owned(),
+                bytes: a.size,
+                source,
+            }),
         }
     }
-    (hosts.iter())
-        .map(|(host, size)| format!("{} MB from {host}", size.div_ceil(1 << 20)))
-        .collect::<Vec<_>>()
-        .join(" and ")
+    hosts
 }
 
 /// The choice's line answered: `--yes`, or "y" typed in a terminal. Anything else changes nothing.
