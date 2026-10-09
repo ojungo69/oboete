@@ -1,0 +1,51 @@
+src/embed_local.rs
+  s_ad0ac4d9af0473::t_41865ad526ce92 1-3,10-21,23-24,29-50,51-60,62,67-90,105-106,108-115,119-132,135,137-228,232,237-259
+  s_ad0ac4d9af0473::t_02fd1729224301 260-282
+  s_ad0ac4d9af0473::t_83661decfd4bcd 22,25-27
+  s_ad0ac4d9af0473::t_512627400da27f 136
+  s_ad0ac4d9af0473::t_8d65850d896aca 4-9
+  s_ad0ac4d9af0473::t_11231309a181a0 116-118
+  s_ad0ac4d9af0473::t_71057c9275acc2 229-231,236
+  s_ad0ac4d9af0473::t_81df02292070c6 61,63-66
+  s_ad0ac4d9af0473::t_cb1d96c13c7289 133-134
+  s_ad0ac4d9af0473::t_4c857182643f59 28
+  s_ad0ac4d9af0473::t_942c908b725f7f 233-235
+  s_ad0ac4d9af0473::t_7d07129ae15ba0 91-104,107
+Cargo.lock
+  s_ad0ac4d9af0473::t_9482b16595caf9 11-24,34-39,111-116,150-158,235-249,303-327,338-353,360-375,391-401,408,413-421,428-458,495-500,517-522,535-549,573-578,703-714,723,732-733,735-736,930-938,1017-1042,1049-1054,1065-1120,1127-1135,1153,1191-1218,1220-1223,1224-1230,1231-1237,1262-1276,1292-1300,1319-1324,1331-1396,1488,1574-1579,1586-1598,1724-1735,1763-1768,1893-1925,2075-2095,2108,2128,2193-2201,2421-2426,2456-2475
+  s_ad0ac4d9af0473::t_c77369e916bf52 972-981,1157,1219
+Cargo.toml
+  s_ad0ac4d9af0473::t_52c9e4412e98c2 30,33-34
+  s_ad0ac4d9af0473::t_e14df8008f7c7f 31-32,35
+docs/spike/local-embeddings/fixture.py
+  s_ad0ac4d9af0473::t_83be545e294276 1-128
+src/main.rs
+  s_ad0ac4d9af0473::t_5f33248943f715 20-21,324-337,791-796
+src/testdata/embed-agreement/items.jsonl
+  s_ad0ac4d9af0473::t_45e98e65cbe5fe 1-220
+NOTICE
+  s_ad0ac4d9af0473::t_8d72a833fe1625 21-51
+docs/spike/local-embeddings/fuse.py
+  s_ad0ac4d9af0473::t_7a5b5113e9314a 1-87
+.github/workflows/local-embed.yml
+  s_ad0ac4d9af0473::t_4f266ee6b02251 68-69,76
+docs/spike/local-embeddings.md
+  s_ad0ac4d9af0473::t_39fb9a28a85278 7-8,35-38,40-60,62,65-66,68-74,78,85-86
+  s_ad0ac4d9af0473::t_a898eb4b2b4e7f 39,61,63-64,67,77,79-84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7bc78ed82e5915a59d81d4c2dbcfe21890067f25",
+  "prompts": {},
+  "sessions": {
+    "s_ad0ac4d9af0473": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "55f3d823-9d62-4fd7-a50c-4f022fc3c6bb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
