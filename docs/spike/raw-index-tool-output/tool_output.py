@@ -9,15 +9,18 @@ point, and the 634 tombstones of 300k records move neither.
 
   python3 tool_output.py RAW_DB QUERIES OUT_DIR [EVERY]
 
-OUT_DIR is best a tmpfs (/dev/shm): the indexes are built there and deleted after each variant.
+OUT_DIR is best a tmpfs (/dev/shm): the indexes are built in a directory of the run's own inside it,
+deleted after each variant, and the directory at the end.
 """
 
 import json
 import os
 import re
+import shutil
 import sqlite3
 import statistics
 import sys
+import tempfile
 import time
 
 import zstandard
@@ -143,12 +146,12 @@ queries = [matching(g) for g in (trigrams(q) for q in dev) if g]
 print(f"dev queries with a trigram: {len(queries)} of {len(dev)}", flush=True)
 
 os.makedirs(OUT, exist_ok=True)
+# A directory of this run's own inside OUT_DIR: nothing already there is touched.
+RUN = tempfile.mkdtemp(prefix="tool-output-", dir=OUT)
 whole = {}
 rows = []
 for name, bound in VARIANTS:
-    path = os.path.join(OUT, "variant.db")
-    if os.path.exists(path):
-        os.remove(path)
+    path = os.path.join(RUN, "variant.db")
     t0 = time.monotonic()
     db = sqlite3.connect(path)
     db.execute("CREATE VIRTUAL TABLE t USING fts5(text, tokenize='trigram', content='', contentless_delete=1)")
@@ -183,9 +186,7 @@ for name, bound in VARIANTS:
     print(rows[-1], flush=True)
 
 # #419: the CJK pairs of every record's text (tool output whole), one row per record, positions not kept.
-path = os.path.join(OUT, "pairs.db")
-if os.path.exists(path):
-    os.remove(path)
+path = os.path.join(RUN, "pairs.db")
 db = sqlite3.connect(path)
 db.execute("CREATE VIRTUAL TABLE p USING fts5(pairs, tokenize='unicode61', content='', detail=none)")
 n_pairs = 0
@@ -197,7 +198,7 @@ with db:
             db.execute("INSERT INTO p(rowid, pairs) VALUES(?, ?)", (rowid, " ".join(sorted(ps))))
 pairs_mb = size(path) / 1e6
 db.close()
-os.remove(path)
+shutil.rmtree(RUN)
 
 print()
 print(f"Sample: one record in {EVERY} of raw.db ({len(records)} records, {total / 1e6:.0f} MB of text, {tool / total:.0%} of it tool output).")
