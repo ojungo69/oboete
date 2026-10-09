@@ -61,4 +61,4 @@ Shown to the owner on 2026-10-09, who left the choice to the long term (「長�
 
 A forget: FTS5 leaves a deleted row's trigrams in its segments, with the copy or without it, until the table is optimized. Milestone 5's physical purge (Slice 2) therefore runs `optimize` on `raw_fts` and `imported_fts` before VACUUM (docs/milestone-5-plan.md).
 
-Next, #317's second step: how much of each tool output the index keeps (its options 2-4), decided after a measurement of the trade-off is shown to the owner.
+#317's second step, how much of each tool output the index keeps: none, as in claude-mem (spec decision 42, docs/spike/raw-index-tool-output.md). The short-word scan above then reads only the records the index holds, about 3% of the text.

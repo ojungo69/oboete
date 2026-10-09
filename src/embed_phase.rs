@@ -732,7 +732,8 @@ pub(crate) fn doctor_facts_in(k: &Connection, embedder: &str) -> DoctorFacts {
              AND v.kind IN ('k', 'p') AND v.key = i.uid)",
     );
     let records = count(
-        "SELECT count(*) FROM raw_docs d WHERE NOT EXISTS (SELECT 1 FROM vector_keys v
+        "SELECT count(*) FROM raw_docs d WHERE d.kind <> 'tool' AND NOT EXISTS (
+           SELECT 1 FROM vector_keys v
            WHERE v.embedder = ?1 AND v.kind = 'r' AND v.key = d.device || ':' || d.seq)",
     );
     let skipped = (|| -> Result<Vec<(String, i64)>> {
@@ -1152,7 +1153,7 @@ const QUEUE: &str = "
       INSERT OR IGNORE INTO vector_todo(family, key, ord) VALUES ('i', NEW.uid, NEW.ts);
     END;
     CREATE TRIGGER vector_todo_record AFTER INSERT ON raw_docs
-      WHEN NOT EXISTS (SELECT 1 FROM vector_keys
+      WHEN NEW.kind <> 'tool' AND NOT EXISTS (SELECT 1 FROM vector_keys
                        WHERE kind = 'r' AND key = NEW.device || ':' || NEW.seq)
     BEGIN
       INSERT OR IGNORE INTO vector_todo(family, key, ord)
@@ -1174,7 +1175,7 @@ const QUEUE: &str = "
         AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.kind IN ('k', 'p') AND v.key = i.uid);
     INSERT OR IGNORE INTO vector_todo(family, key, ord)
       SELECT 'r', d.device || ':' || d.seq, d.seq FROM raw_docs d
-      WHERE NOT EXISTS (SELECT 1 FROM vector_keys v
+      WHERE d.kind <> 'tool' AND NOT EXISTS (SELECT 1 FROM vector_keys v
                         WHERE v.kind = 'r' AND v.key = d.device || ':' || d.seq);";
 
 /// `QUEUE`, made in one transaction the first time a knowledge.db is polled.
@@ -1297,7 +1298,7 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
             let mut read = k.prepare_cached(
                 "SELECT d.kind, d.ts, COALESCE(d.repo, ''), COALESCE(d.session, '')
                  FROM raw_docs d
-                 WHERE d.device = ?2 AND d.seq = ?3
+                 WHERE d.device = ?2 AND d.seq = ?3 AND d.kind <> 'tool'
                    AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
                                      AND v.kind = 'r' AND v.key = ?4)",
             )?;
@@ -1667,7 +1668,7 @@ fn current(raw: Option<&Raw>, k: &Connection, kind: &str, key: &str) -> Result<O
             let row: Option<(String, i64, String, String)> = k
                 .query_row(
                     "SELECT kind, ts, COALESCE(repo, ''), COALESCE(session, '') FROM raw_docs
-                     WHERE device = ?1 AND seq = ?2",
+                     WHERE device = ?1 AND seq = ?2 AND kind <> 'tool'",
                     params![device, seq],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
@@ -3222,6 +3223,55 @@ mod tests {
             .filter(|(.., why)| why.as_deref() == Some("source"))
             .count();
         assert_eq!(source, many);
+    }
+
+    /// Tool output gets no vector (#317, decision 42). It is not queued, before the queue is made
+    /// or after; one a home made before had queued leaves the queue unsent; and it does not count
+    /// as waiting for one. The record beside it is embedded.
+    #[test]
+    fn tool_output_gets_no_vector() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        s.said("s", R, 1_000, "Live words.");
+        let body =
+            serde_json::json!({"tool": "Bash", "input": "cargo test", "output": "Tool words."});
+        let before = s.event("tool", "s", (R, "main"), 2_000, body.clone());
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = Phase::new(s.home.path());
+        assert!(matches!(
+            phase.poll(&s.raw, &k).unwrap(),
+            Step::Waiting { .. }
+        ));
+        while !phase.done() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
+        let after = s.event("tool", "s", (R, "main"), 3_000, body);
+        s.run();
+        let queued = |key: &str| -> i64 {
+            k.query_row(
+                "SELECT count(*) FROM vector_todo WHERE key = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!((queued(&s.key(before)), queued(&s.key(after))), (0, 0));
+        k.execute(
+            "INSERT INTO vector_todo(family, key, ord) VALUES ('r', ?1, ?2)",
+            params![s.key(before), before],
+        )
+        .unwrap();
+        // Nothing to send: the queued tool output leaves the queue.
+        assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Idle);
+        assert_eq!(queued(&s.key(before)), 0);
+        assert_eq!(stub.texts(), [vec!["Live words.".to_owned()]]);
+        let tools = [s.key(before), s.key(after)];
+        assert!(keys(&s).iter().all(|(_, k, _)| !tools.contains(k)));
+        let facts = doctor_facts_in(&k, crate::embed::EMBEDDER);
+        assert_eq!(facts.records.unwrap(), 0);
     }
 
     /// Rows 30-1 and 30-14: what reaches the embedder has passed the gate: a token and a

@@ -63,7 +63,7 @@ Step 9, 2026-10-01: the evaluation home `b-m4`, a copy of `b-import` with `[summ
 
 - **Replay:** `m4.py corpus` (3,109 sessions; 324,943 events before the copy time, none failed to convert; 44 sessions have none), then `m4.py replay` with a release build of 33e7c9b (`~/.oboete/eval/bin/oboete-33e7c9b0adb3`, SHA-256 ce6c9f28c329b8857f45aa1b6ac38a3f0e6d005bcb4a7b5d8b92e14aa861fc53) and `oboete worker --idle-ms 5000` until it drained: 30 min 39 s, 99 MB peak, no worker error. Every consumer's checkpoint is at raw.db's highest seq, 325,577; 178,370 ops; `raw_docs` holds 324,943 records (302,052 of them tool outputs); no providers.db, no claim. The home is 8.5 GB.
 - **Raw's N** is 25, and 8 of those questions (5 sessions) are of the replay set's held-out sessions, which the corpus leaves out: they count with no record of their own session. The gate names them apart and checks every other counted question's session for a record (D10 as amended here); the pre-registration lists them.
-- **Embedding** waits for the owner (What needs the owner, item 8): Raw's corpus is about 542,000 neurons (22,726 requests, 98% of it tool output) and the imported history about 100,000, together about USD 7 at once or about 64 days inside the free allowance.
+- **Embedding** waits for the owner (What needs the owner, item 8): Raw's corpus is about 542,000 neurons (22,726 requests, 98% of it tool output) and the imported history about 100,000, together about USD 7 at once or about 64 days inside the free allowance. Since spec decision 42 (#317) tool output gets no vector, so Raw's corpus is about 2% of that, near 11,000 neurons.
 
 ## Task 7: the viewer on Design B
 

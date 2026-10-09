@@ -1,6 +1,7 @@
 //! The none tier's search (docs/milestone-2-plan.md Task 6): every event's text in an FTS5 trigram
 //! index in knowledge.db, `raw_fts`, with its (device, seq) and labels in `raw_docs`. The index
-//! keeps no copy of the text (#317): a reader reads it back from raw.db (`texts`).
+//! keeps no copy of the text (#317): a reader reads it back from raw.db (`texts`). Tool output
+//! stays out of it (`indexed`).
 
 use crate::raw::{Item, Raw, Target};
 use crate::worker::Consumer;
@@ -28,6 +29,14 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            SELECT DISTINCT session, repo FROM raw_docs WHERE repo IS NOT NULL;",
     )?;
     Ok(())
+}
+
+/// Whether an event of `kind` is searched: tool output (nine records in ten, nearly all the text)
+/// stays in raw.db, out of `raw_fts` and the vectors, as claude-mem searches none (#317, decision
+/// 42). Its `raw_docs` row stays, for its labels and the counts. SQL that picks records says
+/// `kind <> 'tool'` for the same rule.
+pub(crate) fn indexed(kind: &str) -> bool {
+    kind != "tool"
 }
 
 /// The text a person would search for: every string in the event's JSON body (not its keys), or
@@ -166,23 +175,26 @@ pub(crate) fn turns(k: &Connection, rowid: Option<i64>) -> Result<()> {
 /// One indexed record's text replaced by what `Raw::after` returns for it now; its row removed
 /// when that is no event. Nothing for a record this index never held.
 fn reindex(raw: &Raw, k: &Connection, device: &str, seq: i64) -> Result<()> {
-    let Some(rowid) = k
+    let Some((rowid, kind)) = k
         .query_row(
-            "SELECT rowid FROM raw_docs WHERE device = ?1 AND seq = ?2",
+            "SELECT rowid, kind FROM raw_docs WHERE device = ?1 AND seq = ?2",
             params![device, seq],
-            |r| r.get::<_, i64>(0),
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
         )
         .optional()?
     else {
         return Ok(());
     };
+    // A home made before tool output stayed out still holds its row: it goes too.
     k.execute("DELETE FROM raw_fts WHERE rowid = ?1", [rowid])?;
     match texts(raw, device, &[seq])?.pop() {
         Some((_, text)) => {
-            k.execute(
-                "INSERT INTO raw_fts(rowid, text) VALUES(?1, ?2)",
-                params![rowid, text],
-            )?;
+            if indexed(&kind) {
+                k.execute(
+                    "INSERT INTO raw_fts(rowid, text) VALUES(?1, ?2)",
+                    params![rowid, text],
+                )?;
+            }
         }
         None => {
             k.execute("DELETE FROM raw_docs WHERE rowid = ?1", [rowid])?;
@@ -215,10 +227,12 @@ impl Consumer for Fts {
                 "INSERT INTO raw_docs(device, seq, kind, ts, repo, session) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![r.device, r.seq, e.kind, e.ts, e.repo, e.session],
             )?;
-            k.execute(
-                "INSERT INTO raw_fts(rowid, text) VALUES(last_insert_rowid(), ?1)",
-                [text(&e.body)],
-            )?;
+            if indexed(&e.kind) {
+                k.execute(
+                    "INSERT INTO raw_fts(rowid, text) VALUES(last_insert_rowid(), ?1)",
+                    [text(&e.body)],
+                )?;
+            }
         }
         Ok(recs.last().map_or(after, |r| r.seq))
     }
