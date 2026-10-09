@@ -1130,6 +1130,21 @@ fn sort_out(
     Ok(Some((r.doc, sent)))
 }
 
+/// The queue's trigger for a record: no tool output (#317, owner decision 42).
+macro_rules! record_trigger {
+    () => {
+        "
+    CREATE TRIGGER vector_todo_record AFTER INSERT ON raw_docs
+      WHEN NEW.kind <> 'tool' AND NOT EXISTS (SELECT 1 FROM vector_keys
+                       WHERE kind = 'r' AND key = NEW.device || ':' || NEW.seq)
+    BEGIN
+      INSERT OR IGNORE INTO vector_todo(family, key, ord)
+        VALUES ('r', NEW.device || ':' || NEW.seq, NEW.seq);
+    END;
+"
+    };
+}
+
 /// Step 13's queue: the imported documents and records with no key row, kept by triggers on the
 /// tables that hold them and on `vector_keys`, so a poll reads a page of what waits and never the
 /// whole store (over b-import's 178,370 documents each poll scanned them all, 0.7 s, waiting or
@@ -1141,7 +1156,8 @@ fn sort_out(
 /// read of `active`, a view, and few.
 // ponytail: one embedder's queue (a new document's key row of any embedder keeps it out); the
 // second embedder's generation (Task 10) needs a queue of its own.
-const QUEUE: &str = "
+const QUEUE: &str = concat!(
+    "
     CREATE TABLE vector_todo(
       family TEXT NOT NULL, key TEXT NOT NULL, ord INTEGER NOT NULL,
       PRIMARY KEY (family, key)
@@ -1152,14 +1168,9 @@ const QUEUE: &str = "
     BEGIN
       INSERT OR IGNORE INTO vector_todo(family, key, ord) VALUES ('i', NEW.uid, NEW.ts);
     END;
-    CREATE TRIGGER vector_todo_record AFTER INSERT ON raw_docs
-      WHEN NEW.kind <> 'tool' AND NOT EXISTS (SELECT 1 FROM vector_keys
-                       WHERE kind = 'r' AND key = NEW.device || ':' || NEW.seq)
-    BEGIN
-      INSERT OR IGNORE INTO vector_todo(family, key, ord)
-        VALUES ('r', NEW.device || ':' || NEW.seq, NEW.seq);
-    END;
-    CREATE TRIGGER vector_todo_unkeyed AFTER DELETE ON vector_keys WHEN OLD.kind <> 'c'
+",
+    record_trigger!(),
+    "    CREATE TRIGGER vector_todo_unkeyed AFTER DELETE ON vector_keys WHEN OLD.kind <> 'c'
     BEGIN
       INSERT OR IGNORE INTO vector_todo(family, key, ord)
         SELECT 'i', OLD.key,
@@ -1176,9 +1187,26 @@ const QUEUE: &str = "
     INSERT OR IGNORE INTO vector_todo(family, key, ord)
       SELECT 'r', d.device || ':' || d.seq, d.seq FROM raw_docs d
       WHERE d.kind <> 'tool' AND NOT EXISTS (SELECT 1 FROM vector_keys v
-                        WHERE v.kind = 'r' AND v.key = d.device || ':' || d.seq);";
+                        WHERE v.kind = 'r' AND v.key = d.device || ':' || d.seq);"
+);
 
-/// `QUEUE`, made in one transaction the first time a knowledge.db is polled.
+/// A home whose phase ran before tool output stayed out (#317): its trigger queued tool records and
+/// its index may hold their vectors. The key rows go before the queue's: a deleted key row queues
+/// its key again (`vector_todo_unkeyed`).
+const UNTOOL: &str = concat!(
+    "DROP TRIGGER vector_todo_record;",
+    record_trigger!(),
+    "
+    DELETE FROM vec_index WHERE rowid IN (SELECT id FROM vector_keys WHERE kind = 'r'
+      AND key IN (SELECT device || ':' || seq FROM raw_docs WHERE kind = 'tool'));
+    DELETE FROM vector_keys WHERE kind = 'r'
+      AND key IN (SELECT device || ':' || seq FROM raw_docs WHERE kind = 'tool');
+    DELETE FROM vector_todo WHERE family = 'r'
+      AND key IN (SELECT device || ':' || seq FROM raw_docs WHERE kind = 'tool');"
+);
+
+/// `QUEUE`, made in one transaction the first time a knowledge.db is polled; `UNTOOL` once for a
+/// home whose record trigger is older.
 fn queue(k: &Connection) -> Result<()> {
     let made: bool = k.query_row(
         "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vector_todo')",
@@ -1188,6 +1216,19 @@ fn queue(k: &Connection) -> Result<()> {
     if !made {
         let tx = k.unchecked_transaction()?;
         tx.execute_batch(QUEUE)?;
+        tx.commit()?;
+        return Ok(());
+    }
+    let trigger: Option<String> = k
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'vector_todo_record'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if trigger.is_some_and(|sql| !sql.contains("NEW.kind <> 'tool'")) {
+        let tx = k.unchecked_transaction()?;
+        tx.execute_batch(UNTOOL)?;
         tx.commit()?;
     }
     Ok(())
@@ -3272,6 +3313,90 @@ mod tests {
         assert!(keys(&s).iter().all(|(_, k, _)| !tools.contains(k)));
         let facts = doctor_facts_in(&k, crate::embed::EMBEDDER);
         assert_eq!(facts.records.unwrap(), 0);
+    }
+
+    /// A home whose phase ran before tool output stayed out (#317): its trigger queued tool records
+    /// and its index held their vectors. The next poll takes both out and makes the trigger anew,
+    /// and the prompt beside them keeps its vector (Codex on #421).
+    #[test]
+    fn a_home_from_before_loses_its_queued_tool_output_and_its_vectors() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let prompt = s.said("s", R, 1_000, "Live words.");
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let mut phase = Phase::new(s.home.path());
+        phase.poll(&s.raw, &k).unwrap();
+        while !phase.done() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
+        k.execute_batch(
+            "DROP TRIGGER vector_todo_record;
+             CREATE TRIGGER vector_todo_record AFTER INSERT ON raw_docs
+               WHEN NOT EXISTS (SELECT 1 FROM vector_keys
+                                WHERE kind = 'r' AND key = NEW.device || ':' || NEW.seq)
+             BEGIN
+               INSERT OR IGNORE INTO vector_todo(family, key, ord)
+                 VALUES ('r', NEW.device || ':' || NEW.seq, NEW.seq);
+             END;",
+        )
+        .unwrap();
+        let body =
+            serde_json::json!({"tool": "Bash", "input": "cargo test", "output": "Tool words."});
+        let tools = [
+            s.event("tool", "s", (R, "main"), 2_000, body.clone()),
+            s.event("tool", "s", (R, "main"), 3_000, body),
+        ];
+        s.run();
+        let tools = tools.map(|seq| s.key(seq));
+        let held = Doc {
+            kind: "r",
+            key: tools[1].clone(),
+            sha: "from before".into(),
+            repo: String::new(),
+            ts: 3_000,
+            session: "s".into(),
+        };
+        index(
+            &k,
+            crate::embed::EMBEDDER,
+            &held,
+            &[0u8; crate::embed::DIM * 4],
+        )
+        .unwrap();
+        let count =
+            |sql: &str, key: &str| -> i64 { k.query_row(sql, [key], |r| r.get(0)).unwrap() };
+        let queued = |key: &str| count("SELECT count(*) FROM vector_todo WHERE key = ?1", key);
+        let keyed = |key: &str| count("SELECT count(*) FROM vector_keys WHERE key = ?1", key);
+        let indexed = |key: &str| {
+            count(
+                "SELECT count(*) FROM vec_index WHERE rowid IN
+                   (SELECT id FROM vector_keys WHERE key = ?1)",
+                key,
+            )
+        };
+        assert_eq!(queued(&tools[0]), 1, "the old trigger queues tool output");
+        assert_eq!((keyed(&tools[1]), indexed(&tools[1])), (1, 1));
+        phase.poll(&s.raw, &k).unwrap();
+        for key in &tools {
+            assert_eq!((queued(key), keyed(key)), (0, 0), "{key}");
+        }
+        let left: i64 = k
+            .query_row("SELECT count(*) FROM vec_index", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 1, "only the prompt's vector");
+        assert_eq!(keyed(&s.key(prompt)), 1);
+        let later = s.event(
+            "tool",
+            "s",
+            (R, "main"),
+            4_000,
+            serde_json::json!({"tool": "Bash", "input": "ls", "output": "More."}),
+        );
+        s.run();
+        assert_eq!(queued(&s.key(later)), 0, "the trigger is made anew");
     }
 
     /// Rows 30-1 and 30-14: what reaches the embedder has passed the gate: a token and a
