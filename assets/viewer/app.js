@@ -1209,6 +1209,8 @@ const TEXT = {
   provider_api_desc: ['Anthropic’s own Messages API returns JSON in the requested format; its OpenAI-compatible endpoint ignores that request. For Anthropic, choose Anthropic Messages and enter https://api.anthropic.com/v1 as the API base URL.', 'Anthropic 独自の Messages API は、指定した形式どおりの JSON を返します。Anthropic の OpenAI 互換の接続先では、この指定が無視されます。Anthropic を使う場合は「Anthropic Messages」を選び、API の接続先 URL に https://api.anthropic.com/v1 を入力してください。'],
   provider_enabled: ['Enable this entry', 'この要約役を有効にする'],
   provider_subscription: ['Covered by a subscription', 'サブスクリプション内の利用'],
+  provider_credits: ['Past the plan’s usage limits, use the account’s credits', 'プランの利用上限を超えたら、アカウントのクレジットを使う'],
+  provider_credits_desc: ['Off by default. When it is on, curation goes on past the plan’s usage limits while the account has credits, as Codex counts them, and stops when they run out. With automatic reload on, OpenAI buys credits with the card on file, so check automatic reload in ChatGPT (Settings > Usage) first.', '既定ではオフです。オンにすると、プランの利用上限を超えても、Codex が数えるクレジットがアカウントにある間は要約を続け、なくなったら止めます。自動チャージ（automatic reload）がオンの場合は登録済みのカードでクレジットが購入されるため、先に ChatGPT の「設定 > 使用量」で自動チャージを確認してください。'],
   provider_subscription_desc: ['Subscription entries have no daily-call cap control. Existing legacy caps are preserved. Use API prices below for calls billed per token.', 'サブスクリプションには 1 日の回数を設定しません。既存の回数設定は維持します。トークン数で課金される API は下の料金を設定してください。'],
   provider_cli_desc: ['Uses the fixed installed adapter. Complete the provider’s own login first. oboete does not collect subscription login credentials. Installation and a successful connection test are separate states.', '対応するインストール済みアダプターを使います。先にサービス側のログインを完了してください。oboete はサブスクリプションのログイン情報を収集しません。インストール状態と接続確認は別々に表示します。'],
   provider_saved: ['Provider saved. It applies at the next eligible call; it has not been tested.', '要約役を保存しました。次の実行条件が整った呼び出しから反映されます。接続はまだ確認していません。'],
@@ -3552,6 +3554,7 @@ function providerEdit(name = '', saved = {}) {
   return { kind: saved.kind || 'openai', name, enabled: saved.enabled ?? true,
     cli: saved.cli || 'claude', base_url: saved.base_url || '', api: saved.api || 'openai', model: saved.model || '',
     timeout_s: providerText(saved.timeout_s ?? 60), subscription: saved.subscription ?? false,
+    credits: saved.credits ?? false,
     daily_budget: providerText(saved.daily_budget), savedDailyBudget: saved.daily_budget ?? null,
     limits: Object.fromEntries(LIMIT_FIELDS.map((key) => [key, providerText(saved.limits?.[key] ?? defaults[key])])),
   };
@@ -3570,7 +3573,10 @@ function providerBody(draft) {
   const entry = { kind: draft.kind, name: draft.name, enabled: draft.enabled,
     model: draft.kind === 'cli' ? draft.model.trim() || null : draft.model.trim(),
     timeout_s: Number(draft.timeout_s), limits };
-  if (draft.kind === 'cli') entry.cli = draft.cli;
+  if (draft.kind === 'cli') {
+    entry.cli = draft.cli;
+    if (draft.cli === 'codex') entry.credits = draft.credits;
+  }
   else Object.assign(entry, { base_url: draft.base_url.trim(), api: draft.api, subscription: draft.subscription,
     daily_budget: providerDailyBudget(draft) });
   return entry;
@@ -3996,6 +4002,14 @@ function providerEditor(draft, provider, card) {
     draft.subscription = value;
     daily.hidden = value;
   });
+  // Owner decision 41 (#164): codex alone can draw on the account's credits.
+  let credits = null;
+  if (draft.kind === 'cli' && draft.cli === 'codex') {
+    const box = checkbox(draft.credits, (value) => { draft.credits = value; });
+    box.dataset.field = 'providers.credits';
+    box.disabled = Boolean(unsupported);
+    credits = el('div', null, el('label', 'check', box, t('provider_credits')), note(t('provider_credits_desc')));
+  }
   const save = el('button', 'small', t(provider ? 'provider_save' : 'provider_create'));
   save.type = 'button';
   save.disabled = Boolean(unsupported);
@@ -4021,7 +4035,7 @@ function providerEditor(draft, provider, card) {
     !provider ? el('label', 'check', checkbox(draft.enabled, (value) => { draft.enabled = value; }), t('provider_enabled')) : null,
     draft.kind === 'openai' ? el('label', 'check', subscribe, t('provider_subscription')) : note(t('provider_cli_desc')),
     draft.kind === 'openai' ? note(t('provider_subscription_desc')) : null,
-    limits, el('div', 'actions', save, cancel));
+    credits, limits, el('div', 'actions', save, cancel));
 }
 
 function providerKeyPanel(provider) {

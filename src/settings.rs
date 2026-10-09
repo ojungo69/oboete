@@ -329,10 +329,11 @@ fn provider_row(
             cli,
             model,
             timeout_s,
+            credits,
             ..
         } => json!({
             "kind": "cli", "cli": cli, "model": model, "timeout_s": timeout_s,
-            "subscription": true, "key": cli_path_state(cli),
+            "subscription": true, "credits": credits, "key": cli_path_state(cli),
         }),
     };
     let limits = saved.limits();

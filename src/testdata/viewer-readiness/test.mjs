@@ -680,3 +680,22 @@ assert(text(editor).includes('API の種類')&&text(editor).includes('OpenAI 互
 ctx.ui.setLang('en');
 console.log('PASS: an HTTP entry API choice');
 }
+// Owner decision 41 (#164): a codex entry may draw on the account's credits past its plan's limits.
+{
+const {apiUi}=ctx;
+const codex=apiUi.providerEdit('x',{kind:'cli',cli:'codex',credits:true,limits:{}});
+assert.equal(codex.credits,true,'a saved switch is shown');
+const editor=apiUi.providerEditor(codex,null,new Node('article'));
+const box=editor.querySelectorAll('input').find(node=>node.dataset.field==='providers.credits');
+assert(box&&box.checked,'the codex editor offers the switch, on as saved');
+assert(text(editor).includes('automatic reload'),'it says what automatic reload does');
+change(box,false);
+assert.equal(apiUi.providerBody(codex).credits,false,'a save sends the switch');
+const claude=apiUi.providerEdit('y',{kind:'cli',cli:'claude',limits:{}});
+assert(!apiUi.providerEditor(claude,null,new Node('article')).querySelectorAll('input').some(node=>node.dataset.field==='providers.credits'),'claude has no switch');
+assert.equal(apiUi.providerBody(claude).credits,undefined,'claude sends none');
+ctx.ui.setLang('ja');
+assert(text(apiUi.providerEditor(codex,null,new Node('article'))).includes('クレジット'),'Japanese switch');
+ctx.ui.setLang('en');
+console.log('PASS: a codex entry may draw on credits');
+}
