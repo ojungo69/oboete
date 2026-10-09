@@ -1,0 +1,28 @@
+docs/spike/raw-index-copy.md
+  s_ad0ac4d9af0473::t_9fdd26b87731cc 1-52
+docs/spike/raw-index-copy/rust.py
+  s_ad0ac4d9af0473::t_6e1cc609b05fc5 105
+  s_ad0ac4d9af0473::t_67ac9a6e8b8a42 1-104,106-124
+docs/milestone-5-plan.md
+  s_ad0ac4d9af0473::t_0ee2889a5494b7 222-224
+docs/spec.md
+  s_ad0ac4d9af0473::t_5025cacf382108 227
+docs/spike/raw-index-copy/rust-results.txt
+  s_ad0ac4d9af0473::t_2e83edabfba1dd 1-10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0828e75d98fc824d8b94c6ab1eaf4d963e732b88",
+  "prompts": {},
+  "sessions": {
+    "s_ad0ac4d9af0473": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "55f3d823-9d62-4fd7-a50c-4f022fc3c6bb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
