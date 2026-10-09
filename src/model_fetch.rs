@@ -1085,8 +1085,9 @@ mod tests {
         let bin = tempfile::tempdir().unwrap();
         let slow_tar = bin.path().join("tar");
         let go = bin.path().join("go");
+        // At most 30 s: a test that fails before it opens the gate ends instead of hanging.
         let script = format!(
-            "#!/bin/sh\nwhile [ ! -e '{}' ]; do sleep 0.05; done\nprintf runtime\n",
+            "#!/bin/sh\ni=0\nwhile [ ! -e '{}' ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\nprintf runtime\n",
             go.display()
         );
         fs::write(&slow_tar, script).unwrap();
