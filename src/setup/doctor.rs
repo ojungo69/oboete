@@ -2652,8 +2652,9 @@ mod tests {
              CREATE VIEW active AS SELECT uid FROM claims;
              CREATE TABLE imported(uid TEXT);
              INSERT INTO imported VALUES('i'),('i'),('j');
-             CREATE TABLE raw_docs(device TEXT,seq INTEGER);
-             INSERT INTO raw_docs VALUES('private-device',1),('private-device',2);
+             CREATE TABLE raw_docs(device TEXT,seq INTEGER,kind TEXT);
+             INSERT INTO raw_docs VALUES('private-device',1,'prompt'),('private-device',2,'reply'),
+               ('private-device',3,'tool');
              CREATE TABLE vec_generation(embedder TEXT,state TEXT);
              CREATE TABLE vector_keys(embedder TEXT,kind TEXT,key TEXT,skipped TEXT);",
         )

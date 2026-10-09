@@ -1,0 +1,19 @@
+sample: 1 in 5, 64988 records, text 324 MB, of it tool 315 MB (2 s)
+dev queries with a trigram: 312 of 312
+('full', 713.039872, 60.799716727022314, 1.0, 0, 312, 0, 0)
+('tool 16+4 KB', 606.339072, 52.748220961977495, 0.9144230769230769, 179, 312, 246, 21)
+('tool 4+4 KB', 470.908928, 42.66789445199538, 0.7932692307692307, 270, 312, 603, 42)
+('tool 1+1 KB', 270.680064, 23.623085081984755, 0.5269230769230769, 306, 312, 1371, 105)
+('no tool', 27.045888, 1.7080436240066774, 0.16602564102564102, 312, 312, 2576, 26)
+
+Sample: one record in 5 of raw.db (64988 records, 324 MB of text, 97% of it tool output).
+
+| tool output kept | index MB (sample) | of the whole | top 10 kept, mean | queries losing a top-10 hit | lost hits: tool / other |
+|---|---|---|---|---|---|
+| full | 713 | 100% | 100% | 0 of 312 | 0 / 0 |
+| tool 16+4 KB | 606 | 85% | 91% | 179 of 312 | 246 / 21 |
+| tool 4+4 KB | 471 | 66% | 79% | 270 of 312 | 603 / 42 |
+| tool 1+1 KB | 271 | 38% | 53% | 306 of 312 | 1371 / 105 |
+| no tool | 27 | 4% | 17% | 312 of 312 | 2576 / 26 |
+
+#419's CJK pairs (detail=none, distinct per record): 8 MB for 3,527,465 pairs, 1% of the whole trigram index.

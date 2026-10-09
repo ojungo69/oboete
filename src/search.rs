@@ -251,7 +251,9 @@ pub(crate) fn raw_order(
     if grams.is_empty() && short.is_empty() {
         return Ok(Vec::new());
     }
-    let (mut clauses, mut args) = (vec!["1".to_owned()], Vec::new());
+    // Tool output is not searched (`fts::indexed`): a home indexed before keeps its rows until
+    // `oboete rebuild`, and the scan of `holding_every` reads none of it.
+    let (mut clauses, mut args) = (vec!["d.kind <> 'tool'".to_owned()], Vec::new());
     if let Some(r) = repo {
         clauses.push("d.repo = ?".into());
         args.push(Value::Text(r.to_string()));
@@ -444,7 +446,8 @@ pub(crate) fn raw_rows(
         };
         let row = k
             .query_row(
-                "SELECT kind, ts, repo FROM raw_docs WHERE device = ?1 AND seq = ?2",
+                "SELECT kind, ts, repo FROM raw_docs WHERE device = ?1 AND seq = ?2
+                   AND kind <> 'tool'",
                 params![device, seq],
                 |r| {
                     Ok(RawHit {
@@ -604,10 +607,8 @@ mod tests {
         let mut ja = crate::raw::test_event(r#"{"prompt":"同期の設計を見直して"}"#);
         ja.repo = Some("github.com/o/a".into());
         raw.append(&ja).unwrap();
-        let mut en = crate::raw::test_event(
-            r#"{"tool":"Bash","input":"cargo test","output":"the lease worker panicked"}"#,
-        );
-        en.kind = "tool".into();
+        let mut en = crate::raw::test_event(r#"{"assistant":"the lease worker panicked"}"#);
+        en.kind = "reply".into();
         en.repo = Some("github.com/o/b".into());
         raw.append(&en).unwrap();
         let mut k = crate::knowledge::open(p).unwrap();
@@ -621,9 +622,10 @@ mod tests {
         assert!(hits[0].snippet.contains("設計"), "{}", hits[0].snippet);
         let hits = raw_search(p, "worker panicked", None);
         assert_eq!(hits.iter().map(|h| h.seq).collect::<Vec<_>>(), [2]);
-        assert_eq!(hits[0].kind, "tool");
-        // Keys are not text: "prompt" and "tool" are field names here.
+        assert_eq!(hits[0].kind, "reply");
+        // Keys are not text: "prompt" and "assistant" are field names here.
         assert!(raw_search(p, "prompt", None).is_empty());
+        assert!(raw_search(p, "assistant", None).is_empty());
         // This repository unless --all.
         assert!(raw_search(p, "設計", Some("github.com/o/b")).is_empty());
         assert_eq!(raw_search(p, "設計", Some("github.com/o/a")).len(), 1);
@@ -765,6 +767,71 @@ mod tests {
     fn a_short_word_ends_at_punctuation() {
         assert_eq!(found(&["設計 worker", "worker"], "worker"), [2, 1]);
         assert_eq!(found(&["設計 worker", "worker"], "worker、設計。"), [1, 2]);
+    }
+
+    /// Tool output stays in raw.db, out of the index (#317, decision 42): neither a word with a
+    /// trigram nor a short one finds it, before a tombstone's reindex or after, while the prompt
+    /// beside it is found; its `raw_docs` row keeps its labels.
+    #[test]
+    fn tool_output_is_kept_but_not_searched() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut store = crate::raw::open(p).unwrap();
+        let prompt = store
+            .append(&crate::raw::Event {
+                ts: 1_000,
+                ..crate::raw::test_event(r#"{"prompt":"設計 lantern"}"#)
+            })
+            .unwrap();
+        let tool = store
+            .append(&crate::raw::Event {
+                kind: "tool".into(),
+                ts: 2_000,
+                ..crate::raw::test_event(r#"{"tool":"Bash","input":"cat","output":"設計 lantern"}"#)
+            })
+            .unwrap();
+        let indexed = || -> Vec<i64> {
+            let k = crate::knowledge::open(p).unwrap();
+            k.prepare(
+                "SELECT d.seq FROM raw_fts f JOIN raw_docs d ON d.rowid = f.rowid
+                 WHERE raw_fts MATCH 'lantern' ORDER BY d.seq",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+        };
+        crate::worker::run_once(p).unwrap();
+        assert_eq!(indexed(), [prompt]);
+        let key = format!("{}:{prompt}", store.device());
+        for q in ["lantern", "設計"] {
+            let seqs: Vec<i64> = raw_search(p, q, None).iter().map(|h| h.seq).collect();
+            assert_eq!(seqs, [prompt], "{q}");
+            // The scan of a short word reads no tool output either, not only the answer shows none.
+            let k = crate::knowledge::open(p).unwrap();
+            let raw = crate::raw::open(p).unwrap();
+            let order = raw_order(Some(&raw), &k, q, None, (None, None), None, None, 10).unwrap();
+            assert_eq!(order, std::slice::from_ref(&key), "{q}");
+        }
+        let device = store.device().to_owned();
+        store
+            .append_tombstone(crate::raw::Target::Range {
+                device,
+                seq: tool,
+                offset: 0,
+                length: 2,
+            })
+            .unwrap();
+        crate::worker::run_once(p).unwrap();
+        assert_eq!(indexed(), [prompt]);
+        let k = crate::knowledge::open(p).unwrap();
+        let kind: String = k
+            .query_row("SELECT kind FROM raw_docs WHERE seq = ?1", [tool], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(kind, "tool");
     }
 
     /// A query of short words alone looks for them in the text raw.db holds now (#317): written
