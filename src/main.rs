@@ -17,6 +17,8 @@ mod curate;
 mod db;
 mod dispatch;
 mod embed;
+#[cfg(feature = "local-embed")]
+mod embed_local;
 mod embed_phase;
 mod executable;
 mod failure;
@@ -318,6 +320,20 @@ enum Cmd {
         /// Directory for b-<arm>.trec and b-docs.jsonl
         #[arg(long)]
         out: PathBuf,
+    },
+    /// Task 10's spike: embed `{"id","text"}` lines from stdin with the local bge-m3
+    #[cfg(feature = "local-embed")]
+    #[command(hide = true)]
+    EmbedSpike {
+        /// The directory of the model's pinned files
+        #[arg(long)]
+        model: PathBuf,
+        /// ONNX Runtime's threads (all the machine's when absent)
+        #[arg(long)]
+        threads: Option<usize>,
+        /// Check every file's size and SHA-256 first
+        #[arg(long)]
+        verify: bool,
     },
     /// Replay a JSONL fixture through the hook path and measure
     Replay {
@@ -772,6 +788,12 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             Ok(())
         }
         Cmd::View { port, open, .. } => view::run(&home, port, open),
+        #[cfg(feature = "local-embed")]
+        Cmd::EmbedSpike {
+            model,
+            threads,
+            verify,
+        } => embed_local::spike(&model, threads, verify),
         Cmd::Replay {
             fixture,
             repo_root,

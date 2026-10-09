@@ -65,15 +65,15 @@ jobs:
           path: dist/
           retention-days: 7
           if-no-files-found: error
-      # The model's files at the pinned commit; the test checks each one's size and SHA-256 before
-      # it loads them.
+      # The model's files at the pinned commit, the five the fused graph (assets/bge-m3-mha.onnx)
+      # reads; the test checks each one's size and SHA-256 before it loads them.
       - name: The model's files
         shell: bash
         run: |
           dir="$RUNNER_TEMP/bge-m3"
           base=https://huggingface.co/BAAI/bge-m3/resolve/5617a9f61b028005a4858fdac845db406aefb181
           for f in config.json special_tokens_map.json tokenizer_config.json tokenizer.json \
-                   onnx/model.onnx onnx/Constant_7_attr__value onnx/model.onnx_data; do
+                   onnx/model.onnx_data; do
             mkdir -p "$dir/$(dirname "$f")"
             curl -fsSL --retry 3 -o "$dir/$f" "$base/$f"
           done

@@ -18,3 +18,34 @@ and on what to record and what to skip. It is cut down and reworded in the curat
 the request for a session summary and the guidance on its six fields (request, investigated,
 learned, completed, next_steps, notes), reworded in the summary prompt (src/turns.rs, `prompt`).
 No code of Claude-Mem is included.
+
+This product includes a model graph derived from BGE-M3 (https://huggingface.co/BAAI/bge-m3),
+licensed under the MIT License:
+
+    MIT License
+
+    Copyright (c) 2022 staoxiao
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+What was taken, from BAAI/bge-m3 at commit 5617a9f61b028005a4858fdac845db406aefb181:
+assets/bge-m3-mha.onnx is its onnx/model.onnx with the attention of its 24 layers fused into
+ONNX Runtime's MultiHeadAttention (docs/spike/local-embeddings/fuse.py), and holds the layers'
+query, key and value biases. Its other weights are read from the model's own onnx/model.onnx_data,
+which oboete does not include.
