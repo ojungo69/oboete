@@ -866,7 +866,10 @@ mod tests {
         }];
         assert!(!marker_ok(dir.path(), &changed));
         let modified = fs::metadata(&file).unwrap().modified().unwrap();
-        fs::File::open(&file)
+        // Windows sets a time only through a handle opened for writing.
+        fs::File::options()
+            .write(true)
+            .open(&file)
             .unwrap()
             .set_modified(modified + Duration::from_secs(10))
             .unwrap();
