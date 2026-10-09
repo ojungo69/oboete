@@ -51,6 +51,17 @@ impl Resident {
         let state = Arc::new(Mutex::new(State::Loading));
         let shared = Arc::clone(&state);
         std::thread::spawn(move || {
+            // However the thread ends, a panic included, its owner reads that it is gone.
+            struct Exit(Arc<Mutex<State>>);
+            impl Drop for Exit {
+                fn drop(&mut self) {
+                    let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+                    if !matches!(*state, State::Failed(_)) {
+                        *state = State::Gone;
+                    }
+                }
+            }
+            let _exit = Exit(Arc::clone(&shared));
             let set = |s| *shared.lock().unwrap_or_else(PoisonError::into_inner) = s;
             let mut model = match load() {
                 Ok(model) => model,
@@ -70,7 +81,6 @@ impl Resident {
                     .map_err(|e| format!("{e:#}"));
                 let _ = job.reply.send(answer);
             }
-            set(State::Gone);
         });
         Resident { jobs, state }
     }
@@ -186,6 +196,23 @@ mod tests {
             panic!("a NaN vector was taken");
         };
         assert!(why.contains("finite"), "{why}");
+    }
+
+    /// A model whose thread panics is gone, so its owner starts another.
+    #[test]
+    fn a_panic_on_the_models_thread_leaves_it_gone() {
+        let load: Load =
+            Box::new(|| Ok(Box::new(|_: &str| -> Result<Vec<f32>> { panic!("boom") }) as Model));
+        let r = Resident::start(load, None);
+        assert!(matches!(
+            r.embed(&texts(&["a"]), None),
+            Err(Busy::Failed(_))
+        ));
+        let t = Instant::now();
+        while !r.gone() {
+            assert!(t.elapsed() < Duration::from_secs(5), "never gone");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// D14: idle past its time, or dropped by its owner, the model goes with its thread.

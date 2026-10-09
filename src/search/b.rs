@@ -703,14 +703,14 @@ fn local(home: &Path) -> bool {
 
 /// The query's vector from the local model (Task 10, D14): gated and cut as for Workers AI, so
 /// the two runners' vectors agree, but nothing is counted and nothing leaves the machine. A
-/// reader answers from full text while its model loads; the CLI waits for one with `--vectors`.
+/// reader answers from full text while its model loads; the CLI waits for it with `--vectors`.
 fn local_query(
     home: &Path,
     q: &Query,
     active: Option<String>,
     caller: Caller,
 ) -> Result<Near, VectorSkip> {
-    use crate::resident::{Busy, Resident};
+    use crate::resident::Busy;
     match active {
         None => return Err(VectorSkip::NoVectors),
         Some(a) if a != crate::embed::EMBEDDER => return Err(VectorSkip::Building),
@@ -723,21 +723,15 @@ fn local_query(
     if sent.trim().is_empty() || sent.trim() == "[REDACTED]" {
         return Err(VectorSkip::Error);
     }
-    let texts = [sent];
-    let got = match caller {
+    let wait = match caller {
         Caller::Cli { vectors } if !vectors && !crate::embed::CLI_EMBEDS_QUERIES => {
             return Err(VectorSkip::Cli);
         }
-        Caller::Cli { .. } => {
-            let load = crate::embed::local_model(home).map_err(|why| {
-                eprintln!("oboete: {why}");
-                VectorSkip::NoModel
-            })?;
-            Resident::start(load, None).embed(&texts, None)
-        }
-        Caller::Reader => reader(home)?.embed(&texts, Some(QUERY_TIMEOUT)),
+        // One CLI command waits for the load, and keeps the model for its next query.
+        Caller::Cli { .. } => None,
+        Caller::Reader => Some(QUERY_TIMEOUT),
     };
-    match got {
+    match reader(home)?.embed(&[sent], wait) {
         Ok(mut vectors) => (vectors.pop())
             .map(|vector| Near {
                 embedder: crate::embed::EMBEDDER.to_owned(),
@@ -755,6 +749,7 @@ fn local_query(
 
 /// This process's local model for searches (D14): started by the first search that needs it,
 /// gone after `READER_IDLE` without one. A load that failed is tried again only after as long.
+/// One CLI command (`--vectors`, `eval`) keeps its model here between its queries.
 fn reader(home: &Path) -> Result<std::sync::Arc<crate::resident::Resident>, VectorSkip> {
     use std::sync::{Arc, Mutex, PoisonError};
     type Readers = Vec<(std::path::PathBuf, Arc<crate::resident::Resident>, Instant)>;
