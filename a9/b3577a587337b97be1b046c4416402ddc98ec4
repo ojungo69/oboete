@@ -1,0 +1,33 @@
+assets/viewer/app.js
+  s_ad0ac4d9af0473::t_dae5041b91ec6d 723-724,733-734
+src/embed.rs
+  s_ad0ac4d9af0473::t_bfff670be58a1e 33-37,55-75,278,283,286,291-311,414-452,620-634
+src/embed_local.rs
+  s_ad0ac4d9af0473::t_8babb0de62ea71 56-57,59-80
+src/embed_phase.rs
+  s_ad0ac4d9af0473::t_2b8203574b4be1 11,23-29,50-51,73-92,95-96,113-135,139-140,153-154,167-188,214-215,254,329-339,341,349,353-378,381-382,385,389,393,395-396,424-427,436-445,489-493,511-515,563-567,569-570,577-630,677,730,735-739,746-749,768,787,795-801,822-824,826,831,851,979-991,1265,1271,1990,2316,3900-4099
+src/hook.rs
+  s_ad0ac4d9af0473::t_b9103d6be8614d 3854-3906
+src/main.rs
+  s_ad0ac4d9af0473::t_9192fa0eaf13a9 45,218-221,490,511
+src/resident.rs
+  s_ad0ac4d9af0473::t_4938a9186d4f4d 1-231
+src/search/b.rs
+  s_ad0ac4d9af0473::t_fd537ab899d407 25-27,328-333,349-351,358,361-370,379-385,435-437,440-444,464-465,614,620-622,699-778,817-818,5355-5432
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a9b3577a587337b97be1b046c4416402ddc98ec4",
+  "prompts": {},
+  "sessions": {
+    "s_ad0ac4d9af0473": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "55f3d823-9d62-4fd7-a50c-4f022fc3c6bb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
