@@ -176,14 +176,19 @@ mod tests {
     }
 
     /// Loading, a caller with a wait gets `Loading` at once and one without waits for the load;
-    /// the vectors come in order, as unit vectors.
+    /// the vectors come in order, as unit vectors. A gate holds the load until the first call has
+    /// its answer, so no machine finishes it sooner.
     #[test]
     fn it_loads_on_its_thread_and_answers_in_order() {
-        let r = Resident::start(model(Duration::from_millis(300)), None);
-        let t = Instant::now();
+        let (release, gate) = mpsc::channel::<()>();
+        let load: Load = Box::new(move || {
+            gate.recv().unwrap();
+            Ok(Box::new(|text: &str| Ok(crate::embed::stub::vector("t", text))) as Model)
+        });
+        let r = Resident::start(load, None);
         let busy = r.embed(&texts(&["a"]), Some(Duration::from_secs(5)));
         assert_eq!(busy, Err(Busy::Loading));
-        assert!(t.elapsed() < Duration::from_millis(200));
+        release.send(()).unwrap();
         let got = r.embed(&texts(&["alpha", "beta"]), None).unwrap();
         assert!(r.ready());
         assert_eq!(got[0], crate::embed::stub::vector("t", "alpha"));

@@ -409,10 +409,9 @@ pub(crate) mod stub {
         }
     }
 
-    /// The stub's vector for `text` under model `id`: each word adds one to the dimension its
-    /// hash picks, then the vector is scaled to unit length.
     /// A test home's local model (`local_model`): `models/bge-m3/stub` holds its load's delay
-    /// in ms, `fail` or `nan`; each load adds a line to `stub-loads` beside it.
+    /// in ms, `fail`, `nan`, or `gate` (the load waits until a file `go` is put beside it); each
+    /// load adds a line to `stub-loads` beside it.
     pub(crate) fn local_model(home: &std::path::Path) -> Option<crate::resident::Load> {
         let dir = super::local_dir(home);
         let how = std::fs::read_to_string(dir.join("stub")).ok()?;
@@ -426,6 +425,13 @@ pub(crate) mod stub {
                 "fail" => anyhow::bail!("the stub model does not load"),
                 "nan" => {
                     Ok(Box::new(|_: &str| Ok(vec![f32::NAN; super::DIM]))
+                        as crate::resident::Model)
+                }
+                "gate" => {
+                    while !dir.join("go").exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Ok(Box::new(|text: &str| Ok(vector(super::EMBEDDER, text)))
                         as crate::resident::Model)
                 }
                 ms => {
@@ -450,6 +456,8 @@ pub(crate) mod stub {
         std::fs::read_to_string(loads).map_or(0, |s| s.lines().count())
     }
 
+    /// The stub's vector for `text` under model `id`: each word adds one to the dimension its
+    /// hash picks, then the vector is scaled to unit length.
     pub(crate) fn vector(id: &str, text: &str) -> Vec<f32> {
         use sha2::{Digest, Sha256};
         let mut v = vec![0.0f32; super::DIM];

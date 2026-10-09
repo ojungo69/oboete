@@ -3847,10 +3847,6 @@ mod tests {
         assert_eq!(p.prompt("a", "why did that break?"), "");
     }
 
-    /// Task 8 Step 5 (spec 4.7, 4.8): an injection keeps what it showed as the session's shown
-    /// set, each claim with its body's fingerprint and whether its body or only its index line
-    /// came through; a resume keeps it, the next SessionStart replaces it, and `oboete inject`
-    /// keeps OpenCode's.
     /// Spec 4.3, D14: no hook loads the local model, whatever it injects: SessionStart, a prompt
     /// and a file read run on a home the local model embedded. The control: a search in this
     /// process loads it.
@@ -3904,6 +3900,10 @@ mod tests {
         }
     }
 
+    /// Task 8 Step 5 (spec 4.7, 4.8): an injection keeps what it showed as the session's shown
+    /// set, each claim with its body's fingerprint and whether its body or only its index line
+    /// came through; a resume keeps it, the next SessionStart replaces it, and `oboete inject`
+    /// keeps OpenCode's.
     #[test]
     fn session_start_keeps_the_claims_it_showed() {
         const DAY: i64 = 86_400_000;

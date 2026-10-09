@@ -5366,11 +5366,14 @@ mod tests {
     /// its vector, which leaves no machine (D13).
     #[test]
     fn a_query_while_the_model_loads_answers_from_full_text() {
-        let mut s = local_store("300");
+        let mut s = local_store("0");
         let home = s.home.path();
+        // The reader's load waits for `go`, so no machine finishes it before the first search.
+        crate::embed::stub::local(home, "gate");
         let first = query(home, &q("parser caches")).unwrap();
         assert_eq!(first.vector, Vector::Skipped(VectorSkip::Loading));
         assert!(!first.hits.is_empty());
+        std::fs::write(crate::embed::local_dir(home).join("go"), "").unwrap();
         let t = Instant::now();
         let used = loop {
             let a = query(home, &q("parser caches")).unwrap();
