@@ -1,0 +1,21 @@
+.github/workflows/local-embed.yml
+  s_ad0ac4d9af0473::t_4f266ee6b02251 68-69,76
+docs/spike/local-embeddings.md
+  s_ad0ac4d9af0473::t_39fb9a28a85278 7-8,35-74,77-83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1968863120b0088f7f3a15c26281bb421b585f70",
+  "prompts": {},
+  "sessions": {
+    "s_ad0ac4d9af0473": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "55f3d823-9d62-4fd7-a50c-4f022fc3c6bb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
