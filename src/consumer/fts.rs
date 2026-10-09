@@ -1,7 +1,8 @@
 //! The none tier's search (docs/milestone-2-plan.md Task 6): every event's text in an FTS5 trigram
-//! index in knowledge.db, `raw_fts`, with its (device, seq) and labels in `raw_docs`.
+//! index in knowledge.db, `raw_fts`, with its (device, seq) and labels in `raw_docs`. The index
+//! keeps no copy of the text (#317): a reader reads it back from raw.db (`texts`).
 
-use crate::raw::{Item, Raw, Record, Target};
+use crate::raw::{Item, Raw, Target};
 use crate::worker::Consumer;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -18,7 +19,10 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            kind TEXT NOT NULL, ts INTEGER NOT NULL, repo TEXT, session TEXT,
            UNIQUE (device, seq)
          );
-         CREATE VIRTUAL TABLE IF NOT EXISTS raw_fts USING fts5(text, tokenize='trigram');
+         -- Contentless (#317): the text is raw.db's. A home made before keeps its copy until
+         -- `oboete rebuild` makes knowledge.db again; nothing reads it.
+         CREATE VIRTUAL TABLE IF NOT EXISTS raw_fts
+           USING fts5(text, tokenize='trigram', content='', contentless_delete=1);
          -- The repositories each session touched: derived, so a rewind cannot leave one behind.
          CREATE VIEW IF NOT EXISTS session_repos AS
            SELECT DISTINCT session, repo FROM raw_docs WHERE repo IS NOT NULL;",
@@ -45,6 +49,61 @@ pub(crate) fn text(body: &str) -> String {
         }
         _ => body.to_owned(),
     }
+}
+
+/// The text `raw_fts` indexed for `device`'s records at `seqs`, read back from raw.db as
+/// `Raw::after` returns them now (masked, D8), in seq order; one that is no event now is left out.
+pub(crate) fn texts(raw: &Raw, device: &str, seqs: &[i64]) -> Result<Vec<(i64, String)>> {
+    Ok(raw
+        .at(device, seqs)?
+        .into_iter()
+        .filter_map(|r| match r.item {
+            Item::Event(e) => Some((r.seq, text(&e.body))),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Of `device`'s records at `seqs`, in seq order, those whose text holds every word as SQLite's
+/// `LIKE '%word%'` finds it (ASCII letters in either case). A body that cannot hold one is not
+/// parsed: with no `\u` escape in it, a character JSON writes as itself (none of `"`, `\`, `/` or
+/// a control character) is in the body as itself.
+pub(crate) fn holding(raw: &Raw, device: &str, seqs: &[i64], words: &[&str]) -> Result<Vec<i64>> {
+    let words: Vec<String> = words.iter().map(|w| w.to_ascii_lowercase()).collect();
+    // A word with no ASCII letter is found in a text as it is: no lowercase copy of each body.
+    let fold = words
+        .iter()
+        .any(|w| w.bytes().any(|b| b.is_ascii_alphabetic()));
+    let plain = |w: &str| {
+        !w.chars()
+            .any(|c| matches!(c, '"' | '\\' | '/') || c.is_control())
+    };
+    Ok(raw
+        .at(device, seqs)?
+        .into_iter()
+        .filter_map(|r| {
+            let Item::Event(e) = r.item else {
+                return None;
+            };
+            let lower;
+            let body = if fold {
+                lower = e.body.to_ascii_lowercase();
+                &lower
+            } else {
+                &e.body
+            };
+            if !body.contains("\\u") && words.iter().any(|w| plain(w) && !body.contains(w.as_str()))
+            {
+                return None;
+            }
+            let mut text = text(&e.body);
+            text.make_ascii_lowercase();
+            words
+                .iter()
+                .all(|w| text.contains(w.as_str()))
+                .then_some(r.seq)
+        })
+        .collect())
 }
 
 /// Q4: index the stored card fields, without the reader's current gate. Called by the cards
@@ -118,25 +177,18 @@ fn reindex(raw: &Raw, k: &Connection, device: &str, seq: i64) -> Result<()> {
         return Ok(());
     };
     k.execute("DELETE FROM raw_fts WHERE rowid = ?1", [rowid])?;
-    match raw
-        .after(device, seq - 1, 1)?
-        .into_iter()
-        .find(|r| r.seq == seq)
-    {
-        Some(Record {
-            item: Item::Event(e),
-            ..
-        }) => {
+    match texts(raw, device, &[seq])?.pop() {
+        Some((_, text)) => {
             k.execute(
                 "INSERT INTO raw_fts(rowid, text) VALUES(?1, ?2)",
-                params![rowid, text(&e.body)],
+                params![rowid, text],
             )?;
         }
-        _ => {
+        None => {
             k.execute("DELETE FROM raw_docs WHERE rowid = ?1", [rowid])?;
         }
     }
-    crate::embed_phase::touched(k, "r", &format!("{device}:{seq}"))
+    crate::embed_phase::touched(Some(raw), k, "r", &format!("{device}:{seq}"))
 }
 
 impl Consumer for Fts {
@@ -186,7 +238,8 @@ impl Consumer for Fts {
             params![device, to],
         )?;
         for seq in seqs {
-            crate::embed_phase::touched(k, "r", &format!("{device}:{seq}"))?;
+            // Its row is gone: no text is read.
+            crate::embed_phase::touched(None, k, "r", &format!("{device}:{seq}"))?;
         }
         Ok(())
     }

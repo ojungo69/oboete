@@ -486,7 +486,7 @@ fn activate(k: &Connection, uid: &str) -> Result<()> {
     }
     let Some((op_device, op_seq, text)) = active else {
         k.execute("DELETE FROM claims WHERE uid = ?1", [uid])?;
-        return crate::embed_phase::touched(k, "c", uid);
+        return crate::embed_phase::touched(None, k, "c", uid);
     };
     let rowid: i64 = k.query_row(
         "INSERT INTO claims(uid, op_device, op_seq) VALUES(?1, ?2, ?3)
@@ -499,7 +499,7 @@ fn activate(k: &Connection, uid: &str) -> Result<()> {
         "INSERT INTO claims_fts(rowid, text) VALUES(?1, ?2)",
         params![rowid, text],
     )?;
-    crate::embed_phase::touched(k, "c", uid)
+    crate::embed_phase::touched(None, k, "c", uid)
 }
 
 #[cfg(test)]

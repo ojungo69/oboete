@@ -231,6 +231,7 @@ The user settings in 1.5 change what is recorded: capture exclusion per repo or 
 - Each event stores: device, agent, session, repo (origin URL key), branch, HEAD SHA and worktree gitdir, time.
 - Tool outputs are kept in full (today the hook keeps 8,000 characters, src/hook.rs:15, and the summarizer input cuts them to 600, src/observe.rs:235). A single output over about 256 KB keeps head and tail, with an explicit marker and its original size. Capture detail (prompts stored or not, tool output full or head+tail) is a user setting (1.5).
 - Records are compressed per record and kept forever by default; the retention period is a user setting (1.5). Estimate: a few hundred MB to 1 GB per year, to be measured.
+- knowledge.db's full-text index of the records grows with them: about 2.2 GB a month at the owner's rate of September 2026, measured on a copy of the owner's home, once `raw_fts` keeps no copy of the text (3.17 GB with the copy; #317, docs/spike/raw-index-copy.md). raw.db held the same month in 359 MB, above the estimate in the line before. A ceiling for the index comes with #317's second step, how much of each tool output it keeps, decided after a measurement shown to the owner.
 - A zstd dictionary on top of the per-record compression is kept only if it saves 20% or more (RD/constraints-synthesis.md S1-4) (Claude; overrulable). It is kept or dropped by comparing per-record compression with dictionary compression on a real raw.db after a week of dogfooding (RD/constraints-synthesis.md:75).
 
 ### 2.5 Durability and write failures

@@ -113,14 +113,8 @@ fn query_clauses(query: &str, fts: &str, like: &[&str]) -> Option<QueryClauses> 
     let mut clauses: Vec<String> = Vec::new();
     let mut args: Vec<Value> = Vec::new();
     if !grams.is_empty() {
-        // Each trigram as an FTS5 string (quotes doubled), ORed.
-        let q = grams
-            .iter()
-            .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(" OR ");
         clauses.push(format!("{fts} MATCH ?"));
-        args.push(Value::Text(q));
+        args.push(Value::Text(matching(&grams)));
     }
     let mut short_clauses = Vec::new();
     let mut short_args = Vec::new();
@@ -151,6 +145,15 @@ fn query_clauses(query: &str, fts: &str, like: &[&str]) -> Option<QueryClauses> 
         )
     };
     Some((clauses, args, order, order_args))
+}
+
+/// Each trigram as an FTS5 string (quotes doubled), ORed.
+fn matching(grams: &[String]) -> String {
+    grams
+        .iter()
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 /// `as i64` would wrap a huge `--limit` negative, which SQLite reads as "no limit".
@@ -186,7 +189,16 @@ pub fn raw(
         None
     };
     let k = crate::knowledge::open(home)?;
-    let keys = raw_order(raw.as_ref(), &k, query, repo, (None, None), None, limit)?;
+    let keys = raw_order(
+        raw.as_ref(),
+        &k,
+        query,
+        repo,
+        (None, None),
+        None,
+        None,
+        limit,
+    )?;
     raw_rows(raw.as_ref(), &k, &keys, query)
 }
 
@@ -212,10 +224,13 @@ fn within(
 /// [`search`] searches v1's: trigrams ORed and ranked by bm25, or literal terms (all required)
 /// for a query too short for a trigram. `repo = None` searches every repository; `span` is
 /// `within`'s; `skip_session`, an evaluation's, leaves that session's records out (one with no
-/// session stays). `raw` is `None` for a home with no raw.db. The records come as keys
-/// (`device:seq`), the best first, through the tombstone filter, with no text read: `raw_rows`
-/// reads them and gates their snippets, after a search's query call is back (Task 5), with the
-/// rules of that moment.
+/// session stays); `kind`, a clause on `d.kind` with its arguments, keeps those kinds alone (Q5,
+/// before the limit). `raw` is `None` for a home with no raw.db. The records come as keys
+/// (`device:seq`), the best first, through the tombstone filter: `raw_rows` reads them and gates
+/// their snippets, after a search's query call is back (Task 5), with the rules of that moment.
+/// The index keeps no copy of the text (#317): the words too short for a trigram are looked for
+/// in each record's text as raw.db holds it now (`fts::texts`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn raw_order(
     raw: Option<&crate::raw::Raw>,
     k: &Connection,
@@ -223,14 +238,20 @@ pub(crate) fn raw_order(
     repo: Option<&str>,
     span: (Option<i64>, Option<i64>),
     skip_session: Option<&str>,
+    kind: Option<(String, Vec<Value>)>,
     limit: usize,
 ) -> Result<Vec<String>> {
     crate::consumer::fts::schema(k)?;
-    let Some((mut clauses, mut args, order, order_args)) =
-        query_clauses(query, "raw_fts", &["f.text"])
-    else {
-        return Ok(Vec::new());
+    let grams = trigrams(query);
+    let short: Vec<&str> = if grams.is_empty() {
+        query.split_whitespace().collect()
+    } else {
+        short_words(query)
     };
+    if grams.is_empty() && short.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (mut clauses, mut args) = (vec!["1".to_owned()], Vec::new());
     if let Some(r) = repo {
         clauses.push("d.repo = ?".into());
         args.push(Value::Text(r.to_string()));
@@ -240,49 +261,22 @@ pub(crate) fn raw_order(
         clauses.push("COALESCE(d.session, '') <> ?".into());
         args.push(Value::Text(s.to_owned()));
     }
+    if let Some((clause, values)) = kind {
+        clauses.push(clause);
+        args.extend(values);
+    }
     let raw_db = fts_seen(raw, k)?;
     let before = hidden(&raw_db)?.len();
     // Enough rows that the hidden ones cannot take the place of visible ones.
     let rows = limit.saturating_add(before);
-    let query = |sql: &str, args: Vec<Value>| -> Result<Vec<(String, i64)>> {
-        Ok(k.prepare(sql)?
-            .query_map(params_from_iter(args), |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<_, _>>()?)
-    };
-    let hits = "raw_fts f JOIN raw_docs d ON d.rowid = f.rowid";
-    let rows = if order_args.is_empty() {
-        args.push(Value::Integer(sql_limit(rows)));
-        let sql = format!(
-            "SELECT d.device, d.seq FROM {hits} WHERE {} ORDER BY {order}d.ts DESC LIMIT ?",
-            clauses.join(" AND ")
-        );
-        query(&sql, args)?
-    } else {
-        // The short words reorder the best `POOL` rows; `f` names them for `order`. A hit below
-        // them keeps its place, however many are asked for (Codex on #360).
-        let mut pool = args.clone();
-        pool.push(Value::Integer(sql_limit(POOL)));
-        pool.extend(order_args);
-        pool.push(Value::Integer(sql_limit(rows.min(POOL))));
-        let sql = format!(
-            "SELECT device, seq FROM (
-               SELECT d.device, d.seq, d.ts, f.text, f.rank FROM {hits}
-               WHERE {} ORDER BY rank, d.ts DESC, d.rowid LIMIT ?
-             ) f ORDER BY {order}ts DESC LIMIT ?",
-            clauses.join(" AND ")
-        );
-        let mut found = query(&sql, pool)?;
-        if rows > POOL {
-            args.push(Value::Integer(sql_limit(rows - POOL)));
-            args.push(Value::Integer(sql_limit(POOL)));
-            let sql = format!(
-                "SELECT d.device, d.seq FROM {hits}
-                 WHERE {} ORDER BY rank, d.ts DESC, d.rowid LIMIT ? OFFSET ?",
-                clauses.join(" AND ")
-            );
-            found.extend(query(&sql, args)?);
+    let rows = match raw {
+        _ if !grams.is_empty() => {
+            clauses.push("raw_fts MATCH ?".into());
+            args.push(Value::Text(matching(&grams)));
+            ranked(raw, k, &short, &clauses.join(" AND "), args, rows)?
         }
-        found
+        Some(raw) => holding_every(raw, k, &short, &clauses.join(" AND "), args, rows)?,
+        None => Vec::new(),
     };
     let pending = hidden(&raw_db)?;
     Ok(rows
@@ -291,6 +285,104 @@ pub(crate) fn raw_order(
         .take(limit)
         .map(|(device, seq)| format!("{device}:{seq}"))
         .collect())
+}
+
+/// The trigram hits `filter` keeps, at most `rows`, by rank. Short words in the query (同期, M5)
+/// reorder the best `POOL`: the ones whose text holds more of them first. A hit below them keeps
+/// its place, however many are asked for (Codex on #360).
+fn ranked(
+    raw: Option<&crate::raw::Raw>,
+    k: &Connection,
+    short: &[&str],
+    filter: &str,
+    mut args: Vec<Value>,
+    rows: usize,
+) -> Result<Vec<(String, i64)>> {
+    let query = |sql: &str, args: Vec<Value>| -> Result<Vec<(String, i64)>> {
+        Ok(k.prepare(sql)?
+            .query_map(params_from_iter(args), |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?)
+    };
+    let sql = format!(
+        "SELECT d.device, d.seq FROM raw_fts f JOIN raw_docs d ON d.rowid = f.rowid
+         WHERE {filter} ORDER BY rank, d.ts DESC, d.rowid LIMIT ? OFFSET ?"
+    );
+    let (Some(raw), false) = (raw, short.is_empty()) else {
+        args.extend([Value::Integer(sql_limit(rows)), Value::Integer(0)]);
+        return query(&sql, args);
+    };
+    let mut pool = args.clone();
+    pool.extend([Value::Integer(sql_limit(POOL)), Value::Integer(0)]);
+    let mut found = query(&sql, pool)?;
+    // As SQLite's `LIKE '%word%'` finds a word: ASCII letters in either case.
+    let short: Vec<String> = short.iter().map(|w| w.to_ascii_lowercase()).collect();
+    let mut held = std::collections::HashMap::new();
+    for (device, seqs) in by_device(&found) {
+        for (seq, mut text) in crate::consumer::fts::texts(raw, device, &seqs)? {
+            text.make_ascii_lowercase();
+            let n = short.iter().filter(|w| text.contains(w.as_str())).count();
+            held.insert((device.to_owned(), seq), n);
+        }
+    }
+    // Stable: within a count, the pool's order (rank, then the newest).
+    found.sort_by_key(|key| std::cmp::Reverse(held.get(key).copied().unwrap_or(0)));
+    found.truncate(rows.min(POOL));
+    if rows > POOL {
+        args.extend([
+            Value::Integer(sql_limit(rows - POOL)),
+            Value::Integer(sql_limit(POOL)),
+        ]);
+        found.extend(query(&sql, args)?);
+    }
+    Ok(found)
+}
+
+/// A query with no trigram: the newest records `filter` keeps whose text holds every word, at
+/// most `rows`, each page of them read back from raw.db until enough are found.
+fn holding_every(
+    raw: &crate::raw::Raw,
+    k: &Connection,
+    words: &[&str],
+    filter: &str,
+    args: Vec<Value>,
+    rows: usize,
+) -> Result<Vec<(String, i64)>> {
+    const PAGE: usize = 256;
+    let mut st = k.prepare(&format!(
+        "SELECT d.device, d.seq FROM raw_docs d WHERE {filter} ORDER BY d.ts DESC, d.rowid"
+    ))?;
+    let mut keys = st.query_map(params_from_iter(args), |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let mut found = Vec::new();
+    while found.len() < rows {
+        let page = keys
+            .by_ref()
+            .take(PAGE)
+            .collect::<rusqlite::Result<Vec<(String, i64)>>>()?;
+        if page.is_empty() {
+            break;
+        }
+        let mut held = std::collections::HashSet::new();
+        for (device, seqs) in by_device(&page) {
+            for seq in crate::consumer::fts::holding(raw, device, &seqs, words)? {
+                held.insert((device.to_owned(), seq));
+            }
+        }
+        found.extend(page.into_iter().filter(|key| held.contains(key)));
+    }
+    found.truncate(rows);
+    Ok(found)
+}
+
+/// `keys`' seqs by device, each device once, in the order it first comes.
+fn by_device(keys: &[(String, i64)]) -> Vec<(&str, Vec<i64>)> {
+    let mut out: Vec<(&str, Vec<i64>)> = Vec::new();
+    for (device, seq) in keys {
+        match out.iter_mut().find(|(d, _)| d == device) {
+            Some((_, seqs)) => seqs.push(*seq),
+            None => out.push((device, vec![*seq])),
+        }
+    }
+    out
 }
 
 /// D8: a tombstone the index has not reached yet hides its target, so no search shows what raw
@@ -327,8 +419,9 @@ fn hidden(seen: &Seen) -> Result<std::collections::HashSet<(String, i64)>> {
     Ok(out)
 }
 
-/// The raw hits `keys` (`device:seq`) name, in their order, read from the index through the
-/// tombstones past it, each snippet gated (the egress rules of now) before it is cut.
+/// The raw hits `keys` (`device:seq`) name, in their order, their text read from raw.db as it is
+/// now (#317) and any hidden by a tombstone past the index left out, each snippet gated (the
+/// egress rules of now) before it is cut.
 pub(crate) fn raw_rows(
     raw: Option<&crate::raw::Raw>,
     k: &Connection,
@@ -343,10 +436,15 @@ pub(crate) fn raw_rows(
             continue;
         };
         let seq: i64 = seq.parse()?;
+        let Some(raw) = raw else {
+            continue;
+        };
+        let Some((_, text)) = crate::consumer::fts::texts(raw, device, &[seq])?.pop() else {
+            continue;
+        };
         let row = k
             .query_row(
-                "SELECT d.kind, d.ts, d.repo, f.text FROM raw_docs d JOIN raw_fts f ON f.rowid = d.rowid
-                 WHERE d.device = ?1 AND d.seq = ?2",
+                "SELECT kind, ts, repo FROM raw_docs WHERE device = ?1 AND seq = ?2",
                 params![device, seq],
                 |r| {
                     Ok(RawHit {
@@ -355,11 +453,7 @@ pub(crate) fn raw_rows(
                         kind: r.get(0)?,
                         ts: r.get(1)?,
                         repo: r.get(2)?,
-                        snippet: snippet(
-                            &crate::redact::outbound_lines(&r.get::<_, String>(3)?),
-                            &terms,
-                            b::WIDTH,
-                        ),
+                        snippet: snippet(&crate::redact::outbound_lines(&text), &terms, b::WIDTH),
                     })
                 },
             )
@@ -671,6 +765,49 @@ mod tests {
     fn a_short_word_ends_at_punctuation() {
         assert_eq!(found(&["設計 worker", "worker"], "worker"), [2, 1]);
         assert_eq!(found(&["設計 worker", "worker"], "worker、設計。"), [1, 2]);
+    }
+
+    /// A query of short words alone looks for them in the text raw.db holds now (#317): written
+    /// as a `\u` escape too, ASCII letters in either case, never in a key, never under a mask.
+    #[test]
+    fn a_short_word_is_found_in_the_text_raw_db_holds_now() {
+        let none = Vec::<i64>::new();
+        assert_eq!(
+            found(&[r#"{"prompt":"\u8a2d\u8a08を見直す"}"#, "worker"], "設計"),
+            [1]
+        );
+        assert_eq!(found(&["the M5 plan", "worker"], "m5"), [1]);
+        assert_eq!(found(&["the m5 plan", "worker"], "M5"), [1]);
+        assert_eq!(found(&[r#"{"設計":"worker"}"#], "設計"), none);
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut store = crate::raw::open(p).unwrap();
+        let seq = store.append(&crate::raw::test_event("M5 plan")).unwrap();
+        crate::worker::run_once(p).unwrap();
+        assert_eq!(raw_search(p, "M5", None).len(), 1);
+        let device = store.device().to_owned();
+        store
+            .append_tombstone(crate::raw::Target::Range {
+                device,
+                seq,
+                offset: 0,
+                length: 2,
+            })
+            .unwrap();
+        assert!(raw_search(p, "M5", None).is_empty());
+        crate::worker::run_once(p).unwrap();
+        assert!(raw_search(p, "M5", None).is_empty());
+        assert_eq!(raw_search(p, "plan", None).len(), 1);
+    }
+
+    /// A query of short words alone reads the records a page at a time, the newest first, until
+    /// it has enough: one past the first page is found.
+    #[test]
+    fn a_short_word_is_found_past_the_first_page() {
+        let mut bodies = vec!["worker"; 300];
+        bodies[0] = "設計 old";
+        bodies[299] = "設計 new";
+        assert_eq!(found(&bodies, "設計"), [300, 1]);
     }
 
     /// The short words that count are few and counted once: a pasted page is still one query
