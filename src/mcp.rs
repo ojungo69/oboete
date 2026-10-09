@@ -308,9 +308,7 @@ impl Oboete {
         };
         let (repo, settings) = self.checkout()?;
         let (list, fields) = crate::capture::work_state(&list, &a.fields, &settings);
-        // Checked again as it is stored: a name or a key that was only a private block is
-        // empty now (Codex on #408).
-        let list = match crate::work_state::check(&list, &fields) {
+        let list = match crate::work_state::stored(&list, &a.fields, &fields) {
             Ok(list) => list,
             Err(m) => return failed(m),
         };
@@ -345,8 +343,15 @@ impl Oboete {
             None => None,
         };
         let (repo, settings) = self.checkout()?;
-        // Named as it was stored: through the gate its writes passed.
+        // Named as it was stored: through the gate its writes passed, and refused as a write's is
+        // when that leaves it empty (a name that was only a private block: Codex on #408).
         let list = list.map(|l| crate::capture::work_state(&l, &Default::default(), &settings).0);
+        if list.as_deref().is_some_and(|l| l.trim().is_empty()) {
+            return failed(format!(
+                "list must be 1 to {} characters",
+                crate::work_state::MAX_LIST
+            ));
+        }
         let entries = match crate::raw::read_only(&self.home).map_err(internal)? {
             Some(raw) => crate::raw::work_state_in(&raw.conn, &repo).map_err(internal)?,
             None => Vec::new(),
@@ -1732,6 +1737,44 @@ mod tests {
             .unwrap();
         assert_eq!(long.is_error, Some(true));
         assert!(!body(long).contains("lll"));
+    }
+
+    /// Codex and CodeRabbit on #408: a write is checked again as it is stored only where the
+    /// gate can empty it (a name, a key, a task that was only a private block), and a read of a
+    /// name that is only a private block is refused as a write's is; a mask longer than what it
+    /// hides never refuses a write that was within its size.
+    #[test]
+    fn a_write_emptied_by_the_gate_is_refused_and_one_lengthened_is_not() {
+        let s = Store::new();
+        let server = Oboete::new(s.home.path(), &checkout(&s, "r"));
+        let task = write_state(
+            &server,
+            "release",
+            json!({"task": "<private>secret</private>", "status": "done"}),
+        );
+        assert_eq!(task.is_error, Some(true));
+        assert!(
+            s.raw
+                .work_state_entries("github.com/o/r")
+                .unwrap()
+                .is_empty()
+        );
+        let read = server
+            .work_state_read(Parameters(
+                serde_json::from_value(json!({"list": "<private>release</private>"})).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(read.is_error, Some(true));
+        std::fs::write(
+            s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"t\", regex = 'teal-[0-9]{4}' }]\n",
+        )
+        .unwrap();
+        // {"note":"…"} is 11 characters around the value: 2,000 as sent, 2,001 as stored.
+        let note = format!("{} teal-1234", "n".repeat(1_979));
+        let long = write_state(&server, "release", json!({ "note": note }));
+        let refused = long.is_error;
+        assert_eq!(refused, Some(false), "{}", body(long));
     }
 
     /// Codex on #408: a key a rule added later masks is still one key: the next write, stored

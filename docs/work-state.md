@@ -80,8 +80,10 @@ lists. There is no repository argument.
 L3. **Checks.** claude-mem's, with its limits; the 2,000 characters are counted as JavaScript
 counts them, in UTF-16 units of the fields as JSON, so a Japanese list claude-mem takes is taken
 here too. A write that fails a check is a tool error the model can act on (as `search`'s are), and
-nothing is written. The checks run again on what the capture gate leaves (L5): a name or a key that
-was only a private block is empty there and refused.
+nothing is written. What the capture gate leaves (L5) is checked again where the gate can empty it:
+a name, a key or a task that was only a private block is refused (an empty task would be the list's
+own state, and its `done` would close the list), and so is a read of such a name. The size is not
+checked again: a mask can be longer than what it hides, and the write was measured as it was sent.
 
 L4. **Store.** A write is one op of a new type, `work_state`, in raw.db's op log:
 `{repo, list, fields, clock}`. Not an event: events are a session's records, which curation
@@ -107,8 +109,9 @@ whole field matches it), and each value (a task's name and its status among them
 assignment `key = "value"`, which the rules that look for a key before a secret (gitleaks'
 generic-api-key) need. What any view hides is hidden where the lines show it, so no view's mask
 takes the context another view's rule needs (as search gates an imported document's title and
-body), and a key is hidden where the assignment's mask starts in it, found by position, since the
-masked text can spell the key again. Only then are the lines cut to their room; each shown line
+body). In the assignment, a mask is placed by its position, since the masked text can spell the
+key again: one that starts in the key or in the ` = "` after it hides the key and the value whole,
+as the capture gate does. Only then are the lines cut to their room; each shown line
 passes the gate once more, and the section's lines as a whole. A list, a task and a key are folded
 under their names as the gate shows them now, so a rule added later that masks one leaves one that
 a later write replaces or clears. A key shows as it was written with the value it holds, and a list

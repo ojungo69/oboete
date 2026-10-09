@@ -89,6 +89,36 @@ pub fn check(list: &str, fields: &Map<String, Value>) -> Result<String, String> 
     Ok(list)
 }
 
+/// A write as the capture gate stored it, checked again where the gate can have changed it: a
+/// name, a key or a task that was only a private block is empty now (Codex on #408). Not its size:
+/// a mask can be longer than what it hides, and the write was measured as it was sent (CodeRabbit
+/// on #408).
+pub fn stored(
+    list: &str,
+    sent: &Map<String, Value>,
+    fields: &Map<String, Value>,
+) -> Result<String, String> {
+    let list = list.trim();
+    if list.is_empty() {
+        return Err(format!("list must be 1 to {MAX_LIST} characters"));
+    }
+    if fields.is_empty() || fields.keys().any(|k| k.is_empty()) {
+        return Err(
+            "fields must map non-empty keys to strings, finite numbers, booleans or null".into(),
+        );
+    }
+    // An empty task is the list's own state: a task emptied would close the list (Codex on #408).
+    let named = |f: &Map<String, Value>| {
+        f.get("task")
+            .and_then(Value::as_str)
+            .is_some_and(|t| !t.is_empty())
+    };
+    if named(sent) && !named(fields) {
+        return Err("task must still name a task once its private blocks are removed".into());
+    }
+    Ok(list.to_owned())
+}
+
 /// JavaScript's `String(value)` of a field's value.
 pub(crate) fn text(v: &Value) -> String {
     match v {
@@ -339,19 +369,23 @@ impl Raw {
         }
         // A value in the assignment `key = "value"`, which the rules that look for a key before a
         // secret (gitleaks' generic-api-key) need and neither part matches alone: what its scan
-        // hides of the key and of the value is hidden where the line shows them, found by where
-        // it is in the assignment, since the masked text can spell the key again.
+        // hides of the value is hidden where the line shows it, found by where it is in the
+        // assignment, since the masked text can spell the key again. A mask that starts before
+        // the value, in the key or the ` = "` after it, hides the key and the value whole, as the
+        // capture gate does (`capture::Gate::both`; Codex on #408).
         for (key, at, value) in &self.pairs {
             let head = format!("{key} = \"");
             let probe = format!("{head}{}\"", &self.text[value.clone()]);
             let (h, v) = (head.len(), value.len());
             for (s, e) in redact::hidden(&probe, rules).unwrap_or(vec![(0, probe.len())]) {
-                if let Some(at) = at.as_ref().filter(|_| s < key.len()) {
-                    runs.push((at.start + s, at.start + e.min(key.len())));
+                if s < h {
+                    runs.extend(at.iter().map(|at| (at.start, at.end)));
+                    runs.push((value.start, value.end));
+                    continue;
                 }
-                let (s, e) = (s.max(h) - h, e.min(h + v).saturating_sub(h));
+                let e = e.min(h + v);
                 if s < e {
-                    runs.push((value.start + s, value.start + e));
+                    runs.push((value.start + s - h, value.start + e - h));
                 }
             }
         }
@@ -918,8 +952,14 @@ mod tests {
             0,
         )];
         let text = read(None, false, "r", &entries, 0, &spoof);
+        assert!(text.starts_with("- l: [REDACTED]=[REDACTED],"), "{text}");
+        // A mask that starts in the ` = "` between them hides the key and the value, as capture's
+        // does (Codex on #408).
+        let between = user(r#"{ id = "b", regex = 'phase( = ")teal-1234', secret_group = 1 }"#);
+        let entries = [entry("release", json!({"phase": "teal-1234"}), 0)];
+        let text = read(None, false, "r", &entries, 0, &between);
         assert!(
-            text.starts_with("- l: [REDACTED]=teal-1234 = \"private,"),
+            text.starts_with("- release: [REDACTED]=[REDACTED],"),
             "{text}"
         );
     }
