@@ -600,8 +600,10 @@ fn default_providers() -> Vec<Provider> {
         *timeout_s = 160;
     }
     // Anthropic's Messages API, before the subscriptions the owner codes with: the owner's account
-    // gets monthly credits (the owner, 2026-10-09). A machine without the key file skips it, as it
-    // skips every keyed entry. Haiku 5.5 is the cheaper Haiku with structured outputs; its thinking
+    // gets monthly credits (the owner, 2026-10-09). It is off until the user turns it on: a config
+    // that takes this chain would otherwise send to a new recipient, and spend, on upgrade
+    // (Codex's security review of #409). On, a machine without the key file skips it, as it skips
+    // every keyed entry. Haiku 5.5 is the cheaper Haiku with structured outputs; its thinking
     // counts against max_tokens, as nim's reasoning does, so it is off.
     let mut anthropic = openai(
         "anthropic",
@@ -612,8 +614,15 @@ fn default_providers() -> Vec<Provider> {
         true,
         serde_json::json!({"thinking": {"type": "disabled"}}),
     );
-    if let Provider::Openai { api, limits, .. } = &mut anthropic {
+    if let Provider::Openai {
+        api,
+        limits,
+        enabled,
+        ..
+    } = &mut anthropic
+    {
         *api = Api::Anthropic;
+        *enabled = false;
         // Prices of a prompt up to 100,000 tokens (platform.claude.com/docs/en/about-claude/pricing,
         // checked 2026-10-09); a longer one costs five times as much, so none is sent.
         limits.usd_per_mtok_in = 0.10;
@@ -1583,7 +1592,10 @@ model = { claude = "sonnet", groq = "openai/gpt-oss-20b" }
             .map(|p| p.name().to_owned())
             .collect();
         assert!(!called.contains(&"codex".to_owned()), "{called:?}");
-        assert_eq!(called.len(), default_providers().len() - 1);
+        // Nor the built-in entries that are off until turned on (anthropic).
+        let on = default_providers().iter().filter(|p| p.enabled()).count();
+        assert_eq!(called.len(), on - 1);
+        assert!(!called.contains(&"anthropic".to_owned()), "{called:?}");
         assert!(load(dir.path()).unwrap().chain.turns_off("codex"));
     }
 
@@ -2051,11 +2063,14 @@ model = { gone = "m" }
     }
 
     /// The owner, 2026-10-09: Anthropic's API right after OpenCode Go, priced, so it stays inside
-    /// the paid cap with every other paid entry.
+    /// the paid cap with every other paid entry. It is off until the user turns it on: a config
+    /// that takes the built-in chain would otherwise send to a new recipient on upgrade, which
+    /// `[chain] off` written before could not name (Codex's security review of #409).
     #[test]
     fn the_default_anthropic_entry_is_priced_and_speaks_messages() {
         let cfg: Config = toml::from_str("").unwrap();
         let p = find(&cfg, "anthropic");
+        assert!(!p.enabled());
         let Provider::Openai {
             api,
             base_url,

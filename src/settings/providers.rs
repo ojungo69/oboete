@@ -726,6 +726,8 @@ pub(super) fn preview(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
     };
     let input = f64::from(crate::provider::probe_estimate(&p)) * factor;
     let output = crate::budget::output_bound(&p);
+    // `p` is the probe, which sends no `cache_control`: its input is priced once, as the probe's
+    // reservation prices it (`Provider::input_weight`).
     let usd = p
         .limits()
         .is_paid()

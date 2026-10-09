@@ -2,7 +2,8 @@
 
 The owner, 2026-10-09: 「anthropicが毎月無料クレジットを配ってくれるので候補に入る」 (Anthropic gives the
 account monthly credits, so it belongs among the candidates). This note records what the entry
-(`api = "anthropic"` on a `kind = "openai"` entry, and `anthropic` in the default chain) rests on.
+(`api = "anthropic"` on a `kind = "openai"` entry, and `anthropic` in the default chain, off until
+the user turns it on) rests on.
 Every fact below was read on 2026-10-09 from Anthropic's own pages, named with each. No call was
 made to the API.
 
@@ -80,6 +81,11 @@ The Haiku 5.5 migration guide (https://platform.claude.com/docs/en/models/haiku-
   budget (`{"type": "enabled", "budget_tokens": N}`) must be less than `max_tokens`
   (https://platform.claude.com/docs/en/build-with-claude/extended-thinking), so where a paid
   entry's cap lowers `max_tokens` to its budget or below, the call goes without that thinking.
+  Haiku 5.5 itself refuses a manual budget with a 400 ("Configure thinking" in the migration guide):
+  its thinking is adaptive, and `output_config.effort` sets how much it thinks. oboete sends an
+  entry's `extra` as written, so an entry that sends a manual budget to it fails on every call; its
+  connection test, which sends no budget, does not show that. An entry's `output_config` in `extra`
+  joins the one that carries the schema, which it cannot replace.
 
 ## Errors and limits
 

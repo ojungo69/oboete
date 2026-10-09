@@ -3952,12 +3952,17 @@ function providerEditor(draft, provider, card) {
   api.dataset.field = 'providers.api';
   api.disabled = Boolean(unsupported);
   api.addEventListener('change', () => { draft.api = api.value; grid.syncOutput(); });
-  // An endpoint on Anthropic's own host preselects its API; the choice stays the user's.
+  // An endpoint that comes onto Anthropic's own host preselects its API; editing it there keeps
+  // the user's choice (CodeRabbit on #409).
+  const onAnthropic = () => /^https:\/\/api\.anthropic\.com(\/|$)/i.test(draft.base_url.trim());
+  let wasOnAnthropic = onAnthropic();
   endpoint?.querySelector('input').addEventListener('input', () => {
-    if (/^https:\/\/api\.anthropic\.com(\/|$)/i.test(draft.base_url.trim())) {
+    const now = onAnthropic();
+    if (now && !wasOnAnthropic) {
       api.value = draft.api = 'anthropic';
       grid.syncOutput();
     }
+    wasOnAnthropic = now;
   });
   const main = el('div', 'grid', field('name', 'provider_name'), endpoint,
     http ? el('label', 'field', el('span', null, t('provider_api')), api, note(t('provider_api_desc'))) : null,

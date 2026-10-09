@@ -666,6 +666,8 @@ assert.equal(select.value,'anthropic');
 assert.equal(apiUi.providerBody(draft).api,'anthropic','a save sends the choice');
 select.value='openai';for(const cb of select.listeners.change)cb({target:select});
 assert(!capShown(),'switching back hides the cap again');
+url.value='https://api.anthropic.com/v1/';for(const cb of url.listeners.input)cb({target:url});
+assert.equal(apiUi.providerBody(draft).api,'openai','editing the URL on the same host keeps a manual choice');
 url.value='https://example.invalid/v1';for(const cb of url.listeners.input)cb({target:url});
 assert.equal(apiUi.providerBody(draft).api,'openai','the user may still choose the other API');
 assert.equal(apiUi.providerEdit('b',{kind:'openai',api:'anthropic',limits:{}}).api,'anthropic','a saved choice is kept');

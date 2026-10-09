@@ -1678,6 +1678,14 @@ fn anthropic_request(
         "output_config": {"format": {"type": "json_schema", "schema": anthropic_schema(schema)}}
     });
     for (k, v) in extra {
+        // An entry's `output_config` (Haiku 5.5's `effort`) joins the one that carries the
+        // schema; its own `format` cannot replace the schema.
+        if let (true, Some(own)) = (k == "output_config", v.as_object()) {
+            for (key, value) in own.iter().filter(|(key, _)| *key != "format") {
+                body[k][key] = value.clone();
+            }
+            continue;
+        }
         body[k] = v.clone();
     }
     body
@@ -6979,7 +6987,12 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             *api = Api::Anthropic;
             extra.insert("thinking".into(), json!({"type": "disabled"}));
             extra.insert("metadata".into(), json!({"user_id": "private-canary"}));
+            extra.insert("cache_control".into(), json!({"type": "ephemeral"}));
         }
+        // The test writes no prompt cache, so it is priced at its input price once, as its
+        // preview shows (`settings::providers::preview`).
+        assert_eq!(p.input_weight(), 2.0);
+        assert_eq!(probe_provider(&p).unwrap().input_weight(), 1.0);
         let result = probe(&conn, &p, 5.0, &|| Ok(None)).unwrap();
         assert_eq!(
             (result["status"].as_str(), result["http_status"].as_u64()),
@@ -6996,6 +7009,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         );
         assert_eq!(body["thinking"], json!({"type": "disabled"}));
         assert!(body.get("metadata").is_none(), "{body}");
+        assert!(body.get("cache_control").is_none(), "{body}");
         assert_eq!(body["messages"][0]["content"], PROBE_PROMPT);
         // A budget of thinking cannot fit the test's 128 tokens: the test sends none.
         if let Provider::Openai { extra, .. } = &mut p {
@@ -7012,6 +7026,21 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             headers.insert("X-Api-Key".into(), "private-header-canary".into());
         }
         assert_eq!(probe_provider(&p).unwrap_err(), "unsafe_headers");
+    }
+
+    /// Haiku 5.5's thinking is adaptive and its depth is `output_config.effort`: an entry's own
+    /// `output_config` joins the one that carries the schema, which it cannot replace.
+    #[test]
+    fn a_messages_entrys_output_config_joins_the_schema() {
+        let extra = json!({"output_config": {"effort": "low", "format": {"type": "text"}}});
+        let body = anthropic_request(
+            "m",
+            "p",
+            &json!({"type": "object"}),
+            extra.as_object().unwrap(),
+        );
+        assert_eq!(body["output_config"]["effort"], "low");
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
     }
 
     /// ureq keeps an `x-api-key` header on a redirect: a Messages entry follows none, so its key
