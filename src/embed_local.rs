@@ -88,8 +88,23 @@ pub fn verify(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// ONNX Runtime's library, loaded once per process from `OBOETE_ORT` (the spike's second runtime:
+/// only a process that embeds loads it).
+fn runtime() -> Result<()> {
+    static LOADED: std::sync::OnceLock<std::result::Result<(), String>> = std::sync::OnceLock::new();
+    LOADED
+        .get_or_init(|| {
+            let path = std::env::var_os("OBOETE_ORT").ok_or("OBOETE_ORT names ONNX Runtime's library")?;
+            ort::init_from(path).map_err(|e| e.to_string())?.commit();
+            Ok(())
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
+}
+
 /// The model from `dir`'s files, with `threads` for ONNX Runtime (all the machine's when `None`).
 pub fn load(dir: &Path, threads: Option<usize>) -> Result<TextEmbedding> {
+    runtime()?;
     let read =
         |name: &str| std::fs::read(dir.join(name)).with_context(|| format!("reading {name}"));
     let tokenizer = TokenizerFiles {

@@ -142,12 +142,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
-
-[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -767,12 +761,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "hmac-sha256"
-version = "1.1.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ad320b3b96fb2a455a0726d16efe0a5afdbd34b71dea5bc53b05ea057714d4e"
-
-[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -982,6 +970,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libsqlite3-sys"
 version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1015,12 +1013,6 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
-
-[[package]]
-name = "lzma-rust2"
-version = "0.15.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e20f57f9918e5bd7bc58c22cdd70a6afc7375d4dd9683af5f2b34bd3d2bba619"
 
 [[package]]
 name = "macro_rules_attribute"
@@ -1162,6 +1154,7 @@ dependencies = [
  "getrandom 0.4.3",
  "httparse",
  "libc",
+ "ort",
  "percent-encoding",
  "regex",
  "rmcp",
@@ -1223,11 +1216,11 @@ version = "2.0.0-rc.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4336a1e2b38848325241c72889086886004e589b7c74f335e60a8e8db5138a0b"
 dependencies = [
+ "libloading",
  "ndarray",
  "ort-sys",
  "smallvec",
  "tracing",
- "ureq",
 ]
 
 [[package]]
@@ -1235,11 +1228,6 @@ name = "ort-sys"
 version = "2.0.0-rc.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf211e3776eea6aec988552fa118dd746d70e1b1e5e244058d1c98015f3e5872"
-dependencies = [
- "hmac-sha256",
- "lzma-rust2",
- "ureq",
-]
 
 [[package]]
 name = "paste"
@@ -1734,17 +1722,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891"
 
 [[package]]
-name = "socks"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0c3dbbd9ae980613c6dd8e28a9407b50509d3803b57624d5dfe8315218cd58b"
-dependencies = [
- "byteorder",
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "spm_precompiled"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2137,7 +2114,6 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
- "socks",
  "ureq-proto",
  "utf8-zero",
  "webpki-roots",
@@ -2278,22 +2254,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "winapi"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
-dependencies = [
- "winapi-i686-pc-windows-gnu",
- "winapi-x86_64-pc-windows-gnu",
-]
-
-[[package]]
-name = "winapi-i686-pc-windows-gnu"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
-
-[[package]]
 name = "winapi-util"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2301,12 +2261,6 @@ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "winapi-x86_64-pc-windows-gnu"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows-core"
