@@ -153,7 +153,7 @@ fn download(agent: &ureq::Agent, dir: &Path, artifact: &Artifact) -> Result<()> 
     let mut response = None;
     for _ in 0..=10 {
         let mut request = agent.get(&url);
-        if held.is_some() {
+        if offset > 0 {
             request = request.header("Range", format!("bytes={offset}-"));
         }
         let reply = request
@@ -422,12 +422,6 @@ fn check(path: &Path, artifact: &Artifact) -> Result<Metadata> {
     ensure!(
         format!("{:x}", hash.finalize()) == artifact.sha256,
         "{}: SHA-256 does not match the pin",
-        artifact.name
-    );
-    let after = file.metadata()?;
-    ensure!(
-        after.len() == metadata.len() && after.modified()? == metadata.modified()?,
-        "{} changed during verification",
         artifact.name
     );
     Ok(metadata)
@@ -699,13 +693,17 @@ mod tests {
         let part = dir.path().join(format!("{}.part", artifacts[0].name));
         fs::create_dir(part.parent().unwrap()).unwrap();
         fs::write(&part, b"he").unwrap();
-        let error = fetch_with(dir.path(), &artifacts, |_| Some(64 * 1024 * 1024 + 2)).unwrap_err();
+        let error = fetch_with(dir.path(), &artifacts, |_| Some(MARGIN + 2)).unwrap_err();
         assert_eq!(
             error.to_string(),
             "model download needs 67108867 bytes; 67108866 bytes available"
         );
         assert!(stub.requests().is_empty());
-        assert_eq!(fs::read(part).unwrap(), b"he");
+        assert_eq!(fs::read(&part).unwrap(), b"he");
+        // A file that verifies needs no space beyond the margin, and no request.
+        fs::write(dir.path().join(artifacts[0].name), b"hello").unwrap();
+        fetch_with(dir.path(), &artifacts, |_| Some(MARGIN)).unwrap();
+        assert!(stub.requests().is_empty());
     }
 
     #[cfg(windows)]
@@ -777,22 +775,6 @@ mod tests {
     }
 
     #[test]
-    fn the_space_check_counts_only_missing_bytes_and_the_margin() {
-        let dir = tempfile::tempdir().unwrap();
-        let artifacts = [artifact("http://127.0.0.1:1/model")];
-        let part = dir.path().join(format!("{}.part", artifacts[0].name));
-        fs::create_dir(part.parent().unwrap()).unwrap();
-        fs::write(&part, b"he").unwrap();
-        let error = fetch_with(dir.path(), &artifacts, |_| Some(67108866)).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "model download needs 67108867 bytes; 67108866 bytes available"
-        );
-        fs::write(dir.path().join(artifacts[0].name), b"hello").unwrap();
-        fetch_with(dir.path(), &artifacts, |_| Some(67108864)).unwrap();
-    }
-
-    #[test]
     fn an_insecure_or_credentialed_url_is_refused_before_io() {
         for url in [
             "http://example.com/model",
@@ -845,6 +827,20 @@ mod tests {
             fs::read(outside.path().join("model.onnx_data")).unwrap(),
             b"hello"
         );
+    }
+
+    /// Line H with `model_fetch` itself (docs/spike/local-embeddings.md): the five files from
+    /// huggingface.co into the directory `OBOETE_MODEL_FETCH` names, resuming any `.part` there,
+    /// then verified. By hand only: it downloads up to 2.3 GB.
+    #[test]
+    #[ignore]
+    fn fetches_bge_m3_from_huggingface() {
+        let dir =
+            std::env::var_os("OBOETE_MODEL_FETCH").expect("OBOETE_MODEL_FETCH names a directory");
+        let dir = Path::new(&dir);
+        fetch(dir, BGE_M3).unwrap();
+        verify(dir, BGE_M3).unwrap();
+        assert!(marker_ok(dir, BGE_M3));
     }
 
     #[test]
