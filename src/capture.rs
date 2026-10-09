@@ -326,6 +326,59 @@ pub fn directive(text: &str, ts: i64, settings: &Settings) -> Captured {
     c
 }
 
+/// A work state write's list name and fields (docs/work-state.md L5) through the same gate as
+/// every stored string, keys and values alike, a closed opt-out block taken out of each first (as
+/// labels). Its ledger is not kept: an op has none.
+pub fn work_state(
+    list: &str,
+    fields: &Map<String, Value>,
+    settings: &Settings,
+) -> (String, Map<String, Value>) {
+    let mut gate = Gate::new(settings);
+    // Every value beside its key, however long: the fields are at most 2,000 characters (L3).
+    gate.paired = usize::MAX;
+    let cap = gate.cap;
+    let list = gate.text("list", &without_blocks(list, false), cap);
+    let mut stored = Map::new();
+    for (k, v) in fields {
+        // A closing status (`done`, `dropped`) is one of two words, no recorded text: kept as
+        // sent, or a write meant to close a task or the list would leave it open where a rule
+        // masks the word. The line that shows it is gated as any is (Codex on #408).
+        if k == "status" && crate::work_state::closed(Some(v)) {
+            stored.insert(k.clone(), v.clone());
+            continue;
+        }
+        // A number or a boolean is text where it is shown: gated as that text, and kept as it is
+        // where the gate leaves it (Codex's security review of #408).
+        let (v, as_text) = match v {
+            Value::String(s) => (Value::String(without_blocks(s, false)), None),
+            Value::Number(_) | Value::Bool(_) => {
+                let text = crate::work_state::text(v);
+                (Value::String(text.clone()), Some((text, v)))
+            }
+            v => (v.clone(), None),
+        };
+        let one = Map::from_iter([(without_blocks(k, false), v)]);
+        let Value::Object(one) = gate.value("", Value::Object(one), cap) else {
+            continue;
+        };
+        for (key, v) in one {
+            // claude-mem's own keys name no recorded text: one a rule matches stays, or a task
+            // would fold as the list's state and a status as a field (Codex on #408).
+            let key = match k.as_str() {
+                "task" | "status" => k.clone(),
+                _ => key,
+            };
+            let v = match &as_text {
+                Some((text, was)) if v.as_str() == Some(text.as_str()) => (*was).clone(),
+                _ => v,
+            };
+            stored.insert(key, v);
+        }
+    }
+    (list, stored)
+}
+
 /// The one gate every stored string passes (spec 2.2): `redact::scan_capped` over its whole
 /// length (head and tail above the cap), each finding kept with the field it is in.
 struct Gate<'a> {
@@ -334,6 +387,8 @@ struct Gate<'a> {
     cap: usize,
     /// The cap of a tool's `/output`: `cap`, or `HEAD_TAIL_BYTES` by the settings.
     output_cap: usize,
+    /// The longest string value also scanned beside its key (`Gate::both`), in bytes.
+    paired: usize,
     ledger: Vec<(String, redact::Finding)>,
     /// The full size of the strings that were cut, when any was.
     cut: Option<i64>,
@@ -349,6 +404,7 @@ impl<'a> Gate<'a> {
                 crate::config::ToolOutput::Full => cap,
                 crate::config::ToolOutput::HeadTail => HEAD_TAIL_BYTES,
             },
+            paired: PAIRED,
             ledger: Vec::new(),
             cut: None,
         }
@@ -362,6 +418,45 @@ impl<'a> Gate<'a> {
         self.ledger
             .extend(found.into_iter().map(|f| (field.to_owned(), f)));
         stored
+    }
+
+    /// A string `value` beside its `key`, stored as the gate keeps it: scanned alone, as every
+    /// string is, and in the assignment `key = "value"`, which the rules that look for a key before
+    /// a secret (gitleaks' generic-api-key) need and neither part matches alone (Codex's security
+    /// review of #408). Both look at the value as written, so neither takes the context the other
+    /// needs; when both hide something, differently, or a mask reaches past the value, the value
+    /// is hidden whole, its findings at its start. A mask that reaches into the key hides the key
+    /// too (the second of the pair).
+    fn both(&mut self, field: &str, key: &str, value: &str, cap: usize) -> (String, bool) {
+        let mark = self.ledger.len();
+        let alone = self.text(field, value, cap);
+        let head = format!("{key} = \"");
+        let (masked, found) = redact::scan(&format!("{head}{value}\""), self.rules);
+        // Where the first mask starts tells whether a mask reaches into the key: the text before
+        // it is the pair's own, where the masked text as a whole can spell the key again (a key
+        // holding the mask's text: Codex's security review of #408).
+        let Some(first) = found.iter().map(|f| f.offset).min() else {
+            return (alone, false);
+        };
+        let reached = first < head.len();
+        let shown = (!reached)
+            .then(|| masked[head.len()..].strip_suffix('"'))
+            .flatten();
+        let (kept, offset) = match shown {
+            Some(v) if v == alone => return (alone, false),
+            Some(v) if alone == value => (v.to_owned(), head.len()),
+            _ => {
+                for (_, f) in &mut self.ledger[mark..] {
+                    f.offset = 0;
+                }
+                (redact::MASK.to_owned(), usize::MAX)
+            }
+        };
+        self.ledger.extend(found.into_iter().map(|f| {
+            let offset = f.offset.saturating_sub(offset);
+            (field.to_owned(), redact::Finding { offset, ..f })
+        }));
+        (kept, reached)
     }
 
     /// Every string and key of `v`, at its JSON pointer. Blocks are gone by now: stripping here
@@ -388,9 +483,26 @@ impl<'a> Gate<'a> {
                         };
                         // The pointer is built from the stored key, so it never holds a secret.
                         let key = self.text(&format!("{path}#key"), &k, self.cap);
-                        let child = format!("{path}/{}", segment(&key));
-                        let x = self.value(&child, x, cap);
-                        (key, x)
+                        match x {
+                            // Beside the key as written: a rule that masks the key itself leaves
+                            // the context generic-api-key needs, and a mask the pair puts on the
+                            // key hides it (Codex's security review of #408).
+                            Value::String(s) if s.len() <= self.paired => {
+                                let mark = self.ledger.len();
+                                let (x, hidden) = self.both("", &k, &s, cap);
+                                let key = if hidden { redact::MASK.to_owned() } else { key };
+                                let child = format!("{path}/{}", segment(&key));
+                                for (field, _) in &mut self.ledger[mark..] {
+                                    field.clone_from(&child);
+                                }
+                                (key, Value::String(x))
+                            }
+                            x => {
+                                let child = format!("{path}/{}", segment(&key));
+                                let x = self.value(&child, x, cap);
+                                (key, x)
+                            }
+                        }
                     })
                     .collect(),
             ),
@@ -398,6 +510,11 @@ impl<'a> Gate<'a> {
         }
     }
 }
+
+/// The longest string value of a captured event scanned beside its key too (`Gate::both`):
+/// gitleaks' generic-api-key takes a secret of at most 150 characters. A work state write's are
+/// scanned so whatever their length.
+const PAIRED: usize = 256;
 
 /// A key as one JSON pointer segment (`~0`, `~1` escaped). A key over 128 bytes is named by
 /// `~sha:` and the first 16 hex digits of its sha256 instead: thousands of findings under a huge
@@ -714,6 +831,97 @@ mod tests {
             end[0].ledger
         );
         assert!(!format!("{:?}", end[0]).contains(&key));
+    }
+
+    /// Codex's security review of #408: a rule that looks for a key before a secret (gitleaks'
+    /// generic-api-key) matches a string beside its key, the ledger offset in the stored string.
+    #[test]
+    fn a_value_is_scanned_with_its_key() {
+        let secret = format!("R8m2V5p9{}", "Q1s4H7c0N6x3");
+        let payload = json!({"reason": {"api_key": format!("  {secret}"), "note": "violet"}});
+        let v = events("claude", "SessionEnd", &payload, 0, &Settings::default());
+        assert!(!format!("{:?}", v[0]).contains(&secret), "{:?}", v[0]);
+        let (field, f) = &v[0].ledger[0];
+        assert_eq!((field.as_str(), f.offset), ("/reason/api_key", 2));
+        assert_eq!(body(&v[0].event)["reason"]["api_key"], "  [REDACTED]");
+        assert_eq!(body(&v[0].event)["reason"]["note"], "violet");
+        // A mask that reaches past the value masks the value whole, and one that reaches into the
+        // key the key too, its ledger pointer with it.
+        let s = with("[[redaction.extra_rules]]\nid = \"v\"\nregex = 'note = \"violet\"'\n");
+        let v = events("claude", "SessionEnd", &payload, 0, &s);
+        assert!(body(&v[0].event)["reason"].get("note").is_none());
+        assert_eq!(body(&v[0].event)["reason"]["[REDACTED]"], "[REDACTED]");
+        assert!(
+            v[0].ledger
+                .iter()
+                .any(|(field, f)| field == "/reason/[REDACTED]" && f.offset == 0)
+        );
+        // Each scan looks at the value as written: a rule anchored to the whole value still finds
+        // what follows the secret that generic-api-key masks beside its key, and the value two
+        // different masks hide is hidden whole.
+        let s = with(
+            "[[redaction.extra_rules]]\nid = \"t\"\nregex = '^[A-Za-z0-9]{20} (teal-[0-9]{4})$'\n\
+             secret_group = 1\n",
+        );
+        let payload = json!({"reason": {"api_key": format!("{secret} teal-1234")}});
+        let v = events("claude", "SessionEnd", &payload, 0, &s);
+        assert_eq!(body(&v[0].event)["reason"]["api_key"], "[REDACTED]");
+        assert!(v[0].ledger.len() >= 2 && v[0].ledger.iter().all(|(_, f)| f.offset == 0));
+        // A mask the pair puts on the key hides the key, its pointer in the ledger too.
+        let s = with(
+            "[[redaction.extra_rules]]\nid = \"p\"\nregex = '^(teal-[0-9]{4}) = \"private\"$'\n\
+             secret_group = 1\n",
+        );
+        let payload = json!({"reason": {"teal-1234": "private"}});
+        let v = events("claude", "SessionEnd", &payload, 0, &s);
+        assert!(!format!("{:?}", v[0]).contains("teal-1234"), "{:?}", v[0]);
+        assert!(body(&v[0].event)["reason"].get("[REDACTED]").is_some());
+        // Where the mask starts tells whether it reaches the key: the masked pair can spell the
+        // key again when the key holds the mask's own text (Codex's security review of #408).
+        let s = with(
+            "[[redaction.extra_rules]]\nid = \"s\"\n\
+             regex = '^(\\[REDACTED\\]teal-[0-9]{4} = \")teal-[0-9]{4} = \"private\"$'\n\
+             secret_group = 1\n",
+        );
+        let payload = json!({"reason": {"[REDACTED]teal-1234": "teal-1234 = \"private"}});
+        let v = events("claude", "SessionEnd", &payload, 0, &s);
+        assert_eq!(body(&v[0].event)["reason"]["[REDACTED]"], "[REDACTED]");
+        // A rule that masks the key leaves the value's scan beside the key as written.
+        let s = with("[[redaction.extra_rules]]\nid = \"k\"\nregex = '^api_key$'\n");
+        let payload = json!({"reason": {"api_key": secret.clone()}});
+        let v = events("claude", "SessionEnd", &payload, 0, &s);
+        assert!(!format!("{:?}", v[0]).contains(&secret), "{:?}", v[0]);
+        assert_eq!(body(&v[0].event)["reason"]["[REDACTED]"], "[REDACTED]");
+    }
+
+    /// Codex's security review of #408: a number or a boolean is gated as the text it shows as,
+    /// and kept as it is where the gate leaves that text.
+    #[test]
+    fn a_work_state_number_is_gated_as_its_text() {
+        let fields = json!({"authorization": 7_319_462_805u64, "pr": 7, "draft": true});
+        let (_, stored) = work_state("l", fields.as_object().unwrap(), &Settings::default());
+        let stored = Value::Object(stored);
+        assert!(!stored.to_string().contains("7319462805"), "{stored}");
+        assert_eq!((&stored["pr"], &stored["draft"]), (&json!(7), &json!(true)));
+    }
+
+    /// Codex on #408: claude-mem's keys stay where a rule matches them, their values gated, and a
+    /// closing status stays where a rule matches the word.
+    #[test]
+    fn a_work_state_write_keeps_task_and_status() {
+        let s = with(
+            "[[redaction.extra_rules]]\nid = \"k\"\nregex = '^(?:task|status|note)$'\n\n\
+             [[redaction.extra_rules]]\nid = \"v\"\nregex = 'teal-[0-9]{4}|(?i)done|wip'\n",
+        );
+        let fields = json!({"task": "teal-1234", "status": "Done", "note": "x"});
+        let (_, stored) = work_state("l", fields.as_object().unwrap(), &s);
+        assert_eq!(
+            Value::Object(stored),
+            json!({"task": "[REDACTED]", "status": "Done", "[REDACTED]": "x"})
+        );
+        let open = json!({"task": "t", "status": "wip"});
+        let (_, stored) = work_state("l", open.as_object().unwrap(), &s);
+        assert_eq!(stored["status"], "[REDACTED]");
     }
 
     #[test]

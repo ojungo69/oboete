@@ -6,6 +6,22 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// What a session start shows while there is no memory and nothing open: the work state
+/// section alone (docs/work-state.md L7).
+fn only_the_work_state_section(out: &[u8]) -> serde_json::Value {
+    let v: serde_json::Value = serde_json::from_slice(out).unwrap();
+    let context = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        context.starts_with("# Work state: your to-do lists and working state\n")
+            && context.ends_with("\n\nNothing open yet.")
+            && !context.contains("<oboete-memory>"),
+        "{context}"
+    );
+    v
+}
+
 fn hook_output(
     home: &std::path::Path,
     agent: &str,
@@ -42,8 +58,8 @@ fn session_start_note_says_in_japanese_that_there_is_no_memory_yet() {
     );
     assert!(out.status.success());
     assert_eq!(
-        String::from_utf8(out.stdout).unwrap(),
-        "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"\"},\"systemMessage\":\"oboete: 記録は有効です。このリポジトリには、まだ渡せる記憶がありません。画面を開くには oboete view --open\"}\n"
+        only_the_work_state_section(&out.stdout)["systemMessage"],
+        "oboete: 記録は有効です。このリポジトリには、まだ渡せる記憶がありません。画面を開くには oboete view --open"
     );
 }
 
@@ -69,7 +85,7 @@ fn session_start_note_reports_injection_off_in_japanese() {
 }
 
 #[test]
-fn session_start_note_can_be_disabled_without_changing_the_old_empty_output() {
+fn session_start_note_can_be_disabled_leaving_only_what_the_agent_gets() {
     let home = tempfile::tempdir().unwrap();
     for enabled in [true, false] {
         std::fs::write(
@@ -84,7 +100,12 @@ fn session_start_note_can_be_disabled_without_changing_the_old_empty_output() {
             r#"{"session_id":"s","source":"startup"}"#,
         );
         assert!(out.status.success());
-        assert_eq!(out.stdout, b"", "session_start = {enabled}");
+        if enabled {
+            let v = only_the_work_state_section(&out.stdout);
+            assert!(v.get("systemMessage").is_none(), "{v}");
+        } else {
+            assert_eq!(out.stdout, b"");
+        }
     }
 }
 
@@ -177,7 +198,7 @@ fn session_start_note_disabled_keeps_a_recording_failure_fail_open() {
 }
 
 #[test]
-fn session_start_note_keeps_replay_hooks_silent_without_memory() {
+fn session_start_note_is_never_in_a_replay() {
     let home = tempfile::tempdir().unwrap();
     let mut hook = Command::new(env!("CARGO_BIN_EXE_oboete"))
         .arg("--home")
@@ -196,7 +217,8 @@ fn session_start_note_keeps_replay_hooks_silent_without_memory() {
         .unwrap();
     let out = hook.wait_with_output().unwrap();
     assert!(out.status.success());
-    assert_eq!(out.stdout, b"");
+    let v = only_the_work_state_section(&out.stdout);
+    assert!(v.get("systemMessage").is_none(), "{v}");
 }
 
 #[test]

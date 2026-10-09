@@ -654,8 +654,9 @@ mod tests {
         assert_eq!(raw.after(raw.device(), 0, 10).unwrap().len(), 1);
     }
 
-    /// Milestone 4 Task 0, the read arms: before the consumers run, SessionStart shows nothing for
-    /// the checkout; once they are drained it shows the manifest, the replayed prompt with it.
+    /// Milestone 4 Task 0, the read arms: before the consumers run, SessionStart shows no memory
+    /// for the checkout, only the work state section; once they are drained it shows the manifest,
+    /// the replayed prompt with it.
     #[test]
     fn a_cold_read_shows_nothing_and_a_warm_one_shows_the_manifest() {
         let home = tempfile::tempdir().unwrap();
@@ -679,7 +680,10 @@ mod tests {
         )
         .unwrap();
         let (cold, chars) = read_in_process(home.path(), &root, 3);
-        assert_eq!((cold.len(), chars), (3, 0));
+        assert_eq!(
+            (cold.len(), chars),
+            (3, crate::work_state::nothing_open().chars().count())
+        );
         drop(crate::worker::drained(home.path(), false).unwrap());
         let (warm, chars) = read_in_process(home.path(), &root, 3);
         assert_eq!(warm.len(), 3);

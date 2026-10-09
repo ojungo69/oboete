@@ -1748,16 +1748,28 @@ impl Viewer {
             },
             Some(r) => (r.to_owned(), newest_branch(&self.home, r)?),
         };
-        let manifest = if crate::raw::exists(&self.home) {
-            let settings = crate::capture::Settings::load(&self.home)?;
-            let raw = crate::raw::open(&self.home)?;
-            let session = crate::hook::own_session("unknown".into(), &raw);
-            crate::hook::start_text_read(&self.home, &raw, &repo, &branch, &session, &settings)?
-                .map(|s| s.text)
+        // A home with no store yet shows what its first session start will: the work state
+        // section alone. The page creates no store.
+        let settings = crate::capture::Settings::load(&self.home)?;
+        let raw = if crate::raw::exists(&self.home) {
+            Some(crate::raw::open(&self.home)?)
         } else {
             None
         };
-        let text = crate::hook::joined(&self.home, manifest.as_deref());
+        let session = match &raw {
+            Some(raw) => crate::hook::own_session("unknown".into(), raw),
+            None => "unknown".into(),
+        };
+        let manifest = crate::hook::start_text_read(
+            &self.home,
+            raw.as_ref(),
+            &repo,
+            &branch,
+            &session,
+            &settings,
+            true,
+        )?;
+        let text = crate::hook::joined(&self.home, manifest.as_ref());
         Ok(json!({
             "repo": redact::outbound(&repo),
             "branch": redact::outbound(&branch),
@@ -4962,6 +4974,22 @@ curate = false
         let other = get(&v, "/api/context?repo=github.com%2Fx%2Fother");
         assert_eq!(other["repo"], "github.com/x/other");
         assert!(!other["text"].as_str().unwrap().contains("Parser"));
+    }
+
+    /// Codex on #408: the Context page of a home with no store yet shows what its first session
+    /// start will, the work state section alone, and makes no store.
+    #[test]
+    fn the_context_page_of_a_home_with_no_store_shows_the_work_state_section() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("r");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let v = Viewer {
+            token: Token::Run("t0k".into()),
+            ..Viewer::new(home.path(), Some(dir), 4321, Token::File)
+        };
+        let ctx = get(&v, "/api/context");
+        assert_eq!(ctx["text"], crate::work_state::nothing_open());
+        assert!(!crate::raw::exists(home.path()));
     }
 
     /// Codex's security review of Task 7: the Context page answers a manifest it cannot read

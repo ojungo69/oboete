@@ -599,7 +599,8 @@ mod tests {
     }
 
     /// D5: curation reads records and injection reads what curation made, so a home holding
-    /// only imported documents has nothing to curate and shows nothing.
+    /// only imported documents has nothing to curate and shows no memory, only the work state
+    /// section every session start has.
     #[test]
     fn imported_documents_are_never_curated_or_injected() {
         let dir = tempfile::tempdir().unwrap();
@@ -613,7 +614,10 @@ mod tests {
         drop(raw);
         crate::worker::run_once(dir.path()).unwrap();
         let cwd = dir.path().join("free-mem");
-        assert_eq!(hook::inject_text(dir.path(), &cwd, None), "");
+        assert_eq!(
+            hook::inject_text(dir.path(), &cwd, None),
+            crate::work_state::nothing_open()
+        );
     }
 
     /// Codex on #305: a second import on a home is refused while one runs.
