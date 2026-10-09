@@ -161,12 +161,20 @@ impl Reservation {
         // before it sent anything; any other call keeps it, as one may have been reserved before
         // the rest was written (Codex on #418).
         if !(current.uncredited && self.credits) {
-            if current.down_until > crate::db::now_ms() && current.down_until > updated.down_until {
-                updated.down_until = current.down_until;
-                updated.uncredited = current.uncredited;
-            }
+            // A rest that holds every entry outranks one an entry with credits passes: an
+            // uncredited rest kept here never takes the place of a credited one this call brings
+            // as long (a safety hold among them; Codex on #418).
+            let credited =
+                |s: &providers_db::State| !s.uncredited && s.down_until >= current.down_until;
             if current.down_until == providers_db::OWNER_HOLD {
+                let hold = credited(&updated);
                 updated = current;
+                updated.uncredited &= !hold;
+            } else if current.down_until > crate::db::now_ms()
+                && current.down_until >= updated.down_until
+            {
+                updated.uncredited = current.uncredited && !credited(&updated);
+                updated.down_until = current.down_until;
             }
         }
         if updated != current {
@@ -1280,8 +1288,8 @@ mod tests {
 
     /// A rest codex's allowance read set without credits gives way to a call that drew on them,
     /// timed or held; a call of any other entry of the name, which may have been reserved before
-    /// the rest was written, keeps it, as it keeps any other rest and an owner hold (Codex on
-    /// #418).
+    /// the rest was written, keeps it, as it keeps any other rest and an owner hold, but never in
+    /// place of a credited rest as long that the call brings (Codex on #418).
     #[test]
     fn an_uncredited_rest_gives_way_only_to_a_call_that_drew_on_credits() {
         use providers_db::{OWNER_HOLD, State};
@@ -1342,6 +1350,26 @@ mod tests {
                 rest(OWNER_HOLD, false),
                 credited,
                 rest(OWNER_HOLD, false),
+            ),
+            // A safety hold this call brings outranks an uncredited hold kept for it, and a
+            // credited rest as long as an uncredited one is the one kept, whichever was first.
+            (
+                &other,
+                rest(OWNER_HOLD, true),
+                rest(OWNER_HOLD, false),
+                rest(OWNER_HOLD, false),
+            ),
+            (
+                &other,
+                rest(later, true),
+                rest(later, false),
+                rest(later, false),
+            ),
+            (
+                &other,
+                rest(later, false),
+                rest(later, true),
+                rest(later, false),
             ),
         ] {
             let home = tempfile::tempdir().unwrap();
