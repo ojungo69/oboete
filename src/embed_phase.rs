@@ -593,12 +593,17 @@ impl Phase {
                 return Ok(Step::Idle);
             }
         };
+        let embedder = crate::embed::EMBEDDER;
         if rest > now {
             self.local = None;
+            // As while a Workers AI call waits, cached vectors are mapped and documents passed
+            // over are marked; only the model waits (Codex on #426).
+            if pending(raw, k, embedder, reading, rules, true)?.is_none() {
+                return Ok(Step::Idle);
+            }
             let up = rest - now <= crate::curate::STAY_UP_MS;
             return Ok(Step::Waiting { until: rest, up });
         }
-        let embedder = crate::embed::EMBEDDER;
         let loaded = self.local.as_ref().filter(|model| !model.gone()).cloned();
         // With no model yet, every kind is read, so its threshold counts the whole backlog.
         let mut seen = Seen::default();
@@ -4017,6 +4022,47 @@ mod tests {
         crate::embed::stub::local(&home, "0");
         embed_all(&s);
         assert_eq!(indexed_count(&k), 1);
+    }
+
+    /// Codex on #426: while the local model rests after a failure, cached vectors are still
+    /// mapped and no model is loaded, as while a Workers AI call waits.
+    #[test]
+    fn cached_vectors_are_mapped_while_the_local_model_rests() {
+        use crate::providers_db as pdb;
+        let mut s = Store::new();
+        s.imported("o1", "r", 1_000, "Notes", "Project notes.");
+        s.said("s", R, 2_000, "Words.");
+        s.run();
+        local(&s, "0");
+        embed_all(&s);
+        let home = s.home.path().to_owned();
+        let loads = crate::embed::stub::local_loads(&home);
+        // A new index over the cache, as after a rebuild, and a claim with no vector yet, while
+        // the model rests.
+        let k = crate::knowledge::open(&home).unwrap();
+        k.execute_batch("DELETE FROM vector_keys; DELETE FROM vec_index;")
+            .unwrap();
+        claim(
+            &mut s,
+            "Parser caches stay in Redis.",
+            "Parser caches go to Redis.",
+        );
+        s.run();
+        let rest = pdb::State {
+            down_until: crate::db::now_ms() + 60_000,
+            ..pdb::State::default()
+        };
+        pdb::set_state(&pdb::open(&home).unwrap(), LOCAL, rest).unwrap();
+        let step = Phase::new(&home).poll(&s.raw, &k).unwrap();
+        assert!(matches!(step, Step::Waiting { .. }), "{step:?}");
+        assert_eq!(crate::embed::stub::local_loads(&home), loads);
+        let mapped: Vec<String> = keys(&s)
+            .into_iter()
+            .filter(|(kind, _, why)| kind != "c" && why.is_none())
+            .map(|(kind, ..)| kind)
+            .collect();
+        assert_eq!(mapped, ["k", "r"]);
+        assert_eq!(indexed_count(&k), 2);
     }
 
     /// Task 10: the local model calls no Workers AI and reads no key, Workers AI's settings left

@@ -173,14 +173,22 @@ fn tar() -> PathBuf {
 }
 
 /// The archive at its pin (`fetch`), the one member written out by `tar -xOf`, which writes no
-/// path of the archive's own, held to the library's pin, and the archive removed.
+/// path of the archive's own, held to the library's pin, and the archive removed, all under one
+/// hold of the directory's lock: a second setup must not write the same `.part`, or remove the
+/// archive while this one reads it (Codex on #426).
 fn install(dir: &Path, runtime: &Runtime, tar: &Path) -> Result<()> {
+    allow_url(&runtime.archive.url.parse()?)?;
     fs::create_dir_all(dir)?;
+    let _lock = lock(dir)?;
     let library = plain_path(dir, runtime.library.name)?;
     if check(&library, &runtime.library).is_ok() {
         return Ok(());
     }
-    fetch(dir, std::slice::from_ref(&runtime.archive))?;
+    fetch_held(
+        dir,
+        std::slice::from_ref(&runtime.archive),
+        crate::failure::free_bytes,
+    )?;
     let archive = plain_path(dir, runtime.archive.name)?;
     let part = plain_path(dir, &format!("{}.part", runtime.library.name))?;
     let ran = Command::new(tar)
@@ -226,6 +234,15 @@ fn fetch_with(
     }
     fs::create_dir_all(dir)?;
     let _lock = lock(dir)?;
+    fetch_held(dir, artifacts, free)
+}
+
+/// `fetch_with` once its caller holds the directory's lock and has checked every URL.
+fn fetch_held(
+    dir: &Path,
+    artifacts: &[Artifact],
+    free: impl Fn(&Path) -> Option<u64>,
+) -> Result<()> {
     let mut pending = Vec::new();
     let mut needed = MARGIN;
     for artifact in artifacts {
@@ -1056,6 +1073,57 @@ mod tests {
         install(dir.path(), &runtime(sha(b"runtime")), &tar()).unwrap();
         // One download in all: the archive verified the second time, the library the last.
         assert_eq!(stub.requests().len(), 1);
+    }
+
+    /// Codex on #426: the lock is held while `tar` writes the library's `.part`, not only while
+    /// the archive downloads, so a second setup cannot write the same file meanwhile.
+    #[cfg(unix)]
+    #[test]
+    fn the_runtime_is_taken_out_under_the_lock() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        let slow_tar = bin.path().join("tar");
+        fs::write(&slow_tar, "#!/bin/sh\nsleep 1\nprintf runtime\n").unwrap();
+        fs::set_permissions(&slow_tar, fs::Permissions::from_mode(0o755)).unwrap();
+        let sha = |b: &[u8]| -> &'static str {
+            Box::leak(format!("{:x}", Sha256::digest(b)).into_boxed_str())
+        };
+        let stub = Stub::new(|_, _| reply(200, "", b"archive"));
+        let runtime = Runtime {
+            archive: Artifact {
+                name: "onnxruntime/a.tgz",
+                url: stub.url,
+                size: 7,
+                sha256: sha(b"archive"),
+            },
+            member: "x/lib/libfake",
+            library: Artifact {
+                name: "onnxruntime/libfake",
+                url: "",
+                size: 7,
+                sha256: sha(b"runtime"),
+            },
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("onnxruntime/libfake.part");
+        thread::scope(|scope| {
+            let installing = scope.spawn(|| install(dir.path(), &runtime, &slow_tar));
+            let started = std::time::Instant::now();
+            while !part.exists() {
+                assert!(started.elapsed() < Duration::from_secs(10), "tar never ran");
+                thread::sleep(Duration::from_millis(10));
+            }
+            let second = lock(dir.path()).unwrap_err();
+            assert!(
+                format!("{second:#}").contains("another oboete"),
+                "{second:#}"
+            );
+            installing.join().unwrap().unwrap();
+        });
+        assert_eq!(
+            fs::read(dir.path().join("onnxruntime/libfake")).unwrap(),
+            b"runtime"
+        );
     }
 
     #[test]
