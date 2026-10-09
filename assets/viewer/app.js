@@ -1881,6 +1881,7 @@ const TEXT = {
   embedding_index: ['This computer and Workers AI make the same vectors (bge-m3), so switching between them keeps every vector. Turning it off keeps them too.', 'このパソコンと Workers AI は同じベクトル（bge-m3）を作るため、切り替えてもベクトルはそのまま使えます。「使わない」にしてもベクトルは残ります。'],
   embedding_workers_ai_h: ['Cloudflare Workers AI settings', 'Cloudflare Workers AI の設定'],
   embedding_account: ['Account ID (32 characters)', 'アカウント ID（32 文字）'],
+  embedding_account_destination: ['While Workers AI is the method, memories and searches are sent to the account saved here.', 'Workers AI を使っている間は、ここに保存したアカウントへ記憶と検索語を送ります。'],
   embedding_daily_requests: ['Requests a day, at most ({min}–{max})', '1 日のリクエスト数の上限（{min}〜{max}）'],
   embedding_monthly_usd: ['USD a month beyond the free allowance, at most (more than 0)', '無料枠を超える費用の月上限（USD、0 より大きい値）'],
   embedding_usage: ['This month: {usd}. Last 24 hours: {requests} requests.', '今月の費用: {usd}。直近 24 時間: {requests} 回。'],
@@ -3497,6 +3498,7 @@ function workersAiSettings(f) {
     : t('embedding_usage', { usd: usdValue(w.usd_this_month), requests: w.requests_today.toLocaleString(lang) });
   const details = el('details', 'workers-ai', el('summary', null, t('embedding_workers_ai_h')),
     el('label', 'field', el('span', null, t('embedding_account')), account, saved(w.account_id ?? '—')),
+    f.embedding.provider === 'workers-ai' ? note(t('embedding_account_destination')) : null,
     el('div', 'grid',
       el('label', 'field', el('span', null, t('embedding_daily_requests', { min: least.toLocaleString(lang), max: most.toLocaleString(lang) })),
         daily, saved(w.daily_requests.toLocaleString(lang))),
@@ -3570,11 +3572,13 @@ async function embeddingKeySave(button, body) {
   }
 }
 
-// After a choice: the saved method and the files' state as they are now; typed values stay.
+// After a choice: the saved method and the files' state as they are now; typed values stay. An
+// answer that comes after another save replaced the form is dropped, as it is older.
 async function reloadEmbedding() {
+  const mine = form;
   const settings = await api('settings').catch(() => null);
-  if (!settings || settings.error || view !== 'settings' || !form) return;
-  form = mergeProviderSettings(settings, form, { op: 'embedding' });
+  if (!settings || settings.error || !currentSettings(mine)) return;
+  form = mergeProviderSettings(settings, mine, { op: 'embedding' });
   drawSettings();
 }
 
@@ -3582,14 +3586,14 @@ async function refreshEmbedding() {
   const d = embeddingDraft;
   try {
     const status = await api('embedding');
-    const ended = Boolean(d.status?.active) && !status.active && !d.busy;
+    // A run seen running, or a start whose answer did not come back (`none` and `workers-ai`
+    // are never seen running), has ended: the saved method is read again.
+    const ended = (Boolean(d.status?.active) || d.watch) && !status.active && !d.busy;
     d.status = status;
-    if (d.watch && !status.active) {
+    if (ended) {
       d.watch = false;
-      d.started = true;
-    }
-    if (ended) await reloadEmbedding();
-    else renderEmbedding();
+      await reloadEmbedding();
+    } else renderEmbedding();
   } catch {
     // The next poll reads it again.
   }

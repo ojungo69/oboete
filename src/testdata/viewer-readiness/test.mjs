@@ -702,7 +702,7 @@ console.log('PASS: a codex entry may draw on credits');
 // W4: the embedder's method is reviewed and agreed to before it is taken, a download's run is
 // shown, Workers AI's values are checked before a save, and the token goes only into its request.
 {
-vm.runInContext('globalThis.w4={formOf,saveBody,embeddingDraft:()=>embeddingDraft,TEXT};',ctx);
+vm.runInContext('globalThis.w4={formOf,saveBody,embeddingDraft:()=>embeddingDraft,TEXT,refreshEmbedding,reloadEmbedding};',ctx);
 const {w4}=ctx;
 const json=(value,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=>'application/json'},json:async()=>value});
 const embedding=(extra={})=>({provider:'none',
@@ -718,10 +718,11 @@ const settings=(extra={})=>({version:'v1',first_run:false,resident_supported:tru
     idle_minutes:[1,120],paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535],
     daily_requests:[1,100000]},
   view_runtime:{port:17373,mode:'foreground'},embedding:embedding(),...extra});
-const posted=[];let answers=[];
+const posted=[];let answers=[];let settingsGets=0;let settingsAnswer=null;let runStatus=null;
 ctx.fetch=(url,options)=>{
   if(options?.method==='POST'){posted.push({url,body:JSON.parse(options.body)});return Promise.resolve(answers.shift());}
-  if(url.startsWith('/api/settings?'))return Promise.resolve(json(settings()));
+  if(url.startsWith('/api/settings?')){settingsGets++;return settingsAnswer??Promise.resolve(json(settings()));}
+  if(url.startsWith('/api/embedding?')&&runStatus)return Promise.resolve(json(runStatus));
   return new Promise(()=>{});
 };
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
@@ -804,6 +805,24 @@ assert(!JSON.stringify(ctx.ui.getForm()).includes('SyntheticWorkersToken123'),'t
 assert(text(section()).includes('Key found'));
 f=w4.formOf(settings({key_input:false}));ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert(!field('embedding.key')&&text(section()).includes('Linux and WSL'),'no form where a key cannot be registered');
+
+// A start whose answer was lost: the poll finds the run over, and the saved method is read again.
+f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettings();
+w4.embeddingDraft().watch=true;
+runStatus={active:null,held:0,last:{choice:'workers-ai',phase:'done',code:null,held:0,get:0}};
+let gets=settingsGets;
+await w4.refreshEmbedding();await settle();
+assert.equal(settingsGets,gets+1,'a watched run that ended reads the settings again');
+assert(!w4.embeddingDraft().watch);
+// A reload that comes after another save replaced the form is dropped.
+let late;settingsAnswer=new Promise(resolve=>{late=resolve;});
+const reloading=w4.reloadEmbedding();
+const newer=w4.formOf(settings({version:'v2'}));ctx.ui.setForm(newer);
+late(json(settings({version:'v1'})));await reloading;await settle();
+assert.equal(ctx.ui.getForm().version,'v2','an older answer does not replace a newer form');
+settingsAnswer=null;runStatus=null;
+f=w4.formOf(settings({embedding:embedding({provider:'workers-ai'})}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(text(section()).includes('sent to the account saved here'),'the destination beside the account');
 
 ctx.ui.setLang('ja');f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert(text(panel).includes('意味での検索')&&text(section()).includes('このパソコンで処理'),'Japanese section');
