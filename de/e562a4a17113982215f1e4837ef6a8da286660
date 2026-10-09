@@ -1,0 +1,87 @@
+src/backup.rs
+  s_047b37b8e5635e::t_182dea36be2592 2606-2613
+src/consumer/claims.rs
+  s_047b37b8e5635e::t_5c23e50628e37f 489,502
+src/consumer/fts.rs
+  s_047b37b8e5635e::t_b2d34d99b35a1a 2,6,23-26,63-75,80-81,86-96,104-107,110-117,190-191,199,203,255-256
+  s_ad0ac4d9af0473::t_e2982d6d2d1bce 76-79,82-85,97-103,108-109
+  s_ad0ac4d9af0473::t_47ea97ff15c171 3-4,34-41,178,180,182,188,192-197,230-235
+src/consumer/imported.rs
+  s_047b37b8e5635e::t_76b7bef0f8d726 78,99
+src/embed_phase.rs
+  s_047b37b8e5635e::t_6fd74ff17dd1e4 395,506,578,674,692,697,1299-1300,1305,1307,1310-1314,1546-1548,1563,1588,1591,1606-1607,1612-1614,1667-1670,1672-1682,1684,1687-1689,1691-1692,1732,2091-2093,3489-3491,3511-3512,3573
+  s_ad0ac4d9af0473::t_e2b3ad8c8115d4 735-736,1156,1178,1301,1671,3228-3276
+src/raw.rs
+  s_047b37b8e5635e::t_a9e080293a06f4 1995-1997,2000,2019-2078,2081-2091,2741
+  s_ad0ac4d9af0473::t_3e0548eebfa09c 2079-2080,3454-3481
+src/search.rs
+  s_047b37b8e5635e::t_199e9dda63b912 117,150-158,192-201,227-233,241,245-249,251-253,266-269,274-278,280-281,292-318,321-322,326-389,424-426,441-446,459
+  s_ad0ac4d9af0473::t_730974035f9441 319-320,323-325,837-879
+  s_ad0ac4d9af0473::t_5b81158a7f37d5 254-256,449-450,610-611,625-626,628,772-836
+src/search/b.rs
+  s_047b37b8e5635e::t_25b58fab30364d 451,735,773-774,782-795
+docs/spike/raw-index-copy/bench-300-results.txt
+  s_047b37b8e5635e::t_7e94426de04c03 1-10
+docs/spike/raw-index-copy/bench.py
+  s_047b37b8e5635e::t_4cdddaf048bdf2 1-279
+docs/spike/raw-index-copy/fast.py
+  s_047b37b8e5635e::t_149d69a9a1afb6 1-7,13-30
+  s_ad0ac4d9af0473::t_b7e12b8835d9ba 8-12
+docs/spike/raw-index-copy/forget2.py
+  s_047b37b8e5635e::t_4c8fefadd01f59 1-26
+docs/spike/raw-index-copy.md
+  s_ad0ac4d9af0473::t_9fdd26b87731cc 1-36,47-57,61-63
+  s_ad0ac4d9af0473::t_fe0e846abb9835 37-46,58
+  s_ad0ac4d9af0473::t_a18713858a10e8 60-61
+  s_ad0ac4d9af0473::t_addcc9a08dfdb5 64
+docs/spike/raw-index-copy/rust.py
+  s_ad0ac4d9af0473::t_6e1cc609b05fc5 105
+  s_ad0ac4d9af0473::t_67ac9a6e8b8a42 1-104,106-124
+docs/milestone-5-plan.md
+  s_ad0ac4d9af0473::t_0ee2889a5494b7 222-224
+  s_ad0ac4d9af0473::t_79d41318c30d08 225-226
+docs/spike/raw-index-copy/rust-results.txt
+  s_ad0ac4d9af0473::t_2e83edabfba1dd 1-10
+docs/spike/raw-index-copy/rust-results-2.txt
+  s_ad0ac4d9af0473::t_454c2278a201ba 1-10
+docs/spike/raw-index-tool-output.md
+  s_ad0ac4d9af0473::t_0397ed94efa3af 11
+  s_ad0ac4d9af0473::t_863bb83c19588f 1-10,12-46
+  s_ad0ac4d9af0473::t_5095ca76baa005 47
+docs/milestone-4-plan.md
+  s_ad0ac4d9af0473::t_c4c5e6b3431a69 70,97
+docs/milestone-4.md
+  s_ad0ac4d9af0473::t_cfab97453bfb72 66
+docs/spec.md
+  s_ad0ac4d9af0473::t_1218342a247686 69,234,236,398
+docs/spike/raw-index-tool-output/result-every5.txt
+  s_ad0ac4d9af0473::t_413f271f2fc7d1 1-19
+docs/spike/raw-index-tool-output/tool_output.py
+  s_ad0ac4d9af0473::t_dfd9e62d673545 1-210
+src/setup/doctor.rs
+  s_ad0ac4d9af0473::t_b297a4fc8ecc90 2655-2657
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dee562a4a17113982215f1e4837ef6a8da286660",
+  "prompts": {},
+  "sessions": {
+    "s_047b37b8e5635e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8fa093df-349f-48f9-b963-d3e906b3722d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_ad0ac4d9af0473": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "55f3d823-9d62-4fd7-a50c-4f022fc3c6bb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
