@@ -5,9 +5,11 @@ d = zstandard.ZstdDecompressor()
 def walk(b):
     out = []
     def w(x):
-        if isinstance(x, str): out.append(x)
-        elif isinstance(x, list): [w(y) for y in x]
-        elif isinstance(x, dict): [w(y) for y in x.values()]
+        if isinstance(x, str):
+            out.append(x)
+        elif isinstance(x, (list, dict)):
+            for y in x.values() if isinstance(x, dict) else x:
+                w(y)
     w(json.loads(b)); return "\n".join(out)
 def scan(word, verify=True):
     # The decompressed body is searched first; only a body that holds the word is parsed, so a
