@@ -117,7 +117,9 @@ under their names as the gate shows them now, so a rule added later that masks o
 a later write replaces or clears. A key shows as it was written with the value it holds, and a list
 and a task with the name last written. The keys `task`
 and `status`, claude-mem's own, are stored as they are wherever a rule matches them, their values
-gated, so a rule never turns a task into the list's state. The capture gate
+gated, so a rule never turns a task into the list's state; a closing status (`done`, `dropped`) is
+stored as sent too, one of two words and no recorded text, so a rule that masks the word never
+leaves open what a write closed (the line that shows it is gated as any is). The capture gate
 scans a value beside its key as well, as written (a rule that masks the key leaves the context):
 every value of a work state write, and a string value of up to 256 bytes in any other stored JSON;
 a mask that starts in the key, or in the ` = "` after it, hides the key and the value whole.

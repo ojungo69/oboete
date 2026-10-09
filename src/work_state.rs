@@ -213,7 +213,7 @@ fn fold<'a>(
 }
 
 /// A `status` of `done` or `dropped`, in any case.
-fn closed(status: Option<&Value>) -> bool {
+pub(crate) fn closed(status: Option<&Value>) -> bool {
     status.is_some_and(|s| {
         !s.is_null() && matches!(text(s).to_lowercase().as_str(), "done" | "dropped")
     })

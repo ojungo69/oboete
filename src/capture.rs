@@ -341,6 +341,13 @@ pub fn work_state(
     let list = gate.text("list", &without_blocks(list, false), cap);
     let mut stored = Map::new();
     for (k, v) in fields {
+        // A closing status (`done`, `dropped`) is one of two words, no recorded text: kept as
+        // sent, or a write meant to close a task or the list would leave it open where a rule
+        // masks the word. The line that shows it is gated as any is (Codex on #408).
+        if k == "status" && crate::work_state::closed(Some(v)) {
+            stored.insert(k.clone(), v.clone());
+            continue;
+        }
         // A number or a boolean is text where it is shown: gated as that text, and kept as it is
         // where the gate leaves it (Codex's security review of #408).
         let (v, as_text) = match v {
@@ -898,19 +905,23 @@ mod tests {
         assert_eq!((&stored["pr"], &stored["draft"]), (&json!(7), &json!(true)));
     }
 
-    /// Codex on #408: claude-mem's keys stay where a rule matches them, their values gated.
+    /// Codex on #408: claude-mem's keys stay where a rule matches them, their values gated, and a
+    /// closing status stays where a rule matches the word.
     #[test]
     fn a_work_state_write_keeps_task_and_status() {
         let s = with(
             "[[redaction.extra_rules]]\nid = \"k\"\nregex = '^(?:task|status|note)$'\n\n\
-             [[redaction.extra_rules]]\nid = \"v\"\nregex = 'teal-[0-9]{4}'\n",
+             [[redaction.extra_rules]]\nid = \"v\"\nregex = 'teal-[0-9]{4}|(?i)done|wip'\n",
         );
-        let fields = json!({"task": "teal-1234", "status": "done", "note": "x"});
+        let fields = json!({"task": "teal-1234", "status": "Done", "note": "x"});
         let (_, stored) = work_state("l", fields.as_object().unwrap(), &s);
         assert_eq!(
             Value::Object(stored),
-            json!({"task": "[REDACTED]", "status": "done", "[REDACTED]": "x"})
+            json!({"task": "[REDACTED]", "status": "Done", "[REDACTED]": "x"})
         );
+        let open = json!({"task": "t", "status": "wip"});
+        let (_, stored) = work_state("l", open.as_object().unwrap(), &s);
+        assert_eq!(stored["status"], "[REDACTED]");
     }
 
     #[test]
