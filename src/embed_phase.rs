@@ -47,8 +47,6 @@ pub struct Batch {
     pub embedder: String,
     pub docs: Vec<Doc>,
     pub texts: Vec<String>,
-    /// The documents of its page with a text to send, its own included (D14's threshold).
-    pub backlog: usize,
     pub reading: Reading,
     pub ruleset: String,
     pub tombstones: i64,
@@ -382,7 +380,6 @@ impl Phase {
             embedder: id.to_owned(),
             docs: Vec::new(),
             texts: vec![sent],
-            backlog: 1,
             reading: reading.clone(),
             ruleset: rules.version().to_owned(),
             tombstones,
@@ -602,15 +599,19 @@ impl Phase {
             return Ok(Step::Waiting { until: rest, up });
         }
         let embedder = crate::embed::EMBEDDER;
-        let Some(batch) = pending(raw, k, embedder, reading, rules, false)? else {
+        let loaded = self.local.as_ref().filter(|model| !model.gone()).cloned();
+        // With no model yet, every kind is read, so its threshold counts the whole backlog.
+        let mut seen = Seen::default();
+        let counting = loaded.is_none().then_some(&mut seen);
+        let Some(batch) = pending_seen(raw, k, embedder, reading, rules, false, counting)? else {
             self.local = None;
             return Ok(Step::Idle);
         };
-        let model = match &self.local {
-            Some(model) if !model.gone() => Arc::clone(model),
-            _ => {
-                let oldest = batch.docs.iter().map(|d| d.ts).min().unwrap_or(now);
-                if batch.backlog < LOAD_AT && now - oldest < LOAD_AFTER_MS {
+        let model = match loaded {
+            Some(model) => model,
+            None => {
+                let oldest = seen.oldest.unwrap_or(now);
+                if seen.count < LOAD_AT && now - oldest < LOAD_AFTER_MS {
                     let until = oldest + LOAD_AFTER_MS;
                     return Ok(Step::Waiting { until, up: false });
                 }
@@ -674,7 +675,6 @@ impl Phase {
             if !docs.is_empty() {
                 return Ok(Some(Batch {
                     embedder: embedder.to_owned(),
-                    backlog: docs.len(),
                     docs,
                     texts,
                     reading: reading.clone(),
@@ -784,7 +784,6 @@ impl Phase {
                             embedder: batch.embedder.clone(),
                             docs: docs.to_vec(),
                             texts: texts.to_vec(),
-                            backlog: docs.len(),
                             reading: batch.reading.clone(),
                             ruleset: batch.ruleset.clone(),
                             tombstones: batch.tombstones,
@@ -848,7 +847,6 @@ impl Phase {
                     embedder: batch.embedder.clone(),
                     docs: vec![doc],
                     texts: Vec::new(),
-                    backlog: 1,
                     reading: batch.reading.clone(),
                     ruleset: batch.ruleset.clone(),
                     tombstones: batch.tombstones,
@@ -1224,6 +1222,28 @@ fn pending(
     rules: &crate::redact::Rules,
     waiting: bool,
 ) -> Result<Option<Batch>> {
+    pending_seen(raw, k, embedder, reading, rules, waiting, None)
+}
+
+/// What `pending` read past its batch, for the local model's threshold (D14): the documents of
+/// each kind's first page with a text to send, and the oldest of them by its time.
+#[derive(Default)]
+struct Seen {
+    count: usize,
+    oldest: Option<i64>,
+}
+
+/// `pending`, which with `seen` reads each kind's first page with a text to send and counts it
+/// there, the batch still the first kind's.
+fn pending_seen(
+    raw: &Raw,
+    k: &Connection,
+    embedder: &str,
+    reading: &Reading,
+    rules: &crate::redact::Rules,
+    waiting: bool,
+    mut seen: Option<&mut Seen>,
+) -> Result<Option<Batch>> {
     let tombstones = raw.tombstones()?;
     crate::claims::schema(k)?;
     crate::consumer::imported::schema(k)?;
@@ -1262,18 +1282,22 @@ fn pending(
                 .map(|(i, (_, t))| (i.to_string(), t.clone()))
                 .collect();
             let first = crate::embed::batches(&pairs)[0].len();
-            let backlog = todo.len();
+            if let Some(seen) = seen.as_deref_mut() {
+                seen.count += todo.len();
+                if let Some(oldest) = todo.iter().map(|(doc, _)| doc.ts).min() {
+                    seen.oldest = Some(seen.oldest.map_or(oldest, |o| o.min(oldest)));
+                }
+            }
             let (docs, texts) = todo.into_iter().take(first).unzip();
             let batch = Batch {
                 embedder: embedder.to_owned(),
                 docs,
                 texts,
-                backlog,
                 reading: reading.clone(),
                 ruleset: rules.version().to_owned(),
                 tombstones,
             };
-            if !waiting {
+            if !waiting && seen.is_none() {
                 return Ok(Some(batch));
             }
             // ponytail: while a call waits, each kind is mapped up to its first page with a text
@@ -3911,9 +3935,9 @@ mod tests {
             .unwrap()
     }
 
-    /// D14: the worker loads the local model once 20 documents wait or one has waited 10 minutes,
-    /// embeds them, and drops it when none wait. A smaller, newer backlog is no work that keeps
-    /// the worker up.
+    /// D14: the worker loads the local model once 20 documents wait, of every kind together (a
+    /// fresh claim's batch comes first), or one has waited 10 minutes; embeds them, and drops it
+    /// when none wait. A smaller, newer backlog is no work that keeps the worker up.
     #[test]
     fn the_worker_loads_past_the_threshold_and_drops_when_none_pend() {
         let mut s = Store::new();
@@ -3932,7 +3956,9 @@ mod tests {
         assert!(waits, "{step:?}");
         let loads = || crate::embed::stub::local_loads(&home);
         assert_eq!((loads(), indexed_count(&k)), (0, 0));
-        for i in 0..15 {
+        // The claim and the record it quotes, and 13 more records: 20 in all.
+        s.decided(R, now, "A fresh claim goes first.", &[]);
+        for i in 0..13 {
             s.said("s", R, now, &format!("More words {i}."));
         }
         s.run();

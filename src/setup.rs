@@ -276,11 +276,7 @@ fn embeddings_with(
         "none" => {
             let none = "none: search is full text only, and no text or query goes to an \
                         embedder. The vectors made so far stay in the store.";
-            let held: u64 = (files.iter())
-                .filter_map(|a| std::fs::metadata(dir.join(a.name)).ok())
-                .map(|m| m.len())
-                .sum();
-            match held {
+            match bytes_in(&dir) {
                 0 => none.to_owned(),
                 held => format!(
                     "{none} The local model's files stay in {} ({} MB); delete that directory \
@@ -374,6 +370,22 @@ fn embeddings_with(
         home.join("config.toml").display()
     );
     Ok(())
+}
+
+/// The bytes of the files under `dir`, partial downloads and archives included; links are not
+/// followed.
+fn bytes_in(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    (entries.flatten())
+        .filter_map(|e| Some((e.path(), e.file_type().ok()?)))
+        .map(|(path, kind)| match kind {
+            k if k.is_dir() => bytes_in(&path),
+            k if k.is_file() => std::fs::symlink_metadata(&path).map_or(0, |m| m.len()),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// "N MB from host", per host of the `artifacts`' URLs, in their order.
@@ -4939,6 +4951,7 @@ mod tests {
         let rows: &[Row] = &[
             ("none", "account", true, "no text or query goes", Ok(())),
             ("none", "account files", true, "1 MB); delete", Ok(())),
+            ("none", "account part", true, "2 MB); delete", Ok(())),
             ("workers-ai", "key", true, "", Err("account_id")),
             ("workers-ai", "account", true, "", Err("key file")),
             ("workers-ai", "account key", true, "Cloudflare", Ok(())),
@@ -4978,6 +4991,10 @@ mod tests {
                 std::fs::create_dir_all(dir.join("onnxruntime")).unwrap();
                 std::fs::write(dir.join("tokenizer.json"), tokenizer).unwrap();
                 std::fs::write(dir.join("onnxruntime/librt"), "runtime").unwrap();
+            }
+            if holds.contains("part") {
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("tokenizer.json.part"), vec![0u8; 2 << 20]).unwrap();
             }
             if holds == "verified" {
                 let files: Vec<_> = model.iter().copied().chain([runtime.library]).collect();

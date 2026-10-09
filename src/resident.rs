@@ -5,7 +5,7 @@
 
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -36,6 +36,9 @@ type Answer = std::result::Result<Vec<Vec<f32>>, String>;
 
 struct Job {
     texts: Vec<String>,
+    /// Past it, its caller has gone back to full text: the job is dropped unrun, so searches
+    /// that came faster than the model never queue work nobody waits for.
+    until: Option<Instant>,
     reply: mpsc::Sender<Answer>,
 }
 
@@ -75,6 +78,9 @@ impl Resident {
                     None => queue.recv().map_err(|_| RecvTimeoutError::Disconnected),
                 };
                 let Ok(job) = job else { break };
+                if job.until.is_some_and(|until| Instant::now() >= until) {
+                    continue;
+                }
                 let answer = (job.texts.iter())
                     .map(|text| model(text).and_then(crate::embed::unit))
                     .collect::<Result<Vec<_>>>()
@@ -125,6 +131,7 @@ impl Resident {
         let (reply, answer) = mpsc::channel();
         let job = Job {
             texts: texts.to_vec(),
+            until: wait.map(|wait| Instant::now() + wait),
             reply,
         };
         if self.jobs.send(job).is_err() {
@@ -196,6 +203,32 @@ mod tests {
             panic!("a NaN vector was taken");
         };
         assert!(why.contains("finite"), "{why}");
+    }
+
+    /// Searches faster than the model: each that timed out is dropped unrun, so the next one is not
+    /// held behind work nobody waits for (Codex on Task 10).
+    #[test]
+    fn a_timed_out_query_is_dropped_unrun() {
+        use std::sync::atomic::AtomicUsize;
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&runs);
+        let load: Load = Box::new(move || {
+            Ok(Box::new(move |text: &str| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(300));
+                Ok(crate::embed::stub::vector("t", text))
+            }) as Model)
+        });
+        let r = Resident::start(load, None);
+        r.embed(&texts(&["warm"]), None).unwrap();
+        for i in 0..4 {
+            let late = r.embed(&texts(&[&format!("q{i}")]), Some(Duration::from_millis(20)));
+            assert_eq!(late, Err(Busy::Timeout));
+        }
+        r.embed(&texts(&["last"]), None).unwrap();
+        // The warm-up and the last; the first late query too if it was running when it timed out.
+        let n = runs.load(Ordering::SeqCst);
+        assert!((2..=3).contains(&n), "{n} runs");
     }
 
     /// A model whose thread panics is gone, so its owner starts another.
