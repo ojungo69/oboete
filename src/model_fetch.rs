@@ -19,6 +19,10 @@ use ureq::unversioned::{
 
 const MARGIN: u64 = 64 * 1024 * 1024;
 
+/// The longest one step waits for the server: resolving, connecting (TLS included), sending the
+/// request, and each read. The whole download has no limit, as 2.3 GB on a slow line outlasts any.
+const IDLE: Duration = Duration::from_secs(60);
+
 pub struct Artifact {
     pub name: &'static str,
     pub url: &'static str,
@@ -73,6 +77,7 @@ fn fetch_with(
         allow_url(&artifact.url.parse()?)?;
     }
     fs::create_dir_all(dir)?;
+    let _lock = lock(dir)?;
     let mut pending = Vec::new();
     let mut needed = MARGIN;
     for artifact in artifacts {
@@ -103,9 +108,13 @@ fn fetch_with(
     }
     let mut config = ureq::Agent::config_builder()
         .timeout_global(None)
+        .timeout_resolve(Some(IDLE))
+        .timeout_connect(Some(IDLE))
+        .timeout_send_request(Some(IDLE))
         .timeout_recv_body(None)
         .http_status_as_error(false)
-        .max_redirects(10)
+        // Followed in `download`, which holds each hop to `allow_url` and asks for the range again.
+        .max_redirects(0)
         .accept_encoding("identity")
         .user_agent(concat!("oboete/", env!("CARGO_PKG_VERSION")));
     // As `provider::agent_config`: the environment's proxy for the internet, none for this machine.
@@ -140,13 +149,29 @@ fn download(agent: &ureq::Agent, dir: &Path, artifact: &Artifact) -> Result<()> 
     if held.is_some() && offset == artifact.size {
         return finish(&part, &path, artifact);
     }
-    let mut request = agent.get(artifact.url);
-    if held.is_some() {
-        request = request.header("Range", format!("bytes={offset}-"));
+    let mut url = artifact.url.to_owned();
+    let mut response = None;
+    for _ in 0..=10 {
+        let mut request = agent.get(&url);
+        if held.is_some() {
+            request = request.header("Range", format!("bytes={offset}-"));
+        }
+        let reply = request
+            .call()
+            .with_context(|| format!("download {}", artifact.name))?;
+        if !reply.status().is_redirection() {
+            response = Some(reply);
+            break;
+        }
+        let location = reply
+            .headers()
+            .get("Location")
+            .and_then(|value| value.to_str().ok())
+            .with_context(|| format!("{}: a redirect without a Location", artifact.name))?;
+        url = redirect(&url, location)?;
     }
-    let mut response = request
-        .call()
-        .with_context(|| format!("download {}", artifact.name))?;
+    let mut response =
+        response.with_context(|| format!("{}: more than 10 redirects", artifact.name))?;
     let append = match response.status().as_u16() {
         200 => false,
         206 => {
@@ -208,6 +233,28 @@ fn finish(part: &Path, path: &Path, artifact: &Artifact) -> Result<()> {
     Ok(())
 }
 
+/// Where a redirect leads: an absolute URL, or a path on the same host, held to the pinned URLs'
+/// rule (huggingface.co's own redirects are absolute; the tests' are paths). Any other form is
+/// refused.
+fn redirect(from: &str, location: &str) -> Result<String> {
+    let url = match location.strip_prefix('/') {
+        Some(rest) if !rest.starts_with('/') => {
+            let from: ureq::http::Uri = from.parse()?;
+            format!(
+                "{}://{}{location}",
+                from.scheme_str().context("a URL without a scheme")?,
+                from.authority().context("a URL without a host")?
+            )
+        }
+        _ => location.to_owned(),
+    };
+    allow_url(
+        &url.parse()
+            .with_context(|| format!("a redirect to {location}"))?,
+    )?;
+    Ok(url)
+}
+
 fn allow_url(uri: &ureq::http::Uri) -> Result<()> {
     let loopback = matches!(uri.host(), Some("127.0.0.1" | "[::1]" | "localhost"));
     ensure!(
@@ -222,6 +269,8 @@ fn allow_url(uri: &ureq::http::Uri) -> Result<()> {
     Ok(())
 }
 
+/// ureq's own connections, each wrapped in `ModelTransport`. It checks no URL: ureq connects to a
+/// CONNECT proxy through this same connector, and `download` checks every model host itself.
 #[derive(Debug, Default)]
 struct ModelConnector(DefaultConnector);
 
@@ -233,8 +282,6 @@ impl Connector<()> for ModelConnector {
         details: &ConnectionDetails,
         chained: Option<()>,
     ) -> std::result::Result<Option<Self::Out>, ureq::Error> {
-        // Redirects bypass middleware; their destinations must pass the same URL rule.
-        allow_url(details.uri).map_err(|error| ureq::Error::Io(std::io::Error::other(error)))?;
         Ok(self
             .0
             .connect(details, chained)?
@@ -266,7 +313,7 @@ impl Transport for ModelTransport {
     }
 
     fn await_input(&mut self, timeout: NextTimeout) -> std::result::Result<bool, ureq::Error> {
-        let idle = Duration::from_secs(60).into();
+        let idle = IDLE.into();
         let timeout = if timeout.after > idle {
             NextTimeout {
                 after: idle,
@@ -288,6 +335,7 @@ impl Transport for ModelTransport {
 }
 
 pub fn verify(dir: &Path, artifacts: &[Artifact]) -> Result<()> {
+    let _lock = lock(dir)?;
     let marker = plain_path(dir, "verified")?;
     remove(&marker)?;
     let mut text = String::new();
@@ -383,6 +431,24 @@ fn check(path: &Path, artifact: &Artifact) -> Result<Metadata> {
         artifact.name
     );
     Ok(metadata)
+}
+
+/// One fetch or verify at a time in a model's directory: a second fetch appending to a `.part` the
+/// first has already renamed would write into the published file. Held while the file is.
+fn lock(dir: &Path) -> Result<File> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(plain_path(dir, ".lock")?)?;
+    match crate::worker::try_lock(&file) {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => bail!(
+            "another oboete is fetching or verifying the model in {}: run it again when it ends",
+            dir.display()
+        ),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
 }
 
 fn remove(path: &Path) -> Result<()> {
@@ -559,6 +625,49 @@ mod tests {
                 assert!(requests[1].starts_with("GET /storage "));
             }
         }
+    }
+
+    #[test]
+    fn a_redirect_off_the_rule_or_in_a_loop_is_refused() {
+        for (location, error, requests) in [
+            ("http://example.com/model", "HTTPS", 1),
+            ("//example.com/model", "HTTPS", 1),
+            ("/model", "more than 10 redirects", 11),
+        ] {
+            let stub = Stub::new(move |_, _| reply(302, &format!("Location: {location}\r\n"), b""));
+            let dir = tempfile::tempdir().unwrap();
+            let artifacts = [artifact(stub.url)];
+            let part = dir.path().join(format!("{}.part", artifacts[0].name));
+            fs::create_dir(part.parent().unwrap()).unwrap();
+            fs::write(&part, b"he").unwrap();
+            let result = fetch(dir.path(), &artifacts).unwrap_err();
+            assert!(
+                format!("{result:#}").contains(error),
+                "{location}: {result:#}"
+            );
+            assert_eq!(stub.requests().len(), requests, "{location}");
+            assert_eq!(fs::read(&part).unwrap(), b"he");
+        }
+    }
+
+    #[test]
+    fn one_fetch_or_verify_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = [artifact("http://127.0.0.1:1/model")];
+        let file = dir.path().join(artifacts[0].name);
+        fs::create_dir(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"hello").unwrap();
+        let held = lock(dir.path()).unwrap();
+        for result in [
+            fetch_with(dir.path(), &artifacts, |_| None),
+            verify(dir.path(), &artifacts),
+        ] {
+            assert!(format!("{:#}", result.unwrap_err()).contains("another oboete"));
+        }
+        drop(held);
+        fetch_with(dir.path(), &artifacts, |_| None).unwrap();
+        verify(dir.path(), &artifacts).unwrap();
+        assert!(marker_ok(dir.path(), &artifacts));
     }
 
     #[test]
