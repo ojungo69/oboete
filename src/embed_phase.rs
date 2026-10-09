@@ -783,9 +783,10 @@ pub(crate) fn last_embedding_error_in(db: &Connection) -> Result<Option<LastEmbe
 pub fn doctor_lines(home: &Path, k: &Connection) -> Result<Vec<String>> {
     use crate::providers_db as pdb;
     let config = crate::config::load(home)?.embedding;
-    if config.provider != "workers-ai" {
+    if config.provider == "none" {
         return Ok(vec!["embeddings: off".into()]);
     }
+    let local = config.provider == "local";
     let embedder = crate::embed::EMBEDDER;
     crate::claims::schema(k)?;
     crate::consumer::imported::schema(k)?;
@@ -796,7 +797,8 @@ pub fn doctor_lines(home: &Path, k: &Connection) -> Result<Vec<String>> {
     let imports = facts.imports?;
     let records = facts.records?;
     let mut lines = vec![format!(
-        "embeddings: {embedder} ({}), waiting: {claims} claims, {imports} imported, {records} records",
+        "embeddings: {embedder}{} ({}), waiting: {claims} claims, {imports} imported, {records} records",
+        if local { " on this machine" } else { "" },
         state.as_deref().unwrap_or("nothing embedded yet")
     )];
     let skipped: Vec<String> = facts
@@ -807,7 +809,8 @@ pub fn doctor_lines(home: &Path, k: &Connection) -> Result<Vec<String>> {
     if !skipped.is_empty() {
         lines.push(format!("  passed over: {}", skipped.join(", ")));
     }
-    if !home.join("providers.db").exists() {
+    // Requests, USD and rests are Workers AI's.
+    if local || !home.join("providers.db").exists() {
         return Ok(lines);
     }
     let db = pdb::open(home)?;
@@ -3143,6 +3146,14 @@ mod tests {
         ];
         assert_eq!(lines[..3], want);
         assert!(lines[3].starts_with("  last error (embed, "), "{lines:?}");
+        // Task 10: the same vectors on this machine; Workers AI's requests and rests are not its.
+        crate::settings::set_embedding_provider(&home, "local").unwrap();
+        let lines = doctor_lines(&home, &k).unwrap();
+        let want = [
+            "embeddings: bge-m3 on this machine (active), waiting: 0 claims, 0 imported, 0 records",
+            "  passed over: 1 empty",
+        ];
+        assert_eq!(lines, want);
     }
 
     #[test]

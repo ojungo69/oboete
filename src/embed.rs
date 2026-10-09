@@ -1,6 +1,7 @@
 //! Workers AI's bge-m3 (PR-D, docs/pr-d.md), as Design B's embedding phase and search call it
 //! (milestone 4 D8): the request, its limits, and the sign bits the vector index holds.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -28,6 +29,64 @@ pub(crate) const PROMPT_CHARS: usize = 1_000;
 pub(crate) const BATCH_TIMEOUT: Duration = Duration::from_secs(180);
 /// One answer holds up to 100 × 1,024 floats as JSON (about 2 MB).
 const MAX_RESPONSE_BYTES: u64 = 8 << 20;
+
+/// Where `local` keeps bge-m3's files and its runtime (`model_fetch`): no store operation touches
+/// it.
+pub fn local_dir(home: &Path) -> PathBuf {
+    home.join("models").join(EMBEDDER)
+}
+
+/// Why this build cannot run `local` here, if it cannot.
+pub fn local_unavailable() -> Option<&'static str> {
+    if !cfg!(feature = "local-embed") {
+        Some("this oboete was built without local embeddings (cargo feature local-embed)")
+    } else if crate::model_fetch::RUNTIME.is_none() {
+        Some("Microsoft releases no ONNX Runtime 1.28.0 for this machine")
+    } else {
+        None
+    }
+}
+
+/// Whether `local`'s files are ready, and doctor's line on them, from their sizes and the
+/// `verified` marker: nothing is hashed.
+pub fn local_state(home: &Path) -> (bool, String) {
+    match (local_unavailable(), crate::model_fetch::local_files()) {
+        (None, Some(files)) => files_state(&local_dir(home), &files),
+        (why, _) => (
+            false,
+            format!("local model: {}", why.unwrap_or("unavailable")),
+        ),
+    }
+}
+
+fn files_state(dir: &Path, files: &[crate::model_fetch::Artifact]) -> (bool, String) {
+    if crate::model_fetch::marker_ok(dir, files) {
+        return (true, format!("local model: ready in {}", dir.display()));
+    }
+    let setup = "`oboete setup --embeddings local`";
+    let short: Vec<&str> = (files.iter())
+        .filter(|f| std::fs::metadata(dir.join(f.name)).map_or(true, |m| m.len() != f.size))
+        .map(|f| f.name)
+        .collect();
+    let line = if short.len() == files.len() {
+        format!(
+            "not downloaded; {setup} downloads it into {}",
+            dir.display()
+        )
+    } else if !short.is_empty() {
+        format!(
+            "incomplete in {} ({} missing); {setup} downloads the rest",
+            dir.display(),
+            short.join(", ")
+        )
+    } else {
+        format!(
+            "not verified since its files changed in {}; {setup} checks them again",
+            dir.display()
+        )
+    };
+    (false, format!("local model: {line}"))
+}
 
 /// The model's URL and the token.
 fn endpoint(cfg: &config::Embedding) -> Result<(String, String)> {
@@ -420,6 +479,64 @@ mod tests {
         }
         assert_eq!(got.iter().map(|b| b.len()).sum::<usize>(), todo.len());
         assert_eq!(got.last().unwrap().len(), 1);
+    }
+
+    /// Task 10: doctor names `local`'s files from their sizes and the marker, hashing nothing:
+    /// not downloaded, incomplete (which), changed since verified, ready; and a build that cannot
+    /// run them.
+    #[test]
+    fn doctor_names_the_local_model_state() {
+        use crate::model_fetch::Artifact;
+        let pin = |b: &[u8]| -> &'static str {
+            Box::leak(format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(b)).into_boxed_str())
+        };
+        let files = [
+            Artifact {
+                name: "a.json",
+                url: "",
+                size: 1,
+                sha256: pin(b"a"),
+            },
+            Artifact {
+                name: "onnx/b",
+                url: "",
+                size: 2,
+                sha256: pin(b"bb"),
+            },
+        ];
+        let home = tempfile::tempdir().unwrap();
+        let dir = local_dir(home.path());
+        let state = || files_state(&dir, &files);
+        assert!(
+            !state().0 && state().1.contains("not downloaded"),
+            "{:?}",
+            state()
+        );
+        std::fs::create_dir_all(dir.join("onnx")).unwrap();
+        std::fs::write(dir.join("a.json"), "a").unwrap();
+        assert!(state().1.contains("incomplete") && state().1.contains("onnx/b missing"));
+        std::fs::write(dir.join("onnx/b"), "bb").unwrap();
+        assert!(
+            !state().0 && state().1.contains("not verified"),
+            "{:?}",
+            state()
+        );
+        crate::model_fetch::verify(&dir, &files).unwrap();
+        assert!(state().0 && state().1.contains("ready"), "{:?}", state());
+        // Written again, same size: the marker no longer matches, and nothing was hashed to say so.
+        std::fs::remove_file(dir.join("a.json")).unwrap();
+        std::fs::write(dir.join("a.json"), "x").unwrap();
+        assert!(
+            !state().0 && state().1.contains("not verified"),
+            "{:?}",
+            state()
+        );
+        let (ready, line) = local_state(home.path());
+        if let Some(why) = local_unavailable() {
+            assert_eq!((ready, line), (false, format!("local model: {why}")));
+        } else {
+            assert!(!ready && line.contains("not downloaded"), "{line}");
+        }
     }
 
     #[test]

@@ -819,6 +819,35 @@ pub fn set_view_port(home: &Path, port: u16) -> anyhow::Result<()> {
     staged.commit()
 }
 
+/// `[embedding] provider` set to `provider`, the rest of config.toml as it was (`oboete setup
+/// --embeddings`). False when it already was. A file one of its readers would refuse is not
+/// written, and the refusal is the error (`workers-ai` without its account).
+pub fn set_embedding_provider(home: &Path, provider: &str) -> anyhow::Result<bool> {
+    let _config = config_lock(home)?;
+    let path = home.join("config.toml");
+    let was = bytes(home)?;
+    let text = utf8(was.as_deref()).ok_or_else(|| anyhow::anyhow!("config.toml is not UTF-8"))?;
+    let mut doc: toml_edit::DocumentMut = text.parse()?;
+    let now = (doc.get("embedding").and_then(|t| t.get("provider"))).and_then(|v| v.as_str());
+    if now.unwrap_or("none") == provider {
+        return Ok(false);
+    }
+    put(&mut doc, "embedding", "provider", provider.into());
+    let candidate = doc.to_string();
+    config::from_text(&path, &candidate)?;
+    anyhow::ensure!(
+        parsed(&path, &candidate).is_some(),
+        "config.toml is invalid"
+    );
+    let staged = crate::setup::stage(&path, &candidate)?;
+    anyhow::ensure!(
+        version(bytes(home)?.as_deref()) == version(was.as_deref()),
+        "config.toml changed while the embedder was written; try again"
+    );
+    staged.commit()?;
+    Ok(true)
+}
+
 /// R2/A111: setup fills only absent values. Reading or removing agent wiring never does this.
 #[cfg(target_os = "linux")]
 pub fn resident_defaults(home: &Path) -> anyhow::Result<(config::Worker, config::View)> {

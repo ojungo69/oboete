@@ -150,11 +150,14 @@ pub const RUNTIME: Option<Runtime> = Some(Runtime {
 )))]
 pub const RUNTIME: Option<Runtime> = None;
 
-/// This target's runtime library into `dir/onnxruntime/`, unless it already holds its pin.
-pub fn fetch_runtime(dir: &Path) -> Result<()> {
-    let runtime = RUNTIME
-        .as_ref()
-        .context("Microsoft releases no ONNX Runtime 1.28.0 for this target")?;
+/// `local`'s files as installed: bge-m3's and this target's runtime library, each at its pin.
+pub fn local_files() -> Option<Vec<Artifact>> {
+    let runtime = RUNTIME.as_ref()?;
+    Some(BGE_M3.iter().copied().chain([runtime.library]).collect())
+}
+
+/// The runtime library (`RUNTIME`) into `dir/onnxruntime/`, unless it already holds its pin.
+pub fn fetch_runtime(dir: &Path, runtime: &Runtime) -> Result<()> {
     install(dir, runtime, &tar())
 }
 
@@ -991,9 +994,8 @@ mod tests {
             std::env::var_os("OBOETE_MODEL_FETCH").expect("OBOETE_MODEL_FETCH names a directory");
         let dir = Path::new(&dir);
         fetch(dir, BGE_M3).unwrap();
-        fetch_runtime(dir).unwrap();
-        let mut all = BGE_M3.to_vec();
-        all.push(RUNTIME.as_ref().unwrap().library);
+        fetch_runtime(dir, RUNTIME.as_ref().unwrap()).unwrap();
+        let all = local_files().unwrap();
         verify(dir, &all).unwrap();
         assert!(marker_ok(dir, &all));
     }

@@ -82,8 +82,9 @@ pub enum GeminiPlace {
 }
 
 /// Semantic search is a provider slot (docs/plan.md 2b, docs/pr-d.md): `none` (full-text only,
-/// the default), `workers-ai` (bge-m3 on Cloudflare), later `local` (fastembed). One model per
-/// store; switching reindexes.
+/// the default), `workers-ai` (bge-m3 on Cloudflare) or `local` (the same bge-m3 on this machine,
+/// milestone 4 Task 10). The two runners share the model's vectors, so switching between them
+/// reindexes nothing.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Embedding {
     #[serde(default = "default_embedding")]
@@ -760,7 +761,9 @@ pub(crate) fn from_text(path: &Path, text: &str) -> Result<Config> {
         );
     }
     match cfg.embedding.provider.as_str() {
-        "none" => {}
+        // `local` loads in any build: one without the model (`embed::local_unavailable`) embeds
+        // nothing and doctor says why, so a binary built without it never stops the worker.
+        "none" | "local" => {}
         "workers-ai" => {
             anyhow::ensure!(
                 cfg.embedding.account_id.is_some(),
@@ -785,7 +788,7 @@ pub(crate) fn from_text(path: &Path, text: &str) -> Result<Config> {
             );
         }
         other => anyhow::bail!(
-            "{}: [embedding] provider = \"{other}\" does not exist yet; use \"none\" (full-text search) or \"workers-ai\"",
+            "{}: [embedding] provider = \"{other}\" does not exist; use \"none\" (full-text search), \"local\" or \"workers-ai\"",
             path.display()
         ),
     }
@@ -1951,11 +1954,18 @@ model = { gone = "m" }
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("config.toml"),
-            "[embedding]\nprovider = \"local\"\n",
+            "[embedding]\nprovider = \"fastembed\"\n",
         )
         .unwrap();
         let err = load(&dir).unwrap_err().to_string();
-        assert!(err.contains("does not exist yet"), "{err}");
+        assert!(err.contains("does not exist"), "{err}");
+        // `local` loads in every build, the model's files or not (`embed::local_unavailable`).
+        std::fs::write(
+            dir.join("config.toml"),
+            "[embedding]\nprovider = \"local\"\n",
+        )
+        .unwrap();
+        assert!(load(&dir).is_ok());
         std::fs::write(
             dir.join("config.toml"),
             "[embedding]\nprovider = \"none\"\n",

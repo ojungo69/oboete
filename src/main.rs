@@ -34,7 +34,6 @@ mod manifest;
 mod mcp;
 mod migrate;
 // Setup starts using the model downloader in milestone 4, Task 10, Step 6.
-#[allow(dead_code)]
 mod model_fetch;
 mod provider;
 mod providers_db;
@@ -232,12 +231,21 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// Wire this binary into an agent's hooks (claude | codex | grok | agy | opencode | pi | cursor | all)
+    /// Wire this binary into an agent's hooks (claude | codex | grok | agy | opencode | pi | cursor | all),
+    /// or choose the embedder with --embeddings
     Setup {
-        agent: String,
+        #[arg(required_unless_present = "embeddings")]
+        agent: Option<String>,
         /// Take oboete's hook entries out again
-        #[arg(long)]
+        #[arg(long, requires = "agent", conflicts_with = "embeddings")]
         remove: bool,
+        /// none (full-text search), local (bge-m3 on this machine, downloaded once) or workers-ai
+        /// (Cloudflare): says what leaves the machine before anything changes
+        #[arg(long, conflicts_with = "agent", value_parser = ["none", "local", "workers-ai"])]
+        embeddings: Option<String>,
+        /// Take the choice without asking (for scripts)
+        #[arg(long, requires = "embeddings")]
+        yes: bool,
     },
     /// Report hook wiring, stored data and provider readiness
     Doctor,
@@ -528,7 +536,14 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             }
             emit(&out)
         }
-        Cmd::Setup { agent, remove } => setup::run(&home, &agent, remove),
+        Cmd::Setup {
+            embeddings: Some(choice),
+            yes,
+            ..
+        } => setup::embeddings(&home, &choice, yes),
+        Cmd::Setup { agent, remove, .. } => {
+            setup::run(&home, &agent.context("name an agent")?, remove)
+        }
         Cmd::Import {
             source,
             db,
@@ -873,5 +888,23 @@ mod tests {
             .query_row("SELECT MIN(seq) FROM checkpoints", [], |r| r.get(0))
             .unwrap();
         assert_eq!(read, Some(seq));
+    }
+
+    /// `setup` takes an agent or `--embeddings`, never both; `--yes` only with `--embeddings`,
+    /// `--remove` only with an agent, and only the three embedders.
+    #[test]
+    fn setup_takes_an_agent_or_an_embedder() {
+        let parses =
+            |args: &[&str]| Cli::try_parse_from([&["oboete", "setup"], args].concat()).is_ok();
+        assert!(parses(&["claude"]));
+        assert!(parses(&["all", "--remove"]));
+        assert!(parses(&["--embeddings", "local"]));
+        assert!(parses(&["--embeddings", "workers-ai", "--yes"]));
+        assert!(!parses(&[]));
+        assert!(!parses(&["--yes"]));
+        assert!(!parses(&["--remove"]));
+        assert!(!parses(&["claude", "--embeddings", "none"]));
+        assert!(!parses(&["--embeddings", "fastembed"]));
+        assert!(!parses(&["--embeddings", "none", "--remove"]));
     }
 }

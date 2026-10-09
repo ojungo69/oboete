@@ -241,6 +241,157 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
     Ok(())
 }
 
+/// `oboete setup --embeddings <none|local|workers-ai>` (spec 7.1, 7.2): the choice's line says what
+/// leaves the machine, and a terminal's "y" or `--yes` answers it; `local` downloads and checks
+/// the model first. Then only `[embedding] provider` changes: a choice refused or not ready leaves
+/// config.toml as it was.
+pub fn embeddings(home: &Path, choice: &str, yes: bool) -> Result<()> {
+    use std::io::IsTerminal;
+    let terminal = std::io::stdin().is_terminal();
+    let model = crate::model_fetch::BGE_M3;
+    let runtime = crate::model_fetch::RUNTIME.as_ref();
+    embeddings_with(home, choice, model, runtime, |line| {
+        println!("{line}");
+        confirm(yes, terminal, &mut std::io::stdin().lock())
+    })
+}
+
+fn embeddings_with(
+    home: &Path,
+    choice: &str,
+    model: &[crate::model_fetch::Artifact],
+    runtime: Option<&crate::model_fetch::Runtime>,
+    confirm: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    let dir = crate::embed::local_dir(home);
+    let files: Vec<_> = model
+        .iter()
+        .copied()
+        .chain(runtime.map(|r| r.library))
+        .collect();
+    let line = match choice {
+        "none" => "none: search is full text only, and no text or query goes to an embedder. \
+                   The vectors made so far stay in the store."
+            .to_owned(),
+        "workers-ai" => {
+            // What it would run with, before the question: no account or no token is no choice.
+            let cfg = config::load(home)?.embedding;
+            let account = cfg.account_id.as_deref().with_context(|| {
+                format!(
+                    "nothing changed: Workers AI needs your Cloudflare account's id as \
+                     [embedding] account_id in {}",
+                    home.join("config.toml").display()
+                )
+            })?;
+            config::read_key(&cfg.key_file).context("nothing changed")?;
+            format!(
+                "workers-ai: each memory's text, after the redaction rules, and each search query go \
+                 to Cloudflare Workers AI (bge-m3) under account {account}, with the token in {}; \
+                 at most {} requests a day, and USD {:.2} a month past its free allowance.",
+                cfg.key_file.display(),
+                cfg.daily_requests,
+                cfg.monthly_usd
+            )
+        }
+        "local" => {
+            if let Some(why) = crate::embed::local_unavailable() {
+                anyhow::bail!("nothing changed: {why}");
+            }
+            let runtime = runtime.context("nothing changed: no runtime for this machine")?;
+            let after = "after that, no text or query leaves this machine to be embedded.";
+            // By size: a file at its size but off its pin is downloaded again, as the line says.
+            let short = |a: &crate::model_fetch::Artifact| {
+                std::fs::metadata(dir.join(a.name)).map_or(true, |m| m.len() != a.size)
+            };
+            let model: Vec<_> = model.iter().filter(|a| short(a)).collect();
+            let mut missing = Vec::new();
+            if !model.is_empty() {
+                missing.push(format!("{} (BAAI's bge-m3, MIT)", sizes(model.into_iter())));
+            }
+            if short(&runtime.library) {
+                let archive = sizes([&runtime.archive].into_iter());
+                missing.push(format!("{archive} (Microsoft's ONNX Runtime 1.28.0, MIT)"));
+            }
+            if crate::model_fetch::marker_ok(&dir, &files) {
+                format!(
+                    "local: bge-m3 runs on this machine from the files in {}; {after}",
+                    dir.display()
+                )
+            } else if missing.is_empty() {
+                format!(
+                    "local: bge-m3 runs on this machine from the files in {}, once each is held to \
+                     the SHA-256 this oboete pins (one that is not is downloaded again, from \
+                     huggingface.co or github.com); {after}",
+                    dir.display()
+                )
+            } else {
+                format!(
+                    "local: bge-m3 runs on this machine. First, {} are downloaded into {}, each \
+                     file held to the SHA-256 this oboete pins; {after}",
+                    missing.join(" and "),
+                    dir.display()
+                )
+            }
+        }
+        other => anyhow::bail!("--embeddings {other}: use none, local or workers-ai"),
+    };
+    confirm(&line)?;
+    if choice == "local" {
+        let runtime = runtime.context("no runtime for this machine")?;
+        println!("downloading what is missing; run it again to resume if it stops");
+        crate::model_fetch::fetch(&dir, model)?;
+        crate::model_fetch::fetch_runtime(&dir, runtime)?;
+        crate::model_fetch::verify(&dir, &files)?;
+    }
+    let written = crate::settings::set_embedding_provider(home, choice)?;
+    println!(
+        "[embedding] provider = \"{choice}\" {} {}",
+        if written {
+            "written to"
+        } else {
+            "was already in"
+        },
+        home.join("config.toml").display()
+    );
+    Ok(())
+}
+
+/// "N MB from host", per host of the `artifacts`' URLs, in their order.
+fn sizes<'a>(artifacts: impl Iterator<Item = &'a crate::model_fetch::Artifact>) -> String {
+    let mut hosts: Vec<(&str, u64)> = Vec::new();
+    for a in artifacts {
+        let host = a.url.split('/').nth(2).unwrap_or(a.url);
+        match hosts.iter_mut().find(|(h, _)| *h == host) {
+            Some((_, size)) => *size += a.size,
+            None => hosts.push((host, a.size)),
+        }
+    }
+    (hosts.iter())
+        .map(|(host, size)| format!("{} MB from {host}", size.div_ceil(1 << 20)))
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
+/// The choice's line answered: `--yes`, or "y" typed in a terminal. Anything else changes nothing.
+fn confirm(yes: bool, terminal: bool, input: &mut dyn std::io::BufRead) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        terminal,
+        "nothing changed: run it in a terminal to answer, or add --yes"
+    );
+    print!("Go ahead? [y/N] ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    anyhow::ensure!(
+        matches!(answer.trim(), "y" | "Y" | "yes"),
+        "nothing changed"
+    );
+    Ok(())
+}
+
 /// Agent edits remain coordinated even when the corpus's state/config.lock is damaged.
 fn integration_lock(home: &Path) -> Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
@@ -2199,6 +2350,14 @@ pub fn doctor(home: &Path) -> Result<()> {
     if let Some(e) = damage {
         println!("  {e:#}; `oboete rebuild` builds it again from raw.db");
         unhealthy.push("knowledge.db is damaged (see above)");
+    }
+    // Milestone 4 Task 10: `local`'s files, with or without a store.
+    if config::load(home).is_ok_and(|c| c.embedding.provider == "local") {
+        let (ready, line) = crate::embed::local_state(home);
+        println!("  {line}");
+        if !ready {
+            unhealthy.push("the local model is not ready (see above)");
+        }
     }
     let (backup, backup_well) = crate::backup::doctor(home);
     for l in &backup {
@@ -4717,5 +4876,141 @@ mod tests {
                 && !out.contains("stop:1:"),
             "{out}"
         );
+    }
+
+    /// Spec 7.2 (milestone 4 Task 10): each choice says what leaves the machine and is answered
+    /// before anything changes; then only `[embedding] provider` changes, once the choice is
+    /// ready. A refusal, a missing account or token, a file off its pin, or a build without the
+    /// model leaves config.toml as it was.
+    #[test]
+    fn setup_embeddings() {
+        use crate::model_fetch::{Artifact, Runtime};
+        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+        let pin = |b: &[u8]| leak(format!("{:x}", Sha256::digest(b)));
+        // Nobody listens there: a file still to download fails.
+        let closed = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            leak(format!("http://{}/model", listener.local_addr().unwrap()))
+        };
+        let model = [Artifact {
+            name: "tokenizer.json",
+            url: closed,
+            size: 5,
+            sha256: pin(b"model"),
+        }];
+        let runtime = Runtime {
+            archive: Artifact {
+                name: "onnxruntime/rt.tgz",
+                url: closed,
+                size: 1,
+                sha256: pin(b"a"),
+            },
+            member: "rt/lib",
+            library: Artifact {
+                name: "onnxruntime/librt",
+                url: "",
+                size: 7,
+                sha256: pin(b"runtime"),
+            },
+        };
+        let local = crate::embed::local_unavailable().is_none();
+        // (choice, what the home holds, the answer, what the line says, written or the error)
+        type Row<'a> = (&'a str, &'a str, bool, &'a str, Result<(), &'a str>);
+        let rows: &[Row] = &[
+            ("none", "account", true, "no text or query goes", Ok(())),
+            ("workers-ai", "key", true, "", Err("account_id")),
+            ("workers-ai", "account", true, "", Err("key file")),
+            ("workers-ai", "account key", true, "Cloudflare", Ok(())),
+            ("workers-ai", "account key", false, "acct", Err("nothing")),
+            ("local", "", false, "1 MB from 127.0.0.1", Err("nothing")),
+            ("local", "files", true, "once each is held", Ok(())),
+            // A byte off its pin: downloaded again, which fails here.
+            ("local", "changed", true, "once each is held", Err("")),
+        ];
+        for &(choice, holds, answer, said, outcome) in rows {
+            let home = tempfile::tempdir().unwrap();
+            let key_file = home.path().join("key.md");
+            if holds.contains("key") {
+                std::fs::write(&key_file, "workers ai\ntoken\n").unwrap();
+            }
+            let account = holds.contains("account");
+            let was = if account { "workers-ai" } else { "none" };
+            let before = format!(
+                "# the owner's notes\n[summary]\ncurate = true\n\n[embedding]\n# by hand\n\
+                 provider = \"{was}\" # first\n{}key_file = '{}'\ndaily_requests = 150\n",
+                if account {
+                    "account_id = \"acct\"\n"
+                } else {
+                    ""
+                },
+                key_file.display()
+            );
+            std::fs::write(home.path().join("config.toml"), &before).unwrap();
+            let dir = crate::embed::local_dir(home.path());
+            let tokenizer: &[u8] = if holds == "changed" {
+                b"modem"
+            } else {
+                b"model"
+            };
+            if holds == "files" || holds == "changed" {
+                std::fs::create_dir_all(dir.join("onnxruntime")).unwrap();
+                std::fs::write(dir.join("tokenizer.json"), tokenizer).unwrap();
+                std::fs::write(dir.join("onnxruntime/librt"), "runtime").unwrap();
+            }
+            let mut line = None;
+            let got = embeddings_with(home.path(), choice, &model, Some(&runtime), |l| {
+                line = Some(l.to_owned());
+                anyhow::ensure!(answer, "nothing changed");
+                Ok(())
+            });
+            let after = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+            let row = format!("{choice} {holds:?} {answer}: {got:?} {line:?}");
+            if choice == "local" && !local {
+                // A build without the model is refused before the question.
+                let error = format!("{:#}", got.unwrap_err());
+                assert!(
+                    error.contains("local embeddings") || error.contains("ONNX"),
+                    "{row}"
+                );
+                assert_eq!((line, after), (None, before), "{row}");
+                continue;
+            }
+            match outcome {
+                Ok(()) => {
+                    got.unwrap();
+                    let now = before.replace(
+                        &format!("provider = \"{was}\""),
+                        &format!("provider = \"{choice}\""),
+                    );
+                    assert_eq!(after, now, "{row}");
+                }
+                Err(error) => {
+                    assert!(format!("{:#}", got.unwrap_err()).contains(error), "{row}");
+                    assert_eq!(after, before, "{row}");
+                }
+            }
+            match said {
+                "" => assert_eq!(line, None, "{row}"),
+                said => assert!(line.as_deref().is_some_and(|l| l.contains(said)), "{row}"),
+            }
+            if choice == "local" {
+                let files: Vec<_> = model.iter().copied().chain([runtime.library]).collect();
+                let verified = crate::model_fetch::marker_ok(&dir, &files);
+                assert_eq!(verified, outcome.is_ok(), "{row}");
+            }
+        }
+    }
+
+    /// Spec 7.2: a choice needs a terminal's "y" or `--yes`.
+    #[test]
+    fn setup_asks_in_a_terminal_or_takes_yes() {
+        let answer = |yes, terminal, typed: &str| {
+            confirm(yes, terminal, &mut std::io::Cursor::new(typed.as_bytes())).is_ok()
+        };
+        assert!(answer(true, false, ""));
+        assert!(!answer(false, false, "y\n"));
+        assert!(answer(false, true, "y\n"));
+        assert!(!answer(false, true, "n\n"));
+        assert!(!answer(false, true, ""));
     }
 }
