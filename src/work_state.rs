@@ -145,32 +145,10 @@ fn js_json(v: &Value) -> String {
     }
 }
 
-/// ECMAScript's Number::toString: the fewest digits that read back as `f` (Rust's `{:e}` writes
-/// them), placed by their decimal exponent `n`.
+/// ECMAScript's Number::toString, as claude-mem's JavaScript writes a number: of the shortest
+/// digits that read back as `f`, the nearest (`ryu_js`, which Rust's `{:e}` is not).
 fn js_number(f: f64) -> String {
-    if f == 0.0 {
-        return "0".into();
-    }
-    let e = format!("{:e}", f.abs());
-    let (mantissa, exp) = e.split_once('e').unwrap_or((&e, "0"));
-    let digits = mantissa.replace('.', "");
-    let k = digits.len() as i32;
-    let n = exp.parse::<i32>().unwrap_or(0) + 1;
-    let zeros = |c: i32| "0".repeat(c.max(0) as usize);
-    let body = if k <= n && n <= 21 {
-        format!("{digits}{}", zeros(n - k))
-    } else if 0 < n && n <= 21 {
-        let (int, frac) = digits.split_at(n as usize);
-        format!("{int}.{frac}")
-    } else if -6 < n && n <= 0 {
-        format!("0.{}{digits}", zeros(-n))
-    } else {
-        let (first, rest) = digits.split_at(1);
-        let point = if rest.is_empty() { "" } else { "." };
-        let sign = if n > 0 { "+" } else { "-" };
-        format!("{first}{point}{rest}e{sign}{}", (n - 1).abs())
-    };
-    if f < 0.0 { format!("-{body}") } else { body }
+    ryu_js::Buffer::new().format(f).to_owned()
 }
 
 /// A list's state or a task's fields folded: the latest value of each key wins.
@@ -811,6 +789,9 @@ mod tests {
             ("-9223372036854775808", "-9223372036854776000"),
             ("5e-324", "5e-324"),
             ("1.7976931348623157e308", "1.7976931348623157e+308"),
+            // Two shortest spellings read back as this double: JavaScript takes the nearer one
+            // (Codex on #408).
+            ("652282746268236.2", "652282746268236.2"),
         ] {
             let v: Value = serde_json::from_str(sent).unwrap();
             assert_eq!(text(&v), js, "{sent}");
