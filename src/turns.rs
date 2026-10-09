@@ -636,25 +636,31 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS turns_repo ON turns(repo, ts);
          CREATE INDEX IF NOT EXISTS turns_through ON turns(device, through);",
     )?;
-    let fresh = !crate::consumer::manifest::exists(k, "table", "turns_fts")?;
     // knowledge.db's `user_version` 1: `turns_fts` holds the summaries' notes (#403). An index
-    // built before them is built again, once.
-    let old = k.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 1;
-    if fresh || old {
-        let tx = if k.is_autocommit() {
-            Some(k.unchecked_transaction()?)
-        } else {
-            None
-        };
+    // built before them is built again, once: checked again under a write lock taken first, as
+    // `claims::migrate` does, so a second opener of the home waits and finds it built (Codex on
+    // #410).
+    let needed = |k: &Connection| -> Result<bool> {
+        Ok(!crate::consumer::manifest::exists(k, "table", "turns_fts")?
+            || k.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 1)
+    };
+    if !needed(k)? {
+        return Ok(());
+    }
+    let tx = k
+        .is_autocommit()
+        .then(|| rusqlite::Transaction::new_unchecked(k, rusqlite::TransactionBehavior::Immediate))
+        .transpose()?;
+    if needed(k)? {
         k.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(text, tokenize='trigram');
              DELETE FROM turns_fts;",
         )?;
         crate::consumer::fts::turns(k, None)?;
         k.execute_batch("PRAGMA user_version = 1")?;
-        if let Some(tx) = tx {
-            tx.commit()?;
-        }
+    }
+    if let Some(tx) = tx {
+        tx.commit()?;
     }
     Ok(())
 }
@@ -831,6 +837,45 @@ mod tests {
     }
 
     /// A home with `records` appended and `windows` curated over them; the consumers run.
+    /// Codex on #410: two openers of a home whose notes index predates them rebuild it once. The
+    /// second waits for the first's write lock, then finds the index built (a deferred
+    /// transaction failed there with "database is locked").
+    #[test]
+    fn a_second_opener_waits_for_the_notes_index_and_finds_it_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("knowledge.db");
+        let first = Connection::open(&path).unwrap();
+        first.execute_batch("PRAGMA journal_mode = WAL").unwrap();
+        schema(&first).unwrap();
+        first
+            .execute_batch(
+                "PRAGMA user_version = 0;
+                 BEGIN IMMEDIATE;
+                 INSERT INTO turns_fts(rowid, text) VALUES (999, 'built by the first');",
+            )
+            .unwrap();
+        let second = Connection::open(&path).unwrap();
+        second
+            .busy_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        let done = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            first
+                .execute_batch("PRAGMA user_version = 1; COMMIT;")
+                .unwrap();
+        });
+        schema(&second).unwrap();
+        done.join().unwrap();
+        let kept: i64 = second
+            .query_row(
+                "SELECT count(*) FROM turns_fts WHERE rowid = 999",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
     fn home(records: &[Event], windows: &[(OpKind, Value)]) -> tempfile::TempDir {
         let home = tempfile::tempdir().unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
