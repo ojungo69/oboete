@@ -57,9 +57,11 @@ a token written to a 5-minute cache, 2 times for a 1-hour cache, and 0.1 times f
 from it (0.05 or 0.025 times on some models; the same page, "Prompt caching"). The usage reports
 the written tokens (`cache_creation_input_tokens`) and the read ones apart, so oboete counts a
 written token at twice the entry's input price and a read one at once: what it counts toward
-`paid_usd_per_month` is never less than the bill. Such an entry also reserves each input token at
-twice the input price before the call, so a call whose usage never comes back (a timeout, an
-unreadable answer) is counted the same way.
+`paid_usd_per_month` is never less than the bill. Such an entry also prices each input token at
+twice the input price wherever its usage is not known yet (admission, the reservation, the
+recuration estimate), so a call whose usage never comes back (a timeout, an unreadable answer) is
+counted the same way. Only the price is doubled: its tokens count once against the request ceiling,
+the rate limits and the daily tokens.
 
 The Haiku 5.5 migration guide (https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide):
 

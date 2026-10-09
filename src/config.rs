@@ -324,7 +324,9 @@ impl Provider {
     }
     /// The most one input token may be billed, in input prices: twice for a Messages entry that
     /// writes its prompt cache (`cache_control` in its `extra`), which Anthropic bills at up to
-    /// twice the input price, else once. A paid call reserves its input at this (Codex on #409).
+    /// twice the input price, else once. Only prices: a paid call's input is priced at this where
+    /// its usage is not known (admission, the reservation, a call whose usage never comes back,
+    /// recuration's estimate), and its tokens count once against every token limit (Codex on #409).
     pub fn input_weight(&self) -> f64 {
         match self {
             Provider::Openai {
