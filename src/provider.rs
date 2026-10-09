@@ -2896,7 +2896,9 @@ fn codex_rest(read: &Value, now: i64, credits: bool) -> Option<i64> {
         .copied()
         .filter(|s| !s["rateLimitReachedType"].is_null())
         .collect();
-    let past = if read["ordinaryUsageAllowed"] == false {
+    // `ordinaryUsageAllowed` is the main limit's (`rateLimits`, id `codex`), the one credits pay
+    // past: an additional limit carries none (codex's backend client; Codex on #418).
+    let past = if read["ordinaryUsageAllowed"] == false && !usable(&&read["rateLimits"]) {
         Some(snapshots.as_slice())
     } else {
         (!reached.is_empty()).then_some(reached.as_slice())
@@ -3585,6 +3587,19 @@ mod tests {
             "other": limit(json!({"credits": {"hasCredits": false}}))["rateLimits"].clone(),
         }});
         assert_eq!(codex_rest(&both, now, true), Some(later * 1000));
+        // An additional limit, with no credits and no reached type as codex reads it, does not
+        // take over the main limit's `ordinaryUsageAllowed` (Codex on #418).
+        let additional = json!({
+            "ordinaryUsageAllowed": false,
+            "rateLimits": reached["rateLimits"].clone(),
+            "rateLimitsByLimitId": {
+                "codex": reached["rateLimits"].clone(),
+                "other": {"primary": {"usedPercent": 10, "windowDurationMins": 10080,
+                    "resetsAt": later}, "rateLimitReachedType": null, "credits": null},
+            },
+        });
+        assert_eq!(codex_rest(&additional, now, true), None);
+        assert_eq!(codex_rest(&additional, now, false), Some(later * 1000));
     }
 
     /// A rest codex's allowance set before a call is its own cooldown, to the millisecond: no
