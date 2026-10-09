@@ -1,0 +1,41 @@
+docs/spike/raw-index-tool-output.md
+  s_ad0ac4d9af0473::t_0397ed94efa3af 11
+  s_ad0ac4d9af0473::t_863bb83c19588f 1-10,12-46
+  s_ad0ac4d9af0473::t_5095ca76baa005 47
+docs/milestone-4-plan.md
+  s_ad0ac4d9af0473::t_c4c5e6b3431a69 70,97
+docs/milestone-4.md
+  s_ad0ac4d9af0473::t_cfab97453bfb72 66
+docs/spec.md
+  s_ad0ac4d9af0473::t_1218342a247686 67,226,228,390
+docs/spike/raw-index-copy.md
+  s_ad0ac4d9af0473::t_addcc9a08dfdb5 64
+docs/spike/raw-index-tool-output/result-every5.txt
+  s_ad0ac4d9af0473::t_413f271f2fc7d1 1-19
+docs/spike/raw-index-tool-output/tool_output.py
+  s_ad0ac4d9af0473::t_dfd9e62d673545 1-210
+src/consumer/fts.rs
+  s_ad0ac4d9af0473::t_47ea97ff15c171 3-4,34-41,178,180,182,188,192-197,230-235
+src/embed_phase.rs
+  s_ad0ac4d9af0473::t_e2b3ad8c8115d4 735-736,1156,1178,1301,1671,3228-3276
+src/search.rs
+  s_ad0ac4d9af0473::t_5b81158a7f37d5 254-256,449-450,610-611,625-626,628,772-836
+src/setup/doctor.rs
+  s_ad0ac4d9af0473::t_b297a4fc8ecc90 2655-2657
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e8c44054a472fb5917081855ae42a14a38b84aa2",
+  "prompts": {},
+  "sessions": {
+    "s_ad0ac4d9af0473": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "55f3d823-9d62-4fd7-a50c-4f022fc3c6bb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
