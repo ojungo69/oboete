@@ -1,6 +1,12 @@
 //! Milestone 4, Task 10's spike (docs/spike/local-embeddings.md): bge-m3 run in this process with
 //! fastembed, from the pinned files in one directory, never fetched by fastembed itself. Built
 //! only with the `local-embed` feature.
+//!
+//! The graph is not BAAI's: `assets/bge-m3-mha.onnx` is BAAI's with its attention fused into
+//! ONNX Runtime's `MultiHeadAttention` (docs/spike/local-embeddings/fuse.py), which runs as
+//! FlashAttention and keeps memory linear in the text's length. BAAI's graph needed 7.9 GB for
+//! one text of 6,706 tokens; this one 2.4 GB at 8,192, with the same vectors. Its weights are
+//! BAAI's file, unchanged.
 
 use std::io::{BufRead, Read};
 use std::path::Path;
@@ -13,8 +19,12 @@ use fastembed::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-/// huggingface.co/BAAI/bge-m3 at this commit (MIT), the files fastembed's `BGEM3` reads.
+/// huggingface.co/BAAI/bge-m3 at this commit (MIT): the tokenizer's files and the weights.
 pub const COMMIT: &str = "5617a9f61b028005a4858fdac845db406aefb181";
+
+/// The fused graph, and its SHA-256 as `fuse.py` wrote it.
+const GRAPH: &[u8] = include_bytes!("../assets/bge-m3-mha.onnx");
+const GRAPH_SHA256: &str = "395d177d56b5eb75c0cdd0b87bf9b939652e0a424b3257ba31c8b7fe848e1654";
 
 /// Each file's path in the model's directory, size and SHA-256.
 pub const FILES: &[(&str, u64, &str)] = &[
@@ -39,16 +49,6 @@ pub const FILES: &[(&str, u64, &str)] = &[
         "21106b6d7dab2952c1d496fb21d5dc9db75c28ed361a05f5020bbba27810dd08",
     ),
     (
-        "onnx/model.onnx",
-        724_923,
-        "f84251230831afb359ab26d9fd37d5936d4d9bb5d1d5410e66442f630f24435b",
-    ),
-    (
-        "onnx/Constant_7_attr__value",
-        65_552,
-        "cdf16f72c5d07b36484056e601ed9687f78477e5d85cee85a34f2406b7fb5906",
-    ),
-    (
         "onnx/model.onnx_data",
         2_266_820_608,
         "1eebfb28493f67bba03ce0ef64bfdc7fc5a3bd9d7493f818bb1d78cd798416b4",
@@ -58,8 +58,12 @@ pub const FILES: &[(&str, u64, &str)] = &[
 /// The tokens a text is cut to, Workers AI's limit too.
 pub const MAX_LENGTH: usize = 8192;
 
-/// Every file at its pinned size and hash.
+/// The graph and every file at their pinned size and hash.
 pub fn verify(dir: &Path) -> Result<()> {
+    let got = format!("{:x}", Sha256::digest(GRAPH));
+    if got != GRAPH_SHA256 {
+        bail!("the fused graph: SHA-256 {got}, not the pinned {GRAPH_SHA256}");
+    }
     for (name, size, sha) in FILES {
         let path = dir.join(name);
         let mut f = std::fs::File::open(&path).with_context(|| format!("opening {name}"))?;
@@ -94,9 +98,9 @@ pub fn load(dir: &Path, threads: Option<usize>) -> Result<TextEmbedding> {
         special_tokens_map_file: read("special_tokens_map.json")?,
         tokenizer_config_file: read("tokenizer_config.json")?,
     };
-    let model = UserDefinedEmbeddingModel::new(read("onnx/model.onnx")?, tokenizer)
-        .with_pooling(Pooling::Cls);
-    // The weights stay in their files: ONNX Runtime reads the external data from the model's
+    let model =
+        UserDefinedEmbeddingModel::new(GRAPH.to_vec(), tokenizer).with_pooling(Pooling::Cls);
+    // The weights stay in their file: ONNX Runtime reads the external data from the model's
     // folder instead of a copy in memory, which doubled the peak (5.6 GB for one query).
     let folder = dir.join("onnx");
     let mut options = InitOptionsUserDefined::new()
@@ -111,10 +115,10 @@ pub fn load(dir: &Path, threads: Option<usize>) -> Result<TextEmbedding> {
     Ok(TextEmbedding::try_new_from_user_defined(model, options)?)
 }
 
-/// One text at a time: a batch pads every text to its longest, and 8 long texts in one batch
-/// reached 17.8 GB in PR-A2.
+/// One text at a time: the fused graph has no attention mask, so the padding a batch adds to its
+/// shorter texts would change their vectors.
 pub fn embed(model: &mut TextEmbedding, text: &str) -> Result<Vec<f32>> {
-    let mut out = model.embed(&[text], Some(1))?;
+    let mut out = model.embed([text], Some(1))?;
     out.pop().context("no vector")
 }
 
@@ -207,10 +211,14 @@ mod tests {
         let raw = std::fs::read(fixture.join("workers-ai.f32")).unwrap();
         assert_eq!(raw.len(), rows.len() * 1024 * 4);
         let stored: Vec<Vec<f32>> = raw
-            .chunks_exact(1024 * 4)
+            .as_chunks::<{ 1024 * 4 }>()
+            .0
+            .iter()
             .map(|c| {
-                c.chunks_exact(4)
-                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                c.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b))
                     .collect()
             })
             .collect();
