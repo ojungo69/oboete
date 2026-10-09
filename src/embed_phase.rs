@@ -392,7 +392,7 @@ impl Phase {
                     0,
                 )
             });
-            self.finish(k, &f.batch, f.call, sent, ms)?;
+            self.finish(raw, k, &f.batch, f.call, sent, ms)?;
             return Ok(Step::Covered);
         }
         if self.held {
@@ -503,7 +503,7 @@ impl Phase {
             let tx = k.unchecked_transaction()?;
             let held = crate::claims::Pending::read(raw, &tx)?;
             for doc in half.docs {
-                let Some(mut r) = current(&tx, doc.kind, &doc.key)? else {
+                let Some(mut r) = current(Some(raw), &tx, doc.kind, &doc.key)? else {
                     continue;
                 };
                 if r.doc.sha != doc.sha {
@@ -575,6 +575,7 @@ impl Phase {
     /// 55-6), or the batch split and its lone texts refused.
     fn finish(
         &mut self,
+        raw: &Raw,
         k: &Connection,
         batch: &Batch,
         call: i64,
@@ -670,7 +671,7 @@ impl Phase {
             eprintln!("oboete: an embedding call is not settled: {e:#}");
         }
         if let Sent::Vectors(vecs) = &sent {
-            write(k, batch, vecs)?;
+            write(raw, k, batch, vecs)?;
             // The embedder answers: each text held for that goes once more, alone, in an answered
             // split, so only a failure now is that text's fault.
             let held = unhold(k, &batch.embedder)?;
@@ -688,12 +689,12 @@ impl Phase {
             }
         }
         for doc in &refused {
-            if stored(k, doc)? {
+            if stored(raw, k, doc)? {
                 mark(k, &batch.embedder, doc, "refused")?;
             }
         }
         for doc in &hold {
-            if stored(k, doc)? {
+            if stored(raw, k, doc)? {
                 mark(k, &batch.embedder, doc, "held")?;
             }
         }
@@ -1294,18 +1295,22 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
                 return Ok(None);
             };
             let mut read = k.prepare_cached(
-                "SELECT d.kind, d.ts, COALESCE(d.repo, ''), COALESCE(d.session, ''), f.text
-                 FROM raw_docs d JOIN raw_fts f ON f.rowid = d.rowid
+                "SELECT d.kind, d.ts, COALESCE(d.repo, ''), COALESCE(d.session, '')
+                 FROM raw_docs d
                  WHERE d.device = ?2 AND d.seq = ?3
                    AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
                                      AND v.kind = 'r' AND v.key = ?4)",
             )?;
-            let row: Option<(String, i64, String, String, String)> = read
+            let row: Option<(String, i64, String, String)> = read
                 .query_row(params![embedder, device, seq, key], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })
                 .optional()?;
-            let Some((record_kind, ts, repo, session, text)) = row else {
+            let Some((record_kind, ts, repo, session)) = row else {
+                return Ok(None);
+            };
+            // raw.db's text as it is now (#317).
+            let Some((_, text)) = crate::consumer::fts::texts(raw, device, &[seq])?.pop() else {
                 return Ok(None);
             };
             Ok(Some(Read {
@@ -1537,8 +1542,9 @@ fn index(k: &Connection, embedder: &str, doc: &Doc, vec: &[u8]) -> Result<()> {
 /// The document `key` of `family` (`c` a claim, `i` an import, `r` a record) was written, in the
 /// consumer's transaction that wrote it (row 46-2): a key whose text is gone or differs loses its
 /// rows, so a poll gives it the vector of its text now; the same text keeps its vector, under the
-/// document's repository and time now, but not an `excluded` mark (D13), judged again.
-pub fn touched(k: &Connection, family: &str, key: &str) -> Result<()> {
+/// document's repository and time now, but not an `excluded` mark (D13), judged again. `raw`
+/// reads a record's text (#317); a claim's or an import's needs none.
+pub fn touched(raw: Option<&Raw>, k: &Connection, family: &str, key: &str) -> Result<()> {
     let kinds = match family {
         "i" => "'k', 'p'",
         "c" => "'c'",
@@ -1553,7 +1559,7 @@ pub fn touched(k: &Connection, family: &str, key: &str) -> Result<()> {
     let Some((_, kind, ..)) = rows.first() else {
         return Ok(());
     };
-    let now = current(k, kind, key)?.map(|r| r.doc);
+    let now = current(raw, k, kind, key)?.map(|r| r.doc);
     for (id, _, src_sha, skipped) in rows {
         match &now {
             // An `excluded` mark goes whatever the text: what excluded it may have changed.
@@ -1578,10 +1584,10 @@ pub fn touched(k: &Connection, family: &str, key: &str) -> Result<()> {
 
 /// A batch's vectors, cached and indexed, in one transaction: a document whose stored text is no
 /// longer the one sent (a correction or a mask meanwhile) gets none (row 55-6).
-fn write(k: &Connection, batch: &Batch, vecs: &[Vec<f32>]) -> Result<()> {
+fn write(raw: &Raw, k: &Connection, batch: &Batch, vecs: &[Vec<f32>]) -> Result<()> {
     let tx = k.unchecked_transaction()?;
     for (doc, vec) in batch.docs.iter().zip(vecs) {
-        if !stored(&tx, doc)? {
+        if !stored(raw, &tx, doc)? {
             continue;
         }
         let bytes: Vec<u8> = vec.iter().flat_map(|x| x.to_le_bytes()).collect();
@@ -1596,14 +1602,15 @@ fn write(k: &Connection, batch: &Batch, vecs: &[Vec<f32>]) -> Result<()> {
 }
 
 /// Whether `doc`'s stored text is still the one it was read with.
-fn stored(k: &Connection, doc: &Doc) -> Result<bool> {
-    Ok(current(k, doc.kind, &doc.key)?.is_some_and(|r| r.doc.sha == doc.sha))
+fn stored(raw: &Raw, k: &Connection, doc: &Doc) -> Result<bool> {
+    Ok(current(Some(raw), k, doc.kind, &doc.key)?.is_some_and(|r| r.doc.sha == doc.sha))
 }
 
 /// The document `key` of `kind` (`c`, `k` or `p` for an import, `r` or `rp` for a record) as it
 /// is stored now, with its text, or None once it is gone. An imported uid's is its row with the
-/// highest rowid. A record's labels are left unread.
-fn current(k: &Connection, kind: &str, key: &str) -> Result<Option<Read>> {
+/// highest rowid. A record's labels are left unread, and its text is raw.db's (#317): `raw` is
+/// needed for a record the index still holds.
+fn current(raw: Option<&Raw>, k: &Connection, kind: &str, key: &str) -> Result<Option<Read>> {
     let read = |doc: Doc, text: String| Read {
         doc,
         text,
@@ -1656,29 +1663,32 @@ fn current(k: &Connection, kind: &str, key: &str) -> Result<Option<Read>> {
             let Some((device, seq)) = key.rsplit_once(':') else {
                 return Ok(None);
             };
-            k.query_row(
-                "SELECT d.kind, d.ts, COALESCE(d.repo, ''), COALESCE(d.session, ''), f.text
-                 FROM raw_docs d JOIN raw_fts f ON f.rowid = d.rowid
-                 WHERE d.device = ?1 AND d.seq = ?2",
-                params![device, seq.parse::<i64>().unwrap_or(-1)],
-                |r| {
-                    let text: String = r.get(4)?;
+            let seq = seq.parse::<i64>().unwrap_or(-1);
+            let row: Option<(String, i64, String, String)> = k
+                .query_row(
+                    "SELECT kind, ts, COALESCE(repo, ''), COALESCE(session, '') FROM raw_docs
+                     WHERE device = ?1 AND seq = ?2",
+                    params![device, seq],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            let Some((record_kind, ts, repo, session)) = row else {
+                return Ok(None);
+            };
+            let raw = anyhow::Context::context(raw, "a record's text is read from raw.db")?;
+            crate::consumer::fts::texts(raw, device, &[seq])?
+                .pop()
+                .map(|(_, text)| {
                     let doc = Doc {
-                        kind: if r.get::<_, String>(0)? == "prompt" {
-                            "rp"
-                        } else {
-                            "r"
-                        },
+                        kind: if record_kind == "prompt" { "rp" } else { "r" },
                         key: key.to_owned(),
                         sha: sha(&text),
-                        repo: r.get(2)?,
-                        ts: r.get(1)?,
-                        session: r.get(3)?,
+                        repo,
+                        ts,
+                        session,
                     };
-                    Ok(read(doc, text))
-                },
-            )
-            .optional()?
+                    read(doc, text)
+                })
         }
     })
 }
@@ -1718,7 +1728,7 @@ pub(crate) mod fixture {
                 .iter()
                 .map(|t| crate::embed::stub::vector(id, t))
                 .collect();
-            write(&k, &batch, &vectors).unwrap();
+            write(&s.raw, &k, &batch, &vectors).unwrap();
         }
     }
 
@@ -2077,7 +2087,9 @@ mod tests {
         s.raw.exclude("github.com/o/elsewhere", false).unwrap();
         let (sent, _) = send(home, &batch, &embedder, Duration::from_secs(5));
         assert!(matches!(&sent, Sent::Unsent(e) if e.is::<crate::curate::ListChanged>()));
-        Phase::new(home).finish(&k, &batch, call, sent, 0).unwrap();
+        Phase::new(home)
+            .finish(&s.raw, &k, &batch, call, sent, 0)
+            .unwrap();
         assert_eq!(stub.requests(), 0);
         let rows: i64 = db
             .query_row(
@@ -3424,7 +3436,9 @@ mod tests {
         let follows = |s: &Store, kind: &str, key: &str| {
             s.run();
             embed_all(s);
-            let now = current(&k, kind, key).unwrap().map(|r| r.doc.sha);
+            let now = current(Some(&s.raw), &k, kind, key)
+                .unwrap()
+                .map(|r| r.doc.sha);
             let got: Option<String> = k
                 .query_row(
                     "SELECT src_sha FROM vector_keys WHERE key = ?1 AND skipped IS NULL",
@@ -3444,7 +3458,8 @@ mod tests {
         derive(&mut s, seq, quote, "Parser caches go to disk.");
         follows(&s, "c", &uid);
         assert!(
-            current(&k, "c", &uid).unwrap().unwrap().doc.sha == sha("Parser caches go to disk.")
+            current(None, &k, "c", &uid).unwrap().unwrap().doc.sha
+                == sha("Parser caches go to disk.")
         );
         crate::claims::correct(&home, &uid, None, Some("Caches go to files.")).unwrap();
         follows(&s, "c", &uid);
@@ -3505,7 +3520,7 @@ mod tests {
             .append_tombstone(crate::raw::Target::Record { device, seq })
             .unwrap();
         follows(&s, "c", &uid);
-        assert!(current(&k, "c", &uid).unwrap().is_none());
+        assert!(current(None, &k, "c", &uid).unwrap().is_none());
         let (index, kept): (i64, i64) = k
             .query_row(
                 "SELECT (SELECT count(*) FROM vec_index),

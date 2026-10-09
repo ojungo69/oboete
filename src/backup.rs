@@ -2603,7 +2603,14 @@ pub(crate) mod tests {
         drop(raw);
         crate::worker::run_once(p).unwrap();
         let k = crate::knowledge::open(p).unwrap();
-        k.execute("DELETE FROM raw_fts_content", []).unwrap(); // the index keeps its terms
+        // A search index whose text is gone while the index keeps its terms (raw_fts keeps no
+        // text since #317; the claims' and the cards' do).
+        k.execute_batch(
+            "CREATE VIRTUAL TABLE kept_fts USING fts5(text, tokenize='trigram');
+             INSERT INTO kept_fts(rowid, text) VALUES (1, 'note zq001x kept');
+             DELETE FROM kept_fts_content;",
+        )
+        .unwrap();
         assert!(crate::db::quick_check(&k, "knowledge.db").is_err());
         drop(k);
         open_knowledge(p).unwrap();

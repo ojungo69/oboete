@@ -441,7 +441,6 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
         };
         let rows = match q.raw {
             RawArm::Off => Ok(Vec::new()),
-            _ if q.types.is_some() => filtered_raw_fts(&raw, &k, q, depth),
             _ => super::raw_order(
                 Some(&raw),
                 &k,
@@ -449,6 +448,7 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                 q.searched(),
                 span,
                 q.skip_session.as_deref(),
+                q.types.as_ref().map(|f| f.clause(Class::Raw, "d.kind")),
                 depth,
             ),
         };
@@ -732,7 +732,7 @@ pub fn trec_run(
             }
         }
     }
-    let docs = sidecar(&k, &printed)?;
+    let docs = sidecar(&raw, &k, &printed)?;
     std::fs::create_dir_all(out)?;
     for (arm, run) in arms.iter().zip(&runs) {
         std::fs::write(out.join(format!("b-{}.trec", arm.name())), run)?;
@@ -770,8 +770,8 @@ fn question(line: &str, depth: usize) -> Result<(String, Query)> {
 
 /// The run's sidecar (Task 6): one JSON line per printed key, its session, time, kind and text,
 /// gated as embedding gates it (`outbound_lines`; an imported document's fields each alone,
-/// `composed_out`) and cut where the judge cuts.
-fn sidecar(k: &Connection, keys: &[String]) -> Result<String> {
+/// `composed_out`) and cut where the judge cuts. A record's text is raw.db's as it is now (#317).
+fn sidecar(raw: &Raw, k: &Connection, keys: &[String]) -> Result<String> {
     let mut out = String::new();
     for key in keys {
         let row: Option<(Option<String>, i64, String, String)> = match key.strip_prefix("r:") {
@@ -779,17 +779,20 @@ fn sidecar(k: &Connection, keys: &[String]) -> Result<String> {
                 let Some((device, seq)) = record.rsplit_once(':') else {
                     anyhow::bail!("a record key is r:<device>:<seq>, not {key}");
                 };
-                k.query_row(
-                    "SELECT d.session, d.ts, d.kind, f.text
-                     FROM raw_docs d JOIN raw_fts f ON f.rowid = d.rowid
-                     WHERE d.device = ?1 AND d.seq = ?2",
-                    params![device, seq.parse::<i64>()?],
-                    |r| {
-                        let text = redact::outbound_lines(&r.get::<_, String>(3)?);
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, text))
-                    },
-                )
-                .optional()?
+                let seq = seq.parse::<i64>()?;
+                match crate::consumer::fts::texts(raw, device, &[seq])?.pop() {
+                    Some((_, text)) => k
+                        .query_row(
+                            "SELECT session, ts, kind FROM raw_docs WHERE device = ?1 AND seq = ?2",
+                            params![device, seq],
+                            |r| {
+                                let text = redact::outbound_lines(&text);
+                                Ok((r.get(0)?, r.get(1)?, r.get(2)?, text))
+                            },
+                        )
+                        .optional()?,
+                    None => None,
+                }
             }
             None => k
                 .query_row(
@@ -1645,73 +1648,6 @@ fn curated_leg(
         });
     }
     Ok(out)
-}
-
-/// The raw full-text leg with Q5's kind restriction before its limit. Without a type filter
-/// the existing raw leg (including its bounded short-word pool) is used unchanged.
-fn filtered_raw_fts(raw: &Raw, k: &Connection, q: &Query, depth: usize) -> Result<Vec<String>> {
-    let Some((mut clauses, mut args, order, order_args)) =
-        super::query_clauses(&q.text, "raw_fts", &["f.text"])
-    else {
-        return Ok(Vec::new());
-    };
-    type_clause(q, Class::Raw, "d.kind", &mut clauses, &mut args);
-    if let Some(repo) = q.searched() {
-        clauses.push("d.repo = ?".into());
-        args.push(Value::Text(repo.to_owned()));
-    }
-    super::within(&mut clauses, &mut args, "d.ts", (q.since, q.until));
-    if let Some(session) = &q.skip_session {
-        clauses.push("COALESCE(d.session, '') <> ?".into());
-        args.push(Value::Text(session.clone()));
-    }
-    // Keep raw_order's pending-removal compensation and its bounded short-word pool.
-    let seen = super::fts_seen(Some(raw), k)?;
-    let count = depth.saturating_add(super::hidden(&seen)?.len());
-    let query = |sql: &str, args: Vec<Value>| -> Result<Vec<(String, i64)>> {
-        Ok(k.prepare(sql)?
-            .query_map(params_from_iter(args), |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?)
-    };
-    let hits = "raw_fts f JOIN raw_docs d ON d.rowid = f.rowid";
-    let rows = if order_args.is_empty() {
-        args.push(Value::Integer(super::sql_limit(count)));
-        let sql = format!(
-            "SELECT d.device, d.seq FROM {hits} WHERE {} ORDER BY {order}d.ts DESC LIMIT ?",
-            clauses.join(" AND ")
-        );
-        query(&sql, args)?
-    } else {
-        let mut pool = args.clone();
-        pool.push(Value::Integer(super::sql_limit(super::POOL)));
-        pool.extend(order_args);
-        pool.push(Value::Integer(super::sql_limit(count.min(super::POOL))));
-        let sql = format!(
-            "SELECT device, seq FROM (
-               SELECT d.device, d.seq, d.ts, f.text, f.rank FROM {hits}
-               WHERE {} ORDER BY rank, d.ts DESC, d.rowid LIMIT ?
-             ) f ORDER BY {order}ts DESC LIMIT ?",
-            clauses.join(" AND ")
-        );
-        let mut found = query(&sql, pool)?;
-        if count > super::POOL {
-            args.push(Value::Integer(super::sql_limit(count - super::POOL)));
-            args.push(Value::Integer(super::sql_limit(super::POOL)));
-            let sql = format!(
-                "SELECT d.device, d.seq FROM {hits} WHERE {} ORDER BY rank, d.ts DESC, d.rowid LIMIT ? OFFSET ?",
-                clauses.join(" AND ")
-            );
-            found.extend(query(&sql, args)?);
-        }
-        found
-    };
-    let pending = super::hidden(&seen)?;
-    Ok(rows
-        .into_iter()
-        .filter(|key| !pending.contains(key))
-        .take(depth)
-        .map(|(device, seq)| format!("{device}:{seq}"))
-        .collect())
 }
 
 /// The imported documents a search of `repo` reads: those of `imported_repos`, and of the

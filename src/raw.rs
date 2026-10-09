@@ -1942,62 +1942,12 @@ impl Raw {
         limit: usize,
         max_bytes: usize,
     ) -> Result<Vec<Record>> {
-        let mut st = self.conn.prepare(
-            "SELECT device, seq, type, ts, kind, agent, session, repo, branch, head, gitdir, cwd,
-                    source, body, original_bytes,
-                    target_device, target_seq, target_offset, target_length, enc
-             FROM records WHERE device = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
-        )?;
+        let mut st = self.conn.prepare_cached(&format!(
+            "SELECT {RECORD} FROM records WHERE device = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3"
+        ))?;
         let rows = st.query_map(
             params![device, seq, i64::try_from(limit).unwrap_or(i64::MAX)],
-            |r| {
-                let kind: String = r.get(2)?;
-                let item = if kind == "removed" {
-                    Item::Removed
-                } else if kind == "tombstone" {
-                    let (device, seq) = (r.get(15)?, r.get(16)?);
-                    Item::Tombstone(match r.get::<_, Option<i64>>(17)? {
-                        Some(offset) => Target::Range {
-                            device,
-                            seq,
-                            offset,
-                            length: r.get(18)?,
-                        },
-                        None => Target::Record { device, seq },
-                    })
-                } else {
-                    let mut body: Vec<u8> = r.get(13)?;
-                    // Task 10: no reader sees `enc`.
-                    if r.get::<_, String>(19)? == "zstd" {
-                        body = unzstd(&body).map_err(|e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                13,
-                                rusqlite::types::Type::Blob,
-                                Box::new(e),
-                            )
-                        })?;
-                    }
-                    Item::Event(Box::new(Event {
-                        ts: r.get(3)?,
-                        kind: r.get(4)?,
-                        agent: r.get(5)?,
-                        session: r.get(6)?,
-                        repo: r.get(7)?,
-                        branch: r.get(8)?,
-                        head: r.get(9)?,
-                        gitdir: r.get(10)?,
-                        cwd: r.get(11)?,
-                        source: r.get(12)?,
-                        body: String::from_utf8_lossy(&body).into_owned(),
-                        original_bytes: r.get(14)?,
-                    }))
-                };
-                Ok(Record {
-                    device: r.get(0)?,
-                    seq: r.get(1)?,
-                    item,
-                })
-            },
+            record,
         )?;
         let (mut recs, mut bytes) = (Vec::new(), 0usize);
         for r in rows {
@@ -2016,6 +1966,78 @@ impl Raw {
         Ok(recs)
     }
 
+    /// The records of `device` at `seqs` as `after` returns them (masked, D8), in seq order; a
+    /// seq with no record is left out. A reader of many records' text reads them so, a page at a
+    /// time (#317: the raw index keeps no copy of it).
+    pub fn at(&self, device: &str, seqs: &[i64]) -> Result<Vec<Record>> {
+        let mut st = self.conn.prepare_cached(&format!(
+            "SELECT {RECORD} FROM records
+             WHERE device = ?1 AND seq IN (SELECT value FROM json_each(?2)) ORDER BY seq"
+        ))?;
+        let mut recs = st
+            .query_map(params![device, serde_json::to_string(seqs)?], record)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        self.hide(device, &mut recs)?;
+        Ok(recs)
+    }
+}
+
+/// The columns `record` reads, in its order.
+const RECORD: &str = "device, seq, type, ts, kind, agent, session, repo, branch, head, gitdir, \
+                      cwd, source, body, original_bytes, \
+                      target_device, target_seq, target_offset, target_length, enc";
+
+/// A `records` row, its body decompressed, as `Raw::after` reads it before the masks.
+fn record(r: &rusqlite::Row) -> rusqlite::Result<Record> {
+    let kind: String = r.get(2)?;
+    let item = if kind == "removed" {
+        Item::Removed
+    } else if kind == "tombstone" {
+        let (device, seq) = (r.get(15)?, r.get(16)?);
+        Item::Tombstone(match r.get::<_, Option<i64>>(17)? {
+            Some(offset) => Target::Range {
+                device,
+                seq,
+                offset,
+                length: r.get(18)?,
+            },
+            None => Target::Record { device, seq },
+        })
+    } else {
+        let mut body: Vec<u8> = r.get(13)?;
+        // Task 10: no reader sees `enc`.
+        if r.get::<_, String>(19)? == "zstd" {
+            body = unzstd(&body).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    13,
+                    rusqlite::types::Type::Blob,
+                    Box::new(e),
+                )
+            })?;
+        }
+        Item::Event(Box::new(Event {
+            ts: r.get(3)?,
+            kind: r.get(4)?,
+            agent: r.get(5)?,
+            session: r.get(6)?,
+            repo: r.get(7)?,
+            branch: r.get(8)?,
+            head: r.get(9)?,
+            gitdir: r.get(10)?,
+            cwd: r.get(11)?,
+            source: r.get(12)?,
+            body: String::from_utf8_lossy(&body).into_owned(),
+            original_bytes: r.get(14)?,
+        }))
+    };
+    Ok(Record {
+        device: r.get(0)?,
+        seq: r.get(1)?,
+        item,
+    })
+}
+
+impl Raw {
     /// Task 8: this device's records after `seq` as backup lines, one JSON object each, as
     /// `Raw::after` returns them (masked, D8) with each event's ledger rows, until `max_bytes`
     /// of lines (always one). Returns (seq, line) pairs in seq order.
@@ -2639,7 +2661,7 @@ impl Raw {
         let (Some(first), Some(last)) = (recs.first(), recs.last()) else {
             return Ok(());
         };
-        let mut st = self.conn.prepare(
+        let mut st = self.conn.prepare_cached(
             "SELECT target_seq, target_offset, target_length FROM records
              WHERE type = 'tombstone' AND target_device = ?1 AND target_seq BETWEEN ?2 AND ?3",
         )?;

@@ -75,7 +75,7 @@ impl Consumer for Imported {
                 params![k.last_insert_rowid(), format!("{}\n{}", d.title, d.body)],
             )?;
             // A uid imported again: its text is this row's now.
-            crate::embed_phase::touched(k, "i", &d.uid)?;
+            crate::embed_phase::touched(None, k, "i", &d.uid)?;
         }
         Ok(last)
     }
@@ -96,7 +96,7 @@ impl Consumer for Imported {
             params![device, to],
         )?;
         for uid in uids {
-            crate::embed_phase::touched(k, "i", &uid)?;
+            crate::embed_phase::touched(None, k, "i", &uid)?;
         }
         Ok(())
     }
