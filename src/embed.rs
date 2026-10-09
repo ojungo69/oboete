@@ -1,6 +1,7 @@
 //! Workers AI's bge-m3 (PR-D, docs/pr-d.md), as Design B's embedding phase and search call it
 //! (milestone 4 D8): the request, its limits, and the sign bits the vector index holds.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -28,6 +29,90 @@ pub(crate) const PROMPT_CHARS: usize = 1_000;
 pub(crate) const BATCH_TIMEOUT: Duration = Duration::from_secs(180);
 /// One answer holds up to 100 × 1,024 floats as JSON (about 2 MB).
 const MAX_RESPONSE_BYTES: u64 = 8 << 20;
+
+/// Whether one CLI search loads the local model for its query: only if a fresh process's load and
+/// embed fit MCP's 1.5 s on the slowest machine (D14), which the spike's did not (Step 3);
+/// otherwise `oboete search --vectors` waits for the load.
+pub const CLI_EMBEDS_QUERIES: bool = false;
+
+/// Where `local` keeps bge-m3's files and its runtime (`model_fetch`): no store operation touches
+/// it.
+pub fn local_dir(home: &Path) -> PathBuf {
+    home.join("models").join(EMBEDDER)
+}
+
+/// Why this build cannot run `local` here, if it cannot.
+pub fn local_unavailable() -> Option<&'static str> {
+    if !cfg!(feature = "local-embed") {
+        Some("this oboete was built without local embeddings (cargo feature local-embed)")
+    } else if crate::model_fetch::RUNTIME.is_none() {
+        Some("Microsoft releases no ONNX Runtime 1.28.0 for this machine")
+    } else {
+        None
+    }
+}
+
+/// `local`'s model for this home, to load on a `Resident`'s thread, or why there is none: a
+/// build or machine without it, or files not verified (doctor's line).
+pub(crate) fn local_model(home: &Path) -> std::result::Result<crate::resident::Load, String> {
+    #[cfg(test)]
+    if let Some(load) = stub::local_model(home) {
+        return Ok(load);
+    }
+    if let Some(why) = local_unavailable() {
+        return Err(why.to_owned());
+    }
+    let (ready, line) = local_state(home);
+    if !ready {
+        return Err(line);
+    }
+    #[cfg(feature = "local-embed")]
+    let load = Ok(crate::embed_local::loader(local_dir(home)));
+    #[cfg(not(feature = "local-embed"))]
+    let load = Err("this oboete was built without local embeddings".to_owned());
+    load
+}
+
+/// Whether `local`'s files are ready, and doctor's line on them, from their sizes and the
+/// `verified` marker: nothing is hashed.
+pub fn local_state(home: &Path) -> (bool, String) {
+    match (local_unavailable(), crate::model_fetch::local_files()) {
+        (None, Some(files)) => files_state(&local_dir(home), &files),
+        (why, _) => (
+            false,
+            format!("local model: {}", why.unwrap_or("unavailable")),
+        ),
+    }
+}
+
+fn files_state(dir: &Path, files: &[crate::model_fetch::Artifact]) -> (bool, String) {
+    if crate::model_fetch::marker_ok(dir, files) {
+        return (true, format!("local model: ready in {}", dir.display()));
+    }
+    let setup = "`oboete setup --embeddings local`";
+    let short: Vec<&str> = (files.iter())
+        .filter(|f| std::fs::metadata(dir.join(f.name)).map_or(true, |m| m.len() != f.size))
+        .map(|f| f.name)
+        .collect();
+    let line = if short.len() == files.len() {
+        format!(
+            "not downloaded; {setup} downloads it into {}",
+            dir.display()
+        )
+    } else if !short.is_empty() {
+        format!(
+            "incomplete in {} ({} missing); {setup} downloads the rest",
+            dir.display(),
+            short.join(", ")
+        )
+    } else {
+        format!(
+            "not verified since its files changed in {}; {setup} checks them again",
+            dir.display()
+        )
+    };
+    (false, format!("local model: {line}"))
+}
 
 /// The model's URL and the token.
 fn endpoint(cfg: &config::Embedding) -> Result<(String, String)> {
@@ -189,26 +274,39 @@ fn vectors(v: &Value, n: usize) -> Result<Vec<Vec<f32>>> {
         .map(|row| {
             let row = row
                 .as_array()
-                .filter(|r| r.len() == DIM)
                 .ok_or_else(|| anyhow!("workers ai: a vector is not {DIM} numbers"))?;
-            let mut vec = row
+            let vec = row
                 .iter()
                 .map(|x| {
                     x.as_f64()
                         .map(|x| x as f32)
-                        .filter(|x| x.is_finite())
-                        .ok_or_else(|| anyhow!("workers ai: a coordinate is not a finite number"))
+                        .ok_or_else(|| anyhow!("workers ai: a coordinate is not a number"))
                 })
                 .collect::<Result<Vec<f32>>>()?;
-            let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-            anyhow::ensure!(
-                norm.is_finite() && norm > 0.0,
-                "workers ai: a zero or overflowing vector"
-            );
-            vec.iter_mut().for_each(|x| *x /= norm);
-            Ok(vec)
+            unit(vec).context("workers ai")
         })
         .collect()
+}
+
+/// A vector as the index takes it from either runner: `DIM` finite numbers, scaled to unit
+/// length.
+pub fn unit(mut vec: Vec<f32>) -> Result<Vec<f32>> {
+    anyhow::ensure!(
+        vec.len() == DIM,
+        "a vector of {} numbers, not {DIM}",
+        vec.len()
+    );
+    anyhow::ensure!(
+        vec.iter().all(|x| x.is_finite()),
+        "a coordinate is not a finite number"
+    );
+    let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+    anyhow::ensure!(
+        norm.is_finite() && norm > 0.0,
+        "a zero or overflowing vector"
+    );
+    vec.iter_mut().for_each(|x| *x /= norm);
+    Ok(vec)
 }
 
 /// Sign bits, most significant bit first in each byte (as the spike's `np.packbits`).
@@ -309,6 +407,53 @@ pub(crate) mod stub {
             self.state.0.lock().unwrap().held = true;
             Hold(self.state.clone())
         }
+    }
+
+    /// A test home's local model (`local_model`): `models/bge-m3/stub` holds its load's delay
+    /// in ms, `fail`, `nan`, or `gate` (the load waits until a file `go` is put beside it); each
+    /// load adds a line to `stub-loads` beside it.
+    pub(crate) fn local_model(home: &std::path::Path) -> Option<crate::resident::Load> {
+        let dir = super::local_dir(home);
+        let how = std::fs::read_to_string(dir.join("stub")).ok()?;
+        Some(Box::new(move || {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(dir.join("stub-loads"))?
+                .write_all(b"load\n")?;
+            match how.trim() {
+                "fail" => anyhow::bail!("the stub model does not load"),
+                "nan" => {
+                    Ok(Box::new(|_: &str| Ok(vec![f32::NAN; super::DIM]))
+                        as crate::resident::Model)
+                }
+                "gate" => {
+                    while !dir.join("go").exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Ok(Box::new(|text: &str| Ok(vector(super::EMBEDDER, text)))
+                        as crate::resident::Model)
+                }
+                ms => {
+                    std::thread::sleep(std::time::Duration::from_millis(ms.parse().unwrap_or(0)));
+                    Ok(Box::new(|text: &str| Ok(vector(super::EMBEDDER, text)))
+                        as crate::resident::Model)
+                }
+            }
+        }))
+    }
+
+    /// A test home with a local model that loads as `how` says (`local_model`).
+    pub(crate) fn local(home: &std::path::Path, how: &str) {
+        let dir = super::local_dir(home);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("stub"), how).unwrap();
+    }
+
+    /// How many times a test home's local model loaded.
+    pub(crate) fn local_loads(home: &std::path::Path) -> usize {
+        let loads = super::local_dir(home).join("stub-loads");
+        std::fs::read_to_string(loads).map_or(0, |s| s.lines().count())
     }
 
     /// The stub's vector for `text` under model `id`: each word adds one to the dimension its
@@ -420,6 +565,79 @@ mod tests {
         }
         assert_eq!(got.iter().map(|b| b.len()).sum::<usize>(), todo.len());
         assert_eq!(got.last().unwrap().len(), 1);
+    }
+
+    /// Task 10: doctor names `local`'s files from their sizes and the marker, hashing nothing:
+    /// not downloaded, incomplete (which), changed since verified, ready; and a build that cannot
+    /// run them.
+    #[test]
+    fn doctor_names_the_local_model_state() {
+        use crate::model_fetch::Artifact;
+        let pin = |b: &[u8]| -> &'static str {
+            Box::leak(format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(b)).into_boxed_str())
+        };
+        let files = [
+            Artifact {
+                name: "a.json",
+                url: "",
+                size: 1,
+                sha256: pin(b"a"),
+            },
+            Artifact {
+                name: "onnx/b",
+                url: "",
+                size: 2,
+                sha256: pin(b"bb"),
+            },
+        ];
+        let home = tempfile::tempdir().unwrap();
+        let dir = local_dir(home.path());
+        let state = || files_state(&dir, &files);
+        assert!(
+            !state().0 && state().1.contains("not downloaded"),
+            "{:?}",
+            state()
+        );
+        std::fs::create_dir_all(dir.join("onnx")).unwrap();
+        std::fs::write(dir.join("a.json"), "a").unwrap();
+        assert!(state().1.contains("incomplete") && state().1.contains("onnx/b missing"));
+        std::fs::write(dir.join("onnx/b"), "bb").unwrap();
+        assert!(
+            !state().0 && state().1.contains("not verified"),
+            "{:?}",
+            state()
+        );
+        crate::model_fetch::verify(&dir, &files).unwrap();
+        assert!(state().0 && state().1.contains("ready"), "{:?}", state());
+        // Written again, same size: the marker no longer matches, and nothing was hashed to say so.
+        std::fs::remove_file(dir.join("a.json")).unwrap();
+        std::fs::write(dir.join("a.json"), "x").unwrap();
+        assert!(
+            !state().0 && state().1.contains("not verified"),
+            "{:?}",
+            state()
+        );
+        let (ready, line) = local_state(home.path());
+        if let Some(why) = local_unavailable() {
+            assert_eq!((ready, line), (false, format!("local model: {why}")));
+        } else {
+            assert!(!ready && line.contains("not downloaded"), "{line}");
+        }
+    }
+
+    /// Task 10: both runners' vectors pass `unit` (Workers AI's answers through `vectors`, the
+    /// local model's on its `Resident`): 1,024 finite numbers, not all zero, scaled to length 1.
+    #[test]
+    fn a_bad_vector_is_refused_by_either_runner() {
+        let v = unit(vec![3.0; DIM]).unwrap();
+        assert!((v.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-5);
+        assert!(unit(vec![1.0; DIM - 1]).is_err());
+        assert!(unit(vec![0.0; DIM]).is_err());
+        for bad in [f32::NAN, f32::INFINITY] {
+            let mut v = vec![1.0; DIM];
+            v[7] = bad;
+            assert!(unit(v).is_err());
+        }
     }
 
     #[test]

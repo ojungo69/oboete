@@ -7,6 +7,7 @@ use std::{
     fs::{self, File, Metadata},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
+    process::{Command, Stdio},
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -23,6 +24,7 @@ const MARGIN: u64 = 64 * 1024 * 1024;
 /// request, and each read. The whole download has no limit, as 2.3 GB on a slow line outlasts any.
 const IDLE: Duration = Duration::from_secs(60);
 
+#[derive(Clone, Copy)]
 pub struct Artifact {
     pub name: &'static str,
     pub url: &'static str,
@@ -64,6 +66,160 @@ pub const BGE_M3: &[Artifact] = &[
     },
 ];
 
+/// Microsoft's ONNX Runtime 1.28.0 for one target (docs/spike/local-embeddings.md, the runtime
+/// loaded at run time): its release archive, the library's path inside it, and the library, which
+/// has no URL of its own as it comes out of the archive.
+pub struct Runtime {
+    pub archive: Artifact,
+    pub member: &'static str,
+    pub library: Artifact,
+}
+
+/// This target's runtime; `None` where Microsoft releases none (macOS x64), which gets no `local`.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const RUNTIME: Option<Runtime> = Some(Runtime {
+    archive: Artifact {
+        name: "onnxruntime/onnxruntime-linux-x64-1.28.0.tgz",
+        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-linux-x64-1.28.0.tgz",
+        size: 9_125_960,
+        sha256: "a3e1b79d7bb1bf09696ce675f49e4064e6c81f6202b8225624fff0e93f8d6407",
+    },
+    member: "onnxruntime-linux-x64-1.28.0/lib/libonnxruntime.so.1.28.0",
+    library: Artifact {
+        name: "onnxruntime/libonnxruntime.so.1.28.0",
+        url: "",
+        size: 24_268_848,
+        sha256: "1461ef7cc3d9e49982591721683cc3e3a55580aeca9a5254e7aac47b75ee4bab",
+    },
+});
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub const RUNTIME: Option<Runtime> = Some(Runtime {
+    archive: Artifact {
+        name: "onnxruntime/onnxruntime-linux-aarch64-1.28.0.tgz",
+        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-linux-aarch64-1.28.0.tgz",
+        size: 8_116_278,
+        sha256: "e15ff8b5d85afe6c144d97c6fd432254bf76a219daaf17658087d6ecb3e8f0bb",
+    },
+    member: "onnxruntime-linux-aarch64-1.28.0/lib/libonnxruntime.so.1.28.0",
+    library: Artifact {
+        name: "onnxruntime/libonnxruntime.so.1.28.0",
+        url: "",
+        size: 20_591_712,
+        sha256: "f1ec1a08eb99bd6e5401340f0a2b101381bf4694415480291dc13bcaa30f9ec7",
+    },
+});
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub const RUNTIME: Option<Runtime> = Some(Runtime {
+    archive: Artifact {
+        name: "onnxruntime/onnxruntime-osx-arm64-1.28.0.tgz",
+        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-osx-arm64-1.28.0.tgz",
+        size: 32_396_562,
+        sha256: "1268b359718099bde2cedb55787f182a130067bc4f31e8c88478c445b850d3d8",
+    },
+    member: "onnxruntime-osx-arm64-1.28.0/lib/libonnxruntime.1.28.0.dylib",
+    library: Artifact {
+        name: "onnxruntime/libonnxruntime.1.28.0.dylib",
+        url: "",
+        size: 39_312_136,
+        sha256: "dc19bbcb2f5c9fb3c68b4f9248aa0a35065ff702c5dbeae75eac54a74da97b6d",
+    },
+});
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub const RUNTIME: Option<Runtime> = Some(Runtime {
+    archive: Artifact {
+        name: "onnxruntime/onnxruntime-win-x64-1.28.0.zip",
+        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-win-x64-1.28.0.zip",
+        size: 78_796_801,
+        sha256: "abef733dacbe2f571547a7150b479b5cb9cc0df22f96c24983a42cadb1b4f8bc",
+    },
+    member: "onnxruntime-win-x64-1.28.0/lib/onnxruntime.dll",
+    library: Artifact {
+        name: "onnxruntime/onnxruntime.dll",
+        url: "",
+        size: 15_809_848,
+        sha256: "18370c375f07357fa5874344a9d9ac17e6b6fe1eb18b1dd209d79483b4470257",
+    },
+});
+#[cfg(not(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(windows, target_arch = "x86_64")
+)))]
+pub const RUNTIME: Option<Runtime> = None;
+
+/// `local`'s files as installed: bge-m3's and this target's runtime library, each at its pin.
+pub fn local_files() -> Option<Vec<Artifact>> {
+    let runtime = RUNTIME.as_ref()?;
+    Some(BGE_M3.iter().copied().chain([runtime.library]).collect())
+}
+
+/// The runtime library (`RUNTIME`) into `dir/onnxruntime/`, unless it already holds its pin.
+pub fn fetch_runtime(dir: &Path, runtime: &Runtime) -> Result<()> {
+    install(dir, runtime, &tar())
+}
+
+/// The system's `tar`: GNU tar reads a `.tgz` on Linux, and bsdtar reads both a `.tgz` and a
+/// `.zip` on macOS and Windows. Windows' own is named by path, as Git's GNU tar can come first on
+/// the PATH and reads no `.zip`.
+fn tar() -> PathBuf {
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        return Path::new(&root).join("System32").join("tar.exe");
+    }
+    PathBuf::from("tar")
+}
+
+/// The archive at its pin (`fetch`), the one member written out by `tar -xOf`, which writes no
+/// path of the archive's own, held to the library's pin, and the archive removed, all under one
+/// hold of the directory's lock: a second setup must not write the same `.part`, or remove the
+/// archive while this one reads it (Codex on #426).
+fn install(dir: &Path, runtime: &Runtime, tar: &Path) -> Result<()> {
+    allow_url(&runtime.archive.url.parse()?)?;
+    fs::create_dir_all(dir)?;
+    let _lock = lock(dir)?;
+    let library = plain_path(dir, runtime.library.name)?;
+    if check(&library, &runtime.library).is_ok() {
+        return Ok(());
+    }
+    fetch_held(
+        dir,
+        std::slice::from_ref(&runtime.archive),
+        crate::failure::free_bytes,
+    )?;
+    let archive = plain_path(dir, runtime.archive.name)?;
+    let part = plain_path(dir, &format!("{}.part", runtime.library.name))?;
+    let ran = Command::new(tar)
+        .arg("-xOf")
+        .arg(&archive)
+        .arg(runtime.member)
+        .stdin(Stdio::null())
+        .stdout(File::create(&part)?)
+        .stderr(Stdio::null())
+        .status();
+    if !matches!(ran, Ok(status) if status.success()) {
+        remove(&part)?;
+        return Err(match ran {
+            Err(error) => anyhow::Error::new(error).context(format!(
+                "running {} to take the runtime out of its archive; without it, place {} in {}",
+                tar.display(),
+                runtime.member,
+                library.parent().unwrap_or(dir).display()
+            )),
+            Ok(_) => anyhow::anyhow!(
+                "{} could not take {} out of {}",
+                tar.display(),
+                runtime.member,
+                archive.display()
+            ),
+        });
+    }
+    finish(&part, &library, &runtime.library)?;
+    remove(&archive)
+}
+
 pub fn fetch(dir: &Path, artifacts: &[Artifact]) -> Result<()> {
     fetch_with(dir, artifacts, crate::failure::free_bytes)
 }
@@ -78,6 +234,15 @@ fn fetch_with(
     }
     fs::create_dir_all(dir)?;
     let _lock = lock(dir)?;
+    fetch_held(dir, artifacts, free)
+}
+
+/// `fetch_with` once its caller holds the directory's lock and has checked every URL.
+fn fetch_held(
+    dir: &Path,
+    artifacts: &[Artifact],
+    free: impl Fn(&Path) -> Option<u64>,
+) -> Result<()> {
     let mut pending = Vec::new();
     let mut needed = MARGIN;
     for artifact in artifacts {
@@ -400,7 +565,7 @@ fn plain_path(dir: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn check(path: &Path, artifact: &Artifact) -> Result<Metadata> {
+pub(crate) fn check(path: &Path, artifact: &Artifact) -> Result<Metadata> {
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
     ensure!(
@@ -836,17 +1001,138 @@ mod tests {
     }
 
     /// Line H with `model_fetch` itself (docs/spike/local-embeddings.md): the five files from
-    /// huggingface.co into the directory `OBOETE_MODEL_FETCH` names, resuming any `.part` there,
-    /// then verified. By hand only: it downloads up to 2.3 GB.
+    /// huggingface.co and this target's runtime from github.com into the directory
+    /// `OBOETE_MODEL_FETCH` names, resuming any `.part` there, then verified. By hand only: it
+    /// downloads up to 2.4 GB.
     #[test]
     #[ignore]
-    fn fetches_bge_m3_from_huggingface() {
+    fn fetches_bge_m3_and_its_runtime() {
         let dir =
             std::env::var_os("OBOETE_MODEL_FETCH").expect("OBOETE_MODEL_FETCH names a directory");
         let dir = Path::new(&dir);
         fetch(dir, BGE_M3).unwrap();
-        verify(dir, BGE_M3).unwrap();
-        assert!(marker_ok(dir, BGE_M3));
+        fetch_runtime(dir, RUNTIME.as_ref().unwrap()).unwrap();
+        let all = local_files().unwrap();
+        verify(dir, &all).unwrap();
+        assert!(marker_ok(dir, &all));
+    }
+
+    #[test]
+    fn the_runtime_comes_out_of_its_archive() {
+        let src = tempfile::tempdir().unwrap();
+        fs::create_dir_all(src.path().join("x/lib")).unwrap();
+        fs::write(src.path().join("x/lib/libfake"), b"runtime").unwrap();
+        let tgz = src.path().join("a.tgz");
+        let made = Command::new(tar())
+            .arg("-czf")
+            .arg(&tgz)
+            .arg("-C")
+            .arg(src.path())
+            .arg("x/lib/libfake")
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let bytes = fs::read(&tgz).unwrap();
+        let sha = |b: &[u8]| -> &'static str {
+            Box::leak(format!("{:x}", Sha256::digest(b)).into_boxed_str())
+        };
+        let served = bytes.clone();
+        let stub = Stub::new(move |_, _| reply(200, "", &served));
+        let runtime = |library_sha: &'static str| Runtime {
+            archive: Artifact {
+                name: "onnxruntime/a.tgz",
+                url: stub.url,
+                size: bytes.len() as u64,
+                sha256: sha(&bytes),
+            },
+            member: "x/lib/libfake",
+            library: Artifact {
+                name: "onnxruntime/libfake",
+                url: "",
+                size: 7,
+                sha256: library_sha,
+            },
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("onnxruntime/libfake");
+        let part = dir.path().join("onnxruntime/libfake.part");
+
+        let off_pin = install(dir.path(), &runtime(HELLO), &tar()).unwrap_err();
+        assert!(format!("{off_pin:#}").contains("SHA-256"), "{off_pin:#}");
+        let no_tar = install(
+            dir.path(),
+            &runtime(sha(b"runtime")),
+            Path::new("/no/such/tar"),
+        );
+        assert!(format!("{:#}", no_tar.unwrap_err()).contains("place x/lib/libfake in"));
+        assert!(!library.exists() && !part.exists());
+
+        install(dir.path(), &runtime(sha(b"runtime")), &tar()).unwrap();
+        assert_eq!(fs::read(&library).unwrap(), b"runtime");
+        assert!(!dir.path().join("onnxruntime/a.tgz").exists());
+        install(dir.path(), &runtime(sha(b"runtime")), &tar()).unwrap();
+        // One download in all: the archive verified the second time, the library the last.
+        assert_eq!(stub.requests().len(), 1);
+    }
+
+    /// Codex on #426: the lock is held while `tar` writes the library's `.part`, not only while
+    /// the archive downloads, so a second setup cannot write the same file meanwhile. The fake
+    /// `tar` waits for the test to look first (CodeRabbit on #426: a sleep did not promise it).
+    #[cfg(unix)]
+    #[test]
+    fn the_runtime_is_taken_out_under_the_lock() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        let slow_tar = bin.path().join("tar");
+        let go = bin.path().join("go");
+        // At most 30 s: a test that fails before it opens the gate ends instead of hanging.
+        let script = format!(
+            "#!/bin/sh\ni=0\nwhile [ ! -e '{}' ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\nprintf runtime\n",
+            go.display()
+        );
+        fs::write(&slow_tar, script).unwrap();
+        fs::set_permissions(&slow_tar, fs::Permissions::from_mode(0o755)).unwrap();
+        let sha = |b: &[u8]| -> &'static str {
+            Box::leak(format!("{:x}", Sha256::digest(b)).into_boxed_str())
+        };
+        let stub = Stub::new(|_, _| reply(200, "", b"archive"));
+        let runtime = Runtime {
+            archive: Artifact {
+                name: "onnxruntime/a.tgz",
+                url: stub.url,
+                size: 7,
+                sha256: sha(b"archive"),
+            },
+            member: "x/lib/libfake",
+            library: Artifact {
+                name: "onnxruntime/libfake",
+                url: "",
+                size: 7,
+                sha256: sha(b"runtime"),
+            },
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("onnxruntime/libfake.part");
+        thread::scope(|scope| {
+            let installing = scope.spawn(|| install(dir.path(), &runtime, &slow_tar));
+            let started = std::time::Instant::now();
+            while !part.exists() {
+                assert!(started.elapsed() < Duration::from_secs(10), "tar never ran");
+                thread::sleep(Duration::from_millis(10));
+            }
+            let second = lock(dir.path()).map(drop);
+            fs::write(&go, "").unwrap();
+            let refused = second.unwrap_err();
+            assert!(
+                format!("{refused:#}").contains("another oboete"),
+                "{refused:#}"
+            );
+            installing.join().unwrap().unwrap();
+        });
+        assert_eq!(
+            fs::read(dir.path().join("onnxruntime/libfake")).unwrap(),
+            b"runtime"
+        );
     }
 
     #[test]

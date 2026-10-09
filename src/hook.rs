@@ -3847,6 +3847,59 @@ mod tests {
         assert_eq!(p.prompt("a", "why did that break?"), "");
     }
 
+    /// Spec 4.3, D14: no hook loads the local model, whatever it injects: SessionStart, a prompt
+    /// and a file read run on a home the local model embedded. The control: a search in this
+    /// process loads it.
+    #[test]
+    fn no_hook_loads_the_model() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
+        std::fs::write(cwd.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let c = cwd.path().to_string_lossy().into_owned();
+        let settings = crate::capture::Settings::load(&home).unwrap();
+        let (_, repo, _) = crate::capture::checkout(&json!({"cwd": c}), &settings);
+        s.decided(&repo, 1_000, "Parser caches stay in Redis.", &[]);
+        s.run();
+        let config = "[embedding]\nprovider = \"local\"\n";
+        std::fs::write(home.join("config.toml"), config).unwrap();
+        crate::embed::stub::local(&home, "0");
+        crate::embed_phase::fixture::embed_all(&s);
+        let loads = crate::embed::stub::local_loads(&home);
+        let file = format!("{c}/src/parser.rs");
+        for (event, extra) in [
+            ("SessionStart", json!({"source": "startup"})),
+            (
+                "UserPromptSubmit",
+                json!({"prompt": "Where do parser caches go?"}),
+            ),
+            (
+                "PreToolUse",
+                json!({"tool_name": "Read", "tool_input": {"file_path": file}}),
+            ),
+        ] {
+            let mut payload = json!({"session_id": "a", "cwd": c});
+            let fields = extra.as_object().unwrap().clone();
+            payload.as_object_mut().unwrap().extend(fields);
+            hook(&home, "claude", event, &payload);
+        }
+        assert_eq!(crate::embed::stub::local_loads(&home), loads);
+        let q = crate::search::b::Query {
+            text: "parser caches".into(),
+            caller: Some(repo),
+            limit: 5,
+            ..Default::default()
+        };
+        crate::search::b::query(&home, &q).unwrap();
+        let t = std::time::Instant::now();
+        while crate::embed::stub::local_loads(&home) == loads {
+            let late = t.elapsed() > std::time::Duration::from_secs(5);
+            assert!(!late, "the control search loaded nothing");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     /// Task 8 Step 5 (spec 4.7, 4.8): an injection keeps what it showed as the session's shown
     /// set, each claim with its body's fingerprint and whether its body or only its index line
     /// came through; a resume keeps it, the next SessionStart replaces it, and `oboete inject`

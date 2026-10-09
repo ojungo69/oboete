@@ -1220,7 +1220,7 @@ pub(crate) fn doctor_report(home: &Path) -> DoctorReport {
         runtime::Observation::begin(home, config_contents.as_deref().map_err(|state| *state));
     let embedding_on = config
         .as_ref()
-        .is_ok_and(|config| config.embedding.provider == "workers-ai");
+        .is_ok_and(|config| config.embedding.provider != "none");
     let mut embeddings = EmbeddingChecks::unknown(match config.as_ref() {
         Ok(_) if embedding_on => CheckState::Unavailable,
         Ok(_) => CheckState::Off,
