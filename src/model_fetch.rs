@@ -1076,14 +1076,20 @@ mod tests {
     }
 
     /// Codex on #426: the lock is held while `tar` writes the library's `.part`, not only while
-    /// the archive downloads, so a second setup cannot write the same file meanwhile.
+    /// the archive downloads, so a second setup cannot write the same file meanwhile. The fake
+    /// `tar` waits for the test to look first (CodeRabbit on #426: a sleep did not promise it).
     #[cfg(unix)]
     #[test]
     fn the_runtime_is_taken_out_under_the_lock() {
         use std::os::unix::fs::PermissionsExt;
         let bin = tempfile::tempdir().unwrap();
         let slow_tar = bin.path().join("tar");
-        fs::write(&slow_tar, "#!/bin/sh\nsleep 1\nprintf runtime\n").unwrap();
+        let go = bin.path().join("go");
+        let script = format!(
+            "#!/bin/sh\nwhile [ ! -e '{}' ]; do sleep 0.05; done\nprintf runtime\n",
+            go.display()
+        );
+        fs::write(&slow_tar, script).unwrap();
         fs::set_permissions(&slow_tar, fs::Permissions::from_mode(0o755)).unwrap();
         let sha = |b: &[u8]| -> &'static str {
             Box::leak(format!("{:x}", Sha256::digest(b)).into_boxed_str())
@@ -1113,10 +1119,12 @@ mod tests {
                 assert!(started.elapsed() < Duration::from_secs(10), "tar never ran");
                 thread::sleep(Duration::from_millis(10));
             }
-            let second = lock(dir.path()).unwrap_err();
+            let second = lock(dir.path()).map(drop);
+            fs::write(&go, "").unwrap();
+            let refused = second.unwrap_err();
             assert!(
-                format!("{second:#}").contains("another oboete"),
-                "{second:#}"
+                format!("{refused:#}").contains("another oboete"),
+                "{refused:#}"
             );
             installing.join().unwrap().unwrap();
         });
