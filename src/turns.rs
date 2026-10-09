@@ -638,8 +638,8 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
     )?;
     // knowledge.db's `user_version` 1: `turns_fts` holds the summaries' notes (#403). An index
     // built before them is built again, once: checked again under a write lock taken first, as
-    // `claims::migrate` does, so a second opener of the home waits and finds it built (Codex on
-    // #410).
+    // `claims::migrate` does, and waited for through the stores' initialization window, so a
+    // second opener of the home waits and finds it built (Codex on #410).
     let needed = |k: &Connection| -> Result<bool> {
         Ok(!crate::consumer::manifest::exists(k, "table", "turns_fts")?
             || k.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 1)
@@ -647,9 +647,15 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
     if !needed(k)? {
         return Ok(());
     }
+    let deadline = std::time::Instant::now() + crate::db::OPEN_WRITE_WAIT;
     let tx = k
         .is_autocommit()
-        .then(|| rusqlite::Transaction::new_unchecked(k, rusqlite::TransactionBehavior::Immediate))
+        .then(|| {
+            crate::db::retry_busy(k, deadline, || {
+                let immediate = rusqlite::TransactionBehavior::Immediate;
+                Ok(rusqlite::Transaction::new_unchecked(k, immediate)?)
+            })
+        })
         .transpose()?;
     if needed(k)? {
         k.execute_batch(
@@ -838,8 +844,9 @@ mod tests {
 
     /// A home with `records` appended and `windows` curated over them; the consumers run.
     /// Codex on #410: two openers of a home whose notes index predates them rebuild it once. The
-    /// second waits for the first's write lock, then finds the index built (a deferred
-    /// transaction failed there with "database is locked").
+    /// second waits for the first's write lock past its own busy timeout, through the stores'
+    /// initialization window, then finds the index built (a deferred transaction, or one that
+    /// waited only its busy timeout, failed there with "database is locked").
     #[test]
     fn a_second_opener_waits_for_the_notes_index_and_finds_it_built() {
         let dir = tempfile::tempdir().unwrap();
@@ -856,7 +863,7 @@ mod tests {
             .unwrap();
         let second = Connection::open(&path).unwrap();
         second
-            .busy_timeout(std::time::Duration::from_secs(10))
+            .busy_timeout(std::time::Duration::from_millis(100))
             .unwrap();
         let done = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(300));
