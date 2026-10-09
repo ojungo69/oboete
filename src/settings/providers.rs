@@ -528,6 +528,18 @@ pub(super) fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value
                 let (at, old) = selected(&path, &mut doc, selector)?;
                 let new = entry.checked(Some(&old))?;
                 edit(table_mut(&mut doc, at).ok_or_else(invalid)?, &old, &new)?;
+                let credits = |p: &Provider| matches!(p, Provider::Cli { credits: true, .. });
+                if credits(&new) && !credits(&old) {
+                    // Switched on, they take effect now: codex's rest at its plan's line, set
+                    // without them, is lifted as `Use again` lifts it (Codex on #418). Before the
+                    // config is written, so a failure after it leaves a rest the next run sets
+                    // again, never a switch whose rest stays until the plan's reset.
+                    let unavailable = || refused(503, "providers_unavailable", "");
+                    let mut db = crate::providers_db::open(home).map_err(|_| unavailable())?;
+                    let tx = db.transaction().map_err(|_| unavailable())?;
+                    crate::providers_db::resume(&tx, new.name()).map_err(|_| unavailable())?;
+                    tx.commit().map_err(|_| unavailable())?;
+                }
                 if old.name() == "gemini"
                     && new.name() != "gemini"
                     && !base(&path, &doc)?
@@ -1238,6 +1250,53 @@ mod tests {
         let refused = send(home.path(), json!({"op": "create", "entry": claude})).unwrap_err();
         assert_eq!((refused.status, refused.code), (422, "range"));
         assert_eq!(text(), before);
+    }
+
+    /// Credits switched on take effect now: the rest codex's allowance set without them, until
+    /// its plan's reset, is lifted; a save that keeps them on lifts nothing (Codex on #418).
+    #[test]
+    fn credits_switched_on_lift_codexs_rest_at_its_plan_line() {
+        let home = home("providers = []\n");
+        let mut entry = cli("c", None, true);
+        entry["cli"] = json!("codex");
+        let saved = send(home.path(), json!({"op": "create", "entry": entry.clone()})).unwrap();
+        let selector = saved["providers"][0]["selector"].clone();
+        let reset = crate::db::now_ms() + 3 * 86_400_000;
+        let rest = || {
+            let db = crate::providers_db::open(home.path()).unwrap();
+            let s = crate::providers_db::State {
+                down_until: reset,
+                ..Default::default()
+            };
+            crate::providers_db::set_state(&db, "c", s).unwrap();
+        };
+        let down = || {
+            let db = crate::providers_db::open(home.path()).unwrap();
+            crate::providers_db::state(&db, "c").unwrap().down_until
+        };
+        rest();
+        entry["timeout_s"] = json!(120);
+        send(
+            home.path(),
+            json!({"op": "edit", "selector": selector, "entry": entry.clone()}),
+        )
+        .unwrap();
+        assert_eq!(down(), reset);
+        entry["credits"] = json!(true);
+        send(
+            home.path(),
+            json!({"op": "edit", "selector": selector, "entry": entry.clone()}),
+        )
+        .unwrap();
+        assert_eq!(down(), 0);
+        rest();
+        entry["timeout_s"] = json!(180);
+        send(
+            home.path(),
+            json!({"op": "edit", "selector": selector, "entry": entry}),
+        )
+        .unwrap();
+        assert_eq!(down(), reset);
     }
 
     #[test]
