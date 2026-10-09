@@ -27,6 +27,11 @@ toml_edit = "0.23"
 ureq = { version = "3.4.2", features = ["json"] }
 zstd = "0.14"
 unicode-normalization = "0.1.25"
+# Milestone 4, Task 10's spike: bge-m3 in-process, ONNX Runtime linked in, no hf-hub.
+fastembed = { version = "=7.1.1", optional = true, default-features = false, features = ["ort-download-binaries-rustls-tls"] }
+
+[features]
+local-embed = ["dep:fastembed"]
 
 # A timed-out CLI is killed with its process group (provider::kill_tree); already in the tree.
 [target.'cfg(unix)'.dependencies]
