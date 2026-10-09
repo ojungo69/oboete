@@ -497,6 +497,9 @@ main:has(.settings) #status:not(:empty), #status.error:not(:empty) {
 .settings details:not(.settings-group)[open] > summary::before { transform: rotate(45deg); }
 .settings details:not(.settings-group) > summary:hover { color: var(--accent); }
 .settings details { margin-top: 12px; }
+/* What an embedder choice does, read before it is agreed to (W4). */
+.embedding-consent { border-left: 3px solid var(--accent); padding: 2px 0 2px 12px; margin: 8px 0 10px; }
+.embedding-consent .desc { color: inherit; }
 .settings .agent-readiness { margin-top: 0; }
 .settings .agent-readiness > summary { font-size: 15px; font-weight: 600; }
 .settings .agent-readiness ul { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: 10px; }

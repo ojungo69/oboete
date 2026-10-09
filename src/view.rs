@@ -64,6 +64,8 @@ struct Viewer {
     recovery: crate::settings::recovery::Recovery,
     /// One synchronous maintenance operation and its last bounded receipt.
     maintenance: crate::settings::maintenance::Maintenance,
+    /// The embedder's preview, the choice running and the last one (W4).
+    embedding: crate::settings::embedding::Embedding,
     agents: crate::setup::agents::Agents,
     /// The page `--open` gave the browser opener, removed by the first request with the token.
     opener: Mutex<Option<PathBuf>>,
@@ -982,6 +984,7 @@ impl Viewer {
             moving: Mutex::new(()),
             recovery: crate::settings::recovery::Recovery::default(),
             maintenance: crate::settings::maintenance::Maintenance::default(),
+            embedding: crate::settings::embedding::Embedding::default(),
             agents: crate::setup::agents::Agents::default(),
             opener: Mutex::new(None),
             live: AtomicUsize::new(0),
@@ -1126,6 +1129,9 @@ impl Viewer {
             }
             ("POST", "/api/providers/test") => (MAX_BODY, |v, b, _| v.test_provider(b)),
             ("POST", "/api/key") => (MAX_KEY_BODY, |v, b, _| v.save_key(b)),
+            ("POST", "/api/embedding/preview") => (MAX_BODY, |v, b, _| v.embedding_preview(b)),
+            ("POST", "/api/embedding") => (MAX_BODY, |v, b, _| v.embedding_start(b)),
+            ("POST", "/api/embedding/key") => (MAX_KEY_BODY, |v, b, _| v.save_embedding_key(b)),
             ("POST", "/api/resume") => (MAX_BODY, |v, b, _| v.resume(b)),
             ("POST", "/api/privacy/exclude") => (MAX_BODY, |v, b, _| v.exclude(b)),
             ("POST", "/api/claims/correct") => (MAX_BODY, |v, b, _| v.claim_correct(b)),
@@ -1429,6 +1435,25 @@ impl Viewer {
         saved(crate::settings::save_key(&self.home, &self.saving, body))
     }
 
+    fn embedding_preview(&self, body: &[u8]) -> Response {
+        saved(self.embedding.preview(&self.home, body))
+    }
+
+    /// The choice taken; for `local` the answer waits for the download, while the page reads
+    /// its progress from `GET /api/embedding` on another connection.
+    fn embedding_start(&self, body: &[u8]) -> Response {
+        saved(self.embedding.start(&self.home, &self.saving, body))
+    }
+
+    /// The Workers AI token written to a new key file (W4); the answer never holds it.
+    fn save_embedding_key(&self, body: &[u8]) -> Response {
+        saved(crate::settings::embedding::save_key(
+            &self.home,
+            &self.saving,
+            body,
+        ))
+    }
+
     fn resume(&self, body: &[u8]) -> Response {
         saved(crate::settings::resume(&self.home, &self.saving, body))
     }
@@ -1627,6 +1652,13 @@ impl Viewer {
         if name == "maintenance" {
             return if query.is_empty() {
                 Response::json(&self.maintenance.show(&self.home))
+            } else {
+                Response::text(400, "status carries no query")
+            };
+        }
+        if name == "embedding" {
+            return if query.is_empty() {
+                Response::json(&self.embedding.status(&self.home))
             } else {
                 Response::text(400, "status carries no query")
             };
@@ -5495,6 +5527,9 @@ curate = false
             ("/api/providers/key", MAX_KEY_BODY),
             ("/api/providers/test/preview", MAX_BODY),
             ("/api/providers/test", MAX_BODY),
+            ("/api/embedding/preview", MAX_BODY),
+            ("/api/embedding", MAX_BODY),
+            ("/api/embedding/key", MAX_KEY_BODY),
         ] {
             save_guards(&v, path, cap, &body);
         }
@@ -5513,6 +5548,8 @@ curate = false
             "/api/providers/key?x=1",
             "/api/providers/test/preview?x=1",
             "/api/providers/test?x=1",
+            "/api/embedding?x=1",
+            "/api/embedding/key?x=1",
             "/api/doc?id=o1",
         ] {
             let r = request(&v, "POST", t, &[HOST, TOKEN, origin, json_type, cl], &body);

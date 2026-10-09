@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::config::{self, ChainOverlay, Provider, ToolOutput};
 
 pub(crate) mod claims;
+pub(crate) mod embedding;
 pub(crate) mod maintenance;
 pub(crate) mod privacy;
 mod providers;
@@ -142,6 +143,17 @@ pub fn show(home: &Path) -> Value {
         Ok(None) => (Some(0.0), Some(Vec::new())),
         Err(_) => (None, None),
     };
+    // Workers AI's use as doctor counts it (W4).
+    let (embed_usd, embed_requests) = match &ledger {
+        Ok(Some(db)) => (
+            crate::providers_db::embed_usd_this_month(db).ok(),
+            crate::providers_db::calls_in_a_day(db, crate::embed::CALLS)
+                .ok()
+                .map(|(calls, _)| calls),
+        ),
+        Ok(None) => (Some(0.0), Some(0)),
+        Err(_) => (None, None),
+    };
     // One row per name, as `[chain]` sets every entry of a name alike.
     let chain: Vec<Value> = names(&cfg.providers)
         .into_iter()
@@ -193,6 +205,14 @@ pub fn show(home: &Path) -> Value {
         },
         "backup": {"dir": backup},
         "redaction": {"extra_rules": redaction.extra_rules, "allowlist": redaction.allowlist},
+        "embedding": embedding::section(
+            home,
+            &cfg.embedding,
+            embed_usd,
+            embed_requests,
+            crate::model_fetch::BGE_M3,
+            crate::model_fetch::RUNTIME.as_ref(),
+        ),
         "chain": chain,
         "providers": providers,
         // Where a key typed on the page can be written (#94 part 3; macOS and Windows: #281).
@@ -208,6 +228,7 @@ pub fn show(home: &Path) -> Value {
             "per_prompt_chars": range(config::PER_PROMPT_CHARS),
             "correction_chars": range(config::CORRECTION_CHARS),
             "daily_budget": [BUDGET.start(), BUDGET.end()],
+            "daily_requests": [BUDGET.start(), BUDGET.end()],
             "timeout_s": [TIMEOUT_S.start(), TIMEOUT_S.end()],
             "view_port": [1, u16::MAX],
         },
@@ -467,6 +488,8 @@ struct Save {
     backup: Option<BackupIn>,
     /// Older pages leave the custom rules and exact-value exceptions alone.
     redaction: Option<config::Redaction>,
+    /// Workers AI's account and caps; older pages leave them alone (W4).
+    embedding: Option<embedding::Values>,
     /// Every chain entry once, in the order the page wants.
     chain: Vec<EntryIn>,
 }
@@ -684,6 +707,9 @@ pub(crate) fn stage_held(
     let base = alone(&path, &doc).ok_or_else(invalid)?;
     let chain = checked(&posted, &base, &now)?;
     write_privacy_config(&mut doc, text, &posted)?;
+    if let Some(values) = &posted.embedding {
+        embedding::write(&mut doc, values, &now.embedding)?;
+    }
     // The order changes when the chain's does, not when `order` would be spelled another way.
     let reordered = !(posted.chain.iter().map(|e| e.name.as_str())).eq(names(&now.providers));
     if let Some(worker) = &posted.worker {
@@ -824,6 +850,11 @@ pub fn set_view_port(home: &Path, port: u16) -> anyhow::Result<()> {
 /// written, and the refusal is the error (`workers-ai` without its account).
 pub fn set_embedding_provider(home: &Path, provider: &str) -> anyhow::Result<bool> {
     let _config = config_lock(home)?;
+    set_embedding_provider_held(home, provider)
+}
+
+/// `set_embedding_provider` for a caller holding config.lock (the settings page, W4).
+pub(crate) fn set_embedding_provider_held(home: &Path, provider: &str) -> anyhow::Result<bool> {
     let path = home.join("config.toml");
     let was = bytes(home)?;
     let text = utf8(was.as_deref()).ok_or_else(|| anyhow::anyhow!("config.toml is not UTF-8"))?;

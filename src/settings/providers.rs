@@ -625,7 +625,7 @@ pub(super) fn save_key_at(
 }
 
 /// The shared config persistence contract: full validation, stage, stale check, then publish.
-fn commit(home: &Path, expected: &str, doc: DocumentMut) -> Result<Value, Refusal> {
+pub(super) fn commit(home: &Path, expected: &str, doc: DocumentMut) -> Result<Value, Refusal> {
     let path = home.join("config.toml");
     let candidate = doc.to_string();
     let current = bytes(home).map_err(|_| invalid())?;

@@ -85,31 +85,66 @@ pub fn local_state(home: &Path) -> (bool, String) {
     }
 }
 
-fn files_state(dir: &Path, files: &[crate::model_fetch::Artifact]) -> (bool, String) {
-    if crate::model_fetch::marker_ok(dir, files) {
-        return (true, format!("local model: ready in {}", dir.display()));
+/// `local`'s files in a folder, from their sizes and the `verified` marker: nothing is hashed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Files {
+    Ready,
+    NotDownloaded,
+    Incomplete,
+    /// Each at its size, but changed since it was checked.
+    Changed,
+}
+
+impl Files {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Files::Ready => "ready",
+            Files::NotDownloaded => "not_downloaded",
+            Files::Incomplete => "incomplete",
+            Files::Changed => "changed",
+        }
     }
-    let setup = "`oboete setup --embeddings local`";
-    let short: Vec<&str> = (files.iter())
+}
+
+/// The state of `files` in `dir`, and the names of those not at their size.
+pub(crate) fn files_in(
+    dir: &Path,
+    files: &[crate::model_fetch::Artifact],
+) -> (Files, Vec<&'static str>) {
+    if crate::model_fetch::marker_ok(dir, files) {
+        return (Files::Ready, Vec::new());
+    }
+    let short: Vec<&'static str> = (files.iter())
         .filter(|f| std::fs::metadata(dir.join(f.name)).map_or(true, |m| m.len() != f.size))
         .map(|f| f.name)
         .collect();
-    let line = if short.len() == files.len() {
-        format!(
+    let state = if short.len() == files.len() {
+        Files::NotDownloaded
+    } else if !short.is_empty() {
+        Files::Incomplete
+    } else {
+        Files::Changed
+    };
+    (state, short)
+}
+
+fn files_state(dir: &Path, files: &[crate::model_fetch::Artifact]) -> (bool, String) {
+    let setup = "`oboete setup --embeddings local`";
+    let line = match files_in(dir, files) {
+        (Files::Ready, _) => return (true, format!("local model: ready in {}", dir.display())),
+        (Files::NotDownloaded, _) => format!(
             "not downloaded; {setup} downloads it into {}",
             dir.display()
-        )
-    } else if !short.is_empty() {
-        format!(
+        ),
+        (Files::Incomplete, short) => format!(
             "incomplete in {} ({} missing); {setup} downloads the rest",
             dir.display(),
             short.join(", ")
-        )
-    } else {
-        format!(
+        ),
+        (Files::Changed, _) => format!(
             "not verified since its files changed in {}; {setup} checks them again",
             dir.display()
-        )
+        ),
     };
     (false, format!("local model: {line}"))
 }

@@ -272,7 +272,8 @@ fn embeddings_with(
             println!("checking each file against its pin");
         }
     }
-    let written = choose(home, &consent, model, runtime)?;
+    ready(&consent, model, runtime)?;
+    let written = crate::settings::set_embedding_provider(home, consent.choice())?;
     println!(
         "[embedding] provider = \"{choice}\" {} {}",
         if written {
@@ -309,12 +310,45 @@ pub(crate) enum Consent {
     },
 }
 
+impl Consent {
+    /// Whether `ready` has files to download or check before the choice is written.
+    pub(crate) fn needs_files(&self) -> bool {
+        matches!(self, Consent::Local { get, check, .. } if !get.is_empty() || *check)
+    }
+
+    /// The `[embedding] provider` it is for.
+    pub(crate) fn choice(&self) -> &'static str {
+        match self {
+            Consent::None { .. } => "none",
+            Consent::WorkersAi { .. } => "workers-ai",
+            Consent::Local { .. } => "local",
+        }
+    }
+}
+
 /// Bytes one source still needs from one host.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(crate) struct Download {
     pub host: String,
     pub bytes: u64,
-    pub source: &'static str,
+    pub source: Source,
+}
+
+/// What a download is, for the page to word (W4): both are MIT licensed.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Source {
+    Model,
+    Runtime,
+}
+
+impl Source {
+    fn words(self) -> &'static str {
+        match self {
+            Source::Model => "BAAI's bge-m3, MIT",
+            Source::Runtime => "Microsoft's ONNX Runtime 1.28.0, MIT",
+        }
+    }
 }
 
 /// Why a choice cannot be taken now; config.toml stays as it was.
@@ -389,17 +423,14 @@ pub(crate) fn consent(
             }
             let runtime =
                 runtime.ok_or(Refused::Unavailable("no ONNX Runtime for this machine"))?;
-            let files: Vec<_> = (model.iter().copied())
-                .chain([runtime.library])
-                .collect();
+            let files: Vec<_> = (model.iter().copied()).chain([runtime.library]).collect();
             // By size: a file at its size but off its pin is downloaded again, after the check.
             let short = |a: &crate::model_fetch::Artifact| {
                 std::fs::metadata(dir.join(a.name)).map_or(true, |m| m.len() != a.size)
             };
-            let mut get = downloads(model.iter().filter(|a| short(a)), "BAAI's bge-m3, MIT");
+            let mut get = downloads(model.iter().filter(|a| short(a)), Source::Model);
             if short(&runtime.library) {
-                let source = "Microsoft's ONNX Runtime 1.28.0, MIT";
-                get.extend(downloads([&runtime.archive].into_iter(), source));
+                get.extend(downloads([&runtime.archive].into_iter(), Source::Runtime));
             }
             let check = get.is_empty() && !crate::model_fetch::marker_ok(&dir, &files);
             Consent::Local { dir, get, check }
@@ -444,7 +475,7 @@ fn sentence(consent: &Consent) -> String {
                         "{} MB from {} ({})",
                         d.bytes.div_ceil(1 << 20),
                         d.host,
-                        d.source
+                        d.source.words()
                     )
                 })
                 .collect();
@@ -471,32 +502,23 @@ fn sentence(consent: &Consent) -> String {
     }
 }
 
-/// The consented choice taken: `local` downloads what is missing and checks every file first
-/// (holding only the model folder's lock), then `[embedding] provider` is written under
-/// config.lock. False when it already was the provider.
-pub(crate) fn choose(
-    home: &Path,
+/// What `local` needs before it is chosen: what is missing downloaded, and every file checked
+/// against its pin, holding only the model folder's lock. Nothing for the other choices.
+pub(crate) fn ready(
     consent: &Consent,
     model: &[crate::model_fetch::Artifact],
     runtime: Option<&crate::model_fetch::Runtime>,
-) -> Result<bool> {
-    let choice = match consent {
-        Consent::None { .. } => "none",
-        Consent::WorkersAi { .. } => "workers-ai",
-        Consent::Local { dir, get, check } => {
-            if !get.is_empty() || *check {
-                let runtime = runtime.context("no ONNX Runtime for this machine")?;
-                let files: Vec<_> = (model.iter().copied())
-                    .chain([runtime.library])
-                    .collect();
-                crate::model_fetch::fetch(dir, model)?;
-                crate::model_fetch::fetch_runtime(dir, runtime)?;
-                crate::model_fetch::verify(dir, &files)?;
-            }
-            "local"
-        }
-    };
-    crate::settings::set_embedding_provider(home, choice)
+) -> Result<()> {
+    if let Consent::Local { dir, .. } = consent
+        && consent.needs_files()
+    {
+        let runtime = runtime.context("no ONNX Runtime for this machine")?;
+        let files: Vec<_> = (model.iter().copied()).chain([runtime.library]).collect();
+        crate::model_fetch::fetch(dir, model)?;
+        crate::model_fetch::fetch_runtime(dir, runtime)?;
+        crate::model_fetch::verify(dir, &files)?;
+    }
+    Ok(())
 }
 
 /// The bytes of the files under `dir`, partial downloads and archives included; links are not
@@ -518,7 +540,7 @@ pub(crate) fn bytes_in(dir: &Path) -> u64 {
 /// The bytes `artifacts` still need from each of their hosts, in their order, for `source`.
 fn downloads<'a>(
     artifacts: impl Iterator<Item = &'a crate::model_fetch::Artifact>,
-    source: &'static str,
+    source: Source,
 ) -> Vec<Download> {
     let mut hosts: Vec<Download> = Vec::new();
     for a in artifacts {

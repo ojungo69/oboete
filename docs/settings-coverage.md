@@ -61,10 +61,10 @@ left with "—" there.
 
 | Setting or operation | Spec | Now | Backend | Takes effect | OS | Test | Slice |
 |---|---|---|---|---|---|---|---|
-| Embeddings: none, local or Workers AI, with caps | 4.10, 7.1 | — | `[embedding]` | the next window; a new space builds a new generation | all | — | W4 |
-| Workers AI's account id and token, the token write-only with its registration state | 4.10, 6.6, spec-webui | — | `[embedding] account_id`, `key_file`; `save_key` for the embedder's entry | the next embedding call | as the key rows | — | W4 |
-| The local model: source and size before the download, progress, readiness | spec-webui | — | local embedder (parity 5) | once downloaded and checked | all | — | W4 after the local embedder |
-| Index generations: building, active, rebuild after a change | 4.10 | — | `vec_generation` | when the generation is complete | all | — | W4 |
+| Embeddings: none, local or Workers AI | 4.10, 7.1 | page: the method, its review (what leaves the machine, from `setup::consent`) and a one-use agreement; the run and its last outcome | `[embedding] provider` through `settings/embedding.rs` (`setup::consent`, `setup::ready`, `set_embedding_provider_held`) | the worker's next embedding window | all; `local` where the build has it and Microsoft releases the runtime | `settings/embedding.rs` `a_choice_is_previewed_and_then_taken_once`, `local_is_written_only_once_its_files_are_checked`; `setup.rs` `setup_embeddings`; the viewer harness | W4 |
+| Workers AI's account id, caps and token, the token write-only with its registration state | 4.10, 6.6, spec-webui | page: the account id, requests a day and USD a month in the settings save; the token file's state, and a field that registers a new token (Linux, #281) | `[embedding] account_id`, `daily_requests`, `monthly_usd` (`embedding::write`); `key_file` through `keyfile::managed` (`embedding::save_key`) | the next embedding call | the token as the key rows; the values all | `settings/embedding.rs` `workers_ai_values_are_checked_and_written_alone`, `a_workers_ai_token_goes_to_its_own_file_and_into_no_answer` | W4 |
+| The local model: source and size before the download, progress, readiness | spec-webui | page: hosts, sizes and licences in the review; the bytes downloaded while it runs (`GET /api/embedding`); the files' state by size and marker | `model_fetch` under the model folder's lock; `embed::files_in` | once downloaded and checked | as the `local` method | `settings/embedding.rs` `the_page_shows_the_choice_the_token_state_and_the_local_files`, `local_is_written_only_once_its_files_are_checked` | W4 |
+| Index generations: building, active, rebuild after a change | 4.10 | page: local and Workers AI share one generation (bge-m3), so a switch keeps every vector; the waiting counts stay in doctor's "Embedding work" | `vec_generation` | no method offered builds a new generation (another model would, #396) | all | — | W4 |
 
 ### First run, agents, import and maintenance
 
@@ -113,8 +113,9 @@ cloud starts from a page view or a save.
   repository selectors and truthful owner-operation receipts. The capture, retention and forget
   rows retain their milestone-5 dependencies.
 - **W4, embeddings.** The embedder's choice and caps, Workers AI's account id and write-only token, the
-  local model's download with its consent and progress, and the generations' state; after the local
-  embedder (parity 5).
+  local model's download with its consent and progress, and the generations' state, built after the
+  local embedder (#426). [settings-embeddings.md](settings-embeddings.md) records the review, the
+  one-use agreement, the run and the token's registration.
 - **W5, import and maintenance.** The imports with their previews, recurate with its estimate,
   rebuild and restore with their confirmations and progress, and v1 finalization with its exact
   deletion scope. The updater stays visibly not built until milestone 7 builds it.
@@ -292,5 +293,5 @@ cloud starts from a page view or a save.
   owner-only home that a first run's ordinary home creation does not make, and the in-process
   move covers every other case.
 
-W1, W3, W5 and W6 are independent of each other once their backends exist; W2 is security scope and
-W4 waits for the local embedder.
+W1, W3, W5 and W6 are independent of each other once their backends exist; W2 and W4's token
+registration are security scope.
