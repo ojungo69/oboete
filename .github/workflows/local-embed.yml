@@ -1,15 +1,12 @@
 name: local-embed
-# Milestone 4, Task 10 (docs/spike/local-embeddings.md): a ref built with the `local-embed`
-# feature on the five release targets (spec 7.1), the binary started with nothing beside it, and
-# the agreement test on the public fixture. Run by hand only: a run downloads the model's files
-# (about 2.3 GB) on every runner.
+# Milestone 4, Task 10 (docs/spike/local-embeddings.md): the branch the run is started on, built
+# with the `local-embed` feature on the five release targets (spec 7.1), the binary started with
+# nothing beside it, and the agreement test on the public fixture. Run by hand only
+# (`gh workflow run local-embed.yml --ref <branch>`): a run downloads the model's files (about
+# 2.3 GB) on every runner. The run builds only its own ref, so its cache stays in that branch's
+# scope.
 on:
   workflow_dispatch:
-    inputs:
-      ref:
-        description: The branch, tag or commit to build
-        required: true
-        type: string
 permissions:
   contents: read
 jobs:
@@ -28,7 +25,6 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ inputs.ref }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
