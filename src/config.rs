@@ -187,16 +187,38 @@ fn default_idle_minutes() -> u32 {
     10
 }
 
+/// Which API an HTTP entry speaks: OpenAI-compatible chat completions, or Anthropic's Messages API
+/// (owner, 2026-10-09), whose OpenAI-compatible endpoint ignores `response_format` and `strict`
+/// (docs/research/anthropic-messages-2026-10-09.md).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Api {
+    #[default]
+    Openai,
+    Anthropic,
+}
+
+impl Api {
+    fn is_openai(&self) -> bool {
+        *self == Api::Openai
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Provider {
-    /// OpenAI-compatible chat completions with `response_format: json_schema`.
+    /// An HTTP API asked for schema-following JSON: OpenAI-compatible chat completions with
+    /// `response_format: json_schema`, or with `api = "anthropic"` the Messages API with
+    /// `output_config.format`.
     Openai {
         name: String,
         /// One native entry's switch, independent of `[chain] off`'s name-group override.
         #[serde(default = "default_true", skip_serializing_if = "is_true")]
         enabled: bool,
         base_url: String,
+        /// With `Api::Anthropic`, `base_url` is the API root and calls go to `{base_url}/messages`.
+        #[serde(default, skip_serializing_if = "Api::is_openai")]
+        api: Api,
         /// File whose second line is the API key (owner convention: ~/X_KEY.md). None = no auth.
         #[serde(default)]
         key_file: Option<PathBuf>,
@@ -300,11 +322,30 @@ impl Provider {
             Self::Openai { enabled, .. } | Self::Cli { enabled, .. } => *enabled,
         }
     }
+    /// The most one input token may be billed, in input prices: twice for a Messages entry that
+    /// writes its prompt cache (`cache_control` in its `extra`), which Anthropic bills at up to
+    /// twice the input price, else once. Only prices: a paid call's input is priced at this where
+    /// its usage is not known (admission, the reservation, a call whose usage never comes back,
+    /// recuration's estimate), and its tokens count once against every token limit (Codex on #409).
+    pub fn input_weight(&self) -> f64 {
+        match self {
+            Provider::Openai {
+                api: Api::Anthropic,
+                extra,
+                ..
+            } if extra.contains_key("cache_control") => 2.0,
+            _ => 1.0,
+        }
+    }
     /// The output tokens a request reserves on top of its prompt: `max_tokens` or
     /// `max_completion_tokens` in `extra`, at most `max_output_tokens` on a paid entry (as
-    /// `provider::call` sends it), or 0 when it names none.
+    /// `provider::call` sends it), or 0 when it names none. A Messages request always names one:
+    /// `max_output_tokens` when `extra` does not.
     pub fn declared_output(&self) -> u32 {
-        let Provider::Openai { extra, limits, .. } = self else {
+        let Provider::Openai {
+            extra, limits, api, ..
+        } = self
+        else {
             return 0;
         };
         let declared = ["max_tokens", "max_completion_tokens"]
@@ -316,6 +357,7 @@ impl Provider {
             (Some(n), true) => n.min(cap),
             (None, true) => cap,
             (Some(n), false) => n,
+            (None, false) if *api == Api::Anthropic => cap,
             (None, false) => 0,
         };
         u32::try_from(n).unwrap_or(u32::MAX)
@@ -448,6 +490,7 @@ fn openai(
         name: name.into(),
         enabled: true,
         base_url: base_url.into(),
+        api: Api::Openai,
         key_file: Some(home_dir().join(key)),
         model: model.into(),
         daily_budget,
@@ -497,7 +540,8 @@ fn cli(name: &str, model: Option<&str>) -> Provider {
 
 /// Default chain, the owner's order of 2026-09-27: free first (the three Groq strict-schema models
 /// in separate 8k-TPM buckets, OpenRouter free, then NIM, which never answered in the owner's
-/// calls), then the flat-rate OpenCode Go, then the coding subscriptions, codex and claude.
+/// calls), then the flat-rate OpenCode Go, then Anthropic's API (2026-10-09), then the coding
+/// subscriptions, codex and claude.
 /// Mistral is not in it (owner, 2026-09-29): the owner's workspace allows no requests a minute,
 /// so the entry only spent a refused call each time the chain reached it (#233); a key whose free
 /// plan is on can be configured. The subscription CLIs run their cheap models (claude Haiku, codex gpt-6-luna), as
@@ -555,6 +599,36 @@ fn default_providers() -> Vec<Provider> {
     if let Provider::Openai { timeout_s, .. } = &mut nim {
         *timeout_s = 160;
     }
+    // Anthropic's Messages API, before the subscriptions the owner codes with: the owner's account
+    // gets monthly credits (the owner, 2026-10-09). It is off until the user turns it on: a config
+    // that takes this chain would otherwise send to a new recipient, and spend, on upgrade
+    // (Codex's security review of #409). On, a machine without the key file skips it, as it skips
+    // every keyed entry. Haiku 5.5 is the cheaper Haiku with structured outputs; its thinking
+    // counts against max_tokens, as nim's reasoning does, so it is off.
+    let mut anthropic = openai(
+        "anthropic",
+        "https://api.anthropic.com/v1",
+        "ANTHROPIC_API_KEY.md",
+        "claude-haiku-5-5",
+        None,
+        true,
+        serde_json::json!({"thinking": {"type": "disabled"}}),
+    );
+    if let Provider::Openai {
+        api,
+        limits,
+        enabled,
+        ..
+    } = &mut anthropic
+    {
+        *api = Api::Anthropic;
+        *enabled = false;
+        // Prices of a prompt up to 100,000 tokens (platform.claude.com/docs/en/about-claude/pricing,
+        // checked 2026-10-09); a longer one costs five times as much, so none is sent.
+        limits.usd_per_mtok_in = 0.10;
+        limits.usd_per_mtok_out = 0.50;
+        limits.max_request_tokens = Some(100_000);
+    }
     let openrouter = openai(
         "openrouter",
         OPENROUTER,
@@ -605,6 +679,7 @@ fn default_providers() -> Vec<Provider> {
         openrouter,
         nim,
         opencode_go,
+        anthropic,
         cli("codex", Some("gpt-6-luna")),
         cli("claude", Some("haiku")),
     ];
@@ -1173,6 +1248,12 @@ pub(crate) fn toml_error(text: &str, e: &toml::de::Error) -> anyhow::Error {
         .span()
         .and_then(|s| text.get(..s.start))
         .map_or(0, |b| b.matches('\n').count() + 1);
+    // An entry's `api` names no secret: its two values, so a misspelled one is plain to see.
+    if e.message().contains("expected `openai` or `anthropic`") {
+        return anyhow::anyhow!(
+            "line {line}: a provider's api is \"openai\" (the default) or \"anthropic\""
+        );
+    }
     anyhow::anyhow!(
         "line {line} is not valid here (the details are not shown: they could quote a value to hide)"
     )
@@ -1299,6 +1380,7 @@ port = 17374
                 "openrouter",
                 "nim",
                 "opencode-go",
+                "anthropic",
                 "codex",
                 "claude"
             ]
@@ -1401,7 +1483,7 @@ model = "haiku"
         assert_eq!(own(api), 300);
         let before = names("gemini = \"before-subscriptions\"\n");
         let at = before.iter().position(|n| n == "gemini").unwrap();
-        assert_eq!(before[at - 1], "opencode-go");
+        assert_eq!(before[at - 1], "anthropic");
         assert_eq!(before[at + 1], "codex");
         let after = names("gemini = \"after-subscriptions\"\n");
         assert_eq!(after.last().map(String::as_str), Some("gemini"));
@@ -1473,6 +1555,7 @@ model = { claude = "sonnet", groq = "openai/gpt-oss-20b" }
                 "openrouter",
                 "nim",
                 "opencode-go",
+                "anthropic",
                 "codex"
             ]
         );
@@ -1509,7 +1592,10 @@ model = { claude = "sonnet", groq = "openai/gpt-oss-20b" }
             .map(|p| p.name().to_owned())
             .collect();
         assert!(!called.contains(&"codex".to_owned()), "{called:?}");
-        assert_eq!(called.len(), default_providers().len() - 1);
+        // Nor the built-in entries that are off until turned on (anthropic).
+        let on = default_providers().iter().filter(|p| p.enabled()).count();
+        assert_eq!(called.len(), on - 1);
+        assert!(!called.contains(&"anthropic".to_owned()), "{called:?}");
         assert!(load(dir.path()).unwrap().chain.turns_off("codex"));
     }
 
@@ -1924,5 +2010,98 @@ model = { gone = "m" }
         ] {
             assert!(at(bad).is_err(), "{bad}");
         }
+    }
+
+    /// The owner, 2026-10-09: an HTTP entry may speak Anthropic's Messages API. Absent, `api` is
+    /// the OpenAI-compatible one and a save leaves it out; an unknown one is refused, by name.
+    #[test]
+    fn an_entry_speaks_the_api_it_names_and_an_unknown_one_is_refused() {
+        let entry = |rest: &str| {
+            format!(
+                "[[providers]]\nkind = \"openai\"\nname = \"a\"\n\
+                 base_url = \"https://api.anthropic.com/v1\"\nmodel = \"m\"\n{rest}"
+            )
+        };
+        let first = |text: &str| load_text(text).providers.remove(0);
+        let api = |text: &str| match first(text) {
+            Provider::Openai { api, .. } => api,
+            Provider::Cli { .. } => panic!("expected openai"),
+        };
+        assert_eq!(api(&entry("")), Api::Openai);
+        assert_eq!(api(&entry("api = \"openai\"\n")), Api::Openai);
+        assert_eq!(api(&entry("api = \"anthropic\"\n")), Api::Anthropic);
+        let saved = |text: &str| toml::to_string(&first(text)).unwrap();
+        let has_api = |text: &str| saved(text).lines().any(|l| l.starts_with("api ="));
+        assert!(!has_api(&entry("api = \"openai\"\n")));
+        assert!(saved(&entry("api = \"anthropic\"\n")).contains("api = \"anthropic\""));
+        let back: Provider = toml::from_str(&saved(&entry("api = \"anthropic\"\n"))).unwrap();
+        assert!(matches!(
+            back,
+            Provider::Openai {
+                api: Api::Anthropic,
+                ..
+            }
+        ));
+        // A Messages request always names its output's size; an OpenAI one without a price none.
+        assert_eq!(
+            first(&entry("api = \"anthropic\"\n")).declared_output(),
+            4000
+        );
+        assert_eq!(first(&entry("")).declared_output(), 0);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            entry("api = \"antrhopic\"\n"),
+        )
+        .unwrap();
+        let err = format!("{:#}", load(dir.path()).unwrap_err());
+        assert!(
+            err.contains(": a provider's api is \"openai\" (the default) or \"anthropic\""),
+            "{err}"
+        );
+        assert!(!err.contains("antrhopic"), "{err}");
+    }
+
+    /// The owner, 2026-10-09: Anthropic's API right after OpenCode Go, priced, so it stays inside
+    /// the paid cap with every other paid entry. It is off until the user turns it on: a config
+    /// that takes the built-in chain would otherwise send to a new recipient on upgrade, which
+    /// `[chain] off` written before could not name (Codex's security review of #409).
+    #[test]
+    fn the_default_anthropic_entry_is_priced_and_speaks_messages() {
+        let cfg: Config = toml::from_str("").unwrap();
+        let p = find(&cfg, "anthropic");
+        assert!(!p.enabled());
+        let Provider::Openai {
+            api,
+            base_url,
+            key_file,
+            model,
+            extra,
+            limits,
+            subscription,
+            ..
+        } = p
+        else {
+            panic!("expected an HTTP entry")
+        };
+        assert_eq!(*api, Api::Anthropic);
+        assert_eq!(base_url, "https://api.anthropic.com/v1");
+        assert!(
+            key_file
+                .as_ref()
+                .is_some_and(|f| f.ends_with("ANTHROPIC_API_KEY.md"))
+        );
+        assert_eq!(model, "claude-haiku-5-5");
+        assert_eq!(extra["thinking"]["type"], "disabled");
+        assert!(limits.is_paid() && !subscription && p.tier() == 3);
+        assert_eq!(
+            (
+                limits.usd_per_mtok_in,
+                limits.usd_per_mtok_out,
+                limits.max_request_tokens
+            ),
+            (0.10, 0.50, Some(100_000))
+        );
+        assert_eq!(p.declared_output(), limits.max_output_tokens);
     }
 }

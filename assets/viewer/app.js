@@ -1202,7 +1202,11 @@ const TEXT = {
   provider_cli_claude: ['Claude CLI (subscription)', 'Claude CLI (サブスクリプション)'],
   provider_cli_codex: ['Codex CLI (subscription)', 'Codex CLI (サブスクリプション)'],
   provider_endpoint: ['API base URL', 'API の接続先 URL'],
-  provider_endpoint_desc: ['Use HTTPS, or HTTP with a numeric loopback address such as 127.0.0.1. The server must support the OpenAI-compatible chat API. Redirects are not followed by tests.', 'HTTPS、または 127.0.0.1 など数値のループバックアドレスの HTTP を指定します。サーバーは OpenAI 互換のチャット API に対応している必要があります。接続テストではリダイレクトを追跡しません。'],
+  provider_endpoint_desc: ['Use HTTPS, or HTTP with a numeric loopback address such as 127.0.0.1. The server must support the API chosen below. Redirects are not followed by tests.', 'HTTPS、または 127.0.0.1 など数値のループバックアドレスの HTTP を指定します。サーバーは下で選ぶ API に対応している必要があります。接続テストではリダイレクトを追跡しません。'],
+  provider_api: ['API', 'API の種類'],
+  provider_api_openai: ['OpenAI-compatible', 'OpenAI 互換'],
+  provider_api_anthropic: ['Anthropic Messages', 'Anthropic Messages'],
+  provider_api_desc: ['Anthropic’s own Messages API returns JSON in the requested format; its OpenAI-compatible endpoint ignores that request. For Anthropic, choose Anthropic Messages and enter https://api.anthropic.com/v1 as the API base URL.', 'Anthropic 独自の Messages API は、指定した形式どおりの JSON を返します。Anthropic の OpenAI 互換の接続先では、この指定が無視されます。Anthropic を使う場合は「Anthropic Messages」を選び、API の接続先 URL に https://api.anthropic.com/v1 を入力してください。'],
   provider_enabled: ['Enable this entry', 'この要約役を有効にする'],
   provider_subscription: ['Covered by a subscription', 'サブスクリプション内の利用'],
   provider_subscription_desc: ['Subscription entries have no daily-call cap control. Existing legacy caps are preserved. Use API prices below for calls billed per token.', 'サブスクリプションには 1 日の回数を設定しません。既存の回数設定は維持します。トークン数で課金される API は下の料金を設定してください。'],
@@ -3546,7 +3550,7 @@ function providerEdit(name = '', saved = {}) {
   const defaults = { max_request_tokens: null, daily_tokens: null, usd_per_mtok_in: 0,
     usd_per_mtok_out: 0, max_output_tokens: 4000 };
   return { kind: saved.kind || 'openai', name, enabled: saved.enabled ?? true,
-    cli: saved.cli || 'claude', base_url: saved.base_url || '', model: saved.model || '',
+    cli: saved.cli || 'claude', base_url: saved.base_url || '', api: saved.api || 'openai', model: saved.model || '',
     timeout_s: providerText(saved.timeout_s ?? 60), subscription: saved.subscription ?? false,
     daily_budget: providerText(saved.daily_budget), savedDailyBudget: saved.daily_budget ?? null,
     limits: Object.fromEntries(LIMIT_FIELDS.map((key) => [key, providerText(saved.limits?.[key] ?? defaults[key])])),
@@ -3567,7 +3571,7 @@ function providerBody(draft) {
     model: draft.kind === 'cli' ? draft.model.trim() || null : draft.model.trim(),
     timeout_s: Number(draft.timeout_s), limits };
   if (draft.kind === 'cli') entry.cli = draft.cli;
-  else Object.assign(entry, { base_url: draft.base_url.trim(), subscription: draft.subscription,
+  else Object.assign(entry, { base_url: draft.base_url.trim(), api: draft.api, subscription: draft.subscription,
     daily_budget: providerDailyBudget(draft) });
   return entry;
 }
@@ -3914,11 +3918,12 @@ function providerLimitGrid(draft, unsupported) {
   const grid = el('div', 'grid');
   const outputField = el('label', 'field');
   const syncOutput = () => {
-    // Normal dispatch enforces this maximum only for priced HTTP. Keep other entries' saved
-    // estimates in the typed draft without offering an ineffective generation-limit control.
-    const paidHttp = draft.kind === 'openai'
-      && (Number(draft.limits.usd_per_mtok_in) > 0 || Number(draft.limits.usd_per_mtok_out) > 0);
-    if (paidHttp) {
+    // Normal dispatch enforces this maximum for priced HTTP and for every Anthropic Messages entry,
+    // which always sends it. Keep other entries' saved estimates in the typed draft without
+    // offering an ineffective generation-limit control.
+    const capped = draft.kind === 'openai' && (draft.api === 'anthropic'
+      || Number(draft.limits.usd_per_mtok_in) > 0 || Number(draft.limits.usd_per_mtok_out) > 0);
+    if (capped) {
       if (outputField.parentElement !== grid) grid.append(outputField);
     } else outputField.remove();
   };
@@ -3938,6 +3943,7 @@ function providerLimitGrid(draft, unsupported) {
     if (key !== 'max_output_tokens') grid.append(label);
   }
   syncOutput();
+  grid.syncOutput = syncOutput;
   return grid;
 }
 
@@ -3951,8 +3957,31 @@ function providerEditor(draft, provider, card) {
     if (key === 'model') control.maxLength = 200;
     return el('label', 'field', el('span', null, t(label)), control, description ? note(t(description)) : null);
   };
-  const main = el('div', 'grid', field('name', 'provider_name'),
-    draft.kind === 'openai' ? field('base_url', 'provider_endpoint', 'text', 'provider_endpoint_desc') : null,
+  const http = draft.kind === 'openai';
+  const endpoint = http ? field('base_url', 'provider_endpoint', 'text', 'provider_endpoint_desc') : null;
+  const api = el('select', null, ...['openai', 'anthropic'].map((value) => {
+    const option = el('option', null, t(`provider_api_${value}`));
+    option.value = value;
+    return option;
+  }));
+  api.value = draft.api;
+  api.dataset.field = 'providers.api';
+  api.disabled = Boolean(unsupported);
+  api.addEventListener('change', () => { draft.api = api.value; grid.syncOutput(); });
+  // An endpoint that comes onto Anthropic's own host preselects its API; editing it there keeps
+  // the user's choice (CodeRabbit on #409).
+  const onAnthropic = () => /^https:\/\/api\.anthropic\.com(\/|$)/i.test(draft.base_url.trim());
+  let wasOnAnthropic = onAnthropic();
+  endpoint?.querySelector('input').addEventListener('input', () => {
+    const now = onAnthropic();
+    if (now && !wasOnAnthropic) {
+      api.value = draft.api = 'anthropic';
+      grid.syncOutput();
+    }
+    wasOnAnthropic = now;
+  });
+  const main = el('div', 'grid', field('name', 'provider_name'), endpoint,
+    http ? el('label', 'field', el('span', null, t('provider_api')), api, note(t('provider_api_desc'))) : null,
     field('model', 'col_model'), field('timeout_s', 'col_timeout', 'number'));
   const limits = el('details', 'provider-limits', el('summary', null, t('provider_advanced')));
   limits.open = provider?.advanced ?? false;

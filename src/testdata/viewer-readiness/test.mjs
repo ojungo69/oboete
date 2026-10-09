@@ -11,6 +11,7 @@ class Node {
   }
   append(...nodes){for(const node of nodes){this.children.push(node);if(node&&typeof node==='object')node.parentElement=this;}}
   replaceChildren(...nodes){this.children=[];this.append(...nodes);}
+  remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(node=>node!==this);this.parentElement=null;}
   addEventListener(name,cb){(this.listeners[name]??=[]).push(cb);}
   setAttribute(name,value){this.attrs[name]=value;}
   removeAttribute(name){delete this.attrs[name];}
@@ -639,4 +640,43 @@ ctx.ui.setLang('ja');f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.
 assert(text(section()).includes('古いブックマーク')&&text(panel).includes('常駐の画面のポート'),'Japanese page address');
 ctx.ui.setLang('en');
 console.log('PASS: page address, moves, new token and the resident page from a foreground run');
+}
+
+// The owner, 2026-10-09: an HTTP entry's API, chosen in its editor and saved as `api`.
+{
+vm.runInContext('globalThis.apiUi={providerEdit,providerBody,providerEditor};',ctx);
+const {apiUi}=ctx;
+ctx.ui.setForm({ranges:{timeout_s:[1,600],daily_budget:[1,1000]}});
+ctx.ui.setLang('en');
+const draft=apiUi.providerEdit('a',{kind:'openai',base_url:'https://example.invalid/v1',model:'m',timeout_s:30,limits:{}});
+assert.equal(draft.api,'openai','an entry saved without an API is OpenAI-compatible');
+let editor=apiUi.providerEditor(draft,null,new Node('article'));
+const select=editor.querySelectorAll('select').find(node=>node.dataset.field==='providers.api');
+assert(select,'the HTTP editor offers the API');
+assert.deepEqual(select.options.map(node=>node.value),['openai','anthropic']);
+assert.equal(select.value,'openai');
+assert(text(editor).includes('Anthropic Messages')&&text(editor).includes('OpenAI-compatible'),'both APIs are named');
+const url=editor.querySelectorAll('input').find(node=>node.dataset.field==='providers.base_url');
+const capShown=()=>editor.querySelectorAll('input').some(node=>node.dataset.field==='providers.limits.max_output_tokens');
+assert(!capShown(),'an unpriced OpenAI-compatible entry has no output cap to set');
+url.value='https://api.anthropic.com/v1';for(const cb of url.listeners.input)cb({target:url});
+assert.equal(draft.api,'anthropic','an endpoint on the Anthropic host preselects its API');
+assert(capShown(),'a Messages entry always sends its output cap, so it can be set');
+assert.equal(select.value,'anthropic');
+assert.equal(apiUi.providerBody(draft).api,'anthropic','a save sends the choice');
+select.value='openai';for(const cb of select.listeners.change)cb({target:select});
+assert(!capShown(),'switching back hides the cap again');
+url.value='https://api.anthropic.com/v1/';for(const cb of url.listeners.input)cb({target:url});
+assert.equal(apiUi.providerBody(draft).api,'openai','editing the URL on the same host keeps a manual choice');
+url.value='https://example.invalid/v1';for(const cb of url.listeners.input)cb({target:url});
+assert.equal(apiUi.providerBody(draft).api,'openai','the user may still choose the other API');
+assert.equal(apiUi.providerEdit('b',{kind:'openai',api:'anthropic',limits:{}}).api,'anthropic','a saved choice is kept');
+const cli=apiUi.providerEdit('c',{kind:'cli',cli:'claude',limits:{}});
+assert.equal(apiUi.providerBody(cli).api,undefined,'a CLI entry sends no API');
+assert.equal(apiUi.providerEditor(cli,null,new Node('article')).querySelectorAll('select').length,0);
+ctx.ui.setLang('ja');
+editor=apiUi.providerEditor(apiUi.providerEdit('a',{kind:'openai',limits:{}}),null,new Node('article'));
+assert(text(editor).includes('API の種類')&&text(editor).includes('OpenAI 互換'),'Japanese API choice');
+ctx.ui.setLang('en');
+console.log('PASS: an HTTP entry API choice');
 }

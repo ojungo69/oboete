@@ -79,11 +79,18 @@ impl Reservation {
         self.id
     }
 
-    /// Actual reported usage, with the admission-time bounds for any missing part.
+    /// Actual reported usage, with the admission-time bounds for any missing part. A token written
+    /// to the provider's cache counts twice, the most Anthropic bills a cache write (twice the
+    /// input price, for an hour's cache), and one read from it once, so what is counted is never
+    /// less than the bill; an input never reported is priced as admission priced it
+    /// (`Provider::input_weight`; Codex on #409).
     pub(crate) fn cost(&self, p: &Provider, usage: Usage, billed: bool) -> Option<f64> {
+        let written = usage.written.unwrap_or(0);
         (billed && p.limits().is_paid()).then(|| {
             p.limits().usd(
-                usage.prompt.map_or(self.input, |n| n as f64),
+                usage.prompt.map_or(self.input * p.input_weight(), |n| {
+                    n.saturating_add(written) as f64
+                }),
                 usage.completion.map_or(self.output, |n| n as f64),
             )
         })
@@ -316,7 +323,10 @@ pub(crate) fn reserve_with_history(
             bytes_out: 0,
             est_tokens: None,
             usage: Usage::default(),
-            usd: p.limits().is_paid().then(|| p.limits().usd(input, output)),
+            usd: p
+                .limits()
+                .is_paid()
+                .then(|| p.limits().usd(input * p.input_weight(), output)),
         },
     )?;
     let id = tx.last_insert_rowid();
@@ -501,8 +511,9 @@ pub(crate) fn admit_with_history(
     }
     if limits.is_paid() {
         let spent = providers_db::usd_this_month(db)?;
-        // The output the request asks for at most, as `provider::call` sends it.
-        let this = limits.usd(tokens, f64::from(output));
+        // The output the request asks for at most, as `provider::call` sends it, and the input at
+        // the most a token of it may be billed (`Provider::input_weight`).
+        let this = limits.usd(tokens * p.input_weight(), f64::from(output));
         if spent + this > paid_usd_per_month {
             return Ok(Some(Refusal {
                 outcome: "budget",
@@ -617,7 +628,7 @@ pub(crate) fn most_usd_calibrated(
             None => 1.0,
         };
         calibrations.push(calibration);
-        let input = f64::from(tokens) * calibration;
+        let input = f64::from(tokens) * calibration * p.input_weight();
         let output = calls as f64 * f64::from(largest_output(p));
         let usd = p.limits().usd(input, output);
         most = Some(most.unwrap_or(0.0) + usd);
@@ -666,6 +677,7 @@ mod tests {
             enabled: true,
             name: name.into(),
             base_url: "http://127.0.0.1:9".into(),
+            api: Default::default(),
             key_file: None,
             model: "m".into(),
             daily_budget: Some(10),
@@ -1489,6 +1501,19 @@ mod tests {
                 0.00003,
                 30,
             ),
+            // Codex on #409: of the 20 prompt tokens, 10 written to the cache count twice.
+            (
+                true,
+                true,
+                Usage {
+                    prompt: Some(20),
+                    completion: Some(10),
+                    written: Some(10),
+                    ..Default::default()
+                },
+                0.00004,
+                30,
+            ),
         ] {
             let home = tempfile::tempdir().unwrap();
             let db = open(home.path()).unwrap();
@@ -1551,6 +1576,55 @@ mod tests {
                 reserve(&peer, &p, "probe", "held", 100, 5.0, &[])
                     .unwrap()
                     .is_err()
+            );
+        }
+    }
+
+    /// Codex on #409: a Messages entry that writes its prompt cache prices each input token at
+    /// twice its input price, the most a cache write is billed, wherever its usage is not known:
+    /// admission, the reservation, a call whose usage never comes back, recuration's estimate. Its
+    /// tokens count once: a prompt that fits its ceiling is not refused for its price.
+    #[test]
+    fn a_cache_writing_entry_prices_its_input_twice_and_counts_its_tokens_once() {
+        let limits = Limits {
+            max_output_tokens: 100,
+            max_request_tokens: Some(100_000),
+            usd_per_mtok_in: 1.0,
+            usd_per_mtok_out: 1.0,
+            ..Default::default()
+        };
+        for (cache, usd) in [(false, 0.0601), (true, 0.1201)] {
+            let home = tempfile::tempdir().unwrap();
+            let db = open(home.path()).unwrap();
+            let mut p = entry("p", limits.clone());
+            if let Provider::Openai { api, extra, .. } = &mut p {
+                *api = crate::config::Api::Anthropic;
+                if cache {
+                    extra.insert(
+                        "cache_control".into(),
+                        serde_json::json!({"type": "ephemeral"}),
+                    );
+                }
+            }
+            // 60,000 input tokens and 100 output tokens at USD 1 per million each: within USD 0.10
+            // a month once, not twice.
+            let refused = admit_with_history(&db, (&p, &p), 60_000.0, 0.1, &[]).unwrap();
+            assert_eq!(refused.is_some(), cache);
+            let reservation = reserve(&db, &p, "probe", "s", 60_000, 5.0, &[])
+                .unwrap()
+                .unwrap();
+            let pending = providers_db::reserved_since(&db, "p", 0).unwrap();
+            assert_eq!(pending.tokens, 60_100.0, "cache {cache}");
+            let priced = [
+                providers_db::reserved_usd_this_month(&db).unwrap(),
+                reservation.cost(&p, Usage::default(), true).unwrap(),
+                most_usd(None, std::slice::from_ref(&p), 60_000, 1)
+                    .unwrap()
+                    .unwrap(),
+            ];
+            assert!(
+                priced.iter().all(|u| (u - usd).abs() < 1e-12),
+                "cache {cache}: {priced:?}"
             );
         }
     }
