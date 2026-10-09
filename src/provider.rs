@@ -1736,8 +1736,8 @@ fn anthropic_schema(schema: &Value) -> Value {
 }
 
 /// A Messages answer: the JSON is the text of its first text block (a thinking block can come
-/// before it). A refusal, which is billed and need not match the schema, and an answer cut off at
-/// `max_tokens` are failures.
+/// before it). A refusal, which is billed and need not match the schema, an answer cut off at
+/// `max_tokens` and a turn that waits on tool results or a continuation are failures.
 fn anthropic_answer(v: &Value, rate: Option<providers_db::RateLeft>) -> Result<Answer, CallError> {
     let usage = usage_anthropic(&v["usage"]);
     let failed = |why: &str| {
@@ -1751,6 +1751,13 @@ fn anthropic_answer(v: &Value, rate: Option<providers_db::RateLeft>) -> Result<A
         // The model's context window ran out: as cut off (Codex on #409).
         Some("model_context_window_exceeded") => {
             return Err(failed("cut off at the context window"));
+        }
+        // The turn waits on tool results or a continuation, so no text in it is the final
+        // answer (an entry's `extra` can enable tools; Codex on #409).
+        Some(stop @ ("tool_use" | "pause_turn")) => {
+            return Err(failed(&format!(
+                "the turn is not finished (stop_reason {stop})"
+            )));
         }
         _ => {}
     }
@@ -6753,6 +6760,13 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             ("refusal", text("{\"summary\":\"s\"}")),
             ("max_tokens", text("{\"summa")),
             ("model_context_window_exceeded", text("{\"summary\":\"s\"}")),
+            // Turns that wait on the caller: a schema-valid text before them is not the answer.
+            (
+                "tool_use",
+                json!([{"type": "text", "text": "{\"summary\":\"s\"}"},
+                       {"type": "tool_use", "id": "t", "name": "n", "input": {}}]),
+            ),
+            ("pause_turn", text("{\"summary\":\"s\"}")),
             (
                 "end_turn",
                 json!([{"type": "thinking", "thinking": "", "signature": "s"}]),

@@ -27,8 +27,11 @@ Structured outputs (https://platform.claude.com/docs/en/build-with-claude/struct
 - The JSON is the text of the answer's text block. A thinking block can come before it, so the
   first block of type `text` is read. oboete unfences it as it unfences an OpenAI answer.
 - `stop_reason: "refusal"`: HTTP 200, billed, and the output may not match the schema.
-  `stop_reason: "max_tokens"`: the output may be incomplete. oboete counts both as failed answers,
-  with the tokens they billed.
+  `stop_reason: "max_tokens"` and `"model_context_window_exceeded"`: the output may be incomplete.
+  `stop_reason: "tool_use"` and `"pause_turn"` (an entry whose `extra` enables tools): the turn waits
+  on tool results or a continuation, so its text is not the answer
+  ([handling stop reasons](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons)).
+  oboete counts all of these as failed answers, with the tokens they billed.
 - Models with structured outputs include `claude-haiku-5-5` and `claude-haiku-4-5-20251001`.
 - Schema limits: `additionalProperties` must be `false` on objects. Refused with HTTP 400:
   recursive schemas, complex types in enums, external `$ref`, numerical constraints (`minimum`,
