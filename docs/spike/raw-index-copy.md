@@ -57,6 +57,8 @@ A forget (forget2.py): how often each trigram of the deleted row is in the file'
 
 What it costs: a query made only of short words that are rare in the store reads raw.db's bodies newest first until it has its hits, 410 ms where the copy took 177 ms on 197 MB, and both grow with the store. A query with a trigram, and a short word beside a longer one, are as fast as before, as the trigram index finds the rows first; a common short word stops at its first hits. The `compressed` layout would keep the short scan near the copy's for 15% more knowledge.db and a second copy that a forget must also reach; it is not built. And bm25's totals keep counting each record a forget, a mask or a rewind took out of the index: near ties move, the hits do not, until `oboete rebuild` makes knowledge.db again.
 
+Shown to the owner on 2026-10-09, who left the choice to the long term (「長期的に見て良い選択肢を判断して」): no copy. A copy only shortens a scan that grows with the store either way, at about 1 GB a month; the long-term answer for short words is an index of them, which needs no copy (#419).
+
 A forget: FTS5 leaves a deleted row's trigrams in its segments, with the copy or without it, until the table is optimized. Milestone 5's physical purge (Slice 2) therefore runs `optimize` on `raw_fts` and `imported_fts` before VACUUM (docs/milestone-5-plan.md).
 
 Next, #317's second step: how much of each tool output the index keeps (its options 2-4), decided after a measurement of the trade-off is shown to the owner.
