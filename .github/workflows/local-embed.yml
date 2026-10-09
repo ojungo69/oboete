@@ -1,0 +1,56 @@
+name: local-embed
+# Milestone 4, Task 10 (docs/spike/local-embeddings.md): a ref built with the `local-embed`
+# feature on the five release targets (spec 7.1), the binary started with nothing beside it, and
+# the agreement test on the public fixture. Run by hand only: a run downloads the model's files
+# (about 2.3 GB) on every runner.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: The branch, tag or commit to build
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+          - os: ubuntu-24.04-arm
+          - os: macos-15
+          - os: macos-15-intel
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --release --locked --features local-embed
+      # Line F: the binary starts with no library beside it and none on the PATH but the system's.
+      - name: The binary starts alone (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          dir="$(mktemp -d)"
+          cp target/release/oboete "$dir/"
+          env -i PATH=/usr/bin:/bin HOME="$dir" "$dir/oboete" --version
+      - name: The binary starts alone (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'alone')
+          Copy-Item target\release\oboete.exe $dir
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          & (Join-Path $dir 'oboete.exe') --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # Line A's fixture run: public texts and queries against their stored Workers AI vectors.
+      - run: cargo test --release --locked --features local-embed -- --ignored local_vectors_agree_on_the_fixture
