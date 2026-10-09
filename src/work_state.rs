@@ -123,13 +123,38 @@ pub fn stored(
 pub(crate) fn text(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
-        // JavaScript writes an integral number without its fraction.
-        Value::Number(n) => match n.as_f64() {
-            Some(f) if n.is_f64() && f.fract() == 0.0 && f.abs() < 9e15 => (f as i64).to_string(),
-            _ => n.to_string(),
-        },
+        // JavaScript holds every number as a double, so an integer past 2^53 reads as its double.
+        Value::Number(n) => n.as_f64().map_or_else(|| n.to_string(), js_number),
         other => other.to_string(),
     }
+}
+
+/// ECMAScript's Number::toString: the fewest digits that read back as `f` (Rust's `{:e}` writes
+/// them), placed by their decimal exponent `n`.
+fn js_number(f: f64) -> String {
+    if f == 0.0 {
+        return "0".into();
+    }
+    let e = format!("{:e}", f.abs());
+    let (mantissa, exp) = e.split_once('e').unwrap_or((&e, "0"));
+    let digits = mantissa.replace('.', "");
+    let k = digits.len() as i32;
+    let n = exp.parse::<i32>().unwrap_or(0) + 1;
+    let zeros = |c: i32| "0".repeat(c.max(0) as usize);
+    let body = if k <= n && n <= 21 {
+        format!("{digits}{}", zeros(n - k))
+    } else if 0 < n && n <= 21 {
+        let (int, frac) = digits.split_at(n as usize);
+        format!("{int}.{frac}")
+    } else if -6 < n && n <= 0 {
+        format!("0.{}{digits}", zeros(-n))
+    } else {
+        let (first, rest) = digits.split_at(1);
+        let point = if rest.is_empty() { "" } else { "." };
+        let sign = if n > 0 { "+" } else { "-" };
+        format!("{first}{point}{rest}e{sign}{}", (n - 1).abs())
+    };
+    if f < 0.0 { format!("-{body}") } else { body }
 }
 
 /// A list's state or a task's fields folded: the latest value of each key wins.
@@ -739,6 +764,48 @@ mod tests {
                 "  - [todo] ship, updated 1 minute ago"
             ]
         );
+    }
+
+    /// A number reads as JavaScript's `String(JSON.parse(s))` writes it (node 24's answers), so
+    /// one number sent in two spellings names one task (Codex on #408).
+    #[test]
+    fn numbers_read_as_javascript_writes_them() {
+        for (sent, js) in [
+            ("1.0", "1"),
+            ("-0.0", "0"),
+            ("0.1", "0.1"),
+            ("123.456", "123.456"),
+            ("0.000001", "0.000001"),
+            ("2.5e-6", "0.0000025"),
+            ("1e-7", "1e-7"),
+            ("123e-20", "1.23e-18"),
+            ("1e16", "10000000000000000"),
+            ("10000000000000000", "10000000000000000"),
+            ("1e20", "100000000000000000000"),
+            ("1e21", "1e+21"),
+            ("-1.2345e25", "-1.2345e+25"),
+            ("9007199254740993", "9007199254740992"),
+            ("1152921504606846976", "1152921504606847000"),
+            ("18446744073709551615", "18446744073709552000"),
+            ("-9223372036854775808", "-9223372036854776000"),
+            ("5e-324", "5e-324"),
+            ("1.7976931348623157e308", "1.7976931348623157e+308"),
+        ] {
+            let v: Value = serde_json::from_str(sent).unwrap();
+            assert_eq!(text(&v), js, "{sent}");
+        }
+        let task = |s: &str, ts| entry("l", serde_json::from_str(s).unwrap(), ts);
+        let open = [task(r#"{"task": 10000000000000000, "status": "todo"}"#, 0)];
+        assert!(!lines(&open, 0, false).is_empty());
+        let closed = [
+            task(r#"{"task": 10000000000000000, "status": "todo"}"#, 0),
+            task(r#"{"task": 1e16, "status": "done"}"#, 0),
+        ];
+        let named = [
+            task(r#"{"task": "n", "status": "todo"}"#, 0),
+            task(r#"{"task": "n", "status": "done"}"#, 0),
+        ];
+        assert_eq!(lines(&closed, 0, false), lines(&named, 0, false));
     }
 
     /// claude-mem's `describeDuration`.
