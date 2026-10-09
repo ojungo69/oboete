@@ -788,6 +788,9 @@ assert.equal(w4.saveBody().field,'embedding.monthly_usd');
 type(field('embedding.monthly_usd'),'1');type(field('embedding.daily_requests'),'100001');
 assert.equal(w4.saveBody().field,'embedding.daily_requests');
 assert.equal(w4.formOf(settings({embedding:undefined})).embedding,null,'an older viewer shows no section');
+f=w4.formOf(settings({embedding:embedding({workers_ai:{...embedding().workers_ai,account_id:'ACCT',daily_requests:500000,monthly_usd:0}})}));
+ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.deepEqual(plain(w4.saveBody().body.embedding),{daily_requests:500000,monthly_usd:0},'values config.toml has pass as they are');
 
 // The token: typed into its field, sent once, never kept in the page's state.
 f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettings();

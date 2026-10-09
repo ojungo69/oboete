@@ -321,34 +321,36 @@ pub(super) fn section(
     })
 }
 
-/// The page's Workers AI values into `doc`, each only when it changes: an account id is
-/// Cloudflare's 32 lowercase hexadecimal characters, `daily_requests` within the provider budget's
-/// range, and `monthly_usd` a number of USD above 0, as config.toml requires.
+/// The page's Workers AI values into `doc`, each only when it changes, and only then checked: an
+/// account id is Cloudflare's 32 lowercase hexadecimal characters, `daily_requests` within the
+/// provider budget's range, and `monthly_usd` a number of USD above 0, as config.toml requires. A
+/// value config.toml has already is the user's, in range or not, so it does not block the rest of
+/// a save (as `put_entry`).
 pub(super) fn write(
     doc: &mut toml_edit::DocumentMut,
     posted: &Values,
     now: &crate::config::Embedding,
 ) -> Result<(), Refusal> {
-    if let Some(account) = &posted.account_id {
+    if let Some(account) = &posted.account_id
+        && now.account_id.as_ref() != Some(account)
+    {
         let hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
         if account.len() != 32 || !account.bytes().all(hex) {
             return Err(refused(422, "range", "embedding.account_id"));
         }
-        if now.account_id.as_ref() != Some(account) {
-            put(doc, "embedding", "account_id", account.as_str().into());
-        }
-    }
-    if !super::BUDGET.contains(&posted.daily_requests) {
-        return Err(refused(422, "range", "embedding.daily_requests"));
+        put(doc, "embedding", "account_id", account.as_str().into());
     }
     if posted.daily_requests != now.daily_requests {
+        if !super::BUDGET.contains(&posted.daily_requests) {
+            return Err(refused(422, "range", "embedding.daily_requests"));
+        }
         let requests = i64::from(posted.daily_requests);
         put(doc, "embedding", "daily_requests", requests.into());
     }
-    if !(posted.monthly_usd.is_finite() && posted.monthly_usd > 0.0) {
-        return Err(refused(422, "range", "embedding.monthly_usd"));
-    }
     if posted.monthly_usd != now.monthly_usd {
+        if !(posted.monthly_usd.is_finite() && posted.monthly_usd > 0.0) {
+            return Err(refused(422, "range", "embedding.monthly_usd"));
+        }
         put(doc, "embedding", "monthly_usd", posted.monthly_usd.into());
     }
     Ok(())
@@ -709,7 +711,19 @@ mod tests {
         let (go, gate) = std::sync::mpsc::channel::<()>();
         std::thread::scope(|scope| {
             scope.spawn(move || {
-                let (stream, _) = listener.accept().unwrap();
+                // Bounded, as the gate: a download that never connects still ends the test.
+                listener.set_nonblocking(true).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(30);
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "no download came");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(e) => panic!("accept: {e}"),
+                    }
+                };
                 accepted.send(()).unwrap();
                 // Bounded: a test that fails before opening the gate still ends.
                 let _ = gate.recv_timeout(Duration::from_secs(30));
@@ -809,6 +823,12 @@ mod tests {
         let posted = save_body(home.path(), true, None);
         super::super::save(home.path(), &saving, &posted).unwrap();
         assert!(config(home.path()).contains("monthly_usd = 2.5"));
+        // Values the file has already, out of the page's ranges, are sent back and pass as they are.
+        let text = "[embedding]\nprovider = \"none\"\naccount_id = \"ACCT\"\n\
+                    daily_requests = 500000\nmonthly_usd = 0.0\n";
+        std::fs::write(home.path().join("config.toml"), text).unwrap();
+        save(json!({"account_id": "ACCT", "daily_requests": 500_000, "monthly_usd": 0.0})).unwrap();
+        assert_eq!(config(home.path()), text);
     }
 
     /// W4 (security scope): the Workers AI token typed on the page goes to a new owner-only file

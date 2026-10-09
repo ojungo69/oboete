@@ -5712,6 +5712,23 @@ curate = false
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// W4: the embedder's run is a read with the token and no query; a viewer that ran nothing
+    /// says so.
+    #[test]
+    fn the_embedders_run_is_read_with_the_token() {
+        let (dir, v) = viewer("embedding-status");
+        assert_eq!(v.route("GET", "/api/embedding", &[HOST]).status, 401);
+        assert_eq!(
+            v.route("GET", "/api/embedding?x=1", &[HOST, TOKEN]).status,
+            400
+        );
+        assert_eq!(
+            json_of(&v.route("GET", "/api/embedding", &[HOST, TOKEN])),
+            json!({"active": null, "last": null, "held": 0})
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Over a socket: a head declaring too large a body is answered at once, with the body never
     /// sent, and a save whose body comes in pieces is read whole.
     #[test]

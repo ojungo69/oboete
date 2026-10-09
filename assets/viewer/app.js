@@ -3612,10 +3612,10 @@ async function embeddingAction(action) {
   d.error = null;
   d.preview = null;
   d.confirmed = false;
-  if (action === 'start') {
-    d.started = true;
+  if (action === 'start') d.started = true;
+  if (action === 'start' && choice === 'local') {
     // Until the first poll: what the review said is to download.
-    const get = reviewed.consent.get?.reduce((sum, x) => sum + x.bytes, 0) ?? 0;
+    const get = reviewed.consent.get.reduce((sum, x) => sum + x.bytes, 0);
     d.status = { ...d.status, active: { choice, phase: 'running', held: mine.embedding.local.held, get },
       held: mine.embedding.local.held };
   }
@@ -4545,15 +4545,18 @@ function saveBody() {
   if (!['none', 'before-subscriptions', 'after-subscriptions'].includes(form.gemini)) return { field: 'gemini' };
   let embedding = null;
   if (form.embedding) {
-    const e = form.embedding.edit;
-    // Empty keeps the saved account: the page cannot remove one.
+    const e = form.embedding.edit, w = form.embedding.workers;
+    // A value config.toml has already, left as it is, is sent as it is, in range or not; an
+    // account is sent only when typed (empty keeps the saved one: the page cannot remove it).
+    const kept = (typed, had) => typed.trim() === String(had);
     const account = e.account_id.trim().toLowerCase();
-    if (account !== '' && !/^[0-9a-f]{32}$/.test(account)) return { field: 'embedding.account_id' };
-    const daily = whole(e.daily_requests, ...form.ranges.daily_requests);
+    const typed = account !== '' && !kept(e.account_id, w.account_id ?? '');
+    if (typed && !/^[0-9a-f]{32}$/.test(account)) return { field: 'embedding.account_id' };
+    const daily = kept(e.daily_requests, w.daily_requests) ? w.daily_requests : whole(e.daily_requests, ...form.ranges.daily_requests);
     if (Number.isNaN(daily)) return { field: 'embedding.daily_requests' };
-    const monthly = Number(e.monthly_usd.trim());
-    if (e.monthly_usd.trim() === '' || !Number.isFinite(monthly) || monthly <= 0) return { field: 'embedding.monthly_usd' };
-    embedding = { ...(account ? { account_id: account } : {}), daily_requests: daily, monthly_usd: monthly };
+    const monthly = kept(e.monthly_usd, w.monthly_usd) ? w.monthly_usd : Number(e.monthly_usd.trim());
+    if (monthly !== w.monthly_usd && (e.monthly_usd.trim() === '' || !Number.isFinite(monthly) || monthly <= 0)) return { field: 'embedding.monthly_usd' };
+    embedding = { ...(typed ? { account_id: account } : {}), daily_requests: daily, monthly_usd: monthly };
   }
   const chain = [];
   for (const r of form.chain) {
