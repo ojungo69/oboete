@@ -129,9 +129,10 @@ impl Resident {
             State::Loading | State::Ready => {}
         }
         let (reply, answer) = mpsc::channel();
+        let until = wait.map(|wait| Instant::now() + wait);
         let job = Job {
             texts: texts.to_vec(),
-            until: wait.map(|wait| Instant::now() + wait),
+            until,
             reply,
         };
         if self.jobs.send(job).is_err() {
@@ -145,6 +146,13 @@ impl Resident {
             Ok(Ok(vectors)) => Ok(vectors),
             Ok(Err(why)) => Err(Busy::Failed(why)),
             Err(RecvTimeoutError::Timeout) => Err(Busy::Timeout),
+            // A job past its `until` is dropped unrun, which can reach its caller just before
+            // the caller's own wait ends (macOS CI on #426): a timeout, the model still loaded.
+            Err(RecvTimeoutError::Disconnected)
+                if until.is_some_and(|until| Instant::now() >= until) && !self.gone() =>
+            {
+                Err(Busy::Timeout)
+            }
             Err(RecvTimeoutError::Disconnected) => Err(Busy::Failed(self.why())),
         }
     }
