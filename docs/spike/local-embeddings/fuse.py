@@ -20,8 +20,8 @@ external data that has several):
 The output's SHA-256 is pinned in src/embed_local.rs (`GRAPH_SHA256`); two runs gave the same.
 """
 
+import argparse
 import os
-import sys
 
 import numpy as np
 import onnx
@@ -29,7 +29,11 @@ from onnx import TensorProto, helper, numpy_helper
 from onnxruntime.transformers.fusion_options import FusionOptions
 from onnxruntime.transformers.optimizer import optimize_model
 
-model_dir, out = sys.argv[1:3]
+parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+parser.add_argument("model_dir", help="BAAI/bge-m3's files at the pinned commit")
+parser.add_argument("out", help="the fused graph to write")
+args = parser.parse_args()
+model_dir, out = args.model_dir, args.out
 options = FusionOptions("bert")
 options.use_multi_head_attention = True
 options.disable_attention_mask()
