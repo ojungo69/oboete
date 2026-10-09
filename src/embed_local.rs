@@ -7,6 +7,10 @@
 //! FlashAttention and keeps memory linear in the text's length. BAAI's graph needed 7.9 GB for
 //! one text of 6,706 tokens; this one 2.4 GB at 8,192, with the same vectors. Its weights are
 //! BAAI's file, unchanged.
+//!
+//! ONNX Runtime is not linked into the binary (fastembed's `ort-load-dynamic`): a process that
+//! embeds loads Microsoft's released library from the model's `onnxruntime/` folder, checked
+//! against its pin first, so a process that does not embed (a hook) pays nothing for it.
 
 use std::io::{BufRead, Read};
 use std::path::Path;
@@ -58,43 +62,97 @@ pub const FILES: &[(&str, u64, &str)] = &[
 /// The tokens a text is cut to, Workers AI's limit too.
 pub const MAX_LENGTH: usize = 8192;
 
-/// The graph and every file at their pinned size and hash.
+/// Microsoft's ONNX Runtime 1.28.0 library for this target, in the model's `onnxruntime/` folder:
+/// its name, size and SHA-256, taken from the release archive whose digest GitHub publishes.
+/// `None` where Microsoft releases none (macOS x64): that target gets no `local`.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const RUNTIME: Option<(&str, u64, &str)> = Some((
+    "libonnxruntime.so.1.28.0",
+    24_268_848,
+    "1461ef7cc3d9e49982591721683cc3e3a55580aeca9a5254e7aac47b75ee4bab",
+));
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub const RUNTIME: Option<(&str, u64, &str)> = Some((
+    "libonnxruntime.so.1.28.0",
+    20_591_712,
+    "f1ec1a08eb99bd6e5401340f0a2b101381bf4694415480291dc13bcaa30f9ec7",
+));
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub const RUNTIME: Option<(&str, u64, &str)> = Some((
+    "libonnxruntime.1.28.0.dylib",
+    39_312_136,
+    "dc19bbcb2f5c9fb3c68b4f9248aa0a35065ff702c5dbeae75eac54a74da97b6d",
+));
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub const RUNTIME: Option<(&str, u64, &str)> = Some((
+    "onnxruntime.dll",
+    15_809_848,
+    "18370c375f07357fa5874344a9d9ac17e6b6fe1eb18b1dd209d79483b4470257",
+));
+#[cfg(not(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(windows, target_arch = "x86_64")
+)))]
+pub const RUNTIME: Option<(&str, u64, &str)> = None;
+
+/// A file at its pinned size and SHA-256.
+fn check(path: &Path, size: u64, sha: &str) -> Result<()> {
+    let name = path.display();
+    let mut f = std::fs::File::open(path).with_context(|| format!("opening {name}"))?;
+    let len = f.metadata()?.len();
+    if len != size {
+        bail!("{name}: {len} bytes, not {size}");
+    }
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buf[..n]);
+    }
+    let got = format!("{:x}", hash.finalize());
+    if got != sha {
+        bail!("{name}: SHA-256 {got}, not the pinned {sha}");
+    }
+    Ok(())
+}
+
+/// The runtime's library in the model's directory, and its pin.
+fn runtime_file(dir: &Path) -> Result<(std::path::PathBuf, u64, &'static str)> {
+    let (name, size, sha) =
+        RUNTIME.context("Microsoft releases no ONNX Runtime for this target")?;
+    Ok((dir.join("onnxruntime").join(name), size, sha))
+}
+
+/// The graph, the runtime's library and every file at their pinned size and hash.
 pub fn verify(dir: &Path) -> Result<()> {
     let got = format!("{:x}", Sha256::digest(GRAPH));
     if got != GRAPH_SHA256 {
         bail!("the fused graph: SHA-256 {got}, not the pinned {GRAPH_SHA256}");
     }
+    let (path, size, sha) = runtime_file(dir)?;
+    check(&path, size, sha)?;
     for (name, size, sha) in FILES {
-        let path = dir.join(name);
-        let mut f = std::fs::File::open(&path).with_context(|| format!("opening {name}"))?;
-        let len = f.metadata()?.len();
-        if len != *size {
-            bail!("{name}: {len} bytes, not {size}");
-        }
-        let mut hash = Sha256::new();
-        let mut buf = vec![0u8; 1 << 20];
-        loop {
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hash.update(&buf[..n]);
-        }
-        let got = format!("{:x}", hash.finalize());
-        if got != *sha {
-            bail!("{name}: SHA-256 {got}, not the pinned {sha}");
-        }
+        check(&dir.join(name), *size, sha)?;
     }
     Ok(())
 }
 
-/// ONNX Runtime's library, loaded once per process from `OBOETE_ORT` (the spike's second runtime:
-/// only a process that embeds loads it).
-fn runtime() -> Result<()> {
-    static LOADED: std::sync::OnceLock<std::result::Result<(), String>> = std::sync::OnceLock::new();
+/// ONNX Runtime's library, loaded once per process, checked against its pin just before.
+fn runtime(dir: &Path) -> Result<()> {
+    static LOADED: std::sync::OnceLock<std::result::Result<(), String>> =
+        std::sync::OnceLock::new();
     LOADED
         .get_or_init(|| {
-            let path = std::env::var_os("OBOETE_ORT").ok_or("OBOETE_ORT names ONNX Runtime's library")?;
+            let (path, size, sha) = runtime_file(dir).map_err(|e| format!("{e:#}"))?;
+            check(&path, size, sha).map_err(|e| format!("{e:#}"))?;
+            let path = std::path::absolute(&path).map_err(|e| e.to_string())?;
             ort::init_from(path).map_err(|e| e.to_string())?.commit();
             Ok(())
         })
@@ -104,7 +162,7 @@ fn runtime() -> Result<()> {
 
 /// The model from `dir`'s files, with `threads` for ONNX Runtime (all the machine's when `None`).
 pub fn load(dir: &Path, threads: Option<usize>) -> Result<TextEmbedding> {
-    runtime()?;
+    runtime(dir)?;
     let read =
         |name: &str| std::fs::read(dir.join(name)).with_context(|| format!("reading {name}"));
     let tokenizer = TokenizerFiles {
