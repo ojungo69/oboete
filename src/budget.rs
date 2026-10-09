@@ -154,13 +154,17 @@ impl Reservation {
         let current = providers_db::state(&tx, &self.provider)?;
         let mut updated = next(current);
         // An answer cannot implicitly resume an owner-held entry or shorten a concurrent rest,
-        // which keeps its mark (`provider::rest_holds`).
-        if current.down_until > crate::db::now_ms() && current.down_until > updated.down_until {
-            updated.down_until = current.down_until;
-            updated.uncredited = current.uncredited;
-        }
-        if current.down_until == providers_db::OWNER_HOLD {
-            updated = current;
+        // which keeps its mark (`provider::rest_holds`). A rest codex's allowance read set
+        // without credits gives way: only an entry that draws on them calls through it, and a
+        // codex call reads the allowance again before it sends anything (Codex on #418).
+        if !current.uncredited {
+            if current.down_until > crate::db::now_ms() && current.down_until > updated.down_until {
+                updated.down_until = current.down_until;
+                updated.uncredited = false;
+            }
+            if current.down_until == providers_db::OWNER_HOLD {
+                updated = current;
+            }
         }
         if updated != current {
             providers_db::set_state(&tx, &self.provider, updated)?;
@@ -1268,6 +1272,52 @@ mod tests {
             providers_db::last_calls(&db, 1).unwrap(),
             ["p curator ok 1ms "]
         );
+    }
+
+    /// A rest codex's allowance read set without credits gives way to the call settled through
+    /// it, timed or held (Codex on #418); any other rest, and an owner hold, stays.
+    #[test]
+    fn an_uncredited_rest_gives_way_to_the_call_settled_through_it() {
+        use providers_db::{OWNER_HOLD, State};
+        let later = crate::db::now_ms() + 60_000;
+        let rest = |down_until, uncredited| State {
+            down_until,
+            uncredited,
+            ..Default::default()
+        };
+        let credited = rest(later + 60_000, false);
+        // (the stored rest, what the call leaves, the state after)
+        for (stored, left, after) in [
+            (rest(OWNER_HOLD, true), State::default(), State::default()),
+            (rest(later, true), State::default(), State::default()),
+            (rest(OWNER_HOLD, true), credited, credited),
+            (rest(later, false), State::default(), rest(later, false)),
+            (credited, rest(later, true), credited),
+            (rest(OWNER_HOLD, false), credited, rest(OWNER_HOLD, false)),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let db = open(home.path()).unwrap();
+            let p = entry("p", Limits::default());
+            let reservation = reserve(&db, &p, "curator", "s", 100, 5.0, &[])
+                .unwrap()
+                .unwrap();
+            providers_db::set_state(&db, "p", stored).unwrap();
+            let call = Call {
+                provider: "p",
+                role: "curator",
+                span: "s",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 1,
+                est_tokens: Some(100),
+                usage: Usage::default(),
+                usd: None,
+            };
+            let state = reservation.settle(&db, &call, None, |_| left).unwrap();
+            assert_eq!(state, after, "{stored:?}");
+            assert_eq!(providers_db::state(&db, "p").unwrap(), after, "{stored:?}");
+        }
     }
 
     #[test]

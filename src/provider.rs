@@ -1219,19 +1219,20 @@ fn cooldown_for(e: &CallError) -> Option<Duration> {
     }
 }
 
+/// Whether `state`'s rest holds entry `p`. A rest codex's allowance read set without counting the
+/// account's credits does not hold a codex entry that may draw on them, however it came to (the
+/// page, config.toml, another entry of the same name): that entry reads the allowance again (Codex
+/// on #418). Only codex draws on credits (`cli_preflight`), so another CLI's `credits` passes no
+/// rest.
+pub(crate) fn rest_holds(state: &providers_db::State, p: &Provider) -> bool {
+    !(state.uncredited && matches!(p, Provider::Cli { cli, credits: true, .. } if cli == "codex"))
+}
+
 /// A provider's state after a failure: its cooldown, the breaker's count, and the backoff of a
 /// 429 that names no reset or of a rejected key.
 /// A 429 that names no reset doubles its cooldown each time, up to an hour: Mistral's key at
 /// 0 requests a minute refused every request that way, and a flat 45 s re-sent each window to it
 /// (2026-09-27).
-/// Whether `state`'s rest holds entry `p`. A rest codex's allowance read set without counting the
-/// account's credits does not hold an entry that may draw on them, however it came to (the page,
-/// config.toml, another entry of the same name): that entry reads the allowance again (Codex on
-/// #418).
-pub(crate) fn rest_holds(state: &providers_db::State, p: &Provider) -> bool {
-    !(state.uncredited && matches!(p, Provider::Cli { credits: true, .. }))
-}
-
 pub(crate) fn next_state(was: providers_db::State, e: &CallError) -> providers_db::State {
     // A rest its own allowance set before anything was sent (codex at its usage line) is neither
     // an outage nor a failure: only the rest, to the millisecond.
@@ -3687,6 +3688,31 @@ mod tests {
     /// hold an entry that may draw on them, however it came to (the page, config.toml, another
     /// entry of the name): it reads the allowance again. A rest read with them holds (Codex on
     /// #418).
+    /// Only codex draws on credits: another CLI's entry that says `credits` in config.toml is held
+    /// by an uncredited rest all the same (Codex on #418).
+    #[test]
+    fn only_a_codex_entry_passes_an_uncredited_rest() {
+        let rest = providers_db::State {
+            down_until: db::now_ms() + 60_000,
+            uncredited: true,
+            ..Default::default()
+        };
+        let entry = |cli: &str| Provider::Cli {
+            credits: true,
+            enabled: true,
+            name: "codex".into(),
+            cli: cli.into(),
+            model: None,
+            daily_budget: 10,
+            timeout_s: 1,
+            limits: Default::default(),
+        };
+        assert!(!rest_holds(&rest, &entry("codex")));
+        for cli in ["claude", "agy", "grok"] {
+            assert!(rest_holds(&rest, &entry(cli)), "{cli}");
+        }
+    }
+
     #[test]
     fn a_rest_read_without_credits_does_not_hold_an_entry_that_draws_on_them() {
         use std::cell::Cell;
