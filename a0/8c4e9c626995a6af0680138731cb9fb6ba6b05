@@ -1,0 +1,21 @@
+docs/milestone-4-plan.md
+  s_ad0ac4d9af0473::t_22faa4aead21b0 11,110
+docs/spike/local-embeddings.md
+  s_ad0ac4d9af0473::t_a07618623ba164 7-17,45,85-104,106,108,110-115,117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a08c4e9c626995a6af0680138731cb9fb6ba6b05",
+  "prompts": {},
+  "sessions": {
+    "s_ad0ac4d9af0473": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "55f3d823-9d62-4fd7-a50c-4f022fc3c6bb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
