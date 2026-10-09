@@ -222,6 +222,8 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
 - FTS5 は行を消しても三文字組を segment に残す（`raw_fts` の本文の写しの有無によらない。
   docs/spike/raw-index-copy.md）。Slice 2 の物理 purge は `raw_fts` と `imported_fts` に
   `INSERT INTO <表>(<表>) VALUES('optimize')` をしてから VACUUM し、その後に canary を探す。
+  `contentless_delete=1` の表は、消した行を bm25 の合計（行数・語数）からも引かない。順位の近い
+  ヒットが入れ替わる程度でヒット自体は変わらず、`oboete rebuild` で knowledge.db を作り直すと戻る。
 - M22 forget: 段階 4 Task 12b の scale-home 作成器と stub を再利用し、hook writer と並行して
   段階別時間・検索/注入遅延・未完了理由を測る。仕様にない固定秒数を合格線として加えない。
 - 合成データによる build/故障試験はラベル・実モデル・held-out corpus から独立して進める。

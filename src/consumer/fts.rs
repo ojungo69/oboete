@@ -64,17 +64,16 @@ pub(crate) fn texts(raw: &Raw, device: &str, seqs: &[i64]) -> Result<Vec<(i64, S
         .collect())
 }
 
-/// Whether `text` holds `word` as SQLite's `LIKE '%word%'` finds it: ASCII letters in either case.
-pub(crate) fn holds(text: &str, word: &str) -> bool {
-    text.to_ascii_lowercase()
-        .contains(&word.to_ascii_lowercase())
-}
-
-/// Of `device`'s records at `seqs`, in seq order, those whose text holds every word (`holds`). A
-/// body that cannot hold one is not parsed: with no `\u` escape in it, a character JSON writes
-/// as itself (none of `"`, `\`, `/` or a control character) is in the body as itself.
+/// Of `device`'s records at `seqs`, in seq order, those whose text holds every word as SQLite's
+/// `LIKE '%word%'` finds it (ASCII letters in either case). A body that cannot hold one is not
+/// parsed: with no `\u` escape in it, a character JSON writes as itself (none of `"`, `\`, `/` or
+/// a control character) is in the body as itself.
 pub(crate) fn holding(raw: &Raw, device: &str, seqs: &[i64], words: &[&str]) -> Result<Vec<i64>> {
     let words: Vec<String> = words.iter().map(|w| w.to_ascii_lowercase()).collect();
+    // A word with no ASCII letter is found in a text as it is: no lowercase copy of each body.
+    let fold = words
+        .iter()
+        .any(|w| w.bytes().any(|b| b.is_ascii_alphabetic()));
     let plain = |w: &str| {
         !w.chars()
             .any(|c| matches!(c, '"' | '\\' | '/') || c.is_control())
@@ -86,12 +85,19 @@ pub(crate) fn holding(raw: &Raw, device: &str, seqs: &[i64], words: &[&str]) -> 
             let Item::Event(e) = r.item else {
                 return None;
             };
-            let body = e.body.to_ascii_lowercase();
+            let lower;
+            let body = if fold {
+                lower = e.body.to_ascii_lowercase();
+                &lower
+            } else {
+                &e.body
+            };
             if !body.contains("\\u") && words.iter().any(|w| plain(w) && !body.contains(w.as_str()))
             {
                 return None;
             }
-            let text = text(&e.body).to_ascii_lowercase();
+            let mut text = text(&e.body);
+            text.make_ascii_lowercase();
             words
                 .iter()
                 .all(|w| text.contains(w.as_str()))

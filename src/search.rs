@@ -314,13 +314,13 @@ fn ranked(
     let mut pool = args.clone();
     pool.extend([Value::Integer(sql_limit(POOL)), Value::Integer(0)]);
     let mut found = query(&sql, pool)?;
+    // As SQLite's `LIKE '%word%'` finds a word: ASCII letters in either case.
+    let short: Vec<String> = short.iter().map(|w| w.to_ascii_lowercase()).collect();
     let mut held = std::collections::HashMap::new();
     for (device, seqs) in by_device(&found) {
-        for (seq, text) in crate::consumer::fts::texts(raw, device, &seqs)? {
-            let n = short
-                .iter()
-                .filter(|w| crate::consumer::fts::holds(&text, w))
-                .count();
+        for (seq, mut text) in crate::consumer::fts::texts(raw, device, &seqs)? {
+            text.make_ascii_lowercase();
+            let n = short.iter().filter(|w| text.contains(w.as_str())).count();
             held.insert((device.to_owned(), seq), n);
         }
     }
@@ -765,6 +765,49 @@ mod tests {
     fn a_short_word_ends_at_punctuation() {
         assert_eq!(found(&["設計 worker", "worker"], "worker"), [2, 1]);
         assert_eq!(found(&["設計 worker", "worker"], "worker、設計。"), [1, 2]);
+    }
+
+    /// A query of short words alone looks for them in the text raw.db holds now (#317): written
+    /// as a `\u` escape too, ASCII letters in either case, never in a key, never under a mask.
+    #[test]
+    fn a_short_word_is_found_in_the_text_raw_db_holds_now() {
+        let none = Vec::<i64>::new();
+        assert_eq!(
+            found(&[r#"{"prompt":"\u8a2d\u8a08を見直す"}"#, "worker"], "設計"),
+            [1]
+        );
+        assert_eq!(found(&["the M5 plan", "worker"], "m5"), [1]);
+        assert_eq!(found(&["the m5 plan", "worker"], "M5"), [1]);
+        assert_eq!(found(&[r#"{"設計":"worker"}"#], "設計"), none);
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut store = crate::raw::open(p).unwrap();
+        let seq = store.append(&crate::raw::test_event("M5 plan")).unwrap();
+        crate::worker::run_once(p).unwrap();
+        assert_eq!(raw_search(p, "M5", None).len(), 1);
+        let device = store.device().to_owned();
+        store
+            .append_tombstone(crate::raw::Target::Range {
+                device,
+                seq,
+                offset: 0,
+                length: 2,
+            })
+            .unwrap();
+        assert!(raw_search(p, "M5", None).is_empty());
+        crate::worker::run_once(p).unwrap();
+        assert!(raw_search(p, "M5", None).is_empty());
+        assert_eq!(raw_search(p, "plan", None).len(), 1);
+    }
+
+    /// A query of short words alone reads the records a page at a time, the newest first, until
+    /// it has enough: one past the first page is found.
+    #[test]
+    fn a_short_word_is_found_past_the_first_page() {
+        let mut bodies = vec!["worker"; 300];
+        bodies[0] = "設計 old";
+        bodies[299] = "設計 new";
+        assert_eq!(found(&bodies, "設計"), [300, 1]);
     }
 
     /// The short words that count are few and counted once: a pasted page is still one query

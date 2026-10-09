@@ -1,0 +1,10 @@
+records 26834, text 197 MB
+['copy', '211', '563', '44', '41', '356', '180', '279']
+['none', '211', '368', '44', '38', '363', '794', '219']
+| binary | raw.db MB | knowledge.db MB | replay s | index s | trigram ms | short rare ms | short common ms |
+|---|---|---|---|---|---|---|---|
+| copy | 211 | 563 | 44 | 41 | 356 | 180 | 279 |
+| none | 211 | 368 | 44 | 38 | 363 | 794 | 219 |
+trigram: same answers False, lines [20, 20]
+short rare: same answers True, lines [20, 20]
+short common: same answers True, lines [20, 20]

@@ -2026,7 +2026,8 @@ fn record(r: &rusqlite::Row) -> rusqlite::Result<Record> {
             gitdir: r.get(10)?,
             cwd: r.get(11)?,
             source: r.get(12)?,
-            body: String::from_utf8_lossy(&body).into_owned(),
+            body: String::from_utf8(body)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
             original_bytes: r.get(14)?,
         }))
     };
@@ -3373,6 +3374,34 @@ pub fn test_event(body: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn at_reads_the_records_named_in_seq_order_as_after_returns_them() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        for body in ["one", "two secret", "three"] {
+            raw.append(&test_event(body)).unwrap();
+        }
+        let device = raw.device().to_owned();
+        raw.append_tombstone(Target::Range {
+            device: device.clone(),
+            seq: 2,
+            offset: 4,
+            length: 6,
+        })
+        .unwrap();
+        raw.append_tombstone(Target::Record {
+            device: device.clone(),
+            seq: 3,
+        })
+        .unwrap();
+        let recs = raw.at(&device, &[3, 9, 2, 1]).unwrap();
+        assert_eq!(recs.iter().map(|r| r.seq).collect::<Vec<_>>(), [1, 2, 3]);
+        assert!(matches!(&recs[0].item, Item::Event(e) if e.body == "one"));
+        assert!(matches!(&recs[1].item, Item::Event(e) if e.body == "two ******"));
+        assert!(matches!(recs[2].item, Item::Removed));
+        assert!(raw.at(&device, &[]).unwrap().is_empty());
+    }
 
     #[test]
     fn dispatch_wait_failure_records_no_exclusion() {

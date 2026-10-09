@@ -34,6 +34,16 @@ Through oboete (rust.py; raw.db with its WAL 209 MB in both homes):
 
 The command-line times include starting the process. Both builds return the same 20 hits for each query (`rust-results.txt`; device ids, times and the home's path set aside). A first run gave the branch 649 ms for the short rare query.
 
+Run again on 2026-10-09 (`rust-results-2.txt`: the registry had gained a crate, 26,834 records of 197 MB), then the short queries alone, median of 9, with the branch's final scan beside the one above: it makes no lowercase copy of a body for a word with no ASCII letter, and no second copy of a body that is valid UTF-8.
+
+| query, ms | main (copy) | branch, above | branch, final |
+|---|---|---|---|
+| 楓樹 (short rare) | 177 | 657 | 410 |
+| 設計 (short common) | 271 | 214 | 196 |
+| M5 (short, ASCII) | 858 | 1,323 | 1,105 |
+
+In that run the trigram query's 20 hits were the same but two near neighbours traded places (8th and 10th). FTS5 does not lower a contentless-delete table's totals, its rows and tokens, when a row is deleted: 54 records of the corpus had a range masked by the rescan after they were indexed, and each was deleted and indexed again, so bm25 counted 26,888 rows for 26,834 and the tokens of the masked texts twice. SQLite 3.45 with three rows shows the same: a delete leaves the totals of a `contentless_delete=1` table as they were, and lowers those of a normal one. `imported_fts` has had the same since it was made contentless.
+
 A forget (forget2.py): how often each trigram of the deleted row is in the file's bytes.
 
 | layout | before | deleted, VACUUM | `optimize`, VACUUM |
@@ -45,7 +55,7 @@ A forget (forget2.py): how often each trigram of the deleted row is in the file'
 
 `raw_fts` is contentless with `contentless_delete=1`, as `imported_fts` is. knowledge.db is 35% smaller here, and on #317's measurement of September (3.17 GB, of which the copy was 997 MB) the index adds about 2.2 GB a month at the owner's rate instead of 3.2 GB. Readers read the text back from raw.db: snippets, the evaluation's sidecar and the embedding phase through `Raw::at` and `fts::texts`, and a word too short for a trigram through `fts::holding`, which skips a body that cannot hold the word before parsing it. A home made before keeps its copy until `oboete rebuild`; nothing reads it.
 
-What it costs: a query made only of short words that are rare in the store reads raw.db's bodies newest first until it has its hits, 748 ms where the copy took 170 ms on 196 MB, and both grow with the store. A query with a trigram, and a short word beside a longer one, are as fast as before, as the trigram index finds the rows first; a common short word stops at its first hits. The `compressed` layout would keep the short scan near the copy's for 15% more knowledge.db and a second copy that a forget must also reach; it is not built.
+What it costs: a query made only of short words that are rare in the store reads raw.db's bodies newest first until it has its hits, 410 ms where the copy took 177 ms on 197 MB, and both grow with the store. A query with a trigram, and a short word beside a longer one, are as fast as before, as the trigram index finds the rows first; a common short word stops at its first hits. The `compressed` layout would keep the short scan near the copy's for 15% more knowledge.db and a second copy that a forget must also reach; it is not built. And bm25's totals keep counting each record a forget, a mask or a rewind took out of the index: near ties move, the hits do not, until `oboete rebuild` makes knowledge.db again.
 
 A forget: FTS5 leaves a deleted row's trigrams in its segments, with the copy or without it, until the table is optimized. Milestone 5's physical purge (Slice 2) therefore runs `optimize` on `raw_fts` and `imported_fts` before VACUUM (docs/milestone-5-plan.md).
 
