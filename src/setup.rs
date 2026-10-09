@@ -269,10 +269,27 @@ fn embeddings_with(
         .copied()
         .chain(runtime.map(|r| r.library))
         .collect();
+    // What `local` does once answered: download what is missing, or check what is there; none
+    // when its files are verified.
+    let mut note = None;
     let line = match choice {
-        "none" => "none: search is full text only, and no text or query goes to an embedder. \
-                   The vectors made so far stay in the store."
-            .to_owned(),
+        "none" => {
+            let none = "none: search is full text only, and no text or query goes to an \
+                        embedder. The vectors made so far stay in the store.";
+            let held: u64 = (files.iter())
+                .filter_map(|a| std::fs::metadata(dir.join(a.name)).ok())
+                .map(|m| m.len())
+                .sum();
+            match held {
+                0 => none.to_owned(),
+                held => format!(
+                    "{none} The local model's files stay in {} ({} MB); delete that directory \
+                     to free the space.",
+                    dir.display(),
+                    held.div_ceil(1 << 20)
+                ),
+            }
+        }
         "workers-ai" => {
             // What it would run with, before the question: no account or no token is no choice.
             let cfg = config::load(home)?.embedding;
@@ -314,10 +331,12 @@ fn embeddings_with(
             }
             if crate::model_fetch::marker_ok(&dir, &files) {
                 format!(
-                    "local: bge-m3 runs on this machine from the files in {}; {after}",
+                    "local: bge-m3 runs on this machine from the files in {}, checked when they \
+                     were downloaded; no text or query leaves this machine to be embedded.",
                     dir.display()
                 )
             } else if missing.is_empty() {
+                note = Some("checking each file against its pin");
                 format!(
                     "local: bge-m3 runs on this machine from the files in {}, once each is held to \
                      the SHA-256 this oboete pins (one that is not is downloaded again, from \
@@ -325,6 +344,7 @@ fn embeddings_with(
                     dir.display()
                 )
             } else {
+                note = Some("downloading what is missing; run it again to resume if it stops");
                 format!(
                     "local: bge-m3 runs on this machine. First, {} are downloaded into {}, each \
                      file held to the SHA-256 this oboete pins; {after}",
@@ -336,9 +356,9 @@ fn embeddings_with(
         other => anyhow::bail!("--embeddings {other}: use none, local or workers-ai"),
     };
     confirm(&line)?;
-    if choice == "local" {
+    if let Some(note) = note {
         let runtime = runtime.context("no runtime for this machine")?;
-        println!("downloading what is missing; run it again to resume if it stops");
+        println!("{note}");
         crate::model_fetch::fetch(&dir, model)?;
         crate::model_fetch::fetch_runtime(&dir, runtime)?;
         crate::model_fetch::verify(&dir, &files)?;
@@ -4918,12 +4938,14 @@ mod tests {
         type Row<'a> = (&'a str, &'a str, bool, &'a str, Result<(), &'a str>);
         let rows: &[Row] = &[
             ("none", "account", true, "no text or query goes", Ok(())),
+            ("none", "account files", true, "1 MB); delete", Ok(())),
             ("workers-ai", "key", true, "", Err("account_id")),
             ("workers-ai", "account", true, "", Err("key file")),
             ("workers-ai", "account key", true, "Cloudflare", Ok(())),
             ("workers-ai", "account key", false, "acct", Err("nothing")),
             ("local", "", false, "1 MB from 127.0.0.1", Err("nothing")),
             ("local", "files", true, "once each is held", Ok(())),
+            ("local", "verified", true, "checked when they were", Ok(())),
             // A byte off its pin: downloaded again, which fails here.
             ("local", "changed", true, "once each is held", Err("")),
         ];
@@ -4952,10 +4974,14 @@ mod tests {
             } else {
                 b"model"
             };
-            if holds == "files" || holds == "changed" {
+            if holds.contains("files") || holds == "changed" || holds == "verified" {
                 std::fs::create_dir_all(dir.join("onnxruntime")).unwrap();
                 std::fs::write(dir.join("tokenizer.json"), tokenizer).unwrap();
                 std::fs::write(dir.join("onnxruntime/librt"), "runtime").unwrap();
+            }
+            if holds == "verified" {
+                let files: Vec<_> = model.iter().copied().chain([runtime.library]).collect();
+                crate::model_fetch::verify(&dir, &files).unwrap();
             }
             let mut line = None;
             let got = embeddings_with(home.path(), choice, &model, Some(&runtime), |l| {
