@@ -458,7 +458,7 @@ mod tests {
             json!({"agent": "claude", "session": session,
             "repo": "github.com/o/r", "ts": 1_700_000_003_000_i64, "from": seq, "through": seq,
             "read": [], "goals": [], "removed": [], "fields": {"request": "Amber marker=HIDDEN77",
-                "completed": "Amber marker=HIDDEN77", "notes": "zqxjv-hidden-notes"}, "skipped": skipped})
+                "completed": "Amber marker=HIDDEN77", "notes": "zqxjv-notes"}, "skipped": skipped})
         };
         let hidden_summary = s.turn(turn(gone, "gone", false));
         let visible_summary = s.turn(turn(live, "live", false));
@@ -510,21 +510,31 @@ mod tests {
                     .unwrap(),
             );
             assert!(!got.contains("HIDDEN77"), "{got}");
-            assert!(
-                !got.contains("zqxjv-hidden-notes"),
-                "notes are not displayed: {got}"
-            );
         }
         assert!(
             !found.contains("HIDDEN77") && found.contains("[REDACTED]"),
             "{found}"
         );
+        // #403: a summary's notes are shown and searched as its other fields are, its hidden
+        // and skipped twins still never.
+        let got = body(
+            server
+                .get(Parameters(
+                    serde_json::from_value(json!({"id": &visible_summary})).unwrap(),
+                ))
+                .unwrap(),
+        );
+        assert!(got.contains("\nNotes: zqxjv-notes\n"), "{got}");
         let notes = body(
             server
                 .search(Parameters(args("zqxjv", None, None)))
                 .unwrap(),
         );
-        assert!(notes.contains("no hits"), "notes are not indexed: {notes}");
+        assert_eq!(
+            hit_ids(&notes),
+            std::slice::from_ref(&visible_summary),
+            "{notes}"
+        );
     }
 
     fn hit_ids(text: &str) -> Vec<String> {
@@ -1144,7 +1154,7 @@ mod tests {
         let summary = s.turn(json!({"agent": "claude", "session": "work", "repo": "github.com/o/r",
             "ts": 1_700_000_003_000_i64, "from": source, "through": source, "read": [],
             "goals": [], "removed": [], "fields": {"request": "Umbra", "investigated": "Cobalt",
-                "learned": "Sphinx", "completed": "Vortex", "next_steps": "Quorum", "notes": "zqxv"}, "skipped": false}));
+                "learned": "Sphinx", "completed": "Vortex", "next_steps": "Quorum", "notes": "Nimbus"}, "skipped": false}));
         s.run();
         let ask = |query| {
             hit_ids(&body(
@@ -1156,7 +1166,7 @@ mod tests {
         ] {
             assert_eq!(ask(query), [cards[0].clone()], "field query {query}");
         }
-        for query in ["umbra", "cobalt", "sphinx", "vortex", "quorum"] {
+        for query in ["umbra", "cobalt", "sphinx", "vortex", "quorum", "nimbus"] {
             assert_eq!(
                 ask(query),
                 std::slice::from_ref(&summary),
@@ -1165,10 +1175,19 @@ mod tests {
         }
         assert_eq!(ask("M5 worker")[0], cards[2]);
         assert_eq!(ask("M5"), [cards[2].clone()]);
-        assert!(
-            ask("zqxv").is_empty(),
-            "malformed facts and undisplayed notes are not indexed"
-        );
+        assert!(ask("zqxv").is_empty(), "malformed facts are not indexed");
+        // #403: an index built before notes were indexed is built again, once.
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        k.execute_batch(
+            "DELETE FROM turns_fts;
+             INSERT INTO turns_fts(rowid, text)
+               SELECT rowid, json_extract(fields, '$.request') FROM turns WHERE skipped = 0;
+             PRAGMA user_version = 0;",
+        )
+        .unwrap();
+        drop(k);
+        assert_eq!(ask("nimbus"), std::slice::from_ref(&summary));
+        assert_eq!(ask("umbra"), std::slice::from_ref(&summary));
     }
 
     /// Q3/Q5: a filtered raw leg retains the existing pending-removal rule: even a full

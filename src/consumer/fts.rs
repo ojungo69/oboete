@@ -79,7 +79,7 @@ pub(crate) fn cards(k: &Connection, rowid: Option<i64>) -> Result<()> {
     Ok(())
 }
 
-/// Q4: only the five displayed summary fields, never `notes` or a skipped turn.
+/// Q4: every displayed summary field, `notes` among them since #403, never a skipped turn.
 pub(crate) fn turns(k: &Connection, rowid: Option<i64>) -> Result<()> {
     let mut st = k.prepare(
         "SELECT rowid, fields FROM turns WHERE skipped = 0 AND (?1 IS NULL OR rowid = ?1)",
@@ -87,7 +87,7 @@ pub(crate) fn turns(k: &Connection, rowid: Option<i64>) -> Result<()> {
     let rows = st.query_map([rowid], |r| {
         let fields: std::collections::BTreeMap<String, String> =
             serde_json::from_str(&r.get::<_, String>(1)?).unwrap_or_default();
-        let text = crate::turns::FIELDS[..5]
+        let text = crate::turns::FIELDS
             .iter()
             .filter_map(|f| fields.get(*f).map(String::as_str))
             .collect::<Vec<_>>()

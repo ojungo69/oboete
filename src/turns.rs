@@ -586,7 +586,8 @@ pub fn answer_schema() -> Value {
 }
 
 /// The chain's check of an answer (T4): `shape` when it is no object, `empty` when it is no skip
-/// and keeps none of the first five fields under the active `rules`.
+/// and keeps none of its fields under the active `rules`, as claude-mem 13.34.2's parser refuses
+/// a summary with none (#403).
 fn check(v: &Value, rules: &Rules) -> Option<&'static str> {
     if !v.is_object() {
         return Some("shape");
@@ -595,7 +596,7 @@ fn check(v: &Value, rules: &Rules) -> Option<&'static str> {
         return None;
     }
     let fields = kept(v, rules);
-    (!FIELDS[..5].iter().any(|f| fields.contains_key(*f))).then_some("empty")
+    fields.is_empty().then_some("empty")
 }
 
 /// The answer's fields as the op keeps them (T4): trimmed, through the egress gate as a claim
@@ -635,19 +636,37 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS turns_repo ON turns(repo, ts);
          CREATE INDEX IF NOT EXISTS turns_through ON turns(device, through);",
     )?;
-    if !crate::consumer::manifest::exists(k, "table", "turns_fts")? {
-        let tx = if k.is_autocommit() {
-            Some(k.unchecked_transaction()?)
-        } else {
-            None
-        };
+    // knowledge.db's `user_version` 1: `turns_fts` holds the summaries' notes (#403). An index
+    // built before them is built again, once: checked again under a write lock taken first, as
+    // `claims::migrate` does, and waited for through the stores' initialization window, so a
+    // second opener of the home waits and finds it built (Codex on #410).
+    let needed = |k: &Connection| -> Result<bool> {
+        Ok(!crate::consumer::manifest::exists(k, "table", "turns_fts")?
+            || k.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 1)
+    };
+    if !needed(k)? {
+        return Ok(());
+    }
+    let deadline = std::time::Instant::now() + crate::db::OPEN_WRITE_WAIT;
+    let tx = k
+        .is_autocommit()
+        .then(|| {
+            crate::db::retry_busy(k, deadline, || {
+                let immediate = rusqlite::TransactionBehavior::Immediate;
+                Ok(rusqlite::Transaction::new_unchecked(k, immediate)?)
+            })
+        })
+        .transpose()?;
+    if needed(k)? {
         k.execute_batch(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(text, tokenize='trigram');",
+            "CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(text, tokenize='trigram');
+             DELETE FROM turns_fts;",
         )?;
         crate::consumer::fts::turns(k, None)?;
-        if let Some(tx) = tx {
-            tx.commit()?;
-        }
+        k.execute_batch("PRAGMA user_version = 1")?;
+    }
+    if let Some(tx) = tx {
+        tx.commit()?;
     }
     Ok(())
 }
@@ -824,6 +843,46 @@ mod tests {
     }
 
     /// A home with `records` appended and `windows` curated over them; the consumers run.
+    /// Codex on #410: two openers of a home whose notes index predates them rebuild it once. The
+    /// second waits for the first's write lock past its own busy timeout, through the stores'
+    /// initialization window, then finds the index built (a deferred transaction, or one that
+    /// waited only its busy timeout, failed there with "database is locked").
+    #[test]
+    fn a_second_opener_waits_for_the_notes_index_and_finds_it_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("knowledge.db");
+        let first = Connection::open(&path).unwrap();
+        first.execute_batch("PRAGMA journal_mode = WAL").unwrap();
+        schema(&first).unwrap();
+        first
+            .execute_batch(
+                "PRAGMA user_version = 0;
+                 BEGIN IMMEDIATE;
+                 INSERT INTO turns_fts(rowid, text) VALUES (999, 'built by the first');",
+            )
+            .unwrap();
+        let second = Connection::open(&path).unwrap();
+        second
+            .busy_timeout(std::time::Duration::from_millis(100))
+            .unwrap();
+        let done = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            first
+                .execute_batch("PRAGMA user_version = 1; COMMIT;")
+                .unwrap();
+        });
+        schema(&second).unwrap();
+        done.join().unwrap();
+        let kept: i64 = second
+            .query_row(
+                "SELECT count(*) FROM turns_fts WHERE rowid = 999",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
     fn home(records: &[Event], windows: &[(OpKind, Value)]) -> tempfile::TempDir {
         let home = tempfile::tempdir().unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
@@ -1633,14 +1692,17 @@ mod tests {
         assert_eq!(turn_ops(home.path())[0].read, vec![(3, 4), (2, 2)]);
     }
 
-    /// Test 4 (T4): an answer with none of the first five fields is refused; a skip is kept as
-    /// an op with no fields, and the turn is not asked again.
+    /// Test 4 (T4): an answer with none of its fields is refused, one with notes alone is kept
+    /// (#403); a skip is kept as an op with no fields, and the turn is not asked again.
     #[test]
-    fn an_answer_with_none_of_the_five_fields_is_refused_and_a_skip_is_kept() {
+    fn an_answer_with_none_of_its_fields_is_refused_and_a_skip_is_kept() {
         let rules = Rules::default();
+        let none = json!({"skip": false, "request": " ", "investigated": "", "learned": "",
+            "completed": "", "next_steps": "", "notes": ""});
+        assert_eq!(check(&none, &rules), Some("empty"));
         let notes = json!({"skip": false, "request": " ", "investigated": "", "learned": "",
             "completed": "", "next_steps": "", "notes": "Only a note."});
-        assert_eq!(check(&notes, &rules), Some("empty"));
+        assert_eq!(check(&notes, &rules), None);
         assert_eq!(check(&json!("text"), &rules), Some("shape"));
         let home = home(
             &[said("s1", "prompt", "ok?"), said("s1", "reply", "Yes.")],
@@ -1655,9 +1717,9 @@ mod tests {
         assert!(shown(home.path(), &rules).is_empty());
     }
 
-    /// #402 (T4): a first-five field the outbound gate empties (a closed private block) counts as
-    /// empty: an answer left with none of them is refused, a note beside it included, and a public
-    /// field beside it is kept alone.
+    /// #402 (T4): a field the outbound gate empties (a closed private block) counts as empty: an
+    /// answer left with none is refused, and a public field beside it, a note too (#403), is kept
+    /// alone.
     #[test]
     fn a_field_the_gate_empties_counts_as_none() {
         let rules = Rules::default();
@@ -1673,10 +1735,9 @@ mod tests {
         };
         assert!(kept(&answer(json!({})), &rules).is_empty());
         assert_eq!(check(&answer(json!({})), &rules), Some("empty"));
-        assert_eq!(
-            check(&answer(json!({"notes": "A note."})), &rules),
-            Some("empty")
-        );
+        let note = answer(json!({"notes": "A note."}));
+        assert_eq!(check(&note, &rules), None);
+        assert_eq!(kept(&note, &rules).keys().collect::<Vec<_>>(), ["notes"]);
         let public = answer(json!({"completed": "Built the parser."}));
         assert_eq!(check(&public, &rules), None);
         assert_eq!(

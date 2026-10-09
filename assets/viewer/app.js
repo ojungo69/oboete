@@ -439,7 +439,7 @@ function feedEntry(item) {
   let card;
   if (item.kind === 'card') card = feedCard(item);
   else if (item.kind === 'summary') {
-    const sections = ['investigated', 'learned', 'completed', 'next_steps'];
+    const sections = ['investigated', 'learned', 'completed', 'next_steps', 'notes'];
     card = el('article', 'feed-card summary-card', feedHeader(item),
       item.fields.request ? el('h3', 'feed-title', item.fields.request) : null,
       ...sections.filter((field) => item.fields[field]).map((field) => el('section', 'summary-section',
@@ -837,6 +837,7 @@ const TEXT = {
   learned: ['Learned', '学んだこと'],
   completed: ['Completed', '完了したこと'],
   next_steps: ['Next steps', '次の作業'],
+  notes: ['Notes', 'メモ'],
   welcome_help: ['Show welcome', '使い方を表示'],
   welcome_title: ['Welcome to oboete', 'oboete へようこそ'],
   welcome_close: ['Close welcome', '使い方を閉じる'],

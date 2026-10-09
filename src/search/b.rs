@@ -1584,7 +1584,7 @@ fn curated_leg(
             let Some(s) = crate::turns::get(k, raw, &id, rules)? else {
                 continue;
             };
-            let body = crate::turns::FIELDS[1..5]
+            let body = crate::turns::FIELDS[1..]
                 .iter()
                 .filter_map(|f| s.fields.get(*f).map(String::as_str))
                 .collect::<Vec<_>>()
@@ -1958,7 +1958,7 @@ fn card_text(c: &crate::cards::Card, local: &str) -> String {
 }
 
 /// A session summary in full, as its reader gave it (gated, T8): its ID, time and repository,
-/// its request, then claude-mem's other fields, each only when it has something.
+/// its request, then claude-mem's other fields, notes last, each only when it has something.
 fn summary_text(s: &crate::turns::TurnSummary, local: &str) -> String {
     let mut out = format!(
         "{} {} session summary {} ({} session {})\n",
@@ -1976,6 +1976,7 @@ fn summary_text(s: &crate::turns::TurnSummary, local: &str) -> String {
         ("learned", "Learned"),
         ("completed", "Completed"),
         ("next_steps", "Next steps"),
+        ("notes", "Notes"),
     ] {
         if let Some(text) = s.fields.get(field) {
             out.push_str(&format!("\n{label}: {text}\n"));
@@ -3723,11 +3724,10 @@ mod tests {
             "\nLearned: The last line has no newline.\n",
             "\nCompleted: It reads to the end.\n",
             "\nNext steps: Measure it.\n",
+            "\nNotes: One note.\n",
         ] {
             assert!(shown.contains(part), "{part:?}");
         }
-        // Q4/Q8: notes stays stored, but is not a displayed summary section.
-        assert!(!shown.contains("One note.") && !shown.contains("Notes:"));
         assert_eq!(get(home, &format!("S{}", op_seq + 1)).unwrap(), None);
     }
 

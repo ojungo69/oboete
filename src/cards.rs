@@ -343,6 +343,7 @@ where
             ("learned", "Learned"),
             ("completed", "Completed"),
             ("next_steps", "Next Steps"),
+            ("notes", "Notes"),
         ] {
             if let Some(text) = s.fields.get(field).filter(|t| !t.is_empty()) {
                 out.push_str(&format!("**{label}**: {text}\n\n"));
@@ -939,8 +940,8 @@ mod tests {
 
     /// docs/summaries.md S7, S8: the newest summaries are rows among the cards by their own time,
     /// after a card of the same time, `S<op seq>` (another device's with its device) and
-    /// `Session started` without a request; the newest one's four fields follow the timeline when
-    /// it is not older than the newest card shown.
+    /// `Session started` without a request; the newest one's fields follow the timeline when it is
+    /// not older than the newest card shown, notes last, as claude-mem 13.34.2 shows them (#403).
     #[test]
     fn the_block_shows_the_session_summaries_among_the_cards() {
         let newest = summary(
@@ -952,7 +953,7 @@ mod tests {
                 ("learned", "The lock was never released."),
                 ("completed", "Workers release it on exit."),
                 ("next_steps", "Measure the wait."),
-                ("notes", "Not shown."),
+                ("notes", "The agent says the wait was not measured."),
             ],
         );
         let other = TurnSummary {
@@ -987,6 +988,8 @@ mod tests {
              **Completed**: Workers release it on exit.\n\
              \n\
              **Next Steps**: Measure the wait.\n\
+             \n\
+             **Notes**: The agent says the wait was not measured.\n\
              \n"
         );
         // Older than the newest card shown: no fields.
