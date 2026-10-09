@@ -1225,7 +1225,12 @@ fn cooldown_for(e: &CallError) -> Option<Duration> {
 /// on #418). Only codex draws on credits (`cli_preflight`), so another CLI's `credits` passes no
 /// rest.
 pub(crate) fn rest_holds(state: &providers_db::State, p: &Provider) -> bool {
-    !(state.uncredited && matches!(p, Provider::Cli { cli, credits: true, .. } if cli == "codex"))
+    !(state.uncredited && draws_on_credits(p))
+}
+
+/// Whether `p` is a codex entry that may go past its plan's limits on the account's credits.
+pub(crate) fn draws_on_credits(p: &Provider) -> bool {
+    matches!(p, Provider::Cli { cli, credits: true, .. } if cli == "codex")
 }
 
 /// A provider's state after a failure: its cooldown, the breaker's count, and the backoff of a

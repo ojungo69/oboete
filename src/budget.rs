@@ -71,6 +71,8 @@ pub(crate) struct Reservation {
     span: String,
     input: f64,
     output: f64,
+    /// Made for a codex entry that draws on credits (`provider::draws_on_credits`).
+    credits: bool,
 }
 
 impl Reservation {
@@ -155,12 +157,13 @@ impl Reservation {
         let mut updated = next(current);
         // An answer cannot implicitly resume an owner-held entry or shorten a concurrent rest,
         // which keeps its mark (`provider::rest_holds`). A rest codex's allowance read set
-        // without credits gives way: only an entry that draws on them calls through it, and a
-        // codex call reads the allowance again before it sends anything (Codex on #418).
-        if !current.uncredited {
+        // without credits gives way to a call that drew on them, which read the allowance itself
+        // before it sent anything; any other call keeps it, as one may have been reserved before
+        // the rest was written (Codex on #418).
+        if !(current.uncredited && self.credits) {
             if current.down_until > crate::db::now_ms() && current.down_until > updated.down_until {
                 updated.down_until = current.down_until;
-                updated.uncredited = false;
+                updated.uncredited = current.uncredited;
             }
             if current.down_until == providers_db::OWNER_HOLD {
                 updated = current;
@@ -345,6 +348,7 @@ pub(crate) fn reserve_with_history(
         span: span.into(),
         input,
         output,
+        credits: crate::provider::draws_on_credits(p),
     }))
 }
 
@@ -1274,10 +1278,12 @@ mod tests {
         );
     }
 
-    /// A rest codex's allowance read set without credits gives way to the call settled through
-    /// it, timed or held (Codex on #418); any other rest, and an owner hold, stays.
+    /// A rest codex's allowance read set without credits gives way to a call that drew on them,
+    /// timed or held; a call of any other entry of the name, which may have been reserved before
+    /// the rest was written, keeps it, as it keeps any other rest and an owner hold (Codex on
+    /// #418).
     #[test]
-    fn an_uncredited_rest_gives_way_to_the_call_settled_through_it() {
+    fn an_uncredited_rest_gives_way_only_to_a_call_that_drew_on_credits() {
         use providers_db::{OWNER_HOLD, State};
         let later = crate::db::now_ms() + 60_000;
         let rest = |down_until, uncredited| State {
@@ -1286,19 +1292,61 @@ mod tests {
             ..Default::default()
         };
         let credited = rest(later + 60_000, false);
-        // (the stored rest, what the call leaves, the state after)
-        for (stored, left, after) in [
-            (rest(OWNER_HOLD, true), State::default(), State::default()),
-            (rest(later, true), State::default(), State::default()),
-            (rest(OWNER_HOLD, true), credited, credited),
-            (rest(later, false), State::default(), rest(later, false)),
-            (credited, rest(later, true), credited),
-            (rest(OWNER_HOLD, false), credited, rest(OWNER_HOLD, false)),
+        let codex = Provider::Cli {
+            credits: true,
+            enabled: true,
+            name: "p".into(),
+            cli: "codex".into(),
+            model: None,
+            daily_budget: 10,
+            timeout_s: 1,
+            limits: Limits::default(),
+        };
+        let other = entry("p", Limits::default());
+        // (the entry that settles, the stored rest, what the call leaves, the state after)
+        for (p, stored, left, after) in [
+            (
+                &codex,
+                rest(OWNER_HOLD, true),
+                State::default(),
+                State::default(),
+            ),
+            (
+                &codex,
+                rest(later, true),
+                State::default(),
+                State::default(),
+            ),
+            (&codex, rest(OWNER_HOLD, true), credited, credited),
+            (
+                &other,
+                rest(OWNER_HOLD, true),
+                State::default(),
+                rest(OWNER_HOLD, true),
+            ),
+            (
+                &other,
+                rest(later, true),
+                State::default(),
+                rest(later, true),
+            ),
+            (
+                &codex,
+                rest(later, false),
+                State::default(),
+                rest(later, false),
+            ),
+            (&codex, credited, rest(later, true), credited),
+            (
+                &codex,
+                rest(OWNER_HOLD, false),
+                credited,
+                rest(OWNER_HOLD, false),
+            ),
         ] {
             let home = tempfile::tempdir().unwrap();
             let db = open(home.path()).unwrap();
-            let p = entry("p", Limits::default());
-            let reservation = reserve(&db, &p, "curator", "s", 100, 5.0, &[])
+            let reservation = reserve(&db, p, "curator", "s", 100, 5.0, &[])
                 .unwrap()
                 .unwrap();
             providers_db::set_state(&db, "p", stored).unwrap();
@@ -1315,8 +1363,9 @@ mod tests {
                 usd: None,
             };
             let state = reservation.settle(&db, &call, None, |_| left).unwrap();
-            assert_eq!(state, after, "{stored:?}");
-            assert_eq!(providers_db::state(&db, "p").unwrap(), after, "{stored:?}");
+            let case = format!("{} {stored:?}", p.name());
+            assert_eq!(state, after, "{case}");
+            assert_eq!(providers_db::state(&db, "p").unwrap(), after, "{case}");
         }
     }
 
