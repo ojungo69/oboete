@@ -30,6 +30,11 @@ pub(crate) const BATCH_TIMEOUT: Duration = Duration::from_secs(180);
 /// One answer holds up to 100 × 1,024 floats as JSON (about 2 MB).
 const MAX_RESPONSE_BYTES: u64 = 8 << 20;
 
+/// Whether one CLI search loads the local model for its query: only if a fresh process's load and
+/// embed fit MCP's 1.5 s on the slowest machine (D14), which the spike's did not (Step 3);
+/// otherwise `oboete search --vectors` waits for the load.
+pub const CLI_EMBEDS_QUERIES: bool = false;
+
 /// Where `local` keeps bge-m3's files and its runtime (`model_fetch`): no store operation touches
 /// it.
 pub fn local_dir(home: &Path) -> PathBuf {
@@ -45,6 +50,27 @@ pub fn local_unavailable() -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// `local`'s model for this home, to load on a `Resident`'s thread, or why there is none: a
+/// build or machine without it, or files not verified (doctor's line).
+pub(crate) fn local_model(home: &Path) -> std::result::Result<crate::resident::Load, String> {
+    #[cfg(test)]
+    if let Some(load) = stub::local_model(home) {
+        return Ok(load);
+    }
+    if let Some(why) = local_unavailable() {
+        return Err(why.to_owned());
+    }
+    let (ready, line) = local_state(home);
+    if !ready {
+        return Err(line);
+    }
+    #[cfg(feature = "local-embed")]
+    let load = Ok(crate::embed_local::loader(local_dir(home)));
+    #[cfg(not(feature = "local-embed"))]
+    let load = Err("this oboete was built without local embeddings".to_owned());
+    load
 }
 
 /// Whether `local`'s files are ready, and doctor's line on them, from their sizes and the
@@ -248,26 +274,39 @@ fn vectors(v: &Value, n: usize) -> Result<Vec<Vec<f32>>> {
         .map(|row| {
             let row = row
                 .as_array()
-                .filter(|r| r.len() == DIM)
                 .ok_or_else(|| anyhow!("workers ai: a vector is not {DIM} numbers"))?;
-            let mut vec = row
+            let vec = row
                 .iter()
                 .map(|x| {
                     x.as_f64()
                         .map(|x| x as f32)
-                        .filter(|x| x.is_finite())
-                        .ok_or_else(|| anyhow!("workers ai: a coordinate is not a finite number"))
+                        .ok_or_else(|| anyhow!("workers ai: a coordinate is not a number"))
                 })
                 .collect::<Result<Vec<f32>>>()?;
-            let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-            anyhow::ensure!(
-                norm.is_finite() && norm > 0.0,
-                "workers ai: a zero or overflowing vector"
-            );
-            vec.iter_mut().for_each(|x| *x /= norm);
-            Ok(vec)
+            unit(vec).context("workers ai")
         })
         .collect()
+}
+
+/// A vector as the index takes it from either runner: `DIM` finite numbers, scaled to unit
+/// length.
+pub fn unit(mut vec: Vec<f32>) -> Result<Vec<f32>> {
+    anyhow::ensure!(
+        vec.len() == DIM,
+        "a vector of {} numbers, not {DIM}",
+        vec.len()
+    );
+    anyhow::ensure!(
+        vec.iter().all(|x| x.is_finite()),
+        "a coordinate is not a finite number"
+    );
+    let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+    anyhow::ensure!(
+        norm.is_finite() && norm > 0.0,
+        "a zero or overflowing vector"
+    );
+    vec.iter_mut().for_each(|x| *x /= norm);
+    Ok(vec)
 }
 
 /// Sign bits, most significant bit first in each byte (as the spike's `np.packbits`).
@@ -372,6 +411,45 @@ pub(crate) mod stub {
 
     /// The stub's vector for `text` under model `id`: each word adds one to the dimension its
     /// hash picks, then the vector is scaled to unit length.
+    /// A test home's local model (`local_model`): `models/bge-m3/stub` holds its load's delay
+    /// in ms, `fail` or `nan`; each load adds a line to `stub-loads` beside it.
+    pub(crate) fn local_model(home: &std::path::Path) -> Option<crate::resident::Load> {
+        let dir = super::local_dir(home);
+        let how = std::fs::read_to_string(dir.join("stub")).ok()?;
+        Some(Box::new(move || {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(dir.join("stub-loads"))?
+                .write_all(b"load\n")?;
+            match how.trim() {
+                "fail" => anyhow::bail!("the stub model does not load"),
+                "nan" => {
+                    Ok(Box::new(|_: &str| Ok(vec![f32::NAN; super::DIM]))
+                        as crate::resident::Model)
+                }
+                ms => {
+                    std::thread::sleep(std::time::Duration::from_millis(ms.parse().unwrap_or(0)));
+                    Ok(Box::new(|text: &str| Ok(vector(super::EMBEDDER, text)))
+                        as crate::resident::Model)
+                }
+            }
+        }))
+    }
+
+    /// A test home with a local model that loads as `how` says (`local_model`).
+    pub(crate) fn local(home: &std::path::Path, how: &str) {
+        let dir = super::local_dir(home);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("stub"), how).unwrap();
+    }
+
+    /// How many times a test home's local model loaded.
+    pub(crate) fn local_loads(home: &std::path::Path) -> usize {
+        let loads = super::local_dir(home).join("stub-loads");
+        std::fs::read_to_string(loads).map_or(0, |s| s.lines().count())
+    }
+
     pub(crate) fn vector(id: &str, text: &str) -> Vec<f32> {
         use sha2::{Digest, Sha256};
         let mut v = vec![0.0f32; super::DIM];
@@ -536,6 +614,21 @@ mod tests {
             assert_eq!((ready, line), (false, format!("local model: {why}")));
         } else {
             assert!(!ready && line.contains("not downloaded"), "{line}");
+        }
+    }
+
+    /// Task 10: both runners' vectors pass `unit` (Workers AI's answers through `vectors`, the
+    /// local model's on its `Resident`): 1,024 finite numbers, not all zero, scaled to length 1.
+    #[test]
+    fn a_bad_vector_is_refused_by_either_runner() {
+        let v = unit(vec![3.0; DIM]).unwrap();
+        assert!((v.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-5);
+        assert!(unit(vec![1.0; DIM - 1]).is_err());
+        assert!(unit(vec![0.0; DIM]).is_err());
+        for bad in [f32::NAN, f32::INFINITY] {
+            let mut v = vec![1.0; DIM];
+            v[7] = bad;
+            assert!(unit(v).is_err());
         }
     }
 

@@ -8,6 +8,7 @@
 use crate::curate::{Phase as Step, Reading, Reads};
 use crate::embed::{Embedder, Failure};
 use crate::raw::Raw;
+use crate::resident::{Busy, Resident};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -19,6 +20,13 @@ use std::time::{Duration, Instant};
 const ROLE: &str = "embed";
 /// Documents read per poll: each poll sends at most one batch, its texts the shortest of these.
 const PAGE: usize = 2 * crate::embed::BATCH;
+/// `provider_state` name of the local model (Task 10): its rest after a load or run that failed,
+/// kept in providers.db so a worker that exits idle does not load it again at once.
+pub(crate) const LOCAL: &str = "local-embed";
+/// D14: the worker loads the local model once this many documents wait for a vector, or one has
+/// waited this long (ms by its time); a smaller, newer backlog is no work that keeps it up.
+const LOAD_AT: usize = 20;
+const LOAD_AFTER_MS: i64 = 10 * 60 * 1000;
 
 /// One document the phase reads: its kind (`c` claim, `k` imported knowledge, `p` imported prompt,
 /// `r` raw record), its key, and the metadata the index filters by.
@@ -39,6 +47,8 @@ pub struct Batch {
     pub embedder: String,
     pub docs: Vec<Doc>,
     pub texts: Vec<String>,
+    /// The documents of its page with a text to send, its own included (D14's threshold).
+    pub backlog: usize,
     pub reading: Reading,
     pub ruleset: String,
     pub tombstones: i64,
@@ -60,27 +70,30 @@ thread_local! {
     };
 }
 
-/// The thread's body: rules loaded, raw.db opened, exclusions and tombstones checked against the
-/// batch's, raw.db closed, then the call. What it took, in ms, beside what became of it.
+/// Rules loaded, raw.db opened, exclusions and tombstones checked against the batch's, raw.db
+/// closed: what `send` and `send_local` do before the model runs. A call that leaves the machine
+/// holds the dispatch guard, which a forget waits for.
+fn still(home: &Path, batch: &Batch, leaves: bool) -> Result<Option<crate::dispatch::Guard>> {
+    let rules = crate::redact::Rules::load(home)?;
+    anyhow::ensure!(
+        rules.version() == batch.ruleset,
+        "the redaction rules changed since the batch was composed"
+    );
+    let raw = crate::raw::open(home)?;
+    let dispatch = leaves.then(|| raw.dispatch()).transpose()?;
+    batch.reading.still(&raw)?;
+    anyhow::ensure!(
+        raw.tombstones()? == batch.tombstones,
+        "the tombstones changed since the batch was composed"
+    );
+    Ok(dispatch)
+}
+
+/// The thread's body: `still`, then the call. What it took, in ms, beside what became of it.
 pub fn send(home: &Path, batch: &Batch, embedder: &Embedder, timeout: Duration) -> (Sent, i64) {
     let started = Instant::now();
-    let still = crate::redact::Rules::load(home).and_then(|rules| {
-        anyhow::ensure!(
-            rules.version() == batch.ruleset,
-            "the redaction rules changed since the batch was composed"
-        );
-        crate::raw::open(home).and_then(|raw| {
-            let dispatch = raw.dispatch()?;
-            batch.reading.still(&raw)?;
-            anyhow::ensure!(
-                raw.tombstones()? == batch.tombstones,
-                "the tombstones changed since the batch was composed"
-            );
-            Ok(dispatch)
-        })
-    });
-    let dispatch = match still {
-        Ok(dispatch) => dispatch,
+    let dispatch = match still(home, batch, true) {
+        Ok(dispatch) => dispatch.expect("asked for"),
         Err(e) => return (Sent::Unsent(e), 0),
     };
     #[cfg(test)]
@@ -97,11 +110,34 @@ pub fn send(home: &Path, batch: &Batch, embedder: &Embedder, timeout: Duration) 
     (sent, started.elapsed().as_millis() as i64)
 }
 
+/// `send` on the local model (Task 10): nothing leaves the machine, so no dispatch guard holds a
+/// forget back while it runs, which can take minutes; `write` keeps only the vectors of texts
+/// still stored. Waits for the model's load and every text.
+pub fn send_local(home: &Path, batch: &Batch, model: &Resident) -> (Sent, i64) {
+    let started = Instant::now();
+    if let Err(e) = still(home, batch, false) {
+        return (Sent::Unsent(e), 0);
+    }
+    let sent = match model.embed(&batch.texts, None) {
+        Ok(v) => Sent::Vectors(v),
+        Err(busy) => Sent::Failed(Failure {
+            status: None,
+            retry_after_s: None,
+            sent: false,
+            message: match busy {
+                Busy::Failed(why) => format!("local model: {why}"),
+                other => format!("local model: {other:?}"),
+            },
+        }),
+    };
+    (sent, started.elapsed().as_millis() as i64)
+}
+
 /// A call on its thread.
 struct InFlight {
     batch: Arc<Batch>,
-    /// Its `provider_calls` row, counted since before it was sent.
-    call: i64,
+    /// Its `provider_calls` row, counted since before it was sent; none on the local model.
+    call: Option<i64>,
     thread: std::thread::JoinHandle<(Sent, i64)>,
     /// When the call's own timeout has passed (unix ms).
     until: i64,
@@ -114,8 +150,8 @@ struct Asked {
     /// The text as the asker built it, before the cut: the answer goes with it.
     text: String,
     embedder: String,
-    /// Its `provider_calls` row, counted since before it was sent.
-    call: i64,
+    /// Its `provider_calls` row, counted since before it was sent; none on the local model.
+    call: Option<i64>,
     thread: std::thread::JoinHandle<(Sent, i64)>,
     until: i64,
 }
@@ -126,6 +162,28 @@ pub struct Answer {
     pub text: String,
     pub embedder: String,
     pub vector: Vec<f32>,
+}
+
+/// Where a batch's vectors come from: Workers AI's call, or the local model this process holds.
+enum Runner {
+    WorkersAi(Embedder),
+    Local(Arc<Resident>),
+}
+
+impl Runner {
+    /// The batch on a thread of its own (`send` or `send_local`).
+    fn spawn(
+        self,
+        home: &Path,
+        batch: Arc<Batch>,
+        timeout: Duration,
+    ) -> std::thread::JoinHandle<(Sent, i64)> {
+        let home = home.to_owned();
+        std::thread::spawn(move || match self {
+            Runner::WorkersAi(embedder) => send(&home, &batch, &embedder, timeout),
+            Runner::Local(model) => send_local(&home, &batch, &model),
+        })
+    }
 }
 
 /// The requests of `daily_requests` kept for query vectors: batches stop this short (Global
@@ -153,6 +211,8 @@ pub struct Phase {
     /// A call's own timeout: `embed::BATCH_TIMEOUT`, shorter in tests.
     timeout: Duration,
     split: Option<Split>,
+    /// The local model while documents wait for it (D14); dropped when none do.
+    local: Option<Arc<Resident>>,
     #[cfg(test)]
     polls: usize,
 }
@@ -191,6 +251,7 @@ impl Phase {
             db: None,
             timeout: crate::embed::BATCH_TIMEOUT,
             split: None,
+            local: None,
             #[cfg(test)]
             polls: 0,
         }
@@ -265,9 +326,19 @@ impl Phase {
         let Ok(config) = crate::config::load(&self.home) else {
             return Ok(false);
         };
-        let Ok(Some(embedder)) = Embedder::from_config(&config.embedding) else {
-            return Ok(false);
+        let runner = match config.embedding.provider.as_str() {
+            // The local model answers only while the worker holds it for documents (D14): a query
+            // alone loads nothing, and costs nothing to count.
+            "local" => match &self.local {
+                Some(model) if model.ready() => Runner::Local(Arc::clone(model)),
+                _ => return Ok(false),
+            },
+            _ => match Embedder::from_config(&config.embedding) {
+                Ok(Some(embedder)) => Runner::WorkersAi(embedder),
+                _ => return Ok(false),
+            },
         };
+        let id = crate::embed::EMBEDDER;
         let active: Option<String> = k
             .query_row(
                 "SELECT embedder FROM vec_generation WHERE state = 'active'",
@@ -275,49 +346,54 @@ impl Phase {
                 |r| r.get(0),
             )
             .optional()?;
-        if active.as_deref() != Some(embedder.id.as_str()) {
+        if active.as_deref() != Some(id) {
             return Ok(false);
         }
         let sent: String = text.chars().take(crate::embed::PROMPT_CHARS).collect();
-        let reserved = self.providers().and_then(|db| {
-            if pdb::state(db, crate::embed::CALLS)?.down_until > crate::db::now_ms() {
-                return Ok(None);
-            }
-            let cfg = &config.embedding;
-            Ok(reserve(
-                db,
-                "query",
-                "1 query",
-                &sent,
-                cfg.daily_requests,
-                cfg.monthly_usd,
-            )?
-            .ok())
-        });
-        let call = match reserved {
-            Ok(Some(call)) => call,
-            Ok(None) => return Ok(false),
-            Err(e) => {
-                eprintln!("oboete: no query embedding for now: {e:#}");
-                return Ok(false);
+        let call = match &runner {
+            Runner::Local(_) => None,
+            Runner::WorkersAi(_) => {
+                let reserved = self.providers().and_then(|db| {
+                    if pdb::state(db, crate::embed::CALLS)?.down_until > crate::db::now_ms() {
+                        return Ok(None);
+                    }
+                    let cfg = &config.embedding;
+                    Ok(reserve(
+                        db,
+                        "query",
+                        "1 query",
+                        &sent,
+                        cfg.daily_requests,
+                        cfg.monthly_usd,
+                    )?
+                    .ok())
+                });
+                match reserved {
+                    Ok(Some(call)) => Some(call),
+                    Ok(None) => return Ok(false),
+                    Err(e) => {
+                        eprintln!("oboete: no query embedding for now: {e:#}");
+                        return Ok(false);
+                    }
+                }
             }
         };
-        let batch = Batch {
-            embedder: embedder.id.clone(),
+        let batch = Arc::new(Batch {
+            embedder: id.to_owned(),
             docs: Vec::new(),
             texts: vec![sent],
+            backlog: 1,
             reading: reading.clone(),
             ruleset: rules.version().to_owned(),
             tombstones,
-        };
-        let (home, timeout) = (self.home.clone(), self.timeout);
+        });
         self.asked = Some(Asked {
             key: key.to_owned(),
             text: text.to_owned(),
-            embedder: embedder.id.clone(),
+            embedder: id.to_owned(),
             call,
-            thread: std::thread::spawn(move || send(&home, &batch, &embedder, timeout)),
-            until: crate::db::now_ms() + timeout.as_millis() as i64,
+            thread: runner.spawn(&self.home, batch, self.timeout),
+            until: crate::db::now_ms() + self.timeout.as_millis() as i64,
         });
         Ok(true)
     }
@@ -345,7 +421,10 @@ impl Phase {
         let (outcome, detail, billed) = match &sent {
             Sent::Unsent(e) => {
                 eprintln!("oboete: query embedding not sent: {e:#}");
-                if let Err(e) = self.providers().and_then(|db| pdb::unreserve(db, a.call)) {
+                let unreserved = (a.call).map_or(Ok(()), |call| {
+                    self.providers().and_then(|db| pdb::unreserve(db, call))
+                });
+                if let Err(e) = unreserved {
                     eprintln!("oboete: a query embedding not sent stays counted: {e:#}");
                 }
                 self.unasked = Some(a.key);
@@ -354,11 +433,16 @@ impl Phase {
             Sent::Vectors(_) => ("ok", "1 query".to_owned(), true),
             Sent::Failed(f) => ("error", f.message.clone(), f.billed()),
         };
-        let settled = self
-            .providers()
-            .and_then(|db| pdb::settle(db, a.call, outcome, ms, &detail, billed));
-        if let Err(e) = settled {
-            eprintln!("oboete: a query embedding is not settled: {e:#}");
+        // The local model's queries are not counted: they cost nothing and leave nothing.
+        if let Some(call) = a.call {
+            let settled = self
+                .providers()
+                .and_then(|db| pdb::settle(db, call, outcome, ms, &detail, billed));
+            if let Err(e) = settled {
+                eprintln!("oboete: a query embedding is not settled: {e:#}");
+            }
+        } else if let Sent::Failed(f) = &sent {
+            eprintln!("oboete: query embedding failed: {}", f.message);
         }
         let Sent::Vectors(mut vectors) = sent else {
             return None;
@@ -402,8 +486,11 @@ impl Phase {
         let loaded = crate::config::load(&self.home)
             .and_then(|c| Ok((Embedder::from_config(&c.embedding)?, c.embedding)));
         let (embedder, cfg) = match loaded {
-            Ok((Some(e), cfg)) => (e, cfg),
-            Ok((None, _)) => return Ok(Step::Idle),
+            Ok((embedder, cfg)) if embedder.is_some() || cfg.provider == "local" => (embedder, cfg),
+            Ok(_) => {
+                self.local = None;
+                return Ok(Step::Idle);
+            }
             Err(e) => {
                 eprintln!("oboete: no embedding for now: {e:#}");
                 return Ok(Step::Idle);
@@ -421,7 +508,11 @@ impl Phase {
         if crate::curate::lagging(raw, k)? {
             return Ok(Step::Idle);
         }
-        cleared(k, &embedder.id, &reading)?;
+        cleared(k, crate::embed::EMBEDDER, &reading)?;
+        let Some(embedder) = embedder else {
+            return self.local_batch(raw, k, &reading, &rules);
+        };
+        self.local = None;
         let wait = match self.held_back(&cfg) {
             Ok(wait) => wait,
             // A providers.db that will not open or read holds back the vectors only.
@@ -469,17 +560,74 @@ impl Phase {
                 return Ok(Step::Idle);
             }
         };
+        Ok(self.fly(Runner::WorkersAi(embedder), batch, Some(call)))
+    }
+
+    /// The batch sent on its thread: the phase waits for it, and the worker stays up.
+    fn fly(&mut self, runner: Runner, batch: Batch, call: Option<i64>) -> Step {
         let batch = Arc::new(batch);
-        let (home, sending, timeout) = (self.home.clone(), batch.clone(), self.timeout);
-        let thread = std::thread::spawn(move || send(&home, &sending, &embedder, timeout));
-        let until = crate::db::now_ms() + timeout.as_millis() as i64;
+        let thread = runner.spawn(&self.home, Arc::clone(&batch), self.timeout);
+        let until = crate::db::now_ms() + self.timeout.as_millis() as i64;
         self.flight = Some(InFlight {
             batch,
             call,
             thread,
             until,
         });
-        Ok(Step::Waiting { until, up: true })
+        Step::Waiting { until, up: true }
+    }
+
+    /// `batch` on the local model (Task 10, D14): no cap, no count and no split. It loads once
+    /// `LOAD_AT` documents wait or one has waited `LOAD_AFTER_MS`, and goes when none wait; a
+    /// load or run that fails rests it in providers.db as a failed call rests Workers AI.
+    fn local_batch(
+        &mut self,
+        raw: &Raw,
+        k: &Connection,
+        reading: &Reading,
+        rules: &crate::redact::Rules,
+    ) -> Result<Step> {
+        use crate::providers_db as pdb;
+        let now = crate::db::now_ms();
+        let rest = match self.providers().and_then(|db| pdb::state(db, LOCAL)) {
+            Ok(state) => state.down_until,
+            Err(e) => {
+                eprintln!("oboete: no local embedding for now: {e:#}");
+                return Ok(Step::Idle);
+            }
+        };
+        if rest > now {
+            self.local = None;
+            let up = rest - now <= crate::curate::STAY_UP_MS;
+            return Ok(Step::Waiting { until: rest, up });
+        }
+        let embedder = crate::embed::EMBEDDER;
+        let Some(batch) = pending(raw, k, embedder, reading, rules, false)? else {
+            self.local = None;
+            return Ok(Step::Idle);
+        };
+        let model = match &self.local {
+            Some(model) if !model.gone() => Arc::clone(model),
+            _ => {
+                let oldest = batch.docs.iter().map(|d| d.ts).min().unwrap_or(now);
+                if batch.backlog < LOAD_AT && now - oldest < LOAD_AFTER_MS {
+                    let until = oldest + LOAD_AFTER_MS;
+                    return Ok(Step::Waiting { until, up: false });
+                }
+                let load = match crate::embed::local_model(&self.home) {
+                    Ok(load) => load,
+                    // Doctor names why (`embed::local_state`); the documents keep waiting.
+                    Err(why) => {
+                        eprintln!("oboete: no local embedding for now: {why}");
+                        return Ok(Step::Idle);
+                    }
+                };
+                let model = Arc::new(Resident::start(load, None));
+                self.local = Some(Arc::clone(&model));
+                model
+            }
+        };
+        Ok(self.fly(Runner::Local(model), batch, None))
     }
 
     /// The split's next half, its documents read again (D8): one whose stored text changed or
@@ -526,6 +674,7 @@ impl Phase {
             if !docs.is_empty() {
                 return Ok(Some(Batch {
                     embedder: embedder.to_owned(),
+                    backlog: docs.len(),
                     docs,
                     texts,
                     reading: reading.clone(),
@@ -578,18 +727,26 @@ impl Phase {
         raw: &Raw,
         k: &Connection,
         batch: &Batch,
-        call: i64,
+        call: Option<i64>,
         sent: Sent,
         ms: i64,
     ) -> Result<()> {
         use crate::providers_db as pdb;
+        // The local model's batch is not counted, and its failures rest it, not Workers AI.
+        let name = match call {
+            Some(_) => crate::embed::CALLS,
+            None => LOCAL,
+        };
         let failure = match &sent {
             // Nothing left: the call is no longer counted, and no rest is set. A split's other
             // halves were read under the same list: the next poll reads them again.
             Sent::Unsent(e) => {
                 eprintln!("oboete: embedding not sent: {e:#}");
                 self.split = None;
-                if let Err(e) = self.providers().and_then(|db| pdb::unreserve(db, call)) {
+                let unreserved = call.map_or(Ok(()), |call| {
+                    self.providers().and_then(|db| pdb::unreserve(db, call))
+                });
+                if let Err(e) = unreserved {
                     eprintln!("oboete: an embedding call not sent stays counted: {e:#}");
                 }
                 return Ok(());
@@ -608,7 +765,7 @@ impl Phase {
                 }
                 rest = Some(None);
             }
-            Some(f) if matches!(f.status, Some(400 | 413 | 422)) => {
+            Some(f) if call.is_some() && matches!(f.status, Some(400 | 413 | 422)) => {
                 let split = self.split.get_or_insert_with(Split::default);
                 split.fails += 1;
                 if let [doc] = &batch.docs[..] {
@@ -627,6 +784,7 @@ impl Phase {
                             embedder: batch.embedder.clone(),
                             docs: docs.to_vec(),
                             texts: texts.to_vec(),
+                            backlog: docs.len(),
                             reading: batch.reading.clone(),
                             ruleset: batch.ruleset.clone(),
                             tombstones: batch.tombstones,
@@ -634,7 +792,13 @@ impl Phase {
                     }
                 }
             }
-            Some(f) => rest = Some(Some(f)),
+            Some(f) => {
+                if call.is_none() {
+                    eprintln!("oboete: {}", f.message);
+                    self.local = None;
+                }
+                rest = Some(Some(f));
+            }
         }
         // A split that is over, or that failed past `SPLIT_FAILS` unanswered: answered, its lone
         // texts are refused; unanswered, the embedder's state takes the failure as any other's (a
@@ -655,14 +819,16 @@ impl Phase {
             Some(f) => ("error", f.message.clone(), f.billed()),
         };
         let settled = self.providers().and_then(|db| {
-            pdb::settle(db, call, outcome, ms, &detail, billed)?;
+            if let Some(call) = call {
+                pdb::settle(db, call, outcome, ms, &detail, billed)?;
+            }
             if let Some(rest) = rest {
-                let was = pdb::state(db, crate::embed::CALLS)?;
+                let was = pdb::state(db, name)?;
                 let next = rest.map_or_else(pdb::State::default, |f| {
                     crate::provider::next_state(was, &f.into())
                 });
                 if next != was {
-                    pdb::set_state(db, crate::embed::CALLS, next)?;
+                    pdb::set_state(db, name, next)?;
                 }
             }
             Ok(())
@@ -682,6 +848,7 @@ impl Phase {
                     embedder: batch.embedder.clone(),
                     docs: vec![doc],
                     texts: Vec::new(),
+                    backlog: 1,
                     reading: batch.reading.clone(),
                     ruleset: batch.ruleset.clone(),
                     tombstones: batch.tombstones,
@@ -809,8 +976,19 @@ pub fn doctor_lines(home: &Path, k: &Connection) -> Result<Vec<String>> {
     if !skipped.is_empty() {
         lines.push(format!("  passed over: {}", skipped.join(", ")));
     }
-    // Requests, USD and rests are Workers AI's.
-    if local || !home.join("providers.db").exists() {
+    if !home.join("providers.db").exists() {
+        return Ok(lines);
+    }
+    // Requests and USD are Workers AI's; the local model has its own rest, after a load or run
+    // that failed (the worker's log says why).
+    if local {
+        let rest = pdb::state(&pdb::open(home)?, LOCAL)?.down_until;
+        if rest > crate::db::now_ms() {
+            lines.push(format!(
+                "  local model resting until {} after a load or run that failed (the worker's log says why)",
+                crate::db::utc(rest)
+            ));
+        }
         return Ok(lines);
     }
     let db = pdb::open(home)?;
@@ -1084,11 +1262,13 @@ fn pending(
                 .map(|(i, (_, t))| (i.to_string(), t.clone()))
                 .collect();
             let first = crate::embed::batches(&pairs)[0].len();
+            let backlog = todo.len();
             let (docs, texts) = todo.into_iter().take(first).unzip();
             let batch = Batch {
                 embedder: embedder.to_owned(),
                 docs,
                 texts,
+                backlog,
                 reading: reading.clone(),
                 ruleset: rules.version().to_owned(),
                 tombstones,
@@ -1807,7 +1987,7 @@ pub(crate) mod fixture {
             key: key.to_owned(),
             text: text.to_owned(),
             embedder: crate::embed::EMBEDDER.to_owned(),
-            call,
+            call: Some(call),
             thread: std::thread::spawn(move || {
                 wait.recv().unwrap();
                 (sent, 0)
@@ -2133,7 +2313,7 @@ mod tests {
         let (sent, _) = send(home, &batch, &embedder, Duration::from_secs(5));
         assert!(matches!(&sent, Sent::Unsent(e) if e.is::<crate::curate::ListChanged>()));
         Phase::new(home)
-            .finish(&s.raw, &k, &batch, call, sent, 0)
+            .finish(&s.raw, &k, &batch, Some(call), sent, 0)
             .unwrap();
         assert_eq!(stub.requests(), 0);
         let rows: i64 = db
@@ -3716,5 +3896,205 @@ mod tests {
             )
             .unwrap();
         assert_eq!(index, kept);
+    }
+
+    /// Task 10: a home whose embedder is the local model, which loads as `how` says
+    /// (`embed::stub::local`).
+    fn local(s: &Store, how: &str) {
+        let config = "[embedding]\nprovider = \"local\"\n";
+        std::fs::write(s.home.path().join("config.toml"), config).unwrap();
+        crate::embed::stub::local(s.home.path(), how);
+    }
+
+    fn indexed_count(k: &Connection) -> i64 {
+        k.query_row("SELECT count(*) FROM vec_index", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// D14: the worker loads the local model once 20 documents wait or one has waited 10 minutes,
+    /// embeds them, and drops it when none wait. A smaller, newer backlog is no work that keeps
+    /// the worker up.
+    #[test]
+    fn the_worker_loads_past_the_threshold_and_drops_when_none_pend() {
+        let mut s = Store::new();
+        let now = crate::db::now_ms();
+        for i in 0..5 {
+            s.said("s", R, now, &format!("Fresh words {i}."));
+        }
+        s.run();
+        local(&s, "0");
+        let home = s.home.path().to_owned();
+        let k = crate::knowledge::open(&home).unwrap();
+        let mut phase = Phase::new(&home);
+        let step = phase.poll(&s.raw, &k).unwrap();
+        let waits =
+            matches!(step, Step::Waiting { until, up: false } if until >= now + LOAD_AFTER_MS);
+        assert!(waits, "{step:?}");
+        let loads = || crate::embed::stub::local_loads(&home);
+        assert_eq!((loads(), indexed_count(&k)), (0, 0));
+        for i in 0..15 {
+            s.said("s", R, now, &format!("More words {i}."));
+        }
+        s.run();
+        until_idle(&s.raw, &k, &mut phase);
+        assert_eq!((loads(), indexed_count(&k)), (1, 20));
+        assert!(
+            phase.local.is_none(),
+            "the model stayed with nothing to embed"
+        );
+        s.said("s", R, now - LOAD_AFTER_MS, "Words that waited.");
+        s.run();
+        until_idle(&s.raw, &k, &mut phase);
+        assert_eq!((loads(), indexed_count(&k)), (2, 21));
+    }
+
+    /// Task 10: without the model (none placed, a load that fails, a vector the index will not
+    /// take) nothing is indexed or marked and the documents wait. A failure rests the model in
+    /// providers.db, as a failed call rests Workers AI, so a fresh worker waits too; doctor says
+    /// so. The model back, what waited is embedded.
+    #[test]
+    fn a_missing_or_changed_model_leaves_the_phase_waiting() {
+        use crate::providers_db as pdb;
+        let mut s = Store::new();
+        s.said("s", R, 1_000, "Words to embed.");
+        s.run();
+        local(&s, "0");
+        let home = s.home.path().to_owned();
+        std::fs::remove_file(crate::embed::local_dir(&home).join("stub")).unwrap();
+        let k = crate::knowledge::open(&home).unwrap();
+        assert_eq!(Phase::new(&home).poll(&s.raw, &k).unwrap(), Step::Idle);
+        let waiting = doctor_lines(&home, &k).unwrap();
+        assert!(waiting[0].ends_with("waiting: 0 claims, 0 imported, 1 records"));
+        for how in ["fail", "nan"] {
+            crate::embed::stub::local(&home, how);
+            let mut phase = Phase::new(&home);
+            assert!(matches!(
+                phase.poll(&s.raw, &k).unwrap(),
+                Step::Waiting { .. }
+            ));
+            while !phase.done() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
+            let fresh = Phase::new(&home).poll(&s.raw, &k).unwrap();
+            let rests = matches!(fresh, Step::Waiting { until, .. } if until > crate::db::now_ms());
+            assert!(rests, "{how}: {fresh:?}");
+            assert_eq!(indexed_count(&k), 0, "{how}");
+            let lines = doctor_lines(&home, &k).unwrap();
+            assert!(
+                lines[1].starts_with("  local model resting until"),
+                "{lines:?}"
+            );
+            let db = pdb::open(&home).unwrap();
+            pdb::set_state(&db, LOCAL, pdb::State::default()).unwrap();
+        }
+        crate::embed::stub::local(&home, "0");
+        embed_all(&s);
+        assert_eq!(indexed_count(&k), 1);
+    }
+
+    /// Task 10: the local model calls no Workers AI and reads no key, Workers AI's settings left
+    /// in place; with its key, Workers AI gets the next document (the control).
+    #[test]
+    fn a_local_run_calls_no_workers_ai_and_reads_no_key() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.said("s", R, 1_000, "Words to embed.");
+        s.run();
+        let home = s.home.path().to_owned();
+        let text = format!(
+            "[embedding]\nprovider = \"local\"\naccount_id = \"a\"\nkey_file = '{}'\nurl = \"{}\"\n",
+            home.join("no-key.md").display(),
+            stub.url
+        );
+        std::fs::write(home.join("config.toml"), text).unwrap();
+        crate::embed::stub::local(&home, "0");
+        embed_all(&s);
+        let k = crate::knowledge::open(&home).unwrap();
+        assert_eq!((stub.requests(), indexed_count(&k)), (0, 1));
+        config(&s, &stub);
+        s.said("s", R, 2_000, "More words.");
+        s.run();
+        embed_all(&s);
+        assert_eq!((stub.requests(), indexed_count(&k)), (1, 2));
+    }
+
+    /// Row 46-2: both runners make the same model's vectors, so switching between them queues
+    /// nothing and loads nothing; each embeds only what is new.
+    #[test]
+    fn switching_runners_queues_nothing() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.said("s", R, 1_000, "Parser words.");
+        s.said("s", R, 2_000, "Deploy words.");
+        s.run();
+        config(&s, &stub);
+        embed_all(&s);
+        let home = s.home.path().to_owned();
+        let k = crate::knowledge::open(&home).unwrap();
+        local(&s, "0");
+        assert_eq!(Phase::new(&home).poll(&s.raw, &k).unwrap(), Step::Idle);
+        assert_eq!(crate::embed::stub::local_loads(&home), 0);
+        s.said("s", R, 3_000, "Parser words again.");
+        s.run();
+        embed_all(&s);
+        assert_eq!(
+            (crate::embed::stub::local_loads(&home), indexed_count(&k)),
+            (1, 3)
+        );
+        config(&s, &stub);
+        assert_eq!(Phase::new(&home).poll(&s.raw, &k).unwrap(), Step::Idle);
+        assert_eq!(stub.requests(), 1);
+    }
+
+    /// Row 55-6 on the local model: a text corrected while the model embeds it keeps no vector,
+    /// and the next batch embeds the new text.
+    #[test]
+    fn the_local_model_keeps_no_vector_of_text_that_changed() {
+        let mut s = Store::new();
+        let uid = s.decided(R, 1_000, "Parser caches stay in Redis.", &[]);
+        s.run();
+        local(&s, "300");
+        let home = s.home.path().to_owned();
+        let k = crate::knowledge::open(&home).unwrap();
+        let mut phase = Phase::new(&home);
+        assert!(matches!(
+            phase.poll(&s.raw, &k).unwrap(),
+            Step::Waiting { .. }
+        ));
+        crate::claims::correct(&home, &uid, None, Some("Caches go to files.")).unwrap();
+        s.run();
+        while !phase.done() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
+        let kept = |k: &Connection| -> i64 {
+            k.query_row(
+                "SELECT count(*) FROM vector_keys WHERE kind = 'c' AND skipped IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(kept(&k), 0);
+        until_idle(&s.raw, &k, &mut phase);
+        assert_eq!(kept(&k), 1);
+    }
+
+    /// Row 30-1 on the local model: a session that touched an excluded repository reaches no
+    /// embedder, the local one included (D13); the rest is embedded.
+    #[test]
+    fn an_excluded_repositorys_records_reach_no_local_model() {
+        let mut s = Store::new();
+        let there = s.said("sx", "github.com/o/secret", 1_000, "Secret words.");
+        let open = s.said("so", R, 2_000, "Open words.");
+        s.raw.exclude("github.com/o/secret", false).unwrap();
+        s.run();
+        local(&s, "0");
+        embed_all(&s);
+        assert_eq!(skipped(&s, &s.key(there)).as_deref(), Some("excluded"));
+        assert_eq!(skipped(&s, &s.key(open)), None);
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        assert_eq!(indexed_count(&k), 1);
     }
 }

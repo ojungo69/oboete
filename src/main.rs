@@ -33,7 +33,6 @@ mod knowledge;
 mod manifest;
 mod mcp;
 mod migrate;
-// Setup starts using the model downloader in milestone 4, Task 10, Step 6.
 mod model_fetch;
 mod provider;
 mod providers_db;
@@ -43,6 +42,7 @@ mod raw;
 mod redact;
 mod replay;
 mod repo;
+mod resident;
 mod search;
 mod settings;
 mod setup;
@@ -215,6 +215,10 @@ enum Cmd {
         raw: String,
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// With the local embedder: load the model (a few seconds) and search by meaning too;
+        /// without it, this search is full text
+        #[arg(long)]
+        vectors: bool,
     },
     /// Print 1–20 chosen ids in full: claims, cards, summaries, imports or raw records
     Get {
@@ -483,6 +487,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             order,
             raw,
             limit,
+            vectors,
         } => {
             let q = search::b::Query {
                 text: query.join(" "),
@@ -503,7 +508,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 limit: limit.min(100),
                 skip_session: None,
             };
-            let answer = search::b::query(&home, &q)?;
+            let answer = search::b::query_cli(&home, &q, vectors)?;
             if let search::b::Vector::Skipped(why) = answer.vector
                 && why != search::b::VectorSkip::Off
             {

@@ -22,6 +22,9 @@ const PAGES: usize = 10;
 const CANDIDATES: i64 = 400;
 /// The query embedding's own timeout (D8): past it, search answers from full text.
 const QUERY_TIMEOUT: Duration = Duration::from_millis(1_200);
+/// A reader's local model goes after this long without a search (D14), and one whose load
+/// failed is tried again after as long.
+const READER_IDLE: Duration = Duration::from_secs(10 * 60);
 /// An evaluation question's embedding (Task 6): longer than a search's, as a question that cannot
 /// be embedded stops the run (Step 13: 5 of 624 queries passed 1.2 s).
 const EVAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -322,6 +325,12 @@ pub enum VectorSkip {
     Waiting,
     Timeout,
     Error,
+    /// The local model is loading (D14): this search is full text, the next ones use it.
+    Loading,
+    /// The local model is not there, not verified, or not in this build (doctor says which).
+    NoModel,
+    /// The CLI does not load the local model unless `--vectors` asks (D14).
+    Cli,
 }
 
 impl VectorSkip {
@@ -337,16 +346,28 @@ impl VectorSkip {
             VectorSkip::Waiting => "the embedder is resting, or its cap is spent",
             VectorSkip::Timeout => "the query's embedding took too long",
             VectorSkip::Error => "the query could not be embedded",
+            VectorSkip::Loading => "the local model is loading, so this search is full text only",
+            VectorSkip::NoModel => "the local model is not ready; oboete doctor shows why",
+            VectorSkip::Cli => "the local model is loaded only with --vectors",
         }
     }
 }
 
 /// Where the query's vector comes from.
 enum Ask<'a> {
-    // Task 6's evaluation and Task 10's local model give theirs (`query_with`).
+    // Task 6's evaluation gives its own (`query_with`).
     #[cfg_attr(not(test), allow(dead_code))]
     Given(Option<&'a [f32]>),
-    Embed,
+    Embed(Caller),
+}
+
+/// Who searches, which decides how the local model is used (D14).
+#[derive(Clone, Copy)]
+enum Caller {
+    /// MCP and the viewer: the model loads on the first search and stays while searches come.
+    Reader,
+    /// One CLI search: the model loads only with `--vectors`, and the search waits for it.
+    Cli { vectors: bool },
 }
 
 /// The hits for `q`, at most `q.limit`: the delivered and current claims first, each earlier
@@ -355,7 +376,13 @@ enum Ask<'a> {
 /// claims (MUST-M11). Each leg ranks by bm25 and keeps what `q.since`/`q.until` and the repository
 /// allow before it takes its part (MUST-M12).
 pub fn query(home: &Path, q: &Query) -> Result<Answer> {
-    search(home, q, Ask::Embed)
+    search(home, q, Ask::Embed(Caller::Reader))
+}
+
+/// `query` for one CLI search: with the local model, its vector only with `vectors`, after the
+/// model loads (`CLI_EMBEDS_QUERIES`).
+pub fn query_cli(home: &Path, q: &Query, vectors: bool) -> Result<Answer> {
+    search(home, q, Ask::Embed(Caller::Cli { vectors }))
 }
 
 /// `query` with a vector the caller made (Task 6's evaluation, Task 10's local model): nothing is
@@ -405,11 +432,16 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             ),
             None => (Vector::Skipped(VectorSkip::NoVectors), None),
         }),
-        // Before anything else: an excluded repository's query is never sent (row 30-2).
-        Ask::Embed if excluded(&raw.exclusions()?, q) => {
+        // Before anything else: an excluded repository's query is never sent (row 30-2). One the
+        // local model embeds leaves no machine, so it keeps its vector (D13).
+        Ask::Embed(_) if !local(home) && excluded(&raw.exclusions()?, q) => {
             Some((Vector::Skipped(VectorSkip::Excluded), None))
         }
-        Ask::Embed => None,
+        Ask::Embed(_) => None,
+    };
+    let caller = match ask {
+        Ask::Embed(caller) => caller,
+        Ask::Given(_) => Caller::Reader,
     };
     let terms = super::terms(&q.text);
     let depth = q.limit.max(DEPTH);
@@ -429,9 +461,8 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
         // again just before the call. `Err` is the call on its way.
         let asked = ready.ok_or_else(|| {
             s.spawn(move || match crate::raw::open(home) {
-                Ok(raw) => {
-                    embedded(home, &raw, q, active, QUERY_TIMEOUT).unwrap_or(Err(VectorSkip::Error))
-                }
+                Ok(raw) => embedded(home, &raw, q, active, QUERY_TIMEOUT, caller)
+                    .unwrap_or(Err(VectorSkip::Error)),
                 Err(_) => Err(VectorSkip::Error),
             })
         });
@@ -580,11 +611,15 @@ fn embedded(
     q: &Query,
     active: Option<String>,
     timeout: Duration,
+    caller: Caller,
 ) -> Result<Result<Near, VectorSkip>> {
     use crate::providers_db as pdb;
     let Ok(config) = crate::config::load(home) else {
         return Ok(Err(VectorSkip::Error));
     };
+    if config.embedding.provider == "local" {
+        return Ok(local_query(home, q, active, caller));
+    }
     let embedder = match crate::embed::Embedder::from_config(&config.embedding) {
         Ok(Some(e)) => e,
         Ok(None) => return Ok(Err(VectorSkip::Off)),
@@ -661,6 +696,86 @@ fn embedded(
     })
 }
 
+/// Whether this home's embedder is the local model.
+fn local(home: &Path) -> bool {
+    crate::config::load(home).is_ok_and(|c| c.embedding.provider == "local")
+}
+
+/// The query's vector from the local model (Task 10, D14): gated and cut as for Workers AI, so
+/// the two runners' vectors agree, but nothing is counted and nothing leaves the machine. A
+/// reader answers from full text while its model loads; the CLI waits for one with `--vectors`.
+fn local_query(
+    home: &Path,
+    q: &Query,
+    active: Option<String>,
+    caller: Caller,
+) -> Result<Near, VectorSkip> {
+    use crate::resident::{Busy, Resident};
+    match active {
+        None => return Err(VectorSkip::NoVectors),
+        Some(a) if a != crate::embed::EMBEDDER => return Err(VectorSkip::Building),
+        Some(_) => {}
+    }
+    let sent: String = redact::outbound_lines(&q.text)
+        .chars()
+        .take(crate::embed::PROMPT_CHARS)
+        .collect();
+    if sent.trim().is_empty() || sent.trim() == "[REDACTED]" {
+        return Err(VectorSkip::Error);
+    }
+    let texts = [sent];
+    let got = match caller {
+        Caller::Cli { vectors } if !vectors && !crate::embed::CLI_EMBEDS_QUERIES => {
+            return Err(VectorSkip::Cli);
+        }
+        Caller::Cli { .. } => {
+            let load = crate::embed::local_model(home).map_err(|why| {
+                eprintln!("oboete: {why}");
+                VectorSkip::NoModel
+            })?;
+            Resident::start(load, None).embed(&texts, None)
+        }
+        Caller::Reader => reader(home)?.embed(&texts, Some(QUERY_TIMEOUT)),
+    };
+    match got {
+        Ok(mut vectors) => (vectors.pop())
+            .map(|vector| Near {
+                embedder: crate::embed::EMBEDDER.to_owned(),
+                vector,
+            })
+            .ok_or(VectorSkip::Error),
+        Err(Busy::Loading) => Err(VectorSkip::Loading),
+        Err(Busy::Timeout) => Err(VectorSkip::Timeout),
+        Err(Busy::Failed(why)) => {
+            eprintln!("oboete: the local model: {why}");
+            Err(VectorSkip::Error)
+        }
+    }
+}
+
+/// This process's local model for searches (D14): started by the first search that needs it,
+/// gone after `READER_IDLE` without one. A load that failed is tried again only after as long.
+fn reader(home: &Path) -> Result<std::sync::Arc<crate::resident::Resident>, VectorSkip> {
+    use std::sync::{Arc, Mutex, PoisonError};
+    type Readers = Vec<(std::path::PathBuf, Arc<crate::resident::Resident>, Instant)>;
+    static READERS: Mutex<Readers> = Mutex::new(Vec::new());
+    let mut readers = READERS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(i) = readers.iter().position(|(h, ..)| h == home) {
+        let (_, model, started) = &readers[i];
+        if !model.gone() || (model.failed() && started.elapsed() < READER_IDLE) {
+            return Ok(Arc::clone(model));
+        }
+        readers.remove(i);
+    }
+    let load = crate::embed::local_model(home).map_err(|why| {
+        eprintln!("oboete: {why}");
+        VectorSkip::NoModel
+    })?;
+    let model = Arc::new(crate::resident::Resident::start(load, Some(READER_IDLE)));
+    readers.push((home.to_owned(), Arc::clone(&model), Instant::now()));
+    Ok(model)
+}
+
 /// `oboete eval` (Task 6, D10): each question of `queries`, one `{"qid", "text", "session"?}` a
 /// line, embedded once and searched with every arm over every repository, its own session left
 /// out of each leg before its limit. Writes `<out>/b-<arm>.trec` per arm (`qid Q0 key rank score
@@ -699,7 +814,8 @@ pub fn trec_run(
     let (mut printed, mut seen) = (Vec::new(), HashSet::new());
     for line in queries.lines().filter(|l| !l.trim().is_empty()) {
         let (qid, q) = question(line, depth)?;
-        let near = match embedded(home, &raw, &q, active.clone(), EVAL_TIMEOUT)? {
+        let caller = Caller::Cli { vectors: true };
+        let near = match embedded(home, &raw, &q, active.clone(), EVAL_TIMEOUT, caller)? {
             Ok(near) => near,
             Err(why) => anyhow::bail!("question {qid} has no vector ({why:?}): the run stops"),
         };
@@ -5235,5 +5351,83 @@ mod tests {
         };
         assert_eq!(plain(&["parser errors"]), std::slice::from_ref(&lexical));
         assert_eq!(plain(&["parser errors", "config.rs"]), [lexical, filed]);
+    }
+
+    /// Task 10: a store embedded by the local model, which loads in `ms` (`embed::stub::local`).
+    fn local_store(ms: &str) -> Store {
+        let mut s = Store::new();
+        s.said("s", R, 1_000, "Parser caches stay in Redis.");
+        s.said("s", R, 2_000, "Deploy on Fridays.");
+        s.run();
+        let config = "[embedding]\nprovider = \"local\"\n";
+        std::fs::write(s.home.path().join("config.toml"), config).unwrap();
+        crate::embed::stub::local(s.home.path(), ms);
+        crate::embed_phase::fixture::embed_all(&s);
+        s
+    }
+
+    /// D14 (D8): a reader's first search starts the local model and answers from full text, and
+    /// the later ones use its vectors; nothing is counted. An excluded repository's query keeps
+    /// its vector, which leaves no machine (D13).
+    #[test]
+    fn a_query_while_the_model_loads_answers_from_full_text() {
+        let mut s = local_store("300");
+        let home = s.home.path();
+        let first = query(home, &q("parser caches")).unwrap();
+        assert_eq!(first.vector, Vector::Skipped(VectorSkip::Loading));
+        assert!(!first.hits.is_empty());
+        let t = Instant::now();
+        let used = loop {
+            let a = query(home, &q("parser caches")).unwrap();
+            if a.vector == Vector::Used {
+                break a;
+            }
+            assert!(t.elapsed() < Duration::from_secs(10), "{:?}", a.vector);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(!used.hits.is_empty());
+        // The worker's load, then this process's reader.
+        assert_eq!(crate::embed::stub::local_loads(home), 2);
+        let db = crate::providers_db::open(home).unwrap();
+        let counted: i64 = db
+            .query_row(
+                "SELECT count(*) FROM provider_calls WHERE role = 'query'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(counted, 0);
+        s.raw.exclude(R, false).unwrap();
+        assert_eq!(
+            query(home, &q("parser caches")).unwrap().vector,
+            Vector::Used
+        );
+    }
+
+    /// D14: one CLI search loads the local model only with `--vectors`, and then waits for it
+    /// (`CLI_EMBEDS_QUERIES` is false: a fresh process's load and embed miss MCP's 1.5 s).
+    #[test]
+    fn the_cli_embeds_by_its_rule() {
+        let s = local_store("100");
+        let home = s.home.path();
+        let loads = crate::embed::stub::local_loads(home);
+        let plain = query_cli(home, &q("parser caches"), false).unwrap();
+        assert_eq!(plain.vector, Vector::Skipped(VectorSkip::Cli));
+        assert!(!plain.hits.is_empty());
+        assert_eq!(crate::embed::stub::local_loads(home), loads);
+        let asked = query_cli(home, &q("parser caches"), true).unwrap();
+        assert_eq!(asked.vector, Vector::Used);
+        assert_eq!(crate::embed::stub::local_loads(home), loads + 1);
+    }
+
+    /// Task 10: with the model gone from the home, a reader's search is full text and says why.
+    #[test]
+    fn a_search_without_the_local_model_says_so() {
+        let s = local_store("0");
+        let home = s.home.path();
+        std::fs::remove_file(crate::embed::local_dir(home).join("stub")).unwrap();
+        let a = query(home, &q("parser caches")).unwrap();
+        assert_eq!(a.vector, Vector::Skipped(VectorSkip::NoModel));
+        assert!(!a.hits.is_empty());
     }
 }

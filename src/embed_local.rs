@@ -53,21 +53,31 @@ pub fn verify(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// ONNX Runtime's library, loaded once per process, checked against its pin just before.
+/// ONNX Runtime's library, loaded once per process, checked against its pin just before. Only a
+/// success is kept: a resident worker loads again once setup has put the library right.
 fn runtime(dir: &Path) -> Result<()> {
-    static LOADED: std::sync::OnceLock<std::result::Result<(), String>> =
-        std::sync::OnceLock::new();
-    LOADED
-        .get_or_init(|| {
-            let library = library().map_err(|e| format!("{e:#}"))?;
-            let path = dir.join(library.name);
-            crate::model_fetch::check(&path, library).map_err(|e| format!("{e:#}"))?;
-            let path = std::path::absolute(&path).map_err(|e| e.to_string())?;
-            ort::init_from(path).map_err(|e| e.to_string())?.commit();
-            Ok(())
-        })
-        .clone()
-        .map_err(anyhow::Error::msg)
+    static LOADED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+    let mut loaded = LOADED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !*loaded {
+        let library = library()?;
+        let path = dir.join(library.name);
+        crate::model_fetch::check(&path, library)?;
+        ort::init_from(std::path::absolute(&path)?)?.commit();
+        *loaded = true;
+    }
+    Ok(())
+}
+
+/// The model in `dir` as a `Resident` loads it, on at most 8 of the machine's threads (the
+/// spike's cap: its memory and agreement were measured there).
+pub fn loader(dir: std::path::PathBuf) -> crate::resident::Load {
+    Box::new(move || {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+        let mut model = load(&dir, Some(threads))?;
+        Ok(Box::new(move |text: &str| embed(&mut model, text)) as crate::resident::Model)
+    })
 }
 
 /// The model from `dir`'s files, with `threads` for ONNX Runtime (all the machine's when `None`).
