@@ -1,0 +1,21 @@
+docs/spec-webui.md
+  s_d65aec28c0d4e3::t_9e7edbd66a346d 36
+docs/spec.md
+  s_d65aec28c0d4e3::t_c98012019df75a 72-77,321,401-402,1493
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "48f07d68de078afdd0c9c22f534fbb7d6bdeb2ba",
+  "prompts": {},
+  "sessions": {
+    "s_d65aec28c0d4e3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11e51-48f3-7a22-a08e-fafa9fd38bca",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
