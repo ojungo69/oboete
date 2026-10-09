@@ -1130,8 +1130,8 @@ impl Viewer {
             ("POST", "/api/providers/test") => (MAX_BODY, |v, b, _| v.test_provider(b)),
             ("POST", "/api/key") => (MAX_KEY_BODY, |v, b, _| v.save_key(b)),
             ("POST", "/api/embedding/preview") => (MAX_BODY, |v, b, _| v.embedding_preview(b)),
-            ("POST", "/api/embedding") => (MAX_BODY, |v, b, _| v.embedding_start(b)),
-            ("POST", "/api/embedding/key") => (MAX_KEY_BODY, |v, b, _| v.save_embedding_key(b)),
+            ("POST", "/api/embedding") => (MAX_BODY, Self::embedding_start),
+            ("POST", "/api/embedding/key") => (MAX_KEY_BODY, Self::save_embedding_key),
             ("POST", "/api/resume") => (MAX_BODY, |v, b, _| v.resume(b)),
             ("POST", "/api/privacy/exclude") => (MAX_BODY, |v, b, _| v.exclude(b)),
             ("POST", "/api/claims/correct") => (MAX_BODY, |v, b, _| v.claim_correct(b)),
@@ -1440,16 +1440,24 @@ impl Viewer {
     }
 
     /// The choice taken; for `local` the answer waits for the download, while the page reads
-    /// its progress from `GET /api/embedding` on another connection.
-    fn embedding_start(&self, body: &[u8]) -> Response {
-        saved(self.embedding.start(&self.home, &self.saving, body))
+    /// its progress from `GET /api/embedding` on another connection. Its token is checked again
+    /// under config.lock, as a settings save's is.
+    fn embedding_start(&self, body: &[u8], given: &str) -> Response {
+        let authorized = || self.token_ok(Some(given));
+        saved(
+            self.embedding
+                .start(&self.home, &self.saving, &authorized, body),
+        )
     }
 
-    /// The Workers AI token written to a new key file (W4); the answer never holds it.
-    fn save_embedding_key(&self, body: &[u8]) -> Response {
+    /// The Workers AI token written to a new key file (W4); the answer never holds it. The
+    /// request's token is checked again under config.lock.
+    fn save_embedding_key(&self, body: &[u8], given: &str) -> Response {
+        let authorized = || self.token_ok(Some(given));
         saved(crate::settings::embedding::save_key(
             &self.home,
             &self.saving,
+            &authorized,
             body,
         ))
     }
@@ -6967,6 +6975,39 @@ curate = false
         assert_eq!(file_token(home.path()).unwrap(), theirs_token);
         assert_eq!(crate::config::view(home.path()).unwrap().port.get(), theirs);
         assert_eq!(v.port(), port);
+    }
+
+    /// W4 (Codex's security review): a choice of embedder that passed its token's checks and then
+    /// waited for config.lock while `oboete view --new-token` held it writes nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w4_a_choice_behind_the_commands_new_token_writes_nothing() {
+        let (home, port, old, v) = w6p_resident();
+        let config = home.path().join("config.toml");
+        let text = format!(
+            "[worker]\nresident = true\n[view]\nport = {port}\n[embedding]\nprovider = \"local\"\n"
+        );
+        std::fs::write(&config, &text).unwrap();
+        let (status, preview) = w6p_post(
+            &v,
+            &old,
+            "/api/embedding/preview",
+            &json!({"choice": "none"}),
+        );
+        assert_eq!(status, 200, "{preview}");
+        let held = crate::settings::config_lock(home.path()).unwrap();
+        let chooser = {
+            let (v, old) = (Arc::clone(&v), old.clone());
+            let posted = json!({"choice": "none", "confirmed": true,
+                "preview_key": preview["preview_key"]});
+            std::thread::spawn(move || w6p_post(&v, &old, "/api/embedding", &posted))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        write_token(home.path()).unwrap();
+        drop(held);
+        let (status, answer) = chooser.join().unwrap();
+        assert_eq!(status, 401, "{answer}");
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
     }
 
     /// W6 (Codex's final security review): a save that names no other port (the port it serves

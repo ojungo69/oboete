@@ -1870,6 +1870,7 @@ const TEXT = {
   embedding_failed: ['The download stopped, and the method was not changed. The files downloaded so far are kept: choose the method again to resume. Running `oboete setup --embeddings local` in a terminal shows the details.', 'ダウンロードが止まったため、方法は変更していません。ここまでのファイルは保持しているので、もう一度選ぶと続きから再開します。ターミナルで `oboete setup --embeddings local` を実行すると詳細を確認できます。'],
   embedding_busy: ['Another oboete is downloading or checking the model, or another change of method is running. Try again when it ends.', '別の oboete がモデルのダウンロードや検証を行っているか、別の切り替えを実行中です。終わってからもう一度お試しください。'],
   embedding_no_space: ['There is not enough free disk space for the model (about 2.3 GB). Free some space, then choose the method again.', 'モデルを保存する空き容量（約 2.3 GB）が足りません。空きを作ってから、もう一度選んでください。'],
+  embedding_token: ['The page’s token changed during the download, so the method was not changed. The files are kept: choose the method again.', 'ダウンロード中に画面のトークンが変わったため、方法は変更していません。ファイルは保持しているので、もう一度選んでください。'],
   embedding_write_failed: ['The files are ready, but the method could not be saved. Check config.toml, then try again.', 'ファイルは準備できましたが、方法を保存できませんでした。config.toml を確認してから、もう一度お試しください。'],
   embedding_unknown: ['The result could not be confirmed. Check the saved method before choosing again.', '結果を確認できませんでした。保存済みの方法を確認してから、もう一度選んでください。'],
   embedding_stale: ['The settings or the model’s files changed after the review. Review the method again.', '確認したあとで設定またはモデルのファイルが変わりました。もう一度内容を確認してください。'],

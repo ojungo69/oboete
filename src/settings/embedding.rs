@@ -113,6 +113,10 @@ fn busy() -> Refusal {
     refused(409, "embedding_busy", "")
 }
 
+fn unauthorized() -> Refusal {
+    refused(401, "unauthorized", "")
+}
+
 fn known(choice: &str) -> Result<(), Refusal> {
     match choice {
         "none" | "local" | "workers-ai" => Ok(()),
@@ -195,11 +199,14 @@ impl Embedding {
     /// `POST /api/embedding {"choice", "preview_key", "confirmed"}`: the preview taken, once,
     /// while config.toml and the files are as it saw them. `none` and `workers-ai` are written
     /// under the holds that check was made under; `local` first downloads what is missing and
-    /// checks every file, and the answer waits for it.
+    /// checks every file, and the answer waits for it. `authorized` is the request's token checked
+    /// again under config.lock, under which a new token is made: a choice that waited out one
+    /// writes nothing, the provider after a download included (as `/api/settings`).
     pub(crate) fn start(
         &self,
         home: &Path,
         saving: &Mutex<()>,
+        authorized: &dyn Fn() -> bool,
         body: &[u8],
     ) -> Result<Value, Refusal> {
         let posted: Start =
@@ -211,6 +218,9 @@ impl Embedding {
         let consent = {
             let _saving = saving.lock().unwrap_or_else(PoisonError::into_inner);
             let _config = config_lock(home).map_err(|_| refused(500, "write_failed", ""))?;
+            if !authorized() {
+                return Err(unauthorized());
+            }
             let (consent, version) = self.consent(home, &posted.choice)?;
             let mut state = self.lock();
             if state.active.is_some() {
@@ -251,12 +261,14 @@ impl Embedding {
         let _active = Active(self);
         let code = match crate::setup::ready(&consent, self.model, self.runtime) {
             Ok(()) => {
-                let write = || -> anyhow::Result<bool> {
-                    let _saving = saving.lock().unwrap_or_else(PoisonError::into_inner);
-                    let _config = config_lock(home)?;
-                    super::set_embedding_provider_held(home, consent.choice())
-                };
-                write().err().map(|_| "embedding_write_failed")
+                let _saving = saving.lock().unwrap_or_else(PoisonError::into_inner);
+                match config_lock(home) {
+                    Err(_) => Some("embedding_write_failed"),
+                    Ok(_config) if !authorized() => Some("embedding_token"),
+                    Ok(_config) => (super::set_embedding_provider_held(home, consent.choice()))
+                        .err()
+                        .map(|_| "embedding_write_failed"),
+                }
             }
             Err(error) => Some(
                 match error.chain().find_map(|c| c.downcast_ref::<Stopped>()) {
@@ -360,15 +372,22 @@ pub(super) fn write(
 /// as a provider's key is (`keyfile::managed`: a new owner-only file outside the store), and
 /// `[embedding] key_file` pointed at it, against the version the page showed. The old file is
 /// left as it is. The answer is the settings with the key's state: the key is in no answer.
-pub(crate) fn save_key(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
+/// `authorized` is the request's token checked again under config.lock, as for a choice.
+pub(crate) fn save_key(
+    home: &Path,
+    saving: &Mutex<()>,
+    authorized: &dyn Fn() -> bool,
+    body: &[u8],
+) -> Result<Value, Refusal> {
     let owner = crate::config::home_dir();
     let data = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from);
-    save_key_at(home, saving, body, &owner, data.as_deref())
+    save_key_at(home, saving, authorized, body, &owner, data.as_deref())
 }
 
 fn save_key_at(
     home: &Path,
     saving: &Mutex<()>,
+    authorized: &dyn Fn() -> bool,
     body: &[u8],
     owner: &Path,
     data: Option<&Path>,
@@ -380,6 +399,9 @@ fn save_key_at(
     }
     let _held = saving.lock().unwrap_or_else(PoisonError::into_inner);
     let _config = config_lock(home).map_err(|_| refused(500, "write_failed", ""))?;
+    if !authorized() {
+        return Err(unauthorized());
+    }
     let was = bytes(home).map_err(|_| invalid())?;
     if version(was.as_deref()) != posted.version {
         return Err(stale());
@@ -575,7 +597,7 @@ mod tests {
         let preview = |choice: &str| e.preview(home.path(), &body(json!({"choice": choice})));
         let start = |choice: &str, key: &str, confirmed: bool| {
             let posted = json!({"choice": choice, "preview_key": key, "confirmed": confirmed});
-            e.start(home.path(), &saving, &body(posted))
+            e.start(home.path(), &saving, &|| true, &body(posted))
         };
         // No account, then no readable token: refused before any key is given.
         assert_eq!(preview("workers-ai").unwrap_err().code, "no_account");
@@ -651,7 +673,10 @@ mod tests {
             let shown = e.preview(home, &body(json!({"choice": "local"}))).unwrap();
             let posted = json!({"choice": "local", "confirmed": true,
                 "preview_key": shown["preview_key"]});
-            (shown, e.start(home, &saving, &body(posted)).unwrap())
+            (
+                shown,
+                e.start(home, &saving, &|| true, &body(posted)).unwrap(),
+            )
         };
         let start_config = "[summary]\ncurate = false\n[embedding]\nprovider = \"none\" # kept\n";
 
@@ -761,6 +786,75 @@ mod tests {
         assert!(now.contains("curate = true") && now.contains("provider = \"none\" # kept"));
     }
 
+    /// W4 (Codex's security review): a write that passed its token's checks and then waited for
+    /// config.lock while a new token was made there writes nothing, the token's registration and a
+    /// choice alike; and a download that ends after a new token leaves the provider as it was.
+    #[test]
+    fn a_write_that_waited_out_a_new_token_writes_nothing() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let home = tempfile::tempdir().unwrap();
+        let owner = tempfile::tempdir().unwrap();
+        let text = "[embedding]\nprovider = \"local\" # kept\n";
+        std::fs::write(home.path().join("config.toml"), text).unwrap();
+        let (model, runtime) = files(closed());
+        let e = Embedding::with_files(model, Some(runtime));
+        let saving = Mutex::new(());
+        let valid = AtomicBool::new(true);
+        let authorized = || valid.load(Ordering::SeqCst);
+        let preview = e
+            .preview(home.path(), &body(json!({"choice": "none"})))
+            .unwrap();
+        let version = super::super::show(home.path())["version"].clone();
+        let held = config_lock(home.path()).unwrap();
+        std::thread::scope(|scope| {
+            let choice = scope.spawn(|| {
+                let posted = json!({"choice": "none", "confirmed": true,
+                    "preview_key": preview["preview_key"]});
+                e.start(home.path(), &saving, &authorized, &body(posted))
+            });
+            let key = scope.spawn(|| {
+                let posted = body(json!({"key": "SyntheticToken12345", "version": version}));
+                save_key_at(
+                    home.path(),
+                    &saving,
+                    &authorized,
+                    &posted,
+                    owner.path(),
+                    None,
+                )
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            valid.store(false, Ordering::SeqCst);
+            drop(held);
+            assert_eq!(choice.join().unwrap().unwrap_err().status, 401);
+            assert_eq!(key.join().unwrap().unwrap_err().status, 401);
+        });
+        assert_eq!(config(home.path()), text);
+        assert!(listing(owner.path()).is_empty(), "no key file was made");
+        if crate::embed::local_unavailable().is_some() {
+            return;
+        }
+        // The token was good when the choice was taken, and replaced during its download.
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[embedding]\nprovider = \"none\"\n",
+        )
+        .unwrap();
+        put_files(home.path());
+        let calls = AtomicUsize::new(0);
+        let first_only = || calls.fetch_add(1, Ordering::SeqCst) == 0;
+        let preview = e
+            .preview(home.path(), &body(json!({"choice": "local"})))
+            .unwrap();
+        let posted = json!({"choice": "local", "confirmed": true,
+            "preview_key": preview["preview_key"]});
+        let answer = e
+            .start(home.path(), &saving, &first_only, &body(posted))
+            .unwrap();
+        assert_eq!(answer["last"]["code"], "embedding_token", "{answer}");
+        assert_eq!(config(home.path()), "[embedding]\nprovider = \"none\"\n");
+    }
+
     /// W4: Workers AI's account and caps join the page's save, each checked at its range and
     /// written only when it changes; an older page's save leaves them as they are.
     #[test]
@@ -852,7 +946,7 @@ mod tests {
         let canary = format!("{}-{}", "NewSyntheticToken", "7d41e0b2");
         let save = |key: &str, version: &Value| {
             let posted = body(json!({"key": key, "version": version}));
-            save_key_at(home.path(), &saving, &posted, owner.path(), None)
+            save_key_at(home.path(), &saving, &|| true, &posted, owner.path(), None)
         };
         let refused = save(&format!("{canary} x"), &version).unwrap_err();
         assert_eq!(

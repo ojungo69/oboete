@@ -65,6 +65,8 @@ While a choice runs, a preview is `embedding_busy` (409).
 viewer's settings lock and config.lock it computes the consent again and compares the fingerprint:
 a key used before, or a config.toml or files changed since the preview, is `stale` (409), and a
 missing agreement is `embedding_confirmation` (422). The key is used once, whatever happens next.
+The request's own token is checked again there, as a settings save checks it, since a new token is
+made under config.lock: a choice that waited out one writes nothing (401).
 
 - `none` and `workers-ai` are written at once, under the holds the check was made under, as
   `settings::set_embedding_provider` writes (every reader's parse, then the version check).
@@ -78,8 +80,9 @@ missing agreement is `embedding_confirmation` (422). The key is used once, whate
 The answer is the status. A run that stops says why in `last.code`: `embedding_busy` (another
 oboete holds the model folder), `embedding_no_space` (less free space than the download needs),
 `embedding_failed` (any other download or check failure; `oboete setup --embeddings local` shows
-its details), `embedding_write_failed` (the files are ready but config.toml was not written) or
-`embedding_unknown` (the run stopped in a panic). A stopped download changes no setting: the files
+its details), `embedding_token` (the page's token was replaced during the download, so the
+provider is not written), `embedding_write_failed` (the files are ready but config.toml was not
+written) or `embedding_unknown` (the run stopped in a panic). A stopped download changes no setting: the files
 stay, their state says `incomplete`, and a new choice resumes it. The viewer runs one choice at a
 time and keeps the last one, as maintenance keeps its receipt (`settings/maintenance.rs`).
 
@@ -96,8 +99,8 @@ field keeps the saved account, as a `workers-ai` choice needs one. The fields ar
 The token is write-only: `POST /api/embedding/key {"key", "version"}`, under the same guards and
 the same 1 KiB body cap as `/api/providers/key`, registers it as a provider's key is registered
 (`keyfile::managed`: a new owner-only file outside the store) and points `[embedding] key_file` at
-it; the file it was read from before stays as it was. The answer is the settings with the key's
-state, never the key. Registration is Linux only until #281, as for providers: on macOS and
+it; the file it was read from before stays as it was. Its token is checked again under
+config.lock, as a choice's is. The answer is the settings with the key's state, never the key. Registration is Linux only until #281, as for providers: on macOS and
 Windows the page shows the key state without a field (the iMac, the one Workers AI machine, keeps
 its token in the default `key_file`, which shows `ok`). This endpoint is security scope: its PR
 runs semgrep and a security review.
@@ -123,9 +126,13 @@ the folder and its size. Per-prompt injection of past work by meaning (G23) is i
   (with `local-embed`: files checked then written; a failed download and a held folder write
   nothing; while a download waits on its server, the page sees it running, a settings save
   finishes before it, and another choice is busy); `workers_ai_values_are_checked_and_written_alone`;
-  `a_workers_ai_token_goes_to_its_own_file_and_into_no_answer` (Linux).
+  `a_workers_ai_token_goes_to_its_own_file_and_into_no_answer` (Linux);
+  `a_write_that_waited_out_a_new_token_writes_nothing` (the token's registration, a choice, and
+  the provider after a download).
 - `setup.rs` `setup_embeddings`: `setup --embeddings` says and does the same as before.
-- `view.rs`: the three POST routes pass every guard first, the token's at 1 KiB.
+- `view.rs`: the three POST routes pass every guard first, the token's at 1 KiB;
+  `the_embedders_run_is_read_with_the_token`; `w4_a_choice_behind_the_commands_new_token_writes_nothing`
+  (with `oboete view --new-token`'s hold, Linux).
 - The viewer harness (`src/testdata/viewer-readiness/test.mjs`): both languages for every string,
   the review before the agreement, the run while its answer waits and its stopped reason, the
   values checked before a save, and the token in no page state.
