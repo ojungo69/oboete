@@ -4,7 +4,17 @@ Throwaway (spec 8.3). Milestone 4's Task 10 (docs/milestone-4-plan.md): can bge-
 
 ## What runs
 
-- **The runtime**: fastembed 7.1.1, with ONNX Runtime 1.28.0 (ort 2.0.0-rc.13) linked into the binary (`ort-download-binaries-rustls-tls`), behind the cargo feature `local-embed`. The model is loaded from files oboete fetched and checked itself (`model_fetch`), never through hf-hub: fastembed's user-defined model, given its graph as bytes and its weights' folder by name (`session.model_external_initializers_file_folder_path`).
+- **The runtime**: fastembed 7.1.1 behind the cargo feature `local-embed`, with ONNX Runtime 1.28.0 (ort 2.0.0-rc.13), measured in two shapes. First it was linked into the binary (`ort-download-binaries-rustls-tls`, pyke's build); after that failed lines D and F, it was loaded at run time (`ort-load-dynamic`): the binary links no ONNX Runtime, and only a process that embeds loads Microsoft's released library for its target from the model's folder (`onnxruntime/`), once it has checked the file against the size and SHA-256 pinned in the binary (`src/embed_local.rs`, `RUNTIME`). Step 3 chose the second. Either way the model is loaded from files oboete fetched and checked itself (`model_fetch`), never through hf-hub: fastembed's user-defined model, given its graph as bytes and its weights' folder by name (`session.model_external_initializers_file_folder_path`).
+- **The runtime's library** (the second shape), from the archives of Microsoft's release v1.28.0 on github.com/microsoft/onnxruntime, each archive pinned too (`.github/workflows/local-embed.yml`):
+
+  | Target | File | Bytes | SHA-256 |
+  |---|---|---|---|
+  | Linux x64 | `libonnxruntime.so.1.28.0` | 24,268,848 | `1461ef7c…` |
+  | Linux arm64 | `libonnxruntime.so.1.28.0` | 20,591,712 | `f1ec1a08…` |
+  | macOS arm64 | `libonnxruntime.1.28.0.dylib` | 39,312,136 | `dc19bbcb…` |
+  | Windows x64 | `onnxruntime.dll` | 15,809,848 | `18370c37…` |
+
+  Microsoft publishes no 1.28.0 library for macOS x64.
 - **The model**: BAAI/bge-m3 (MIT) at commit `5617a9f61b028005a4858fdac845db406aefb181` of huggingface.co/BAAI/bge-m3, run at 8,192 tokens, one text at a time. The graph is oboete's, built into the binary: `assets/bge-m3-mha.onnx` (474,829 bytes, SHA-256 `395d177d56b5eb75c0cdd0b87bf9b939652e0a424b3257ba31c8b7fe848e1654`) is BAAI's `onnx/model.onnx` with its 24 attention blocks fused into ONNX Runtime's `MultiHeadAttention` with no mask, which runs as FlashAttention on the CPU (`docs/spike/local-embeddings/fuse.py`, which makes it again byte for byte; NOTICE carries BGE-M3's licence). BAAI's own graph builds each layer's whole attention matrices and fails line C (Results). From BAAI the model needs five files, 2,283,920,811 bytes, each checked against its size and SHA-256 (`src/embed_local.rs`, `FILES`): `config.json` (687, `26159e7a…`), `special_tokens_map.json` (964, `8c785abe…`), `tokenizer_config.json` (444, `a62b2b67…`), `tokenizer.json` (17,098,108, `21106b6d…`) and `onnx/model.onnx_data` (2,266,820,608, `1eebfb28…`). A change to the graph, a file or the commit is a new embedder id. The int8 export is not a candidate: it failed PR-A2's agreement check (cos 0.846 at worst, docs/pr-a.md, A2 item 5).
 - **Machines**: this PC's WSL (x86_64, 32 threads), the same pinned to 4 threads as the stand-in for the slowest WSL machine (What needs the owner, item 5), the M1 iMac (8 GB) over SSH, and Windows on this PC with the MSVC build. `.github/workflows/local-embed.yml` builds the branch it is run on (`gh workflow run local-embed.yml --ref <branch>`) on the five release targets (spec 7.1: Linux x64 and arm64, macOS arm64 and x64, Windows x64), starts each binary alone and runs the agreement test on the public fixture.
 
@@ -32,7 +42,7 @@ The plan's rule: failing A, F, G or the worker's C, that target gets no `local`.
 - **G**: on WSL, the model's files in place, `unshare -n` (no network at all) around a load and an embedding: they must succeed, and the process must open no socket (`strace -f -e trace=network` shows none).
 - **H**: `model_fetch` against huggingface.co, which answers the file's URL with a redirect to its storage: a `Range` request after the redirect returns 206 with the requested bytes; a download killed at 30% and one killed at 70% resume where they stopped and end with the pinned SHA-256.
 
-## Results (Step 2, 2026-10-09)
+## Results with the runtime linked in (Step 2, 2026-10-09)
 
 GB is 10^9 bytes. WSL is this PC (AMD Ryzen 9 5950X, 16 cores and 32 threads, WSL given 22 GB); the iMac is the M1 with 8 GB. "BAAI's graph" is the export as published; "the fused graph" is the one oboete loads.
 
@@ -72,15 +82,36 @@ Also found:
 - The fused graph has no attention mask, so the padding a batch adds to its shorter texts would change their vectors: one text per run. Texts of exactly the same token count need no padding; a backfill could batch those (not built).
 - Python's onnx package, used only by `fuse.py`, refuses weights whose file has more than one hard link.
 
-## After the runs
+## Results with the runtime loaded at run time (2026-10-09)
 
-**Step 3 is provisional.** The runtime measured here, ONNX Runtime linked into the binary, fails line D on Windows (+7.5 ms) and line F on macOS x64, so by the plan's rule Task 10 stops at this note with it. Every process pays for it, hooks included, though no hook embeds: on WSL `oboete --version` starts 0.95-1.18 ms later, and on Windows each start loads the C++ runtime and DirectML's three libraries and runs ONNX Runtime's static initializers. A first build of the other shape on WSL, fastembed's `ort-load-dynamic`, links none of it and starts in 1.58 ms against the plain build's 1.50.
+The same lines, machines and harnesses, with Microsoft's library in the model's folder. This run and its stop rule were fixed before it ran (#423: if it failed line D on WSL, on the iMac or on Windows, Task 10 would stop at this note). WSL and the iMac ran release builds of one commit with the feature and without it, each built on its machine; Windows ran the MSVC pair of `local-embed.yml`'s run 37935548058.
 
-The next spike measures that second runtime: the binary links no ONNX Runtime, and only a process that embeds loads Microsoft's released library (1.28.0, pinned by its SHA-256 and checked just before it is loaded) from the model's folder. Its stop rule, set before it runs: if it fails line D on WSL, on the iMac or on Windows, Task 10 stops at this note. A, B, C and G are measured again with it, and F and H gain the library's download. macOS x64 gets no `local` with either runtime.
+- **A** (the public fixture): the same numbers as with the linked runtime, on WSL, on the iMac and on the four targets with a library in run 37935548058 (Linux x64 and arm64, macOS arm64, Windows x64): cos at least 0.99996 (`ja-20-24`), and every query's top 10 overlapping in at least 9 (`q-ja-12`).
+- **B** (312 dev questions, the embeddings' p95 / p50 in ms): WSL at 32 threads 113.1 / 48.2, at 8 threads 73.7 / 32.6, and pinned to 4 threads 120.8 / 40.0; the iMac at its 8 threads 175.6 / 51.9, and at 4 threads 199.0 / 60.4. Passes: the slowest p95 is 199.0 ms (181.7 with the linked runtime).
+- **C** (the iMac; peak RSS, its peak memory footprint in brackets): a reader took 1.98 GB [1.83] for one query; the worker 2.30 GB [2.10] and 23.5 s at 6,706 tokens, and 2.47 GB [2.20] and 35.8 s at 8,192; the 8,192-token worker and two readers started together 2.29 + 1.67 + 1.68 = 5.64 GB [5.87] (swap in use 806 to 1,206 MiB). Passes, each within 0.12 GB of the linked runtime's numbers. On WSL at 8 threads a reader took 1.84 GB, and the worker 2.32 GB at 6,706 tokens and 2.44 GB at 8,192.
+- **D** (hook spawn p95 in ms, as before: the median of five runs of each build alternated, without the feature to with it):
 
-What holds for either runtime:
+  | | 1 KB | 64 KB |
+  |---|---|---|
+  | WSL | 11.9 to 11.9 (0.0) | 13.7 to 13.8 (+0.1) |
+  | iMac | 24.0 to 23.8 (-0.2) | 23.1 to 23.2 (+0.1) |
+  | Windows MSVC | 23.4 to 23.3 (-0.1) | 24.8 to 25.1 (+0.3) |
 
-- **The model**: the fused graph and BAAI's five files. One text per run, for any length (the fused graph has no mask), at most 8 threads (B: WSL's p95 108 ms at 8 against 143 at 32 and 134 at 4; the iMac has 8).
-- **The machines, line by line** with this runtime: this PC's WSL passes A, B, C, D, G and H; the iMac passes A, B, C and D (G is the binary's and H the host's, measured once on WSL); Windows passes A (on its runner) and fails D; macOS x64 fails F. The slowest WSL machine's 4-thread stand-in passes B; its memory is not known (What needs the owner, item 5). Which machines use `local` stays the owner's choice (What needs the owner, item 2), with these numbers: about 2.5 GB for the worker and 2.0 GB per searching process, the evaluation home's whole store in about 18 hours on WSL and 35 on the iMac, no money.
-- **`CLI_EMBEDS_QUERIES`**: false. A fresh process needs 1.1-2.5 s to load the model, past MCP's 1.5 s on WSL, so only a process that stays loaded (MCP's server) embeds queries.
-- **The spike's downloads** stay until the owner chooses (What needs the owner, items 2 and 6): this PC's (2.3 GB) and the iMac's (PR-A2's cache, with the spike's hard links to it, which take no more space).
+  **Passes on all three.** A process that does not embed loads nothing more than the plain build: on WSL `oboete --version` starts in 1.58 ms against the plain build's 1.50 (p50 of 400 alternated starts). A first Windows session, run while WSL's and the iMac's measurements shared this PC, gave +1.8 and -0.8 ms with one of the plain build's runs at 60.6 ms; the table's is the second, on a quiet machine.
+- **F** (run 37935548058): all five targets built and started alone, macOS x64 included, as no ONNX Runtime is linked. On Windows the feature build imports the same 18 DLLs as the plain build, and on macOS only the system's libraries (`otool -L`). Microsoft's `onnxruntime.dll` itself imports the Visual C++ runtime's C++ libraries (`MSVCP140.dll`, from the same redistributable as the `VCRUNTIME140.dll` that every oboete build already imports) and DXGI, loaded only by a process that embeds.
+- **G** (WSL): inside `unshare -rn`, `--verify` (which now checks the library too), a load and an embedding succeeded, and `strace -f -e trace=network` over the whole run recorded no network call.
+- **H** (WSL, curl `-L -C -`, for the library's host): github.com answered a release archive's URL with a redirect to its storage (release-assets.githubusercontent.com), where a ranged request returned 206 with the bytes asked for. The Windows archive (78,796,801 bytes), killed at 30% and again at 70%, resumed both times and ended with the release's SHA-256.
+- **Reported**: loading takes 1.7-3.1 s on WSL and 1.2-2.2 s on the iMac. Embedding documents is slower than with the linked runtime: the fixture's 220 texts took 199 s against 170 at 8 threads on WSL (+17%), 187 against 151 at 32 (+24%), and the iMac's whole fixture test 390 s against 361 (+8%), so the evaluation home's texts would take about 21 hours on WSL and 38 on the iMac. Queries were not slower on WSL (B). The binary grows from 19.9 to 22.7 MB on Linux x64, from 20.2 to 23.1 MB on Windows x64 and from 16.4 to 19.1 MB on macOS arm64, instead of to 45.2, 44.2 and 36.2; the library adds 15.8 to 39.3 MB to the model's folder, only where `local` is used.
+
+## Step 3: the runtime and D14
+
+**The runtime is the second one**: ONNX Runtime loaded at run time from Microsoft's pinned library. It passes every line the linked runtime passed, and the two that one failed: D on Windows (+0.3 ms against +7.5) and F on macOS x64. A process that does not embed, a hook first of all, pays nothing for the feature. What it costs: embedding a document takes 8-24% longer, and the build fetches one more file per target, from a second host (github.com, whose H passes), pinned as the model's files are. The binary stays one static binary (spec 7.1): it links no ONNX Runtime and starts alone on all five targets; the library belongs to the optional local model, as its weights do.
+
+- **The targets**: Linux x64 and arm64, macOS arm64 and Windows x64 may offer `local`. macOS x64 builds and starts, but Microsoft publishes no ONNX Runtime 1.28.0 for it, so it gets no `local`.
+- **The machines, line by line**: this PC's WSL passes A, B, C (WSL's numbers), D, G and H; the iMac passes A, B, C and D (G is the binary's and H the host's, measured on WSL); Windows passes A (on its runner) and D. The slowest WSL machine's 4-thread stand-in passes B; its memory is not known (What needs the owner, item 5). Which machines use `local` stays the owner's choice (What needs the owner, item 2), with these numbers: about 2.5 GB for the worker and 2.0 GB per searching process, the evaluation home's whole store in about 21 hours on WSL and 38 on the iMac, no money.
+- **The model**: the fused graph and BAAI's five files, one text per run for any length, at most 8 threads (B: WSL's p95 74 ms at 8 against 113 at 32 and 121 at 4; the iMac has 8).
+- **`CLI_EMBEDS_QUERIES`**: false. A fresh process needs 1.2-3.1 s to load the model, past MCP's 1.5 s, so only a process that stays loaded (MCP's server) embeds queries.
+- **What the build adds for the runtime**: `model_fetch` also fetches the target's library: Microsoft's archive at its pinned SHA-256, the one file taken out of it and checked against its own pin (`embed_local::RUNTIME`) before it is placed in `onnxruntime/`. Doctor names a missing or changed library as it names the model's files.
+- **The spike's downloads** stay until the owner chooses (What needs the owner, items 2 and 6): this PC's (2.3 GB, and the library), the iMac's (PR-A2's cache with the spike's hard links to it, and the library), and the builds in the Windows probe folder.
+
+The linked runtime's results stay above as measured. Its D failure on Windows came from the start of every process: the feature build loaded the C++ runtime and DirectML's three libraries and ran ONNX Runtime's static initializers, and on WSL it started 0.95-1.18 ms later than the plain build, though no hook embeds.
