@@ -1,7 +1,8 @@
 name: local-embed
 # Milestone 4, Task 10 (docs/spike/local-embeddings.md): the branch the run is started on, built
 # with the `local-embed` feature on the five release targets (spec 7.1), the binary started with
-# nothing beside it, and the agreement test on the public fixture. Run by hand only
+# nothing beside it, and the agreement test on the public fixture with Microsoft's ONNX Runtime
+# library in the model's folder, which the binary loads at run time. Run by hand only
 # (`gh workflow run local-embed.yml --ref <branch>`): a run downloads the model's files (about
 # 2.3 GB) on every runner. The run builds only its own ref, so its cache stays in that branch's
 # scope.
@@ -66,8 +67,10 @@ jobs:
           retention-days: 7
           if-no-files-found: error
       # The model's files at the pinned commit, the five the fused graph (assets/bge-m3-mha.onnx)
-      # reads; the test checks each one's size and SHA-256 before it loads them.
+      # reads; the test checks each one's size and SHA-256 before it loads them. Microsoft releases
+      # no ONNX Runtime 1.28.0 for macOS x64, so that target only builds and starts.
       - name: The model's files
+        if: matrix.os != 'macos-15-intel'
         shell: bash
         run: |
           dir="$RUNNER_TEMP/bge-m3"
@@ -78,5 +81,34 @@ jobs:
             curl -fsSL --retry 3 -o "$dir/$f" "$base/$f"
           done
           echo "OBOETE_BGE_M3=$dir" >> "$GITHUB_ENV"
+      # The runtime the binary loads: Microsoft's 1.28.0 release for the target, its archive
+      # checked against the release's SHA-256; the test checks the library against its own pin
+      # (embed_local::RUNTIME) before loading it.
+      - name: The runtime library
+        if: matrix.os != 'macos-15-intel'
+        shell: bash
+        run: |
+          case "${{ matrix.os }}" in
+            ubuntu-24.04) a=onnxruntime-linux-x64-1.28.0.tgz lib=libonnxruntime.so.1.28.0
+              sum=a3e1b79d7bb1bf09696ce675f49e4064e6c81f6202b8225624fff0e93f8d6407 ;;
+            ubuntu-24.04-arm) a=onnxruntime-linux-aarch64-1.28.0.tgz lib=libonnxruntime.so.1.28.0
+              sum=e15ff8b5d85afe6c144d97c6fd432254bf76a219daaf17658087d6ecb3e8f0bb ;;
+            macos-15) a=onnxruntime-osx-arm64-1.28.0.tgz lib=libonnxruntime.1.28.0.dylib
+              sum=1268b359718099bde2cedb55787f182a130067bc4f31e8c88478c445b850d3d8 ;;
+            windows-latest) a=onnxruntime-win-x64-1.28.0.zip lib=onnxruntime.dll
+              sum=abef733dacbe2f571547a7150b479b5cb9cc0df22f96c24983a42cadb1b4f8bc ;;
+          esac
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 -o "$a" "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/$a"
+          if command -v sha256sum > /dev/null; then check="sha256sum -c -"; else check="shasum -a 256 -c -"; fi
+          echo "$sum  $a" | $check
+          inner="${a%.*}/lib/$lib"
+          case "$a" in
+            *.zip) unzip -q "$a" "$inner" ;;
+            *) tar -xzf "$a" "$inner" ;;
+          esac
+          mkdir -p bge-m3/onnxruntime
+          cp "$inner" bge-m3/onnxruntime/
       # Line A's fixture run: public texts and queries against their stored Workers AI vectors.
-      - run: cargo test --release --locked --features local-embed -- --ignored local_vectors_agree_on_the_fixture --nocapture
+      - if: matrix.os != 'macos-15-intel'
+        run: cargo test --release --locked --features local-embed -- --ignored local_vectors_agree_on_the_fixture --nocapture
