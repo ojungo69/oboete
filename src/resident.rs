@@ -214,29 +214,39 @@ mod tests {
     }
 
     /// Searches faster than the model: each that timed out is dropped unrun, so the next one is not
-    /// held behind work nobody waits for (Codex on Task 10).
+    /// held behind work nobody waits for (Codex on Task 10). A gate holds the model on one text
+    /// until every late query has timed out, so no scheduler can run one in time (macOS CI on #426).
     #[test]
     fn a_timed_out_query_is_dropped_unrun() {
         use std::sync::atomic::AtomicUsize;
         let runs = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&runs);
+        let (held, holding) = mpsc::channel::<()>();
+        let (release, gate) = mpsc::channel::<()>();
         let load: Load = Box::new(move || {
             Ok(Box::new(move |text: &str| {
                 counted.fetch_add(1, Ordering::SeqCst);
-                std::thread::sleep(Duration::from_millis(300));
+                if text == "hold" {
+                    held.send(()).unwrap();
+                    gate.recv().unwrap();
+                }
                 Ok(crate::embed::stub::vector("t", text))
             }) as Model)
         });
-        let r = Resident::start(load, None);
+        let r = Arc::new(Resident::start(load, None));
         r.embed(&texts(&["warm"]), None).unwrap();
+        let holder = Arc::clone(&r);
+        let hold = std::thread::spawn(move || holder.embed(&texts(&["hold"]), None));
+        holding.recv().unwrap();
         for i in 0..4 {
             let late = r.embed(&texts(&[&format!("q{i}")]), Some(Duration::from_millis(20)));
             assert_eq!(late, Err(Busy::Timeout));
         }
+        release.send(()).unwrap();
+        hold.join().unwrap().unwrap();
         r.embed(&texts(&["last"]), None).unwrap();
-        // The warm-up and the last; the first late query too if it was running when it timed out.
-        let n = runs.load(Ordering::SeqCst);
-        assert!((2..=3).contains(&n), "{n} runs");
+        // The warm-up, the held text and the last: the four late queries were never run.
+        assert_eq!(runs.load(Ordering::SeqCst), 3);
     }
 
     /// A model whose thread panics is gone, so its owner starts another.
