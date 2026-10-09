@@ -1,0 +1,33 @@
+src/backup.rs
+  s_047b37b8e5635e::t_182dea36be2592 2606-2613
+src/consumer/claims.rs
+  s_047b37b8e5635e::t_5c23e50628e37f 489,502
+src/consumer/fts.rs
+  s_047b37b8e5635e::t_b2d34d99b35a1a 2-3,5,22-25,54-102,174-175,178,181,185,235-236
+src/consumer/imported.rs
+  s_047b37b8e5635e::t_76b7bef0f8d726 78,99
+src/embed_phase.rs
+  s_047b37b8e5635e::t_6fd74ff17dd1e4 395,506,578,674,692,697,1298-1299,1304,1306,1309-1313,1545-1547,1562,1587,1590,1605-1606,1611-1613,1666-1681,1683,1686-1688,1690-1691,1731,2090-2092,3439-3441,3461-3462,3523
+src/raw.rs
+  s_047b37b8e5635e::t_a9e080293a06f4 1945-1947,1950,1969-2040,2664
+src/search.rs
+  s_047b37b8e5635e::t_199e9dda63b912 117,150-158,192-201,227-233,241,245-249,251-254,264-267,272-276,278-279,290-387,422-424,439-444,447,456
+src/search/b.rs
+  s_047b37b8e5635e::t_25b58fab30364d 451,735,773-774,782-795
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "80160d40e36844956967569cb8f4f632c870219d",
+  "prompts": {},
+  "sessions": {
+    "s_047b37b8e5635e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8fa093df-349f-48f9-b963-d3e906b3722d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
