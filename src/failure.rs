@@ -313,7 +313,10 @@ fn df_bounded_child(
     use std::io::ErrorKind;
     use std::time::{Duration, Instant};
     const OUTPUT_LIMIT: usize = 8 * 1024;
-    const CLEANUP_RESERVE: Duration = Duration::from_millis(50);
+    // A killed child gets this long to be reaped. 50 ms left it a zombie on GitHub's macOS
+    // runners, whose 5 ms sleeps overran it (3 of about 15 runs, 2026-10-09); df itself takes
+    // milliseconds, so the work keeps most of the half second.
+    const CLEANUP_RESERVE: Duration = Duration::from_millis(200);
     const POLL: Duration = Duration::from_millis(5);
     let deadline = Instant::now() + DF_TIMEOUT;
     let work_deadline = deadline - CLEANUP_RESERVE;
