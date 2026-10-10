@@ -33,6 +33,14 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
     let made = !dir.exists();
     std::fs::create_dir_all(&dir)?;
     crate::db::private(&dir, 0o700);
+    // One keep at a time from the bound's check to the rename: overlapping failed calls would each
+    // pass it (Codex on #440).
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("keep.lock"))?;
+    lock.lock()?;
     let held: u64 = files(&dir)?
         .iter()
         .filter_map(|p| p.metadata().ok())
@@ -52,7 +60,7 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
     // Two keeps of one process in one millisecond get two names (CodeRabbit on #440).
     static KEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = KEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let name = format!("{}-{}-{n}", crate::db::now_ms(), std::process::id());
+    let name = name(crate::db::now_ms(), std::process::id(), n);
     let tmp = dir.join(format!(".{name}.tmp"));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -84,6 +92,19 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
     #[cfg(not(unix))]
     let _ = made;
     Ok(())
+}
+
+/// U1: a kept file's name, which sorts as the process kept them: the count is padded, so the
+/// tenth file of one millisecond sorts after the ninth (CI on #440).
+fn name(ms: i64, pid: u32, n: u64) -> String {
+    format!("{ms}-{pid}-{n:020}")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The store error the next write-back meets, as a damaged raw.db gives it.
+    pub(crate) static FAILS: std::cell::Cell<Option<std::os::raw::c_int>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// U3, U4: the oldest kept files, `PER_CALL` at most, each appended in one transaction (an event
@@ -119,6 +140,11 @@ pub fn write_back(home: &Path, raw: &mut crate::raw::Raw) -> Result<usize> {
         };
         for c in &mut kept.events {
             c.event.session = crate::hook::own_session(std::mem::take(&mut c.event.session), raw);
+        }
+        #[cfg(test)]
+        if let Some(code) = FAILS.take() {
+            let e = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+            return Err(e.into());
         }
         match raw.append_kept(&kept.events, &kept.ruleset) {
             Ok(()) => {
@@ -198,6 +224,49 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// U1: a process's files sort as it kept them, ten and more in one millisecond too (CI on
+    /// #440: unpadded, the tenth file sorted before the second).
+    #[test]
+    fn kept_names_sort_by_time_then_count() {
+        let ms = 1_760_000_000_000;
+        assert!(name(ms, 7, 9) < name(ms, 7, 10));
+        assert!(name(ms, 7, 99) < name(ms, 7, 100));
+        assert!(name(ms, 7, u64::MAX) < name(ms + 1, 7, 0));
+    }
+
+    /// U5: a keep waits for the one in progress, so overlapping failed calls cannot each pass the
+    /// bound (Codex on #440).
+    #[test]
+    fn a_keep_waits_for_the_keep_in_progress() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path().to_path_buf();
+        let dir = h.join(DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("keep.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        let (done, kept) = std::sync::mpsc::channel();
+        let p = h.clone();
+        let t = std::thread::spawn(move || {
+            keep(&p, &[prompt("waits", 1_000)], "r").unwrap();
+            done.send(()).unwrap();
+        });
+        assert!(
+            kept.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "kept beside a keep in progress"
+        );
+        drop(held);
+        kept.recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
+        t.join().unwrap();
+        assert_eq!(counts(&h).0, 1);
     }
 
     /// U1, U3: a kept file holds the masked text, never the secret, and is the owner's alone; it
