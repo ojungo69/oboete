@@ -902,18 +902,22 @@ mod tests {
             );
             assert_eq!(config(home.path()), text);
         }
-        let shown = save(json!({"account_id": ACCOUNT, "daily_requests": 150,
+        let shown = save(json!({"account_id": ACCOUNT, "daily_requests": 300,
             "monthly_usd": 2.5}))
         .unwrap();
         assert_eq!(
             config(home.path()),
-            format!("{text}account_id = \"{ACCOUNT}\"\nmonthly_usd = 2.5\n")
+            format!(
+                "{}account_id = \"{ACCOUNT}\"\nmonthly_usd = 2.5\n",
+                text.replace("150 # mine", "300 # mine")
+            )
         );
         let workers_ai = &shown["embedding"]["workers_ai"];
         assert_eq!(
-            (&workers_ai["account_id"], &workers_ai["monthly_usd"]),
-            (&json!(ACCOUNT), &json!(2.5))
+            (&workers_ai["account_id"], &workers_ai["daily_requests"]),
+            (&json!(ACCOUNT), &json!(300))
         );
+        assert_eq!(workers_ai["monthly_usd"], 2.5);
         let posted = save_body(home.path(), true, None);
         super::super::save(home.path(), &saving, &posted).unwrap();
         assert!(config(home.path()).contains("monthly_usd = 2.5"));

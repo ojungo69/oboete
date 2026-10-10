@@ -56,7 +56,12 @@ jobs:
       - uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
         with:
           tool: cargo-llvm-cov
-      - run: cargo llvm-cov --lcov --output-path target/lcov.info
+      # Both builds, as the check job tests them (the local model's code runs only with its
+      # feature), merged as cargo-llvm-cov's README shows.
+      - run: cargo llvm-cov clean --workspace
+      - run: cargo llvm-cov --no-report
+      - run: cargo llvm-cov --no-report --features local-embed
+      - run: cargo llvm-cov report --lcov --output-path target/lcov.info
       - run: >-
           node --test --experimental-test-coverage
           --test-reporter=spec --test-reporter-destination=stdout
