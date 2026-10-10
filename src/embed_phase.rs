@@ -1347,7 +1347,7 @@ fn sort_out(
     r: Read,
     rules: &crate::redact::Rules,
 ) -> Result<Option<(Doc, String)>> {
-    if let Some(why) = passed_over(raw, k, reading, &r)? {
+    if let Some(why) = passed_over(raw, k, reading, &r, rules)? {
         mark(k, embedder, &r.doc, why)?;
         return Ok(None);
     }
@@ -1708,12 +1708,13 @@ fn claim_pending(pending: &crate::claims::Pending, k: &Connection, doc: &Doc) ->
 }
 
 /// Why a document gets no vector without being sent: its repository or session is excluded
-/// (D13), or it is a record of an imported source (A92).
+/// (D13), it is a record of an imported source (A92), or no reader shows it now.
 fn passed_over(
     raw: &Raw,
     k: &Connection,
     reading: &Reading,
     r: &Read,
+    rules: &crate::redact::Rules,
 ) -> Result<Option<&'static str>> {
     let list = &reading.exclusions;
     match r.doc.kind {
@@ -1725,6 +1726,16 @@ fn passed_over(
         "k" | "p" => Ok(import_excluded(&r.doc.repo, list).then_some("excluded")),
         "o" | "s" if r.text.trim().is_empty() => Ok(Some("empty")),
         "o" | "s" => {
+            // A card or summary a removal hides (K4, T7) is sent nowhere, as a removed record is
+            // not: asked of its one reader (K7).
+            let shown = if r.doc.kind == "o" {
+                crate::cards::get(k, raw, &r.doc.key, rules)?.is_some()
+            } else {
+                crate::turns::get(k, raw, &r.doc.key, rules)?.is_some()
+            };
+            if !shown {
+                return Ok(Some("empty"));
+            }
             let excluded =
                 list.contains(&r.doc.repo) || made_from_excluded(raw, k, &reading.excluded, r)?;
             Ok(excluded.then_some("excluded"))
@@ -2665,6 +2676,45 @@ mod tests {
         assert!(sent.iter().all(|t| !t.contains("Secret")), "{sent:?}");
         for key in &secret {
             assert_eq!(skipped(&s, key).as_deref(), Some("excluded"), "{key}");
+        }
+    }
+
+    /// Tools slice 3 (V2, K4, T7): a card and a summary a removal hides before they are embedded
+    /// are not sent; each is marked `empty`, as a removed record is.
+    #[test]
+    fn a_card_and_a_summary_a_removal_hides_reach_no_embedder() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let gone = s.said("s", R, 1_000, "Gone words.");
+        let card = s.cards(
+            gone,
+            gone,
+            serde_json::json!([{"type": "bugfix", "title": "Hidden card"}]),
+            false,
+        )[0]
+        .clone();
+        let summary = s.turn(
+            serde_json::json!({"agent": "claude", "session": "s", "repo": R,
+            "ts": 2_000, "from": gone, "through": gone, "read": [], "goals": [],
+            "removed": [], "fields": {"request": "Hidden summary"}, "skipped": false}),
+        );
+        let device = s.raw.device().to_owned();
+        s.raw
+            .append_tombstone(crate::raw::Target::Record {
+                device: device.clone(),
+                seq: gone,
+            })
+            .unwrap();
+        s.run();
+        embed_all(&s);
+        let sent = stub.texts().concat();
+        assert!(sent.iter().all(|t| !t.contains("Hidden")), "{sent:?}");
+        for key in [
+            format!("{device}.{card}"),
+            format!("S{device}.{}", &summary[1..]),
+        ] {
+            assert_eq!(skipped(&s, &key).as_deref(), Some("empty"), "{key}");
         }
     }
 

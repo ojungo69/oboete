@@ -104,8 +104,10 @@ records are the ones its hide rule reads: a card's window and goals (K4); a summ
 and the windows whose cards it read with their goals (T7). It gets an `excluded` mark, judged again
 when the exclusion changes. A window's records that curation kept back, of a session the list named
 then, count too: the row keeps the range, not what was kept back, so such a card waits for the
-undo with them. An empty text is marked `empty`. A card a removal hides (K4) keeps its vector, as
-it keeps its full-text row: its hit is read through `cards::read`, which hides it (Q3).
+undo with them. An empty text is marked `empty`, and so is a card or summary a removal hides (K4,
+T7) before it has a vector, as a removed record is: no reader shows it, so it is sent nowhere. One
+hidden after it has its vector keeps it, as it keeps its full-text row: its hit is read through its
+reader, which hides it (Q3).
 
 V3. **The vector follows its row.** The consumers that write the cards and the summaries call
 `embed_phase::touched` for each row they replace or remove, in the transaction that does it, as
@@ -136,7 +138,8 @@ list, count the cards and the summaries beside the claims, imported documents an
 3. A skipped summary gets no vector, and an excluded repository's card and summary are not sent,
    nor those made from a record of a session that touched it: a window across sessions, a goal, a
    window a summary read.
-4. A card a removal hides is not found by its vector.
+4. A card a removal hides is not found by its vector, and a card and a summary hidden before they
+   had one are not sent.
 
 ## Differences from claude-mem, and why
 
