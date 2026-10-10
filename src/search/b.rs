@@ -493,6 +493,9 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                 Err(_) => (Vector::Skipped(VectorSkip::Error), None),
             },
         };
+        // Read again after the call: a forget registered while it was out holds here too (D5;
+        // Codex's adversarial review of slice 2a), as a tombstone does in the raw leg.
+        let forgotten = raw.forgotten_uids()?;
         let rules = redact::Rules::load(home)?;
         let (mut hits, mut lowered, mut imports, mut records) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -2257,6 +2260,11 @@ fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView
     // A derivation whose quote a tombstone the worker has yet to apply masks is left out, as
     // Anchors will drop it: its body may say what the mask hides (Codex's security review).
     let pending = claims::Pending::read(raw, k)?;
+    // A forget of the uid registered after `named` read it holds here too (D5; Codex's
+    // adversarial review of slice 2a).
+    if raw.forgotten(&uid)? {
+        return Ok(None);
+    }
     let mut history = Vec::with_capacity(rows.len());
     for (change, op_device, op_seq) in rows {
         if !pending.touches_op(k, &op_device, op_seq)? {
@@ -4295,6 +4303,63 @@ mod tests {
         drop(held);
         assert_eq!(answer.vector, Vector::Skipped(VectorSkip::Timeout));
         assert_eq!(records(&answer), 0, "{:?}", keys(&answer));
+    }
+
+    /// Milestone 5 D5 (Codex's adversarial review of slice 2a): a document forgotten while the
+    /// query's call is out takes no place in the answer, though its list was read before.
+    #[test]
+    fn a_document_forgotten_while_the_query_is_out_is_not_returned() {
+        use crate::embed::stub::Stub;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        let doc = s.imported("o1", "r", 3_000, "Deploy notes", "Deploy with the parser.");
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let home = s.home.path().to_owned();
+        let ask = Query {
+            text: "parser".into(),
+            all: true,
+            limit: 5,
+            ..Default::default()
+        };
+        let found = |a: &Answer| a.hits.iter().any(|h| h.key == doc);
+        assert!(found(&query(&home, &ask).unwrap()));
+        let sent = stub.requests();
+        let held = stub.hold();
+        let search = {
+            let home = home.clone();
+            std::thread::spawn(move || query(&home, &ask).unwrap())
+        };
+        // The call is out, and the full-text lists have been read beside it.
+        while stub.requests() == sent {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let target = crate::forget::Target::parse_uid(&doc).unwrap();
+        let p = crate::forget::preview(&home, target).unwrap();
+        crate::forget::start(&home, &p).unwrap();
+        let answer = search.join().unwrap();
+        drop(held);
+        assert!(!found(&answer), "{:?}", keys(&answer));
+    }
+
+    /// Milestone 5 D5 (Codex's adversarial review of slice 2a): a claim forgotten after `named`
+    /// read it, before the rest of the read, is not shown.
+    #[test]
+    fn a_claim_forgotten_inside_its_read_is_not_shown() {
+        let mut s = Store::new();
+        let uid = s.decided(R, 2_000, "Use tabs for the parser.", &[]);
+        s.run();
+        let home = s.home.path().to_owned();
+        let (h, u) = (home.clone(), uid.clone());
+        BETWEEN.set(Some(Box::new(move || {
+            let target = crate::forget::Target::parse_uid(&u).unwrap();
+            let p = crate::forget::preview(&h, target).unwrap();
+            crate::forget::start(&h, &p).unwrap();
+        })));
+        assert!(claim(&home, &uid).unwrap().is_none());
+        assert!(BETWEEN.take().is_none(), "the forget ran inside the read");
     }
 
     /// D8 with the query's call beside the full-text sides: a redaction rule added while the call

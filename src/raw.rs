@@ -3208,13 +3208,12 @@ impl Rebuild {
     /// with every op after it: the curation checkpoint must never pass a seq the store does not
     /// hold, or the records that reuse those seqs would never be curated, and an import's must
     /// not pass records it lost, or its next pass would skip them (D6); so a migration op whose
-    /// batch lost a record goes too, even when later segments were restored. Returns how many ops
-    /// went.
+    /// batch lost a record goes too, even when later segments were restored. A forget op among
+    /// them is appended again (D5). Returns how many ops went, those not counted.
     // ponytail: a restore keeping a batch's records but not its migration op imports them again;
     // a check of the restored records against the source's ids would catch it.
     pub fn finish(self) -> Result<usize> {
-        let dropped = self.conn.execute(
-            "DELETE FROM ops WHERE op_seq >= (
+        let past = "op_seq >= (
                SELECT MIN(w.op_seq) FROM ops w WHERE w.device = ops.device
                  AND w.type IN ('window', 'migration')
                  AND (json_extract(w.body, '$.to_seq') >
@@ -3223,9 +3222,21 @@ impl Rebuild {
                         (SELECT COUNT(*) FROM records r WHERE r.device = w.device
                            AND r.seq BETWEEN json_extract(w.body, '$.from_seq')
                                          AND json_extract(w.body, '$.to_seq'))
-                        < json_extract(w.body, '$.to_seq') - json_extract(w.body, '$.from_seq') + 1))",
-            [],
-        )?;
+                        < json_extract(w.body, '$.to_seq') - json_extract(w.body, '$.from_seq') + 1))";
+        // D5: a forget op among them derives nothing from the lost records. It is appended again
+        // below, at a reused op seq as any new op is, so the uid stays forgotten when no request
+        // log brings it back (Codex's adversarial review of slice 2a); as this device's, the only
+        // one whose ops a backup holds until sync (milestone 6).
+        let forgets: Vec<String> = self
+            .conn
+            .prepare(&format!(
+                "SELECT body FROM ops WHERE type = 'forget' AND {past}"
+            ))?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let dropped = self
+            .conn
+            .execute(&format!("DELETE FROM ops WHERE {past}"), [])?;
         // After that check: a forget's tombstones take new seqs, which must not make an old window
         // look as if the records a damaged backup lost were there.
         let device: String =
@@ -3233,13 +3244,27 @@ impl Rebuild {
                 .query_row("SELECT value FROM meta WHERE key = 'device_id'", [], |r| {
                     r.get(0)
                 })?;
+        for body in &forgets {
+            let uid: String = serde_json::from_str::<serde_json::Value>(body)?["uid"]
+                .as_str()
+                .context("a forget op without its uid")?
+                .to_owned();
+            if !forgotten_uid(&self.conn, &uid)? {
+                insert_ops(
+                    &self.conn,
+                    &device,
+                    &[(OpKind::Forget.name(), body.clone())],
+                )?;
+            }
+        }
         for r in &self.forget {
             r.check()?;
             apply_request(&self.conn, &device, r)?;
         }
         self.conn.execute_batch("COMMIT")?;
         self.conn.close().map_err(|(_, e)| e)?;
-        Ok(dropped)
+        // A forget op appended again was not lost: its denial stands.
+        Ok(dropped - forgets.len())
     }
 }
 

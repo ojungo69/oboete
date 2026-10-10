@@ -1526,10 +1526,13 @@ fn request(
     // Each repository's candidates, found by its own lines and kept with it: a draft supersedes
     // only its own repository's claims.
     let mut shown_in: Vec<(String, crate::claims::Claim)> = Vec::new();
+    let forgotten = raw.forgotten_uids()?;
     for repo in repos {
         let (said, rest) = searched(w, repo);
-        // Under the repository's name, as the window's headings show it.
+        // Under the repository's name, as the window's headings show it. A forgotten claim is no
+        // candidate: it is sent nowhere (milestone 5 D5; Codex's adversarial review of slice 2a).
         let mut current = crate::claims::current_before(k, repo, w)?;
+        current.retain(|c| !forgotten.contains(&c.uid));
         if !w.reading.excluded.is_empty() {
             let mut kept = Vec::with_capacity(current.len());
             for c in current {
@@ -10907,6 +10910,41 @@ curate = false
             !text.contains("Secret proposal.") && !text.contains(&uid),
             "{text}"
         );
+    }
+
+    /// Milestone 5 D5 (Codex's adversarial review of slice 2a): a forgotten claim is no later
+    /// window's candidate, though knowledge.db still holds it and the window's words find it.
+    #[test]
+    fn a_forgotten_claim_is_no_candidate() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _) = open(home.path());
+        let earlier = "Deploy the review bot on Workers.";
+        let decided = kept(&mut raw, "s1", "a", earlier);
+        raw.append_ops(std::slice::from_ref(&decided)).unwrap();
+        curated_so_far(&mut raw);
+        let later = Event {
+            session: "new".into(),
+            repo: Some("a".into()),
+            ..prompt("Drop the review bot on Workers.")
+        };
+        raw.append(&later).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let dev = raw.device().to_owned();
+        let asked = |raw: &Raw| {
+            let w = next_window(raw, &dev, WINDOW_TOKENS, &rules)
+                .unwrap()
+                .unwrap();
+            let req = request(raw, &k, &rules, &summary, &w).unwrap();
+            (req.prompt.contains(earlier), req.shown_in.len())
+        };
+        assert_eq!(asked(&raw), (true, 1));
+        let uid = crate::claims::op_uid(&decided.1).unwrap();
+        let target = crate::forget::Target::parse_uid(&uid).unwrap();
+        let p = crate::forget::preview(home.path(), target).unwrap();
+        crate::forget::start(home.path(), &p).unwrap();
+        assert_eq!(asked(&raw), (false, 0));
     }
 
     /// Milestone 5 D1 rule 12: a forget while a recuration's call is out (here a deny row, or a

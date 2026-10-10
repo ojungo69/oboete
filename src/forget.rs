@@ -377,14 +377,18 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
                 .optional()?;
             let mut again = Vec::new();
             let mut st = k.prepare(
-                "SELECT DISTINCT d2.body FROM edges e
+                "SELECT DISTINCT c.uid, d2.body FROM edges e
                  JOIN derivations d ON d.op_device = e.op_device AND d.op_seq = e.op_seq
                  JOIN claims c ON c.uid = e.to_uid
                  JOIN derivations d2 ON d2.op_device = c.op_device AND d2.op_seq = c.op_seq
                  WHERE d.uid = ?1 AND e.type = 'supersedes'",
             )?;
-            for b in st.query_map([&uid], |r| r.get::<_, String>(0))? {
-                again.push(line(&b?));
+            for row in st.query_map([&uid], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))? {
+                let (superseded, body): (String, String) = row?;
+                // One forgotten already comes back as nothing (Codex's adversarial review).
+                if !raw.forgotten(&superseded)? {
+                    again.push(line(&body));
+                }
             }
             shown = Some((
                 UidPreview {
@@ -1065,6 +1069,15 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        // A claim it supersedes that is forgotten already comes back as nothing (Codex's
+        // adversarial review of slice 2a).
+        start(
+            home,
+            &preview(home, Target::parse_uid(&older).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let p = preview(home, Target::parse_uid(&uid).unwrap()).unwrap();
+        assert_eq!(p.uid.map(|u| u.again), Some(Vec::new()));
     }
 
     /// D5: from the commit of its request, version 2 in both logs, a uid is passed over by every

@@ -3065,6 +3065,55 @@ pub(crate) mod tests {
         assert_eq!(ops.last().map(|s| (s.first, s.last)), Some((3, 3)));
     }
 
+    /// Milestone 5 D5 (Codex's adversarial review of slice 2a): a forget op past the restored
+    /// records is appended again, not dropped with the ops it follows, so its uid stays forgotten
+    /// with no request log to bring it back.
+    #[test]
+    fn a_forget_op_past_the_restored_records_is_appended_again() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 10, 5); // segments 1-5, 6-10
+        let mut raw = raw::open(p).unwrap();
+        let dev = raw.device().to_owned();
+        raw.append_ops(&[window(3), claim("a")]).unwrap();
+        raw.append_ops(&[window(10), claim("b")]).unwrap();
+        drop(raw);
+        // As a registration writes it, with no request log beside it.
+        let uid = "f".repeat(64);
+        let body = serde_json::json!({"uid": uid, "job": "j"}).to_string();
+        rusqlite::Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO ops(device, op_seq, type, ts, body, batch)
+                 VALUES(?1, 5, 'forget', 0, ?2, 5)",
+                rusqlite::params![dev, body],
+            )
+            .unwrap();
+        export(p).unwrap();
+        let newest = segments(&p.join("backups"), Kind::Records)
+            .unwrap()
+            .remove(1)
+            .path;
+        std::fs::write(&newest, b"damaged").unwrap();
+        damage_raw(p);
+        crate::worker::run_once(p).unwrap();
+        let restored = raw::open(p).unwrap();
+        assert!(restored.forgotten(&uid).unwrap());
+        let kept: Vec<(i64, raw::OpKind)> = restored
+            .ops_after(&dev, 0, 100)
+            .unwrap()
+            .iter()
+            .map(|o| (o.op_seq, o.kind))
+            .collect();
+        use raw::OpKind::{Claim, Forget, Window};
+        assert_eq!(kept, [(1, Window), (2, Claim), (3, Forget)]);
+        let note = std::fs::read_to_string(p.join("state/restored")).unwrap();
+        assert!(
+            note.contains("2 op(s) past the restored records dropped"),
+            "{note}"
+        );
+    }
+
     /// docs/cards.md K4 after a restore that lost records: a removal made at a seq the lost
     /// records had still hides the card of a window cut before the loss, as any removal its op
     /// does not list does.
