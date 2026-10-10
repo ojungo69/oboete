@@ -36,31 +36,22 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     crate::db::private(&dir, 0o700);
     // One keep at a time from the bound's check to the rename: overlapping failed calls would each
-    // pass it, and name their files in no order (Codex on #440). Waited for a second at most, so
-    // the hook still sets its marker before the agent's deadline.
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join("keep.lock"))?;
-    let until = std::time::Instant::now() + KEEP_WAIT;
-    loop {
-        match lock.try_lock() {
-            Ok(()) => break,
-            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Err(std::fs::TryLockError::WouldBlock) => {
-                anyhow::bail!("another keep held {DIR}/ for {} s", KEEP_WAIT.as_secs())
-            }
-            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+    // pass it, and name their files in no order (Codex on #440).
+    let _lock = keep_lock(&dir)?;
+    // A temporary file found under the lock is a keep's that was killed before its rename: it
+    // would hold its name, and every later keep would fail on it (Codex on #440).
+    for entry in std::fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|x| x == "tmp") {
+            std::fs::remove_file(&path)?;
         }
     }
     let kept = files(&dir)?;
+    let bad = files(&dir.join("bad"))?;
     // `bad/` counts too: oboete never deletes what it set aside there (Codex on #440).
     let held: u64 = kept
         .iter()
-        .chain(&files(&dir.join("bad"))?)
+        .chain(&bad)
         .filter_map(|p| p.metadata().ok())
         .map(|m| m.len())
         .sum();
@@ -75,11 +66,14 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
         "{DIR}/ holds {held} bytes, and {} more would pass its bound",
         body.len()
     );
-    // One past the newest file, chosen under the lock: the files sort as they were kept, those of
-    // two processes in one millisecond too (Codex on #440).
+    // One past the newest file here or in `bad/`, chosen under the lock: the files sort as they
+    // were kept, those of two processes in one millisecond too, and a file set aside never takes
+    // the name of one set aside before (Codex on #440).
     let next = kept
-        .last()
-        .and_then(|p| p.file_stem()?.to_str()?.parse::<u64>().ok())
+        .iter()
+        .chain(&bad)
+        .filter_map(|p| p.file_stem()?.to_str()?.parse::<u64>().ok())
+        .max()
         .map_or(0, |n| n + 1);
     let name = format!("{next:020}");
     let tmp = dir.join(format!(".{name}.tmp"));
@@ -208,7 +202,32 @@ fn files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// U5: `unwritten/keep.lock`, held by a keep from its look at the files to its rename and by a move
+/// to `bad/`, so the bound sees each file once (Codex on #440). Waited for a second at most, so the
+/// hook still sets its marker before the agent's deadline.
+fn keep_lock(dir: &Path) -> Result<std::fs::File> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("keep.lock"))?;
+    let until = std::time::Instant::now() + KEEP_WAIT;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(lock),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                anyhow::bail!("another keep held {DIR}/ for {} s", KEEP_WAIT.as_secs())
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
+    }
+}
+
 fn set_aside(dir: &Path, path: &Path) -> Result<()> {
+    let _lock = keep_lock(dir)?;
     let bad = dir.join("bad");
     std::fs::create_dir_all(&bad)?;
     if let Some(name) = path.file_name() {
@@ -335,6 +354,65 @@ mod tests {
             .unwrap();
         t.join().unwrap();
         assert_eq!(counts(&h).0, 1);
+    }
+
+    /// U1: a temporary file that a keep killed before its rename left is removed by the next keep,
+    /// which then takes its name (Codex on #440).
+    #[test]
+    fn a_temporary_file_a_killed_keep_left_gives_up_its_name() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let left = dir.join(format!(".{:020}.tmp", 0));
+        std::fs::write(&left, "half").unwrap();
+        keep(home.path(), &[prompt("after the kill", 1_000)], "r").unwrap();
+        assert!(!left.exists());
+        assert_eq!(counts(home.path()).0, 1);
+    }
+
+    /// U1, U4: names are unique across the files kept and those set aside, so a file set aside
+    /// after the first one left never replaces it (Codex on #440).
+    #[test]
+    fn a_file_set_aside_never_replaces_one_set_aside_before() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut raw = crate::raw::open(h).unwrap();
+        for n in 0..2 {
+            keep(h, &[prompt(&format!("kept {n}"), 1_000 + n)], "r").unwrap();
+            let file = files(&h.join(DIR)).unwrap().pop().unwrap();
+            std::fs::write(&file, format!("damaged {n}")).unwrap();
+            assert_eq!(write_back(h, &mut raw).unwrap(), 0);
+        }
+        let bad: Vec<String> = files(&h.join(DIR).join("bad"))
+            .unwrap()
+            .iter()
+            .map(|p| std::fs::read_to_string(p).unwrap())
+            .collect();
+        assert_eq!(bad, ["damaged 0", "damaged 1"]);
+    }
+
+    /// U5: a move to `bad/` takes the keep lock, so a keep's look at the files cannot miss a file
+    /// on its way there (Codex on #440): while a keep holds the lock, the file stays.
+    #[test]
+    fn a_move_to_bad_waits_for_the_keep_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let dir = h.join(DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{:020}.json", 0)), "not json").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("keep.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        let mut raw = crate::raw::open(h).unwrap();
+        assert!(write_back(h, &mut raw).is_err());
+        assert_eq!(counts(h), (1, 0));
+        drop(held);
+        assert_eq!(write_back(h, &mut raw).unwrap(), 0);
+        assert_eq!(counts(h), (0, 1));
     }
 
     /// U1, U3: a kept file holds the masked text, never the secret, and is the owner's alone; it
