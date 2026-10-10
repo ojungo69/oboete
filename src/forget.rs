@@ -100,14 +100,14 @@ impl Target {
             "{text} is a card's or a session summary's id: they go with the records they were \
              made from (forget those with --record or --span)"
         );
-        check_uid(text)?;
+        well_formed(text)?;
         Ok(Self::Uid { uid: text.into() })
     }
 }
 
 /// A uid as a request carries it (D5): a claim's (64 hex digits) or an imported document's
 /// (`<source>:<key>`), printable ASCII with no space, bounded.
-pub(crate) fn check_uid(uid: &str) -> Result<()> {
+pub(crate) fn well_formed(uid: &str) -> Result<()> {
     anyhow::ensure!(
         (1..=256).contains(&uid.len()) && uid.bytes().all(|b| b.is_ascii_graphic()),
         "invalid uid"
@@ -159,7 +159,7 @@ pub struct Preview {
 impl Preview {
     pub(crate) fn validate(&self) -> Result<()> {
         if let Target::Uid { uid } = &self.target {
-            check_uid(uid)?;
+            well_formed(uid)?;
             anyhow::ensure!(
                 self.records.is_empty() && self.uid.is_some(),
                 "forget selection differs from its preview"
@@ -249,7 +249,7 @@ impl Request {
         // Version 2 is a uid's (D5); an older binary skips its line as of an unknown version.
         match (&self.target, self.v) {
             (Target::Uid { uid }, 2) => {
-                check_uid(uid)?;
+                well_formed(uid)?;
                 anyhow::ensure!(self.records.is_empty(), "invalid record count");
                 return Ok(());
             }
@@ -328,7 +328,7 @@ pub fn preview(home: &Path, target: Target) -> Result<Preview> {
 /// either store.
 fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Preview> {
     use rusqlite::OptionalExtension;
-    check_uid(&uid)?;
+    well_formed(&uid)?;
     anyhow::ensure!(
         raw.home_id_proven()?,
         "this store has no verified home identity: forget was not registered"

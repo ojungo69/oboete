@@ -1526,7 +1526,7 @@ fn request(
     // Each repository's candidates, found by its own lines and kept with it: a draft supersedes
     // only its own repository's claims.
     let mut shown_in: Vec<(String, crate::claims::Claim)> = Vec::new();
-    let forgotten = raw.forgotten_uids()?;
+    let forgotten = raw.forgotten_set()?;
     for repo in repos {
         let (said, rest) = searched(w, repo);
         // Under the repository's name, as the window's headings show it. A forgotten claim is no

@@ -1064,7 +1064,7 @@ impl Pending {
         use crate::worker::Consumer;
         // Milestone 5 D5: a forgotten uid, a claim's or a document's, from its forget op's commit.
         let mut p = Self {
-            uids: raw.forgotten_uids()?,
+            uids: raw.forgotten_set()?,
             ..Self::default()
         };
         for device in Claims.devices(raw)? {

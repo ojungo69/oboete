@@ -1410,7 +1410,7 @@ impl Raw {
     }
 
     /// Every forgotten uid (D5): the readers and senders pass them over.
-    pub fn forgotten_uids(&self) -> Result<std::collections::HashSet<String>> {
+    pub fn forgotten_set(&self) -> Result<std::collections::HashSet<String>> {
         let mut st = self.conn.prepare_cached(
             "SELECT json_extract(body, '$.uid') FROM ops
              WHERE type = 'forget' AND json_extract(body, '$.uid') IS NOT NULL",
