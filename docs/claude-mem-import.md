@@ -42,8 +42,9 @@ I5. **Reading work state.** A repository's work state is its own entries and tho
 claude-mem project its key ends in, the project's worktree keys (`claude-mem:<name>/…`) included,
 as search reads its imported documents, folded together by clock: an imported list goes on under
 the repository's own writes. An imported entry takes effect at its own time, also when this
-device's writes reached the store before it, and lifts no clock of theirs; it shows its own time
-(`at`). The name reads imported entries only, as search's reads imported documents only: a native
+device's writes reached the store before it, or at its import when its time is later (a clock ahead
+of this device's), and lifts no clock of theirs, when they are read or written; it shows its own
+time (`at`). The name reads imported entries only, as search's reads imported documents only: a native
 entry is read by its own key alone, whatever its shape (an origin like `ssh://claude-mem:<name>/x`
 makes a key shaped like a worktree project's). A checkout whose key ends in a project's name reads
 that project's lists, as claude-mem showed them to every checkout of that name: the import cannot
@@ -70,6 +71,7 @@ from the local model on this PC and from Workers AI on the iMac (decision 35's e
    is counted; a second run adds nothing.
 5. A repository reads its project's imported lists, a worktree project's too, and not another
    project's, with its own writes by time: its own later write comes last though it reached the
-   store first; an imported entry keeps its own time. A native entry under a key shaped like a
-   worktree project's is read by that key alone.
+   store first; an imported entry keeps its own time. An imported entry dated ahead of this
+   device's clock lifts no write's clock, and a write made after it still comes last. A native
+   entry under a key shaped like a worktree project's is read by that key alone.
 6. The default home takes the import without `--eval-store` and refuses it with it.

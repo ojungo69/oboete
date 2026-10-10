@@ -816,9 +816,10 @@ pub(crate) fn work_state_in(
         }
         let own = v["clock"].as_i64().unwrap_or(ts);
         // An imported entry was written elsewhere, before or after this device's own writes: it
-        // takes effect at its own time and lifts no clock of theirs.
+        // takes effect at its own time, or at its import when that is earlier (a clock ahead of
+        // this one), and lifts no clock of theirs.
         let at = if v.get("source").is_some() {
-            own
+            own.min(ts)
         } else {
             clock = clock.max(own);
             clock
@@ -2337,7 +2338,8 @@ impl Raw {
 
     /// docs/work-state.md L4: one write of an agent's work state, `{repo, list, fields, clock}`,
     /// as this device's next op; `list` and `fields` have passed the gate (L5). Its clock is one
-    /// past every work state clock the store holds and at least now, as an exclusion's. No
+    /// past every work state clock the store holds and at least now, as an exclusion's; an
+    /// imported entry's time, another clock's, lifts none (docs/claude-mem-import.md I5). No
     /// dispatch lock: a work state write orders against no provider call.
     pub fn work_state(
         &mut self,
@@ -2347,7 +2349,7 @@ impl Raw {
     ) -> Result<i64> {
         let seen: Option<i64> = self.conn.query_row(
             "SELECT MAX(COALESCE(json_extract(body, '$.clock'), ts)) FROM ops
-             WHERE type = 'work_state'",
+             WHERE type = 'work_state' AND json_extract(body, '$.source') IS NULL",
             [],
             |r| r.get(0),
         )?;

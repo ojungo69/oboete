@@ -851,6 +851,32 @@ mod tests {
         assert_eq!(fields[2]["status"], "done");
     }
 
+    /// Codex on #431: an imported entry dated ahead of this device's clock lifts no clock of the
+    /// writes made here, and takes effect no later than its import, so a write made here after it
+    /// still comes last; it shows its own time.
+    #[test]
+    fn an_imported_entry_ahead_of_this_clock_lifts_no_later_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        let ahead = crate::db::now_ms() + 86_400_000;
+        raw.append_ops(&[(
+            OpKind::WorkState,
+            json!({"repo": "claude-mem:free-mem", "list": "plan",
+                "fields": {"task": "Port search", "status": "doing"}, "clock": ahead,
+                "at": ahead, "source": "claude-mem:b62f07076e19", "source_id": "w1"}),
+        )])
+        .unwrap();
+        let repo = "github.com/o/free-mem";
+        let done = json!({"task": "Port search", "status": "done"});
+        raw.work_state(repo, "plan", done.as_object().unwrap())
+            .unwrap();
+        let ops = work_ops(&raw);
+        assert!(ops[1]["clock"].as_i64().unwrap() < ahead, "{ops:?}");
+        let entries = raw.work_state_entries(repo).unwrap();
+        assert_eq!(entries[0].ts, ahead);
+        assert_eq!(entries[1].fields["status"], "done", "{entries:?}");
+    }
+
     /// The security review of the N1 commit: the name rule reads imported entries only, as
     /// search's reads imported documents only. A native entry is read by its own key alone, also
     /// when an origin gives that key an imported project's shape (`ssh://claude-mem:<name>/x`
