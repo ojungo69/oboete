@@ -6,7 +6,7 @@
 //! repository reads the project its key ends in (`imported_repos`). Its work state comes in too
 //! (docs/claude-mem-import.md).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -398,24 +398,27 @@ struct Row<'a> {
 struct Sink<'a> {
     raw: &'a mut Raw,
     source: &'a str,
-    /// The source ids imported so far, by earlier runs and this one, each with the repository it
-    /// was filed under last.
-    known: HashMap<String, String>,
+    /// The source ids imported so far, by earlier runs and this one, each with the repositories
+    /// it was filed under.
+    known: HashMap<String, HashSet<String>>,
     docs: Vec<ImportDoc>,
 }
 
 impl Sink<'_> {
-    /// A row as an import op, with its session. False: imported before, under the same
-    /// repository. A row claude-mem moved since (I3) comes in again with the same uid: readers
-    /// take a document's newest row (Codex on #431).
+    /// A row as an import op, with its session. False: imported before under this repository.
+    /// A row claude-mem moved since (I3) comes in again with the same uid: readers take a
+    /// document's newest row (Codex on #431).
     fn put(&mut self, r: Row) -> Result<bool> {
         let repo = repo(r.project);
         match self.known.get(&r.key) {
             // One whose project is lost (claude-mem pruned its session) stays where it came in.
-            Some(had) if *had == repo || r.project.is_empty() => return Ok(false),
+            Some(had) if had.contains(&repo) || r.project.is_empty() => return Ok(false),
             _ => {}
         }
-        self.known.insert(r.key.clone(), repo.clone());
+        self.known
+            .entry(r.key.clone())
+            .or_default()
+            .insert(repo.clone());
         let session = match r.session {
             Some(s) => s.id.clone(),
             // No session id at all: a session of its own, so unrelated rows do not merge.
@@ -843,6 +846,26 @@ mod tests {
             .unwrap();
         let line = crate::search::b::get(dir.path(), &uid).unwrap().unwrap();
         assert!(line.contains(" claude-mem:free-mem (imported from"));
+        // The row's first import also on another device, at a higher op seq than this device's
+        // (a copied store): op seqs order one device's ops only, and the row is filed under the
+        // merged project already, so nothing more comes in (Codex on #431).
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        let first = raw
+            .ops_after(raw.device(), 0, 10_000)
+            .unwrap()
+            .into_iter()
+            .find(|o| o.kind == OpKind::Import && o.body["source_id"] == "o40")
+            .unwrap();
+        Connection::open(dir.path().join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO ops(device, op_seq, type, ts, body, batch)
+                 VALUES('elsewhere', 1000000, 'import', 0, ?1, 1000000)",
+                [first.body.to_string()],
+            )
+            .unwrap();
+        let copied = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!(copied.observations, 0);
     }
 
     /// Test 1: a database at a schema newer than the import knows is refused, nothing written.

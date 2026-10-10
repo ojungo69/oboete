@@ -2438,18 +2438,25 @@ impl Raw {
         self.source_ids("work_state", source)
     }
 
-    /// The documents imported from `source`, each id with the repository its newest import op
-    /// files it under: a row claude-mem moved since (a `ProjectMerge`) comes in again
-    /// (docs/claude-mem-import.md I3).
-    pub fn import_repos(&self, source: &str) -> Result<std::collections::HashMap<String, String>> {
+    /// The documents imported from `source`, each id with every repository an import op files it
+    /// under, on any device: a row claude-mem moved since (a `ProjectMerge`) comes in again
+    /// (docs/claude-mem-import.md I3). A set, not the newest: op seqs order one device's ops only
+    /// (Codex on #431).
+    pub fn import_repos(
+        &self,
+        source: &str,
+    ) -> Result<std::collections::HashMap<String, std::collections::HashSet<String>>> {
         let mut st = self.conn.prepare(
             "SELECT json_extract(body, '$.source_id'), COALESCE(json_extract(body, '$.repo'), '')
              FROM ops WHERE type = 'import' AND json_extract(body, '$.source') = ?1
-               AND typeof(json_extract(body, '$.source_id')) = 'text'
-             ORDER BY op_seq",
+               AND typeof(json_extract(body, '$.source_id')) = 'text'",
         )?;
-        let rows = st.query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut out = std::collections::HashMap::<String, std::collections::HashSet<String>>::new();
+        for row in st.query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            let (id, repo) = row?;
+            out.entry(id).or_default().insert(repo);
+        }
+        Ok(out)
     }
 
     fn source_ids(&self, kind: &str, source: &str) -> Result<std::collections::HashSet<String>> {
