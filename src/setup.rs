@@ -509,11 +509,16 @@ pub(crate) fn ready(
     model: &[crate::model_fetch::Artifact],
     runtime: Option<&crate::model_fetch::Runtime>,
 ) -> Result<()> {
-    if let Consent::Local { dir, .. } = consent
+    if let Consent::Local { dir, get, .. } = consent
         && consent.needs_files()
     {
         let runtime = runtime.context("no ONNX Runtime for this machine")?;
         let files: Vec<_> = (model.iter().copied()).chain([runtime.library]).collect();
+        // With nothing to download, the check alone comes first: the fetches hash each file once
+        // more before `verify` does, 2.2 GB each time.
+        if get.is_empty() && crate::model_fetch::verify(dir, &files).is_ok() {
+            return Ok(());
+        }
         crate::model_fetch::fetch(dir, model)?;
         crate::model_fetch::fetch_runtime(dir, runtime)?;
         crate::model_fetch::verify(dir, &files)?;

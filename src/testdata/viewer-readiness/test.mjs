@@ -815,12 +815,16 @@ let gets=settingsGets;
 await w4.refreshEmbedding();await settle();
 assert.equal(settingsGets,gets+1,'a watched run that ended reads the settings again');
 assert(!w4.embeddingDraft().watch);
-// A reload that comes after another save replaced the form is dropped.
+// Another save's answer replaces the form while the reload reads (a save made before the
+// download wrote the method): the reload reads again, and the method written last is shown.
 let late;settingsAnswer=new Promise(resolve=>{late=resolve;});
+gets=settingsGets;
 const reloading=w4.reloadEmbedding();
-const newer=w4.formOf(settings({version:'v2'}));ctx.ui.setForm(newer);
-late(json(settings({version:'v1'})));await reloading;await settle();
-assert.equal(ctx.ui.getForm().version,'v2','an older answer does not replace a newer form');
+ctx.ui.setForm(w4.formOf(settings({version:'v2'})));
+const local=json(settings({version:'v3',embedding:embedding({provider:'local'})}));
+settingsAnswer=Promise.resolve(local);late(local);await reloading;await settle();
+assert.equal(ctx.ui.getForm().embedding.provider,'local','a save answered during the reload does not keep an older method');
+assert.equal(settingsGets,gets+2,'the reload read again for the form then shown');
 settingsAnswer=null;runStatus=null;
 f=w4.formOf(settings({embedding:embedding({provider:'workers-ai'})}));ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert(text(section()).includes('sent to the account saved here'),'the destination beside the account');

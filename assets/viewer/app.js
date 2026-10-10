@@ -3573,12 +3573,17 @@ async function embeddingKeySave(button, body) {
   }
 }
 
-// After a choice: the saved method and the files' state as they are now; typed values stay. An
-// answer that comes after another save replaced the form is dropped, as it is older.
+// After a choice: the saved method and the files' state as they are now; typed values stay.
+// Another save's answer can replace the form while this reads, and be older or newer than this
+// read (a save made before a download wrote the method), so this reads again for the form then
+// shown until a read comes back with the form as it was.
 async function reloadEmbedding() {
-  const mine = form;
-  const settings = await api('settings').catch(() => null);
-  if (!settings || settings.error || !currentSettings(mine)) return;
+  let mine, settings;
+  do {
+    mine = form;
+    settings = await api('settings').catch(() => null);
+    if (!settings || settings.error || view !== 'settings') return;
+  } while (form !== mine);
   form = mergeProviderSettings(settings, mine, { op: 'embedding' });
   drawSettings();
 }
@@ -3640,7 +3645,6 @@ async function embeddingAction(action) {
       embeddingRefused(d, res, answer);
       d.status = await api('embedding').catch(() => null);
     }
-    d.busy = false;
     if (res.ok) await reloadEmbedding();
   } catch {
     if (action === 'start') d.watch = true;
