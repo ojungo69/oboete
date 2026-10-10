@@ -1,0 +1,22 @@
+.github/workflows/ci.yml
+  s_234f6f365da547::t_a818983a448f69 59-60
+  s_234f6f365da547::t_f080346415e693 61-64
+src/settings/embedding.rs
+  s_234f6f365da547::t_888e84fd972efd 905,910-913,917-918,920
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "685943d57b4631c472b7e6004560b805302f72ed",
+  "prompts": {},
+  "sessions": {
+    "s_234f6f365da547": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3206e10e-7912-46d9-b070-aa879bc5ad93",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
