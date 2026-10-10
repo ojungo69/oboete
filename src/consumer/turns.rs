@@ -59,12 +59,22 @@ impl Consumer for Turns {
                 ],
             )?;
             crate::consumer::fts::turns(k, Some(k.last_insert_rowid()))?;
+            // A row written again over its key: its vector follows its text (docs/tools.md V3).
+            let key = format!("S{device}.{}", op.op_seq);
+            crate::embed_phase::touched(None, k, "s", &key)?;
         }
         Ok(last)
     }
 
     fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> {
         schema(k)?;
+        let lost: Vec<String> = k
+            .prepare(
+                "SELECT 'S' || device || '.' || op_seq FROM turns
+                 WHERE device = ?1 AND op_seq > ?2",
+            )?
+            .query_map(params![device, to], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
         k.execute(
             "DELETE FROM turns_fts WHERE rowid IN
                (SELECT rowid FROM turns WHERE device = ?1 AND op_seq > ?2)",
@@ -74,6 +84,9 @@ impl Consumer for Turns {
             "DELETE FROM turns WHERE device = ?1 AND op_seq > ?2",
             params![device, to],
         )?;
+        for key in lost {
+            crate::embed_phase::touched(None, k, "s", &key)?;
+        }
         Ok(())
     }
 }

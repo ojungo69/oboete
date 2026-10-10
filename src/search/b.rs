@@ -497,8 +497,8 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
         if let Some(fts) = imported {
             (hits, lowered) = claims_leg(&raw, &k, q, depth, &terms, near.as_ref())?;
             imports = imported_leg(&k, q, depth, &terms, fts?, near.as_ref(), &rules)?;
-            let cards = curated_leg(&raw, &k, q, depth, &terms, &rules, false)?;
-            let summaries = curated_leg(&raw, &k, q, depth, &terms, &rules, true)?;
+            let cards = curated_leg(&raw, &k, q, depth, &terms, &rules, false, near.as_ref())?;
+            let summaries = curated_leg(&raw, &k, q, depth, &terms, &rules, true, near.as_ref())?;
             let lists = [&cards, &summaries, &imports];
             let keys: Vec<Vec<String>> = lists
                 .iter()
@@ -993,6 +993,23 @@ impl Near {
                     )
                     .optional()?,
                 ),
+                // A card's kind is its type, or `summary` without one, as `curated_leg` says.
+                "o" => {
+                    let Some((device, op_seq, n)) = crate::cards::id_parts(&key, "") else {
+                        continue;
+                    };
+                    (
+                        Class::Card,
+                        k.query_row(
+                            "SELECT COALESCE(type, 'summary') FROM cards
+                             WHERE device = ?1 AND op_seq = ?2 AND n = ?3",
+                            params![device, op_seq, n],
+                            |r| r.get(0),
+                        )
+                        .optional()?,
+                    )
+                }
+                "s" => (Class::Summary, Some("summary".to_owned())),
                 "r" => {
                     let Some((device, seq)) = key.rsplit_once(':') else {
                         continue;
@@ -1637,8 +1654,10 @@ fn imported_hit(
     }
 }
 
-/// Cards and summaries rank on their stored text, but display only through their one reader
-/// (`get` calls `cards::read` / `turns::read_row`). Hidden rows take no slot in either list.
+/// Cards and summaries rank on their stored text and their vectors (fused by `rrf`, docs/tools.md
+/// V4), but display only through their one reader (`get` calls `cards::read` / `turns::read_row`).
+/// Hidden rows take no slot in either list.
+#[allow(clippy::too_many_arguments)]
 fn curated_leg(
     raw: &Raw,
     k: &Connection,
@@ -1647,56 +1666,18 @@ fn curated_leg(
     terms: &[String],
     rules: &redact::Rules,
     summaries: bool,
+    near: Option<&Near>,
 ) -> Result<Vec<Hit>> {
     let (table, fts, current, number) = if summaries {
         ("turns", "turns_fts", "d.skipped = 0", "0")
     } else {
         ("cards", "cards_fts", "d.replaced_by IS NULL", "d.n")
     };
-    let Some((mut clauses, mut args, order, order_args)) =
-        super::query_clauses(&q.text, fts, &["f.text"])
-    else {
-        return Ok(Vec::new());
-    };
-    clauses.push(current.into());
-    type_clause(
-        q,
-        if summaries {
-            Class::Summary
-        } else {
-            Class::Card
-        },
-        if summaries { "'summary'" } else { "d.type" },
-        &mut clauses,
-        &mut args,
-    );
-    if let Some(repo) = q.searched() {
-        clauses.push("d.repo = ?".into());
-        args.push(Value::Text(repo.to_owned()));
-    }
-    super::within(&mut clauses, &mut args, "d.ts", (q.since, q.until));
-    if let Some(session) = &q.skip_session {
-        clauses.push("COALESCE(d.session, '') <> ?".into());
-        args.push(Value::Text(session.clone()));
-    }
-    args.extend(order_args);
-    let sql = format!(
-        "SELECT d.device, d.op_seq, {number} FROM {fts} f JOIN {table} d ON d.rowid = f.rowid
-         WHERE {} ORDER BY {order}d.ts DESC, d.device, d.op_seq{}",
-        clauses.join(" AND "),
-        if summaries { "" } else { ", d.n" }
-    );
-    let mut st = k.prepare(&sql)?;
-    let mut rows = st.query(params_from_iter(args))?;
-    let mut out = Vec::new();
-    while out.len() < depth
-        && let Some(row) = rows.next()?
-    {
-        let (device, seq): (String, i64) = (row.get(0)?, row.get(1)?);
+    // The hit of the row `id` names, read through its reader: none when it hides the row.
+    let read = |id: &str| -> Result<Option<Hit>> {
         let (key, class, repo, when, kind, title, body, read_tokens) = if summaries {
-            let id = format!("S{device}.{seq}");
-            let Some(s) = crate::turns::get(k, raw, &id, rules)? else {
-                continue;
+            let Some(s) = crate::turns::get(k, raw, id, rules)? else {
+                return Ok(None);
             };
             let body = crate::turns::FIELDS[1..]
                 .iter()
@@ -1714,10 +1695,8 @@ fn curated_leg(
                 None,
             )
         } else {
-            let n: i64 = row.get(2)?;
-            let id = format!("{device}.{seq}.{n}");
-            let Some(c) = crate::cards::get(k, raw, &id, rules)? else {
-                continue;
+            let Some(c) = crate::cards::get(k, raw, id, rules)? else {
+                return Ok(None);
             };
             let cost = card_text(&c, raw.device()).chars().count().div_ceil(4);
             let body = std::iter::once(c.subtitle.as_str())
@@ -1744,7 +1723,7 @@ fn curated_leg(
             )
         };
         let flat = redact::flattened_with(&body, rules, usize::MAX, one_line).masked();
-        out.push(Hit {
+        Ok(Some(Hit {
             key,
             class,
             repo,
@@ -1756,9 +1735,76 @@ fn curated_leg(
             title,
             snippet: redact::outbound_with(&super::snippet(&flat, terms, WIDTH), rules),
             read_tokens,
-        });
+        }))
+    };
+    let mut hits = HashMap::new();
+    let mut order = Vec::new();
+    if let Some((mut clauses, mut args, by, by_args)) =
+        super::query_clauses(&q.text, fts, &["f.text"])
+    {
+        clauses.push(current.into());
+        type_clause(
+            q,
+            if summaries {
+                Class::Summary
+            } else {
+                Class::Card
+            },
+            if summaries { "'summary'" } else { "d.type" },
+            &mut clauses,
+            &mut args,
+        );
+        if let Some(repo) = q.searched() {
+            clauses.push("d.repo = ?".into());
+            args.push(Value::Text(repo.to_owned()));
+        }
+        super::within(&mut clauses, &mut args, "d.ts", (q.since, q.until));
+        if let Some(session) = &q.skip_session {
+            clauses.push("COALESCE(d.session, '') <> ?".into());
+            args.push(Value::Text(session.clone()));
+        }
+        args.extend(by_args);
+        let sql = format!(
+            "SELECT d.device, d.op_seq, {number} FROM {fts} f JOIN {table} d ON d.rowid = f.rowid
+             WHERE {} ORDER BY {by}d.ts DESC, d.device, d.op_seq{}",
+            clauses.join(" AND "),
+            if summaries { "" } else { ", d.n" }
+        );
+        let mut st = k.prepare(&sql)?;
+        let mut rows = st.query(params_from_iter(args))?;
+        while order.len() < depth
+            && let Some(row) = rows.next()?
+        {
+            let (device, seq): (String, i64) = (row.get(0)?, row.get(1)?);
+            let id = if summaries {
+                format!("S{device}.{seq}")
+            } else {
+                format!("{device}.{seq}.{}", row.get::<_, i64>(2)?)
+            };
+            if let Some(hit) = read(&id)? {
+                hits.insert(id.clone(), hit);
+                order.push(id);
+            }
+        }
     }
-    Ok(out)
+    if let Some(near) = near {
+        let mut nearest = Vec::new();
+        for id in near.query_knn(k, q, if summaries { "s" } else { "o" }, depth)? {
+            if !hits.contains_key(&id) {
+                let Some(hit) = read(&id)? else {
+                    continue;
+                };
+                hits.insert(id.clone(), hit);
+            }
+            nearest.push(id);
+        }
+        order = rrf(&order, &nearest);
+        order.truncate(depth);
+    }
+    Ok(order
+        .into_iter()
+        .filter_map(|id| hits.remove(&id))
+        .collect())
 }
 
 /// The imported documents a search of `repo` reads: those of `imported_repos`, and of the
@@ -2893,6 +2939,75 @@ mod tests {
             super::tests::keys(&query_with(s.home.path(), &skip, Some(&vector)).unwrap()),
             [ids[2].as_str()]
         );
+    }
+
+    /// Tools slice 3 (V1, V4): cards and summaries are found by their vectors where no full-text
+    /// list holds the query's words, each kind ranked by its vector and `type` keeping the kind
+    /// asked; a card a removal hides is not found by its vector, and takes no place (Q3).
+    #[test]
+    fn cards_and_summaries_are_found_by_their_vectors() {
+        let mut s = Store::new();
+        let gone = s.said("gone", R, 1_000, "First source.");
+        let live = s.said("live", R, 2_000, "Second source.");
+        let card = |s: &mut Store, seq, title: &str| {
+            s.cards(
+                seq,
+                seq,
+                serde_json::json!([{"type": "bugfix", "title": title}]),
+                false,
+            )[0]
+            .clone()
+        };
+        let db = card(&mut s, live, "Db ok");
+        let up = card(&mut s, live, "Up to it");
+        let hidden = card(&mut s, gone, "Db ok so");
+        let turn = |s: &mut Store, request: &str| {
+            s.turn(
+                serde_json::json!({"agent": "claude", "session": "live", "repo": R,
+                "ts": 3_000, "from": live, "through": live, "read": [], "goals": [],
+                "removed": [], "fields": {"request": request}, "skipped": false}),
+            )
+        };
+        let go = turn(&mut s, "Go on so");
+        let am = turn(&mut s, "Am in us");
+        s.run();
+        crate::embed_phase::fixture::vectors(&s);
+        let ask = |text: &str, types: &str| -> Vec<String> {
+            let q = Query {
+                text: text.into(),
+                raw: RawArm::Off,
+                types: Some(types.parse().unwrap()),
+                limit: 1,
+                ..Default::default()
+            };
+            let vector = crate::embed::stub::vector(crate::embed::EMBEDDER, text);
+            let found = query_with(s.home.path(), &q, Some(&vector)).unwrap();
+            assert_eq!(found.vector, Vector::Used);
+            keys(&found).into_iter().map(str::to_owned).collect()
+        };
+        // Words of two letters: no full-text list holds them.
+        let plain = Query {
+            text: "db ok".into(),
+            raw: RawArm::Off,
+            ..Default::default()
+        };
+        assert!(
+            query_with(s.home.path(), &plain, None)
+                .unwrap()
+                .hits
+                .is_empty()
+        );
+        assert_eq!(ask("up to it", "observations"), [up]);
+        assert_eq!(ask("db ok so", "observations"), [hidden]);
+        assert_eq!(ask("am in us", "sessions"), [am]);
+        assert_eq!(ask("go on so", "sessions"), [go]);
+        s.raw
+            .append_tombstone(crate::raw::Target::Record {
+                device: s.raw.device().to_owned(),
+                seq: gone,
+            })
+            .unwrap();
+        assert_eq!(ask("db ok so", "observations"), [db]);
     }
 
     /// Q4: consumers write the rows and their indexes in one transaction; a rollback leaves

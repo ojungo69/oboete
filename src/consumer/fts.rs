@@ -115,28 +115,46 @@ pub(crate) fn holding(raw: &Raw, device: &str, seqs: &[i64], words: &[&str]) -> 
         .collect())
 }
 
+/// The card columns its full-text row and its vector are made of (Q4, docs/tools.md V1), in order.
+pub(crate) const CARD_COLUMNS: &str =
+    "title, subtitle, narrative, facts, concepts, files_read, files_modified";
+
+/// A card's searchable text from `CARD_COLUMNS` read from `r` at `at`: the lists one item a line.
+pub(crate) fn card_text(r: &rusqlite::Row, at: usize) -> rusqlite::Result<String> {
+    let mut fields = Vec::new();
+    for i in 0..7 {
+        let s: String = r.get(at + i)?;
+        fields.push(if i >= 3 {
+            serde_json::from_str::<Vec<String>>(&s)
+                .unwrap_or_default()
+                .join("\n")
+        } else {
+            s
+        });
+    }
+    Ok(fields.join("\n"))
+}
+
+/// A summary's searchable text from its `fields` JSON: every displayed field, `notes` among them.
+pub(crate) fn turn_text(fields: &str) -> String {
+    let fields: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(fields).unwrap_or_default();
+    crate::turns::FIELDS
+        .iter()
+        .filter_map(|f| fields.get(*f).map(String::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Q4: index the stored card fields, without the reader's current gate. Called by the cards
 /// consumer in its transaction, and once for rows predating the index when its schema is made.
 /// `None` restores every current row after a rewind or on that first backfill.
 pub(crate) fn cards(k: &Connection, rowid: Option<i64>) -> Result<()> {
-    let mut st = k.prepare(
-        "SELECT rowid, title, subtitle, narrative, facts, concepts, files_read, files_modified
-         FROM cards WHERE replaced_by IS NULL AND (?1 IS NULL OR rowid = ?1)",
-    )?;
-    let rows = st.query_map([rowid], |r| {
-        let mut fields = Vec::new();
-        for i in 1..=7 {
-            let s: String = r.get(i)?;
-            fields.push(if i >= 4 {
-                serde_json::from_str::<Vec<String>>(&s)
-                    .unwrap_or_default()
-                    .join("\n")
-            } else {
-                s
-            });
-        }
-        Ok((r.get::<_, i64>(0)?, fields.join("\n")))
-    })?;
+    let mut st = k.prepare(&format!(
+        "SELECT rowid, {CARD_COLUMNS} FROM cards
+         WHERE replaced_by IS NULL AND (?1 IS NULL OR rowid = ?1)"
+    ))?;
+    let rows = st.query_map([rowid], |r| Ok((r.get::<_, i64>(0)?, card_text(r, 1)?)))?;
     for row in rows {
         let (id, text) = row?;
         k.execute(
@@ -153,14 +171,7 @@ pub(crate) fn turns(k: &Connection, rowid: Option<i64>) -> Result<()> {
         "SELECT rowid, fields FROM turns WHERE skipped = 0 AND (?1 IS NULL OR rowid = ?1)",
     )?;
     let rows = st.query_map([rowid], |r| {
-        let fields: std::collections::BTreeMap<String, String> =
-            serde_json::from_str(&r.get::<_, String>(1)?).unwrap_or_default();
-        let text = crate::turns::FIELDS
-            .iter()
-            .filter_map(|f| fields.get(*f).map(String::as_str))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Ok((r.get::<_, i64>(0)?, text))
+        Ok((r.get::<_, i64>(0)?, turn_text(&r.get::<_, String>(1)?)))
     })?;
     for row in rows {
         let (id, text) = row?;

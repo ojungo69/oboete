@@ -88,7 +88,55 @@ file, the anchor marked, claims in their place by time. Designed and built after
 ## Slice 3: vectors
 
 The cards' and summaries' vectors, made by the embedding phase as claims' are, so search by meaning
-reaches them (spec 4.10). After slice 2.
+reaches them (spec 4.10). After slice 2. It is also what per-prompt delivery by meaning stands on
+(decision 40, G23 of the 13.34.2 comparison).
+
+V1. **Two more kinds of document.** A current card (`o`, keyed `<device>.<op seq>.<n>`) and a
+session summary that was not skipped (`s`, keyed `S<device>.<op seq>`) are embedded as claims and
+imported documents are, in the same phase and the same calls: claims first, then cards, summaries,
+imported documents and records, as search lists them (Q2). The text is what their full-text index
+holds (Q4), made by the one function that writes that index, so the words full text finds and the
+vector come from the same text; it is gated and cut as every document's is (D8).
+
+V2. **Passed over.** A card or summary of an excluded repository, or made from a record of a
+session that touched one, is not sent, as a claim that quotes such a record is not (D13). The
+records are the ones its hide rule reads: a card's window and goals (K4); a summary's own session,
+and the windows whose cards it read with their goals (T7). It gets an `excluded` mark, judged again
+when the exclusion changes. A window's records that curation kept back, of a session the list named
+then, count too: the row keeps the range, not what was kept back, so such a card waits for the
+undo with them. An empty text is marked `empty`. A card a removal hides (K4) keeps its vector, as
+it keeps its full-text row: its hit is read through `cards::read`, which hides it (Q3).
+
+V3. **The vector follows its row.** The consumers that write the cards and the summaries call
+`embed_phase::touched` for each row they replace or remove, in the transaction that does it, as
+the claims' consumer does: a recuration that replaces a window's cards (K3), a rewind and a
+rebuild. A row whose text is gone or changed loses its vector; one whose text is the same keeps it,
+under its repository and time now. A rebuild sends nothing again: vectors are kept by their text's
+hash. Milestone 5's purge of a card or summary goes through the same call (its plan lists every
+generation's vectors).
+
+V4. **Search.** The cards' list and the summaries' list in Q2 item 2 are each their full-text list
+fused with their vector list by `rrf`, as the claims' lists are. `type`, the repository, `since`,
+`until` and the session `search` skips apply inside the vector search, as for imported documents and
+records, and a hit is still read through its table's one reader (Q3).
+
+V5. **Cost.** A card or summary is one more document in the phase's batches, under the embedder's
+caps (Workers AI's daily requests and monthly USD; the local model is free). Cards come about one
+per 4.6 tool uses (decision 39), and a summary one per reply.
+
+V6. **Doctor.** The documents waiting for a vector, in `oboete doctor` and on the page's doctor
+list, count the cards and the summaries beside the claims, imported documents and records.
+
+## Tests of slice 3 (through the embedding phase's stub answers and `search`)
+
+1. A card and a summary get vectors after the claims; a search whose words no full-text list holds
+   finds each by its vector, and `type` keeps only the kind asked.
+2. A recuration's replaced cards lose their vectors and its new cards get theirs; a rewind removes
+   them; a rebuild maps the same vectors and sends nothing.
+3. A skipped summary gets no vector, and an excluded repository's card and summary are not sent,
+   nor those made from a record of a session that touched it: a window across sessions, a goal, a
+   window a summary read.
+4. A card a removal hides is not found by its vector.
 
 ## Differences from claude-mem, and why
 
