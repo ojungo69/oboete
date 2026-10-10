@@ -3598,8 +3598,11 @@ async function refreshEmbedding() {
     // are never seen running), has ended: the saved method is read again.
     const ended = (Boolean(d.status?.active) || d.watch) && !status.active && !d.busy;
     d.status = status;
-    if (ended) d.watch = !(await reloadEmbedding());
-    else renderEmbedding();
+    if (ended) {
+      // Cleared before the read, so a choice started meanwhile keeps its own watch.
+      d.watch = false;
+      if (!(await reloadEmbedding())) d.watch = true;
+    } else renderEmbedding();
   } catch {
     // The next poll reads it again.
   }

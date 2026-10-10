@@ -61,7 +61,8 @@ jobs:
       - run: cargo llvm-cov clean --workspace
       - run: cargo llvm-cov --no-report
       - run: cargo llvm-cov --no-report --features local-embed
-      - run: cargo llvm-cov report --lcov --output-path target/lcov.info
+      # A test that kills a child can leave its profile half written; the rest still merge.
+      - run: cargo llvm-cov report --lcov --failure-mode all --output-path target/lcov.info
       - run: >-
           node --test --experimental-test-coverage
           --test-reporter=spec --test-reporter-destination=stdout

@@ -833,6 +833,16 @@ settingsAnswer=null;gets=settingsGets;
 await w4.refreshEmbedding();await settle();
 assert.equal(settingsGets,gets+1,'the next poll reads them');
 assert(!w4.embeddingDraft().watch);
+// A choice started while that read waits, whose answer is lost, keeps its watch after the read.
+w4.embeddingDraft().watch=true;
+let release;settingsAnswer=new Promise(resolve=>{release=resolve;});
+const refreshing=w4.refreshEmbedding();await settle();
+w4.embeddingDraft().watch=true;
+release(json(settings()));await refreshing;await settle();
+assert(w4.embeddingDraft().watch,'a newer choice keeps its watch');
+settingsAnswer=null;
+await w4.refreshEmbedding();await settle();
+assert(!w4.embeddingDraft().watch);
 // Another save's answer replaces the form while the reload reads (a save made before the
 // download wrote the method): the reload reads again, and the method written last is shown.
 let late;settingsAnswer=new Promise(resolve=>{late=resolve;});
