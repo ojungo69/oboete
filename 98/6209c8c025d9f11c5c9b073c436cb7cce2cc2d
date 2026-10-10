@@ -1,0 +1,34 @@
+src/forget.rs
+  s_234f6f365da547::t_ed5dfa0178f457 380,386-391
+  s_234f6f365da547::t_f425dda5a267b3 1072-1076
+  s_234f6f365da547::t_0da212695f8cbc 1077-1080
+src/backup.rs
+  s_234f6f365da547::t_892d2880aef861 3068-3115
+  s_234f6f365da547::t_c02d3bba3e72ea 3116
+src/search/b.rs
+  s_234f6f365da547::t_a0800617e28ee2 4308-4364
+  s_234f6f365da547::t_371b98a1d2e27e 496-498
+  s_234f6f365da547::t_c132a226db7229 2263-2267
+src/raw.rs
+  s_234f6f365da547::t_eb96b0c72cf17a 3216,3225-3239,3247-3252,3256
+  s_234f6f365da547::t_67ec48e5338127 3211-3212,3253-3255,3257-3259,3266-3267
+src/curate.rs
+  s_234f6f365da547::t_b9a73b34c43791 10915-10949
+  s_234f6f365da547::t_efdc3fcbc20a87 1529,1532-1533,1535
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "986209c8c025d9f11c5c9b073c436cb7cce2cc2d",
+  "prompts": {},
+  "sessions": {
+    "s_234f6f365da547": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3206e10e-7912-46d9-b070-aa879bc5ad93",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
