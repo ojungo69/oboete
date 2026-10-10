@@ -1,0 +1,38 @@
+src/raw.rs
+  s_234f6f365da547::t_b93f1cb170dceb 1494-1506
+  s_234f6f365da547::t_87aa387b9ed697 1507-1509
+  s_234f6f365da547::t_8d9f751bf010bf 136,1510
+src/unwritten.rs
+  s_234f6f365da547::t_6f0c8d3da2afd4 1-132,137-139
+  s_234f6f365da547::t_0d26a0f9230649 133-136,140-267
+docs/unwritten.md
+  s_234f6f365da547::t_d6374246de91aa 1-48
+src/capture.rs
+  s_234f6f365da547::t_2791947f5b92af 82
+src/failure.rs
+  s_234f6f365da547::t_1711eac5670db2 231-233,240-243,245,776
+src/hook.rs
+  s_234f6f365da547::t_d454b4a6a4a930 154-164,301,633-637,639-677,683-689,691-710,1527-1528,1586,1702,2357-2358,2361,5540,5780,5786,6152-6161,6164-6218,6223-6229,6231-6259,6261-6266
+src/main.rs
+  s_234f6f365da547::t_b923a091f0c793 52
+src/redact.rs
+  s_234f6f365da547::t_b03e39b81cf0f1 575
+src/setup.rs
+  s_234f6f365da547::t_3ca4e9eb1c1c29 2470,2472,2474-2483
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ff39415cf5fd1c35ae8b3522018bcebc7e818229",
+  "prompts": {},
+  "sessions": {
+    "s_234f6f365da547": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3206e10e-7912-46d9-b070-aa879bc5ad93",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
