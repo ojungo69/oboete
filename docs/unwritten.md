@@ -23,8 +23,11 @@ says recording failed, and nothing brings them back. This keeps them and writes 
 - **U3. Written back.** By the next hook call whose store opens, before its own events, so the
   seqs follow the events' times: the oldest 16 files a call, each in one transaction with its
   ledger rows, the file removed after the commit. One call at a time (a lock beside the files):
-  two at once would append a file twice, so the other writes its own events first. A crash
-  between the commit and the removal writes the file again later: a duplicate, never a loss.
+  two at once would append a file twice. While older files remain after a call's write-back (more
+  than 16 queued, or another call writing them back), the call keeps its own events behind them
+  instead of appending them, so the seqs keep the events' order; it appends them only when they
+  cannot be kept. A crash between the commit and the removal writes the file again later: a
+  duplicate, never a loss.
 - **U4. What cannot be written back** (an unknown version, unreadable JSON, an event raw refuses)
   moves to `unwritten/bad/`, never deleted by oboete; doctor counts it.
 - **U5. Bound.** Nothing more is kept while `unwritten/` holds 64 MiB: the marker alone says the
