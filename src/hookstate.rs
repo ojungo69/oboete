@@ -78,25 +78,77 @@ pub fn update(
 ) -> std::io::Result<()> {
     let dir = dir(home, agent, session);
     std::fs::create_dir_all(&dir)?;
+    let _lock = locked(&dir)?;
+    let path = dir.join(name);
+    match f(std::fs::read_to_string(&path).ok()) {
+        Some(v) => replace(&dir, name, &v),
+        None => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+    }
+}
+
+/// The session directory's lock, which every change of its values holds.
+fn locked(dir: &Path) -> std::io::Result<std::fs::File> {
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(dir.join(".lock"))?;
     lock.lock()?;
-    let path = dir.join(name);
-    match f(std::fs::read_to_string(&path).ok()) {
-        Some(v) => {
-            // Renamed into place, so a reader without the lock sees the old value or the new.
+    Ok(lock)
+}
+
+/// Renamed into place, so a reader without the lock sees the old value or the new.
+fn replace(dir: &Path, name: &str, v: &str) -> std::io::Result<()> {
+    let part = dir.join(format!(".{name}.part"));
+    std::fs::write(&part, v)?;
+    std::fs::rename(&part, dir.join(name))
+}
+
+/// Milestone 5 D5 (2b): every session's value `name` that `f` changes, replaced under that
+/// session's lock as `update` does, and a part a crashed change left beside it removed. A session
+/// gone meanwhile is passed over. How many values changed.
+pub fn update_all(
+    home: &Path,
+    name: &str,
+    mut f: impl FnMut(&str) -> Option<String>,
+) -> std::io::Result<usize> {
+    let mut changed = 0;
+    let Ok(agents) = std::fs::read_dir(root(home)) else {
+        return Ok(0);
+    };
+    for agent in agents.flatten() {
+        let Ok(sessions) = std::fs::read_dir(agent.path()) else {
+            continue;
+        };
+        for s in sessions.flatten() {
+            let dir = s.path();
             let part = dir.join(format!(".{name}.part"));
-            std::fs::write(&part, v)?;
-            std::fs::rename(&part, &path)
+            if !dir.join(name).exists() && !part.exists() {
+                continue;
+            }
+            // `prune` may be removing it: the lock's file cannot be made then.
+            let _lock = match locked(&dir) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                held => held?,
+            };
+            if let Err(e) = std::fs::remove_file(&part)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(e);
+            }
+            if let Some(v) = std::fs::read_to_string(dir.join(name))
+                .ok()
+                .and_then(|v| f(&v))
+            {
+                replace(&dir, name, &v)?;
+                changed += 1;
+            }
         }
-        None => match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        },
     }
+    Ok(changed)
 }
 
 /// The session's value `name`: none when it has none or it cannot be read.

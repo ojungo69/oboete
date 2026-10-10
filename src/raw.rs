@@ -372,6 +372,18 @@ fn denied(conn: &Connection, origin: Option<&str>, text: &str) -> Result<bool> {
     Ok(denied || cfg!(test) && text.contains(DENIED_IN_TESTS))
 }
 
+/// Every forgotten uid (D5): the readers and senders pass them over.
+fn forgotten_set(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    let mut st = conn.prepare_cached(
+        "SELECT json_extract(body, '$.uid') FROM ops
+         WHERE type = 'forget' AND json_extract(body, '$.uid') IS NOT NULL",
+    )?;
+    let uids = st
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(uids)
+}
+
 /// Milestone 5 D5: whether a forget op names `uid`.
 fn forgotten_uid(conn: &Connection, uid: &str) -> Result<bool> {
     Ok(conn.query_row(
@@ -539,6 +551,11 @@ impl ReadOnly {
     /// Milestone 5 D5: whether `uid` is forgotten.
     pub(crate) fn forgotten(&self, uid: &str) -> Result<bool> {
         forgotten_uid(&self.conn, uid)
+    }
+
+    /// Every forgotten uid (D5).
+    pub(crate) fn forgotten_set(&self) -> Result<std::collections::HashSet<String>> {
+        forgotten_set(&self.conn)
     }
 
     /// Windows cannot rename a file with an open SQLite handle. Close that connection, keeping
@@ -1499,14 +1516,7 @@ impl Raw {
 
     /// Every forgotten uid (D5): the readers and senders pass them over.
     pub fn forgotten_set(&self) -> Result<std::collections::HashSet<String>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT json_extract(body, '$.uid') FROM ops
-             WHERE type = 'forget' AND json_extract(body, '$.uid') IS NOT NULL",
-        )?;
-        let uids = st
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(uids)
+        forgotten_set(&self.conn)
     }
 
     /// Milestone 5 D5 (2b): every op of `uid` rewritten to `{"forgotten": job}`, in one write

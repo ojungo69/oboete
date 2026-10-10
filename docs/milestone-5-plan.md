@@ -346,6 +346,18 @@ vector も持ち越さない）、進み方と再開（step の数字ではな�
 （`--yes` の後の継続と `--continue`）、step 2 までの status。2b-2: 4〜7（rebuild・carry・hook の状態・
 完了の判定）と 8 の worker からの起動。下の試験は 1・3・4・8 が 2b-1、2・5・6・7 が 2b-2。
 
+2b-2 の実装で決めたこと（2026-10-11）:
+
+- 止めた job（7）は列を足さず状態で判定する。rebuild の後は行が残っても step 3 を記録し、op に本文が
+  なく knowledge.db がその uid を持つ job を status は「stopped: knowledge.db still holds it after its
+  rebuild」と言い、doctor は不健全とする。worker も `--continue` も、step 3 で本文のない job は続けない
+  ので、rebuild を繰り返さない。
+- worker が未完了の job を見るのは 10 分に 1 回まで（8）。見た時刻を見る前に `state/forget-continue`
+  に書き、起動しなかった回も書く。rebuild と restore の中の pass からは見ない。
+- aside の写し（5）は、purge が step 3 に進む回に、5 の規則で持ち越してから sidecar ごと全部消す。
+- `raw.db.quarantined-*` と `raw.db.restored.quarantined-*` も書き換える前の op の本文を持つ。backup の
+  segment と同じく 2c で扱う。
+
 試験（2b の分）:
 
 1. claim の uid の forget の後に purge を回すと、その uid の Claim op（再導出と recuration を含む）と

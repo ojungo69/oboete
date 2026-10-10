@@ -11,6 +11,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::io::{BufRead, IsTerminal, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
@@ -515,28 +516,74 @@ pub fn start(home: &Path, preview: &Preview) -> Result<(Status, Report)> {
         problems: vec![format!("the request logs were not reconciled: {e:#}")],
         ..Report::default()
     });
-    Ok((status_of(&request), report))
+    Ok((status_of(&request, PENDING), report))
 }
 
+const PENDING: &str = "hidden; physical purge pending";
+/// D5 item 7: past its rebuild, knowledge.db still holds the uid.
+const STOPPED: &str = "stopped: knowledge.db still holds it after its rebuild";
+
+/// Each job, its local state read from the stores (D5 item 9): a uid job past step 3 whose ops
+/// hold no text is purged here, or stopped while knowledge.db still holds its uid.
 pub fn status(home: &Path) -> Result<Vec<Status>> {
     if !crate::raw::exists(home) {
         return Ok(Vec::new());
     }
-    Ok(crate::raw::open(home)?
-        .forget_requests()?
+    let raw = crate::raw::open(home)?;
+    let mut past = Vec::new();
+    for (request, step) in raw.forget_jobs()? {
+        let purged = match &request.target {
+            Target::Uid { uid } => step >= 3 && !raw.uid_has_ops(uid)?,
+            _ => false,
+        };
+        past.push((request, purged));
+    }
+    let uids: HashSet<String> = past
         .iter()
-        .map(status_of)
+        .filter_map(|(r, purged)| match &r.target {
+            Target::Uid { uid } if *purged => Some(uid.clone()),
+            _ => None,
+        })
+        .collect();
+    let holding = knowledge_holding(home, &uids)?;
+    Ok(past
+        .iter()
+        .map(|(r, purged)| {
+            let local = match &r.target {
+                Target::Uid { uid } if *purged && holding.contains(uid) => STOPPED,
+                _ if *purged => "purged here; backups pending",
+                _ => PENDING,
+            };
+            status_of(r, local)
+        })
         .collect())
 }
 
-fn status_of(r: &Request) -> Status {
+fn status_of(r: &Request, local: &'static str) -> Status {
     Status {
         job: r.job.clone(),
         target: r.target.clone(),
         records: r.records.len(),
         started: r.started,
-        local: "hidden; physical purge pending",
+        local,
     }
+}
+
+/// Doctor's lines (D5 item 7): each stopped job. True when one is.
+pub(crate) fn doctor_lines(home: &Path) -> Result<(Vec<String>, bool)> {
+    let lines: Vec<String> = status(home)?
+        .into_iter()
+        .filter(|s| s.local == STOPPED)
+        .map(|s| {
+            format!(
+                "forget job {} stopped: knowledge.db still holds its uid after the rebuild (an op \
+                 it came from was missed); `oboete forget --status` lists it",
+                s.job
+            )
+        })
+        .collect();
+    let stopped = !lines.is_empty();
+    Ok((lines, stopped))
 }
 
 /// How long a purge tries to truncate raw.db-wal past the readers that hold it (D5, 2b).
@@ -545,20 +592,102 @@ const TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(test)]
 const TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
 
-/// What a purge did (D5, 2b): how many uid jobs it took and ops it rewrote, and the jobs whose
-/// step it could not finish (raw.db-wal would not truncate).
+/// What a purge did (D5, 2b).
 #[derive(Debug, Default, PartialEq)]
 pub struct Purged {
+    /// The uid jobs it went on with: not past step 3, or whose ops hold their text again.
     pub jobs: usize,
     pub ops: usize,
+    /// Jobs whose step 2 waits: readers kept raw.db-wal from truncating.
     pub unfinished: Vec<String>,
+    /// Whether knowledge.db was rebuilt without them.
+    pub rebuilt: bool,
+    /// The files of knowledge.db copies set aside (by a rebuild that stopped, or quarantined)
+    /// removed.
+    pub aside: usize,
+    /// Sessions whose shown value lost a forgotten uid's entry.
+    pub shown: usize,
+    /// Jobs whose uid knowledge.db still holds after the rebuild: an op it came from was missed.
+    pub stopped: Vec<String>,
 }
 
-/// D5 (2b): every uid job's ops that still hold its text rewritten without it, then raw.db-wal
-/// truncated, and the jobs' step 2 recorded. Each continuation checks the op log again, whatever
-/// the step says: a restore may have brought the bodies back. Only one runs at a time
-/// (`state/purge.lock`, not waited for: None when another holds it), and under the worker lock, as
-/// `oboete rebuild` takes it.
+/// Each uid job a purge goes on with, by state rather than step (D5 item 7): one not past step 3,
+/// or whose ops hold text again (a restore can bring the bodies back): its job, uid and step, and
+/// whether its ops hold text.
+fn due(raw: &crate::raw::Raw) -> Result<Vec<(String, String, i64, bool)>> {
+    let mut due = Vec::new();
+    for (request, step) in raw.forget_jobs()? {
+        if let Target::Uid { uid } = request.target {
+            let held = raw.uid_has_ops(&uid)?;
+            if held || step < 3 {
+                due.push((request.job, uid, step, held));
+            }
+        }
+    }
+    Ok(due)
+}
+
+/// The `uids` knowledge.db still holds a row of (D5 item 7): a claim, a derivation, a correction,
+/// an imported document or a vector key.
+fn knowledge_holding(home: &Path, uids: &HashSet<String>) -> Result<HashSet<String>> {
+    let path = home.join("knowledge.db");
+    let mut holding = HashSet::new();
+    if uids.is_empty() || !path.exists() {
+        return Ok(holding);
+    }
+    let k =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let tables: HashSet<String> = k
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let reads: Vec<String> = [
+        ("claims", "uid = ?1"),
+        ("derivations", "uid = ?1"),
+        ("corrections", "uid = ?1"),
+        ("imported", "uid = ?1"),
+        ("vector_keys", "kind IN ('c', 'k', 'p') AND key = ?1"),
+    ]
+    .into_iter()
+    .filter(|(table, _)| tables.contains(*table))
+    .map(|(table, row)| format!("EXISTS(SELECT 1 FROM {table} WHERE {row})"))
+    .collect();
+    if reads.is_empty() {
+        return Ok(holding);
+    }
+    let mut st = k.prepare(&format!("SELECT {}", reads.join(" OR ")))?;
+    for uid in uids {
+        if st.query_row([uid], |r| r.get(0))? {
+            holding.insert(uid.clone());
+        }
+    }
+    Ok(holding)
+}
+
+/// The files of knowledge.db copies set aside, sidecars too: a rebuild's that stopped and the
+/// quarantined (spec 1.7).
+fn aside_files(home: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(home)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            e.file_name().to_str().is_some_and(|n| {
+                n.starts_with("knowledge.db.quarantined-")
+                    || n.starts_with("knowledge.db.rebuilding-")
+            })
+        })
+        .map(|e| e.path())
+        .collect()
+}
+
+/// D5 (2b): each uid job purged by the state it finds (item 7). Step 2: its ops that hold its text
+/// rewritten without it and raw.db-wal truncated, under the worker lock as `oboete rebuild` takes
+/// it. Step 3: knowledge.db rebuilt from raw.db once for every job that it still holds (item 4),
+/// the copies of knowledge.db set aside carried from by the same rule and removed (item 5), and
+/// the uids taken out of every session's shown value (item 6). A uid knowledge.db holds after the
+/// rebuild came from an op the purge did not find: its job is stopped, reported and not done.
+/// Only one runs at a time (`state/purge.lock`, not waited for: None when another holds it).
 pub fn purge(home: &Path) -> Result<Option<Purged>> {
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
@@ -576,39 +705,117 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     if !crate::raw::exists(home) {
         return Ok(Some(purged));
     }
-    let due = |raw: &crate::raw::Raw| -> Result<Vec<(String, String, bool)>> {
-        let mut due = Vec::new();
-        for (request, step) in raw.forget_jobs()? {
-            if let Target::Uid { uid } = request.target {
-                let held = raw.uid_has_ops(&uid)?;
-                if held || step < 2 {
-                    due.push((request.job, uid, held));
-                }
-            }
-        }
-        Ok(due)
-    };
-    if due(&crate::raw::open(home)?)?.is_empty() {
-        return Ok(Some(purged));
-    }
-    let _worker = crate::worker::lock_asking(home)?;
-    let mut raw = crate::raw::open(home)?;
-    let due = due(&raw)?;
+    let due = due(&crate::raw::open(home)?)?;
     purged.jobs = due.len();
-    for (job, uid, held) in &due {
-        if *held {
+    let ready = if due.iter().any(|(_, _, step, held)| *step < 2 || *held) {
+        let _worker = crate::worker::lock_asking(home)?;
+        let mut raw = crate::raw::open(home)?;
+        for (job, uid, ..) in &due {
             purged.ops += raw.purge_uid(uid, job)?;
         }
+        let truncated = raw.truncate_wal(TRUNCATE_WAIT)?;
+        let mut ready = Vec::new();
+        for (job, uid, ..) in due {
+            if truncated && !raw.uid_has_ops(&uid)? {
+                raw.finish_forget_step(&job, 2)?;
+                ready.push((job, uid));
+            } else {
+                purged.unfinished.push(job);
+            }
+        }
+        ready
+    } else {
+        due.into_iter().map(|(job, uid, ..)| (job, uid)).collect()
+    };
+    // The worker lock and raw are let go: the rebuild takes them itself.
+    if ready.is_empty() {
+        return Ok(Some(purged));
     }
-    let truncated = raw.truncate_wal(TRUNCATE_WAIT)?;
-    for (job, uid, _) in due {
-        if truncated && !raw.uid_has_ops(&uid)? {
-            raw.finish_forget_step(&job, 2)?;
-        } else {
-            purged.unfinished.push(job);
+    let uids: HashSet<String> = ready.iter().map(|(_, uid)| uid.clone()).collect();
+    if !knowledge_holding(home, &uids)?.is_empty() {
+        crate::worker::rebuild(home).context("knowledge.db was not rebuilt")?;
+        purged.rebuilt = true;
+        #[cfg(test)]
+        if let Some(after) = AFTER_REBUILD.with(|hook| hook.borrow_mut().take()) {
+            after();
+        }
+    }
+    let holding = knowledge_holding(home, &uids)?;
+    if !aside_files(home).is_empty() {
+        let _worker = crate::worker::lock_asking(home)?;
+        let raw = crate::raw::open(home)?;
+        crate::embed_phase::carry_set_aside(home, &crate::knowledge::open(home)?, &raw)?;
+        for file in aside_files(home) {
+            std::fs::remove_file(&file)
+                .with_context(|| format!("{} was not removed", file.display()))?;
+            purged.aside += 1;
+        }
+    }
+    purged.shown =
+        crate::hookstate::update_all(home, "shown", |v| crate::hook::without_uids(v, &uids))?;
+    let raw = crate::raw::open(home)?;
+    for (job, uid) in ready {
+        // Recorded for a stopped job too: it is not tried again, and `status` says it stopped.
+        raw.finish_forget_step(&job, 3)?;
+        if holding.contains(&uid) {
+            purged.stopped.push(job);
         }
     }
     Ok(Some(purged))
+}
+
+/// How often a worker looks for a uid job its purge left (D5 item 8).
+const CONTINUE_EVERY_MS: i64 = 10 * 60 * 1000;
+
+#[cfg(test)]
+thread_local! {
+    /// The `oboete forget --continue` a worker on this thread would have started.
+    pub(crate) static CONTINUED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// What happens to knowledge.db right after a purge's rebuild on this thread.
+    static AFTER_REBUILD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// D5 item 8: from a worker's round, `oboete forget --continue` started when a uid job waits for
+/// its purge and none runs. Looked for at most once in ten minutes, the time of the last look in
+/// `state/forget-continue`, written before it: a look that fails is not made again at once.
+pub(crate) fn continue_due(home: &Path, raw: &crate::raw::Raw) {
+    let stamp = home.join("state").join("forget-continue");
+    let now = crate::db::now_ms();
+    let last = std::fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|t| t.trim().parse::<i64>().ok());
+    if last.is_some_and(|at| (0..CONTINUE_EVERY_MS).contains(&(now - at))) {
+        return;
+    }
+    if let Err(e) = std::fs::write(&stamp, now.to_string()) {
+        eprintln!("oboete: forget jobs not looked for: {e}");
+        return;
+    }
+    let waiting = due(raw).map_or_else(
+        |e| {
+            eprintln!("oboete: forget jobs not read: {e:#}");
+            false
+        },
+        |due| !due.is_empty(),
+    );
+    // A purge that runs goes on with them itself.
+    let free = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.join("state").join("purge.lock"))
+        .is_ok_and(|f| f.try_lock().is_ok());
+    if !waiting || !free {
+        return;
+    }
+    #[cfg(test)]
+    CONTINUED.set(CONTINUED.get() + 1);
+    // Reaped when it leaves, as a resident worker's viewer is.
+    #[cfg(not(test))]
+    if let Some(mut child) = crate::hook::spawn_detached(home, &["forget", "--continue"]) {
+        std::thread::spawn(move || child.wait());
+    }
 }
 
 /// What a reconcile found: lines skipped, copies it could not read or write. Never a refusal.
@@ -886,9 +1093,12 @@ pub(crate) fn logged(home: &Path) -> (Vec<Request>, Report) {
 /// What a uid's forget cannot reach yet (D5), printed before it asks.
 fn uid_limits(kind: &str) -> String {
     let mut out = String::from(
-        "Its ops in raw.db are rewritten without the text right after registration. knowledge.db \
-         and the backup segments keep it until their purge is built, hidden from every reader \
-         and never sent again.\n\
+        "Its ops in raw.db are rewritten without the text right after registration, then \
+         knowledge.db is rebuilt from raw.db without it. That takes minutes on a large store \
+         (a minute and a half for 70,000 records), and a session that starts meanwhile gets part \
+         of its memory or none; two forgets one after the other rebuild twice. The backup \
+         segments keep it until their purge is built, hidden from every reader and never sent \
+         again.\n\
          A packet already handed to an agent and a call already sent are not taken back.\n\
          The request is logged by this uid, without the text.\n",
     );
@@ -1026,7 +1236,7 @@ pub fn run(
     }
     // D5 (2b): registered, and purged in this process.
     match purge(home)
-        .context("its ops still hold the text; `oboete forget --continue` purges them")?
+        .context("the purge did not finish; `oboete forget --continue` goes on with it")?
     {
         Some(p) => say_purged(&p),
         None => {
@@ -1041,11 +1251,29 @@ pub fn run(
 
 fn say_purged(p: &Purged) -> Result<()> {
     println!("Ops rewritten without their text in raw.db: {}", p.ops);
+    if p.rebuilt {
+        println!("knowledge.db rebuilt from raw.db without it.");
+    }
+    if p.aside > 0 {
+        println!(
+            "Files of knowledge.db copies set aside, removed: {}",
+            p.aside
+        );
+    }
+    if p.shown > 0 {
+        println!("Sessions whose shown memory lost it: {}", p.shown);
+    }
     anyhow::ensure!(
         p.unfinished.is_empty(),
         "raw.db-wal did not truncate while readers held it: `oboete forget --continue` finishes \
          jobs {}",
         p.unfinished.join(", ")
+    );
+    anyhow::ensure!(
+        p.stopped.is_empty(),
+        "knowledge.db still holds the uid of jobs {} after the rebuild: an op it came from was \
+         missed, so they stopped and are not done",
+        p.stopped.join(", ")
     );
     Ok(())
 }
@@ -1384,8 +1612,8 @@ mod tests {
 
     /// D5 (2b-1): a purge rewrites what holds a forgotten uid's text, its claim's Claim op and the
     /// Correction that names it, or a document's Import op, to `{"forgotten": job}` with its
-    /// type, op_seq and batch kept; every other op stays byte for byte; step 2 is recorded, and the
-    /// next purge finds nothing to do.
+    /// type, op_seq and batch kept; every other op stays byte for byte; steps 2 and 3 are recorded,
+    /// and the next purge finds nothing to do.
     #[test]
     fn a_purge_rewrites_the_forgotten_uids_ops_and_no_other() {
         let mut s = crate::search::b::fixture::Store::new();
@@ -1408,8 +1636,11 @@ mod tests {
         }
         let jobs = uid_jobs(&home);
         let job = |u: &str| jobs.iter().find(|j| j.0 == u).unwrap().1.clone();
+        // A rebuild wants raw.db open nowhere else.
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
         let purged = purge(&home).unwrap().unwrap();
-        assert_eq!((purged.jobs, purged.ops), (2, 3));
+        assert_eq!((purged.jobs, purged.ops, purged.rebuilt), (2, 3, true));
         assert!(purged.unfinished.is_empty());
         let after = op_rows(&home);
         let mut rewritten = 0;
@@ -1438,11 +1669,7 @@ mod tests {
             }
         }
         assert_eq!(rewritten, 3);
-        assert!(
-            uid_jobs(&home).iter().all(|j| j.2 == 2),
-            "{:?}",
-            uid_jobs(&home)
-        );
+        assert!(uid_jobs(&home).iter().all(|j| j.2 == 3));
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
     }
 
@@ -1482,7 +1709,12 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(purge(&home).unwrap().unwrap().ops, 3);
+        // Rewritten as a purge's step 2 rewrites them, before any consumer has read them.
+        let rewritten: usize = uid_jobs(&home)
+            .iter()
+            .map(|(u, job, _)| s.raw.purge_uid(u, job).unwrap())
+            .sum();
+        assert_eq!(rewritten, 3);
         let skips = |home: &Path| -> Vec<String> {
             k(home)
                 .prepare("SELECT reason FROM claim_skips ORDER BY op_seq")
@@ -1519,10 +1751,12 @@ mod tests {
         assert_eq!(skips(&home), ["forgotten", "forgotten"]);
     }
 
-    /// D5 (2b-1, item 10): a claim op's text that no record holds leaves no byte in raw.db or
-    /// raw.db-wal once purged: the rewrite runs with secure_delete and the WAL is truncated.
+    /// D5 (2b, item 10, test 2): a claim op's text that no record holds leaves no byte in raw.db,
+    /// knowledge.db, their WALs or any file under `state/` once purged: the ops are rewritten with
+    /// secure_delete and the WAL truncated, knowledge.db is rebuilt without the claim, and every
+    /// session's shown value (OpenCode's receipts too, and a part a crashed change left) loses it.
     #[test]
-    fn a_purge_leaves_no_byte_of_the_claims_own_text_in_raw_db() {
+    fn a_purge_leaves_no_byte_of_the_claims_own_text_in_the_stores_or_the_hook_state() {
         const CANARY: &str = "canary-7f3a";
         let mut s = crate::search::b::fixture::Store::new();
         let seq = s.said("s", "github.com/o/r", 1_000, "We deploy on Fridays.");
@@ -1555,26 +1789,84 @@ mod tests {
             .unwrap();
         s.run();
         let home = s.home.path().to_owned();
-        let hits = |home: &Path| -> usize {
-            ["raw.db", "raw.db-wal"]
-                .iter()
-                .filter_map(|f| std::fs::read(home.join(f)).ok())
-                .map(|bytes| {
-                    bytes
-                        .windows(CANARY.len())
-                        .filter(|w| *w == CANARY.as_bytes())
-                        .count()
-                })
-                .sum()
+        // What sessions were shown: Claude Code's form, OpenCode's with a receipt not yet taken,
+        // and the part a change that crashed left in a session not shown it yet.
+        let entry = format!(r#"{{"fp":"f","body":"Deploys happen on Friday, {CANARY}."}}"#);
+        let kept = r#"{"fp":"g","body":"Kept."}"#;
+        let flat = format!(r#"{{"{uid}":{entry},"kept-uid":{kept}}}"#);
+        let receipts = format!(
+            r#"{{"entries":{{"{uid}":{entry}}},"pending":[{{"id":"{}","at":1,"changes":[{{"uid":"{uid}","before":null,"after":{entry}}}],"replace":{{"{uid}":{entry}}}}}]}}"#,
+            "0".repeat(32)
+        );
+        let before_crash = format!(r#"{{"kept-uid":{kept}}}"#);
+        crate::hookstate::update(&home, "claude", "s", "shown", |_| Some(flat)).unwrap();
+        crate::hookstate::update(&home, "claude", "crashed", "shown", |_| Some(before_crash))
+            .unwrap();
+        crate::hookstate::update(&home, "opencode", "oc", "shown", |_| Some(receipts)).unwrap();
+        let crashed = std::fs::read_dir(home.join("state/hooks/claude"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|d| {
+                !std::fs::read_to_string(d.join("shown"))
+                    .unwrap()
+                    .contains(&uid)
+            })
+            .unwrap();
+        std::fs::write(crashed.join(".shown.part"), &entry).unwrap();
+        // Every store file and every file under `state/` that holds the canary.
+        fn holding(dir: &Path, found: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    holding(&path, found);
+                } else if std::fs::read(&path)
+                    .unwrap()
+                    .windows(CANARY.len())
+                    .any(|w| w == CANARY.as_bytes())
+                {
+                    found.push(path);
+                }
+            }
+        }
+        let hits = |home: &Path| -> Vec<PathBuf> {
+            let mut found = Vec::new();
+            holding(&home.join("state"), &mut found);
+            for f in ["raw.db", "raw.db-wal", "knowledge.db", "knowledge.db-wal"] {
+                let path = home.join(f);
+                if std::fs::read(&path)
+                    .is_ok_and(|b| b.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()))
+                {
+                    found.push(path);
+                }
+            }
+            found
         };
-        assert!(hits(&home) > 0);
+        let before = hits(&home);
+        assert!(
+            before
+                .iter()
+                .any(|p| p.ends_with("knowledge.db") || p.ends_with("knowledge.db-wal"))
+        );
+        assert_eq!(
+            before
+                .iter()
+                .filter(|p| p.starts_with(home.join("state")))
+                .count(),
+            3
+        );
         start(
             &home,
             &preview(&home, Target::parse_uid(&uid).unwrap()).unwrap(),
         )
         .unwrap();
-        assert_eq!(purge(&home).unwrap().unwrap().ops, 1);
-        assert_eq!(hits(&home), 0);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.ops, purged.rebuilt, purged.shown), (1, true, 2));
+        assert_eq!(hits(&home), Vec::<PathBuf>::new());
+        let shown = crate::hookstate::value(&home, "claude", "s", "shown").unwrap();
+        assert!(shown.contains("kept-uid"), "{shown}");
     }
 
     /// D5 (2b-1): a purged Import op no longer names its source id, so the import's own check
@@ -1608,7 +1900,7 @@ mod tests {
 
     /// D5 (2b-1): while a reader holds raw.db-wal, the purge rewrites the ops but cannot truncate
     /// the WAL, which may still hold their old pages: step 2 is not recorded, and the next purge,
-    /// with the reader gone, records it.
+    /// with the reader gone, records it and goes on to step 3.
     #[test]
     fn a_wal_a_reader_holds_keeps_the_step() {
         let mut s = crate::search::b::fixture::Store::new();
@@ -1630,10 +1922,12 @@ mod tests {
         assert_eq!(uid_jobs(&home)[0].2, 1);
         reader.execute_batch("COMMIT").unwrap();
         drop(reader);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
         let purged = purge(&home).unwrap().unwrap();
-        assert_eq!((purged.jobs, purged.ops), (1, 0));
+        assert_eq!((purged.jobs, purged.ops, purged.rebuilt), (1, 0, true));
         assert!(purged.unfinished.is_empty());
-        assert_eq!(uid_jobs(&home)[0].2, 2);
+        assert_eq!(uid_jobs(&home)[0].2, 3);
     }
 
     /// D5 (2b-1): one purge at a time: while another holds `state/purge.lock`, a purge does
@@ -1660,6 +1954,239 @@ mod tests {
         assert_eq!(uid_jobs(&home)[0].2, 1);
         drop(held);
         assert_eq!(purge(&home).unwrap().unwrap().ops, 1);
+    }
+
+    /// Registers the forget of `uid` in `home`.
+    fn forget(home: &Path, uid: &str) {
+        start(
+            home,
+            &preview(home, Target::parse_uid(uid).unwrap()).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The knowledge.db copies set aside in `home`: a rebuild that stopped leaves one.
+    fn set_aside_copy(home: &Path, to: &Path) {
+        let k = crate::knowledge::open(home).unwrap();
+        k.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        drop(k);
+        std::fs::copy(home.join("knowledge.db"), to).unwrap();
+    }
+
+    /// D5 (2b, item 4, test 5): one rebuild takes every job past step 2: two forgets registered
+    /// before a purge leave knowledge.db together, and the next purge has nothing to do.
+    #[test]
+    fn one_rebuild_takes_every_job_registered_before_it() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let tabs = s.decided("github.com/o/r", 1_000, "Use tabs.", &[]);
+        let doc = s.imported("o1", "r", 2_000, "Deploy notes", "Notes.");
+        s.run();
+        let home = s.home.path().to_owned();
+        forget(&home, &tabs);
+        forget(&home, &doc);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.jobs, purged.rebuilt), (2, true));
+        assert!(purged.stopped.is_empty());
+        let uids = HashSet::from([tabs, doc]);
+        assert!(knowledge_holding(&home, &uids).unwrap().is_empty());
+        assert!(uid_jobs(&home).iter().all(|j| j.2 == 3));
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+        let local: Vec<&str> = status(&home).unwrap().iter().map(|s| s.local).collect();
+        assert_eq!(local, ["purged here; backups pending"; 2]);
+    }
+
+    /// D5 (2b, item 5, test 6): no forgotten uid's vector comes back, neither from the knowledge.db
+    /// the purge's rebuild sets aside nor from one an earlier rebuild left set aside when it
+    /// stopped; a kept claim's comes back, and the copy is removed.
+    #[test]
+    fn no_forgotten_vector_comes_back_from_a_copy_set_aside() {
+        let mut s = crate::search::b::fixture::Store::new();
+        // A quote shorter than its record: no record's vector is the claim's.
+        let said = "Parser caches stay in Redis, the team said.";
+        let seq = s.said("s", "github.com/o/r", 1_000, said);
+        let quote = "Parser caches stay in Redis";
+        let gone = s.claim(seq, quote, ("decision", "decided", "user"), &[]);
+        let kept = s.decided("github.com/o/r", 2_000, "Deploys run on Fridays.", &[]);
+        s.run();
+        crate::embed_phase::fixture::vectors(&s);
+        let home = s.home.path().to_owned();
+        let sha = |uid: &str| -> String {
+            crate::knowledge::open(&home)
+                .unwrap()
+                .query_row(
+                    "SELECT src_sha FROM vector_keys WHERE kind = 'c' AND key = ?1",
+                    [uid],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let (gone_sha, kept_sha) = (sha(&gone), sha(&kept));
+        let others: i64 = crate::knowledge::open(&home)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM vector_keys WHERE src_sha = ?1 AND key <> ?2",
+                [&gone_sha, &gone],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(others, 0);
+        set_aside_copy(
+            &home,
+            &home.join(format!("knowledge.db.rebuilding-{}", crate::db::now_ms())),
+        );
+        forget(&home, &gone);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let purged = purge(&home).unwrap().unwrap();
+        assert!(purged.rebuilt && purged.aside > 0, "{purged:?}");
+        assert!(aside_files(&home).is_empty());
+        let k = crate::knowledge::open(&home).unwrap();
+        let has = |sha: &str| -> bool {
+            k.query_row(
+                "SELECT EXISTS(SELECT 1 FROM vectors WHERE src_sha = ?1)",
+                [sha],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(!has(&gone_sha));
+        assert!(has(&kept_sha));
+    }
+
+    /// D5 (2b, item 7, test 6): a purge stopped after its rebuild, before it removed the copy set
+    /// aside, goes on without a second rebuild: the copy is removed and step 3 recorded.
+    #[test]
+    fn a_purge_stopped_after_its_rebuild_removes_the_copy_without_rebuilding_again() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        s.run();
+        let home = s.home.path().to_owned();
+        let copy = home.join("copy");
+        set_aside_copy(&home, &copy);
+        forget(&home, &uid);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        assert!(purge(&home).unwrap().unwrap().rebuilt);
+        // Stopped there: the old file left set aside, step 3 not recorded.
+        let aside = home.join(format!("knowledge.db.rebuilding-{}", crate::db::now_ms()));
+        std::fs::rename(&copy, aside).unwrap();
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute("UPDATE forget_jobs SET step = 2", [])
+            .unwrap();
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.jobs, purged.ops, purged.rebuilt), (1, 0, false));
+        assert!(purged.aside > 0);
+        assert!(aside_files(&home).is_empty());
+        assert_eq!(uid_jobs(&home)[0].2, 3);
+    }
+
+    /// D5 (2b, item 7, test 6): a restore that brings a purged op's text back is purged again,
+    /// though its job recorded step 3: the state decides, and a worker starts the continuation.
+    #[test]
+    fn a_text_a_restore_brings_back_is_purged_again() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        let home = s.home.path().to_owned();
+        let before = op_rows(&home);
+        forget(&home, &uid);
+        assert_eq!(purge(&home).unwrap().unwrap().ops, 1);
+        assert_eq!(uid_jobs(&home)[0].2, 3);
+        // The bodies an older raw.db held, back in place.
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        for (device, seq, _, body) in &before {
+            conn.execute(
+                "UPDATE ops SET body = ?3 WHERE device = ?1 AND op_seq = ?2",
+                rusqlite::params![device, seq, body],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        CONTINUED.set(0);
+        continue_due(&home, &s.raw);
+        assert_eq!(CONTINUED.get(), 1);
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.jobs, purged.ops), (1, 1));
+        assert_eq!(uid_jobs(&home)[0].2, 3);
+        assert!(!op_rows(&home).iter().any(|o| o.3.contains("Use tabs.")));
+    }
+
+    /// D5 (2b, item 8, test 7): a worker that finds a uid job its purge left starts `oboete forget
+    /// --continue`, at most once in ten minutes and not while a purge runs; none once it is done.
+    #[test]
+    fn the_worker_starts_a_continuation_once_in_ten_minutes() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        let home = s.home.path().to_owned();
+        forget(&home, &uid);
+        CONTINUED.set(0);
+        s.run();
+        assert_eq!(CONTINUED.get(), 1);
+        s.run();
+        assert_eq!(CONTINUED.get(), 1, "looked again within ten minutes");
+        let ago = |home: &Path| {
+            let at = crate::db::now_ms() - 11 * 60_000;
+            std::fs::write(home.join("state/forget-continue"), at.to_string()).unwrap();
+        };
+        ago(&home);
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(home.join("state/purge.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        s.run();
+        assert_eq!(CONTINUED.get(), 1, "started beside a purge that runs");
+        drop(held);
+        ago(&home);
+        s.run();
+        assert_eq!(CONTINUED.get(), 2);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        ago(&home);
+        crate::worker::run_once(&home).unwrap();
+        assert_eq!(CONTINUED.get(), 2, "started with nothing to continue");
+    }
+
+    /// D5 (2b, item 7): a uid knowledge.db still holds after the purge's rebuild came from an op the
+    /// purge did not find: the job stops, the purge fails saying so, `status` and doctor name it,
+    /// and neither a worker nor the next purge goes on with it.
+    #[test]
+    fn a_uid_the_rebuild_leaves_in_knowledge_db_stops_its_job() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        s.run();
+        let home = s.home.path().to_owned();
+        forget(&home, &uid);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let (at, left) = (home.clone(), uid.clone());
+        AFTER_REBUILD.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                crate::knowledge::open(&at)
+                    .unwrap()
+                    .execute(
+                        "INSERT INTO claims(uid, op_device, op_seq) VALUES (?1, 'd', 1)",
+                        [&left],
+                    )
+                    .unwrap();
+            }))
+        });
+        let purged = purge(&home).unwrap().unwrap();
+        let job = uid_jobs(&home)[0].1.clone();
+        assert_eq!(purged.stopped, std::slice::from_ref(&job));
+        assert!(say_purged(&purged).unwrap_err().to_string().contains(&job));
+        assert_eq!(status(&home).unwrap()[0].local, STOPPED);
+        let (lines, stopped) = doctor_lines(&home).unwrap();
+        assert!(stopped && lines.len() == 1 && lines[0].contains(&job));
+        CONTINUED.set(0);
+        continue_due(&home, &raw::open(&home).unwrap());
+        assert_eq!(CONTINUED.get(), 0);
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
     }
 
     /// D5: from the commit of its request, version 2 in both logs, a uid is passed over by every
