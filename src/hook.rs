@@ -1378,20 +1378,21 @@ fn shown_set(home: &Path, agent: &str, session: &str) -> serde_json::Map<String,
 fn injection_packet(home: &Path, cwd: &Path, session: Option<&str>) -> (String, Option<Start>) {
     // The failure line does not wait on the settings or raw.db: one that cannot be read may be
     // the failure it reports.
-    let (store, manifest) = (|| -> Result<(crate::raw::Raw, Option<Start>)> {
-        let settings = crate::capture::Settings::load(home)?;
-        let store = crate::raw::open_within(home, Duration::from_secs(2))?;
-        let labels = json!({"session_id": session.unwrap_or("unknown"), "cwd": cwd});
-        let manifest = checkout_manifest(home, &store, &labels, &settings, true)?;
-        Ok((store, manifest))
-    })()
-    .map_or_else(
-        |e| {
+    let store = crate::raw::open_within(home, Duration::from_secs(2))
+        .inspect_err(|e| eprintln!("oboete: manifest not read: {e:#}"))
+        .ok();
+    // A manifest that cannot be read keeps the store for the stop line (Codex on #438).
+    let manifest = store.as_ref().and_then(|store| {
+        (|| -> Result<Option<Start>> {
+            let settings = crate::capture::Settings::load(home)?;
+            let labels = json!({"session_id": session.unwrap_or("unknown"), "cwd": cwd});
+            checkout_manifest(home, store, &labels, &settings, true)
+        })()
+        .unwrap_or_else(|e| {
             eprintln!("oboete: manifest not read: {e:#}");
-            (None, None)
-        },
-        |(store, manifest)| (Some(store), manifest),
-    );
+            None
+        })
+    });
     let text = joined(home, store.as_ref(), manifest.as_ref());
     (text, manifest)
 }
@@ -4436,6 +4437,14 @@ mod tests {
         assert!(
             packet.starts_with("oboete: curation has waited for you since ")
                 && packet.contains("Parser errors go to stderr."),
+            "{packet}"
+        );
+        // A manifest that cannot be read still leaves the line (Codex on #438).
+        std::fs::write(home.join("knowledge.db"), "not a database").unwrap();
+        let packet = inject_text(home, Path::new(&p.c), Some("stopped-unread"));
+        assert!(
+            packet.starts_with("oboete: curation has waited for you since ")
+                && !packet.contains("Parser errors go to stderr."),
             "{packet}"
         );
     }
