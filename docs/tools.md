@@ -97,7 +97,8 @@ imported documents are, in the same phase and the same calls: claims first, then
 imported documents and records, as search lists them (Q2). The text is what their full-text index
 holds (Q4), made by the one function that writes that index, so the words full text finds and the
 vector come from the same text; it is gated, each value alone as its reader gates it (K6), and cut
-as every document's is (D8).
+as every document's is (D8). Its vector is cached by that text and where each value lies in it, so
+values that join to one text at other places, which gate differently, share no vector.
 
 V2. **Passed over.** A card or summary of an excluded repository, or made from a record of a
 session that touched one, is not sent, as a claim that quotes such a record is not (D13). The
@@ -145,6 +146,8 @@ list, count the cards and the summaries beside the claims, imported documents an
    a card and a summary hidden before they had one are not sent.
 5. A rule on a whole value of a card or summary, across its lines, holds in the text sent.
 6. Cards held for an answer are each sent again alone.
+7. A card or summary whose values join to another's text at other places gets its own vector, its
+   own gated text sent.
 
 ## Differences from claude-mem, and why
 

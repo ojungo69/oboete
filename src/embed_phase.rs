@@ -1642,7 +1642,7 @@ fn card_read(r: &rusqlite::Row) -> rusqlite::Result<Read> {
         doc: Doc {
             kind: "o",
             key: r.get(7)?,
-            sha: sha(&text),
+            sha: joined_sha(&text, &parts),
             repo: r.get(8)?,
             ts: r.get(9)?,
             session: r.get(10)?,
@@ -1666,7 +1666,7 @@ fn summary_read(r: &rusqlite::Row) -> rusqlite::Result<Read> {
         doc: Doc {
             kind: "s",
             key: r.get(1)?,
-            sha: sha(&text),
+            sha: joined_sha(&text, &parts),
             repo: r.get(2)?,
             ts: r.get(3)?,
             session: r.get(5)?,
@@ -1709,6 +1709,18 @@ pub(crate) fn composed_out(kind: &str, title: &str, body: &str) -> String {
 
 pub(crate) fn sha(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+/// `sha` of a text gated value by value (`joined_with`), with where each value lies: values that
+/// join to one text at other places gate differently, so they share no vector (Codex and
+/// CodeRabbit on #429).
+fn joined_sha(text: &str, parts: &[std::ops::Range<usize>]) -> String {
+    let mut h = Sha256::new();
+    h.update(text.as_bytes());
+    for p in parts {
+        h.update(format!("\0{}-{}", p.start, p.end));
+    }
+    format!("{:x}", h.finalize())
 }
 
 /// A claim a pending correction or tombstone touches: its text may change on the next pass.
@@ -2768,6 +2780,68 @@ mod tests {
             sent.iter()
                 .all(|t| !t.contains("123456") && !t.contains("654321")),
             "{sent:?}"
+        );
+    }
+
+    /// Codex and CodeRabbit on #429: a card's or a summary's vector is reused only by a row whose
+    /// values join to the same text at the same places. Values split differently gate differently
+    /// (`joined_with`), so the second row's own gated text is sent, not mapped to the first's.
+    #[test]
+    fn values_joined_to_one_text_at_other_places_share_no_vector() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let path = s.home.path().join("config.toml");
+        let rule =
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = '^ACME\\ncode=[0-9]{6}$' }]\n";
+        std::fs::write(&path, std::fs::read_to_string(&path).unwrap() + rule).unwrap();
+        let summary = |s: &mut Store, session: &str, fields: serde_json::Value| {
+            let seq = s.said(session, R, 1_000, "Open words.");
+            s.turn(
+                serde_json::json!({"agent": "claude", "session": session, "repo": R,
+                "ts": 2_000, "from": seq, "through": seq, "read": [], "goals": [],
+                "removed": [], "fields": fields, "skipped": false}),
+            );
+        };
+        let card = |s: &mut Store, session: &str, facts: serde_json::Value| {
+            let seq = s.said(session, R, 1_000, "Open words.");
+            s.cards(
+                seq,
+                seq,
+                serde_json::json!([{"type": "bugfix", "title": "Card", "facts": facts}]),
+                false,
+            );
+        };
+        // Neither value is the rule's whole: the code goes out with the rest.
+        summary(
+            &mut s,
+            "a",
+            serde_json::json!({"request": "Prefix\nACME\ncode=123456"}),
+        );
+        card(&mut s, "b", serde_json::json!(["ACME", "code=654321"]));
+        s.run();
+        embed_all(&s);
+        let first = stub.texts().concat();
+        assert!(first.iter().any(|t| t.contains("123456")), "{first:?}");
+        assert!(first.iter().any(|t| t.contains("654321")), "{first:?}");
+        let before = stub.requests();
+        // The same texts, one value the rule's whole in each.
+        summary(
+            &mut s,
+            "c",
+            serde_json::json!({"request": "Prefix", "learned": "ACME\ncode=123456"}),
+        );
+        card(&mut s, "d", serde_json::json!(["ACME\ncode=654321"]));
+        s.run();
+        embed_all(&s);
+        let later = stub.texts()[before..].concat();
+        assert!(later.iter().any(|t| t.starts_with("Prefix")), "{later:?}");
+        assert!(later.iter().any(|t| t.starts_with("Card")), "{later:?}");
+        assert!(
+            later
+                .iter()
+                .all(|t| !t.contains("123456") && !t.contains("654321")),
+            "{later:?}"
         );
     }
 
