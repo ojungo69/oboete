@@ -1359,6 +1359,51 @@ impl Raw {
         Ok(self.conn.query_row(DENIED_COUNT, [], |r| r.get(0))?)
     }
 
+    /// D5: `uid`'s ops in the op log when knowledge.db has not read them yet (right after an
+    /// import, or while the worker lags; Codex on #435): a claim's, its uid computed as the
+    /// consumer computes it, with the corrections that name it, or a document's import ops. Its
+    /// kind, how many ops and what to show first; None when the log holds none.
+    pub fn uid_ops(&self, uid: &str) -> Result<Option<(&'static str, usize, String)>> {
+        if uid.len() == 64 && uid.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let mut st = self
+                .conn
+                .prepare("SELECT body FROM ops WHERE type = 'claim'")?;
+            let mut rows = st.query([])?;
+            let (mut n, mut first) = (0, None);
+            while let Some(row) = rows.next()? {
+                let Ok(body) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(0)?)
+                else {
+                    continue;
+                };
+                if crate::claims::op_uid(&body).as_deref() == Some(uid) {
+                    n += 1;
+                    first.get_or_insert_with(|| body["body"].as_str().unwrap_or("").to_owned());
+                }
+            }
+            let corrections: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM ops WHERE type = 'correction'
+                 AND json_extract(body, '$.uid') = ?1",
+                [uid],
+                |r| r.get(0),
+            )?;
+            let ops = n + usize::try_from(corrections)?;
+            return Ok((n > 0).then(|| ("claim", ops, first.unwrap_or_default())));
+        }
+        let (n, title): (i64, Option<String>) = self.conn.query_row(
+            "SELECT COUNT(*), MIN(json_extract(body, '$.title')) FROM ops
+             WHERE type = 'import' AND json_extract(body, '$.uid') = ?1",
+            [uid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((n > 0).then(|| {
+            (
+                "document",
+                usize::try_from(n).unwrap_or(0),
+                title.unwrap_or_default(),
+            )
+        }))
+    }
+
     /// Milestone 5 D5: whether `uid`, a claim's or an imported document's, is forgotten.
     pub fn forgotten(&self, uid: &str) -> Result<bool> {
         forgotten_uid(&self.conn, uid)

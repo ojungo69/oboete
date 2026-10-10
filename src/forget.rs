@@ -323,8 +323,9 @@ pub fn preview(home: &Path, target: Target) -> Result<Preview> {
 }
 
 /// D5: what forgetting `uid` takes. knowledge.db is its index: a claim's derivations and
-/// corrections, or a document's import ops; a uid it holds neither of is refused. Nothing is
-/// written to either store.
+/// corrections, or a document's import ops; a uid it holds neither of is looked for in the op log,
+/// whose ops no consumer may have read yet, and refused when that has none. Nothing is written to
+/// either store.
 fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Preview> {
     use rusqlite::OptionalExtension;
     check_uid(&uid)?;
@@ -334,12 +335,12 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
     );
     anyhow::ensure!(!raw.forgotten(&uid)?, "{uid} is forgotten already");
     let path = home.join("knowledge.db");
-    anyhow::ensure!(
-        path.exists(),
-        "{uid} is neither a claim's nor a document's uid here"
-    );
-    let k =
-        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // A store with no knowledge.db yet reads as an empty one: the op log decides below.
+    let k = if path.exists() {
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
+    } else {
+        rusqlite::Connection::open_in_memory()?
+    };
     let has = |table: &str| -> Result<bool> {
         Ok(k.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1)",
@@ -421,6 +422,19 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
                 title,
             ));
         }
+    }
+    // Not in knowledge.db yet: no consumer has read its ops (right after an import, or while the
+    // worker lags), and the op log decides (Codex on #435).
+    if shown.is_none()
+        && let Some((kind, ops, first)) = raw.uid_ops(&uid)?
+    {
+        let shown_raw = UidPreview {
+            kind,
+            ops,
+            vectors: 0,
+            again: Vec::new(),
+        };
+        shown = Some((shown_raw, Some(first)));
     }
     let (mut uid_preview, sample) =
         shown.with_context(|| format!("{uid} is neither a claim's nor a document's uid here"))?;
@@ -1078,6 +1092,42 @@ mod tests {
         .unwrap();
         let p = preview(home, Target::parse_uid(&uid).unwrap()).unwrap();
         assert_eq!(p.uid.map(|u| u.again), Some(Vec::new()));
+    }
+
+    /// D5 (Codex on #435): a uid whose ops no consumer has read yet, right after an import or
+    /// while the worker lags, is found in the op log and forgotten; once the consumers read them,
+    /// search still passes it over.
+    #[test]
+    fn a_uid_knowledge_has_not_read_yet_is_forgotten_from_the_op_log() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs for the parser.", &[]);
+        let doc = s.imported("o1", "r", 3_000, "Deploy notes", "Deploy with the parser.");
+        let home = s.home.path().to_owned();
+        let p = preview(&home, Target::parse_uid(&uid).unwrap()).unwrap();
+        let shown = p.uid.as_ref().map(|u| (u.kind, u.ops));
+        assert_eq!(
+            (shown, p.sample.as_deref()),
+            (Some(("claim", 1)), Some("Use tabs for the parser."))
+        );
+        start(&home, &p).unwrap();
+        let p = preview(&home, Target::parse_uid(&doc).unwrap()).unwrap();
+        let shown = p.uid.as_ref().map(|u| (u.kind, u.ops));
+        assert_eq!(
+            (shown, p.sample.as_deref()),
+            (Some(("document", 1)), Some("Deploy notes"))
+        );
+        start(&home, &p).unwrap();
+        let e = preview(&home, Target::parse_uid(&"b".repeat(64)).unwrap()).unwrap_err();
+        assert!(e.to_string().contains("neither"), "{e}");
+        s.run();
+        let q = crate::search::b::Query {
+            text: "parser".into(),
+            all: true,
+            limit: 20,
+            ..Default::default()
+        };
+        let found: Vec<String> = s.query(&q).hits.into_iter().map(|h| h.key).collect();
+        assert!(!found.contains(&uid) && !found.contains(&doc));
     }
 
     /// D5: from the commit of its request, version 2 in both logs, a uid is passed over by every
