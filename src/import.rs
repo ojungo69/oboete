@@ -730,8 +730,6 @@ mod tests {
         assert_eq!(found, ["claude-mem:b62f07076e19:s20"]);
     }
 
-    /// D5: a document keeps the uid v1's import gave it, `<source>:<o|s|p><id>`, the source named
-    /// by the database's first migration time, so v1's judgments map to it.
     /// docs/claude-mem-import.md tests 1, 3 and 4: 13.35.0's database brings its summaries'
     /// notes, a merged worktree's rows under their project, and its work state, gated, oldest
     /// first, at their own times; the rows no write would take are counted; a second run adds
@@ -883,6 +881,8 @@ mod tests {
         assert_eq!(tasks(&crafted), [r#""Imported""#, r#""Written here""#]);
     }
 
+    /// D5: a document keeps the uid v1's import gave it, `<source>:<o|s|p><id>`, the source named
+    /// by the database's first migration time, so v1's judgments map to it.
     #[test]
     fn the_source_name_and_uids_match_the_v1_import() {
         let dir = tempfile::tempdir().unwrap();
