@@ -754,6 +754,7 @@ button('embedding.preview').click();await settle();
 assert.deepEqual(posted.at(-1),{url:'/api/embedding/preview',body:{choice:'local'}});
 let shown=text(section());
 assert(shown.includes('huggingface.co')&&shown.includes('BAAI’s bge-m3, MIT License')&&shown.includes('github.com'),'what is downloaded, from where');
+assert(shown.includes('2.3 GB')&&shown.includes('9 MB'),'sizes as the page says them elsewhere');
 assert(shown.includes('no text or search leaves this computer'),'what leaves afterwards');
 assert(button('embedding.start').disabled,'the method waits for the agreement');
 const agree=section().querySelectorAll('input').find(node=>node.dataset.field==='embedding.confirmed');

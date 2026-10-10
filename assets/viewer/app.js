@@ -1887,7 +1887,7 @@ const TEXT = {
   embedding_monthly_usd: ['USD a month beyond the free allowance, at most (more than 0)', '無料枠を超える費用の月上限（USD、0 より大きい値）'],
   embedding_usage: ['This month: {usd}. Last 24 hours: {requests} requests.', '今月の費用: {usd}。直近 24 時間: {requests} 回。'],
   embedding_usage_unknown: ['Usage could not be read.', '利用状況を読み込めませんでした。'],
-  embedding_key_file: ['Token file: {file}', 'トークンのファイル: {file}'],
+  embedding_key_file: ['Token: {state} ({file})', 'トークン: {state}（{file}）'],
   embedding_key_desc: ['Paste a Cloudflare API token limited to Workers AI. oboete chooses private storage, and the saved value is never shown. Saving sends nothing.', 'Workers AI 用に権限を絞った Cloudflare の API トークンを貼り付けます。専用の保存先は oboete が選び、保存した値は表示しません。保存時に送信は行いません。'],
   embedding_key_label: ['New Workers AI token', 'Workers AI の新しいトークン'],
 
@@ -3378,11 +3378,11 @@ const EMBEDDING_REFUSALS = { no_account: 'embedding_no_account', no_key: 'embedd
 let embeddingDraft = { choice: null, preview: null, confirmed: false, busy: false, error: null,
   status: null, watch: false, started: false };
 
-// A size in MB, or in GB from 1 GB up.
+// A size in MB, or in GB from 1 GB up, in units of 1,000 as the "about 2.3 GB" the page says.
 function bytesText(n) {
-  const gb = n >= 1024 ** 3;
+  const gb = n >= 1e9;
   return new Intl.NumberFormat(lang, { style: 'unit', unit: gb ? 'gigabyte' : 'megabyte',
-    maximumFractionDigits: gb ? 1 : 0 }).format(n / 1024 ** (gb ? 3 : 2));
+    maximumFractionDigits: gb ? 1 : 0 }).format(n / (gb ? 1e9 : 1e6));
 }
 
 function embeddingMessage(code) {
@@ -3505,7 +3505,7 @@ function workersAiSettings(f) {
         daily, saved(w.daily_requests.toLocaleString(lang))),
       el('label', 'field', el('span', null, t('embedding_monthly_usd')), monthly, saved(usdValue(w.monthly_usd)))),
     el('p', 'desc', usage),
-    el('p', 'desc', t(w.key === 'ok' ? 'key_ok' : 'key_missing'), ' ', t('embedding_key_file', { file: w.key_file })),
+    el('p', 'desc', t('embedding_key_file', { state: t(w.key === 'ok' ? 'key_ok' : 'key_missing'), file: w.key_file })),
     note(t('embedding_key_desc')),
     f.keyInput ? embeddingKeyField() : note(t('provider_key_unsupported')));
   details.open = (embeddingDraft.choice ?? f.embedding.provider) === 'workers-ai';
