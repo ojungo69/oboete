@@ -64,6 +64,8 @@ struct Viewer {
     recovery: crate::settings::recovery::Recovery,
     /// One synchronous maintenance operation and its last bounded receipt.
     maintenance: crate::settings::maintenance::Maintenance,
+    /// The embedder's preview, the choice running and the last one (W4).
+    embedding: crate::settings::embedding::Embedding,
     agents: crate::setup::agents::Agents,
     /// The page `--open` gave the browser opener, removed by the first request with the token.
     opener: Mutex<Option<PathBuf>>,
@@ -982,6 +984,7 @@ impl Viewer {
             moving: Mutex::new(()),
             recovery: crate::settings::recovery::Recovery::default(),
             maintenance: crate::settings::maintenance::Maintenance::default(),
+            embedding: crate::settings::embedding::Embedding::default(),
             agents: crate::setup::agents::Agents::default(),
             opener: Mutex::new(None),
             live: AtomicUsize::new(0),
@@ -1126,6 +1129,9 @@ impl Viewer {
             }
             ("POST", "/api/providers/test") => (MAX_BODY, |v, b, _| v.test_provider(b)),
             ("POST", "/api/key") => (MAX_KEY_BODY, |v, b, _| v.save_key(b)),
+            ("POST", "/api/embedding/preview") => (MAX_BODY, |v, b, _| v.embedding_preview(b)),
+            ("POST", "/api/embedding") => (MAX_BODY, Self::embedding_start),
+            ("POST", "/api/embedding/key") => (MAX_KEY_BODY, Self::save_embedding_key),
             ("POST", "/api/resume") => (MAX_BODY, |v, b, _| v.resume(b)),
             ("POST", "/api/privacy/exclude") => (MAX_BODY, |v, b, _| v.exclude(b)),
             ("POST", "/api/claims/correct") => (MAX_BODY, |v, b, _| v.claim_correct(b)),
@@ -1429,6 +1435,33 @@ impl Viewer {
         saved(crate::settings::save_key(&self.home, &self.saving, body))
     }
 
+    fn embedding_preview(&self, body: &[u8]) -> Response {
+        saved(self.embedding.preview(&self.home, body))
+    }
+
+    /// The choice taken; for `local` the answer waits for the download, while the page reads
+    /// its progress from `GET /api/embedding` on another connection. Its token is checked again
+    /// under config.lock, as a settings save's is.
+    fn embedding_start(&self, body: &[u8], given: &str) -> Response {
+        let authorized = || self.token_ok(Some(given));
+        saved(
+            self.embedding
+                .start(&self.home, &self.saving, &authorized, body),
+        )
+    }
+
+    /// The Workers AI token written to a new key file (W4); the answer never holds it. The
+    /// request's token is checked again under config.lock.
+    fn save_embedding_key(&self, body: &[u8], given: &str) -> Response {
+        let authorized = || self.token_ok(Some(given));
+        saved(crate::settings::embedding::save_key(
+            &self.home,
+            &self.saving,
+            &authorized,
+            body,
+        ))
+    }
+
     fn resume(&self, body: &[u8]) -> Response {
         saved(crate::settings::resume(&self.home, &self.saving, body))
     }
@@ -1627,6 +1660,13 @@ impl Viewer {
         if name == "maintenance" {
             return if query.is_empty() {
                 Response::json(&self.maintenance.show(&self.home))
+            } else {
+                Response::text(400, "status carries no query")
+            };
+        }
+        if name == "embedding" {
+            return if query.is_empty() {
+                Response::json(&self.embedding.status(&self.home))
             } else {
                 Response::text(400, "status carries no query")
             };
@@ -5495,6 +5535,9 @@ curate = false
             ("/api/providers/key", MAX_KEY_BODY),
             ("/api/providers/test/preview", MAX_BODY),
             ("/api/providers/test", MAX_BODY),
+            ("/api/embedding/preview", MAX_BODY),
+            ("/api/embedding", MAX_BODY),
+            ("/api/embedding/key", MAX_KEY_BODY),
         ] {
             save_guards(&v, path, cap, &body);
         }
@@ -5513,6 +5556,8 @@ curate = false
             "/api/providers/key?x=1",
             "/api/providers/test/preview?x=1",
             "/api/providers/test?x=1",
+            "/api/embedding?x=1",
+            "/api/embedding/key?x=1",
             "/api/doc?id=o1",
         ] {
             let r = request(&v, "POST", t, &[HOST, TOKEN, origin, json_type, cl], &body);
@@ -5672,6 +5717,23 @@ curate = false
         let after = v.route("GET", "/api/settings", &[HOST, TOKEN]);
         assert!(!String::from_utf8_lossy(&after.body).contains("canary"));
         assert_eq!(json_of(&after)["chain"][0]["key"], "ok");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// W4: the embedder's run is a read with the token and no query; a viewer that ran nothing
+    /// says so.
+    #[test]
+    fn the_embedders_run_is_read_with_the_token() {
+        let (dir, v) = viewer("embedding-status");
+        assert_eq!(v.route("GET", "/api/embedding", &[HOST]).status, 401);
+        assert_eq!(
+            v.route("GET", "/api/embedding?x=1", &[HOST, TOKEN]).status,
+            400
+        );
+        assert_eq!(
+            json_of(&v.route("GET", "/api/embedding", &[HOST, TOKEN])),
+            json!({"active": null, "last": null, "held": 0})
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -6913,6 +6975,39 @@ curate = false
         assert_eq!(file_token(home.path()).unwrap(), theirs_token);
         assert_eq!(crate::config::view(home.path()).unwrap().port.get(), theirs);
         assert_eq!(v.port(), port);
+    }
+
+    /// W4 (Codex's security review): a choice of embedder that passed its token's checks and then
+    /// waited for config.lock while `oboete view --new-token` held it writes nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn w4_a_choice_behind_the_commands_new_token_writes_nothing() {
+        let (home, port, old, v) = w6p_resident();
+        let config = home.path().join("config.toml");
+        let text = format!(
+            "[worker]\nresident = true\n[view]\nport = {port}\n[embedding]\nprovider = \"local\"\n"
+        );
+        std::fs::write(&config, &text).unwrap();
+        let (status, preview) = w6p_post(
+            &v,
+            &old,
+            "/api/embedding/preview",
+            &json!({"choice": "none"}),
+        );
+        assert_eq!(status, 200, "{preview}");
+        let held = crate::settings::config_lock(home.path()).unwrap();
+        let chooser = {
+            let (v, old) = (Arc::clone(&v), old.clone());
+            let posted = json!({"choice": "none", "confirmed": true,
+                "preview_key": preview["preview_key"]});
+            std::thread::spawn(move || w6p_post(&v, &old, "/api/embedding", &posted))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        write_token(home.path()).unwrap();
+        drop(held);
+        let (status, answer) = chooser.join().unwrap();
+        assert_eq!(status, 401, "{answer}");
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
     }
 
     /// W6 (Codex's final security review): a save that names no other port (the port it serves

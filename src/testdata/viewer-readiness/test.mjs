@@ -699,3 +699,166 @@ assert(text(apiUi.providerEditor(codex,null,new Node('article'))).includes('ク�
 ctx.ui.setLang('en');
 console.log('PASS: a codex entry may draw on credits');
 }
+// W4: the embedder's method is reviewed and agreed to before it is taken, a download's run is
+// shown, Workers AI's values are checked before a save, and the token goes only into its request.
+{
+vm.runInContext('globalThis.w4={formOf,saveBody,embeddingDraft:()=>embeddingDraft,TEXT,refreshEmbedding,reloadEmbedding};',ctx);
+const {w4}=ctx;
+const json=(value,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=>'application/json'},json:async()=>value});
+const embedding=(extra={})=>({provider:'none',
+  workers_ai:{account_id:null,key_file:'/home/u/CF_WORKERS_AI_KEY.md',key:'missing',daily_requests:200,monthly_usd:1,
+    usd_this_month:0,requests_today:0},
+  local:{unavailable:null,files:'not_downloaded',dir:'/home/u/.oboete/models/bge-m3',held:0},...extra});
+const settings=(extra={})=>({version:'v1',first_run:false,resident_supported:true,worker:{resident:true},view:{port:17373},
+  summary:{curate:false,language:'Japanese',window_tokens:6000,idle_minutes:10},paid_usd_per_month:0,gemini:null,usd_this_month:0,
+  stopped:null,inject:{session_start:true,session_start_note:true,per_prompt:false,correction:true,session_start_chars:6000,
+    per_prompt_chars:1500,correction_chars:800},capture:{store_prompts:false,tool_output:'full'},backup:{dir:null},
+  redaction:{extra_rules:[],allowlist:[]},chain:[],providers:[],warnings:[],key_input:true,
+  ranges:{session_start_chars:[0,20000],per_prompt_chars:[0,5000],correction_chars:[0,2000],window_tokens:[1000,100000],
+    idle_minutes:[1,120],paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535],
+    daily_requests:[1,100000]},
+  view_runtime:{port:17373,mode:'foreground'},embedding:embedding(),...extra});
+const posted=[];let answers=[];let settingsGets=0;let settingsAnswer=null;let runStatus=null;
+ctx.fetch=(url,options)=>{
+  if(options?.method==='POST'){posted.push({url,body:JSON.parse(options.body)});return Promise.resolve(answers.shift());}
+  if(url.startsWith('/api/settings?')){settingsGets++;return settingsAnswer??Promise.resolve(json(settings()));}
+  if(url.startsWith('/api/embedding?')&&runStatus)return Promise.resolve(json(runStatus));
+  return new Promise(()=>{});
+};
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+const panel=document.getElementById('panel');
+const section=()=>panel.querySelector('.embedding-settings');
+const select=()=>section().querySelectorAll('select').find(node=>node.dataset.field==='embedding.choice');
+const button=action=>section().querySelectorAll('button').find(node=>node.dataset.action===action);
+const field=name=>panel.querySelectorAll('input').find(node=>node.dataset.field===name);
+const type=(node,value)=>{node.value=value;for(const cb of node.listeners.input||[])cb({target:node});};
+const plain=value=>JSON.parse(JSON.stringify(value));
+ctx.ui.setLang('en');ctx.ui.setView('settings');
+
+// Every string of the section in both languages.
+for(const [key,[en,ja]] of Object.entries(w4.TEXT).filter(([key])=>key.startsWith('embedding_')||key.startsWith('group_search'))){
+  assert(en&&ja&&en!==ja,`${key} has its English and Japanese`);
+}
+let f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(section(),'Settings shows the embedder');
+assert.deepEqual(plain(select().options.map(node=>node.value)),['none','local','workers-ai']);
+assert.equal(select().value,'none');
+select().value='local';for(const cb of select().listeners.change)cb({target:select()});
+assert(text(section()).includes('not been downloaded'),'the local files state is shown');
+assert(!button('embedding.start'),'no taking before the review');
+const consent={choice:'local',dir:'/home/u/.oboete/models/bge-m3',check:false,
+  get:[{host:'huggingface.co',bytes:2283937811,source:'model'},{host:'github.com',bytes:9125960,source:'runtime'}]};
+const key='ab'.repeat(32);
+answers=[json({preview_key:key,consent})];
+button('embedding.preview').click();await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/embedding/preview',body:{choice:'local'}});
+let shown=text(section());
+assert(shown.includes('huggingface.co')&&shown.includes('BAAI’s bge-m3, MIT License')&&shown.includes('github.com'),'what is downloaded, from where');
+assert(shown.includes('2.3 GB')&&shown.includes('9 MB'),'sizes as the page says them elsewhere');
+assert(shown.includes('no text or search leaves this computer'),'what leaves afterwards');
+assert(button('embedding.start').disabled,'the method waits for the agreement');
+const agree=section().querySelectorAll('input').find(node=>node.dataset.field==='embedding.confirmed');
+agree.checked=true;for(const cb of agree.listeners.change)cb({target:agree});
+assert(!button('embedding.start').disabled);
+let finish;answers=[new Promise(resolve=>{finish=resolve;})];
+button('embedding.start').click();await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/embedding',body:{choice:'local',preview_key:key,confirmed:true}});
+assert(text(section()).includes('Downloading the model'),'the run shows while its answer waits');
+assert(select().disabled,'no other method meanwhile');
+const stopped={active:null,held:0,last:{choice:'local',phase:'failed',code:'embedding_no_space',held:0,get:2293063771}};
+settingsAnswer=Promise.resolve(json({},503));
+finish(json(stopped));
+await settle();await settle();await settle();
+assert(text(section()).includes('not enough free disk space'),'a stopped run says why');
+assert(!select().disabled);
+// The settings could not be read after it: the run stays watched, and the next poll reads them.
+assert(w4.embeddingDraft().watch,'a failed read after the answer keeps the run watched');
+settingsAnswer=null;runStatus=stopped;
+const before=settingsGets;
+await w4.refreshEmbedding();await settle();
+assert.equal(settingsGets,before+1,'the next poll reads the settings again');
+assert(!w4.embeddingDraft().watch);
+runStatus=null;
+
+// A refusal is worded, and points at the field it needs.
+select().value='workers-ai';for(const cb of select().listeners.change)cb({target:select()});
+answers=[json({code:'no_account',field:'embedding.choice'},422)];
+button('embedding.preview').click();await settle();
+assert(text(section()).includes('Cloudflare account ID first'));
+
+// Workers AI's values: checked before the save, the account lowercased, an empty one kept.
+f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettings();
+type(field('embedding.account_id'),'0123456789ABCDEF0123456789ABCDEF');
+type(field('embedding.monthly_usd'),'2.5');
+assert.deepEqual(plain(w4.saveBody().body.embedding),{account_id:'0123456789abcdef0123456789abcdef',daily_requests:200,monthly_usd:2.5});
+type(field('embedding.account_id'),'');
+assert.deepEqual(plain(w4.saveBody().body.embedding),{daily_requests:200,monthly_usd:2.5});
+type(field('embedding.account_id'),'0123');
+assert.equal(w4.saveBody().field,'embedding.account_id');
+type(field('embedding.account_id'),'');type(field('embedding.monthly_usd'),'0');
+assert.equal(w4.saveBody().field,'embedding.monthly_usd');
+type(field('embedding.monthly_usd'),'1');type(field('embedding.daily_requests'),'100001');
+assert.equal(w4.saveBody().field,'embedding.daily_requests');
+assert.equal(w4.formOf(settings({embedding:undefined})).embedding,null,'an older viewer shows no section');
+f=w4.formOf(settings({embedding:embedding({workers_ai:{...embedding().workers_ai,account_id:'ACCT',daily_requests:500000,monthly_usd:0}})}));
+ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.deepEqual(plain(w4.saveBody().body.embedding),{daily_requests:500000,monthly_usd:0},'values config.toml has pass as they are');
+
+// The token: typed into its field, sent once, never kept in the page's state.
+f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettings();
+const token=field('embedding.key');
+type(token,'SyntheticWorkersToken123');
+answers=[json({...settings({embedding:embedding({workers_ai:{...embedding().workers_ai,key:'ok'}})}),key_saved:{durable:true}})];
+const save=panel.querySelectorAll('button').find(node=>node.parentElement===token.parentElement);
+save.click();await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/embedding/key',body:{key:'SyntheticWorkersToken123',version:'v1'}});
+assert(!JSON.stringify(ctx.ui.getForm()).includes('SyntheticWorkersToken123'),'the token is not kept');
+assert(text(section()).includes('Key found'));
+f=w4.formOf(settings({key_input:false}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(!field('embedding.key')&&text(section()).includes('Linux and WSL'),'no form where a key cannot be registered');
+
+// A start whose answer was lost: the poll finds the run over, and the saved method is read again.
+f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettings();
+w4.embeddingDraft().watch=true;
+runStatus={active:null,held:0,last:{choice:'workers-ai',phase:'done',code:null,held:0,get:0}};
+let gets=settingsGets;
+await w4.refreshEmbedding();await settle();
+assert.equal(settingsGets,gets+1,'a watched run that ended reads the settings again');
+assert(!w4.embeddingDraft().watch);
+// That read fails: the run stays watched, and the next poll reads the settings again.
+w4.embeddingDraft().watch=true;settingsAnswer=Promise.resolve(json({},503));
+await w4.refreshEmbedding();await settle();
+assert(w4.embeddingDraft().watch,'a failed read keeps the ended run watched');
+settingsAnswer=null;gets=settingsGets;
+await w4.refreshEmbedding();await settle();
+assert.equal(settingsGets,gets+1,'the next poll reads them');
+assert(!w4.embeddingDraft().watch);
+// A choice started while that read waits, whose answer is lost, keeps its watch after the read.
+w4.embeddingDraft().watch=true;
+let release;settingsAnswer=new Promise(resolve=>{release=resolve;});
+const refreshing=w4.refreshEmbedding();await settle();
+w4.embeddingDraft().watch=true;
+release(json(settings()));await refreshing;await settle();
+assert(w4.embeddingDraft().watch,'a newer choice keeps its watch');
+settingsAnswer=null;
+await w4.refreshEmbedding();await settle();
+assert(!w4.embeddingDraft().watch);
+// Another save's answer replaces the form while the reload reads (a save made before the
+// download wrote the method): the reload reads again, and the method written last is shown.
+let late;settingsAnswer=new Promise(resolve=>{late=resolve;});
+gets=settingsGets;
+const reloading=w4.reloadEmbedding();
+ctx.ui.setForm(w4.formOf(settings({version:'v2'})));
+const local=json(settings({version:'v3',embedding:embedding({provider:'local'})}));
+settingsAnswer=Promise.resolve(local);late(local);await reloading;await settle();
+assert.equal(ctx.ui.getForm().embedding.provider,'local','a save answered during the reload does not keep an older method');
+assert.equal(settingsGets,gets+2,'the reload read again for the form then shown');
+settingsAnswer=null;runStatus=null;
+f=w4.formOf(settings({embedding:embedding({provider:'workers-ai'})}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(text(section()).includes('sent to the account saved here'),'the destination beside the account');
+
+ctx.ui.setLang('ja');f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(text(panel).includes('意味での検索')&&text(section()).includes('このパソコンで処理'),'Japanese section');
+ctx.ui.setLang('en');
+console.log('PASS: the embedder is reviewed, agreed and run; its values and token');
+}

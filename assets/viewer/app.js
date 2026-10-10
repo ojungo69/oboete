@@ -1835,6 +1835,61 @@ const TEXT = {
   maintenance_key: ["The preview is invalid. Prepare it again.", "プレビューが不正です。作成し直してください。"],
   maintenance_id: ["The operation identifier is invalid. Prepare a fresh operation.", "処理の識別情報が不正です。新しい処理を準備してください。"],
   maintenance_id_changed: ["That operation identifier belongs to another confirmed request. Inspect status.", "その識別情報は別の確認済み処理のものです。状況を確認してください。"],
+  group_search_h: ['Search by meaning', '意味での検索'],
+  group_search_desc: ['How memories are also found by what they mean, and where that work runs.', '記憶を意味でも探すための処理と、その処理を行う場所です。'],
+  embedding_h: ['Search by meaning (embeddings)', '意味での検索（埋め込み）'],
+  embedding_desc: ['oboete turns each memory into numbers (a vector), so a search also finds memories close in meaning. Full-text search works with every method.', 'oboete は各記憶を数値（ベクトル）に変換し、意味の近い記憶も検索で見つかるようにします。どの方法を選んでも全文検索は使えます。'],
+  embedding_choice: ['Method', '方法'],
+  embedding_none: ['Off (full-text search only)', '使わない（全文検索のみ）'],
+  embedding_local: ['On this computer (bge-m3)', 'このパソコンで処理（bge-m3）'],
+  embedding_workers_ai: ['Cloudflare Workers AI (bge-m3)', 'Cloudflare Workers AI（bge-m3）'],
+  embedding_none_desc: ['Nothing is sent anywhere to be turned into vectors. The vectors made so far stay stored.', 'ベクトルへの変換のための送信は行いません。これまでに作ったベクトルは保存したままにします。'],
+  embedding_local_desc: ['bge-m3 runs on this computer. It needs a one-time download of about 2.3 GB; after that, no text or search leaves this computer to be turned into vectors.', 'bge-m3 をこのパソコンで動かします。最初に一度だけ約 2.3 GB のダウンロードが必要です。その後は、ベクトルへの変換のために文章や検索語が外部へ送られることはありません。'],
+  embedding_workers_ai_desc: ['Each memory’s text (after masking) and each search query are sent to Cloudflare Workers AI under your account, within the limits set below.', '各記憶の文章（マスキング後）と検索語を、あなたのアカウントの Cloudflare Workers AI に送ります。送信は下で設定する上限の範囲内で行います。'],
+  embedding_files_ready: ['The model’s files are ready in {dir} ({size}).', 'モデルのファイルは {dir} に準備できています（{size}）。'],
+  embedding_files_not_downloaded: ['The model has not been downloaded yet.', 'モデルはまだダウンロードしていません。'],
+  embedding_files_incomplete: ['The model’s download is incomplete ({size} so far, in {dir}). Choosing this method again resumes it.', 'モデルのダウンロードが途中です（{dir} に {size}）。もう一度この方法を選ぶと続きから再開します。'],
+  embedding_files_changed: ['The model’s files in {dir} changed after they were checked. Choosing this method again checks them.', '{dir} にあるモデルのファイルが、検証後に変更されています。もう一度この方法を選ぶと検証し直します。'],
+  embedding_unavailable_no_feature: ['This oboete was built without on-computer embeddings, so this method cannot be used.', 'この oboete はパソコン上での処理を含めずにビルドされているため、この方法は使えません。'],
+  embedding_unavailable_no_runtime: ['ONNX Runtime is not provided for this computer, so this method cannot be used here.', 'このパソコン向けの ONNX Runtime が提供されていないため、ここではこの方法を使えません。'],
+  embedding_preview: ['Review this method', '内容を確認'],
+  embedding_confirm: ['I agree to the above.', '上記の内容に同意します。'],
+  embedding_start: ['Use this method', 'この方法にする'],
+  embedding_consent_none_files: ['The model’s files stay in {dir} ({size}); oboete does not delete them.', 'モデルのファイルは {dir} に残します（{size}）。oboete が削除することはありません。'],
+  embedding_consent_workers_ai: ['Each memory’s text (after masking) and each search query will be sent to Cloudflare Workers AI (bge-m3) under account {account}, using the token in {file}: at most {requests} requests a day, and at most {usd} a month beyond the free allowance.', '各記憶の文章（マスキング後）と検索語を、アカウント {account} の Cloudflare Workers AI（bge-m3）に、{file} のトークンを使って送ります。上限は 1 日 {requests} 回、無料枠を超える費用は月 {usd} までです。'],
+  embedding_consent_get: ['{size} will be downloaded from {host} ({source}).', '{host} から {size} をダウンロードします（{source}）。'],
+  embedding_consent_into: ['The files go into {dir}, and each one is checked against the SHA-256 value built into oboete.', 'ファイルは {dir} に保存し、それぞれを oboete に組み込まれた SHA-256 値で検証します。'],
+  embedding_consent_check: ['The files already in {dir} will be checked against the SHA-256 values built into oboete; a file that does not match is downloaded again.', '{dir} にあるファイルを、oboete に組み込まれた SHA-256 値で検証します。一致しないファイルはダウンロードし直します。'],
+  embedding_consent_local: ['After that, no text or search leaves this computer to be turned into vectors.', 'その後は、ベクトルへの変換のために文章や検索語が外部へ送られることはありません。'],
+  embedding_consent_ready: ['bge-m3 runs from the files in {dir}, which were checked when they were downloaded. No text or search leaves this computer to be turned into vectors.', '{dir} のファイル（ダウンロード時に検証済み）で bge-m3 を動かします。ベクトルへの変換のために文章や検索語が外部へ送られることはありません。'],
+  embedding_source_model: ['BAAI’s bge-m3, MIT License', 'BAAI の bge-m3、MIT ライセンス'],
+  embedding_source_runtime: ['Microsoft’s ONNX Runtime 1.28.0, MIT License', 'Microsoft の ONNX Runtime 1.28.0、MIT ライセンス'],
+  embedding_running: ['Downloading the model: {done} of {total}. Other settings can be saved meanwhile.', 'モデルをダウンロードしています（{done} / {total}）。その間もほかの設定は保存できます。'],
+  embedding_checking: ['Checking the model’s files. Other settings can be saved meanwhile.', 'モデルのファイルを検証しています。その間もほかの設定は保存できます。'],
+  embedding_done: ['The method was changed. Background processing uses it from its next run.', '方法を切り替えました。次回のバックグラウンド処理から使われます。'],
+  embedding_failed: ['The download stopped, and the method was not changed. The files downloaded so far are kept: choose the method again to resume. Running `oboete setup --embeddings local` in a terminal shows the details.', 'ダウンロードが止まったため、方法は変更していません。ここまでのファイルは保持しているので、もう一度選ぶと続きから再開します。ターミナルで `oboete setup --embeddings local` を実行すると詳細を確認できます。'],
+  embedding_busy: ['Another oboete is downloading or checking the model, or another change of method is running. Try again when it ends.', '別の oboete がモデルのダウンロードや検証を行っているか、別の切り替えを実行中です。終わってからもう一度お試しください。'],
+  embedding_no_space: ['There is not enough free disk space for the model (about 2.3 GB). Free some space, then choose the method again.', 'モデルを保存する空き容量（約 2.3 GB）が足りません。空きを作ってから、もう一度選んでください。'],
+  embedding_token: ['The page’s token changed during the download, so the method was not changed. The files are kept: choose the method again.', 'ダウンロード中に画面のトークンが変わったため、方法は変更していません。ファイルは保持しているので、もう一度選んでください。'],
+  embedding_write_failed: ['The files are ready, but the method could not be saved. Check config.toml, then try again.', 'ファイルは準備できましたが、方法を保存できませんでした。config.toml を確認してから、もう一度お試しください。'],
+  embedding_unknown: ['The result could not be confirmed. Check the saved method before choosing again.', '結果を確認できませんでした。保存済みの方法を確認してから、もう一度選んでください。'],
+  embedding_stale: ['The settings or the model’s files changed after the review. Review the method again.', '確認したあとで設定またはモデルのファイルが変わりました。もう一度内容を確認してください。'],
+  embedding_no_account: ['Enter and save your Cloudflare account ID first.', '先に Cloudflare のアカウント ID を入力して保存してください。'],
+  embedding_no_key: ['The Workers AI token file could not be read. Save a token first.', 'Workers AI のトークンのファイルを読み込めませんでした。先にトークンを保存してください。'],
+  embedding_local_unavailable: ['On-computer embeddings cannot be used with this build or on this computer.', 'この構成またはこのパソコンでは、パソコン上での処理を使えません。'],
+  embedding_confirmation: ['Review the method and agree to it first.', '先に内容を確認し、同意してください。'],
+  embedding_request_failed: ['The request could not be completed. Please try again.', '処理を完了できませんでした。もう一度お試しください。'],
+  embedding_index: ['This computer and Workers AI make the same vectors (bge-m3), so switching between them keeps every vector. Turning it off keeps them too.', 'このパソコンと Workers AI は同じベクトル（bge-m3）を作るため、切り替えてもベクトルはそのまま使えます。「使わない」にしてもベクトルは残ります。'],
+  embedding_workers_ai_h: ['Cloudflare Workers AI settings', 'Cloudflare Workers AI の設定'],
+  embedding_account: ['Account ID (32 characters)', 'アカウント ID（32 文字）'],
+  embedding_account_destination: ['While Workers AI is the method, memories and searches are sent to the account saved here.', 'Workers AI を使っている間は、ここに保存したアカウントへ記憶と検索語を送ります。'],
+  embedding_daily_requests: ['Requests a day, at most ({min}–{max})', '1 日のリクエスト数の上限（{min}〜{max}）'],
+  embedding_monthly_usd: ['USD a month beyond the free allowance, at most (more than 0)', '無料枠を超える費用の月上限（USD、0 より大きい値）'],
+  embedding_usage: ['This month: {usd}. Last 24 hours: {requests} requests.', '今月の費用: {usd}。直近 24 時間: {requests} 回。'],
+  embedding_usage_unknown: ['Usage could not be read.', '利用状況を読み込めませんでした。'],
+  embedding_key_file: ['Token: {state} ({file})', 'トークン: {state}（{file}）'],
+  embedding_key_desc: ['Paste a Cloudflare API token limited to Workers AI. oboete chooses private storage, and the saved value is never shown. Saving sends nothing.', 'Workers AI 用に権限を絞った Cloudflare の API トークンを貼り付けます。専用の保存先は oboete が選び、保存した値は表示しません。保存時に送信は行いません。'],
+  embedding_key_label: ['New Workers AI token', 'Workers AI の新しいトークン'],
 
 };
 
@@ -2390,6 +2445,10 @@ function formOf(s) {
       return value;
     }));
   const text = (v) => (v === null || v === undefined ? '' : String(v));
+  // A saved config answers a preview's key with `stale`: the review is made again.
+  embeddingDraft.preview = null;
+  embeddingDraft.confirmed = false;
+  const workers = s.embedding?.workers_ai;
   return {
     version: s.version,
     saved: { summary: { ...s.summary }, capture: { ...s.capture }, paid_usd_per_month: s.paid_usd_per_month, gemini: s.gemini,
@@ -2421,6 +2480,11 @@ function formOf(s) {
     warnings: s.warnings,
     ranges: s.ranges,
     keyInput: s.key_input,
+    embedding: s.embedding ? {
+      provider: s.embedding.provider, workers, local: s.embedding.local,
+      edit: { account_id: text(workers.account_id), daily_requests: String(workers.daily_requests),
+        monthly_usd: String(workers.monthly_usd) },
+    } : null,
   };
 }
 
@@ -3158,6 +3222,7 @@ async function showSettings() {
     form = formOf(s);
     drawSettings();
     setStatus('');
+    if (form?.embedding) void refreshEmbedding();
   };
 }
 
@@ -3300,6 +3365,296 @@ async function recoveryAction(action) {
   } finally {
     d.busy=false;
     if(view==='settings')drawSettings();
+  }
+}
+
+// --- Search by meaning (W4): the embedder's choice is reviewed, then taken once agreed --------
+
+const EMBEDDING_CHOICES = { none: 'embedding_none', local: 'embedding_local', 'workers-ai': 'embedding_workers_ai' };
+const EMBEDDING_REFUSALS = { no_account: 'embedding_no_account', no_key: 'embedding_no_key',
+  local_unavailable: 'embedding_local_unavailable', stale: 'embedding_stale', file_invalid: 'file_error' };
+// `status` is the viewer's GET /api/embedding; `watch` keeps reading it after a start whose answer
+// did not come back (a long download can outlast the browser's wait, while the viewer goes on).
+let embeddingDraft = { choice: null, preview: null, confirmed: false, busy: false, error: null,
+  status: null, watch: false, started: false };
+
+// A size in MB, or in GB from 1 GB up, in units of 1,000 as the "about 2.3 GB" the page says.
+function bytesText(n) {
+  const gb = n >= 1e9;
+  return new Intl.NumberFormat(lang, { style: 'unit', unit: gb ? 'gigabyte' : 'megabyte',
+    maximumFractionDigits: gb ? 1 : 0 }).format(n / (gb ? 1e9 : 1e6));
+}
+
+function embeddingMessage(code) {
+  const key = EMBEDDING_REFUSALS[code] || code;
+  return t(Object.hasOwn(TEXT, key) ? key : 'embedding_request_failed');
+}
+
+// What the viewer said the choice does, in the page's words.
+function embeddingConsent(consent) {
+  const lines = [];
+  if (consent.choice === 'none') {
+    lines.push(t('embedding_none_desc'));
+    if (consent.held > 0) lines.push(t('embedding_consent_none_files', { dir: consent.dir, size: bytesText(consent.held) }));
+  } else if (consent.choice === 'workers-ai') {
+    lines.push(t('embedding_consent_workers_ai', { account: consent.account, file: consent.key_file,
+      requests: consent.daily_requests.toLocaleString(lang), usd: usdValue(consent.monthly_usd) }));
+  } else if (consent.get.length) {
+    for (const d of consent.get) {
+      lines.push(t('embedding_consent_get', { size: bytesText(d.bytes), host: d.host, source: t(`embedding_source_${d.source}`) }));
+    }
+    lines.push(t('embedding_consent_into', { dir: consent.dir }), t('embedding_consent_local'));
+  } else if (consent.check) {
+    lines.push(t('embedding_consent_check', { dir: consent.dir }), t('embedding_consent_local'));
+  } else lines.push(t('embedding_consent_ready', { dir: consent.dir }));
+  return el('div', 'embedding-consent', ...lines.map((line) => el('p', 'desc', line)));
+}
+
+function embeddingRun(d) {
+  const active = d.status?.active;
+  if (active) {
+    if (!active.get) return el('p', 'pending', t('embedding_checking'));
+    const done = Math.min(Math.max(0, (d.status.held ?? 0) - active.held), active.get);
+    return el('p', 'pending', t('embedding_running', { done: bytesText(done), total: bytesText(active.get) }));
+  }
+  const last = d.status?.last;
+  if (!last || (last.phase === 'done' && !d.started)) return null;
+  if (last.phase === 'done') return el('p', 'desc', t('embedding_done'));
+  return el('p', 'error', embeddingMessage(last.code || 'embedding_unknown'));
+}
+
+// The part the poll redraws: the choice, its review and the run. The Workers AI fields stay, so a
+// token being typed is not cleared.
+function embeddingChoice(f) {
+  const d = embeddingDraft, e = f.embedding;
+  const locked = d.busy || Boolean(d.status?.active);
+  const choice = d.choice ?? e.provider;
+  const pick = el('select', null, ...Object.entries(EMBEDDING_CHOICES).map(([value, key]) => {
+    const option = el('option', null, t(key));
+    option.value = value;
+    return option;
+  }));
+  pick.value = choice;
+  pick.dataset.field = 'embedding.choice';
+  pick.disabled = locked;
+  pick.addEventListener('change', () => {
+    d.choice = pick.value;
+    d.preview = null;
+    d.confirmed = false;
+    d.error = null;
+    renderEmbedding();
+  });
+  const reviewed = d.preview?.choice === choice;
+  const preview = el('button', 'quiet', t('embedding_preview'));
+  preview.type = 'button';
+  preview.dataset.action = 'embedding.preview';
+  preview.disabled = locked;
+  preview.addEventListener('click', () => void embeddingAction('preview'));
+  const start = el('button', 'quiet', t('embedding_start'));
+  start.type = 'button';
+  start.dataset.action = 'embedding.start';
+  start.disabled = !d.confirmed || locked;
+  start.addEventListener('click', () => void embeddingAction('start'));
+  const consent = checkbox(d.confirmed, (value) => { d.confirmed = value; start.disabled = !value || locked; });
+  consent.dataset.field = 'embedding.confirmed';
+  consent.disabled = locked;
+  const local = e.local;
+  const files = local.unavailable ? t(`embedding_unavailable_${local.unavailable}`)
+    : t(`embedding_files_${local.files}`, { dir: local.dir, size: bytesText(local.held) });
+  return el('div', 'embedding-choice',
+    el('label', 'field', el('span', null, t('embedding_choice')), pick,
+      note(t('saved_value', { value: t(EMBEDDING_CHOICES[e.provider] || 'embedding_none') }))),
+    el('p', 'desc', t(`${EMBEDDING_CHOICES[choice]}_desc`)),
+    choice === 'local' ? el('p', 'desc', files) : null,
+    reviewed ? embeddingConsent(d.preview.consent) : null,
+    reviewed ? el('label', 'check', consent, t('embedding_confirm')) : null,
+    reviewed ? start : preview,
+    embeddingRun(d),
+    d.error ? el('p', 'error', embeddingMessage(d.error)) : null);
+}
+
+function renderEmbedding() {
+  if (!form?.embedding || view !== 'settings') return;
+  const block = $('panel').querySelector('.embedding-choice');
+  if (!block) return;
+  const focused = block.contains(document.activeElement) ? document.activeElement : null;
+  const key = focused?.dataset.action ? ['action', focused.dataset.action]
+    : focused?.dataset.field ? ['field', focused.dataset.field] : null;
+  block.replaceChildren(...embeddingChoice(form).childNodes);
+  const next = key && block.querySelector(`[data-${key[0]}="${key[1]}"]`);
+  if (next && !next.disabled) next.focus({ preventScroll: true });
+}
+
+function workersAiSettings(f) {
+  const w = f.embedding.workers, edit = f.embedding.edit;
+  const saved = (value) => note(t('saved_value', { value }));
+  const account = input('text', edit.account_id, '', 'embedding.account_id', (v) => { edit.account_id = v; });
+  const daily = input('number', edit.daily_requests, '', 'embedding.daily_requests', (v) => { edit.daily_requests = v; });
+  const [least, most] = f.ranges.daily_requests;
+  [daily.min, daily.max] = [least, most];
+  const monthly = input('number', edit.monthly_usd, '', 'embedding.monthly_usd', (v) => { edit.monthly_usd = v; });
+  monthly.step = 'any';
+  monthly.inputMode = 'decimal';
+  const usage = w.usd_this_month === null || w.requests_today === null ? t('embedding_usage_unknown')
+    : t('embedding_usage', { usd: usdValue(w.usd_this_month), requests: w.requests_today.toLocaleString(lang) });
+  const details = el('details', 'workers-ai', el('summary', null, t('embedding_workers_ai_h')),
+    el('label', 'field', el('span', null, t('embedding_account')), account, saved(w.account_id ?? '—')),
+    f.embedding.provider === 'workers-ai' ? note(t('embedding_account_destination')) : null,
+    el('div', 'grid',
+      el('label', 'field', el('span', null, t('embedding_daily_requests', { min: least.toLocaleString(lang), max: most.toLocaleString(lang) })),
+        daily, saved(w.daily_requests.toLocaleString(lang))),
+      el('label', 'field', el('span', null, t('embedding_monthly_usd')), monthly, saved(usdValue(w.monthly_usd)))),
+    el('p', 'desc', usage),
+    el('p', 'desc', t('embedding_key_file', { state: t(w.key === 'ok' ? 'key_ok' : 'key_missing'), file: w.key_file })),
+    note(t('embedding_key_desc')),
+    f.keyInput ? embeddingKeyField() : note(t('provider_key_unsupported')));
+  details.open = (embeddingDraft.choice ?? f.embedding.provider) === 'workers-ai';
+  return details;
+}
+
+function embeddingSection(f) {
+  if (!f.embedding) return null;
+  return el('section', 'embedding-settings',
+    el('h3', null, t('embedding_h')),
+    el('p', 'desc', t('embedding_desc')),
+    embeddingChoice(f),
+    el('p', 'desc', t('embedding_index')),
+    workersAiSettings(f));
+}
+
+// As a provider's key field: the token is only in the field and the one request that carries it.
+function embeddingKeyField() {
+  const i = el('input');
+  i.type = 'text';
+  i.autocomplete = 'off';
+  i.spellcheck = false;
+  i.autocapitalize = 'off';
+  i.placeholder = t('key_placeholder');
+  i.dataset.field = 'embedding.key';
+  i.setAttribute('aria-label', t('embedding_key_label'));
+  const save = el('button', 'small', t('key_save'));
+  save.type = 'button';
+  save.disabled = true;
+  i.addEventListener('input', () => { save.disabled = !i.value; });
+  i.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); if (!save.disabled) save.click(); }
+  });
+  save.addEventListener('click', () => {
+    const body = { key: i.value, version: form.version };
+    i.value = '';
+    void embeddingKeySave(save, body);
+  });
+  return el('div', 'key-input', i, save);
+}
+
+async function embeddingKeySave(button, body) {
+  const mine = form;
+  const fields = button.closest('.settings');
+  button.disabled = true;
+  fields.inert = true;
+  try {
+    const { res, answer } = await memoryWrite('embedding/key', body);
+    if (!currentSettings(mine)) return;
+    if (res.status === 409) return reloadProviderSettings(await api('settings'));
+    if (!res.ok) {
+      fields.inert = false;
+      if (answer.field) markInvalid(answer.field, fields);
+      setStatus(providerReason(answer.code || PROVIDER_HTTP_ERRORS[res.status], 'key'), true, lang);
+      return;
+    }
+    form = mergeProviderSettings(answer, mine, { op: 'embedding-key' });
+    drawSettings();
+    setStatus(t(answer.key_saved?.durable ? 'key_saved' : 'key_not_durable'), !answer.key_saved?.durable, lang);
+  } catch {
+    if (currentSettings(mine)) setStatus(t('network_failed'), true, lang);
+  } finally {
+    button.disabled = false;
+    fields.inert = false;
+  }
+}
+
+// After a choice: the saved method and the files' state as they are now; typed values stay.
+// Another save's answer can replace the form while this reads, and be older or newer than this
+// read (a save made before a download wrote the method), so this reads again for the form then
+// shown until a read comes back with the form as it was. It answers whether it read them: a run
+// whose read failed stays watched, so the next poll reads them again.
+async function reloadEmbedding() {
+  let mine, settings;
+  do {
+    mine = form;
+    settings = await api('settings').catch(() => null);
+    if (!settings || settings.error || view !== 'settings') return false;
+  } while (form !== mine);
+  form = mergeProviderSettings(settings, mine, { op: 'embedding' });
+  drawSettings();
+  return true;
+}
+
+async function refreshEmbedding() {
+  const d = embeddingDraft;
+  try {
+    const status = await api('embedding');
+    // A run seen running, or a start whose answer did not come back (`none` and `workers-ai`
+    // are never seen running), has ended: the saved method is read again.
+    const ended = (Boolean(d.status?.active) || d.watch) && !status.active && !d.busy;
+    d.status = status;
+    if (ended) {
+      // Cleared before the read, so a choice started meanwhile keeps its own watch.
+      d.watch = false;
+      if (!(await reloadEmbedding())) d.watch = true;
+    } else renderEmbedding();
+  } catch {
+    // The next poll reads it again.
+  }
+}
+
+function embeddingRefused(d, res, answer) {
+  d.preview = null;
+  d.confirmed = false;
+  d.error = answer.code || PROVIDER_HTTP_ERRORS[res.status] || 'embedding_request_failed';
+  if (answer.code === 'no_account') markInvalid('embedding.account_id');
+}
+
+async function embeddingAction(action) {
+  const d = embeddingDraft, mine = form;
+  if (d.busy || d.status?.active || !mine?.embedding) return;
+  const choice = d.choice ?? mine.embedding.provider;
+  const reviewed = d.preview?.choice === choice ? d.preview : null;
+  if (action === 'start' && !(reviewed && d.confirmed)) return;
+  d.busy = true;
+  d.error = null;
+  d.preview = null;
+  d.confirmed = false;
+  if (action === 'start') d.started = true;
+  if (action === 'start' && choice === 'local') {
+    // Until the first poll: what the review said is to download.
+    const get = reviewed.consent.get.reduce((sum, x) => sum + x.bytes, 0);
+    d.status = { ...d.status, active: { choice, phase: 'running', held: mine.embedding.local.held, get },
+      held: mine.embedding.local.held };
+  }
+  renderEmbedding();
+  try {
+    if (action === 'preview') {
+      const { res, answer } = await memoryWrite('embedding/preview', { choice });
+      if (!currentSettings(mine)) return;
+      if (res.ok && /^[0-9a-f]{64}$/.test(answer.preview_key ?? '') && answer.consent?.choice === choice) {
+        d.preview = { choice, key: answer.preview_key, consent: answer.consent };
+      } else embeddingRefused(d, res, answer);
+      return;
+    }
+    const { res, answer } = await memoryWrite('embedding', { choice, preview_key: reviewed.key, confirmed: true });
+    if (res.ok) d.status = answer;
+    else {
+      embeddingRefused(d, res, answer);
+      d.status = await api('embedding').catch(() => null);
+    }
+    if (res.ok && !(await reloadEmbedding())) d.watch = true;
+  } catch {
+    if (action === 'start') d.watch = true;
+    else d.error = 'embedding_request_failed';
+  } finally {
+    d.busy = false;
+    renderEmbedding();
   }
 }
 
@@ -3636,6 +3991,7 @@ function providerValidation(draft) {
 // index changes, never by the first entry with a matching name.
 function preserveSettingsDrafts(next, mine) {
   for (const key of ['worker', 'view', 'summary', 'paid_usd_per_month', 'inject', 'capture', 'backup', 'redaction']) next[key] = mine[key];
+  if (next.embedding && mine.embedding) next.embedding.edit = mine.embedding.edit;
   next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
   const groups = new Map(next.chain.map((r) => [r.name, r]));
   next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {
@@ -4199,6 +4555,21 @@ function saveBody() {
   const [least, most] = form.ranges.paid_usd_per_month;
   if (paid === '' || !Number.isFinite(cap) || cap < least || (most !== null && cap > most)) return { field: 'paid_usd_per_month' };
   if (!['none', 'before-subscriptions', 'after-subscriptions'].includes(form.gemini)) return { field: 'gemini' };
+  let embedding = null;
+  if (form.embedding) {
+    const e = form.embedding.edit, w = form.embedding.workers;
+    // A value config.toml has already, left as it is, is sent as it is, in range or not; an
+    // account is sent only when typed (empty keeps the saved one: the page cannot remove it).
+    const kept = (typed, had) => typed.trim() === String(had);
+    const account = e.account_id.trim().toLowerCase();
+    const typed = account !== '' && !kept(e.account_id, w.account_id ?? '');
+    if (typed && !/^[0-9a-f]{32}$/.test(account)) return { field: 'embedding.account_id' };
+    const daily = kept(e.daily_requests, w.daily_requests) ? w.daily_requests : whole(e.daily_requests, ...form.ranges.daily_requests);
+    if (Number.isNaN(daily)) return { field: 'embedding.daily_requests' };
+    const monthly = kept(e.monthly_usd, w.monthly_usd) ? w.monthly_usd : Number(e.monthly_usd.trim());
+    if (monthly !== w.monthly_usd && (e.monthly_usd.trim() === '' || !Number.isFinite(monthly) || monthly <= 0)) return { field: 'embedding.monthly_usd' };
+    embedding = { ...(typed ? { account_id: account } : {}), daily_requests: daily, monthly_usd: monthly };
+  }
   const chain = [];
   for (const r of form.chain) {
     // Empty follows the curator's own value; a value config.toml has already stays as it is.
@@ -4232,6 +4603,7 @@ function saveBody() {
       capture: { store_prompts: form.capture.store_prompts, tool_output: form.capture.tool_output },
       ...(!form.backup.reset && form.backup.edit === (form.backup.dir ?? '') ? {} : { backup: { dir: form.backup.reset ? null : form.backup.edit || null } }),
       redaction: redaction.value,
+      ...(embedding ? { embedding } : {}),
       chain,
     },
   };
@@ -4592,6 +4964,7 @@ function drawSettings() {
         el('div', 'scroll', el('table', 'chain', el('thead', null, head), rows))),
       el('section', null,
         el('h3', null, t('stopped_h')), el('p', 'desc', t('stopped_desc')), stoppedState())),
+    settingsGroup('search', Boolean(embeddingDraft.status?.active), embeddingSection(f)),
     settingsGroup('privacy', false, redactionSection(f), privacySection(f)),
     settingsGroup('computer', f.firstRun,
       el('section', null,
@@ -4734,6 +5107,8 @@ let pollFailureNotice = null;
 
 async function pollMaintenance() {
   if(view==='settings' && form?.maintenance)await refreshMaintenance(form.maintenance);
+  const d = embeddingDraft;
+  if (view === 'settings' && form?.embedding && (d.busy || d.watch || d.status?.active)) await refreshEmbedding();
 }
 async function poll() {
   if (polling || document.visibilityState !== 'visible') return;

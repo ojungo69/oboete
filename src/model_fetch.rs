@@ -24,6 +24,33 @@ const MARGIN: u64 = 64 * 1024 * 1024;
 /// request, and each read. The whole download has no limit, as 2.3 GB on a slow line outlasts any.
 const IDLE: Duration = Duration::from_secs(60);
 
+/// Why a fetch did not start, for a caller that answers with a code (the settings page, W4).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Stopped {
+    /// Another oboete holds the model directory's lock.
+    Busy(PathBuf),
+    /// The disk holds less than the download needs.
+    NoSpace { needed: u64, available: u64 },
+}
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Stopped::Busy(dir) => write!(
+                f,
+                "another oboete is fetching or verifying the model in {}: run it again when it ends",
+                dir.display()
+            ),
+            Stopped::NoSpace { needed, available } => write!(
+                f,
+                "model download needs {needed} bytes; {available} bytes available"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Stopped {}
+
 #[derive(Clone, Copy)]
 pub struct Artifact {
     pub name: &'static str,
@@ -266,10 +293,7 @@ fn fetch_held(
         pending.push(artifact);
     }
     if let Some(available) = free(dir) {
-        ensure!(
-            available >= needed,
-            "model download needs {needed} bytes; {available} bytes available"
-        );
+        ensure!(available >= needed, Stopped::NoSpace { needed, available });
     }
     let mut config = ureq::Agent::config_builder()
         .timeout_global(None)
@@ -602,10 +626,7 @@ fn lock(dir: &Path) -> Result<File> {
         .open(plain_path(dir, ".lock")?)?;
     match crate::worker::try_lock(&file) {
         Ok(()) => Ok(file),
-        Err(std::fs::TryLockError::WouldBlock) => bail!(
-            "another oboete is fetching or verifying the model in {}: run it again when it ends",
-            dir.display()
-        ),
+        Err(std::fs::TryLockError::WouldBlock) => bail!(Stopped::Busy(dir.to_owned())),
         Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
     }
 }
@@ -827,7 +848,9 @@ mod tests {
             fetch_with(dir.path(), &artifacts, |_| None),
             verify(dir.path(), &artifacts),
         ] {
-            assert!(format!("{:#}", result.unwrap_err()).contains("another oboete"));
+            let error = result.unwrap_err();
+            assert!(format!("{error:#}").contains("another oboete"));
+            assert!(matches!(error.downcast_ref(), Some(Stopped::Busy(_))));
         }
         drop(held);
         fetch_with(dir.path(), &artifacts, |_| None).unwrap();
@@ -869,6 +892,11 @@ mod tests {
             error.to_string(),
             "model download needs 67108867 bytes; 67108866 bytes available"
         );
+        // The settings page answers it with a code (W4).
+        assert!(matches!(
+            error.downcast_ref::<Stopped>(),
+            Some(Stopped::NoSpace { .. })
+        ));
         assert!(stub.requests().is_empty());
         assert_eq!(fs::read(&part).unwrap(), b"he");
         // A file that verifies needs no space beyond the margin, and no request.
