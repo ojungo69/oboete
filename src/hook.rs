@@ -165,7 +165,9 @@ fn run_io(
             Err(e) => {
                 // docs/unwritten.md U2: what this call would have written, built without it.
                 match built(home, None, agent, event, &payload, db::now_ms(), &settings) {
-                    Ok((built, _)) => keep(home, agent, &built, &settings),
+                    Ok((built, _)) => {
+                        keep(home, agent, &built, &settings);
+                    }
                     Err(b) => eprintln!("oboete: events not kept: {b:#}"),
                 }
                 return Err(e);
@@ -695,6 +697,18 @@ pub fn record(
         0
     });
     let (built, prompt) = built(home, Some(raw), agent, event, payload, ts, settings)?;
+    // docs/unwritten.md U3: older kept files a later call writes back keep this call's events
+    // behind them, so the seqs follow the events' order (Codex on #440).
+    if !built.is_empty()
+        && crate::unwritten::counts(home).0 > 0
+        && keep(home, agent, &built, settings)
+    {
+        return Ok(Recorded {
+            events: Vec::new(),
+            prompt,
+            written_back,
+        });
+    }
     let mut appended = Vec::new();
     for (n, b) in built.iter().enumerate() {
         match raw.append_with_ledger(
@@ -763,14 +777,21 @@ fn built(
 
 /// docs/unwritten.md U1: the events a failed write did not append, kept for a later write. When
 /// they cannot be, an agy step claimed for them is given back, so a later hook records it.
-fn keep(home: &Path, agent: &str, unwritten: &[Built], settings: &crate::capture::Settings) {
+fn keep(
+    home: &Path,
+    agent: &str,
+    unwritten: &[Built],
+    settings: &crate::capture::Settings,
+) -> bool {
     let events: Vec<_> = unwritten.iter().map(|b| b.captured.clone()).collect();
-    if let Err(e) = crate::unwritten::keep(home, &events, settings.rules.version()) {
+    let kept = crate::unwritten::keep(home, &events, settings.rules.version());
+    if let Err(e) = &kept {
         eprintln!("oboete: events not kept: {e:#}");
         for (session, step) in unwritten.iter().filter_map(|b| b.step.as_ref()) {
             crate::hookstate::take(home, agent, session, &format!("step-{step}"));
         }
     }
+    kept.is_ok()
 }
 
 /// What SessionStart shows for the checkout `labels` names (Claude Code's fields), for the agent's
@@ -6563,6 +6584,47 @@ mod tests {
         assert_eq!(prompts.len(), 3);
         for (body, word) in prompts.iter().zip(["first", "second", "third"]) {
             assert!(body.contains(word), "{body}");
+        }
+    }
+
+    /// docs/unwritten.md U3 (Codex on #440): with more kept files than one call writes back, the
+    /// call keeps its own prompt behind them, and every prompt is recorded in order across the
+    /// calls that write them back.
+    #[test]
+    fn a_long_backlog_keeps_the_prompts_in_order() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let settings = crate::capture::Settings::load(h).unwrap();
+        for n in 1..=17 {
+            let payload = json!({"session_id": "s", "cwd": h, "prompt": format!("prompt {n:02}")});
+            let events =
+                crate::capture::events("claude", "UserPromptSubmit", &payload, n, &settings);
+            crate::unwritten::keep(h, &events, settings.rules.version()).unwrap();
+        }
+        let call = |prompt: &str| {
+            let _contending = crate::worker::contending();
+            let _worker = crate::worker::lock(h).unwrap();
+            let payload = json!({"session_id": "s", "cwd": h, "prompt": prompt});
+            run_io(
+                h,
+                "claude",
+                "UserPromptSubmit",
+                payload.to_string().as_bytes(),
+                &mut Vec::new(),
+            )
+        };
+        call("prompt 18").unwrap();
+        assert_eq!(crate::unwritten::counts(h), (2, 0));
+        call("prompt 19").unwrap();
+        assert_eq!(crate::unwritten::counts(h), (0, 0));
+        let prompts: Vec<String> = recorded(h, "claude", "s")
+            .into_iter()
+            .filter(|e| e.kind == "prompt")
+            .map(|e| e.body)
+            .collect();
+        assert_eq!(prompts.len(), 19);
+        for (n, body) in (1..).zip(&prompts) {
+            assert!(body.contains(&format!("prompt {n:02}")), "{n}: {body}");
         }
     }
 

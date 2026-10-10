@@ -38,12 +38,17 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
         .filter_map(|p| p.metadata().ok())
         .map(|m| m.len())
         .sum();
-    anyhow::ensure!(held < BOUND, "{DIR}/ holds {held} bytes already");
     let body = serde_json::to_vec(&Kept {
         v: VERSION,
         ruleset: ruleset.to_owned(),
         events: events.to_vec(),
     })?;
+    // The new file counts too: one call may hold many events (Codex on #440).
+    anyhow::ensure!(
+        held + body.len() as u64 <= BOUND,
+        "{DIR}/ holds {held} bytes, and {} more would pass its bound",
+        body.len()
+    );
     // Two keeps of one process in one millisecond get two names (CodeRabbit on #440).
     static KEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = KEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -277,9 +282,10 @@ mod tests {
         assert_eq!(counts(h), (1, 1));
         conn.execute_batch("DROP TRIGGER refuse;").unwrap();
         assert_eq!(write_back(h, &mut raw).unwrap(), 1);
+        // A file that would take it past the bound is not kept either.
         std::fs::File::create(dir.join("2-1.json"))
             .unwrap()
-            .set_len(BOUND)
+            .set_len(BOUND - 10)
             .unwrap();
         let e = keep(h, &[prompt("one", 1)], "r").unwrap_err();
         assert!(e.to_string().contains("holds"), "{e}");
