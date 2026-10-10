@@ -10,8 +10,10 @@ says recording failed, and nothing brings them back. This keeps them and writes 
 
 - **U1. What is kept.** The events the failed write would have appended, as they would have been
   stored: after the gate (spec 2.2), each with its ledger rows and the ruleset version. Never the
-  payload as the agent sent it. One file per hook call, `<home>/unwritten/<ms>-<pid>.json`, mode
-  0600, written to a temporary name and renamed, so a file is whole or absent. Not `spool/`: v1
+  payload as the agent sent it. One file per hook call, `<home>/unwritten/<ms>-<pid>-<n>.json` (`n`
+  counts this process's files), mode 0600, written to a temporary name and renamed, so a file is
+  whole or absent, and the directory synced after the rename (the home too when the directory is
+  new): the rename is the only copy's entry. Not `spool/`: v1
   left a directory of that name, and `oboete migrate --finish` deletes it.
 - **U2. When.** A hook whose store does not open within its 2 s, or whose append fails, keeps the
   events it built. Built without a store, they lack two things the store gives: an event whose

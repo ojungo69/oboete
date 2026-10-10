@@ -181,7 +181,9 @@ fn run_io(
             &settings,
         )?;
         let events = &recorded.events;
-        wrote = !events.is_empty();
+        // A call that only wrote back what earlier ones kept wrote too: the worker starts and the
+        // marker clears (Codex on #440).
+        wrote = !events.is_empty() || recorded.written_back > 0;
         session = session_label(&labels).to_owned();
         ended = crate::failure::now();
         // MUST-M21 (D9): the session's last failed call, which its next prompt is matched against.
@@ -657,6 +659,8 @@ fn session_start_note(japanese: bool, handed: Handed) -> String {
 pub struct Recorded {
     pub events: Vec<(i64, crate::raw::Event)>,
     pub prompt: Option<String>,
+    /// The kept files this call wrote back (docs/unwritten.md U3): a write too.
+    pub written_back: usize,
 }
 
 /// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db` with the
@@ -686,9 +690,10 @@ pub fn record(
         None
     };
     // docs/unwritten.md U3: what earlier calls kept goes first, so the seqs follow their times.
-    if let Err(e) = crate::unwritten::write_back(home, raw) {
+    let written_back = crate::unwritten::write_back(home, raw).unwrap_or_else(|e| {
         eprintln!("oboete: kept events not written back yet: {e:#}");
-    }
+        0
+    });
     let (built, prompt) = built(home, Some(raw), agent, event, payload, ts, settings)?;
     let mut appended = Vec::new();
     for (n, b) in built.iter().enumerate() {
@@ -707,6 +712,7 @@ pub fn record(
     Ok(Recorded {
         events: appended,
         prompt,
+        written_back,
     })
 }
 
@@ -6558,6 +6564,40 @@ mod tests {
         for (body, word) in prompts.iter().zip(["first", "second", "third"]) {
             assert!(body.contains(word), "{body}");
         }
+    }
+
+    /// docs/unwritten.md U3: a call that records nothing of its own but writes back what an
+    /// earlier call kept wrote too: the recording-failure marker clears (Codex on #440).
+    #[test]
+    fn a_call_that_only_writes_back_clears_the_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let call = |prompt: &str| {
+            let _contending = crate::worker::contending();
+            let _worker = crate::worker::lock(h).unwrap();
+            let payload = json!({"session_id": "s", "cwd": h, "prompt": prompt});
+            run_io(
+                h,
+                "claude",
+                "UserPromptSubmit",
+                payload.to_string().as_bytes(),
+                &mut Vec::new(),
+            )
+        };
+        call("first prompt").unwrap();
+        let held = crate::raw::lock_for_swap(h).unwrap();
+        assert!(call("second prompt").is_err());
+        assert!(crate::failure::since(h).is_some());
+        drop(held);
+        // All private: no event of its own.
+        call("<private>nothing to record</private>").unwrap();
+        assert_eq!(crate::unwritten::counts(h), (0, 0));
+        assert!(crate::failure::since(h).is_none());
+        let prompts = recorded(h, "claude", "s")
+            .into_iter()
+            .filter(|e| e.kind == "prompt")
+            .count();
+        assert_eq!(prompts, 2);
     }
 
     #[test]

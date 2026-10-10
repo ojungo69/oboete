@@ -30,6 +30,7 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
         return Ok(());
     }
     let dir = home.join(DIR);
+    let made = !dir.exists();
     std::fs::create_dir_all(&dir)?;
     crate::db::private(&dir, 0o700);
     let held: u64 = files(&dir)?
@@ -43,7 +44,10 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
         ruleset: ruleset.to_owned(),
         events: events.to_vec(),
     })?;
-    let name = format!("{}-{}", crate::db::now_ms(), std::process::id());
+    // Two keeps of one process in one millisecond get two names (CodeRabbit on #440).
+    static KEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = KEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!("{}-{}-{n}", crate::db::now_ms(), std::process::id());
     let tmp = dir.join(format!(".{name}.tmp"));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -57,6 +61,23 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.into());
     }
+    // The rename is the only copy's entry: synced with its directory, and a new directory with the
+    // home (Codex and CodeRabbit on #440). The file is in place even when a sync fails.
+    #[cfg(unix)]
+    if let Err(e) = std::fs::File::open(&dir)
+        .and_then(|d| d.sync_all())
+        .and_then(|()| {
+            if made {
+                std::fs::File::open(home)?.sync_all()
+            } else {
+                Ok(())
+            }
+        })
+    {
+        eprintln!("oboete: {DIR}/ not synced after a keep: {e}");
+    }
+    #[cfg(not(unix))]
+    let _ = made;
     Ok(())
 }
 
