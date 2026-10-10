@@ -119,31 +119,59 @@ pub(crate) fn holding(raw: &Raw, device: &str, seqs: &[i64], words: &[&str]) -> 
 pub(crate) const CARD_COLUMNS: &str =
     "title, subtitle, narrative, facts, concepts, files_read, files_modified";
 
-/// A card's searchable text from `CARD_COLUMNS` read from `r` at `at`: the lists one item a line.
-pub(crate) fn card_text(r: &rusqlite::Row, at: usize) -> rusqlite::Result<String> {
-    let mut fields = Vec::new();
+/// Values one a line, with the byte range of each in the text: a reader gates each value alone
+/// (K6), and so does the embedding phase (docs/tools.md V1).
+#[derive(Default)]
+pub(crate) struct Joined {
+    pub text: String,
+    pub parts: Vec<std::ops::Range<usize>>,
+}
+
+impl Joined {
+    /// `value` on a line of its own after the text so far, unless it is the `first`.
+    fn push(&mut self, first: bool, value: &str) {
+        if !first {
+            self.text.push('\n');
+        }
+        if !value.is_empty() {
+            self.parts
+                .push(self.text.len()..self.text.len() + value.len());
+        }
+        self.text.push_str(value);
+    }
+}
+
+/// A card's searchable text from `CARD_COLUMNS` read from `r` at `at`: the lists one item a line,
+/// an empty list an empty line.
+pub(crate) fn card_text(r: &rusqlite::Row, at: usize) -> rusqlite::Result<Joined> {
+    let mut out = Joined::default();
     for i in 0..7 {
         let s: String = r.get(at + i)?;
-        fields.push(if i >= 3 {
-            serde_json::from_str::<Vec<String>>(&s)
-                .unwrap_or_default()
-                .join("\n")
-        } else {
-            s
-        });
+        if i < 3 {
+            out.push(i == 0, &s);
+            continue;
+        }
+        let items = serde_json::from_str::<Vec<String>>(&s).unwrap_or_default();
+        if items.is_empty() {
+            out.push(false, "");
+        }
+        for item in &items {
+            out.push(false, item);
+        }
     }
-    Ok(fields.join("\n"))
+    Ok(out)
 }
 
 /// A summary's searchable text from its `fields` JSON: every displayed field, `notes` among them.
-pub(crate) fn turn_text(fields: &str) -> String {
+pub(crate) fn turn_text(fields: &str) -> Joined {
     let fields: std::collections::BTreeMap<String, String> =
         serde_json::from_str(fields).unwrap_or_default();
-    crate::turns::FIELDS
-        .iter()
-        .filter_map(|f| fields.get(*f).map(String::as_str))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut out = Joined::default();
+    let present = crate::turns::FIELDS.iter().filter_map(|f| fields.get(*f));
+    for (n, value) in present.enumerate() {
+        out.push(n == 0, value);
+    }
+    out
 }
 
 /// Q4: index the stored card fields, without the reader's current gate. Called by the cards
@@ -154,7 +182,9 @@ pub(crate) fn cards(k: &Connection, rowid: Option<i64>) -> Result<()> {
         "SELECT rowid, {CARD_COLUMNS} FROM cards
          WHERE replaced_by IS NULL AND (?1 IS NULL OR rowid = ?1)"
     ))?;
-    let rows = st.query_map([rowid], |r| Ok((r.get::<_, i64>(0)?, card_text(r, 1)?)))?;
+    let rows = st.query_map([rowid], |r| {
+        Ok((r.get::<_, i64>(0)?, card_text(r, 1)?.text))
+    })?;
     for row in rows {
         let (id, text) = row?;
         k.execute(
@@ -171,7 +201,7 @@ pub(crate) fn turns(k: &Connection, rowid: Option<i64>) -> Result<()> {
         "SELECT rowid, fields FROM turns WHERE skipped = 0 AND (?1 IS NULL OR rowid = ?1)",
     )?;
     let rows = st.query_map([rowid], |r| {
-        Ok((r.get::<_, i64>(0)?, turn_text(&r.get::<_, String>(1)?)))
+        Ok((r.get::<_, i64>(0)?, turn_text(&r.get::<_, String>(1)?).text))
     })?;
     for row in rows {
         let (id, text) = row?;

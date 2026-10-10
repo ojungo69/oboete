@@ -96,7 +96,8 @@ session summary that was not skipped (`s`, keyed `S<device>.<op seq>`) are embed
 imported documents are, in the same phase and the same calls: claims first, then cards, summaries,
 imported documents and records, as search lists them (Q2). The text is what their full-text index
 holds (Q4), made by the one function that writes that index, so the words full text finds and the
-vector come from the same text; it is gated and cut as every document's is (D8).
+vector come from the same text; it is gated, each value alone as its reader gates it (K6), and cut
+as every document's is (D8).
 
 V2. **Passed over.** A card or summary of an excluded repository, or made from a record of a
 session that touched one, is not sent, as a claim that quotes such a record is not (D13). The
@@ -120,7 +121,9 @@ generation's vectors).
 V4. **Search.** The cards' list and the summaries' list in Q2 item 2 are each their full-text list
 fused with their vector list by `rrf`, as the claims' lists are. `type`, the repository, `since`,
 `until` and the session `search` skips apply inside the vector search, as for imported documents and
-records, and a hit is still read through its table's one reader (Q3).
+records, and a hit is still read through its table's one reader (Q3). The vector list is read from
+the bounded candidate pool, nearest first, and its depth counts only the rows the reader shows: a
+hidden row takes no place, however many are nearer.
 
 V5. **Cost.** A card or summary is one more document in the phase's batches, under the embedder's
 caps (Workers AI's daily requests and monthly USD; the local model is free). Cards come about one
@@ -138,8 +141,10 @@ list, count the cards and the summaries beside the claims, imported documents an
 3. A skipped summary gets no vector, and an excluded repository's card and summary are not sent,
    nor those made from a record of a session that touched it: a window across sessions, a goal, a
    window a summary read.
-4. A card a removal hides is not found by its vector, and a card and a summary hidden before they
-   had one are not sent.
+4. A card a removal hides is not found by its vector, nor takes a place, however many are nearer;
+   a card and a summary hidden before they had one are not sent.
+5. A rule on a whole value of a card or summary, across its lines, holds in the text sent.
+6. Cards held for an answer are each sent again alone.
 
 ## Differences from claude-mem, and why
 

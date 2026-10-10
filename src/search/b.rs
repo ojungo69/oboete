@@ -1788,8 +1788,14 @@ fn curated_leg(
         }
     }
     if let Some(near) = near {
+        // The whole candidate pool, nearest first: a row its reader hides takes no place, so the
+        // depth counts only the rows shown (Q3), as the full-text list's does.
+        let pool = near.query_knn(k, q, if summaries { "s" } else { "o" }, CANDIDATES as usize)?;
         let mut nearest = Vec::new();
-        for id in near.query_knn(k, q, if summaries { "s" } else { "o" }, depth)? {
+        for id in pool {
+            if nearest.len() == depth {
+                break;
+            }
             if !hits.contains_key(&id) {
                 let Some(hit) = read(&id)? else {
                     continue;
@@ -3008,6 +3014,41 @@ mod tests {
             })
             .unwrap();
         assert_eq!(ask("db ok so", "observations"), [db]);
+    }
+
+    /// Tools slice 3 (V4, Q3; Codex): rows their reader hides take no place in the vector list,
+    /// however many of them are nearer than a row it shows.
+    #[test]
+    fn hidden_rows_take_no_place_in_the_vector_list() {
+        let mut s = Store::new();
+        let gone = s.said("gone", R, 1_000, "First source.");
+        let live = s.said("live", R, 2_000, "Second source.");
+        let nearer = vec![serde_json::json!({"type": "bugfix", "title": "Db ok so"}); DEPTH];
+        s.cards(gone, gone, serde_json::Value::Array(nearer), false);
+        let shown = s.cards(
+            live,
+            live,
+            serde_json::json!([{"type": "bugfix", "title": "Db ok"}]),
+            false,
+        );
+        s.run();
+        crate::embed_phase::fixture::vectors(&s);
+        s.raw
+            .append_tombstone(crate::raw::Target::Record {
+                device: s.raw.device().to_owned(),
+                seq: gone,
+            })
+            .unwrap();
+        let q = Query {
+            text: "db ok so".into(),
+            raw: RawArm::Off,
+            types: Some("observations".parse().unwrap()),
+            limit: 1,
+            ..Default::default()
+        };
+        let vector = crate::embed::stub::vector(crate::embed::EMBEDDER, &q.text);
+        let found = query_with(s.home.path(), &q, Some(&vector)).unwrap();
+        assert_eq!(keys(&found), shown);
     }
 
     /// Q4: consumers write the rows and their indexes in one transaction; a rollback leaves

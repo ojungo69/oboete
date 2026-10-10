@@ -1230,6 +1230,9 @@ struct Read {
     title: Option<(String, String)>,
     /// Records and summaries: its session as `Raw::event_labels` spells it, and a record's source.
     labels: Option<(String, String)>,
+    /// Cards and summaries: the byte range of each value in `text`, gated alone as their readers
+    /// gate it (K6).
+    parts: Vec<std::ops::Range<usize>>,
 }
 
 /// The next batch of documents with no vector from `embedder`: claims, then cards and session
@@ -1532,6 +1535,7 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
                     text,
                     title: None,
                     labels: None,
+                    parts: Vec::new(),
                 })
             })?
             .collect::<rusqlite::Result<_>>()?,
@@ -1578,6 +1582,7 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
                         text,
                         title: Some((doc_kind, title)),
                         labels: None,
+                        parts: Vec::new(),
                     })
                 })
                 .optional()?)
@@ -1620,6 +1625,7 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
                 labels: raw.event_labels(device, seq)?,
                 text,
                 title: None,
+                parts: Vec::new(),
             }))
         })?,
     })
@@ -1631,7 +1637,7 @@ const CARD_DOC: &str =
     "device || '.' || op_seq || '.' || n, COALESCE(repo, ''), ts, COALESCE(session, '')";
 
 fn card_read(r: &rusqlite::Row) -> rusqlite::Result<Read> {
-    let text = crate::consumer::fts::card_text(r, 0)?;
+    let crate::consumer::fts::Joined { text, parts } = crate::consumer::fts::card_text(r, 0)?;
     Ok(Read {
         doc: Doc {
             kind: "o",
@@ -1644,6 +1650,7 @@ fn card_read(r: &rusqlite::Row) -> rusqlite::Result<Read> {
         labels: None,
         text,
         title: None,
+        parts,
     })
 }
 
@@ -1653,7 +1660,8 @@ const SUMMARY_DOC: &str = "fields, 'S' || device || '.' || op_seq, COALESCE(repo
     COALESCE(agent, '') || char(0) || COALESCE(session, ''), COALESCE(session, '')";
 
 fn summary_read(r: &rusqlite::Row) -> rusqlite::Result<Read> {
-    let text = crate::consumer::fts::turn_text(&r.get::<_, String>(0)?);
+    let crate::consumer::fts::Joined { text, parts } =
+        crate::consumer::fts::turn_text(&r.get::<_, String>(0)?);
     Ok(Read {
         doc: Doc {
             kind: "s",
@@ -1666,6 +1674,7 @@ fn summary_read(r: &rusqlite::Row) -> rusqlite::Result<Read> {
         labels: Some((r.get(4)?, String::new())),
         text,
         title: None,
+        parts,
     })
 }
 
@@ -1838,7 +1847,8 @@ fn gated(r: &Read, rules: &crate::redact::Rules) -> String {
             let (text, parts) = composed_parts(kind, title, &r.text);
             crate::redact::joined_with(&text, &parts, rules)
         }
-        None => crate::redact::lines_with(&r.text, rules),
+        None if r.parts.is_empty() => crate::redact::lines_with(&r.text, rules),
+        None => crate::redact::joined_with(&r.text, &r.parts, rules),
     }
     .chars()
     .take(keep)
@@ -1887,6 +1897,8 @@ fn unhold(k: &Connection, embedder: &str) -> Result<Vec<Doc>> {
         .map(|(kind, key, sha)| Doc {
             kind: match kind.as_str() {
                 "c" => "c",
+                "o" => "o",
+                "s" => "s",
                 "k" => "k",
                 "p" => "p",
                 _ => "r",
@@ -2020,6 +2032,7 @@ fn current(raw: Option<&Raw>, k: &Connection, kind: &str, key: &str) -> Result<O
         text,
         title: None,
         labels: None,
+        parts: Vec::new(),
     };
     Ok(match kind {
         "c" => k
@@ -2715,6 +2728,92 @@ mod tests {
             format!("S{device}.{}", &summary[1..]),
         ] {
             assert_eq!(skipped(&s, &key).as_deref(), Some("empty"), "{key}");
+        }
+    }
+
+    /// Tools slice 3 (V1, K6; Codex): each value of a card or a summary is gated alone, as its
+    /// reader gates it, so a rule on a whole value that spans its lines holds in the text sent.
+    #[test]
+    fn a_rule_on_a_whole_value_of_a_card_or_summary_holds_in_the_text_sent() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let path = s.home.path().join("config.toml");
+        let rule =
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = '^ACME\\ncode=[0-9]{6}$' }]\n";
+        std::fs::write(&path, std::fs::read_to_string(&path).unwrap() + rule).unwrap();
+        let seq = s.said("s", R, 1_000, "Open words.");
+        s.cards(
+            seq,
+            seq,
+            serde_json::json!([{"type": "bugfix", "title": "Card title",
+                "facts": ["ACME\ncode=123456"]}]),
+            false,
+        );
+        s.turn(
+            serde_json::json!({"agent": "claude", "session": "s", "repo": R, "ts": 2_000,
+            "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+            "fields": {"request": "Summary request", "learned": "ACME\ncode=654321"},
+            "skipped": false}),
+        );
+        s.run();
+        embed_all(&s);
+        let sent = stub.texts().concat();
+        assert!(sent.iter().any(|t| t.starts_with("Card title")), "{sent:?}");
+        assert!(
+            sent.iter().any(|t| t.starts_with("Summary request")),
+            "{sent:?}"
+        );
+        assert!(
+            sent.iter()
+                .all(|t| !t.contains("123456") && !t.contains("654321")),
+            "{sent:?}"
+        );
+    }
+
+    /// Tools slice 3 (Codex): cards held for an answer (Step 6) come back as cards, each sent once
+    /// more alone after another document's answer, not read again as one batch.
+    #[test]
+    fn held_cards_are_sent_again_each_alone() {
+        use crate::providers_db as pdb;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let seq = s.said("s", R, 1_000, "Open words.");
+        s.run();
+        embed_all(&s);
+        let db = pdb::open(s.home.path()).unwrap();
+        let mut held = Vec::new();
+        for title in ["First card", "Second card"] {
+            let card = s.cards(
+                seq,
+                seq,
+                serde_json::json!([{"type": "bugfix", "title": title}]),
+                false,
+            )[0]
+            .clone();
+            stub.fail_next(400, None);
+            s.run();
+            embed_all(&s);
+            let key = format!("{}.{card}", s.raw.device());
+            assert_eq!(skipped(&s, &key).as_deref(), Some("held"));
+            // A 400 alone is one failure and no rest: cleared, so the next card is alone too.
+            pdb::set_state(&db, crate::embed::CALLS, pdb::State::default()).unwrap();
+            held.push(key);
+        }
+        let sent = stub.requests();
+        s.said("s", R, 2_000, "Later words.");
+        s.run();
+        embed_all(&s);
+        let texts = &stub.texts()[sent..];
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert!(texts.iter().any(|t| *t == ["First card"]), "{texts:?}");
+        assert!(texts.iter().any(|t| *t == ["Second card"]), "{texts:?}");
+        for key in &held {
+            assert!(
+                keys(&s).iter().any(|(_, k, why)| k == key && why.is_none()),
+                "{key}"
+            );
         }
     }
 
