@@ -138,6 +138,9 @@ pub struct Fallback {
     pub provider: String,
     pub reason: String,
     pub skip: Skip,
+    /// The answer, when the caller's check refused it only because none of its quotes anchored:
+    /// the curation phase keeps its cards as the window's last resort (docs/cards.md C5).
+    pub answer: Option<Value>,
 }
 
 /// What `Chain::run` fails with when it went past every provider; the curation phase takes it
@@ -824,6 +827,7 @@ impl<'a> Chain<'a> {
                     provider: name.clone(),
                     reason,
                     skip,
+                    answer: None,
                 })
             };
             if !p.enabled() {
@@ -1047,9 +1051,12 @@ impl<'a> Chain<'a> {
             // Only strict-schema providers enforce the shape: an answer the caller's check refuses
             // (or, with no check, the schema) fails here, so the next provider is tried rather
             // than the window failing later.
-            let mut refused = None;
+            let (mut refused, mut kept) = (None, None);
             let result = result.and_then(|a| {
                 refused = self.check.and_then(|check| check(&a.value));
+                if refused == Some("unanchored") {
+                    kept = Some(a.value.clone());
+                }
                 let why = match refused {
                     Some(outcome) => {
                         // Why text is not JSON (an answer cut at max_tokens), never the text.
@@ -1163,6 +1170,7 @@ impl<'a> Chain<'a> {
                         provider: name,
                         reason: e.message,
                         skip,
+                        answer: kept,
                     });
                 }
             }
@@ -6511,7 +6519,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             // Alone, it is a provider that failed (D11 counts it); one whose answer only did not
             // anchor answered, and is not counted toward its breaker (#330).
             let before = crate::providers_db::state(&conn, "stub").unwrap().fails;
-            let (url, _) = serve_once(content(answer).into_bytes(), "");
+            let (url, _) = serve_once(content(answer.clone()).into_bytes(), "");
             let Err(err) = Chain::new(&[stub(url)], &conn).check(&check).run(
                 "curator",
                 "s",
@@ -6522,14 +6530,18 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             };
             let ChainFailed(fallbacks) = err.downcast::<ChainFailed>().unwrap();
             let fails = crate::providers_db::state(&conn, "stub").unwrap().fails;
+            // Only an answer that did not anchor is kept, for its cards (docs/cards.md C5).
             if outcome == "unanchored" {
                 assert_eq!((&fallbacks[0].skip, fails), (&Skip::Refused, 0));
+                let answer: Value = serde_json::from_str(&answer).unwrap();
+                assert_eq!(fallbacks[0].answer.as_ref(), Some(&answer));
             } else {
                 assert_eq!(
                     (&fallbacks[0].skip, fails),
                     (&Skip::Failed, before + 1),
                     "{outcome}"
                 );
+                assert_eq!(fallbacks[0].answer, None, "{outcome}");
             }
             // Each was a request sent: the daily budget counts it.
             let (sent, _) = crate::providers_db::calls_in_a_day(&conn, "stub").unwrap();

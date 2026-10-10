@@ -174,14 +174,21 @@ C4. **An answer without the list is an answer.** A provider that does not hold t
 may leave `observations` out: the op then has none and its summary is the card (K1). An empty
 list says there was nothing worth a card, and the window has none.
 
-C5. **A refused answer gives no cards.** An answer whose claims are all unanchored is still a
-provider's failure (D11), its cards with it, and the window goes to the next entry. Before C1a,
-the answers so refused in the probes were the ones that had written carried items as cards. A rule
-that kept their cards and dropped their claims would also take the window as curated without the
-claims the next entry may anchor. With Codex's small model as the only entry, 2 of the 14 windows
-of a span were refused so after C1a, each over one claim that quoted a tool's input or an output
-JSON-escaped twice (issue #368); a window every entry refuses has cards after
-`oboete recurate --skipped`.
+C5. **A refused answer's cards are the window's last resort.** An answer whose claims are all
+unanchored is still a provider's failure (D11), and the window goes to the next entry, which may
+anchor its claims. When the window's last counted attempt (D11's third) ends with no valid answer
+and at least one answer refused only because none of its quotes anchored, the window is curated
+with the first such answer in the chain's order: its summary and its cards, none of its claims.
+The op lists the claims as dropped (their quote is not in the window) and says `refused`, so
+`oboete recurate --skipped` takes the window again as it takes a skipped one, and a recuration
+replaces those cards (K3). An attempt with no such answer still skips the window.
+
+Before, such a window was skipped, its cards with it, until that recuration. On the evaluation home
+799 of Haiku's 3,490 calls (22.9%) were refused so; with Codex's small model as the only entry, 2
+of the 14 windows of a span were, each over one claim that quoted a tool's input or an output
+JSON-escaped twice (issue #368), and the cards of each were about the window's own work. claude-mem
+keeps each observation alone, so one bad item never takes the others with it (G08 of the 13.34.2
+comparison).
 
 `ponytail:` the curator sees one window, not the cards it wrote before, so a result confirmed
 again two windows later can get a second card; claude-mem's observer sees its own earlier
@@ -304,6 +311,10 @@ says so.
    then no card; an op with an empty list has none.
 8. Every field of a curator's card is gated when it is read.
 9. The prompt keeps the summary, the cards and the claims to the numbered lines (C1a).
+10. A window whose third attempt ends with answers refused only for their anchors is curated with
+    the first such answer's summary and cards and no claim, its claims listed as dropped and the
+    op marked `refused`; `oboete recurate --skipped` lists it until a recuration covers it, and
+    the recuration's cards replace those. A third attempt with no such answer still skips it.
 
 
 ## Tests of slice 3 (through `cards::block`, `consumer::manifest::text` and `search::b::get`)
