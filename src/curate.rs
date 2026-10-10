@@ -2990,10 +2990,18 @@ pub fn stopped(home: &std::path::Path, raw: &Raw, now: i64) -> Result<Option<Sto
     let device = raw.device();
     let (seq, offset) = raw.curation_checkpoint(device)?;
     let next = offset.map_or((seq + 1, 0), |o| (seq, o));
-    let waits = match providers_db::read_only(home)? {
-        Some(db) => providers_db::pending_of(&db, device)?,
-        None => None,
-    }
+    // providers.db that cannot be read hides the wait only: the skipped spans are raw's (Codex on
+    // #438).
+    let waits = (|| -> Result<Option<Pending>> {
+        match providers_db::read_only(home)? {
+            Some(db) => providers_db::pending_of(&db, device),
+            None => Ok(None),
+        }
+    })()
+    .unwrap_or_else(|e| {
+        eprintln!("oboete: curation's wait not read: {e:#}");
+        None
+    })
     // Only the window that waits now: a device's records are one sequence, so it starts where
     // the checkpoint ends. One before or after it (a restore moved the checkpoint) waits for
     // nothing, and the next pass replaces it (CodeRabbit on #438).
@@ -7898,6 +7906,13 @@ mod tests {
         let again = json!({"from_seq": 1, "from_offset": null, "to_seq": 1, "to_offset": null,
             "outcome": "curated", "recurate": true});
         raw.append_ops(&[(OpKind::Window, again)]).unwrap();
+        assert_eq!(stopped(h, &raw, now).unwrap().unwrap().skipped, 1);
+        // providers.db that cannot be read leaves raw's spans said (Codex on #438).
+        drop(db);
+        for f in ["providers.db-wal", "providers.db-shm"] {
+            let _ = std::fs::remove_file(h.join(f));
+        }
+        std::fs::write(h.join("providers.db"), "not a database").unwrap();
         assert_eq!(stopped(h, &raw, now).unwrap().unwrap().skipped, 1);
     }
 
