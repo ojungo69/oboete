@@ -109,40 +109,47 @@ fn replace(dir: &Path, name: &str, v: &str) -> std::io::Result<()> {
 
 /// Milestone 5 D5 (2b): every session's value `name` that `f` changes, replaced under that
 /// session's lock as `update` does, and a part a crashed change left beside it removed. A session
-/// gone meanwhile is passed over. How many values changed.
+/// gone meanwhile is passed over; a directory or a value that cannot be read is an error, since it
+/// may hold what must go (Codex on #444). How many values changed.
 pub fn update_all(
     home: &Path,
     name: &str,
     mut f: impl FnMut(&str) -> Option<String>,
 ) -> std::io::Result<usize> {
+    let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
     let mut changed = 0;
-    let Ok(agents) = std::fs::read_dir(root(home)) else {
-        return Ok(0);
+    let agents = match std::fs::read_dir(root(home)) {
+        Err(e) if gone(&e) => return Ok(0),
+        agents => agents?,
     };
-    for agent in agents.flatten() {
-        let Ok(sessions) = std::fs::read_dir(agent.path()) else {
-            continue;
+    for agent in agents {
+        let sessions = match std::fs::read_dir(agent?.path()) {
+            Err(e) if gone(&e) => continue,
+            sessions => sessions?,
         };
-        for s in sessions.flatten() {
-            let dir = s.path();
+        for s in sessions {
+            let dir = s?.path();
             let part = dir.join(format!(".{name}.part"));
             if !dir.join(name).exists() && !part.exists() {
                 continue;
             }
             // `prune` may be removing it: the lock's file cannot be made then.
             let _lock = match locked(&dir) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) if gone(&e) => continue,
                 held => held?,
             };
             if let Err(e) = std::fs::remove_file(&part)
-                && e.kind() != std::io::ErrorKind::NotFound
+                && !gone(&e)
             {
                 return Err(e);
             }
-            if let Some(v) = std::fs::read_to_string(dir.join(name))
-                .ok()
-                .and_then(|v| f(&v))
-            {
+            let value = match std::fs::read_to_string(dir.join(name)) {
+                Err(e) if gone(&e) => continue,
+                // Not text: `f` gets it empty, and may replace it.
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => String::new(),
+                value => value?,
+            };
+            if let Some(v) = f(&value) {
                 replace(&dir, name, &v)?;
                 changed += 1;
             }
@@ -180,6 +187,28 @@ pub fn prune(home: &Path, keep: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Milestone 5 D5 (2b): a directory the sweep cannot read fails it, since a value in it may
+    /// hold what must go (Codex on #444); a value that is not text is offered empty and replaced.
+    #[cfg(unix)]
+    #[test]
+    fn a_sweep_fails_on_a_directory_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        update(home.path(), "claude", "s", "shown", |_| Some("{}".into())).unwrap();
+        let agent = root(home.path()).join("claude");
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let swept = update_all(home.path(), "shown", |_| None);
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(swept.is_err());
+        std::fs::write(dir(home.path(), "claude", "s").join("shown"), [0xff, 0xfe]).unwrap();
+        let swept = update_all(home.path(), "shown", |v| v.is_empty().then(|| "{}".into()));
+        assert_eq!(swept.unwrap(), 1);
+        assert_eq!(
+            value(home.path(), "claude", "s", "shown").as_deref(),
+            Some("{}")
+        );
+    }
 
     #[test]
     fn a_claim_is_won_once_across_threads_and_a_take_clears_it_once() {

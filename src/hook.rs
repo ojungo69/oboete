@@ -909,12 +909,15 @@ fn apply_changes(
 
 /// Milestone 5 D5 (2b): a session's shown value without the entries of `uids`, in either form
 /// (OpenCode's receipts hold bodies in their changes and replacements too), or None when it holds
-/// none of them. A value that does not parse is left as it is.
+/// none of them. A value that does not parse becomes an empty set: it could hold anything, and
+/// losing it costs a body shown again.
 pub(crate) fn without_uids(
     value: &str,
     uids: &std::collections::HashSet<String>,
 ) -> Option<String> {
-    let mut v: Value = serde_json::from_str(value).ok()?;
+    let Ok(mut v) = serde_json::from_str::<Value>(value) else {
+        return Some("{}".into());
+    };
     let before = v.clone();
     let strip = |m: &mut serde_json::Map<String, Value>| m.retain(|uid, _| !uids.contains(uid));
     if v.get("entries").is_some() && v.get("pending").is_some() {
@@ -6486,8 +6489,8 @@ mod tests {
     }
 
     /// Milestone 5 D5 (2b): a shown value loses a forgotten uid's entries in either form, OpenCode's
-    /// receipts' changes and replacements too, and keeps the rest; one that holds none, or does not
-    /// parse, is left alone.
+    /// receipts' changes and replacements too, and keeps the rest; one that holds none is left
+    /// alone, and one that does not parse becomes an empty set.
     #[test]
     fn a_shown_value_loses_a_forgotten_uids_entries() {
         let gone = std::collections::HashSet::from(["g".to_owned()]);
@@ -6509,11 +6512,11 @@ mod tests {
         })
         .to_string();
         let out = without_uids(&receipts, &gone).unwrap();
-        assert!(!out.contains("Gone.") && out.contains("Kept."), "{out}");
+        assert!(!out.contains("Gone.") && out.contains("Kept."));
         let state = opencode_shown(Some(&out));
         assert_eq!(state.pending[0].changes.len(), 1);
         assert_eq!(without_uids(&out, &gone), None);
-        assert_eq!(without_uids("not json", &gone), None);
+        assert_eq!(without_uids("not json", &gone).as_deref(), Some("{}"));
     }
 
     #[test]

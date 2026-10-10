@@ -598,7 +598,8 @@ pub struct Purged {
     /// The uid jobs it went on with: not past step 3, or whose ops hold their text again.
     pub jobs: usize,
     pub ops: usize,
-    /// Jobs whose step 2 waits: readers kept raw.db-wal from truncating.
+    /// Jobs not done this time: readers kept raw.db-wal from truncating, or a restore put the
+    /// text back meanwhile.
     pub unfinished: Vec<String>,
     /// Whether knowledge.db was rebuilt without them.
     pub rebuilt: bool,
@@ -741,9 +742,14 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         }
     }
     let holding = knowledge_holding(home, &uids)?;
+    purged.shown =
+        crate::hookstate::update_all(home, "shown", |v| crate::hook::without_uids(v, &uids))?;
+    // The copies set aside, then step 3, under the worker lock as a restore takes it: a restore
+    // that put the bodies back since step 2 leaves the job to the next continuation (Codex on
+    // #444).
+    let _worker = crate::worker::lock_asking(home)?;
+    let raw = crate::raw::open(home)?;
     if !aside_files(home).is_empty() {
-        let _worker = crate::worker::lock_asking(home)?;
-        let raw = crate::raw::open(home)?;
         crate::embed_phase::carry_set_aside(home, &crate::knowledge::open(home)?, &raw)?;
         for file in aside_files(home) {
             std::fs::remove_file(&file)
@@ -751,10 +757,11 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
             purged.aside += 1;
         }
     }
-    purged.shown =
-        crate::hookstate::update_all(home, "shown", |v| crate::hook::without_uids(v, &uids))?;
-    let raw = crate::raw::open(home)?;
     for (job, uid) in ready {
+        if raw.uid_has_ops(&uid)? {
+            purged.unfinished.push(job);
+            continue;
+        }
         // Recorded for a stopped job too: it is not tried again, and `status` says it stopped.
         raw.finish_forget_step(&job, 3)?;
         if holding.contains(&uid) {
@@ -1265,8 +1272,8 @@ fn say_purged(p: &Purged) -> Result<()> {
     }
     anyhow::ensure!(
         p.unfinished.is_empty(),
-        "raw.db-wal did not truncate while readers held it: `oboete forget --continue` finishes \
-         jobs {}",
+        "jobs {} are not done (readers kept raw.db-wal from truncating, or a restore put the text \
+         back): `oboete forget --continue` finishes them",
         p.unfinished.join(", ")
     );
     anyhow::ensure!(
@@ -2040,7 +2047,7 @@ mod tests {
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
         drop(raw);
         let purged = purge(&home).unwrap().unwrap();
-        assert!(purged.rebuilt && purged.aside > 0, "{purged:?}");
+        assert!(purged.rebuilt && purged.aside > 0);
         assert!(aside_files(&home).is_empty());
         let k = crate::knowledge::open(&home).unwrap();
         let has = |sha: &str| -> bool {
@@ -2111,6 +2118,42 @@ mod tests {
         assert_eq!((purged.jobs, purged.ops), (1, 1));
         assert_eq!(uid_jobs(&home)[0].2, 3);
         assert!(!op_rows(&home).iter().any(|o| o.3.contains("Use tabs.")));
+    }
+
+    /// D5 (2b, item 7): bodies a restore puts back while the purge runs, after its step 2, keep the
+    /// job from step 3, and the next continuation rewrites them again (Codex on #444).
+    #[test]
+    fn bodies_put_back_during_the_purge_leave_the_job_to_the_next_continuation() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        s.run();
+        let home = s.home.path().to_owned();
+        let before = op_rows(&home);
+        forget(&home, &uid);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let at = home.clone();
+        AFTER_REBUILD.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let conn = rusqlite::Connection::open(at.join("raw.db")).unwrap();
+                for (device, seq, _, body) in &before {
+                    conn.execute(
+                        "UPDATE ops SET body = ?3 WHERE device = ?1 AND op_seq = ?2",
+                        rusqlite::params![device, seq, body],
+                    )
+                    .unwrap();
+                }
+            }))
+        });
+        let purged = purge(&home).unwrap().unwrap();
+        let job = uid_jobs(&home)[0].1.clone();
+        assert_eq!(purged.unfinished, std::slice::from_ref(&job));
+        assert!(say_purged(&purged).is_err());
+        assert_eq!(uid_jobs(&home)[0].2, 2);
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!(purged.ops, 1);
+        assert!(purged.unfinished.is_empty());
+        assert_eq!(uid_jobs(&home)[0].2, 3);
     }
 
     /// D5 (2b, item 8, test 7): a worker that finds a uid job its purge left starts `oboete forget
