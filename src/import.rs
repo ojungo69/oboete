@@ -294,9 +294,21 @@ fn work_state(
             Ok(())
         },
     )?;
-    // A run that stops keeps the batches it appended; the next adds the rest.
-    for batch in ops.chunks(crate::raw::IMPORT_BATCH) {
-        raw.append_ops(batch)?;
+    // A run that stops keeps the batches it appended; the next adds the rest. A batch keeps to the
+    // count and the size an append takes, as the documents' do: a rule's masks can lengthen
+    // fields past the size they were checked at (CodeRabbit on #431).
+    let (mut batch, mut bytes) = (Vec::new(), 0);
+    for op in ops {
+        let size = op.1.to_string().len();
+        if batch.len() == crate::raw::IMPORT_BATCH || bytes + size > crate::raw::MAX_BATCH_BYTES {
+            raw.append_ops(&std::mem::take(&mut batch))?;
+            bytes = 0;
+        }
+        bytes += size;
+        batch.push(op);
+    }
+    if !batch.is_empty() {
+        raw.append_ops(&batch)?;
     }
     Ok(())
 }
@@ -849,6 +861,35 @@ mod tests {
         assert!(fields[1].contains_key("note"));
         assert_eq!(entries[1].ts, 3_100);
         assert_eq!(fields[2]["status"], "done");
+    }
+
+    /// CodeRabbit on #431: work state rows go in batches within the size an append takes as well
+    /// as the count, so rows a rule makes long (every `x` a mask) still all come in.
+    #[test]
+    fn work_state_rows_a_rule_lengthens_come_in_within_the_batch_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        let c = Connection::open(&src).unwrap();
+        let note = format!(r#"{{"note": "{}"}}"#, vec!["x"; 990].join(" "));
+        for i in 0..500 {
+            c.execute(
+                "INSERT INTO work_state_entries(project, list_name, fields, created_at,
+                   created_at_epoch) VALUES('free-mem', 'long', ?1, '', ?2)",
+                params![note, 10_000 + i],
+            )
+            .unwrap();
+        }
+        drop(c);
+        let rule = "[[redaction.extra_rules]]\nid = \"x\"\nregex = 'x'\n";
+        std::fs::write(dir.path().join("config.toml"), rule).unwrap();
+        let settings = crate::capture::Settings::load(dir.path()).unwrap();
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        let stats = claude_mem(&mut raw, &src, &settings).unwrap();
+        assert_eq!((stats.work_state, stats.refused), (502, 2));
+        let ops = work_ops(&raw);
+        let bytes: usize = ops.iter().map(|o| o.to_string().len()).sum();
+        assert!(bytes > crate::raw::MAX_BATCH_BYTES, "{bytes}");
     }
 
     /// Codex on #431: an imported entry dated ahead of this device's clock lifts no clock of the
