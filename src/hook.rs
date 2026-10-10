@@ -692,11 +692,21 @@ pub fn record(
         None
     };
     // docs/unwritten.md U3: what earlier calls kept goes first, so the seqs follow their times.
-    let written_back = crate::unwritten::write_back(home, raw).unwrap_or_else(|e| {
-        eprintln!("oboete: kept events not written back yet: {e:#}");
-        0
-    });
+    let back = crate::unwritten::write_back(home, raw);
     let (built, prompt) = built(home, Some(raw), agent, event, payload, ts, settings)?;
+    let written_back = match back {
+        Ok(n) => n,
+        // A damaged raw.db goes on to `run_io`, which asks the worker to restore it; this call's
+        // events wait behind the kept files (Codex on #440).
+        Err(e) if crate::backup::corrupt(&e) => {
+            keep(home, agent, &built, settings);
+            return Err(e);
+        }
+        Err(e) => {
+            eprintln!("oboete: kept events not written back yet: {e:#}");
+            0
+        }
+    };
     // docs/unwritten.md U3: older kept files a later call writes back keep this call's events
     // behind them, so the seqs follow the events' order (Codex on #440).
     if !built.is_empty()
@@ -6660,6 +6670,46 @@ mod tests {
             .filter(|e| e.kind == "prompt")
             .count();
         assert_eq!(prompts, 2);
+    }
+
+    /// docs/unwritten.md U3: a write-back that finds raw.db damaged keeps the call's events behind
+    /// the files and fails, so the worker is asked to restore the store (Codex on #440).
+    #[test]
+    fn a_damaged_store_met_by_the_write_back_is_restored_and_the_call_kept() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let call = |prompt: &str| {
+            let _contending = crate::worker::contending();
+            let _worker = crate::worker::lock(h).unwrap();
+            let payload = json!({"session_id": "s", "cwd": h, "prompt": prompt});
+            run_io(
+                h,
+                "claude",
+                "UserPromptSubmit",
+                payload.to_string().as_bytes(),
+                &mut Vec::new(),
+            )
+        };
+        call("first prompt").unwrap();
+        let held = crate::raw::lock_for_swap(h).unwrap();
+        assert!(call("second prompt").is_err());
+        drop(held);
+        assert_eq!(crate::unwritten::counts(h), (1, 0));
+        crate::unwritten::FAILS.set(Some(rusqlite::ffi::SQLITE_CORRUPT));
+        assert!(call("third prompt").is_err());
+        assert!(crate::backup::restore_requested(h));
+        assert_eq!(crate::unwritten::counts(h), (2, 0));
+        call("fourth prompt").unwrap();
+        assert_eq!(crate::unwritten::counts(h), (0, 0));
+        let prompts: Vec<String> = recorded(h, "claude", "s")
+            .into_iter()
+            .filter(|e| e.kind == "prompt")
+            .map(|e| e.body)
+            .collect();
+        assert_eq!(prompts.len(), 4);
+        for (body, word) in prompts.iter().zip(["first", "second", "third", "fourth"]) {
+            assert!(body.contains(word), "{body}");
+        }
     }
 
     #[test]

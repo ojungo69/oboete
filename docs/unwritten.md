@@ -11,7 +11,7 @@ says recording failed, and nothing brings them back. This keeps them and writes 
 - **U1. What is kept.** The events the failed write would have appended, as they would have been
   stored: after the gate (spec 2.2), each with its ledger rows and the ruleset version. Never the
   payload as the agent sent it. One file per hook call, `<home>/unwritten/<ms>-<pid>-<n>.json` (`n`
-  counts this process's files), mode 0600, written to a temporary name and renamed, so a file is
+  counts this process's files, padded to 20 digits so the names sort as they were kept), mode 0600, written to a temporary name and renamed, so a file is
   whole or absent, and the directory synced after the rename (the home too when the directory is
   new): the rename is the only copy's entry. Not `spool/`: v1
   left a directory of that name, and `oboete migrate --finish` deletes it.
@@ -27,11 +27,14 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   than 16 queued, or another call writing them back), the call keeps its own events behind them
   instead of appending them, so the seqs keep the events' order; it appends them only when they
   cannot be kept. A crash between the commit and the removal writes the file again later: a
-  duplicate, never a loss.
+  duplicate, never a loss. A write-back that finds raw.db damaged keeps the call's events behind
+  the files and fails, so the marker is set and the worker is asked to restore the store; any
+  other store error stops the write-back and the call goes on.
 - **U4. What cannot be written back** (an unknown version, unreadable JSON, an event raw refuses)
   moves to `unwritten/bad/`, never deleted by oboete; doctor counts it.
-- **U5. Bound.** Nothing more is kept while `unwritten/` holds 64 MiB: the marker alone says the
-  write failed, as before. A full disk usually refuses the file too; then likewise.
+- **U5. Bound.** Nothing more is kept while `unwritten/` holds 64 MiB, the new file counted: the
+  marker alone says the write failed, as before. One keep at a time checks the bound and renames
+  its file (a lock beside the files), so overlapping failed calls cannot each pass it. A full disk usually refuses the file too; then likewise.
 - **U6. What is said.** The marker and its line stay: the write did fail. While files wait, the
   line says how many hook calls are kept and that they are written when a write succeeds; doctor
   says the same, and counts `bad/`.
