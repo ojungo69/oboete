@@ -1234,6 +1234,7 @@ mod tests {
                     provider: "fake".into(),
                     reason: "rate limited".into(),
                     skip: crate::provider::Skip::Wait(until),
+                    answer: None,
                 }])
                 .into(),
             )
@@ -1307,6 +1308,7 @@ mod tests {
                         provider: "fake".into(),
                         reason: "unanchored".into(),
                         skip: crate::provider::Skip::Refused,
+                        answer: None,
                     }])
                     .into(),
                 )

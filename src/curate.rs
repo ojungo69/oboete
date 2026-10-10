@@ -1470,7 +1470,10 @@ pub fn run_phase(
     let (hold, next, counted) = hold(&failed, after);
     let attempts = pending.as_ref().map_or(0, |p| p.attempts) + i64::from(counted);
     if attempts >= ATTEMPTS {
-        let op = json!({"outcome": "skipped", "reason": reason});
+        let op = match refused_op(raw, &w, &req, &failed)? {
+            Some(op) => op,
+            None => json!({"outcome": "skipped", "reason": reason}),
+        };
         return cover(raw, db, &w, op, Vec::new());
     }
     let p = Pending {
@@ -1678,19 +1681,14 @@ fn answered(
                     .chain(gated.dropped)
                     .chain(over)
                     .collect();
-                // The candidates the prompt showed, in its order: what this window could
-                // supersede, kept for an audit of the gates and for measurement (#222).
-                let shown: Vec<&str> = req.shown_in.iter().map(|(_, c)| c.uid.as_str()).collect();
-                let mut op = json!({"outcome": "curated", "provider": r.provider,
-                    "summary": summary, "dropped": dropped, "lowered": gated.lowered,
-                    "candidates": shown});
-                shown_records(raw, &mut op, w, &req.goals)?;
-                if let Some((cards, dropped)) = cards_of(w, &r.output) {
-                    op["observations"] = cards.into();
-                    if dropped > 0 {
-                        op["cards_dropped"] = dropped.into();
-                    }
-                }
+                let op = curated_op(
+                    raw,
+                    w,
+                    req,
+                    json!({"provider": r.provider, "summary": summary, "dropped": dropped,
+                        "lowered": gated.lowered}),
+                    &r.output,
+                )?;
                 Ok((op, claims))
             }
             // Counted like a provider that failed: no answer this window can use.
@@ -1698,6 +1696,7 @@ fn answered(
                 provider: r.provider,
                 reason: e.to_string(),
                 skip: Skip::Failed,
+                answer: None,
             }]),
         },
         Err(e) => match e.downcast::<ChainFailed>() {
@@ -1705,6 +1704,55 @@ fn answered(
             Err(e) => return Err(e),
         },
     })
+}
+
+/// A `curated` window op of `output`, an answer about `w`, with `fields` (its provider, summary and
+/// the drafts the gates dropped and lowered): the candidates the prompt showed, in its order (what
+/// this window could supersede, kept for an audit of the gates and for measurement, #222), the
+/// records it was shown, and the answer's cards.
+fn curated_op(
+    raw: &Raw,
+    w: &Window,
+    req: &Request,
+    fields: Value,
+    output: &Value,
+) -> Result<Value> {
+    let shown: Vec<&str> = req.shown_in.iter().map(|(_, c)| c.uid.as_str()).collect();
+    let mut op = json!({"outcome": "curated", "candidates": shown});
+    if let (Some(op), Value::Object(fields)) = (op.as_object_mut(), fields) {
+        op.extend(fields);
+    }
+    shown_records(raw, &mut op, w, &req.goals)?;
+    if let Some((cards, dropped)) = cards_of(w, output) {
+        op["observations"] = cards.into();
+        if dropped > 0 {
+            op["cards_dropped"] = dropped.into();
+        }
+    }
+    Ok(op)
+}
+
+/// docs/cards.md C5 (G08, #368): the window op of the first answer in `failed` refused only
+/// because none of its quotes anchored, as the window's last resort: its summary and cards, each
+/// of its claims dropped, marked `refused` so `recurate --skipped` takes the window again. None
+/// when no answer was refused so.
+fn refused_op(raw: &Raw, w: &Window, req: &Request, failed: &[Fallback]) -> Result<Option<Value>> {
+    let Some((provider, answer)) = failed
+        .iter()
+        .find_map(|f| Some((&f.provider, f.answer.as_ref()?)))
+    else {
+        return Ok(None);
+    };
+    let Ok((summary, drafts)) = parse(answer) else {
+        return Ok(None);
+    };
+    let dropped: Vec<(String, &str)> = drafts
+        .into_iter()
+        .map(|d| (d.id, "its quote is not in the window"))
+        .collect();
+    let fields = json!({"provider": provider, "summary": summary, "dropped": dropped,
+        "lowered": [], "refused": true});
+    Ok(Some(curated_op(raw, w, req, fields, answer)?))
 }
 
 /// Records `from` to `to` of this device, to curate again (Task 11): from `from_offset` into the
@@ -2863,7 +2911,7 @@ fn spans_skipped_from(
                             .map(|c| (o.op_seq, c)),
                     );
                 }
-            } else if o.body["outcome"] == "skipped"
+            } else if (o.body["outcome"] == "skipped" || o.body["refused"] == true)
                 && keep(o.body["reason"].as_str().unwrap_or(""))
             {
                 skipped.push((o.op_seq, span));
@@ -5602,6 +5650,7 @@ mod tests {
             provider: (*provider).into(),
             reason: (*reason).into(),
             skip: skip.clone(),
+            answer: None,
         });
         ChainFailed(each.collect()).into()
     }
@@ -6329,6 +6378,79 @@ mod tests {
             (&json!("skipped"), &json!("curated"))
         );
         assert_eq!(step.get(), 4);
+    }
+
+    /// docs/cards.md C5 (G08, #368): a window whose third attempt has answers refused only for
+    /// their anchors is curated with the first such answer's summary and cards and no claim,
+    /// marked `refused`, and `recurate --skipped` still lists it. Without such an answer it is
+    /// skipped (`an_unanchored_window_is_tried_again_at_once_and_skipped_after_three`).
+    #[test]
+    fn a_refused_answers_cards_are_the_windows_last_resort() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&prompt(&"a".repeat(40))).unwrap();
+        let refused = |provider: &str, summary: &str| Fallback {
+            provider: provider.into(),
+            reason: "unanchored".into(),
+            skip: Skip::Refused,
+            answer: Some(json!({"claims": [{"id": "c1", "kind": "decision",
+                "status": "decided", "speaker": "user", "scope": "repo", "body": "Use tabs.",
+                "quote": "words the window never had", "line": "L1", "supersedes": [],
+                "why": ""}], "summary": summary,
+                "observations": [card("The parser reads one line at a time")]})),
+        };
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+            Err(ChainFailed(vec![
+                refused("claude", "First refused."),
+                refused("codex", "Second refused."),
+            ])
+            .into())
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        for _ in 0..ATTEMPTS {
+            run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut chain).unwrap();
+        }
+        let op = &windows(&raw)[0];
+        assert_eq!(
+            (
+                &op["outcome"],
+                &op["refused"],
+                &op["provider"],
+                &op["summary"]
+            ),
+            (
+                &json!("curated"),
+                &json!(true),
+                &json!("claude"),
+                &json!("First refused.")
+            )
+        );
+        assert_eq!(
+            op["observations"],
+            json!([card("The parser reads one line at a time")])
+        );
+        assert_eq!(
+            op["dropped"],
+            json!([["c1", "its quote is not in the window"]])
+        );
+        let ops = raw.ops_after(raw.device(), 0, 100).unwrap();
+        assert!(ops.iter().all(|o| o.kind != OpKind::Claim));
+        let skipped = skipped_spans(&raw).unwrap();
+        assert_eq!(skipped, [Span::records(1, 1)]);
+        // Until a recuration covers it.
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let w = span_windows(
+            &raw,
+            &skipped[0],
+            WINDOW_TOKENS,
+            &rules,
+            &Reading::default(),
+        );
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| Ok(claimed("L1", "aaaa"));
+        let w = &w.unwrap()[0];
+        let done = recurate_window(&mut raw, &k, &db, &rules, &summary, &mut chain, w, None);
+        assert!(done.unwrap().is_ok());
+        assert!(skipped_spans(&raw).unwrap().is_empty());
     }
 
     /// Task 5: a pending row counts only while raw's next window still starts where it does. A
