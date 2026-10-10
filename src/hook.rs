@@ -74,6 +74,8 @@ fn run_io(
     let mut manifest = None;
     // Whether that manifest could not be read, which is not a checkout with none.
     let mut unread = false;
+    // G22: why curation stopped, read with that manifest.
+    let mut stopped = None;
     let mut injecting = false;
     // Task 8 Step 6: what this call's prompt gets (spec 4.2, 4.6), and the session the shown set
     // is kept under.
@@ -195,6 +197,11 @@ fn run_io(
                     unread = true;
                     None
                 });
+            stopped =
+                crate::curate::stopped(home, &store, crate::db::now_ms()).unwrap_or_else(|e| {
+                    eprintln!("oboete: curation's state not read: {e:#}");
+                    None
+                });
         }
         // The prompt point (Step 6), after the record, as SessionStart's manifest: nothing read
         // there fails the hook. Grok's UserPromptSubmit keeps its picks for its next tool call.
@@ -270,10 +277,14 @@ fn run_io(
         // docs/work-state.md L7: the work state's rule beside the failure line, outside every
         // fence, and its open lines in a fence of their own before the manifest's.
         let work = manifest.as_ref().and_then(|m| m.work.as_ref());
-        let line = [failure.clone(), work.map(|w| w.rule.clone())]
-            .into_iter()
-            .flatten()
-            .reduce(|a, b| format!("{a}\n{b}"));
+        let line = [
+            failure.clone(),
+            stopped.as_ref().map(crate::curate::Stopped::line),
+            work.map(|w| w.rule.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(|a, b| format!("{a}\n{b}"));
         let mut blocks: Vec<(&str, &str)> = Vec::new();
         if let Some(open) = work.and_then(|w| w.open.as_deref()) {
             blocks.push((crate::work_state::OPEN, open));
@@ -305,7 +316,12 @@ fn run_io(
                 Some(m) => Handed::Shown(m.shown.len(), m.cards),
                 None => Handed::Nothing,
             };
-            session_start_note(japanese, handed)
+            let note = session_start_note(japanese, handed);
+            match &stopped {
+                // A line of its own: the first ends on a command.
+                Some(s) => format!("{note}\noboete: {}", s.note(japanese, crate::db::now_ms())),
+                None => note,
+            }
         });
         let (text, kept) = assembled(agent, line, &blocks);
         // The shown set follows what the agent gets: a line a cut dropped or the fence changed is
@@ -4351,6 +4367,59 @@ mod tests {
             note(false, 0, 5),
             "oboete: memory is on. 5 recent work entries for this repository were handed over. Open the page with: oboete view --open"
         );
+    }
+
+    /// G22 (parity row 11): while curation waits for the owner, session start says so to the
+    /// agent beside the memory, and to the person on a line of its own, with the command; neither
+    /// holds the providers' reasons.
+    #[test]
+    fn session_start_says_why_curation_stopped() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path();
+        std::fs::write(home.join("config.toml"), "[summary]\ncurate = true\n").unwrap();
+        let device = p.s.raw.device().to_owned();
+        let (seq, _) = p.s.raw.curation_checkpoint(&device).unwrap();
+        let now = crate::db::now_ms();
+        let waits = crate::providers_db::Pending {
+            device,
+            from_seq: seq + 1,
+            from_offset: None,
+            to_seq: seq + 1,
+            to_offset: None,
+            reason: "every provider failed: claude: stopped until the owner acts".into(),
+            hold: "owner".into(),
+            attempts: 0,
+            next_attempt_at: now + 60 * 60 * 1000,
+            since: now - 2 * 60 * 60 * 1000 - 60_000,
+            prompt: String::new(),
+        };
+        let db = crate::providers_db::open(home).unwrap();
+        crate::providers_db::set_pending(&db, &waits).unwrap();
+        let out = hook(
+            home,
+            "claude",
+            "SessionStart",
+            &json!({"session_id": "stopped", "cwd": p.c, "source": "startup"}),
+        );
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let note = v["systemMessage"].as_str().unwrap();
+        assert!(
+            note.starts_with("oboete: 記憶は有効です。") && note.ends_with(
+                "\noboete: 要約が 2 時間前から止まっています。要約役があなたの操作を待っています。理由と直し方: oboete doctor"
+            ),
+            "{note}"
+        );
+        let context = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(
+            context.starts_with("oboete: curation has waited for you since ")
+                && context.contains("Parser errors go to stderr."),
+            "{context}"
+        );
+        assert!(!out.contains("stopped until the owner acts"), "{out}");
     }
 
     #[test]

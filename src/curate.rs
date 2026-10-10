@@ -2862,7 +2862,10 @@ pub fn parked_spans(raw: &Raw, source: &str) -> Result<Vec<Span>> {
 
 /// This device's skipped windows whose reason `keep` takes, less what later recurations covered.
 fn spans_skipped(raw: &Raw, keep: impl Fn(&str) -> bool) -> Result<Vec<Span>> {
-    spans_skipped_from(|after| raw.ops_after(raw.device(), after, 1_000), keep)
+    spans_skipped_from(
+        |after| raw.skip_window_ops_after(raw.device(), after, 1_000),
+        keep,
+    )
 }
 
 fn spans_skipped_from(
@@ -2942,7 +2945,7 @@ pub(crate) type ParkingCounts = (
 pub(crate) fn parked_counts_in(conn: &Connection, device: &str) -> Result<ParkingCounts> {
     parking_counts(
         spans_skipped_from(
-            |after| crate::raw::ops_after_in(conn, device, after, 1_000),
+            |after| crate::raw::skip_window_ops_after_in(conn, device, after, 1_000),
             |reason| reason.starts_with("imported:"),
         )?,
         |ranges| crate::raw::imported_counts_in(conn, device, ranges),
@@ -2962,6 +2965,139 @@ fn parking_counts(
         .context("curation checkpoint overflow")?;
     let waiting = counts(&[(next, i64::MAX)])?;
     Ok((parked, waiting))
+}
+
+/// How long a window every provider failed waits on their resets before a session's start says
+/// curation stopped (G22). claude-mem says so after three failures in a row; here three counted
+/// attempts skip a window, so a window that waits this long waits on rate limits.
+const STOPPED_MS: i64 = 30 * 60 * 1000;
+
+/// Curation stopped, as a session's start says it (parity row 11, G22): the window every provider
+/// failed, while it waits for the owner or a budget, or on resets once it has waited
+/// `STOPPED_MS`; and the spans of windows every provider skipped that no recuration covered.
+#[derive(Debug, PartialEq)]
+pub struct Stopped {
+    pub waits: Option<Pending>,
+    pub skipped: usize,
+}
+
+/// `Stopped` for `raw`'s device at `now`, None while curation is off or none stopped. providers.db
+/// is read, never created.
+pub fn stopped(home: &std::path::Path, raw: &Raw, now: i64) -> Result<Option<Stopped>> {
+    if !crate::config::load(home)?.summary.curate {
+        return Ok(None);
+    }
+    let device = raw.device();
+    let (seq, offset) = raw.curation_checkpoint(device)?;
+    let next = offset.map_or((seq + 1, 0), |o| (seq, o));
+    let waits = match providers_db::read_only(home)? {
+        Some(db) => providers_db::pending_of(&db, device)?,
+        None => None,
+    }
+    // One the checkpoint has passed (a restore moved it) waits for nothing.
+    .filter(|p| (p.from_seq, p.from_offset.unwrap_or(0)) >= next)
+    .filter(|p| p.hold != "time" || now - p.since >= STOPPED_MS);
+    let skipped = failed_spans(raw)?;
+    Ok((waits.is_some() || skipped > 0).then_some(Stopped { waits, skipped }))
+}
+
+/// How many spans of this device's windows every provider skipped are left for `oboete recurate
+/// --skipped`: not an imported source's, nor an excluded repository's. A refused window
+/// (docs/cards.md C5) gives no reason, and is not counted: its summary and cards stand.
+pub fn failed_spans(raw: &Raw) -> Result<usize> {
+    Ok(spans_skipped(raw, |r| {
+        !r.is_empty() && !r.starts_with("imported:") && r != "excluded"
+    })?
+    .len())
+}
+
+impl Stopped {
+    /// The agent's line, beside the recording-failure line: what stopped and the command that
+    /// says why or curates what was skipped. Never a provider's words.
+    pub fn line(&self) -> String {
+        let mut lines = Vec::new();
+        if let Some(p) = &self.waits {
+            let since = crate::db::utc(p.since);
+            let next = crate::db::utc(p.next_attempt_at);
+            lines.push(match p.hold.as_str() {
+                "owner" => format!(
+                    "oboete: curation has waited for you since {since}: no provider takes it \
+                     until you act. `oboete doctor` names each one and why."
+                ),
+                "budget" => format!(
+                    "oboete: curation has waited on a spending cap since {since}, until {next}. \
+                     Raise the cap on the settings page (`oboete view --open`) or wait."
+                ),
+                _ => format!(
+                    "oboete: curation has failed since {since}; it is tried again at {next}, by \
+                     itself. `oboete doctor` says why."
+                ),
+            });
+        }
+        if self.skipped > 0 {
+            lines.push(format!(
+                "oboete: {} span(s) of records were skipped, every provider failing them: \
+                 `oboete recurate --skipped` lists them, and with --yes curates them again.",
+                self.skipped
+            ));
+        }
+        lines.join("\n")
+    }
+
+    /// What the line for the person at the terminal adds (`hook::session_start_note`): a time
+    /// as a duration, the cause in a few words, and the command.
+    pub fn note(&self, japanese: bool, now: i64) -> String {
+        let mut parts = Vec::new();
+        if let Some(p) = &self.waits {
+            let since = duration(now - p.since, japanese);
+            let next = duration(p.next_attempt_at - now, japanese);
+            parts.push(match (japanese, p.hold.as_str()) {
+                (true, "owner") => format!(
+                    "要約が {since}前から止まっています。要約役があなたの操作を待っています。理由と直し方: oboete doctor"
+                ),
+                (true, "budget") => format!(
+                    "要約が {since}前から止まっています。支出の上限に達しています（{next}後に再開）。理由と直し方: oboete doctor"
+                ),
+                (true, _) => format!(
+                    "要約が {since}前から止まっています。要約役が応答しません（{next}後にもう一度試します）。理由: oboete doctor"
+                ),
+                (false, "owner") => format!(
+                    "curation has stopped for {since}: a provider waits for you. Why and what to do: oboete doctor"
+                ),
+                (false, "budget") => format!(
+                    "curation has stopped for {since}: a spending cap is reached (it resumes in {next}). Why and what to do: oboete doctor"
+                ),
+                (false, _) => format!(
+                    "curation has stopped for {since}: the providers do not answer (tried again in {next}). Why: oboete doctor"
+                ),
+            });
+        }
+        if self.skipped > 0 {
+            parts.push(if japanese {
+                format!(
+                    "要約できなかった区間が {} 件あります。oboete recurate --skipped で確認できます。",
+                    self.skipped
+                )
+            } else {
+                format!(
+                    "{} span(s) were not curated: oboete recurate --skipped lists them.",
+                    self.skipped
+                )
+            });
+        }
+        parts.join(if japanese { "" } else { " " })
+    }
+}
+
+/// `ms` as the person reads it: minutes, hours below two days, then days.
+fn duration(ms: i64, japanese: bool) -> String {
+    let minutes = (ms / 60_000).max(1);
+    let (n, ja, en) = match minutes {
+        m if m < 60 => (m, "分", "min"),
+        m if m < 48 * 60 => (m / 60, "時間", "h"),
+        m => (m / (24 * 60), "日", "days"),
+    };
+    format!("{n} {}", if japanese { ja } else { en })
 }
 
 /// Doctor's line for the imported records curation has not read (D6), per source: those the phase
@@ -7637,6 +7773,105 @@ mod tests {
             &mut |_, _, _, _| panic!("nothing is sent again"),
         );
         assert_eq!(phase.unwrap(), Phase::Idle);
+    }
+
+    /// G22 (parity row 11): what a session's start says when curation stopped. A window that
+    /// waits for the owner or a budget at once, one that waits on resets once it has waited
+    /// `STOPPED_MS`; none with curation off, nor a row the checkpoint has passed. The spans every
+    /// provider skipped count, not a refused window's (C5), an imported source's, nor one a
+    /// recuration covered. Neither line holds the providers' reasons.
+    #[test]
+    fn a_sessions_start_says_why_curation_stopped() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let (mut raw, db) = open(h);
+        for text in ["One.", "Two.", "Three.", "Four."] {
+            raw.append(&prompt(text)).unwrap();
+        }
+        let dev = raw.device().to_owned();
+        let now = crate::db::now_ms();
+        let config = |on: bool| {
+            std::fs::write(h.join("config.toml"), format!("[summary]\ncurate = {on}\n")).unwrap();
+        };
+        config(true);
+        assert_eq!(stopped(h, &raw, now).unwrap(), None);
+        let pending = |hold: &str, since: i64| Pending {
+            device: dev.clone(),
+            from_seq: 1,
+            from_offset: None,
+            to_seq: 4,
+            to_offset: None,
+            reason: "every provider failed: groq: http 401: invalid_api_key".into(),
+            hold: hold.into(),
+            attempts: 0,
+            next_attempt_at: now + 3 * 60 * 60 * 1000,
+            since,
+            prompt: String::new(),
+        };
+        for (hold, since, shown) in [
+            ("owner", now, true),
+            ("budget", now, true),
+            ("time", now - STOPPED_MS + 1, false),
+            ("time", now - STOPPED_MS, true),
+        ] {
+            providers_db::set_pending(&db, &pending(hold, since)).unwrap();
+            let s = stopped(h, &raw, now).unwrap();
+            assert_eq!(
+                s.as_ref().map(|s| &s.waits.as_ref().unwrap().hold[..]),
+                shown.then_some(hold)
+            );
+        }
+        providers_db::set_pending(&db, &pending("owner", now - 2 * 60 * 60 * 1000)).unwrap();
+        let s = stopped(h, &raw, now).unwrap().unwrap();
+        assert!(s.line().contains("`oboete doctor`"), "{}", s.line());
+        assert_eq!(
+            s.note(true, now),
+            "要約が 2 時間前から止まっています。要約役があなたの操作を待っています。理由と直し方: oboete doctor"
+        );
+        for text in [s.line(), s.note(true, now), s.note(false, now)] {
+            assert!(
+                !text.contains("invalid_api_key") && !text.contains("groq"),
+                "{text}"
+            );
+        }
+        config(false);
+        assert_eq!(stopped(h, &raw, now).unwrap(), None);
+        config(true);
+        // Records 1 to 4 each its window: skipped by every provider, refused (C5), an imported
+        // source's, skipped again; the checkpoint passes the waiting row.
+        let window = |seq: i64, more: Value| {
+            let mut op = json!({"from_seq": seq, "from_offset": null, "to_seq": seq,
+                "to_offset": null, "outcome": "skipped", "reason": "every provider failed: x"});
+            op.as_object_mut()
+                .unwrap()
+                .extend(more.as_object().unwrap().clone());
+            (OpKind::Window, op)
+        };
+        raw.append_ops(&[
+            window(1, json!({})),
+            window(
+                2,
+                json!({"outcome": "curated", "refused": true, "reason": null}),
+            ),
+            window(3, json!({"reason": "imported:transcript"})),
+            window(4, json!({})),
+        ])
+        .unwrap();
+        let s = stopped(h, &raw, now).unwrap().unwrap();
+        assert_eq!((s.waits.is_none(), s.skipped), (true, 2));
+        assert_eq!(
+            s.note(true, now),
+            "要約できなかった区間が 2 件あります。oboete recurate --skipped で確認できます。"
+        );
+        assert!(
+            s.line().contains("`oboete recurate --skipped`"),
+            "{}",
+            s.line()
+        );
+        let again = json!({"from_seq": 1, "from_offset": null, "to_seq": 1, "to_offset": null,
+            "outcome": "curated", "recurate": true});
+        raw.append_ops(&[(OpKind::Window, again)]).unwrap();
+        assert_eq!(stopped(h, &raw, now).unwrap().unwrap().skipped, 1);
     }
 
     /// Task 11: `recurate --skipped` finds each window every provider skipped, until a recuration

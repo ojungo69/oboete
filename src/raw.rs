@@ -679,6 +679,49 @@ pub(crate) fn ops_after_in(
         .collect()
 }
 
+/// `device`'s window ops after `op_seq` that a skipped span is made of (`curate::spans_skipped`):
+/// one every provider skipped or refused, and a recuration. Through the windows' own index
+/// (`ops_windows`), and only their bodies are parsed: a session's start reads them (G22), and on
+/// a store of 15,492 windows parsing every body took it from 30 ms to 277 ms (debug build), this
+/// 34 ms.
+pub(crate) fn skip_window_ops_after_in(
+    conn: &Connection,
+    device: &str,
+    op_seq: i64,
+    limit: usize,
+) -> Result<Vec<Op>> {
+    let mut st = conn.prepare_cached(
+        "SELECT op_seq, ts, body, batch FROM ops
+         WHERE device = ?1 AND type = 'window' AND op_seq > ?2
+           AND (json_extract(body, '$.outcome') = 'skipped' OR json_extract(body, '$.refused') = 1
+                OR json_extract(body, '$.recurate') = 1)
+         ORDER BY op_seq LIMIT ?3",
+    )?;
+    let rows = st.query_map(
+        params![device, op_seq, i64::try_from(limit).unwrap_or(i64::MAX)],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get(1)?,
+                r.get::<_, String>(2)?,
+                r.get(3)?,
+            ))
+        },
+    )?;
+    rows.map(|row| {
+        let (op_seq, ts, body, batch) = row?;
+        Ok(Op {
+            device: device.to_owned(),
+            op_seq,
+            kind: OpKind::Window,
+            ts,
+            body: serde_json::from_str(&body).with_context(|| format!("op {op_seq}: body"))?,
+            batch,
+        })
+    })
+    .collect()
+}
+
 fn op_rows_in(conn: &Connection, device: &str, op_seq: i64, limit: usize) -> Result<Vec<OpRow>> {
     let mut st = conn.prepare(
         "SELECT op_seq, type, ts, body, batch FROM ops WHERE device = ?1 AND op_seq > ?2
@@ -2287,6 +2330,15 @@ impl Raw {
     /// Up to `limit` ops of `device` after `op_seq`, in op_seq order.
     pub fn ops_after(&self, device: &str, op_seq: i64, limit: usize) -> Result<Vec<Op>> {
         ops_after_in(&self.conn, device, op_seq, limit)
+    }
+
+    pub fn skip_window_ops_after(
+        &self,
+        device: &str,
+        op_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<Op>> {
+        skip_window_ops_after_in(&self.conn, device, op_seq, limit)
     }
 
     fn op_rows(&self, device: &str, op_seq: i64, limit: usize) -> Result<Vec<OpRow>> {

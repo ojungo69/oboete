@@ -2529,6 +2529,17 @@ pub fn doctor(home: &Path) -> Result<()> {
                 {
                     println!("  {line}");
                 }
+                // G22: the spans every provider skipped, and the command that curates them again.
+                if let Some(raw) = &raw {
+                    let skipped = crate::curate::failed_spans(raw).context("raw.db's windows")?;
+                    if skipped > 0 {
+                        let s = crate::curate::Stopped {
+                            waits: None,
+                            skipped,
+                        };
+                        println!("  {}", s.line());
+                    }
+                }
                 // Milestone 4 D8: the embedding phase.
                 for line in crate::embed_phase::doctor_lines(home, &k)? {
                     println!("  {line}");
