@@ -226,19 +226,46 @@ fn two_files_with_one_session_are_imported_once() {
     assert_eq!(tree(&root.path().join("codex")), source);
 }
 
+/// docs/claude-mem-import.md I1: the everyday store takes claude-mem's history; a store named an
+/// evaluation store is refused there, before anything is opened.
 #[test]
-fn claude_mem_keeps_its_everyday_store_refusal() {
+fn claude_mem_imports_into_the_everyday_store_and_not_as_an_evaluation_store() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join(".oboete");
-    for args in [
-        vec!["import", "claude-mem", "missing.db"],
-        vec!["import", "claude-mem", "missing.db", "--eval-store"],
-    ] {
-        let out = oboete(&home, root.path(), &args, "");
-        assert!(!out.status.success());
-        let said = String::from_utf8_lossy(&out.stderr);
-        assert!(said.contains("everyday store"), "{said}");
-    }
+    let db = root.path().join("claude-mem.db");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE sdk_sessions(id INTEGER PRIMARY KEY, content_session_id TEXT NOT NULL,
+               memory_session_id TEXT, project TEXT);
+             CREATE TABLE observations(id INTEGER PRIMARY KEY, memory_session_id TEXT,
+               project TEXT, created_at_epoch INTEGER, type TEXT, title TEXT, narrative TEXT,
+               facts TEXT);
+             CREATE TABLE session_summaries(id INTEGER PRIMARY KEY, memory_session_id TEXT,
+               project TEXT, created_at_epoch INTEGER, request TEXT, investigated TEXT,
+               learned TEXT, completed TEXT, next_steps TEXT);
+             CREATE TABLE user_prompts(id INTEGER PRIMARY KEY, content_session_id TEXT,
+               created_at_epoch INTEGER, prompt_text TEXT);
+             INSERT INTO observations VALUES(1, NULL, 'p', 1000, 'change', 'Invented',
+               'An invented body.', '[]');",
+        )
+        .unwrap();
+    let db = db.to_str().unwrap();
+    let out = oboete(
+        &home,
+        root.path(),
+        &["import", "claude-mem", db, "--eval-store"],
+        "",
+    );
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("everyday one"), "{said}");
+    assert!(!home.join("raw.db").exists());
+    let out = oboete(&home, root.path(), &["import", "claude-mem", db], "");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    let stats: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stats["observations"], 1);
 }
 
 #[test]

@@ -11,6 +11,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use crate::claims::{self, Claim};
+use crate::import::{imported_match, imported_repos, imported_scope};
 use crate::raw::Raw;
 use crate::redact;
 
@@ -1515,18 +1516,6 @@ fn on_this_device(raw: &Raw, device: &str, seq: i64) -> Result<bool> {
             .is_some_and(|r| r.seq == seq))
 }
 
-/// The repositories whose imported documents are `repo`'s: claude-mem names a project, not a
-/// repository, and its documents are `claude-mem:<project>` (`import::repo`), so a repository's
-/// are those of the project its key ends in, and a claude-mem name's those of its own project (a
-/// worktree session's too, as the index files them). ponytail: by name, as PR-H is to map them.
-fn imported_repos(repo: &str) -> [String; 2] {
-    let project = match repo.strip_prefix("claude-mem:") {
-        Some(name) => name.split('/').next().unwrap_or(name),
-        None => repo.rsplit('/').next().unwrap_or(repo),
-    };
-    [repo.to_owned(), crate::import::repo(project)]
-}
-
 /// The imported documents `q` finds, once per uid (two devices' imports of one are one): the
 /// documents in one full-text list (Q2), fused with their vector side's. Both imported vector
 /// partitions (`k` knowledge and `p` prompts) take part in that one list.
@@ -1821,23 +1810,6 @@ fn curated_leg(
         .into_iter()
         .filter_map(|id| hits.remove(&id))
         .collect())
-}
-
-/// The imported documents a search of `repo` reads: those of `imported_repos`, and of the
-/// claude-mem project's worktree sessions, whose repository starts with the prefix given.
-fn imported_scope(repo: &str) -> ([String; 2], String) {
-    let [own, named] = imported_repos(repo);
-    let worktrees = format!("{named}/");
-    ([own, named], worktrees)
-}
-
-/// SQL over `col` for `imported_scope(repo)`, with the four values it takes.
-fn imported_match(col: &str, repo: &str) -> (String, [Value; 4]) {
-    let ([own, named], worktrees) = imported_scope(repo);
-    (
-        format!("({col} IN (?, ?) OR substr({col}, 1, length(?)) = ?)"),
-        [own, named, worktrees.clone(), worktrees].map(Value::Text),
-    )
 }
 
 /// A hit on one line, as the CLI prints it and MCP returns it: its key (a claim's first 12

@@ -2,8 +2,9 @@
 //! `import` ops in raw.db (milestone 4 D5; docs/pr-b.md, decision 2). Text passes the outbound gate
 //! on the way in, prompts go through the hook's own cleaning, and the source ids already imported
 //! are read first, so a second run, or one after a run that stopped, adds nothing twice.
-//! Repositories become `claude-mem:<project>`: claude-mem names a project, not a path, and mapping
-//! the names onto oboete's repository keys waits for PR-H.
+//! Repositories become `claude-mem:<project>`: claude-mem names a project, not a path, and a
+//! repository reads the project its key ends in (`imported_repos`). Its work state comes in too
+//! (docs/claude-mem-import.md).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -27,6 +28,10 @@ pub struct Stats {
     pub seen: u64,
     /// Rows with nothing left to store (empty, or a harness notification).
     pub empty: u64,
+    /// Work state rows imported as work state ops (docs/claude-mem-import.md I4).
+    pub work_state: u64,
+    /// Work state rows the checks a write passes refused.
+    pub refused: u64,
 }
 
 struct Session {
@@ -56,12 +61,43 @@ pub fn lock(home: &Path) -> Result<std::fs::File> {
     }
 }
 
-pub fn claude_mem(raw: &mut Raw, path: &Path) -> Result<Stats> {
+/// The newest claude-mem schema the import reads all of: 13.35.0's (docs/claude-mem-import.md I2).
+const NEWEST_SCHEMA: i64 = 64;
+
+/// `settings` gates the work state rows as a write's (docs/work-state.md L5).
+pub fn claude_mem(
+    raw: &mut Raw,
+    path: &Path,
+    settings: &crate::capture::Settings,
+) -> Result<Stats> {
     let src = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open {} read-only", path.display()))?;
     // One read transaction: a consistent snapshot while claude-mem keeps writing.
     src.execute_batch("BEGIN")?;
+    if let Some(version) = schema_version(&src)?
+        && version > NEWEST_SCHEMA
+    {
+        anyhow::bail!(
+            "this claude-mem database is at schema v{version}, newer than v{NEWEST_SCHEMA}, the \
+             newest this oboete imports: update oboete first, so nothing claude-mem keeps is left \
+             behind"
+        );
+    }
     let source = source_name(&src)?;
+    // A row claude-mem merged into another project is read under that one (I3).
+    let project = |table: &str| -> Result<&'static str> {
+        Ok(if has_column(&src, table, "merged_into_project")? {
+            "COALESCE(NULLIF(merged_into_project, ''), project, '')"
+        } else {
+            "COALESCE(project, '')"
+        })
+    };
+    let (observed, summarized) = (project("observations")?, project("session_summaries")?);
+    let notes = if has_column(&src, "session_summaries", "notes")? {
+        "COALESCE(notes, '')"
+    } else {
+        "''"
+    };
     let mut sink = Sink {
         known: raw.import_keys(&source)?,
         raw,
@@ -96,8 +132,11 @@ pub fn claude_mem(raw: &mut Raw, path: &Path) -> Result<Stats> {
 
     each_row(
         &src,
-        "SELECT id, COALESCE(memory_session_id, ''), COALESCE(project, ''), created_at_epoch, COALESCE(type, ''), COALESCE(title, ''),
-                COALESCE(narrative, ''), COALESCE(facts, '') FROM observations ORDER BY id",
+        &format!(
+            "SELECT id, COALESCE(memory_session_id, ''), {observed}, created_at_epoch,
+                    COALESCE(type, ''), COALESCE(title, ''), COALESCE(narrative, ''),
+                    COALESCE(facts, '') FROM observations ORDER BY id"
+        ),
         |r| {
             let (id, memory, project, ts): (i64, String, String, i64) =
                 (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
@@ -127,9 +166,12 @@ pub fn claude_mem(raw: &mut Raw, path: &Path) -> Result<Stats> {
 
     each_row(
         &src,
-        "SELECT id, COALESCE(memory_session_id, ''), COALESCE(project, ''), created_at_epoch, COALESCE(request, ''),
-                COALESCE(investigated, ''), COALESCE(learned, ''), COALESCE(completed, ''),
-                COALESCE(next_steps, '') FROM session_summaries ORDER BY id",
+        &format!(
+            "SELECT id, COALESCE(memory_session_id, ''), {summarized}, created_at_epoch,
+                    COALESCE(request, ''), COALESCE(investigated, ''), COALESCE(learned, ''),
+                    COALESCE(completed, ''), COALESCE(next_steps, ''), {notes}
+             FROM session_summaries ORDER BY id"
+        ),
         |r| {
             let (id, memory, project, ts): (i64, String, String, i64) =
                 (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
@@ -140,6 +182,7 @@ pub fn claude_mem(raw: &mut Raw, path: &Path) -> Result<Stats> {
                 "Learned",
                 "Completed",
                 "Next steps",
+                "Notes",
             ]
             .iter()
             .enumerate()
@@ -199,7 +242,88 @@ pub fn claude_mem(raw: &mut Raw, path: &Path) -> Result<Stats> {
         },
     )?;
     sink.flush()?;
+    if has_table(&src, "work_state_entries")? {
+        work_state(raw, &src, &source, settings, &mut stats)?;
+    }
     Ok(stats)
+}
+
+/// I4: claude-mem's work state rows as work state ops, oldest first, under their project as an
+/// import names it and at their own time, each checked and gated as a write is (docs/work-state.md
+/// L3, L5): a row the checks refuse is counted, not imported.
+fn work_state(
+    raw: &mut Raw,
+    src: &Connection,
+    source: &str,
+    settings: &crate::capture::Settings,
+    stats: &mut Stats,
+) -> Result<()> {
+    let known = raw.work_state_keys(source)?;
+    let mut ops = Vec::new();
+    each_row(
+        src,
+        "SELECT id, COALESCE(project, ''), COALESCE(list_name, ''), COALESCE(fields, ''),
+                created_at_epoch FROM work_state_entries ORDER BY id",
+        |r| {
+            let key = format!("w{}", r.get::<_, i64>(0)?);
+            if known.contains(&key) {
+                stats.seen += 1;
+                return Ok(());
+            }
+            let (project, list, fields, at): (String, String, String, i64) =
+                (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
+            let checked =
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&fields)
+                    .ok()
+                    .and_then(|sent| {
+                        let list = crate::work_state::check(&list, &sent).ok()?;
+                        let (list, fields) = crate::capture::work_state(&list, &sent, settings);
+                        let list = crate::work_state::stored(&list, &sent, &fields).ok()?;
+                        Some((list, fields))
+                    });
+            let Some((list, fields)) = checked else {
+                stats.refused += 1;
+                return Ok(());
+            };
+            ops.push((
+                crate::raw::OpKind::WorkState,
+                serde_json::json!({"repo": repo(&project), "list": list, "fields": fields,
+                    "clock": at, "at": at, "source": source, "source_id": key}),
+            ));
+            stats.work_state += 1;
+            Ok(())
+        },
+    )?;
+    // A run that stops keeps the batches it appended; the next adds the rest.
+    for batch in ops.chunks(crate::raw::IMPORT_BATCH) {
+        raw.append_ops(batch)?;
+    }
+    Ok(())
+}
+
+/// The newest version in claude-mem's migration log, if it keeps one.
+fn schema_version(src: &Connection) -> Result<Option<i64>> {
+    if !has_table(src, "schema_versions")? {
+        return Ok(None);
+    }
+    Ok(src.query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))?)
+}
+
+fn has_table(src: &Connection, table: &str) -> Result<bool> {
+    Ok(src.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [table],
+        |r| r.get(0),
+    )?)
+}
+
+/// Whether claude-mem's `table` has `column`: read from the table, not its version number (I2).
+fn has_column(src: &Connection, table: &str, column: &str) -> Result<bool> {
+    Ok(src.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+        [table, column],
+        |r| r.get(0),
+    )?)
 }
 
 /// Calls `each` with every row `sql` selects from `src`, in order.
@@ -308,6 +432,35 @@ pub(crate) fn repo(project: &str) -> String {
     format!("{SOURCE}:{project}")
 }
 
+/// The repositories whose imported documents and work state are `repo`'s: claude-mem names a
+/// project, not a repository, and files it as `claude-mem:<project>` (`repo`), so a repository's
+/// are those of the project its key ends in, and a claude-mem name's those of its own project (a
+/// worktree's `<project>/<worktree>` too, as the index files them). ponytail: by name; a mapping by
+/// checkout waits for two repositories that share a last name.
+pub(crate) fn imported_repos(key: &str) -> [String; 2] {
+    let project = match key.strip_prefix("claude-mem:") {
+        Some(name) => name.split('/').next().unwrap_or(name),
+        None => key.rsplit('/').next().unwrap_or(key),
+    };
+    [key.to_owned(), repo(project)]
+}
+
+/// `imported_repos(key)`, and the prefix of its claude-mem project's worktrees.
+pub(crate) fn imported_scope(key: &str) -> ([String; 2], String) {
+    let [own, named] = imported_repos(key);
+    let worktrees = format!("{named}/");
+    ([own, named], worktrees)
+}
+
+/// SQL over `col` for `imported_scope(key)`, with the four values it takes.
+pub(crate) fn imported_match(col: &str, key: &str) -> (String, [rusqlite::types::Value; 4]) {
+    let ([own, named], worktrees) = imported_scope(key);
+    (
+        format!("({col} IN (?, ?) OR substr({col}, 1, length(?)) = ?)"),
+        [own, named, worktrees.clone(), worktrees].map(rusqlite::types::Value::Text),
+    )
+}
+
 /// claude-mem's types are oboete's kinds, plus a few it wrote by mistake (`discovery>`) or keeps
 /// for itself (`security_note`); those count as discoveries.
 fn kind(t: &str) -> &'static str {
@@ -336,6 +489,7 @@ mod tests {
     use super::*;
     use crate::raw::OpKind;
     use rusqlite::params;
+    use serde_json::json;
 
     /// The columns of claude-mem's tables that the import reads.
     /// `created` is the database's first migration time, so two values stand for two databases.
@@ -437,6 +591,64 @@ mod tests {
         }
     }
 
+    /// `claude_mem_db` as 13.35.0 keeps it (docs/claude-mem-import.md I2-I4): v64 in its log,
+    /// summaries' notes, a worktree's observation merged into its project, and work state rows,
+    /// two of which no write would take.
+    fn claude_mem_v64(path: &Path, created: &str) {
+        claude_mem_db(path, created);
+        let c = Connection::open(path).unwrap();
+        c.execute_batch(
+            "ALTER TABLE observations ADD COLUMN merged_into_project TEXT;
+             ALTER TABLE session_summaries ADD COLUMN merged_into_project TEXT;
+             ALTER TABLE session_summaries ADD COLUMN notes TEXT;
+             INSERT INTO schema_versions VALUES(2, 64, '2026-10-09T00:00:00.000Z');
+             CREATE TABLE work_state_entries(id INTEGER PRIMARY KEY AUTOINCREMENT,
+               project TEXT NOT NULL, list_name TEXT NOT NULL, fields TEXT NOT NULL,
+               created_at TEXT NOT NULL, created_at_epoch INTEGER NOT NULL);
+             UPDATE session_summaries SET notes = 'Kept the index small.' WHERE id = 20;
+             INSERT INTO observations(id, memory_session_id, project, created_at_epoch, type,
+               title, narrative, facts, merged_into_project)
+               VALUES(40, 'mem-1', 'free-mem/wt', 1700, 'change', 'In a worktree', 'Merged.',
+               '[]', 'free-mem');",
+        )
+        .unwrap();
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let rows = [
+            (
+                "free-mem",
+                "plan",
+                r#"{"task": "Port search", "status": "doing"}"#.to_owned(),
+                3_000,
+            ),
+            (
+                "free-mem/wt",
+                "plan",
+                format!(r#"{{"note": "token {key}"}}"#),
+                3_100,
+            ),
+            ("free-mem", "", r#"{"task": "No list"}"#.to_owned(), 3_200),
+            ("free-mem", "plan", "not fields".to_owned(), 3_300),
+        ];
+        for (project, list, fields, at) in rows {
+            c.execute(
+                "INSERT INTO work_state_entries(project, list_name, fields, created_at,
+                   created_at_epoch) VALUES(?1, ?2, ?3, '', ?4)",
+                params![project, list, fields, at],
+            )
+            .unwrap();
+        }
+    }
+
+    /// The work state ops raw holds, in op order.
+    fn work_ops(raw: &Raw) -> Vec<serde_json::Value> {
+        raw.ops_after(raw.device(), 0, 10_000)
+            .unwrap()
+            .into_iter()
+            .filter(|o| o.kind == OpKind::WorkState)
+            .map(|o| o.body)
+            .collect()
+    }
+
     /// The import ops raw holds, in op order.
     fn docs(raw: &Raw) -> Vec<ImportDoc> {
         raw.ops_after(raw.device(), 0, 10_000)
@@ -457,7 +669,7 @@ mod tests {
         let src = dir.path().join("claude-mem.db");
         claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
         let mut raw = crate::raw::open(dir.path()).unwrap();
-        let stats = claude_mem(&mut raw, &src).unwrap();
+        let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
         assert_eq!(counts(&stats), (6, 1, 1, 0, 2));
         let docs = docs(&raw);
         let at = |id: &str| docs.iter().find(|d| d.source_id == id).unwrap();
@@ -520,13 +732,134 @@ mod tests {
 
     /// D5: a document keeps the uid v1's import gave it, `<source>:<o|s|p><id>`, the source named
     /// by the database's first migration time, so v1's judgments map to it.
+    /// docs/claude-mem-import.md tests 1, 3 and 4: 13.35.0's database brings its summaries'
+    /// notes, a merged worktree's rows under their project, and its work state, gated, oldest
+    /// first, at their own times; the rows no write would take are counted; a second run adds
+    /// nothing.
+    #[test]
+    fn a_v64_database_brings_notes_merged_rows_and_work_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!((stats.work_state, stats.refused), (2, 2));
+        let docs = docs(&raw);
+        let at = |id: &str| docs.iter().find(|d| d.source_id == id).unwrap();
+        assert!(
+            at("s20").body.ends_with("\nNotes: Kept the index small."),
+            "{}",
+            at("s20").body
+        );
+        assert_eq!(at("o40").repo, "claude-mem:free-mem");
+        let ops = work_ops(&raw);
+        assert_eq!(ops.len(), 2);
+        assert_eq!(
+            (
+                &ops[0]["repo"],
+                &ops[0]["clock"],
+                &ops[0]["at"],
+                &ops[0]["list"]
+            ),
+            (
+                &json!("claude-mem:free-mem"),
+                &json!(3_000),
+                &json!(3_000),
+                &json!("plan")
+            )
+        );
+        assert_eq!(ops[1]["repo"], "claude-mem:free-mem/wt");
+        let note = ops[1]["fields"]["note"].as_str().unwrap();
+        assert!(
+            note.starts_with("token ") && !note.contains("q9Zx8"),
+            "{note}"
+        );
+        let again = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!((again.work_state, again.refused), (0, 2));
+        assert_eq!(work_ops(&raw).len(), 2);
+    }
+
+    /// Test 1: a database at a schema newer than the import knows is refused, nothing written.
+    #[test]
+    fn a_database_newer_than_v64_is_refused_with_nothing_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        Connection::open(&src)
+            .unwrap()
+            .execute("INSERT INTO schema_versions VALUES(3, 65, '')", [])
+            .unwrap();
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        let said = claude_mem(&mut raw, &src, &Default::default())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(said.contains("v65") && said.contains("v64"), "{said}");
+        assert!(docs(&raw).is_empty() && work_ops(&raw).is_empty());
+    }
+
+    /// Test 2: what is read is found by its columns, whatever version the log names: an older
+    /// database with notes, and a v61 row with no work state table (another draft's v61).
+    #[test]
+    fn columns_are_found_whatever_version_names_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        Connection::open(&src)
+            .unwrap()
+            .execute_batch(
+                "ALTER TABLE session_summaries ADD COLUMN notes TEXT;
+                 UPDATE session_summaries SET notes = 'Found by its column.';
+                 INSERT INTO schema_versions VALUES(2, 61, '');",
+            )
+            .unwrap();
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!(stats.work_state, 0);
+        let docs = docs(&raw);
+        let summary = docs.iter().find(|d| d.source_id == "s20").unwrap();
+        assert!(summary.body.ends_with("\nNotes: Found by its column."));
+    }
+
+    /// I5 (test 5): a repository reads its project's imported lists, its worktree project's too,
+    /// with its own writes, each at its own time whichever reached the store first: a write made
+    /// here before the import, later than every imported entry, still comes last.
+    #[test]
+    fn a_repository_reads_its_projects_imported_work_state_by_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        let repo = "github.com/o/free-mem";
+        let done = json!({"task": "Port search", "status": "done"});
+        raw.work_state(repo, "plan", done.as_object().unwrap())
+            .unwrap();
+        claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        raw.append_ops(&[(
+            OpKind::WorkState,
+            json!({"repo": "claude-mem:free-memory", "list": "plan",
+                "fields": {"task": "Not this project's"}, "clock": 1, "at": 1,
+                "source": "claude-mem:other", "source_id": "w1"}),
+        )])
+        .unwrap();
+        let entries = raw.work_state_entries(repo).unwrap();
+        let fields: Vec<&serde_json::Map<String, serde_json::Value>> =
+            entries.iter().map(|e| &e.fields).collect();
+        assert_eq!(fields.len(), 3, "{fields:?}");
+        assert_eq!(fields[0]["status"], "doing");
+        assert_eq!(entries[0].ts, 3_000);
+        assert!(fields[1].contains_key("note"));
+        assert_eq!(entries[1].ts, 3_100);
+        assert_eq!(fields[2]["status"], "done");
+    }
+
     #[test]
     fn the_source_name_and_uids_match_the_v1_import() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("claude-mem.db");
         claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
         let mut raw = crate::raw::open(dir.path()).unwrap();
-        claude_mem(&mut raw, &src).unwrap();
+        claude_mem(&mut raw, &src, &Default::default()).unwrap();
         let mut uids: Vec<String> = docs(&raw).into_iter().map(|d| d.uid).collect();
         uids.sort();
         let want: Vec<String> = ["o10", "o11", "o13", "o14", "o15", "o16", "p30", "s20"]
@@ -542,10 +875,10 @@ mod tests {
         let src = dir.path().join("claude-mem.db");
         claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
         let mut raw = crate::raw::open(dir.path()).unwrap();
-        claude_mem(&mut raw, &src).unwrap();
+        claude_mem(&mut raw, &src, &Default::default()).unwrap();
         let ops = raw.max_op_seq_of(raw.device()).unwrap();
         assert_eq!(
-            counts(&claude_mem(&mut raw, &src).unwrap()),
+            counts(&claude_mem(&mut raw, &src, &Default::default()).unwrap()),
             (0, 0, 0, 8, 2)
         );
         // claude-mem pruning its sessions does not rename the database.
@@ -554,7 +887,7 @@ mod tests {
             .execute("DELETE FROM sdk_sessions", [])
             .unwrap();
         assert_eq!(
-            counts(&claude_mem(&mut raw, &src).unwrap()),
+            counts(&claude_mem(&mut raw, &src, &Default::default()).unwrap()),
             (0, 0, 0, 8, 2)
         );
         assert_eq!(raw.max_op_seq_of(raw.device()).unwrap(), ops);
@@ -562,7 +895,7 @@ mod tests {
         let other = dir.path().join("other.db");
         claude_mem_db(&other, "2026-06-26T18:19:21.955Z");
         assert_eq!(
-            counts(&claude_mem(&mut raw, &other).unwrap()),
+            counts(&claude_mem(&mut raw, &other, &Default::default()).unwrap()),
             (6, 1, 1, 0, 2)
         );
     }
@@ -585,11 +918,11 @@ mod tests {
         drop(c);
         let mut raw = crate::raw::open(dir.path()).unwrap();
         crate::crash::at(2);
-        let killed = claude_mem(&mut raw, &src);
+        let killed = claude_mem(&mut raw, &src, &Default::default());
         crate::crash::off();
         assert!(killed.is_err());
         assert_eq!(docs(&raw).len(), crate::raw::IMPORT_BATCH);
-        let stats = claude_mem(&mut raw, &src).unwrap();
+        let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
         assert_eq!((stats.observations, stats.seen), (706, 500));
         let mut ids: Vec<String> = docs(&raw).into_iter().map(|d| d.source_id).collect();
         let all = ids.len();
@@ -607,7 +940,7 @@ mod tests {
         let src = dir.path().join("claude-mem.db");
         claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
         let mut raw = crate::raw::open(dir.path()).unwrap();
-        claude_mem(&mut raw, &src).unwrap();
+        claude_mem(&mut raw, &src, &Default::default()).unwrap();
         let rules = crate::redact::Rules::default();
         let window = curate::next_window(&raw, raw.device(), 100_000, &rules).unwrap();
         assert!(window.is_none());

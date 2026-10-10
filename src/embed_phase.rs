@@ -1861,18 +1861,14 @@ fn made_from_excluded(
 }
 
 /// Whether an imported document's repository is excluded: listed itself, or a claude-mem project
-/// (and its worktree sessions, `claude-mem:<name>/…`) named by a listed repository's last part,
-/// as search maps them (D13).
+/// (and its worktree sessions, `claude-mem:<name>/…`) a listed repository reads, as search maps
+/// them (`import::imported_repos`, D13).
 pub(crate) fn import_excluded(repo: &str, list: &[String]) -> bool {
-    if list.iter().any(|x| x == repo) {
-        return true;
-    }
-    let Some(name) = repo.strip_prefix("claude-mem:") else {
-        return false;
-    };
-    let project = crate::import::repo(name.split('/').next().unwrap_or(name));
-    list.iter()
-        .any(|x| *x == project || crate::import::repo(x.rsplit('/').next().unwrap_or(x)) == project)
+    let project = &crate::import::imported_repos(repo)[1];
+    list.iter().any(|x| {
+        x == repo
+            || repo.starts_with("claude-mem:") && crate::import::imported_repos(x)[1] == *project
+    })
 }
 
 /// The text sent for `r`: gated first (an imported document's fields each alone, `composed_out`),

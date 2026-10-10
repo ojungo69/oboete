@@ -170,7 +170,8 @@ L9. **Removal.** A list or a task is closed, not deleted, as in claude-mem. Mile
 repository takes its work state too, built with forget; until then it goes only with the home.
 
 L10. **Import.** N1 brings claude-mem's `work_state_entries` over as work state ops, oldest first,
-with their times, before claude-mem is removed.
+with their times, before claude-mem is removed; a repository reads its claude-mem project's lists
+with its own (docs/claude-mem-import.md I4, I5).
 
 ## Tests
 
