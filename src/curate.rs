@@ -2996,7 +2996,12 @@ pub fn stopped(home: &std::path::Path, raw: &Raw, now: i64) -> Result<Option<Sto
     }
     // One the checkpoint has passed (a restore moved it) waits for nothing.
     .filter(|p| (p.from_seq, p.from_offset.unwrap_or(0)) >= next)
-    .filter(|p| p.hold != "time" || now - p.since >= STOPPED_MS);
+    // One due now is tried at the next pass, which this session's start begins (Codex on #438).
+    .filter(|p| match p.hold.as_str() {
+        "owner" => true,
+        "budget" => p.next_attempt_at > now,
+        _ => p.next_attempt_at > now && now - p.since >= STOPPED_MS,
+    });
     let skipped = failed_spans(raw)?;
     Ok((waits.is_some() || skipped > 0).then_some(Stopped { waits, skipped }))
 }
@@ -7808,17 +7813,25 @@ mod tests {
             since,
             prompt: String::new(),
         };
-        for (hold, since, shown) in [
-            ("owner", now, true),
-            ("budget", now, true),
-            ("time", now - STOPPED_MS + 1, false),
-            ("time", now - STOPPED_MS, true),
+        let due = |hold: &str| Pending {
+            next_attempt_at: now,
+            ..pending(hold, now - STOPPED_MS)
+        };
+        for (p, shown) in [
+            (pending("owner", now), true),
+            (pending("budget", now), true),
+            (pending("time", now - STOPPED_MS + 1), false),
+            (pending("time", now - STOPPED_MS), true),
+            (due("owner"), true),
+            (due("budget"), false),
+            (due("time"), false),
         ] {
-            providers_db::set_pending(&db, &pending(hold, since)).unwrap();
+            let hold = p.hold.clone();
+            providers_db::set_pending(&db, &p).unwrap();
             let s = stopped(h, &raw, now).unwrap();
             assert_eq!(
                 s.as_ref().map(|s| &s.waits.as_ref().unwrap().hold[..]),
-                shown.then_some(hold)
+                shown.then_some(&hold[..])
             );
         }
         providers_db::set_pending(&db, &pending("owner", now - 2 * 60 * 60 * 1000)).unwrap();
