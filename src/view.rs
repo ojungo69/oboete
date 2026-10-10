@@ -2926,8 +2926,57 @@ mod tests {
         assert!(!home.exists());
     }
 
+    /// The doctor's inventory reads the agents' files under the user's home, so on a machine
+    /// whose agents have oboete wired in it is incomplete for an absent oboete home (#404): the
+    /// check runs again in a child with a cleared environment, as readiness's registered-agent
+    /// matrix does, whose every agent directory is its own and empty.
     #[test]
     fn w6d_doctor_requires_an_explicit_empty_object_and_keeps_absence() {
+        const CHILD: &str = "OBOETE_W6D_DOCTOR_TEST";
+        const NAME: &str =
+            "view::tests::w6d_doctor_requires_an_explicit_empty_object_and_keeps_absence";
+        if std::env::var_os(CHILD).is_none() {
+            let private = tempfile::tempdir().unwrap();
+            let dir = private.path();
+            let at = |sub: &str| {
+                let path = dir.join(sub);
+                std::fs::create_dir_all(&path).unwrap();
+                path
+            };
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", NAME, "--nocapture"])
+                .env_clear()
+                .env(CHILD, "1")
+                .env("HOME", at("owner"))
+                .env("USERPROFILE", at("owner"))
+                .env("OBOETE_NO_SPAWN", "1")
+                .env("CLAUDE_CONFIG_DIR", at("agents/claude"))
+                .env("CODEX_HOME", at("agents/codex"))
+                .env("GROK_HOME", at("agents/grok"))
+                .env("OPENCODE_CONFIG_DIR", at("agents/opencode"))
+                .env("PI_CODING_AGENT_DIR", at("agents/pi"))
+                .env("CURSOR_CONFIG_DIR", at("agents/cursor"))
+                .env("XDG_CONFIG_HOME", at("xdg/config"))
+                .env("XDG_DATA_HOME", at("xdg/data"))
+                .env("TMPDIR", at("tmp"))
+                .env("TMP", at("tmp"))
+                .env("TEMP", at("tmp"))
+                .env("PATH", at("bin"));
+            #[cfg(windows)]
+            child.env("SystemRoot", std::env::var_os("SystemRoot").unwrap());
+            if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+                child.env("LLVM_PROFILE_FILE", profile);
+            }
+            let output = child.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("absent");
         let v = Viewer::new(&home, None, 4321, Token::Run("t0k".into()));
