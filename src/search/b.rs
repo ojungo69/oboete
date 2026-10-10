@@ -1654,6 +1654,79 @@ fn imported_hit(
     }
 }
 
+/// The hit of the card or summary `id` names, read through its one reader: none when the reader
+/// hides the row (Q3).
+fn curated_hit(
+    raw: &Raw,
+    k: &Connection,
+    rules: &redact::Rules,
+    terms: &[String],
+    summaries: bool,
+    id: &str,
+) -> Result<Option<Hit>> {
+    let (key, class, repo, when, kind, title, body, read_tokens) = if summaries {
+        let Some(s) = crate::turns::get(k, raw, id, rules)? else {
+            return Ok(None);
+        };
+        let body = crate::turns::FIELDS[1..]
+            .iter()
+            .filter_map(|f| s.fields.get(*f).map(String::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (
+            s.id(raw.device()),
+            Class::Summary,
+            s.repo,
+            s.ts,
+            "summary".to_owned(),
+            s.row,
+            body,
+            None,
+        )
+    } else {
+        let Some(c) = crate::cards::get(k, raw, id, rules)? else {
+            return Ok(None);
+        };
+        let cost = card_text(&c, raw.device()).chars().count().div_ceil(4);
+        let body = std::iter::once(c.subtitle.as_str())
+            .chain(std::iter::once(c.narrative.as_str()))
+            .chain(
+                c.facts
+                    .iter()
+                    .chain(&c.concepts)
+                    .chain(&c.files_read)
+                    .chain(&c.files_modified)
+                    .map(String::as_str),
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
+        (
+            c.id(raw.device()),
+            Class::Card,
+            c.repo,
+            c.ts,
+            c.kind.unwrap_or_else(|| "summary".into()),
+            c.row_title,
+            body,
+            Some(cost),
+        )
+    };
+    let flat = redact::flattened_with(&body, rules, usize::MAX, one_line).masked();
+    Ok(Some(Hit {
+        key,
+        class,
+        repo,
+        when,
+        kind,
+        status: String::new(),
+        muted: false,
+        label: Label::QuoteOnly,
+        title,
+        snippet: redact::outbound_with(&super::snippet(&flat, terms, WIDTH), rules),
+        read_tokens,
+    }))
+}
+
 /// Cards and summaries rank on their stored text and their vectors (fused by `rrf`, docs/tools.md
 /// V4), but display only through their one reader (`get` calls `cards::read` / `turns::read_row`).
 /// Hidden rows take no slot in either list.
@@ -1673,70 +1746,7 @@ fn curated_leg(
     } else {
         ("cards", "cards_fts", "d.replaced_by IS NULL", "d.n")
     };
-    // The hit of the row `id` names, read through its reader: none when it hides the row.
-    let read = |id: &str| -> Result<Option<Hit>> {
-        let (key, class, repo, when, kind, title, body, read_tokens) = if summaries {
-            let Some(s) = crate::turns::get(k, raw, id, rules)? else {
-                return Ok(None);
-            };
-            let body = crate::turns::FIELDS[1..]
-                .iter()
-                .filter_map(|f| s.fields.get(*f).map(String::as_str))
-                .collect::<Vec<_>>()
-                .join("\n");
-            (
-                s.id(raw.device()),
-                Class::Summary,
-                s.repo,
-                s.ts,
-                "summary".to_owned(),
-                s.row,
-                body,
-                None,
-            )
-        } else {
-            let Some(c) = crate::cards::get(k, raw, id, rules)? else {
-                return Ok(None);
-            };
-            let cost = card_text(&c, raw.device()).chars().count().div_ceil(4);
-            let body = std::iter::once(c.subtitle.as_str())
-                .chain(std::iter::once(c.narrative.as_str()))
-                .chain(
-                    c.facts
-                        .iter()
-                        .chain(&c.concepts)
-                        .chain(&c.files_read)
-                        .chain(&c.files_modified)
-                        .map(String::as_str),
-                )
-                .collect::<Vec<_>>()
-                .join("\n");
-            (
-                c.id(raw.device()),
-                Class::Card,
-                c.repo,
-                c.ts,
-                c.kind.unwrap_or_else(|| "summary".into()),
-                c.row_title,
-                body,
-                Some(cost),
-            )
-        };
-        let flat = redact::flattened_with(&body, rules, usize::MAX, one_line).masked();
-        Ok(Some(Hit {
-            key,
-            class,
-            repo,
-            when,
-            kind,
-            status: String::new(),
-            muted: false,
-            label: Label::QuoteOnly,
-            title,
-            snippet: redact::outbound_with(&super::snippet(&flat, terms, WIDTH), rules),
-            read_tokens,
-        }))
-    };
+    let read = |id: &str| curated_hit(raw, k, rules, terms, summaries, id);
     let mut hits = HashMap::new();
     let mut order = Vec::new();
     if let Some((mut clauses, mut args, by, by_args)) =

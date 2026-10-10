@@ -2662,7 +2662,7 @@ mod tests {
             serde_json::json!([there]),
             "Secret summary of a goal",
         );
-        let secret = [
+        let not_sent = [
             format!("{device}.{}", card(&mut s, there, "Secret card there")),
             format!("{device}.{}", card(&mut s, elsewhere, "Secret card here")),
             format!("{device}.{mixed}"),
@@ -2687,7 +2687,7 @@ mod tests {
         assert!(sent.iter().any(|t| t.starts_with("Open card")), "{sent:?}");
         assert!(sent.iter().any(|t| t == "Open summary"), "{sent:?}");
         assert!(sent.iter().all(|t| !t.contains("Secret")), "{sent:?}");
-        for key in &secret {
+        for key in &not_sent {
             assert_eq!(skipped(&s, key).as_deref(), Some("excluded"), "{key}");
         }
     }

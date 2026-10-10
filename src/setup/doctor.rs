@@ -119,6 +119,8 @@ impl Checks {
                 self.embeddings.state,
                 self.embeddings.generation.state,
                 self.embeddings.waiting.claims.state,
+                self.embeddings.waiting.cards.state,
+                self.embeddings.waiting.summaries.state,
                 self.embeddings.waiting.imports.state,
                 self.embeddings.waiting.records.state,
                 self.embeddings.skipped.state,
@@ -2726,6 +2728,42 @@ mod tests {
             report["checks"]["embeddings"]["waiting"]["records"],
             serde_json::json!({"state":"schema_missing","value":null})
         );
+    }
+
+    /// CodeRabbit on #429: the cards' and the summaries' waiting counts are among what a complete
+    /// report has established.
+    #[test]
+    fn w6d_unknown_card_or_summary_waiting_counts_leave_the_report_incomplete() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(
+            p.join("config.toml"),
+            "[embedding]\nprovider='workers-ai'\naccount_id='synthetic-account'\n",
+        )
+        .unwrap();
+        let k = Connection::open(p.join("knowledge.db")).unwrap();
+        let cards = "CREATE TABLE cards(device TEXT,op_seq INTEGER,n INTEGER,replaced_by INTEGER);";
+        let turns = "CREATE TABLE turns(device TEXT,op_seq INTEGER,skipped INTEGER);";
+        k.execute_batch(&format!(
+            "CREATE TABLE rewinds(ts);
+             CREATE TABLE gaps(agent TEXT,transcript_turns INTEGER,raw_turns INTEGER);
+             CREATE TABLE claims(uid TEXT);
+             CREATE VIEW active AS SELECT uid FROM claims;
+             CREATE TABLE imported(uid TEXT);
+             CREATE TABLE raw_docs(device TEXT,seq INTEGER,kind TEXT);
+             CREATE TABLE vec_generation(embedder TEXT,state TEXT);
+             CREATE TABLE vector_keys(embedder TEXT,kind TEXT,key TEXT,skipped TEXT);
+             {cards} {turns}"
+        ))
+        .unwrap();
+        let complete = || serde_json::to_value(doctor_report(p)).unwrap()["complete"].clone();
+        assert_eq!(complete(), true);
+        for (table, create) in [("cards", cards), ("turns", turns)] {
+            k.execute_batch(&format!("DROP TABLE {table};")).unwrap();
+            assert_eq!(complete(), false, "{table}");
+            k.execute_batch(create).unwrap();
+        }
+        assert_eq!(complete(), true);
     }
 
     fn legacy_fixture(home: &Path) -> Connection {
