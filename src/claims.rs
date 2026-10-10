@@ -96,6 +96,14 @@ pub fn uid(kind: &str, first: &Evidence) -> String {
     })
 }
 
+/// The uid a claim op's `body` derives, as the claims consumer derives it (its kind normalized,
+/// its first quote), or None for a body of another shape (milestone 5 D5 refuses an op by it).
+pub fn op_uid(body: &serde_json::Value) -> Option<String> {
+    let c: ClaimOp = serde_json::from_value(body.clone()).ok()?;
+    let (kind, _) = normalize(&c.kind, &c.status);
+    Some(uid(kind, c.evidence.first()?))
+}
+
 /// Windows whose claims lost a quote to a mask or a removal since: Task 11 sends them again.
 /// With the claim op that lost it, so a rewind that loses the op takes it back, and its first
 /// record: a recuration of a span's middle leaves the parts on both sides (#192).
@@ -440,7 +448,8 @@ fn correction_target_exists(
                 x.uid, x.status, x.body, x.op_device, x.op_seq, x.ts
          FROM claims c, derivations d, corrections x LIMIT 0",
     )?;
-    let found = correction_anchor(&k, uid)?.is_some();
+    // A forgotten claim (milestone 5 D5) has nothing left to correct.
+    let found = !raw.forgotten(uid)? && correction_anchor(&k, uid)?.is_some();
     raw.current()?;
     current()?;
     Ok(found)
@@ -1038,7 +1047,8 @@ pub fn place(units: Vec<Vec<Claim>>, places: usize) -> (Vec<Vec<Claim>>, Vec<Vec
 /// the owner's corrections past the claims consumer, and the records of tombstones past the
 /// anchors consumer. A reader of knowledge.db leaves out a claim either touches until the worker
 /// has applied it, as the manifest's read leaves out a text a tombstone may touch: a claim the
-/// owner retracted, or one quoting what the owner removed, is never shown.
+/// owner retracted, or one quoting what the owner removed, is never shown. A forgotten uid, a
+/// claim's or an imported document's, is touched for good (milestone 5 D5).
 #[derive(Debug, Default)]
 pub struct Pending {
     uids: std::collections::HashSet<String>,
@@ -1052,7 +1062,11 @@ impl Pending {
         use crate::consumer::claims::{Anchors, Claims};
         use crate::knowledge::checkpoint;
         use crate::worker::Consumer;
-        let mut p = Self::default();
+        // Milestone 5 D5: a forgotten uid, a claim's or a document's, from its forget op's commit.
+        let mut p = Self {
+            uids: raw.forgotten_set()?,
+            ..Self::default()
+        };
         for device in Claims.devices(raw)? {
             let at = checkpoint::get_in(k, Claims.checkpoints(), Claims.name(), &device)?;
             for body in raw.ops_of(crate::raw::OpKind::Correction, &device, at)? {

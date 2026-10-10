@@ -77,6 +77,10 @@ CREATE INDEX IF NOT EXISTS ops_exclusions ON ops(device, op_seq) WHERE type = 'e
 CREATE INDEX IF NOT EXISTS ops_windows ON ops(device, op_seq) WHERE type = 'window';
 -- docs/work-state.md L4: the agents' work state, read at each session start from its own ops.
 CREATE INDEX IF NOT EXISTS ops_work_state ON ops(device, op_seq) WHERE type = 'work_state';
+-- Milestone 5 D5: a forgotten uid, by the forget op that names it, any device's. The op is the
+-- authority and this its index: a restore of the ops brings the denial back with them.
+CREATE INDEX IF NOT EXISTS ops_forget_uid ON ops(json_extract(body, '$.uid'))
+  WHERE type = 'forget';
 -- Milestone 5 D1 (docs/milestone-5-plan.md): what forget denies, by the record's import origin,
 -- the one identity (rule 5); `device` and `seq` are where it was when it was forgotten, `ts` its
 -- time only when it counted toward the transcript cut (rule 10), `session` its labels' hash.
@@ -236,6 +240,8 @@ pub enum OpKind {
     Turn,
     /// One write of an agent's work state (docs/work-state.md L4): `{repo, list, fields, clock}`.
     WorkState,
+    /// A claim's or an imported document's uid forgotten (milestone 5 D5): `{uid, job}`, no text.
+    Forget,
 }
 
 impl OpKind {
@@ -250,6 +256,7 @@ impl OpKind {
             OpKind::Migration => "migration",
             OpKind::Turn => "turn",
             OpKind::WorkState => "work_state",
+            OpKind::Forget => "forget",
         }
     }
     fn from_name(name: &str) -> Option<Self> {
@@ -263,6 +270,7 @@ impl OpKind {
             Self::Migration,
             Self::Turn,
             Self::WorkState,
+            Self::Forget,
         ]
         .into_iter()
         .find(|k| k.name() == name)
@@ -346,6 +354,21 @@ fn denied(conn: &Connection, origin: Option<&str>, text: &str) -> Result<bool> {
     )?;
     Ok(denied || cfg!(test) && text.contains(DENIED_IN_TESTS))
 }
+
+/// Milestone 5 D5: whether a forget op names `uid`.
+fn forgotten_uid(conn: &Connection, uid: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ops WHERE type = 'forget' AND json_extract(body, '$.uid') = ?1)",
+        [uid],
+        |r| r.get(0),
+    )?)
+}
+
+/// What forget denies: records by origin, and uids by their forget ops. The derived writers'
+/// fence (rule 12) and a preview's token count both, so a uid's forget also cuts a window in
+/// flight again (D5: rare, and safe).
+const DENIED_COUNT: &str = "SELECT (SELECT COUNT(*) FROM denied_records)
+  + (SELECT COUNT(*) FROM ops WHERE type = 'forget')";
 
 /// Opposite import sources do not share event identifiers. Keep exact-origin denials, but
 /// refuse an import that could reintroduce their copy from the other source.
@@ -496,6 +519,11 @@ pub(crate) struct ReadOnly {
 }
 
 impl ReadOnly {
+    /// Milestone 5 D5: whether `uid` is forgotten.
+    pub(crate) fn forgotten(&self, uid: &str) -> Result<bool> {
+        forgotten_uid(&self.conn, uid)
+    }
+
     /// Windows cannot rename a file with an open SQLite handle. Close that connection, keeping
     /// the original swap hold and identity until `open` owns a hold on the same recovered file.
     pub(crate) fn into_writer(self, home: &Path) -> Result<Raw> {
@@ -1265,6 +1293,7 @@ impl Raw {
             denied: self.denied_count()?,
             sources,
             sample,
+            uid: None,
         })
     }
 
@@ -1282,13 +1311,25 @@ impl Raw {
             crate::dispatch::exclusive(&self.home).context("forget was not registered")?;
         self.current()?;
         let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
-        let again = self.forget_preview(preview.target.clone())?;
+        let again = match &preview.target {
+            // D5: its index is knowledge.db, which is not read under raw's lock (rule 2): raw's
+            // part is read again, the denials.
+            crate::forget::Target::Uid { uid } => {
+                anyhow::ensure!(!forgotten_uid(&tx, uid)?, "{uid} is forgotten already");
+                crate::forget::Preview {
+                    denied: self.denied_count()?,
+                    ..preview.clone()
+                }
+            }
+            target => self.forget_preview(target.clone())?,
+        };
         anyhow::ensure!(
             again.token()? == preview.token()?,
             "forget preview is stale; preview again"
         );
+        let uid = matches!(preview.target, crate::forget::Target::Uid { .. });
         let request = crate::forget::Request {
-            v: 1,
+            v: if uid { 2 } else { 1 },
             home: self.home_id.clone(),
             job: job.into(),
             started,
@@ -1334,9 +1375,72 @@ impl Raw {
 
     /// How many records forget denies: the derived writers' fence (rule 12).
     pub fn denied_count(&self) -> Result<i64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM denied_records", [], |r| r.get(0))?)
+        Ok(self.conn.query_row(DENIED_COUNT, [], |r| r.get(0))?)
+    }
+
+    /// D5: `uid`'s ops in the op log when knowledge.db has not read them yet (right after an
+    /// import, or while the worker lags; Codex on #435): a claim's, its uid computed as the
+    /// consumer computes it, with the corrections that name it, or a document's import ops. Its
+    /// kind, how many ops and what to show first; None when the log holds none.
+    pub fn uid_ops(&self, uid: &str) -> Result<Option<(&'static str, usize, String)>> {
+        if uid.len() == 64 && uid.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let mut st = self
+                .conn
+                .prepare("SELECT body FROM ops WHERE type = 'claim'")?;
+            let mut rows = st.query([])?;
+            let (mut n, mut first) = (0, None);
+            while let Some(row) = rows.next()? {
+                let Ok(body) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(0)?)
+                else {
+                    continue;
+                };
+                if crate::claims::op_uid(&body).as_deref() == Some(uid) {
+                    n += 1;
+                    first.get_or_insert_with(|| body["body"].as_str().unwrap_or("").to_owned());
+                }
+            }
+            let corrections: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM ops WHERE type = 'correction'
+                 AND json_extract(body, '$.uid') = ?1",
+                [uid],
+                |r| r.get(0),
+            )?;
+            if n > 0 {
+                let ops = n + usize::try_from(corrections)?;
+                return Ok(Some(("claim", ops, first.unwrap_or_default())));
+            }
+            // No claim has it: an import op may still carry it (CodeRabbit on #435).
+        }
+        let (n, title): (i64, Option<String>) = self.conn.query_row(
+            "SELECT COUNT(*), MIN(json_extract(body, '$.title')) FROM ops
+             WHERE type = 'import' AND json_extract(body, '$.uid') = ?1",
+            [uid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((n > 0).then(|| {
+            (
+                "document",
+                usize::try_from(n).unwrap_or(0),
+                title.unwrap_or_default(),
+            )
+        }))
+    }
+
+    /// Milestone 5 D5: whether `uid`, a claim's or an imported document's, is forgotten.
+    pub fn forgotten(&self, uid: &str) -> Result<bool> {
+        forgotten_uid(&self.conn, uid)
+    }
+
+    /// Every forgotten uid (D5): the readers and senders pass them over.
+    pub fn forgotten_set(&self) -> Result<std::collections::HashSet<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT json_extract(body, '$.uid') FROM ops
+             WHERE type = 'forget' AND json_extract(body, '$.uid') IS NOT NULL",
+        )?;
+        let uids = st
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(uids)
     }
 
     pub fn device(&self) -> &str {
@@ -1347,7 +1451,7 @@ impl Raw {
         &self.home_id
     }
 
-    fn home_id_proven(&self) -> Result<bool> {
+    pub(crate) fn home_id_proven(&self) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM meta WHERE key='home_id_proven' AND value='1')",
             [],
@@ -2288,7 +2392,7 @@ impl Raw {
     ) -> Result<Vec<i64>> {
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
-        let now: i64 = tx.query_row("SELECT COUNT(*) FROM denied_records", [], |r| r.get(0))?;
+        let now: i64 = tx.query_row(DENIED_COUNT, [], |r| r.get(0))?;
         if now != denied {
             return Err(crate::curate::ListChanged.into());
         }
@@ -2551,7 +2655,8 @@ impl Raw {
         for doc in docs {
             let text = format!("{}\n{}", doc.title, doc.body);
             let origin = crate::forget::origin(&doc.source, &doc.source_id);
-            if denied(&self.conn, Some(&origin), &text)? {
+            // A forgotten document (D5) is passed over here: `append_ops` refuses a batch with it.
+            if denied(&self.conn, Some(&origin), &text)? || forgotten_uid(&self.conn, &doc.uid)? {
                 continue;
             }
             let body = serde_json::to_value(within_op_cap(doc)?)?;
@@ -3202,13 +3307,12 @@ impl Rebuild {
     /// with every op after it: the curation checkpoint must never pass a seq the store does not
     /// hold, or the records that reuse those seqs would never be curated, and an import's must
     /// not pass records it lost, or its next pass would skip them (D6); so a migration op whose
-    /// batch lost a record goes too, even when later segments were restored. Returns how many ops
-    /// went.
+    /// batch lost a record goes too, even when later segments were restored. A forget op among
+    /// them is appended again (D5). Returns how many ops went, those not counted.
     // ponytail: a restore keeping a batch's records but not its migration op imports them again;
     // a check of the restored records against the source's ids would catch it.
     pub fn finish(self) -> Result<usize> {
-        let dropped = self.conn.execute(
-            "DELETE FROM ops WHERE op_seq >= (
+        let past = "op_seq >= (
                SELECT MIN(w.op_seq) FROM ops w WHERE w.device = ops.device
                  AND w.type IN ('window', 'migration')
                  AND (json_extract(w.body, '$.to_seq') >
@@ -3217,9 +3321,21 @@ impl Rebuild {
                         (SELECT COUNT(*) FROM records r WHERE r.device = w.device
                            AND r.seq BETWEEN json_extract(w.body, '$.from_seq')
                                          AND json_extract(w.body, '$.to_seq'))
-                        < json_extract(w.body, '$.to_seq') - json_extract(w.body, '$.from_seq') + 1))",
-            [],
-        )?;
+                        < json_extract(w.body, '$.to_seq') - json_extract(w.body, '$.from_seq') + 1))";
+        // D5: a forget op among them derives nothing from the lost records. It is appended again
+        // below, at a reused op seq as any new op is, so the uid stays forgotten when no request
+        // log brings it back (Codex's adversarial review of slice 2a); as this device's, the only
+        // one whose ops a backup holds until sync (milestone 6).
+        let forgets: Vec<String> = self
+            .conn
+            .prepare(&format!(
+                "SELECT body FROM ops WHERE type = 'forget' AND {past}"
+            ))?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let dropped = self
+            .conn
+            .execute(&format!("DELETE FROM ops WHERE {past}"), [])?;
         // After that check: a forget's tombstones take new seqs, which must not make an old window
         // look as if the records a damaged backup lost were there.
         let device: String =
@@ -3227,13 +3343,27 @@ impl Rebuild {
                 .query_row("SELECT value FROM meta WHERE key = 'device_id'", [], |r| {
                     r.get(0)
                 })?;
+        for body in &forgets {
+            let uid: String = serde_json::from_str::<serde_json::Value>(body)?["uid"]
+                .as_str()
+                .context("a forget op without its uid")?
+                .to_owned();
+            if !forgotten_uid(&self.conn, &uid)? {
+                insert_ops(
+                    &self.conn,
+                    &device,
+                    &[(OpKind::Forget.name(), body.clone())],
+                )?;
+            }
+        }
         for r in &self.forget {
             r.check()?;
             apply_request(&self.conn, &device, r)?;
         }
         self.conn.execute_batch("COMMIT")?;
         self.conn.close().map_err(|(_, e)| e)?;
-        Ok(dropped)
+        // No forget op among them is lost: each is appended again, or its uid is forgotten already.
+        Ok(dropped - forgets.len())
     }
 }
 
@@ -3248,6 +3378,13 @@ pub(crate) fn apply_request(
     device: &str,
     r: &crate::forget::Request,
 ) -> Result<bool> {
+    // D5: one forget op per uid, whichever request or log line brings it first.
+    if let crate::forget::Target::Uid { uid } = &r.target
+        && !forgotten_uid(conn, uid)?
+    {
+        let body = serde_json::json!({"uid": uid, "job": r.job}).to_string();
+        insert_ops(conn, device, &[(OpKind::Forget.name(), body)])?;
+    }
     for rec in &r.records {
         conn.execute(
             "INSERT OR IGNORE INTO denied_records(origin, device, seq, ts, session, job)
@@ -3289,8 +3426,19 @@ pub(crate) fn apply_request(
 }
 
 /// A Claim or Correction op anchored on a record forget denies, by the record's origin (D1 rule
-/// 5): never recorded. Window and turn ops are fenced by `Reading` (rule 12).
+/// 5), or a Claim, Correction or Import op of a forgotten uid (D5): never recorded. Window and
+/// turn ops are fenced by `Reading` (rule 12).
 fn forgotten_op(conn: &Connection, kind: OpKind, body: &serde_json::Value) -> Result<bool> {
+    let uid = match kind {
+        OpKind::Claim => crate::claims::op_uid(body),
+        OpKind::Correction | OpKind::Import => body["uid"].as_str().map(str::to_owned),
+        _ => None,
+    };
+    if let Some(uid) = uid
+        && forgotten_uid(conn, &uid)?
+    {
+        return Ok(true);
+    }
     let anchor = |e: &serde_json::Value| -> Result<bool> {
         Ok(conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM import_origins o JOIN denied_records d
@@ -3445,11 +3593,7 @@ fn within_batch_cap(ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<(&'static
 }
 
 /// `bodies` as `device`'s next ops, one batch, inside a write transaction.
-fn insert_ops(
-    tx: &rusqlite::Transaction,
-    device: &str,
-    bodies: &[(&str, String)],
-) -> Result<Vec<i64>> {
+fn insert_ops(tx: &Connection, device: &str, bodies: &[(&str, String)]) -> Result<Vec<i64>> {
     let mut op_seq: i64 = tx.query_row(
         "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
         [device],
@@ -3693,6 +3837,90 @@ mod tests {
 
     /// F2 also covers the consistent snapshot after the first schema transaction, before
     /// the opener returns: it already carries the lineage later forgets will name.
+    /// Milestone 5 D5: a forgotten uid's Claim (derived again, whatever its body), Correction and
+    /// Import ops are refused, an imported document of it is passed over, and a request applied
+    /// again adds no second forget op.
+    #[test]
+    fn a_forgotten_uids_ops_are_refused_and_its_document_passed_over() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let seq = raw.append(&test_event("We use tabs.")).unwrap();
+        let device = raw.device().to_owned();
+        let claim = |body: &str| {
+            serde_json::to_value(crate::claims::ClaimOp {
+                id: "c1".into(),
+                kind: "decision".into(),
+                status: "decided".into(),
+                speaker: "user".into(),
+                scope: "repo".into(),
+                body: body.into(),
+                evidence: vec![crate::claims::Evidence {
+                    device: device.clone(),
+                    seq,
+                    offset: 0,
+                    length: 6,
+                    sentence: 0,
+                    quote: "We use".into(),
+                    claim_at: None,
+                }],
+                supersedes: Vec::new(),
+                recipe: "test".into(),
+                tier: 1,
+                why: String::new(),
+                tainted: false,
+            })
+            .unwrap()
+        };
+        let doc = |id: &str| ImportDoc {
+            uid: format!("claude-mem:test:{id}"),
+            source: "claude-mem:test".into(),
+            source_id: id.into(),
+            kind: "decision".into(),
+            repo: "claude-mem:r".into(),
+            session: "s".into(),
+            ts: 1,
+            title: "A title".into(),
+            body: "A body.".into(),
+        };
+        let uid = crate::claims::op_uid(&claim("Use tabs.")).unwrap();
+        let forget = |raw: &mut Raw, uid: &str, job: char| {
+            raw.forget_apply(&[crate::forget::Request {
+                v: 2,
+                home: raw.home_id().into(),
+                job: job.to_string().repeat(32),
+                started: 1,
+                target: crate::forget::Target::Uid { uid: uid.into() },
+                records: Vec::new(),
+            }])
+            .unwrap()
+        };
+        assert_eq!(forget(&mut raw, &uid, 'a'), 1);
+        assert_eq!(forget(&mut raw, &doc("o1").uid, 'b'), 1);
+        // Another job of a uid forgotten already writes its job row and no second op.
+        assert_eq!(forget(&mut raw, &uid, 'c'), 1);
+        let forgets = |raw: &Raw| {
+            raw.ops_after(&device, 0, 100)
+                .unwrap()
+                .iter()
+                .filter(|o| o.kind == OpKind::Forget)
+                .count()
+        };
+        assert_eq!(forgets(&raw), 2);
+        let correction = serde_json::json!({"uid": uid, "status": "done",
+            "anchor": {"device": device, "seq": seq}});
+        for (kind, body) in [
+            (OpKind::Claim, claim("Indent with tabs everywhere.")),
+            (OpKind::Correction, correction),
+            (OpKind::Import, serde_json::to_value(doc("o1")).unwrap()),
+        ] {
+            assert!(raw.append_ops(&[(kind, body)]).is_err(), "{kind:?}");
+        }
+        assert_eq!(raw.append_imports(vec![doc("o1"), doc("o2")]).unwrap(), 1);
+        assert!(raw.forgotten(&uid).unwrap() && raw.forgotten(&doc("o1").uid).unwrap());
+        assert!(!raw.forgotten(&doc("o2").uid).unwrap());
+        assert_eq!(raw.forget_requests().unwrap().len(), 3);
+    }
+
     #[test]
     fn a_snapshot_of_first_schema_commit_keeps_forget_lineage() {
         let home = tempfile::tempdir().unwrap();

@@ -671,7 +671,7 @@ impl Phase {
                 if r.doc.sha != doc.sha {
                     continue;
                 }
-                if claim_pending(&held, &tx, &r.doc)? {
+                if claim_pending(raw, &held, &tx, &r.doc)? {
                     continue;
                 }
                 if let Some((device, seq)) = doc.key.rsplit_once(':')
@@ -1311,7 +1311,7 @@ fn pending_seen(
             let tx = k.unchecked_transaction()?;
             let held = crate::claims::Pending::read(raw, &tx)?;
             for r in page {
-                if claim_pending(&held, &tx, &r.doc)? {
+                if claim_pending(raw, &held, &tx, &r.doc)? {
                     deferred = true;
                     continue;
                 }
@@ -1751,9 +1751,15 @@ fn joined_sha(text: &str, parts: &[std::ops::Range<usize>]) -> String {
     format!("j{:x}", h.finalize())
 }
 
-/// A claim a pending correction or tombstone touches: its text may change on the next pass.
-fn claim_pending(pending: &crate::claims::Pending, k: &Connection, doc: &Doc) -> Result<bool> {
-    Ok(doc.kind == "c" && pending.touches(k, &doc.key)?)
+/// A claim a pending correction or tombstone touches: its text may change on the next pass. A
+/// forgotten one is not waited for: `passed_over` marks it (milestone 5 D5).
+fn claim_pending(
+    raw: &Raw,
+    pending: &crate::claims::Pending,
+    k: &Connection,
+    doc: &Doc,
+) -> Result<bool> {
+    Ok(doc.kind == "c" && pending.touches(k, &doc.key)? && !raw.forgotten(&doc.key)?)
 }
 
 /// Why a document gets no vector without being sent: its repository or session is excluded
@@ -1766,6 +1772,10 @@ fn passed_over(
     rules: &crate::redact::Rules,
 ) -> Result<Option<&'static str>> {
     let list = &reading.exclusions;
+    // A forgotten claim or document is sent nowhere (milestone 5 D5).
+    if matches!(r.doc.kind, "c" | "k" | "p") && raw.forgotten(&r.doc.key)? {
+        return Ok(Some("forgotten"));
+    }
     match r.doc.kind {
         "c" => {
             let excluded = list.contains(&r.doc.repo)
@@ -2633,6 +2643,32 @@ mod tests {
     /// Tools slice 3 (V2, D13): an excluded repository's card and summary, those of a session
     /// that touched it, and those made from one of its records (a window across sessions, a goal,
     /// a window a summary read) are not sent; each is marked `excluded`. The rest is sent.
+    /// Milestone 5 D5: a claim and an imported document forgotten before their vectors reach no
+    /// embedder, though knowledge.db still holds them: each is marked `forgotten`, and the rest are
+    /// sent.
+    #[test]
+    fn a_forgotten_claim_or_document_reaches_no_embedder() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let uid = claim(&mut s, "Parser caches stay in Redis.", "Secret claim body.");
+        let doc = s.imported("o1", "r", 2_000, "Secret title", "Secret document body.");
+        s.said("s", R, 3_000, "Open words.");
+        s.run();
+        let home = s.home.path().to_owned();
+        for u in [&uid, &doc] {
+            let target = crate::forget::Target::parse_uid(u).unwrap();
+            let p = crate::forget::preview(&home, target).unwrap();
+            crate::forget::start(&home, &p).unwrap();
+        }
+        embed_all(&s);
+        let sent = stub.texts().concat();
+        assert!(sent.iter().any(|t| t.contains("Open words")), "{sent:?}");
+        assert!(sent.iter().all(|t| !t.contains("Secret")), "{sent:?}");
+        assert_eq!(skipped(&s, &uid).as_deref(), Some("forgotten"));
+        assert_eq!(skipped(&s, &doc).as_deref(), Some("forgotten"));
+    }
+
     #[test]
     fn an_excluded_repositorys_cards_and_summaries_reach_no_embedder() {
         const X: &str = "github.com/o/secret";

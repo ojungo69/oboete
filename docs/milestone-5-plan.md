@@ -174,6 +174,93 @@ hub が未設定なら `hub=not_configured` とし、ローカル完了を妨げ
 設定済みなら waiting/acked を区別し、acked を hub purge 完了と表示しない。
 第一 slice は hub を調べず `hub=not_connected` と表示し、M6 の接続後にその状態を拡張する。
 
+### D5. uid の forget（Slice 2）
+
+spec 6.2 の claim-uid target。claim の uid（`claims::uid`、64 桁の hex）と imported document の
+uid（`<source>:<key>`）だけを受ける。raw の record は 1 件も消さない（preview は「raw records: 0」と、
+本文自体を消すときに forget すべき span を示す）。
+
+- **target の見分け方。** 64 桁の hex は claim の uid。それ以外は knowledge.db の `imported` に
+  あれば document の uid。`<device>:<seq>` の形の record id は `--record` を使うよう案内して拒否し、
+  card（`<device>.<op seq>.<n>`）と summary（`S<device>.<op seq>`）の id も拒否する（それらは record
+  から派生し、record を消す Slice 3 で K4・T7 のとおり隠れる）。knowledge.db にも raw の op にも
+  見つからない uid は登録前に拒否する。
+- **uid の op の探し方。** claim op の本文は uid を持たず、全 op（import が 17 万件を超えうる）を
+  計算し直すと遅い。knowledge.db を索引にする: `derivations` と `claims` が uid ごとの
+  `(op_device, op_seq)` を、`imported` が import op の op_seq を与える。見つけた op の本文から
+  consumer と同じ導出（`claims::normalize` の後の `claims::uid`）で uid を計算し直し、一致するものだけを
+  対象にする。その uid の Correction op は本文の `uid` で選ぶ（`Pending::read` と同じ）。
+- **登録は raw の書込 transaction 1 つ（D1 と同じ）。** 本文を持たない `forget` op（`{uid, job}`）を
+  op log に追記し、`forget_jobs` に要求を書く。要求は版 2（target `Uid`、records なし）で、要求ログ
+  2 部にも D1 と同じ規則で書く。古い binary は版 2 の行を読まずに飛ばす。別の表は作らない: op が
+  権威で、その uid への式索引（`ops_forget_uid`）が索引。ops segment で backup に運ばれ、restore した
+  raw.db はそれだけで忘れている。restore と reconcile が要求を適用するときは、同じ uid の op が
+  すでにあれば足さない。spec 5.8 の tombstone として、M6 はこの op を exclusion と同じ control op と
+  して先に送る。op の種類は `OpKind` に加え、すべての op consumer が知っている種類にする（知らない
+  種類で worker は止まる）。
+- **隠す・送らない（backstop）。** 登録の commit の時点から、claim と imported document の本文が
+  外へ出るすべての所で、その uid を返さず送らない: search の各 leg・get・cite・timeline・viewer・
+  MCP・hook の注入と packet・`oboete claims`（読む側）、embedding phase・curator の prompt
+  （shortlist、前の window から持ち込む決定と提案、recuration の `anchored_in`）（送る側）。どこも同じ
+  索引（`Raw::forgotten`）を引く。claim の読み手の多くはすでに `claims::Pending`（worker がまだ
+  適用していない owner の変更と tombstone）で隠すので、`Pending::read` が忘れた uid も読み、
+  `touches` がそれに真を返す。embedding phase は忘れた claim を Pending の保留にせず `forgotten` の
+  印を付けて飛ばす（保留のままだと、印のない文書が列の先頭に残り続ける）。knowledge.db に行が残って
+  いる間（step 3 の前）もこれで隠れる。忘れた claim の訂正と mute は、claim が無いものとして断る。
+- **再導出の拒否。** 同じ span を curate し直すと同じ uid が導かれる（uid は kind と最初の引用の文で
+  決まる）。curation は忘れた uid の claim を append の前に落とし、window op の `dropped` に
+  `its uid is forgotten` として載せる。import は忘れた uid の文書を飛ばす。`append_ops` は忘れた uid の
+  Claim・Correction・Import op を含む batch を拒否する（最後の砦。ここで拒否されると window や
+  500 件の import batch が止まるので、前段で落とすのが本来の経路）。D1 規則 12 の fence の件数に
+  forget op も数える: curation の呼出し中の uid の forget は、どの window もいったん切り直させる
+  （uid の forget は稀なので、広すぎる fence を受け入れる）。
+- **raw の op 本文を消す（2b）。** 見つけた Claim op（同じ uid の再導出と recuration を全部）、その
+  uid の Correction op、Import op の body を、本文を持たない `{"forgotten": "<job>"}` に書き換える。
+  op_seq・type・batch は変えない（checkpoint は op_seq で数える）。すべての op consumer は一つの
+  helper でこの body を何も導かない op として読み、エラーにしない。書換えの transaction は
+  `secure_delete` を有効にし、commit 後に `wal_checkpoint(TRUNCATE)` する。
+  消した claim が supersede していた claim は、何にも supersede されなくなり current に戻る。preview は
+  その claim を名指しし、利用者は mute か forget を選べる（Claude; overrulable: 本文のない
+  supersede を残して古い claim を隠し続けるより、何も導かない op の方が単純で、理由を示せない隠れ方を
+  作らない）。消した claim を supersede していた claim は、行のない uid を指す supersede を持つだけで
+  そのまま残る。
+- **knowledge.db は AI を呼ばない rebuild（`worker::rebuild`）で作り直す（2b）。** 書き換えた op からは
+  何も導かれないので、claim・derivation・correction・edge・FTS・packet・imported の行は新しい
+  ファイルに入らない。rebuild の後に uid の derivation と imported の行が無いことを確かめ、残って
+  いれば索引が op を取りこぼしたとして job を止め、done と報告しない。`carry` は、古いファイルの
+  `vector_keys` で忘れた uid の鍵だけが指す `src_sha` の vector を持ち越さない（同じ本文を持つ別の
+  文書が指す vector は、消す本文を新たに漏らさないので残す）。古い knowledge.db、
+  `knowledge.db.rebuilding-*`、`*.quarantined-*` は rebuild の後に消す。
+- **backup（2c）。** 書き換えた op を含む ops segment を書き直す（新しい segment と seal を横に書いて
+  から入れ替え、中断しても restore がその segment の他の op を失わない。既存の seal を上書きしない）。
+  record segment は触らない。
+- **進み方と再開。** `forget_jobs.step` は 1 登録・2 op 本文・3 knowledge.db・4 backup・5 完了。
+  各 step は冪等で、終わるごとに step を進める。worker の起動時と forget command が未完了の job を
+  続ける。`local` は step 5 まで「hidden; physical purge pending」、5 で「done」。
+- **preview。** uid の種類、一行の見出し（claim は本文の最初の行、document は title）、raw records 0、
+  消える claim op・correction op・import op の数、vector の数、書き直す ops segment の数、current に
+  戻る claim。
+
+PR は 3 つに分ける。2a: target・登録・要求ログ・restore と reconcile・隠す・送らない・再導出の拒否
+（step 1 から進まない）。2b: op 本文・rebuild と carry・ファイルの後始末・完了の確認と再開。
+2c: backup の書直し・中断試験・byte grep の canary。
+
+試験（2a の分）:
+
+1. claim の uid と document の uid の preview は raw records 0 と各数を返す。知らない uid、
+   record・card・summary の id は登録前に拒否し、record の形の id には `--record` を案内する。
+2. 登録の commit の直後から search・get・cite・timeline・viewer・MCP・hook の注入がその uid を
+   返さない（knowledge.db に行が残っている間も）。
+3. 登録の後、embedding phase とその window の recuration を回しても、stub の provider はその本文の
+   どの byte も受け取らない（claim と document の両方）。
+4. 同じ window の recuration が同じ uid を導いても claim op は書かれず、`dropped` に
+   `its uid is forgotten` と載る。同じ claude-mem DB の再 import はその文書を戻さない。忘れた uid の op を含む batch を
+   `append_ops` は拒否する。curation の呼出し中に登録された uid の forget は、その答えを何も書かせない。
+5. 要求ログ 2 部に版 2 の行が書かれ、版 1 の行と混ざったログを読める。raw.db を失った restore の後も
+   忘れた uid が戻り、reconcile を何度回しても forget op は 1 つ。
+6. forget op は ops segment に入り、restore した raw.db はその op だけで uid を忘れている（別の表は
+   作らない）。記録の segment が壊れて切り詰められても forget op は付け直される。
+
 ## 実装順序と完了条件
 
 | Slice | 対象と再利用する処理 | 完了条件 |
@@ -233,8 +320,8 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
 
 ## 実装状況
 
-- [ ] Slice 1: 削除要求と raw record/span の安全な受理
-- [ ] Slice 2: uid の物理 purge
+- [x] Slice 1: 削除要求と raw record/span の安全な受理（#389）
+- [ ] Slice 2: uid の物理 purge（D5。2a 登録と隠す・送らない、2b op 本文と knowledge.db、2c backup）
 - [ ] Slice 3: raw scope、rescan、retention
 - [ ] Slice 4: 可逆な管理と訂正
 - [ ] Slice 5: WebUI

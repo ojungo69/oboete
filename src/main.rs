@@ -102,6 +102,9 @@ enum Cmd {
         /// This device's raw span: <device>:<from>-<to> (at most 500 records)
         #[arg(long, conflicts_with_all = ["record", "status"])]
         span: Option<String>,
+        /// A claim's uid, or an imported document's, from search or get
+        #[arg(long, conflicts_with_all = ["record", "span", "status"])]
+        uid: Option<String>,
         /// Print the preview and skip its confirmation
         #[arg(long, conflicts_with = "status")]
         yes: bool,
@@ -689,9 +692,17 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         Cmd::Forget {
             record,
             span,
+            uid,
             yes,
             status,
-        } => forget::run(&home, record.as_deref(), span.as_deref(), yes, status),
+        } => forget::run(
+            &home,
+            record.as_deref(),
+            span.as_deref(),
+            uid.as_deref(),
+            yes,
+            status,
+        ),
         Cmd::Claims => {
             let settings = capture::Settings::load(&home)?;
             let cwd = std::env::current_dir()?;
@@ -699,21 +710,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             // As a hook's JSON payload carries it: a path that is not UTF-8 never panics here.
             let cwd = cwd.to_string_lossy();
             let (_, repo, _) = capture::checkout(&serde_json::json!({ "cwd": cwd }), &settings);
-            // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits).
-            let _raw = raw::open(&home)?;
-            let k = knowledge::open(&home)?;
-            claims::schema(&k)?;
-            let mut out = String::new();
-            // The global preferences too: `oboete correct` needs their uids, and no repository
-            // lists them.
-            for c in claims::current(&k, &repo)?
-                .into_iter()
-                .chain(claims::global(&k)?)
-            {
-                let body = redact::outbound(&c.body).replace('\n', " ");
-                out.push_str(&format!("{}  {} {}  {body}\n", c.uid, c.kind, c.status));
-            }
-            emit(&out)
+            emit(&claims_listed(&home, &repo)?)
         }
         Cmd::Recurate {
             skipped,
@@ -841,9 +838,54 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
     }
 }
 
+/// `oboete claims`: `repo`'s current claims and the global preferences, one a line.
+fn claims_listed(home: &std::path::Path, repo: &str) -> Result<String> {
+    // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits).
+    let raw = raw::open(home)?;
+    let k = knowledge::open(home)?;
+    claims::schema(&k)?;
+    let mut out = String::new();
+    // The global preferences too: `oboete correct` needs their uids, and no repository
+    // lists them. A forgotten claim is no claim (milestone 5 D5).
+    for c in claims::current(&k, repo)?
+        .into_iter()
+        .chain(claims::global(&k)?)
+    {
+        if raw.forgotten(&c.uid)? {
+            continue;
+        }
+        let body = redact::outbound(&c.body).replace('\n', " ");
+        out.push_str(&format!("{}  {} {}  {body}\n", c.uid, c.kind, c.status));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Milestone 5 D5: `oboete claims` lists no forgotten claim, and an owner's mute of one is
+    /// refused as of a claim that is not there.
+    #[test]
+    fn claims_list_no_forgotten_claim_and_refuse_its_mute() {
+        let mut s = search::b::fixture::Store::new();
+        let gone = s.decided("r", 5, "Ship on Fridays.", &[]);
+        let kept = s.decided("r", 6, "Ship on Mondays.", &[]);
+        s.run();
+        let home = s.home.path();
+        let target = forget::Target::parse_uid(&gone).unwrap();
+        forget::start(home, &forget::preview(home, target).unwrap()).unwrap();
+        let listed = claims_listed(home, "r").unwrap();
+        assert!(
+            listed.contains(&kept) && !listed.contains(&gone),
+            "{listed}"
+        );
+        let refused = claims::mute(home, &gone, true).unwrap_err();
+        assert!(
+            refused.to_string().contains("no claim has the uid"),
+            "{refused:#}"
+        );
+    }
 
     #[test]
     fn mute_and_unmute_commands_wait_for_the_claims_consumer() {

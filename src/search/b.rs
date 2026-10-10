@@ -467,9 +467,11 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                 Err(_) => Err(VectorSkip::Error),
             })
         });
+        // A forgotten document (milestone 5 D5) takes no place: each list reads past them.
+        let forgotten = raw.forgotten_set()?;
         let imported = match q.raw {
             RawArm::Only => None,
-            _ => Some(imported_fts(&k, q, depth)),
+            _ => Some(imported_fts(&k, q, depth + forgotten.len())),
         };
         let rows = match q.raw {
             RawArm::Off => Ok(Vec::new()),
@@ -497,7 +499,8 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         if let Some(fts) = imported {
             (hits, lowered) = claims_leg(&raw, &k, q, depth, &terms, near.as_ref())?;
-            imports = imported_leg(&k, q, depth, &terms, fts?, near.as_ref(), &rules)?;
+            let found = (fts?, &forgotten);
+            imports = imported_leg(&k, q, depth, &terms, found, near.as_ref(), &rules)?;
             let cards = curated_leg(&raw, &k, q, depth, &terms, &rules, false, near.as_ref())?;
             let summaries = curated_leg(&raw, &k, q, depth, &terms, &rules, true, near.as_ref())?;
             let lists = [&cards, &summaries, &imports];
@@ -547,6 +550,14 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             _ => hits.extend(imports.into_iter().chain(records)),
         }
         hits.extend(lowered);
+        // Read again as the answer leaves: a forget registered while the call was out or the legs
+        // read holds here too (D5; Codex's adversarial review of slice 2a, CodeRabbit on #435).
+        // Cards, summaries and records go with their records (slice 3).
+        let forgotten = raw.forgotten_set()?;
+        hits.retain(|h| {
+            matches!(h.class, Class::Card | Class::Summary | Class::Raw)
+                || !forgotten.contains(&h.key)
+        });
         if let Some(filter) = &q.types {
             hits.retain(|h| filter.matches(h));
         }
@@ -1524,15 +1535,18 @@ fn imported_leg(
     q: &Query,
     depth: usize,
     terms: &[String],
-    mut uids: Vec<String>,
+    (mut uids, forgotten): (Vec<String>, &std::collections::HashSet<String>),
     near: Option<&Near>,
     rules: &redact::Rules,
 ) -> Result<Vec<Hit>> {
     let mut out = Vec::new();
+    uids.retain(|u| !forgotten.contains(u));
     if let Some(near) = near {
-        uids = rrf(&uids, &near.query_knn(k, q, "i", depth)?);
-        uids.truncate(depth);
+        let mut by_meaning = near.query_knn(k, q, "i", depth + forgotten.len())?;
+        by_meaning.retain(|u| !forgotten.contains(u));
+        uids = rrf(&uids, &by_meaning);
     }
+    uids.truncate(depth);
     for uid in uids {
         out.extend(imported_hit(k, &uid, terms, rules)?);
     }
@@ -1920,7 +1934,10 @@ fn named(raw: &Raw, k: &Connection, id: &str) -> Result<Option<Named>> {
             |r| r.get(0),
         )
         .optional()?;
-    if let Some(uid) = imported {
+    // A forgotten document (milestone 5 D5) is no document.
+    if let Some(uid) = imported
+        && !raw.forgotten(&uid)?
+    {
         return Ok(Some(Named::Imported(uid)));
     }
     let Some((device, Ok(seq))) = id.split_once(':').map(|(d, s)| (d, s.parse::<i64>())) else {
@@ -1960,23 +1977,44 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
     Ok(match named(&raw, &k, id)? {
         None => None,
         Some(Named::Claim(uid)) => claim_text(&raw, &k, &uid)?,
-        Some(Named::Claims(uids)) => {
-            let mut out = format!("{} claims start with {}:\n", uids.len(), id.trim());
-            for uid in uids {
-                if let Some(c) = claims::active_one(&k, &uid)? {
-                    out.push_str(&format!(
-                        "{uid} {} {} {}{}: {}\n",
-                        &crate::db::utc(c.valid_from)[..10],
-                        c.kind,
-                        c.status,
-                        muted_label(claims::muted(&k, &uid)?),
-                        one_line(&redact::outbound(&c.body), 80)
+        Some(Named::Claims(mut uids)) => {
+            let mut lines = Vec::new();
+            for uid in &uids {
+                if let Some(c) = claims::active_one(&k, uid)? {
+                    lines.push((
+                        uid.clone(),
+                        format!(
+                            "{uid} {} {} {}{}: {}\n",
+                            &crate::db::utc(c.valid_from)[..10],
+                            c.kind,
+                            c.status,
+                            muted_label(claims::muted(&k, uid)?),
+                            one_line(&redact::outbound(&c.body), 80)
+                        ),
                     ));
+                }
+            }
+            // A forget registered while they were read holds too (D5), as in `search`.
+            let forgotten = raw.forgotten_set()?;
+            uids.retain(|uid| !forgotten.contains(uid));
+            let mut out = format!("{} claims start with {}:\n", uids.len(), id.trim());
+            for (uid, line) in lines {
+                if !forgotten.contains(&uid) {
+                    out.push_str(&line);
                 }
             }
             Some(out)
         }
-        Some(Named::Imported(uid)) => imported_text(&k, &uid)?,
+        Some(Named::Imported(uid)) => {
+            let text = imported_text(&k, &uid)?;
+            #[cfg(test)]
+            if let Some(between) = BETWEEN.take() {
+                between();
+            }
+            // A forget registered after `named` read the document holds here too (D5; Codex on
+            // #435), as in `claim`.
+            if raw.forgotten(&uid)? { None } else { text }
+        }
         Some(Named::Record(id, e)) => Some(record_text(&id, &e)),
     })
 }
@@ -2134,8 +2172,9 @@ pub struct Change {
 
 #[cfg(test)]
 thread_local! {
-    /// A test seam: run between `claim`'s history read and its `Pending` read, as a worker
-    /// committing there would.
+    /// A test seam: run between `claim`'s history read and its `Pending` read, or between a
+    /// reader's read and its last forgotten check (`get`, `cite`, `timeline`), as a worker or a
+    /// forget committing there would.
     static BETWEEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -2232,7 +2271,7 @@ fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView
         })
         .optional()?
         .flatten();
-    Ok(Some(ClaimView {
+    let view = ClaimView {
         muted: claims::muted(k, &uid)?,
         delivered: claims::delivered_one(k, &uid)?.is_some()
             && (c.kind != "open item" || c.status == "decided"),
@@ -2254,7 +2293,13 @@ fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView
         ended_by,
         quotes,
         history,
-    }))
+    };
+    // A forget of the uid registered after `named` read it holds here too, as the view leaves
+    // (D5; Codex's adversarial review of slice 2a, and Codex on #435).
+    if raw.forgotten(&view.uid)? {
+        return Ok(None);
+    }
+    Ok(Some(view))
 }
 
 fn claim_text(raw: &Raw, k: &Connection, uid: &str) -> Result<Option<String>> {
@@ -2296,8 +2341,13 @@ pub fn cite(home: &Path, uids: &[String]) -> Result<Vec<serde_json::Value>> {
     };
     // One snapshot of knowledge.db, as `claim` reads it.
     let _snapshot = k.unchecked_transaction()?;
-    uids.iter()
+    let cited = uids
+        .iter()
         .map(|uid| {
+            // A forgotten claim (milestone 5 D5) is no claim.
+            if raw.forgotten(uid)? {
+                return Ok(not_a_claim(uid));
+            }
             let Some(c) = claims::active_one(&k, uid)? else {
                 return Ok(not_a_claim(uid));
             };
@@ -2318,7 +2368,24 @@ pub fn cite(home: &Path, uids: &[String]) -> Result<Vec<serde_json::Value>> {
                 .collect::<Result<Vec<_>>>()?;
             Ok(serde_json::json!({"uid": uid, "label": label, "evidence": evidence}))
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    #[cfg(test)]
+    if let Some(between) = BETWEEN.take() {
+        between();
+    }
+    // And one forgotten while they were read (D5), as in `search`.
+    let forgotten = raw.forgotten_set()?;
+    Ok(cited
+        .into_iter()
+        .zip(uids)
+        .map(|(c, uid)| {
+            if forgotten.contains(uid) {
+                not_a_claim(uid)
+            } else {
+                c
+            }
+        })
+        .collect())
 }
 
 /// The quotes of `uid`'s active derivation, in order.
@@ -2529,9 +2596,19 @@ pub fn timeline(
         from,
         &key,
     )?;
+    // A forget registered while the pages were read holds too (D5; Codex on #435), as in `search`.
+    let unforgotten = |mut items: Vec<Item>| -> Result<Vec<Item>> {
+        #[cfg(test)]
+        if let Some(between) = BETWEEN.take() {
+            between();
+        }
+        let forgotten = raw.forgotten_set()?;
+        items.retain(|i| i.class == "start" || !forgotten.contains(&i.key));
+        Ok(items)
+    };
     let Some(at) = at else {
         before.truncate(limit);
-        return Ok(before);
+        return unforgotten(before);
     };
     let mut after = read(
         &format!(
@@ -2546,7 +2623,7 @@ pub fn timeline(
     after.truncate(later);
     after.reverse();
     after.append(&mut before);
-    Ok(after)
+    unforgotten(after)
 }
 
 /// A timeline entry on one line, as the CLI prints it and MCP returns it, with its repository when
@@ -4254,6 +4331,97 @@ mod tests {
         drop(held);
         assert_eq!(answer.vector, Vector::Skipped(VectorSkip::Timeout));
         assert_eq!(records(&answer), 0, "{:?}", keys(&answer));
+    }
+
+    /// Milestone 5 D5 (Codex's adversarial review of slice 2a): a document forgotten while the
+    /// query's call is out takes no place in the answer, though its list was read before.
+    #[test]
+    fn a_document_forgotten_while_the_query_is_out_is_not_returned() {
+        use crate::embed::stub::Stub;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        let doc = s.imported("o1", "r", 3_000, "Deploy notes", "Deploy with the parser.");
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let home = s.home.path().to_owned();
+        let ask = Query {
+            text: "parser".into(),
+            all: true,
+            limit: 5,
+            ..Default::default()
+        };
+        let found = |a: &Answer| a.hits.iter().any(|h| h.key == doc);
+        assert!(found(&query(&home, &ask).unwrap()));
+        let sent = stub.requests();
+        let held = stub.hold();
+        let search = {
+            let home = home.clone();
+            std::thread::spawn(move || query(&home, &ask).unwrap())
+        };
+        // The call is out, and the full-text lists have been read beside it.
+        while stub.requests() == sent {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let target = crate::forget::Target::parse_uid(&doc).unwrap();
+        let p = crate::forget::preview(&home, target).unwrap();
+        crate::forget::start(&home, &p).unwrap();
+        let answer = search.join().unwrap();
+        drop(held);
+        assert!(!found(&answer), "{:?}", keys(&answer));
+    }
+
+    /// Milestone 5 D5 (Codex's adversarial review of slice 2a): a claim forgotten after `named`
+    /// read it, before the rest of the read, is not shown.
+    #[test]
+    fn a_claim_forgotten_inside_its_read_is_not_shown() {
+        let mut s = Store::new();
+        let uid = s.decided(R, 2_000, "Use tabs for the parser.", &[]);
+        s.run();
+        let home = s.home.path().to_owned();
+        let (h, u) = (home.clone(), uid.clone());
+        BETWEEN.set(Some(Box::new(move || {
+            let target = crate::forget::Target::parse_uid(&u).unwrap();
+            let p = crate::forget::preview(&h, target).unwrap();
+            crate::forget::start(&h, &p).unwrap();
+        })));
+        assert!(claim(&home, &uid).unwrap().is_none());
+        assert!(BETWEEN.take().is_none(), "the forget ran inside the read");
+    }
+
+    /// Milestone 5 D5 (Codex on #435): a document or a claim forgotten while `get`, `cite` or
+    /// `timeline` reads it is not in what it returns.
+    #[test]
+    fn what_is_forgotten_inside_get_cite_or_timeline_is_not_returned() {
+        let mut s = Store::new();
+        let cited = s.decided(R, 2_000, "Use tabs for the parser.", &[]);
+        let listed = s.decided(R, 2_500, "Deploy on Fridays.", &[]);
+        let doc = s.imported("o1", "r", 3_000, "Deploy notes", "Deploy with the parser.");
+        s.run();
+        let home = s.home.path().to_owned();
+        let all = || timeline(&home, None, None, None, 10).unwrap();
+        assert!(get(&home, &doc).unwrap().is_some());
+        assert!(cite(&home, std::slice::from_ref(&cited)).unwrap()[0]["label"] == "citable");
+        assert!(all().iter().any(|i| i.key == listed));
+        let forget_inside = |uid: &str| {
+            let (h, u) = (home.clone(), uid.to_owned());
+            BETWEEN.set(Some(Box::new(move || {
+                let target = crate::forget::Target::parse_uid(&u).unwrap();
+                let p = crate::forget::preview(&h, target).unwrap();
+                crate::forget::start(&h, &p).unwrap();
+            })));
+        };
+        forget_inside(&doc);
+        assert!(get(&home, &doc).unwrap().is_none());
+        assert!(BETWEEN.take().is_none(), "the forget ran inside get");
+        forget_inside(&cited);
+        let answer = cite(&home, std::slice::from_ref(&cited)).unwrap();
+        assert!(answer == [serde_json::json!({"uid": cited, "error": "not a claim"})]);
+        assert!(BETWEEN.take().is_none(), "the forget ran inside cite");
+        forget_inside(&listed);
+        assert!(!all().iter().any(|i| i.key == listed));
+        assert!(BETWEEN.take().is_none(), "the forget ran inside timeline");
     }
 
     /// D8 with the query's call beside the full-text sides: a redaction rule added while the call
