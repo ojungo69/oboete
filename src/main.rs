@@ -286,7 +286,7 @@ enum Cmd {
         /// Its database file (read-only; e.g. ~/.claude-mem/claude-mem.db)
         #[arg(required_if_eq("source", "claude-mem"))]
         db: Option<PathBuf>,
-        /// The --home store is for evaluation, not the one the hooks write (required until PR-H)
+        /// The --home store is for evaluation, not the one the hooks write (refuses the default home)
         #[arg(long)]
         eval_store: bool,
         /// Import only this agent's transcripts (default: both)
@@ -575,21 +575,20 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let db = db.context("import claude-mem requires a database path")?;
             anyhow::ensure!(!yes, "--yes is only for import transcripts");
             anyhow::ensure!(agent.is_none(), "--agent is only for import transcripts");
-            // Until repositories map onto claude-mem's project names (PR-H), the rows would
-            // reach no repository's injection; keep them out of the store the hooks write.
-            // The hooks may write a custom home (OBOETE_HOME), so the caller has to say the store
-            // is for evaluation; the default home is refused even then. Resolved paths:
-            // `~/.oboete/../.oboete` or a symlink is the same store.
+            // docs/claude-mem-import.md I1: any home takes it; one named an evaluation store is
+            // not the everyday one. Resolved paths: `~/.oboete/../.oboete` or a symlink is the
+            // same store.
             let resolved =
                 |p: &std::path::Path| std::fs::canonicalize(p).or_else(|_| std::path::absolute(p));
-            if !eval_store || resolved(&home)? == resolved(&config::home_dir().join(".oboete"))? {
+            if eval_store && resolved(&home)? == resolved(&config::home_dir().join(".oboete"))? {
                 anyhow::bail!(
-                    "importing into the everyday store waits for the repository mapping (PR-H); for an evaluation store pass --home <dir> --eval-store"
+                    "--eval-store names an evaluation store, and this is the everyday one: pass --home <dir>, or leave --eval-store out"
                 );
             }
+            let settings = capture::Settings::load(&home)?;
             let _lock = import::lock(&home)?;
             let mut raw = raw::open(&home)?;
-            let stats = import::claude_mem(&mut raw, &db)?;
+            let stats = import::claude_mem(&mut raw, &db, &settings)?;
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())
         }

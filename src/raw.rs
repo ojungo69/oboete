@@ -777,21 +777,31 @@ pub(crate) fn migration_checkpoints_in(
 
 /// docs/work-state.md L4: `repo`'s work state writes, in the order they were written: a device's
 /// in its own order, its clock never going back in it, then every device's by that clock, as
-/// `exclusions_in` orders exclusions. Only `repo`'s ops are parsed here (Codex's security review
-/// of #408); SQLite still reads the repository of every work state op, as no index may have a
-/// repository for its root (spec 1.6), and a malformed op still fails the read.
+/// `exclusions_in` orders exclusions. With them, the entries imported for the claude-mem project
+/// its key ends in, its worktrees' too, at their own times (docs/claude-mem-import.md I4, I5).
+/// Only these ops are parsed here (Codex's security review of #408); SQLite still reads the
+/// repository of every work state op, as no index may have a repository for its root (spec 1.6),
+/// and a malformed op still fails the read.
 pub(crate) fn work_state_in(
     conn: &Connection,
     repo: &str,
 ) -> Result<Vec<crate::work_state::Entry>> {
-    let mut st = conn.prepare(
+    let (scope, values) = crate::import::imported_match("json_extract(body, '$.repo')", repo);
+    // The name reads imported entries only, as search's reads imported documents only: a native
+    // entry is read by its own key alone, though an origin like `ssh://claude-mem:<name>/x` gives
+    // that key a worktree project's shape (the security review of the N1 commit).
+    let mut st = conn.prepare(&format!(
         "SELECT device, ts, body FROM main.ops
-         WHERE type = 'work_state' AND json_extract(body, '$.repo') = ?1
-         ORDER BY device, op_seq",
-    )?;
+         WHERE type = 'work_state' AND {scope}
+           AND (json_extract(body, '$.source') IS NOT NULL OR json_extract(body, '$.repo') = ?)
+         ORDER BY device, op_seq"
+    ))?;
     let mut writes = Vec::new();
     let (mut device, mut clock) = (String::new(), i64::MIN);
-    let rows = st.query_map([repo], |r| {
+    let values = values
+        .into_iter()
+        .chain([rusqlite::types::Value::Text(repo.to_owned())]);
+    let rows = st.query_map(rusqlite::params_from_iter(values), |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, i64>(1)?,
@@ -804,16 +814,25 @@ pub(crate) fn work_state_in(
         if from != device {
             (device, clock) = (from.clone(), i64::MIN);
         }
-        clock = clock.max(v["clock"].as_i64().unwrap_or(ts));
+        let own = v["clock"].as_i64().unwrap_or(ts);
+        // An imported entry was written elsewhere, before or after this device's own writes: it
+        // takes effect at its own time, or at its import when that is earlier (a clock ahead of
+        // this one), and lifts no clock of theirs.
+        let at = if v.get("source").is_some() {
+            own.min(ts)
+        } else {
+            clock = clock.max(own);
+            clock
+        };
         let (Some(name), Some(fields)) = (v["list"].as_str(), v["fields"].as_object()) else {
             continue;
         };
         let entry = crate::work_state::Entry {
             list: name.to_owned(),
             fields: fields.clone(),
-            ts,
+            ts: v["at"].as_i64().unwrap_or(ts),
         };
-        writes.push((clock, from, i, entry));
+        writes.push((at, from, i, entry));
     }
     writes.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
     Ok(writes.into_iter().map(|w| w.3).collect())
@@ -2319,7 +2338,8 @@ impl Raw {
 
     /// docs/work-state.md L4: one write of an agent's work state, `{repo, list, fields, clock}`,
     /// as this device's next op; `list` and `fields` have passed the gate (L5). Its clock is one
-    /// past every work state clock the store holds and at least now, as an exclusion's. No
+    /// past every work state clock the store holds and at least now, as an exclusion's; an
+    /// imported entry's time, another clock's, lifts none (docs/claude-mem-import.md I5). No
     /// dispatch lock: a work state write orders against no provider call.
     pub fn work_state(
         &mut self,
@@ -2329,7 +2349,7 @@ impl Raw {
     ) -> Result<i64> {
         let seen: Option<i64> = self.conn.query_row(
             "SELECT MAX(COALESCE(json_extract(body, '$.clock'), ts)) FROM ops
-             WHERE type = 'work_state'",
+             WHERE type = 'work_state' AND json_extract(body, '$.source') IS NULL",
             [],
             |r| r.get(0),
         )?;
@@ -2409,12 +2429,43 @@ impl Raw {
     /// skips (D5). An op whose `source_id` is missing or not text, which this version cannot read,
     /// is passed over as the consumer passes it (OpenCodeReview on #305).
     pub fn import_keys(&self, source: &str) -> Result<std::collections::HashSet<String>> {
+        self.source_ids("import", source)
+    }
+
+    /// The claude-mem work state rows already imported from `source`, by their ids
+    /// (docs/claude-mem-import.md I4).
+    pub fn work_state_keys(&self, source: &str) -> Result<std::collections::HashSet<String>> {
+        self.source_ids("work_state", source)
+    }
+
+    /// The documents imported from `source`, each id with every repository an import op files it
+    /// under, on any device: a row claude-mem moved since (a `ProjectMerge`) comes in again
+    /// (docs/claude-mem-import.md I3). A set, not the newest: op seqs order one device's ops only
+    /// (Codex on #431).
+    pub fn import_repos(
+        &self,
+        source: &str,
+    ) -> Result<std::collections::HashMap<String, std::collections::HashSet<String>>> {
         let mut st = self.conn.prepare(
-            "SELECT json_extract(body, '$.source_id') FROM ops
-             WHERE type = 'import' AND json_extract(body, '$.source') = ?1
+            "SELECT json_extract(body, '$.source_id'), COALESCE(json_extract(body, '$.repo'), '')
+             FROM ops WHERE type = 'import' AND json_extract(body, '$.source') = ?1
                AND typeof(json_extract(body, '$.source_id')) = 'text'",
         )?;
-        let rows = st.query_map([source], |r| r.get(0))?;
+        let mut out = std::collections::HashMap::<String, std::collections::HashSet<String>>::new();
+        for row in st.query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            let (id, repo) = row?;
+            out.entry(id).or_default().insert(repo);
+        }
+        Ok(out)
+    }
+
+    fn source_ids(&self, kind: &str, source: &str) -> Result<std::collections::HashSet<String>> {
+        let mut st = self.conn.prepare(
+            "SELECT json_extract(body, '$.source_id') FROM ops
+             WHERE type = ?1 AND json_extract(body, '$.source') = ?2
+               AND typeof(json_extract(body, '$.source_id')) = 'text'",
+        )?;
+        let rows = st.query_map([kind, source], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
