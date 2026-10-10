@@ -211,6 +211,9 @@ pub struct Phase {
     split: Option<Split>,
     /// The local model while documents wait for it (D14); dropped when none do.
     local: Option<Arc<Resident>>,
+    /// The redaction rules whose `masked` marks were last judged (`unmask`): none before this
+    /// worker's first poll.
+    masked_under: Option<String>,
     #[cfg(test)]
     polls: usize,
 }
@@ -250,6 +253,7 @@ impl Phase {
             timeout: crate::embed::BATCH_TIMEOUT,
             split: None,
             local: None,
+            masked_under: None,
             #[cfg(test)]
             polls: 0,
         }
@@ -506,6 +510,10 @@ impl Phase {
             return Ok(Step::Idle);
         }
         cleared(k, crate::embed::EMBEDDER, &reading)?;
+        if self.masked_under.as_deref() != Some(rules.version()) {
+            unmask(k, crate::embed::EMBEDDER, rules.version())?;
+            self.masked_under = Some(rules.version().to_owned());
+        }
         let Some(embedder) = embedder else {
             return self.local_batch(raw, k, &reading, &rules);
         };
@@ -875,6 +883,8 @@ impl Phase {
 pub(crate) struct DoctorFacts {
     pub(crate) generation: Result<Option<String>>,
     pub(crate) claims: Result<i64>,
+    pub(crate) cards: Result<i64>,
+    pub(crate) summaries: Result<i64>,
     pub(crate) imports: Result<i64>,
     pub(crate) records: Result<i64>,
     pub(crate) skipped: Result<Vec<(String, i64)>>,
@@ -895,6 +905,16 @@ pub(crate) fn doctor_facts_in(k: &Connection, embedder: &str) -> DoctorFacts {
         "SELECT count(*) FROM active a WHERE NOT EXISTS (SELECT 1 FROM vector_keys v
            WHERE v.embedder = ?1 AND v.kind = 'c' AND v.key = a.uid)",
     );
+    let cards = count(
+        "SELECT count(*) FROM cards c WHERE c.replaced_by IS NULL AND NOT EXISTS (
+           SELECT 1 FROM vector_keys v WHERE v.embedder = ?1 AND v.kind = 'o'
+             AND v.key = c.device || '.' || c.op_seq || '.' || c.n)",
+    );
+    let summaries = count(
+        "SELECT count(*) FROM turns t WHERE t.skipped = 0 AND NOT EXISTS (
+           SELECT 1 FROM vector_keys v WHERE v.embedder = ?1 AND v.kind = 's'
+             AND v.key = 'S' || t.device || '.' || t.op_seq)",
+    );
     let imports = count(
         "SELECT count(*) FROM imported i
          WHERE i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
@@ -908,8 +928,9 @@ pub(crate) fn doctor_facts_in(k: &Connection, embedder: &str) -> DoctorFacts {
     );
     let skipped = (|| -> Result<Vec<(String, i64)>> {
         Ok(k.prepare(
-            "SELECT skipped, count(*) FROM vector_keys WHERE embedder = ?1 AND skipped IS NOT NULL
-             GROUP BY skipped ORDER BY skipped",
+            "SELECT CASE WHEN skipped LIKE 'masked:%' THEN 'empty' ELSE skipped END AS why,
+                    count(*) FROM vector_keys WHERE embedder = ?1 AND skipped IS NOT NULL
+             GROUP BY why ORDER BY why",
         )?
         .query_map([embedder], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?)
@@ -917,6 +938,8 @@ pub(crate) fn doctor_facts_in(k: &Connection, embedder: &str) -> DoctorFacts {
     DoctorFacts {
         generation,
         claims,
+        cards,
+        summaries,
         imports,
         records,
         skipped,
@@ -961,13 +984,17 @@ pub fn doctor_lines(home: &Path, k: &Connection) -> Result<Vec<String>> {
     crate::claims::schema(k)?;
     crate::consumer::imported::schema(k)?;
     crate::consumer::fts::schema(k)?;
+    crate::cards::schema(k)?;
+    crate::turns::schema(k)?;
     let facts = doctor_facts_in(k, embedder);
     let state = facts.generation?;
     let claims = facts.claims?;
+    let cards = facts.cards?;
+    let summaries = facts.summaries?;
     let imports = facts.imports?;
     let records = facts.records?;
     let mut lines = vec![format!(
-        "embeddings: {embedder}{} ({}), waiting: {claims} claims, {imports} imported, {records} records",
+        "embeddings: {embedder}{} ({}), waiting: {claims} claims, {cards} cards, {summaries} summaries, {imports} imported, {records} records",
         if local { " on this machine" } else { "" },
         state.as_deref().unwrap_or("nothing embedded yet")
     )];
@@ -1202,6 +1229,18 @@ fn cleared(k: &Connection, embedder: &str, reading: &Reading) -> Result<()> {
     Ok(())
 }
 
+/// The texts the rules blanked under other rules, their marks taken off so they are read again
+/// under these (Codex on #429), as an `excluded` mark is judged again when the exclusion changes.
+/// Read once per worker and once per change of the rules: it reads every key row.
+fn unmask(k: &Connection, embedder: &str, ruleset: &str) -> Result<()> {
+    k.execute(
+        "DELETE FROM vector_keys WHERE embedder = ?1 AND skipped LIKE 'masked:%'
+           AND skipped <> 'masked:' || ?2",
+        params![embedder, ruleset],
+    )?;
+    Ok(())
+}
+
 /// A document read to embed: what it is, and its stored text.
 struct Read {
     doc: Doc,
@@ -1210,15 +1249,19 @@ struct Read {
     /// Imported documents only: their kind and title, composed with the body once each is gated
     /// alone (`gated`).
     title: Option<(String, String)>,
-    /// Records only: its session as `Raw::event_labels` spells it, and its source.
+    /// Records and summaries: its session as `Raw::event_labels` spells it, and a record's source.
     labels: Option<(String, String)>,
+    /// Cards and summaries: the byte range of each value in `text`, gated alone as their readers
+    /// gate it (K6).
+    parts: Vec<std::ops::Range<usize>>,
 }
 
-/// The next batch of documents with no vector from `embedder`: claims, then imported documents,
-/// then raw records, the newest first. A document passed over is marked (`excluded`, `source`,
-/// `empty`), and one whose stored text is already embedded is mapped to that vector, so neither
-/// comes back; the rest of a page is sent as one batch of its shortest texts. While a call
-/// `waiting` goes nowhere, the later kinds are mapped and marked too.
+/// The next batch of documents with no vector from `embedder`: claims, then cards and session
+/// summaries (docs/tools.md V1), then imported documents, then raw records, the newest first. A
+/// document passed over is marked (`excluded`, `source`, `empty`), and one whose stored text is
+/// already embedded is mapped to that vector, so neither comes back; the rest of a page is sent
+/// as one batch of its shortest texts. While a call `waiting` goes nowhere, the later kinds are
+/// mapped and marked too.
 fn pending(
     raw: &Raw,
     k: &Connection,
@@ -1253,9 +1296,11 @@ fn pending_seen(
     crate::claims::schema(k)?;
     crate::consumer::imported::schema(k)?;
     crate::consumer::fts::schema(k)?;
+    crate::cards::schema(k)?;
+    crate::turns::schema(k)?;
     queue(k)?;
     let mut waits = None;
-    for kind in ["c", "i", "r"] {
+    for kind in ["c", "o", "s", "i", "r"] {
         loop {
             let page = read_page(raw, k, embedder, kind)?;
             if page.is_empty() {
@@ -1326,13 +1371,19 @@ fn sort_out(
     r: Read,
     rules: &crate::redact::Rules,
 ) -> Result<Option<(Doc, String)>> {
-    if let Some(why) = passed_over(raw, k, reading, &r)? {
+    if let Some(why) = passed_over(raw, k, reading, &r, rules)? {
         mark(k, embedder, &r.doc, why)?;
         return Ok(None);
     }
     let sent = gated(&r, rules);
     if sent.trim().is_empty() || sent.trim() == "[REDACTED]" {
-        mark(k, embedder, &r.doc, "empty")?;
+        // A text the rules blank is passed over under these rules only (`unmask`).
+        let why = if r.text.trim().is_empty() {
+            "empty".to_owned()
+        } else {
+            format!("masked:{}", rules.version())
+        };
+        mark(k, embedder, &r.doc, &why)?;
         return Ok(None);
     }
     if let Some(vec) = cached(k, embedder, &r.doc.sha)? {
@@ -1485,7 +1536,8 @@ fn queued(
 }
 
 /// A page of `kind`'s documents (`i` reads both imported kinds) with no key row for `embedder`,
-/// the newest first: claims from `active`, the rest from the queue.
+/// the newest first: claims from `active`, current cards (`o`) from `cards`, summaries not skipped
+/// (`s`) from `turns`, the rest from the queue.
 fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Vec<Read>> {
     let limit = PAGE as i64;
     Ok(match kind {
@@ -1510,8 +1562,28 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
                     text,
                     title: None,
                     labels: None,
+                    parts: Vec::new(),
                 })
             })?
+            .collect::<rusqlite::Result<_>>()?,
+        "o" => k
+            .prepare_cached(&format!(
+                "SELECT {}, {CARD_DOC} FROM cards c WHERE replaced_by IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
+                     AND v.kind = 'o' AND v.key = c.device || '.' || c.op_seq || '.' || c.n)
+                 ORDER BY ts DESC LIMIT ?2",
+                crate::consumer::fts::CARD_COLUMNS
+            ))?
+            .query_map(params![embedder, limit], card_read)?
+            .collect::<rusqlite::Result<_>>()?,
+        "s" => k
+            .prepare_cached(&format!(
+                "SELECT {SUMMARY_DOC} FROM turns t WHERE skipped = 0
+                   AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
+                     AND v.kind = 's' AND v.key = 'S' || t.device || '.' || t.op_seq)
+                 ORDER BY ts DESC LIMIT ?2"
+            ))?
+            .query_map(params![embedder, limit], summary_read)?
             .collect::<rusqlite::Result<_>>()?,
         "i" => queued(k, "i", |uid| {
             let mut read = k.prepare_cached(
@@ -1537,6 +1609,7 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
                         text,
                         title: Some((doc_kind, title)),
                         labels: None,
+                        parts: Vec::new(),
                     })
                 })
                 .optional()?)
@@ -1579,8 +1652,56 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
                 labels: raw.event_labels(device, seq)?,
                 text,
                 title: None,
+                parts: Vec::new(),
             }))
         })?,
+    })
+}
+
+/// What `card_read` reads after a card's `CARD_COLUMNS`: its key (the ID `cards::get` takes), its
+/// repository, time and session.
+const CARD_DOC: &str =
+    "device || '.' || op_seq || '.' || n, COALESCE(repo, ''), ts, COALESCE(session, '')";
+
+fn card_read(r: &rusqlite::Row) -> rusqlite::Result<Read> {
+    let crate::consumer::fts::Joined { text, parts } = crate::consumer::fts::card_text(r, 0)?;
+    Ok(Read {
+        doc: Doc {
+            kind: "o",
+            key: r.get(7)?,
+            sha: joined_sha(&text, &parts),
+            repo: r.get(8)?,
+            ts: r.get(9)?,
+            session: r.get(10)?,
+        },
+        labels: None,
+        text,
+        title: None,
+        parts,
+    })
+}
+
+/// What `summary_read` reads of a summary: its fields, its key (the ID `turns::get` takes), its
+/// repository and time, its session as `Raw::event_labels` spells it, and its session alone.
+const SUMMARY_DOC: &str = "fields, 'S' || device || '.' || op_seq, COALESCE(repo, ''), ts,
+    COALESCE(agent, '') || char(0) || COALESCE(session, ''), COALESCE(session, '')";
+
+fn summary_read(r: &rusqlite::Row) -> rusqlite::Result<Read> {
+    let crate::consumer::fts::Joined { text, parts } =
+        crate::consumer::fts::turn_text(&r.get::<_, String>(0)?);
+    Ok(Read {
+        doc: Doc {
+            kind: "s",
+            key: r.get(1)?,
+            sha: joined_sha(&text, &parts),
+            repo: r.get(2)?,
+            ts: r.get(3)?,
+            session: r.get(5)?,
+        },
+        labels: Some((r.get(4)?, String::new())),
+        text,
+        title: None,
+        parts,
     })
 }
 
@@ -1617,18 +1738,32 @@ pub(crate) fn sha(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
+/// `sha` of a text gated value by value (`joined_with`), with where each value lies: values that
+/// join to one text at other places gate differently, so they share no vector (Codex and
+/// CodeRabbit on #429). Its `j` keeps it apart from every plain text's key, whatever that text
+/// holds.
+fn joined_sha(text: &str, parts: &[std::ops::Range<usize>]) -> String {
+    let mut h = Sha256::new();
+    h.update(text.as_bytes());
+    for p in parts {
+        h.update(format!("\0{}-{}", p.start, p.end));
+    }
+    format!("j{:x}", h.finalize())
+}
+
 /// A claim a pending correction or tombstone touches: its text may change on the next pass.
 fn claim_pending(pending: &crate::claims::Pending, k: &Connection, doc: &Doc) -> Result<bool> {
     Ok(doc.kind == "c" && pending.touches(k, &doc.key)?)
 }
 
 /// Why a document gets no vector without being sent: its repository or session is excluded
-/// (D13), or it is a record of an imported source (A92).
+/// (D13), it is a record of an imported source (A92), or no reader shows it now.
 fn passed_over(
     raw: &Raw,
     k: &Connection,
     reading: &Reading,
     r: &Read,
+    rules: &crate::redact::Rules,
 ) -> Result<Option<&'static str>> {
     let list = &reading.exclusions;
     match r.doc.kind {
@@ -1638,6 +1773,22 @@ fn passed_over(
             Ok(excluded.then_some("excluded"))
         }
         "k" | "p" => Ok(import_excluded(&r.doc.repo, list).then_some("excluded")),
+        "o" | "s" if r.text.trim().is_empty() => Ok(Some("empty")),
+        "o" | "s" => {
+            // A card or summary a removal hides (K4, T7) is sent nowhere, as a removed record is
+            // not: asked of its one reader (K7).
+            let shown = if r.doc.kind == "o" {
+                crate::cards::get(k, raw, &r.doc.key, rules)?.is_some()
+            } else {
+                crate::turns::get(k, raw, &r.doc.key, rules)?.is_some()
+            };
+            if !shown {
+                return Ok(Some("empty"));
+            }
+            let excluded =
+                list.contains(&r.doc.repo) || made_from_excluded(raw, k, &reading.excluded, r)?;
+            Ok(excluded.then_some("excluded"))
+        }
         _ => {
             let Some((device, seq)) = r.doc.key.rsplit_once(':') else {
                 return Ok(Some("empty"));
@@ -1661,6 +1812,52 @@ fn passed_over(
             })
         }
     }
+}
+
+/// Whether a card or a summary was made from a record of a session in `excluded` (D13,
+/// docs/tools.md V2), as `curate::quotes_excluded` asks of a claim's quotes: a card's window and
+/// goals (K4); a summary's own session, and the windows whose cards it read with their goals (T7).
+/// A window's records of a session the list named when it was curated were kept back, unread, and
+/// count too: the row keeps the range, not what was kept back, so such a card waits for the undo
+/// as well.
+fn made_from_excluded(
+    raw: &Raw,
+    k: &Connection,
+    excluded: &std::collections::HashSet<String>,
+    r: &Read,
+) -> Result<bool> {
+    if excluded.is_empty() {
+        return Ok(false);
+    }
+    let not_a_key = || anyhow::anyhow!("not a key of its kind: {}", r.doc.key);
+    let (device, spans, goals): (String, String, String) = if r.doc.kind == "o" {
+        let (device, op_seq, n) = crate::cards::id_parts(&r.doc.key, "").ok_or_else(not_a_key)?;
+        k.query_row(
+            "SELECT device, json_array(json_array(from_seq, to_seq)), goals FROM cards
+             WHERE device = ?1 AND op_seq = ?2 AND n = ?3",
+            params![device, op_seq, n],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?
+    } else {
+        // A turn is its own session's records (T7): that session is all they are of.
+        if r.labels
+            .as_ref()
+            .is_some_and(|(session, _)| excluded.contains(session))
+        {
+            return Ok(true);
+        }
+        let (device, op_seq) = crate::turns::id_parts(&r.doc.key, "").ok_or_else(not_a_key)?;
+        k.query_row(
+            "SELECT device, read, goals FROM turns WHERE device = ?1 AND op_seq = ?2",
+            params![device, op_seq],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?
+    };
+    // As the readers read them (K4, T7): a list that does not parse is none.
+    let spans: Vec<(i64, i64)> = serde_json::from_str(&spans).unwrap_or_default();
+    let goals: Vec<i64> = serde_json::from_str(&goals).unwrap_or_default();
+    let sessions = raw.sessions_over(&device, &spans, &goals)?;
+    Ok(sessions.iter().any(|session| excluded.contains(session)))
 }
 
 /// Whether an imported document's repository is excluded: listed itself, or a claude-mem project
@@ -1690,7 +1887,8 @@ fn gated(r: &Read, rules: &crate::redact::Rules) -> String {
             let (text, parts) = composed_parts(kind, title, &r.text);
             crate::redact::joined_with(&text, &parts, rules)
         }
-        None => crate::redact::lines_with(&r.text, rules),
+        None if r.parts.is_empty() => crate::redact::lines_with(&r.text, rules),
+        None => crate::redact::joined_with(&r.text, &r.parts, rules),
     }
     .chars()
     .take(keep)
@@ -1739,6 +1937,8 @@ fn unhold(k: &Connection, embedder: &str) -> Result<Vec<Doc>> {
         .map(|(kind, key, sha)| Doc {
             kind: match kind.as_str() {
                 "c" => "c",
+                "o" => "o",
+                "s" => "s",
                 "k" => "k",
                 "p" => "p",
                 _ => "r",
@@ -1793,15 +1993,17 @@ fn index(k: &Connection, embedder: &str, doc: &Doc, vec: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// The document `key` of `family` (`c` a claim, `i` an import, `r` a record) was written, in the
-/// consumer's transaction that wrote it (row 46-2): a key whose text is gone or differs loses its
-/// rows, so a poll gives it the vector of its text now; the same text keeps its vector, under the
-/// document's repository and time now, but not an `excluded` mark (D13), judged again. `raw`
-/// reads a record's text (#317); a claim's or an import's needs none.
+/// The document `key` of `family` (`c` a claim, `o` a card, `s` a summary, `i` an import, `r` a
+/// record) was written, replaced or removed, in the consumer's transaction that did it (row 46-2):
+/// a key whose text is gone or differs loses its rows, so a poll gives it the vector of its text
+/// now; the same text keeps its vector, under the document's repository and time now, but not an
+/// `excluded` mark (D13), judged again. `raw` reads a record's text (#317); the others need none.
 pub fn touched(raw: Option<&Raw>, k: &Connection, family: &str, key: &str) -> Result<()> {
     let kinds = match family {
         "i" => "'k', 'p'",
         "c" => "'c'",
+        "o" => "'o'",
+        "s" => "'s'",
         _ => "'r'",
     };
     let rows: Vec<(i64, String, Option<String>, Option<String>)> = k
@@ -1860,16 +2062,17 @@ fn stored(raw: &Raw, k: &Connection, doc: &Doc) -> Result<bool> {
     Ok(current(Some(raw), k, doc.kind, &doc.key)?.is_some_and(|r| r.doc.sha == doc.sha))
 }
 
-/// The document `key` of `kind` (`c`, `k` or `p` for an import, `r` or `rp` for a record) as it
-/// is stored now, with its text, or None once it is gone. An imported uid's is its row with the
-/// highest rowid. A record's labels are left unread, and its text is raw.db's (#317): `raw` is
-/// needed for a record the index still holds.
+/// The document `key` of `kind` (`c`, `o`, `s`, `k` or `p` for an import, `r` or `rp` for a
+/// record) as it is stored now, with its text, or None once it is gone (a card replaced, a summary
+/// skipped). An imported uid's is its row with the highest rowid. A record's labels are left
+/// unread, and its text is raw.db's (#317): `raw` is needed for a record the index still holds.
 fn current(raw: Option<&Raw>, k: &Connection, kind: &str, key: &str) -> Result<Option<Read>> {
     let read = |doc: Doc, text: String| Read {
         doc,
         text,
         title: None,
         labels: None,
+        parts: Vec::new(),
     };
     Ok(match kind {
         "c" => k
@@ -1913,6 +2116,35 @@ fn current(raw: Option<&Raw>, k: &Connection, kind: &str, key: &str) -> Result<O
                 },
             )
             .optional()?,
+        "o" => {
+            let Some((device, op_seq, n)) = crate::cards::id_parts(key, "") else {
+                return Ok(None);
+            };
+            k.query_row(
+                &format!(
+                    "SELECT {}, {CARD_DOC} FROM cards
+                     WHERE device = ?1 AND op_seq = ?2 AND n = ?3 AND replaced_by IS NULL",
+                    crate::consumer::fts::CARD_COLUMNS
+                ),
+                params![device, op_seq, n],
+                card_read,
+            )
+            .optional()?
+        }
+        "s" => {
+            let Some((device, op_seq)) = crate::turns::id_parts(key, "") else {
+                return Ok(None);
+            };
+            k.query_row(
+                &format!(
+                    "SELECT {SUMMARY_DOC} FROM turns
+                     WHERE device = ?1 AND op_seq = ?2 AND skipped = 0"
+                ),
+                params![device, op_seq],
+                summary_read,
+            )
+            .optional()?
+        }
         _ => {
             let Some((device, seq)) = key.rsplit_once(':') else {
                 return Ok(None);
@@ -2312,6 +2544,434 @@ mod tests {
         assert!(sent.iter().all(|t| !t.contains("Secret")), "{sent:?}");
         for key in &secret {
             assert_eq!(skipped(&s, key).as_deref(), Some("excluded"), "{key}");
+        }
+    }
+
+    /// Tools slice 3 (V1, V3): cards and summaries are embedded after the claims, a skipped summary
+    /// is not, and each vector follows its row: a recuration's replaced card loses its vector and
+    /// the new card gets one, a rewind takes them off and maps the card it brings back with no
+    /// call, and a rebuild sends nothing.
+    #[test]
+    fn a_cards_and_a_summarys_vectors_follow_their_rows() {
+        use crate::consumer::{cards::Cards, turns::Turns};
+        use crate::worker::Consumer;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let quote = "Parser caches stay in Redis.";
+        let seq = s.said("s", R, 1_000, quote);
+        derive(&mut s, seq, quote, quote);
+        let first = s.cards(
+            seq,
+            seq,
+            serde_json::json!([{"type": "bugfix", "title": "Azimuth"}]),
+            false,
+        );
+        let turn = |skipped: bool| {
+            serde_json::json!({"agent": "claude", "session": "s", "repo": R, "ts": 2_000,
+                "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+                "fields": if skipped { serde_json::json!({}) }
+                          else { serde_json::json!({"request": "Fix the parser."}) },
+                "skipped": skipped})
+        };
+        let before_turns = s.raw.max_op_seq().unwrap();
+        let summary = s.turn(turn(false));
+        s.turn(turn(true));
+        s.run();
+        embed_all(&s);
+        let device = s.raw.device().to_owned();
+        let kept = |s: &Store, kind: &str| -> Vec<String> {
+            keys(s)
+                .into_iter()
+                .filter(|(k, _, why)| k == kind && why.is_none())
+                .map(|(_, key, _)| key)
+                .collect()
+        };
+        assert_eq!(stub.texts()[0], [quote], "the claims' batch first");
+        assert!(
+            stub.texts()
+                .concat()
+                .iter()
+                .any(|t| t.starts_with("Azimuth"))
+        );
+        assert_eq!(kept(&s, "o"), [format!("{device}.{}", first[0])]);
+        let summary_key = format!("S{device}.{}", &summary[1..]);
+        assert_eq!(kept(&s, "s"), std::slice::from_ref(&summary_key));
+        // A recuration replaces the card.
+        let before = s.raw.max_op_seq().unwrap();
+        let second = s.cards(
+            seq,
+            seq,
+            serde_json::json!([{"type": "feature", "title": "Nebula"}]),
+            true,
+        );
+        s.run();
+        embed_all(&s);
+        assert_eq!(kept(&s, "o"), [format!("{device}.{}", second[0])]);
+        // A restore that lost the recuration: the card it replaced is current again, mapped to the
+        // vector it had, and a lost summary's vector goes.
+        let sent = stub.requests();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        Cards.rewind(&k, &device, before).unwrap();
+        Turns.rewind(&k, &device, before_turns).unwrap();
+        assert!(kept(&s, "o").is_empty() && kept(&s, "s").is_empty());
+        embed_all(&s);
+        assert_eq!(kept(&s, "o"), [format!("{device}.{}", first[0])]);
+        assert_eq!(stub.requests(), sent);
+        // A rebuild, with no store open as `oboete rebuild` runs, makes the rows again from the op
+        // log, and their vectors from the ones kept.
+        drop(k);
+        let Store { home, raw } = s;
+        drop(raw);
+        crate::worker::rebuild(home.path()).unwrap();
+        let s = Store {
+            raw: crate::raw::open(home.path()).unwrap(),
+            home,
+        };
+        embed_all(&s);
+        assert_eq!(kept(&s, "o"), [format!("{device}.{}", second[0])]);
+        assert_eq!(kept(&s, "s"), [summary_key]);
+        assert_eq!(stub.requests(), sent);
+    }
+
+    /// Tools slice 3 (V2, D13): an excluded repository's card and summary, those of a session
+    /// that touched it, and those made from one of its records (a window across sessions, a goal,
+    /// a window a summary read) are not sent; each is marked `excluded`. The rest is sent.
+    #[test]
+    fn an_excluded_repositorys_cards_and_summaries_reach_no_embedder() {
+        const X: &str = "github.com/o/secret";
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let there = s.said("sx", X, 1_000, "Secret words there.");
+        let elsewhere = s.said("sx", R, 2_000, "Words said here.");
+        let open = s.said("so", R, 3_000, "Open words.");
+        let card = |s: &mut Store, seq, title: &str| {
+            s.cards(
+                seq,
+                seq,
+                serde_json::json!([{"type": "bugfix", "title": title}]),
+                false,
+            )[0]
+            .clone()
+        };
+        let turn = |s: &mut Store, session: &str, repo: &str, seq, request: &str| {
+            s.turn(
+                serde_json::json!({"agent": "claude", "session": session, "repo": repo,
+                "ts": 4_000, "from": seq, "through": seq, "read": [], "goals": [],
+                "removed": [], "fields": {"request": request}, "skipped": false}),
+            )
+        };
+        let device = s.raw.device().to_owned();
+        // K4's records: a window over two sessions has no session or repository label of its own,
+        // and a goal is a record its curator was shown.
+        let mixed = s.cards(
+            elsewhere,
+            open,
+            serde_json::json!([{"type": "bugfix", "title": "Secret card across sessions"}]),
+            false,
+        )[0]
+        .clone();
+        let goal = s
+            .raw
+            .append_ops(&[(
+                crate::raw::OpKind::Window,
+                serde_json::json!({"outcome": "curated", "summary": "", "from_seq": open,
+                "to_seq": open, "from_offset": null, "to_offset": null, "elided": [],
+                "removed": [], "goals": [there], "recurate": false,
+                "observations": [{"type": "bugfix", "title": "Secret card of a goal"}]}),
+            )])
+            .unwrap()[0];
+        // T7's: the windows whose cards a summary read, and their goals.
+        let read = |s: &mut Store, read: serde_json::Value, goals: serde_json::Value, request| {
+            s.turn(
+                serde_json::json!({"agent": "claude", "session": "so", "repo": R,
+                "ts": 4_000, "from": open, "through": open, "read": read, "goals": goals,
+                "removed": [], "fields": {"request": request}, "skipped": false}),
+            )
+        };
+        let read_there = read(
+            &mut s,
+            serde_json::json!([[there, there]]),
+            serde_json::json!([]),
+            "Secret summary of what it read",
+        );
+        let goal_there = read(
+            &mut s,
+            serde_json::json!([]),
+            serde_json::json!([there]),
+            "Secret summary of a goal",
+        );
+        let not_sent = [
+            format!("{device}.{}", card(&mut s, there, "Secret card there")),
+            format!("{device}.{}", card(&mut s, elsewhere, "Secret card here")),
+            format!("{device}.{mixed}"),
+            format!("{device}.{goal}.0"),
+            format!(
+                "S{device}.{}",
+                &turn(&mut s, "sx", X, there, "Secret summary")[1..]
+            ),
+            format!(
+                "S{device}.{}",
+                &turn(&mut s, "sx", R, elsewhere, "Secret summary here")[1..]
+            ),
+            format!("S{device}.{}", &read_there[1..]),
+            format!("S{device}.{}", &goal_there[1..]),
+        ];
+        card(&mut s, open, "Open card");
+        turn(&mut s, "so", R, open, "Open summary");
+        s.raw.exclude(X, false).unwrap();
+        s.run();
+        embed_all(&s);
+        let sent = stub.texts().concat();
+        assert!(sent.iter().any(|t| t.starts_with("Open card")), "{sent:?}");
+        assert!(sent.iter().any(|t| t == "Open summary"), "{sent:?}");
+        assert!(sent.iter().all(|t| !t.contains("Secret")), "{sent:?}");
+        for key in &not_sent {
+            assert_eq!(skipped(&s, key).as_deref(), Some("excluded"), "{key}");
+        }
+    }
+
+    /// Tools slice 3 (V2, K4, T7): a card and a summary a removal hides before they are embedded
+    /// are not sent; each is marked `empty`, as a removed record is.
+    #[test]
+    fn a_card_and_a_summary_a_removal_hides_reach_no_embedder() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let gone = s.said("s", R, 1_000, "Gone words.");
+        let card = s.cards(
+            gone,
+            gone,
+            serde_json::json!([{"type": "bugfix", "title": "Hidden card"}]),
+            false,
+        )[0]
+        .clone();
+        let summary = s.turn(
+            serde_json::json!({"agent": "claude", "session": "s", "repo": R,
+            "ts": 2_000, "from": gone, "through": gone, "read": [], "goals": [],
+            "removed": [], "fields": {"request": "Hidden summary"}, "skipped": false}),
+        );
+        let device = s.raw.device().to_owned();
+        s.raw
+            .append_tombstone(crate::raw::Target::Record {
+                device: device.clone(),
+                seq: gone,
+            })
+            .unwrap();
+        s.run();
+        embed_all(&s);
+        let sent = stub.texts().concat();
+        assert!(sent.iter().all(|t| !t.contains("Hidden")), "{sent:?}");
+        for key in [
+            format!("{device}.{card}"),
+            format!("S{device}.{}", &summary[1..]),
+        ] {
+            assert_eq!(skipped(&s, &key).as_deref(), Some("empty"), "{key}");
+        }
+    }
+
+    /// Tools slice 3 (V1, K6; Codex): each value of a card or a summary is gated alone, as its
+    /// reader gates it, so a rule on a whole value that spans its lines holds in the text sent.
+    #[test]
+    fn a_rule_on_a_whole_value_of_a_card_or_summary_holds_in_the_text_sent() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let path = s.home.path().join("config.toml");
+        let rule =
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = '^ACME\\ncode=[0-9]{6}$' }]\n";
+        std::fs::write(&path, std::fs::read_to_string(&path).unwrap() + rule).unwrap();
+        let seq = s.said("s", R, 1_000, "Open words.");
+        s.cards(
+            seq,
+            seq,
+            serde_json::json!([{"type": "bugfix", "title": "Card title",
+                "facts": ["ACME\ncode=123456"]}]),
+            false,
+        );
+        s.turn(
+            serde_json::json!({"agent": "claude", "session": "s", "repo": R, "ts": 2_000,
+            "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+            "fields": {"request": "Summary request", "learned": "ACME\ncode=654321"},
+            "skipped": false}),
+        );
+        s.run();
+        embed_all(&s);
+        let sent = stub.texts().concat();
+        assert!(sent.iter().any(|t| t.starts_with("Card title")), "{sent:?}");
+        assert!(
+            sent.iter().any(|t| t.starts_with("Summary request")),
+            "{sent:?}"
+        );
+        assert!(
+            sent.iter()
+                .all(|t| !t.contains("123456") && !t.contains("654321")),
+            "{sent:?}"
+        );
+    }
+
+    /// Codex on #429: a text the rules leave blank is passed over under those rules only: when
+    /// they change, it is read again, and sent when the new rules leave it words.
+    #[test]
+    fn a_text_the_rules_blank_is_read_again_when_they_change() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let path = s.home.path().join("config.toml");
+        let unruled = std::fs::read_to_string(&path).unwrap();
+        let rule = "[redaction]\nextra_rules = [{ id = \"plan\", regex = 'Secret plan' }]\n";
+        std::fs::write(&path, unruled.clone() + rule).unwrap();
+        let seq = s.said("s", R, 1_000, "Open words.");
+        s.cards(
+            seq,
+            seq,
+            serde_json::json!([{"type": "decision", "title": "Secret plan"}]),
+            false,
+        );
+        s.turn(
+            serde_json::json!({"agent": "claude", "session": "s", "repo": R, "ts": 2_000,
+            "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+            "fields": {"request": "Secret plan"}, "skipped": false}),
+        );
+        s.run();
+        embed_all(&s);
+        let blanked = |t: &String| t.contains("Secret plan") || t.trim() == "[REDACTED]";
+        assert!(!stub.texts().concat().iter().any(blanked));
+        // doctor counts them as texts with nothing to send.
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let facts = doctor_facts_in(&k, crate::embed::EMBEDDER).skipped.unwrap();
+        assert!(facts.contains(&("empty".to_owned(), 2)), "{facts:?}");
+        let before = stub.requests();
+        std::fs::write(&path, unruled).unwrap();
+        embed_all(&s);
+        let later = stub.texts()[before..].concat();
+        assert_eq!(
+            later
+                .iter()
+                .filter(|t| t.starts_with("Secret plan"))
+                .count(),
+            2,
+            "{later:?}"
+        );
+    }
+
+    /// CodeRabbit on #429: a joined text's key is never another text's plain hash, whatever bytes
+    /// that text holds (a claim's body may hold a NUL).
+    #[test]
+    fn a_joined_key_is_never_a_plain_texts_key() {
+        let one = 0..1;
+        assert_ne!(
+            joined_sha("A", std::slice::from_ref(&one)),
+            sha("A\u{0}0-1")
+        );
+    }
+
+    /// Codex and CodeRabbit on #429: a card's or a summary's vector is reused only by a row whose
+    /// values join to the same text at the same places. Values split differently gate differently
+    /// (`joined_with`), so the second row's own gated text is sent, not mapped to the first's.
+    #[test]
+    fn values_joined_to_one_text_at_other_places_share_no_vector() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let path = s.home.path().join("config.toml");
+        let rule =
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = '^ACME\\ncode=[0-9]{6}$' }]\n";
+        std::fs::write(&path, std::fs::read_to_string(&path).unwrap() + rule).unwrap();
+        let summary = |s: &mut Store, session: &str, fields: serde_json::Value| {
+            let seq = s.said(session, R, 1_000, "Open words.");
+            s.turn(
+                serde_json::json!({"agent": "claude", "session": session, "repo": R,
+                "ts": 2_000, "from": seq, "through": seq, "read": [], "goals": [],
+                "removed": [], "fields": fields, "skipped": false}),
+            );
+        };
+        let card = |s: &mut Store, session: &str, facts: serde_json::Value| {
+            let seq = s.said(session, R, 1_000, "Open words.");
+            s.cards(
+                seq,
+                seq,
+                serde_json::json!([{"type": "bugfix", "title": "Card", "facts": facts}]),
+                false,
+            );
+        };
+        // Neither value is the rule's whole: the code goes out with the rest.
+        summary(
+            &mut s,
+            "a",
+            serde_json::json!({"request": "Prefix\nACME\ncode=123456"}),
+        );
+        card(&mut s, "b", serde_json::json!(["ACME", "code=654321"]));
+        s.run();
+        embed_all(&s);
+        let first = stub.texts().concat();
+        assert!(first.iter().any(|t| t.contains("123456")), "{first:?}");
+        assert!(first.iter().any(|t| t.contains("654321")), "{first:?}");
+        let before = stub.requests();
+        // The same texts, one value the rule's whole in each.
+        summary(
+            &mut s,
+            "c",
+            serde_json::json!({"request": "Prefix", "learned": "ACME\ncode=123456"}),
+        );
+        card(&mut s, "d", serde_json::json!(["ACME\ncode=654321"]));
+        s.run();
+        embed_all(&s);
+        let later = stub.texts()[before..].concat();
+        assert!(later.iter().any(|t| t.starts_with("Prefix")), "{later:?}");
+        assert!(later.iter().any(|t| t.starts_with("Card")), "{later:?}");
+        assert!(
+            later
+                .iter()
+                .all(|t| !t.contains("123456") && !t.contains("654321")),
+            "{later:?}"
+        );
+    }
+
+    /// Tools slice 3 (Codex): cards held for an answer (Step 6) come back as cards, each sent once
+    /// more alone after another document's answer, not read again as one batch.
+    #[test]
+    fn held_cards_are_sent_again_each_alone() {
+        use crate::providers_db as pdb;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let seq = s.said("s", R, 1_000, "Open words.");
+        s.run();
+        embed_all(&s);
+        let db = pdb::open(s.home.path()).unwrap();
+        let mut held = Vec::new();
+        for title in ["First card", "Second card"] {
+            let card = s.cards(
+                seq,
+                seq,
+                serde_json::json!([{"type": "bugfix", "title": title}]),
+                false,
+            )[0]
+            .clone();
+            stub.fail_next(400, None);
+            s.run();
+            embed_all(&s);
+            let key = format!("{}.{card}", s.raw.device());
+            assert_eq!(skipped(&s, &key).as_deref(), Some("held"));
+            // A 400 alone is one failure and no rest: cleared, so the next card is alone too.
+            pdb::set_state(&db, crate::embed::CALLS, pdb::State::default()).unwrap();
+            held.push(key);
+        }
+        let sent = stub.requests();
+        s.said("s", R, 2_000, "Later words.");
+        s.run();
+        embed_all(&s);
+        let texts = &stub.texts()[sent..];
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert!(texts.iter().any(|t| *t == ["First card"]), "{texts:?}");
+        assert!(texts.iter().any(|t| *t == ["Second card"]), "{texts:?}");
+        for key in &held {
+            assert!(
+                keys(&s).iter().any(|(_, k, why)| k == key && why.is_none()),
+                "{key}"
+            );
         }
     }
 
@@ -3337,7 +3997,7 @@ mod tests {
         let lines = doctor_lines(&home, &k).unwrap();
         assert!(lines[0].contains("(nothing embedded yet)"), "{lines:?}");
         assert!(
-            lines[0].ends_with("0 claims, 0 imported, 2 records"),
+            lines[0].ends_with("0 claims, 0 cards, 0 summaries, 0 imported, 2 records"),
             "{lines:?}"
         );
         stub.fail_next(500, None);
@@ -3349,7 +4009,7 @@ mod tests {
         embed_all(&s);
         let lines = doctor_lines(&home, &k).unwrap();
         let want = [
-            "embeddings: bge-m3 (active), waiting: 0 claims, 0 imported, 0 records",
+            "embeddings: bge-m3 (active), waiting: 0 claims, 0 cards, 0 summaries, 0 imported, 0 records",
             "  passed over: 1 empty",
             "  requests in the last day: 2 of 200 (40 kept for queries); USD this month: 0.00 of 1.00",
         ];
@@ -3359,7 +4019,7 @@ mod tests {
         crate::settings::set_embedding_provider(&home, "local").unwrap();
         let lines = doctor_lines(&home, &k).unwrap();
         let want = [
-            "embeddings: bge-m3 on this machine (active), waiting: 0 claims, 0 imported, 0 records",
+            "embeddings: bge-m3 on this machine (active), waiting: 0 claims, 0 cards, 0 summaries, 0 imported, 0 records",
             "  passed over: 1 empty",
         ];
         assert_eq!(lines, want);
@@ -3478,7 +4138,9 @@ mod tests {
         }
         assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
         assert_eq!(stub.texts(), [vec!["Live words.".to_owned()]]);
-        assert_eq!(skipped(&s, &s.key(empty)).as_deref(), Some("empty"));
+        // Its words are all private: blanked by the rules, and judged again when they change.
+        let why = skipped(&s, &s.key(empty)).unwrap();
+        assert!(why.starts_with("masked:"), "{why}");
         let source = keys(&s)
             .iter()
             .filter(|(.., why)| why.as_deref() == Some("source"))
@@ -3729,10 +4391,10 @@ mod tests {
             got.iter()
                 .any(|(_, k, skipped)| *k == uid && skipped.is_none())
         );
-        // Gated to the mask whole: nothing to send.
+        // Gated to the mask whole: nothing to send under these rules.
         assert!(
-            got.iter()
-                .any(|(_, k, skipped)| *k == other && skipped.as_deref() == Some("empty")),
+            got.iter().any(|(_, k, skipped)| *k == other
+                && skipped.as_deref().is_some_and(|w| w.starts_with("masked:"))),
             "{got:?}"
         );
     }
@@ -3995,7 +4657,9 @@ mod tests {
         let k = crate::knowledge::open(&home).unwrap();
         assert_eq!(Phase::new(&home).poll(&s.raw, &k).unwrap(), Step::Idle);
         let waiting = doctor_lines(&home, &k).unwrap();
-        assert!(waiting[0].ends_with("waiting: 0 claims, 0 imported, 1 records"));
+        assert!(
+            waiting[0].ends_with("waiting: 0 claims, 0 cards, 0 summaries, 0 imported, 1 records")
+        );
         for how in ["fail", "nan"] {
             crate::embed::stub::local(&home, how);
             let mut phase = Phase::new(&home);

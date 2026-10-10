@@ -742,14 +742,17 @@ pub fn page(
     Ok((out, false))
 }
 
+/// A summary's ID as `get` takes it, `S<device>.<op seq>` or `S<op seq>` of `local`, in parts.
+pub(crate) fn id_parts<'a>(id: &'a str, local: &'a str) -> Option<(&'a str, i64)> {
+    let rest = id.trim().strip_prefix('S')?;
+    let (device, op_seq) = rest.rsplit_once('.').unwrap_or((local, rest));
+    Some((device, op_seq.parse().ok()?))
+}
+
 /// The summary an ID names (S10), as `recent` would read it: `S<op seq>` of this device's, or
 /// `S<device>.<op seq>`; none for an ID of no summary, a skip, or one hidden by a removal.
 pub fn get(k: &Connection, raw: &Raw, id: &str, rules: &Rules) -> Result<Option<TurnSummary>> {
-    let Some(rest) = id.trim().strip_prefix('S') else {
-        return Ok(None);
-    };
-    let (device, op_seq) = rest.rsplit_once('.').unwrap_or((raw.device(), rest));
-    let Ok(op_seq) = op_seq.parse::<i64>() else {
+    let Some((device, op_seq)) = id_parts(id, raw.device()) else {
         return Ok(None);
     };
     if !crate::consumer::manifest::exists(k, "table", "turns")? {

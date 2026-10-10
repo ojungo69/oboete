@@ -1844,6 +1844,29 @@ impl Raw {
         })
     }
 
+    /// The sessions, as `session_key` spells them, of `device`'s events in the inclusive seq
+    /// ranges `spans` and at `seqs`, from the rows alone: what a card or a summary was made from
+    /// (docs/cards.md K4, docs/summaries.md T7), which the embedding phase passes it over for
+    /// (docs/tools.md V2).
+    pub fn sessions_over(
+        &self,
+        device: &str,
+        spans: &[(i64, i64)],
+        seqs: &[i64],
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT DISTINCT COALESCE(agent, '') || char(0) || COALESCE(session, '') FROM records
+             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'",
+        )?;
+        let mut out = std::collections::HashSet::new();
+        for (from, to) in spans.iter().copied().chain(seqs.iter().map(|&s| (s, s))) {
+            for key in st.query_map(params![device, from, to], |r| r.get(0))? {
+                out.insert(key?);
+            }
+        }
+        Ok(out)
+    }
+
     /// `device`'s event `seq`: its session as `session_key` spells it, and its source, from the
     /// row alone. What the embedding phase passes a record over for (milestone 4 D8, D13).
     pub fn event_labels(&self, device: &str, seq: i64) -> Result<Option<(String, String)>> {

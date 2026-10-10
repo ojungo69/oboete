@@ -105,6 +105,7 @@ impl Consumer for Cards {
 
     fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> {
         schema(k)?;
+        let lost = keys(k, device, "op_seq > ?2", to)?;
         k.execute(
             "DELETE FROM cards_fts WHERE rowid IN
                (SELECT rowid FROM cards WHERE device = ?1 AND op_seq > ?2)",
@@ -124,8 +125,21 @@ impl Consumer for Cards {
             params![device, to],
         )?;
         crate::consumer::fts::cards(k, None)?;
+        // Their vectors go with them (docs/tools.md V3).
+        for key in lost {
+            crate::embed_phase::touched(None, k, "o", &key)?;
+        }
         Ok(())
     }
+}
+
+/// The vector keys (`<device>.<op seq>.<n>`) of `device`'s cards where `clause` holds for `?2`.
+fn keys(k: &Connection, device: &str, clause: &str, value: i64) -> Result<Vec<String>> {
+    Ok(k.prepare(&format!(
+        "SELECT device || '.' || op_seq || '.' || n FROM cards WHERE device = ?1 AND {clause}"
+    ))?
+    .query_map(params![device, value], |r| r.get(0))?
+    .collect::<rusqlite::Result<_>>()?)
 }
 
 /// K3: recuration op `op_seq` replaces the cards of `device`'s earlier windows that overlap what
@@ -161,6 +175,9 @@ fn replace(k: &Connection, device: &str, op_seq: i64, op: &serde_json::Value) ->
                        (SELECT rowid FROM cards WHERE device = ?1 AND op_seq = ?2)",
                     params![device, earlier],
                 )?;
+                for key in keys(k, device, "op_seq = ?2", earlier)? {
+                    crate::embed_phase::touched(None, k, "o", &key)?;
+                }
             }
         }
     }

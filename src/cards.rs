@@ -679,16 +679,22 @@ where
     Some(out.join("\n"))
 }
 
+/// A card's ID as `get` takes it, `<device>.<op seq>.<n>` or `<op seq>.<n>` of `local`, in parts:
+/// the device, the op seq and the place.
+pub(crate) fn id_parts<'a>(id: &'a str, local: &'a str) -> Option<(&'a str, i64, i64)> {
+    let parts: Vec<&str> = id.trim().split('.').collect();
+    let (device, op_seq, n) = match parts[..] {
+        [op_seq, n] => (local, op_seq, n),
+        [device, op_seq, n] => (device, op_seq, n),
+        _ => return None,
+    };
+    Some((device, op_seq.parse().ok()?, n.parse().ok()?))
+}
+
 /// The current card an ID names (S3, S6), as `recent` would read it: `<op seq>.<n>` of this
 /// device's, or `<device>.<op seq>.<n>`.
 pub fn get(k: &Connection, raw: &Raw, id: &str, rules: &Rules) -> Result<Option<Card>> {
-    let parts: Vec<&str> = id.trim().split('.').collect();
-    let (device, op_seq, n) = match parts[..] {
-        [op_seq, n] => (raw.device(), op_seq, n),
-        [device, op_seq, n] => (device, op_seq, n),
-        _ => return Ok(None),
-    };
-    let (Ok(op_seq), Ok(n)) = (op_seq.parse::<i64>(), n.parse::<i64>()) else {
+    let Some((device, op_seq, n)) = id_parts(id, raw.device()) else {
         return Ok(None);
     };
     if !crate::consumer::manifest::exists(k, "table", "cards")? {

@@ -119,6 +119,8 @@ impl Checks {
                 self.embeddings.state,
                 self.embeddings.generation.state,
                 self.embeddings.waiting.claims.state,
+                self.embeddings.waiting.cards.state,
+                self.embeddings.waiting.summaries.state,
                 self.embeddings.waiting.imports.state,
                 self.embeddings.waiting.records.state,
                 self.embeddings.skipped.state,
@@ -527,6 +529,8 @@ struct Generation {
 #[derive(Serialize)]
 struct Waiting {
     claims: Count,
+    cards: Count,
+    summaries: Count,
     imports: Count,
     records: Count,
 }
@@ -558,6 +562,8 @@ impl EmbeddingChecks {
             generation: Generation { state, value: None },
             waiting: Waiting {
                 claims: Count::unknown(state),
+                cards: Count::unknown(state),
+                summaries: Count::unknown(state),
                 imports: Count::unknown(state),
                 records: Count::unknown(state),
             },
@@ -595,6 +601,15 @@ fn embedding_queries(conn: &Connection) -> EmbeddingChecks {
     let waiting = match vectors {
         Ok(true) => Waiting {
             claims: count(conn, "active", &["uid"], || facts.claims),
+            cards: count(
+                conn,
+                "cards",
+                &["device", "op_seq", "n", "replaced_by"],
+                || facts.cards,
+            ),
+            summaries: count(conn, "turns", &["device", "op_seq", "skipped"], || {
+                facts.summaries
+            }),
             imports: count(conn, "imported", &["uid"], || facts.imports),
             records: count(conn, "raw_docs", &["device", "seq"], || facts.records),
         },
@@ -604,6 +619,8 @@ fn embedding_queries(conn: &Connection) -> EmbeddingChecks {
                 .map_or(CheckState::SchemaMissing, |error| error_state(&error));
             Waiting {
                 claims: Count::unknown(state),
+                cards: Count::unknown(state),
+                summaries: Count::unknown(state),
                 imports: Count::unknown(state),
                 records: Count::unknown(state),
             }
@@ -2655,6 +2672,12 @@ mod tests {
              CREATE TABLE raw_docs(device TEXT,seq INTEGER,kind TEXT);
              INSERT INTO raw_docs VALUES('private-device',1,'prompt'),('private-device',2,'reply'),
                ('private-device',3,'tool');
+             CREATE TABLE cards(device TEXT,op_seq INTEGER,n INTEGER,replaced_by INTEGER);
+             INSERT INTO cards VALUES('private-device',5,0,NULL),('private-device',5,1,NULL),
+               ('private-device',4,0,5);
+             CREATE TABLE turns(device TEXT,op_seq INTEGER,skipped INTEGER);
+             INSERT INTO turns VALUES('private-device',6,0),('private-device',7,0),
+               ('private-device',8,1);
              CREATE TABLE vec_generation(embedder TEXT,state TEXT);
              CREATE TABLE vector_keys(embedder TEXT,kind TEXT,key TEXT,skipped TEXT);",
         )
@@ -2664,6 +2687,8 @@ mod tests {
             .unwrap();
         for (kind, key, skipped) in [
             ("c", "a", None),
+            ("o", "private-device.5.0", None),
+            ("s", "Sprivate-device.6", None),
             ("k", "i", Some("excluded")),
             ("r", "private-device:1", Some("private-reason")),
         ] {
@@ -2677,7 +2702,7 @@ mod tests {
         let report = serde_json::to_value(doctor_report(p)).unwrap();
         let checks = &report["checks"]["embeddings"];
         assert_eq!(checks["generation"]["value"], "active");
-        for name in ["claims", "imports", "records"] {
+        for name in ["claims", "cards", "summaries", "imports", "records"] {
             assert_eq!(
                 checks["waiting"][name],
                 serde_json::json!({"state":"known","value":1})
@@ -2703,6 +2728,42 @@ mod tests {
             report["checks"]["embeddings"]["waiting"]["records"],
             serde_json::json!({"state":"schema_missing","value":null})
         );
+    }
+
+    /// CodeRabbit on #429: the cards' and the summaries' waiting counts are among what a complete
+    /// report has established.
+    #[test]
+    fn w6d_unknown_card_or_summary_waiting_counts_leave_the_report_incomplete() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(
+            p.join("config.toml"),
+            "[embedding]\nprovider='workers-ai'\naccount_id='synthetic-account'\n",
+        )
+        .unwrap();
+        let k = Connection::open(p.join("knowledge.db")).unwrap();
+        let cards = "CREATE TABLE cards(device TEXT,op_seq INTEGER,n INTEGER,replaced_by INTEGER);";
+        let turns = "CREATE TABLE turns(device TEXT,op_seq INTEGER,skipped INTEGER);";
+        k.execute_batch(&format!(
+            "CREATE TABLE rewinds(ts);
+             CREATE TABLE gaps(agent TEXT,transcript_turns INTEGER,raw_turns INTEGER);
+             CREATE TABLE claims(uid TEXT);
+             CREATE VIEW active AS SELECT uid FROM claims;
+             CREATE TABLE imported(uid TEXT);
+             CREATE TABLE raw_docs(device TEXT,seq INTEGER,kind TEXT);
+             CREATE TABLE vec_generation(embedder TEXT,state TEXT);
+             CREATE TABLE vector_keys(embedder TEXT,kind TEXT,key TEXT,skipped TEXT);
+             {cards} {turns}"
+        ))
+        .unwrap();
+        let complete = || serde_json::to_value(doctor_report(p)).unwrap()["complete"].clone();
+        assert_eq!(complete(), true);
+        for (table, create) in [("cards", cards), ("turns", turns)] {
+            k.execute_batch(&format!("DROP TABLE {table};")).unwrap();
+            assert_eq!(complete(), false, "{table}");
+            k.execute_batch(create).unwrap();
+        }
+        assert_eq!(complete(), true);
     }
 
     fn legacy_fixture(home: &Path) -> Connection {
