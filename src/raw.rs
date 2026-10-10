@@ -1386,8 +1386,11 @@ impl Raw {
                 [uid],
                 |r| r.get(0),
             )?;
-            let ops = n + usize::try_from(corrections)?;
-            return Ok((n > 0).then(|| ("claim", ops, first.unwrap_or_default())));
+            if n > 0 {
+                let ops = n + usize::try_from(corrections)?;
+                return Ok(Some(("claim", ops, first.unwrap_or_default())));
+            }
+            // No claim has it: an import op may still carry it (CodeRabbit on #435).
         }
         let (n, title): (i64, Option<String>) = self.conn.query_row(
             "SELECT COUNT(*), MIN(json_extract(body, '$.title')) FROM ops

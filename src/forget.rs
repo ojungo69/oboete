@@ -423,18 +423,20 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
             ));
         }
     }
-    // Not in knowledge.db yet: no consumer has read its ops (right after an import, or while the
-    // worker lags), and the op log decides (Codex on #435).
-    if shown.is_none()
-        && let Some((kind, ops, first)) = raw.uid_ops(&uid)?
-    {
-        let shown_raw = UidPreview {
-            kind,
-            ops,
-            vectors: 0,
-            again: Vec::new(),
-        };
-        shown = Some((shown_raw, Some(first)));
+    // The op log decides what knowledge.db has not read yet (right after an import, or while the
+    // worker lags): the uid itself, or its ops since (Codex on #435).
+    match (&mut shown, raw.uid_ops(&uid)?) {
+        (Some((preview, _)), Some((_, ops, _))) => preview.ops = ops,
+        (None, Some((kind, ops, first))) => {
+            let preview = UidPreview {
+                kind,
+                ops,
+                vectors: 0,
+                again: Vec::new(),
+            };
+            shown = Some((preview, Some(first)));
+        }
+        _ => {}
     }
     let (mut uid_preview, sample) =
         shown.with_context(|| format!("{uid} is neither a claim's nor a document's uid here"))?;
@@ -1128,6 +1130,44 @@ mod tests {
         };
         let found: Vec<String> = s.query(&q).hits.into_iter().map(|h| h.key).collect();
         assert!(!found.contains(&uid) && !found.contains(&doc));
+    }
+
+    /// D5 (Codex and CodeRabbit on #435): the op log gives the preview its count while knowledge.db
+    /// lags it, and a uid of 64 hex digits that no claim has is looked for among the imports.
+    #[test]
+    fn the_preview_counts_what_the_op_log_holds() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs for the parser.", &[]);
+        s.run();
+        let home = s.home.path().to_owned();
+        let ops = |uid: &str| {
+            preview(&home, Target::parse_uid(uid).unwrap())
+                .unwrap()
+                .uid
+                .map(|u| (u.kind, u.ops))
+        };
+        assert_eq!(ops(&uid), Some(("claim", 1)));
+        // An owner's change no consumer has read yet.
+        let change = serde_json::json!({"uid": uid, "muted": true});
+        s.raw
+            .append_ops(&[(raw::OpKind::Correction, change)])
+            .unwrap();
+        assert_eq!(ops(&uid), Some(("claim", 2)));
+        let hex = "c".repeat(64);
+        s.raw
+            .append_imports(vec![raw::ImportDoc {
+                uid: hex.clone(),
+                source: "claude-mem:test".into(),
+                source_id: "h".into(),
+                kind: "decision".into(),
+                repo: crate::import::repo("r"),
+                session: "cm".into(),
+                ts: 3_000,
+                title: "Hex notes".into(),
+                body: "Hex.".into(),
+            }])
+            .unwrap();
+        assert_eq!(ops(&hex), Some(("document", 1)));
     }
 
     /// D5: from the commit of its request, version 2 in both logs, a uid is passed over by every

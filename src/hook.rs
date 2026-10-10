@@ -213,6 +213,28 @@ fn run_io(
                     None
                 });
         }
+        // Milestone 5 D5 (Codex on #435): a forget registered while this call read holds at its
+        // edge too. A packet that shows a uid forgotten since is not sent (the next call's reads
+        // leave the uid out), nor one whose check cannot be made.
+        if manifest.is_some() || prompted.is_some() {
+            let forgotten = forgotten_now(&store).map(Some).unwrap_or_else(|e| {
+                eprintln!("oboete: nothing injected: the forgotten uids are not read: {e:#}");
+                None
+            });
+            let shows = |uid: &String| forgotten.as_ref().is_none_or(|f| f.contains(uid));
+            if manifest
+                .as_ref()
+                .is_some_and(|m| m.shown.iter().any(|s| shows(&s.uid)))
+            {
+                manifest = None;
+            }
+            if prompted
+                .as_ref()
+                .is_some_and(|p| p.named.iter().any(|(_, _, n)| shows(&n.uid)))
+            {
+                prompted = None;
+            }
+        }
         Ok(())
     })();
     if ended == 0 {
@@ -721,6 +743,15 @@ pub fn start_text_read(
         )?,
         None => None,
     };
+    // Milestone 5 D5 (Codex on #435): a forget registered while it was read holds at its edge,
+    // for every reader of it (a hook, the viewer's Context page, `oboete inject`).
+    let manifest = match (manifest, store) {
+        (Some(m), Some(store)) => {
+            let forgotten = forgotten_now(store)?;
+            (!m.shown.iter().any(|s| forgotten.contains(&s.uid))).then_some(m)
+        }
+        (manifest, _) => manifest,
+    };
     Ok(match work {
         Some(work) => Some(Start {
             work: Some(work),
@@ -728,6 +759,22 @@ pub fn start_text_read(
         }),
         None => manifest,
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A forget registered after a packet's reads, before its last check.
+    static BEFORE_EDGE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The forgotten uids as a packet leaves (milestone 5 D5): read after every read that built it.
+fn forgotten_now(raw: &crate::raw::Raw) -> Result<std::collections::HashSet<String>> {
+    #[cfg(test)]
+    if let Some(between) = BEFORE_EDGE.take() {
+        between();
+    }
+    raw.forgotten_set()
 }
 
 /// The failure line, then each block inside the memory fence after what it holds. Cursor drops a
@@ -3078,6 +3125,63 @@ mod tests {
         assert!(text.contains("Parser errors go to stderr."), "{text}");
         // A reader may make the write-ahead log to read through, never a frame in it.
         assert!(file() == before && wal() == frames, "knowledge.db changed");
+    }
+
+    /// Milestone 5 D5 (Codex on #435): a claim forgotten after a packet's reads, before it
+    /// leaves, is not in it: at the manifest's edge (`oboete inject`, the viewer's Context page and
+    /// a hook share it), and at a hook call's own edge, for SessionStart and for a prompt.
+    #[test]
+    fn a_claim_forgotten_while_a_packet_is_read_is_not_sent() {
+        let mut p = Prompts::new(true);
+        let texts = [
+            "Parser errors go to stderr.",
+            "Lexer warnings go to a log.",
+            "Linker errors go to stdout.",
+        ];
+        let uids: Vec<String> = texts.iter().map(|t| p.decided(1, t, &[])).collect();
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let forget = |h: &Path, u: &str| {
+            let target = crate::forget::Target::parse_uid(u).unwrap();
+            let p = crate::forget::preview(h, target).unwrap();
+            crate::forget::start(h, &p).unwrap();
+        };
+        // At the first check a packet makes (`then`: at its second).
+        let forget_inside = |uid: &str, then: bool| {
+            let (h, u) = (home.clone(), uid.to_owned());
+            let at = Box::new(move || forget(&h, &u));
+            BEFORE_EDGE.set(Some(if then {
+                Box::new(move || BEFORE_EDGE.set(Some(at)))
+            } else {
+                at
+            }));
+        };
+        let plain = inject_text(&home, Path::new(&p.c), None);
+        assert!(texts.iter().all(|t| plain.contains(t)));
+        forget_inside(&uids[0], false);
+        let plain = inject_text(&home, Path::new(&p.c), None);
+        assert!(
+            BEFORE_EDGE.take().is_none(),
+            "the forget ran inside the read"
+        );
+        assert!(!plain.contains(texts[0]));
+        assert!(p.hook("SessionStart", "a", json!({})).contains(texts[1]));
+        forget_inside(&uids[1], true);
+        let start = p.hook("SessionStart", "b", json!({}));
+        assert!(
+            BEFORE_EDGE.take().is_none(),
+            "the forget ran inside SessionStart"
+        );
+        assert!(!start.contains(texts[1]));
+        let ask = "where do the linker errors go";
+        assert!(p.prompt("c", ask).contains(texts[2]));
+        forget_inside(&uids[2], false);
+        let text = p.prompt("d", ask);
+        assert!(
+            BEFORE_EDGE.take().is_none(),
+            "the forget ran inside the prompt"
+        );
+        assert!(!text.contains(texts[2]));
     }
 
     /// #295 row 2 (D2): an earlier decision the prompt matches comes with the later one that ended

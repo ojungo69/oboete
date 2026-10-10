@@ -2287,11 +2287,6 @@ fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView
     // A derivation whose quote a tombstone the worker has yet to apply masks is left out, as
     // Anchors will drop it: its body may say what the mask hides (Codex's security review).
     let pending = claims::Pending::read(raw, k)?;
-    // A forget of the uid registered after `named` read it holds here too (D5; Codex's
-    // adversarial review of slice 2a).
-    if raw.forgotten(&uid)? {
-        return Ok(None);
-    }
     let mut history = Vec::with_capacity(rows.len());
     for (change, op_device, op_seq) in rows {
         if !pending.touches_op(k, &op_device, op_seq)? {
@@ -2304,7 +2299,7 @@ fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView
         })
         .optional()?
         .flatten();
-    Ok(Some(ClaimView {
+    let view = ClaimView {
         muted: claims::muted(k, &uid)?,
         delivered: claims::delivered_one(k, &uid)?.is_some()
             && (c.kind != "open item" || c.status == "decided"),
@@ -2326,7 +2321,13 @@ fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView
         ended_by,
         quotes,
         history,
-    }))
+    };
+    // A forget of the uid registered after `named` read it holds here too, as the view leaves
+    // (D5; Codex's adversarial review of slice 2a, and Codex on #435).
+    if raw.forgotten(&view.uid)? {
+        return Ok(None);
+    }
+    Ok(Some(view))
 }
 
 fn claim_text(raw: &Raw, k: &Connection, uid: &str) -> Result<Option<String>> {
