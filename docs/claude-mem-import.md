@@ -31,7 +31,8 @@ summaries and prompts, as import ops, gated on the way in, each once (by source 
 - a summary's `notes` comes in as its last line, `Notes: …`, as claude-mem 13.34.2 shows them
   (#403);
 - a row claude-mem merged into another project (`merged_into_project`, its `ProjectMerge`) comes in
-  under that project, where claude-mem reads it.
+  under that project, where claude-mem reads it; one merged after it came in comes in again, with
+  the same uid, and readers take a document's newest row (Codex on #431).
 
 I4. **Work state.** Each `work_state_entries` row (v61) comes in as a work state op, oldest first:
 the list, the fields, `repo` the project as an import names it (`claude-mem:<project>`), its own

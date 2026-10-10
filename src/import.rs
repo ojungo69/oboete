@@ -6,7 +6,7 @@
 //! repository reads the project its key ends in (`imported_repos`). Its work state comes in too
 //! (docs/claude-mem-import.md).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -99,7 +99,7 @@ pub fn claude_mem(
         "''"
     };
     let mut sink = Sink {
-        known: raw.import_keys(&source)?,
+        known: raw.import_repos(&source)?,
         raw,
         source: &source,
         docs: Vec::new(),
@@ -398,17 +398,24 @@ struct Row<'a> {
 struct Sink<'a> {
     raw: &'a mut Raw,
     source: &'a str,
-    /// The source ids imported so far, by earlier runs and this one.
-    known: HashSet<String>,
+    /// The source ids imported so far, by earlier runs and this one, each with the repository it
+    /// was filed under last.
+    known: HashMap<String, String>,
     docs: Vec<ImportDoc>,
 }
 
 impl Sink<'_> {
-    /// A row as an import op, with its session. False: imported before.
+    /// A row as an import op, with its session. False: imported before, under the same
+    /// repository. A row claude-mem moved since (I3) comes in again with the same uid: readers
+    /// take a document's newest row (Codex on #431).
     fn put(&mut self, r: Row) -> Result<bool> {
-        if !self.known.insert(r.key.clone()) {
-            return Ok(false);
+        let repo = repo(r.project);
+        match self.known.get(&r.key) {
+            // One whose project is lost (claude-mem pruned its session) stays where it came in.
+            Some(had) if *had == repo || r.project.is_empty() => return Ok(false),
+            _ => {}
         }
+        self.known.insert(r.key.clone(), repo.clone());
         let session = match r.session {
             Some(s) => s.id.clone(),
             // No session id at all: a session of its own, so unrelated rows do not merge.
@@ -421,7 +428,7 @@ impl Sink<'_> {
             source: self.source.to_owned(),
             source_id: r.key,
             kind: r.kind.to_owned(),
-            repo: repo(r.project),
+            repo,
             session,
             ts: r.ts,
             title: r.title.to_owned(),
@@ -787,6 +794,58 @@ mod tests {
         let again = claude_mem(&mut raw, &src, &Default::default()).unwrap();
         assert_eq!((again.work_state, again.refused), (0, 2));
         assert_eq!(work_ops(&raw).len(), 2);
+    }
+
+    /// Codex on #431: a row claude-mem merges into another project after it came in comes in
+    /// again under that project, with the same uid, and the index files it there (readers take a
+    /// document's newest row); a run after that adds nothing.
+    #[test]
+    fn a_row_merged_after_its_import_comes_in_again_under_its_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        let merge = |into: Option<&str>| {
+            Connection::open(&src)
+                .unwrap()
+                .execute(
+                    "UPDATE observations SET merged_into_project = ?1 WHERE id = 40",
+                    [into],
+                )
+                .unwrap();
+        };
+        merge(None);
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        let o40 = |raw: &Raw| -> Vec<String> {
+            docs(raw)
+                .into_iter()
+                .filter(|d| d.source_id == "o40")
+                .map(|d| d.repo)
+                .collect()
+        };
+        assert_eq!(o40(&raw), ["claude-mem:free-mem/wt"]);
+        merge(Some("free-mem"));
+        let moved = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!(moved.observations, 1);
+        assert_eq!(o40(&raw), ["claude-mem:free-mem/wt", "claude-mem:free-mem"]);
+        let again = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!(again.observations, 0);
+        assert_eq!(o40(&raw).len(), 2);
+        drop(raw);
+        crate::worker::run_once(dir.path()).unwrap();
+        let k = crate::knowledge::open(dir.path()).unwrap();
+        let uid: String = k
+            .query_row(
+                "SELECT uid FROM imported WHERE source_id = 'o40' LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let line = crate::search::b::get(dir.path(), &uid).unwrap().unwrap();
+        assert!(
+            line.contains(" claude-mem:free-mem (imported from"),
+            "{line}"
+        );
     }
 
     /// Test 1: a database at a schema newer than the import knows is refused, nothing written.
