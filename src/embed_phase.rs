@@ -211,6 +211,9 @@ pub struct Phase {
     split: Option<Split>,
     /// The local model while documents wait for it (D14); dropped when none do.
     local: Option<Arc<Resident>>,
+    /// The redaction rules whose `masked` marks were last judged (`unmask`): none before this
+    /// worker's first poll.
+    masked_under: Option<String>,
     #[cfg(test)]
     polls: usize,
 }
@@ -250,6 +253,7 @@ impl Phase {
             timeout: crate::embed::BATCH_TIMEOUT,
             split: None,
             local: None,
+            masked_under: None,
             #[cfg(test)]
             polls: 0,
         }
@@ -506,6 +510,10 @@ impl Phase {
             return Ok(Step::Idle);
         }
         cleared(k, crate::embed::EMBEDDER, &reading)?;
+        if self.masked_under.as_deref() != Some(rules.version()) {
+            unmask(k, crate::embed::EMBEDDER, rules.version())?;
+            self.masked_under = Some(rules.version().to_owned());
+        }
         let Some(embedder) = embedder else {
             return self.local_batch(raw, k, &reading, &rules);
         };
@@ -920,8 +928,9 @@ pub(crate) fn doctor_facts_in(k: &Connection, embedder: &str) -> DoctorFacts {
     );
     let skipped = (|| -> Result<Vec<(String, i64)>> {
         Ok(k.prepare(
-            "SELECT skipped, count(*) FROM vector_keys WHERE embedder = ?1 AND skipped IS NOT NULL
-             GROUP BY skipped ORDER BY skipped",
+            "SELECT CASE WHEN skipped LIKE 'masked:%' THEN 'empty' ELSE skipped END AS why,
+                    count(*) FROM vector_keys WHERE embedder = ?1 AND skipped IS NOT NULL
+             GROUP BY why ORDER BY why",
         )?
         .query_map([embedder], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?)
@@ -1220,6 +1229,18 @@ fn cleared(k: &Connection, embedder: &str, reading: &Reading) -> Result<()> {
     Ok(())
 }
 
+/// The texts the rules blanked under other rules, their marks taken off so they are read again
+/// under these (Codex on #429), as an `excluded` mark is judged again when the exclusion changes.
+/// Read once per worker and once per change of the rules: it reads every key row.
+fn unmask(k: &Connection, embedder: &str, ruleset: &str) -> Result<()> {
+    k.execute(
+        "DELETE FROM vector_keys WHERE embedder = ?1 AND skipped LIKE 'masked:%'
+           AND skipped <> 'masked:' || ?2",
+        params![embedder, ruleset],
+    )?;
+    Ok(())
+}
+
 /// A document read to embed: what it is, and its stored text.
 struct Read {
     doc: Doc,
@@ -1356,7 +1377,13 @@ fn sort_out(
     }
     let sent = gated(&r, rules);
     if sent.trim().is_empty() || sent.trim() == "[REDACTED]" {
-        mark(k, embedder, &r.doc, "empty")?;
+        // A text the rules blank is passed over under these rules only (`unmask`).
+        let why = if r.text.trim().is_empty() {
+            "empty".to_owned()
+        } else {
+            format!("masked:{}", rules.version())
+        };
+        mark(k, embedder, &r.doc, &why)?;
         return Ok(None);
     }
     if let Some(vec) = cached(k, embedder, &r.doc.sha)? {
@@ -2784,6 +2811,51 @@ mod tests {
         );
     }
 
+    /// Codex on #429: a text the rules leave blank is passed over under those rules only: when
+    /// they change, it is read again, and sent when the new rules leave it words.
+    #[test]
+    fn a_text_the_rules_blank_is_read_again_when_they_change() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let path = s.home.path().join("config.toml");
+        let unruled = std::fs::read_to_string(&path).unwrap();
+        let rule = "[redaction]\nextra_rules = [{ id = \"plan\", regex = 'Secret plan' }]\n";
+        std::fs::write(&path, unruled.clone() + rule).unwrap();
+        let seq = s.said("s", R, 1_000, "Open words.");
+        s.cards(
+            seq,
+            seq,
+            serde_json::json!([{"type": "decision", "title": "Secret plan"}]),
+            false,
+        );
+        s.turn(
+            serde_json::json!({"agent": "claude", "session": "s", "repo": R, "ts": 2_000,
+            "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+            "fields": {"request": "Secret plan"}, "skipped": false}),
+        );
+        s.run();
+        embed_all(&s);
+        let blanked = |t: &String| t.contains("Secret plan") || t.trim() == "[REDACTED]";
+        assert!(!stub.texts().concat().iter().any(blanked));
+        // doctor counts them as texts with nothing to send.
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let facts = doctor_facts_in(&k, crate::embed::EMBEDDER).skipped.unwrap();
+        assert!(facts.contains(&("empty".to_owned(), 2)), "{facts:?}");
+        let before = stub.requests();
+        std::fs::write(&path, unruled).unwrap();
+        embed_all(&s);
+        let later = stub.texts()[before..].concat();
+        assert_eq!(
+            later
+                .iter()
+                .filter(|t| t.starts_with("Secret plan"))
+                .count(),
+            2,
+            "{later:?}"
+        );
+    }
+
     /// CodeRabbit on #429: a joined text's key is never another text's plain hash, whatever bytes
     /// that text holds (a claim's body may hold a NUL).
     #[test]
@@ -4066,7 +4138,9 @@ mod tests {
         }
         assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
         assert_eq!(stub.texts(), [vec!["Live words.".to_owned()]]);
-        assert_eq!(skipped(&s, &s.key(empty)).as_deref(), Some("empty"));
+        // Its words are all private: blanked by the rules, and judged again when they change.
+        let why = skipped(&s, &s.key(empty)).unwrap();
+        assert!(why.starts_with("masked:"), "{why}");
         let source = keys(&s)
             .iter()
             .filter(|(.., why)| why.as_deref() == Some("source"))
@@ -4317,10 +4391,10 @@ mod tests {
             got.iter()
                 .any(|(_, k, skipped)| *k == uid && skipped.is_none())
         );
-        // Gated to the mask whole: nothing to send.
+        // Gated to the mask whole: nothing to send under these rules.
         assert!(
-            got.iter()
-                .any(|(_, k, skipped)| *k == other && skipped.as_deref() == Some("empty")),
+            got.iter().any(|(_, k, skipped)| *k == other
+                && skipped.as_deref().is_some_and(|w| w.starts_with("masked:"))),
             "{got:?}"
         );
     }

@@ -109,7 +109,9 @@ then, count too: the row keeps the range, not what was kept back, so such a card
 undo with them. An empty text is marked `empty`, and so is a card or summary a removal hides (K4,
 T7) before it has a vector, as a removed record is: no reader shows it, so it is sent nowhere. One
 hidden after it has its vector keeps it, as it keeps its full-text row: its hit is read through its
-reader, which hides it (Q3).
+reader, which hides it (Q3). A text the redaction rules leave blank, of any kind, is marked with
+those rules' version, not `empty`: when the rules change it is read again, and sent if the new
+ones leave it words, as an `excluded` mark is judged again (doctor counts it with `empty`).
 
 V3. **The vector follows its row.** The consumers that write the cards and the summaries call
 `embed_phase::touched` for each row they replace or remove, in the transaction that does it, as
@@ -151,6 +153,8 @@ list, count the cards and the summaries beside the claims, imported documents an
 6. Cards held for an answer are each sent again alone.
 7. A card or summary whose values join to another's text at other places gets its own vector, its
    own gated text sent.
+8. A card and a summary the rules leave blank are sent once the rule goes; doctor counts them as
+   `empty` until then.
 
 ## Differences from claude-mem, and why
 
