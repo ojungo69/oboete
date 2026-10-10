@@ -124,7 +124,9 @@ fused with their vector list by `rrf`, as the claims' lists are. `type`, the rep
 `until` and the session `search` skips apply inside the vector search, as for imported documents and
 records, and a hit is still read through its table's one reader (Q3). The vector list is read from
 the bounded candidate pool, nearest first, and its depth counts only the rows the reader shows: a
-hidden row takes no place, however many are nearer.
+hidden row takes no place in it. The pool is the 400 candidates the bit index gives (D8), as for
+the other legs, so a shown row is missed by its vector only behind 400 hidden ones nearer to the
+query (full text still finds it), until milestone 5's purge takes a removed row's vector with it.
 
 V5. **Cost.** A card or summary is one more document in the phase's batches, under the embedder's
 caps (Workers AI's daily requests and monthly USD; the local model is free). Cards come about one
@@ -142,8 +144,9 @@ list, count the cards and the summaries beside the claims, imported documents an
 3. A skipped summary gets no vector, and an excluded repository's card and summary are not sent,
    nor those made from a record of a session that touched it: a window across sessions, a goal, a
    window a summary read.
-4. A card a removal hides is not found by its vector, nor takes a place, however many are nearer;
-   a card and a summary hidden before they had one are not sent.
+4. A card a removal hides is not found by its vector, nor takes a place in the vector list (100
+   hidden cards nearer than the one shown); a card and a summary hidden before they had one are
+   not sent.
 5. A rule on a whole value of a card or summary, across its lines, holds in the text sent.
 6. Cards held for an answer are each sent again alone.
 7. A card or summary whose values join to another's text at other places gets its own vector, its

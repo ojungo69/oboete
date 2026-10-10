@@ -3026,8 +3026,8 @@ mod tests {
         assert_eq!(ask("db ok so", "observations"), [db]);
     }
 
-    /// Tools slice 3 (V4, Q3; Codex): rows their reader hides take no place in the vector list,
-    /// however many of them are nearer than a row it shows.
+    /// Tools slice 3 (V4, Q3; Codex): rows their reader hides take no place in the vector list:
+    /// a hundred of them nearer than a row it shows, within the candidate pool.
     #[test]
     fn hidden_rows_take_no_place_in_the_vector_list() {
         let mut s = Store::new();

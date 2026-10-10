@@ -1713,14 +1713,15 @@ pub(crate) fn sha(text: &str) -> String {
 
 /// `sha` of a text gated value by value (`joined_with`), with where each value lies: values that
 /// join to one text at other places gate differently, so they share no vector (Codex and
-/// CodeRabbit on #429).
+/// CodeRabbit on #429). Its `j` keeps it apart from every plain text's key, whatever that text
+/// holds.
 fn joined_sha(text: &str, parts: &[std::ops::Range<usize>]) -> String {
     let mut h = Sha256::new();
     h.update(text.as_bytes());
     for p in parts {
         h.update(format!("\0{}-{}", p.start, p.end));
     }
-    format!("{:x}", h.finalize())
+    format!("j{:x}", h.finalize())
 }
 
 /// A claim a pending correction or tombstone touches: its text may change on the next pass.
@@ -2780,6 +2781,17 @@ mod tests {
             sent.iter()
                 .all(|t| !t.contains("123456") && !t.contains("654321")),
             "{sent:?}"
+        );
+    }
+
+    /// CodeRabbit on #429: a joined text's key is never another text's plain hash, whatever bytes
+    /// that text holds (a claim's body may hold a NUL).
+    #[test]
+    fn a_joined_key_is_never_a_plain_texts_key() {
+        let one = 0..1;
+        assert_ne!(
+            joined_sha("A", std::slice::from_ref(&one)),
+            sha("A\u{0}0-1")
         );
     }
 
