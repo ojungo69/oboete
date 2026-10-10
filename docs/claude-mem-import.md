@@ -43,12 +43,17 @@ claude-mem project its key ends in, the project's worktree keys (`claude-mem:<na
 as search reads its imported documents, folded together by clock: an imported list goes on under
 the repository's own writes. An imported entry takes effect at its own time, also when this
 device's writes reached the store before it, and lifts no clock of theirs; it shows its own time
-(`at`).
+(`at`). The name reads imported entries only, as search's reads imported documents only: a native
+entry is read by its own key alone, whatever its shape (an origin like `ssh://claude-mem:<name>/x`
+makes a key shaped like a worktree project's). A checkout whose key ends in a project's name reads
+that project's lists, as claude-mem showed them to every checkout of that name: the import cannot
+split what claude-mem kept under one name.
 
 I6. **Exclusion and forget.** Unchanged and by the same names: the embedding phase passes over an
 imported document of an excluded repository's project (milestone 4 D13), and work state goes to no
 provider (L8). Milestone 5's forget of a repository is to reach its imported documents and work
-state by the same rule.
+state by the same rule, and its capture exclusion is to keep an excluded repository's imported
+lists out by that rule, as it refuses the repository's writes (docs/work-state.md L8).
 
 I7. **Size.** The owner's database of 2026-09-24 (178,370 documents) made raw.db 323 MB and
 knowledge.db 864 MB in an evaluation home (docs/milestone-4.md); their vectors add about 930 MB,
@@ -65,5 +70,6 @@ from the local model on this PC and from Workers AI on the iMac (decision 35's e
    is counted; a second run adds nothing.
 5. A repository reads its project's imported lists, a worktree project's too, and not another
    project's, with its own writes by time: its own later write comes last though it reached the
-   store first; an imported entry keeps its own time.
+   store first; an imported entry keeps its own time. A native entry under a key shaped like a
+   worktree project's is read by that key alone.
 6. The default home takes the import without `--eval-store` and refuses it with it.

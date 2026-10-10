@@ -853,6 +853,36 @@ mod tests {
         assert_eq!(fields[2]["status"], "done");
     }
 
+    /// The security review of the N1 commit: the name rule reads imported entries only, as
+    /// search's reads imported documents only. A native entry is read by its own key alone, also
+    /// when an origin gives that key an imported project's shape (`ssh://claude-mem:<name>/x`
+    /// keeps its non-numeric "port" in the host).
+    #[test]
+    fn a_native_entry_under_a_claude_mem_name_is_read_by_its_own_key_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        let crafted = crate::repo::normalize("ssh://claude-mem:free-mem/x").unwrap();
+        assert_eq!(crafted, "claude-mem:free-mem/x");
+        let task = |t: &str| json!({"task": t, "status": "todo"});
+        raw.work_state(&crafted, "plan", task("Written here").as_object().unwrap())
+            .unwrap();
+        raw.append_ops(&[(
+            OpKind::WorkState,
+            json!({"repo": crafted, "list": "plan", "fields": task("Imported"), "clock": 1,
+                "at": 1, "source": "claude-mem:b62f07076e19", "source_id": "w1"}),
+        )])
+        .unwrap();
+        let tasks = |repo: &str| -> Vec<String> {
+            let entries = raw.work_state_entries(repo).unwrap();
+            entries
+                .iter()
+                .map(|e| e.fields["task"].to_string())
+                .collect()
+        };
+        assert_eq!(tasks("github.com/o/free-mem"), [r#""Imported""#]);
+        assert_eq!(tasks(&crafted), [r#""Imported""#, r#""Written here""#]);
+    }
+
     #[test]
     fn the_source_name_and_uids_match_the_v1_import() {
         let dir = tempfile::tempdir().unwrap();

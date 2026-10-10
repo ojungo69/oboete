@@ -777,23 +777,30 @@ pub(crate) fn migration_checkpoints_in(
 
 /// docs/work-state.md L4: `repo`'s work state writes, in the order they were written: a device's
 /// in its own order, its clock never going back in it, then every device's by that clock, as
-/// `exclusions_in` orders exclusions. With them, those of the claude-mem project its key ends in,
-/// its worktrees' too, imported at their own times (docs/claude-mem-import.md I4, I5). Only these
-/// ops are parsed here (Codex's security review of #408); SQLite still reads the repository of
-/// every work state op, as no index may have a repository for its root (spec 1.6), and a
-/// malformed op still fails the read.
+/// `exclusions_in` orders exclusions. With them, the entries imported for the claude-mem project
+/// its key ends in, its worktrees' too, at their own times (docs/claude-mem-import.md I4, I5).
+/// Only these ops are parsed here (Codex's security review of #408); SQLite still reads the
+/// repository of every work state op, as no index may have a repository for its root (spec 1.6),
+/// and a malformed op still fails the read.
 pub(crate) fn work_state_in(
     conn: &Connection,
     repo: &str,
 ) -> Result<Vec<crate::work_state::Entry>> {
     let (scope, values) = crate::import::imported_match("json_extract(body, '$.repo')", repo);
+    // The name reads imported entries only, as search's reads imported documents only: a native
+    // entry is read by its own key alone, though an origin like `ssh://claude-mem:<name>/x` gives
+    // that key a worktree project's shape (the security review of the N1 commit).
     let mut st = conn.prepare(&format!(
         "SELECT device, ts, body FROM main.ops
          WHERE type = 'work_state' AND {scope}
+           AND (json_extract(body, '$.source') IS NOT NULL OR json_extract(body, '$.repo') = ?)
          ORDER BY device, op_seq"
     ))?;
     let mut writes = Vec::new();
     let (mut device, mut clock) = (String::new(), i64::MIN);
+    let values = values
+        .into_iter()
+        .chain([rusqlite::types::Value::Text(repo.to_owned())]);
     let rows = st.query_map(rusqlite::params_from_iter(values), |r| {
         Ok((
             r.get::<_, String>(0)?,
