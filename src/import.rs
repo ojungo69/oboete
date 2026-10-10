@@ -842,10 +842,7 @@ mod tests {
             )
             .unwrap();
         let line = crate::search::b::get(dir.path(), &uid).unwrap().unwrap();
-        assert!(
-            line.contains(" claude-mem:free-mem (imported from"),
-            "{line}"
-        );
+        assert!(line.contains(" claude-mem:free-mem (imported from"));
     }
 
     /// Test 1: a database at a schema newer than the import knows is refused, nothing written.
