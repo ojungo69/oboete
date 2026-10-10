@@ -3576,16 +3576,18 @@ async function embeddingKeySave(button, body) {
 // After a choice: the saved method and the files' state as they are now; typed values stay.
 // Another save's answer can replace the form while this reads, and be older or newer than this
 // read (a save made before a download wrote the method), so this reads again for the form then
-// shown until a read comes back with the form as it was.
+// shown until a read comes back with the form as it was. It answers whether it read them: a run
+// whose read failed stays watched, so the next poll reads them again.
 async function reloadEmbedding() {
   let mine, settings;
   do {
     mine = form;
     settings = await api('settings').catch(() => null);
-    if (!settings || settings.error || view !== 'settings') return;
+    if (!settings || settings.error || view !== 'settings') return false;
   } while (form !== mine);
   form = mergeProviderSettings(settings, mine, { op: 'embedding' });
   drawSettings();
+  return true;
 }
 
 async function refreshEmbedding() {
@@ -3596,10 +3598,8 @@ async function refreshEmbedding() {
     // are never seen running), has ended: the saved method is read again.
     const ended = (Boolean(d.status?.active) || d.watch) && !status.active && !d.busy;
     d.status = status;
-    if (ended) {
-      d.watch = false;
-      await reloadEmbedding();
-    } else renderEmbedding();
+    if (ended) d.watch = !(await reloadEmbedding());
+    else renderEmbedding();
   } catch {
     // The next poll reads it again.
   }
@@ -3645,7 +3645,7 @@ async function embeddingAction(action) {
       embeddingRefused(d, res, answer);
       d.status = await api('embedding').catch(() => null);
     }
-    if (res.ok) await reloadEmbedding();
+    if (res.ok && !(await reloadEmbedding())) d.watch = true;
   } catch {
     if (action === 'start') d.watch = true;
     else d.error = 'embedding_request_failed';

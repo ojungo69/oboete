@@ -765,10 +765,20 @@ button('embedding.start').click();await settle();
 assert.deepEqual(posted.at(-1),{url:'/api/embedding',body:{choice:'local',preview_key:key,confirmed:true}});
 assert(text(section()).includes('Downloading the model'),'the run shows while its answer waits');
 assert(select().disabled,'no other method meanwhile');
-finish(json({active:null,held:0,last:{choice:'local',phase:'failed',code:'embedding_no_space',held:0,get:2293063771}}));
+const stopped={active:null,held:0,last:{choice:'local',phase:'failed',code:'embedding_no_space',held:0,get:2293063771}};
+settingsAnswer=Promise.resolve(json({},503));
+finish(json(stopped));
 await settle();await settle();await settle();
 assert(text(section()).includes('not enough free disk space'),'a stopped run says why');
 assert(!select().disabled);
+// The settings could not be read after it: the run stays watched, and the next poll reads them.
+assert(w4.embeddingDraft().watch,'a failed read after the answer keeps the run watched');
+settingsAnswer=null;runStatus=stopped;
+const before=settingsGets;
+await w4.refreshEmbedding();await settle();
+assert.equal(settingsGets,before+1,'the next poll reads the settings again');
+assert(!w4.embeddingDraft().watch);
+runStatus=null;
 
 // A refusal is worded, and points at the field it needs.
 select().value='workers-ai';for(const cb of select().listeners.change)cb({target:select()});
@@ -814,6 +824,14 @@ runStatus={active:null,held:0,last:{choice:'workers-ai',phase:'done',code:null,h
 let gets=settingsGets;
 await w4.refreshEmbedding();await settle();
 assert.equal(settingsGets,gets+1,'a watched run that ended reads the settings again');
+assert(!w4.embeddingDraft().watch);
+// That read fails: the run stays watched, and the next poll reads the settings again.
+w4.embeddingDraft().watch=true;settingsAnswer=Promise.resolve(json({},503));
+await w4.refreshEmbedding();await settle();
+assert(w4.embeddingDraft().watch,'a failed read keeps the ended run watched');
+settingsAnswer=null;gets=settingsGets;
+await w4.refreshEmbedding();await settle();
+assert.equal(settingsGets,gets+1,'the next poll reads them');
 assert(!w4.embeddingDraft().watch);
 // Another save's answer replaces the form while the reload reads (a save made before the
 // download wrote the method): the reload reads again, and the method written last is shown.
