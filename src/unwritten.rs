@@ -13,6 +13,8 @@ const DIR: &str = "unwritten";
 const BOUND: u64 = 64 << 20;
 /// U3: the files one hook call writes back, the oldest first.
 const PER_CALL: usize = 16;
+/// U5: how long a keep waits for the one in progress: a hook has seconds in all.
+const KEEP_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 const VERSION: u64 = 1;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -34,15 +36,31 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     crate::db::private(&dir, 0o700);
     // One keep at a time from the bound's check to the rename: overlapping failed calls would each
-    // pass it (Codex on #440).
+    // pass it, and name their files in no order (Codex on #440). Waited for a second at most, so
+    // the hook still sets its marker before the agent's deadline.
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(dir.join("keep.lock"))?;
-    lock.lock()?;
-    let held: u64 = files(&dir)?
+    let until = std::time::Instant::now() + KEEP_WAIT;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                anyhow::bail!("another keep held {DIR}/ for {} s", KEEP_WAIT.as_secs())
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
+    }
+    let kept = files(&dir)?;
+    // `bad/` counts too: oboete never deletes what it set aside there (Codex on #440).
+    let held: u64 = kept
         .iter()
+        .chain(&files(&dir.join("bad"))?)
         .filter_map(|p| p.metadata().ok())
         .map(|m| m.len())
         .sum();
@@ -57,10 +75,13 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
         "{DIR}/ holds {held} bytes, and {} more would pass its bound",
         body.len()
     );
-    // Two keeps of one process in one millisecond get two names (CodeRabbit on #440).
-    static KEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = KEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let name = name(crate::db::now_ms(), std::process::id(), n);
+    // One past the newest file, chosen under the lock: the files sort as they were kept, those of
+    // two processes in one millisecond too (Codex on #440).
+    let next = kept
+        .last()
+        .and_then(|p| p.file_stem()?.to_str()?.parse::<u64>().ok())
+        .map_or(0, |n| n + 1);
+    let name = format!("{next:020}");
     let tmp = dir.join(format!(".{name}.tmp"));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -92,12 +113,6 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
     #[cfg(not(unix))]
     let _ = made;
     Ok(())
-}
-
-/// U1: a kept file's name, which sorts as the process kept them: the count is padded, so the
-/// tenth file of one millisecond sorts after the ninth (CI on #440).
-fn name(ms: i64, pid: u32, n: u64) -> String {
-    format!("{ms}-{pid}-{n:020}")
 }
 
 #[cfg(test)]
@@ -226,14 +241,67 @@ mod tests {
             .collect()
     }
 
-    /// U1: a process's files sort as it kept them, ten and more in one millisecond too (CI on
-    /// #440: unpadded, the tenth file sorted before the second).
+    /// U1: each file is named one past the newest, under the keep lock, so the files sort as they
+    /// were kept, past ten too (CI on #440) and across processes (Codex on #440); one kept after a
+    /// write-back sorts after what is left.
     #[test]
-    fn kept_names_sort_by_time_then_count() {
-        let ms = 1_760_000_000_000;
-        assert!(name(ms, 7, 9) < name(ms, 7, 10));
-        assert!(name(ms, 7, 99) < name(ms, 7, 100));
-        assert!(name(ms, 7, u64::MAX) < name(ms + 1, 7, 0));
+    fn kept_files_sort_in_the_order_they_were_kept() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        for n in 0..12 {
+            keep(h, &[prompt(&format!("prompt {n:02}"), 1_000 + n)], "r").unwrap();
+        }
+        let held = |h: &Path| -> Vec<String> {
+            files(&h.join(DIR))
+                .unwrap()
+                .iter()
+                .map(|p| std::fs::read_to_string(p).unwrap())
+                .collect()
+        };
+        for (n, body) in held(h).iter().enumerate() {
+            assert!(body.contains(&format!("prompt {n:02}")), "{n}: {body}");
+        }
+        for p in files(&h.join(DIR)).unwrap().iter().take(11) {
+            std::fs::remove_file(p).unwrap();
+        }
+        keep(h, &[prompt("later", 2_000)], "r").unwrap();
+        let left = held(h);
+        assert_eq!(left.len(), 2);
+        assert!(left[0].contains("prompt 11") && left[1].contains("later"));
+    }
+
+    /// U5: a keep waits a second at most for one that holds the lock, so the hook still sets its
+    /// marker before the agent's deadline (Codex on #440).
+    #[test]
+    fn a_keep_gives_up_on_a_keep_that_holds_the_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("keep.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        let start = std::time::Instant::now();
+        assert!(keep(home.path(), &[prompt("waits", 1_000)], "r").is_err());
+        assert!(start.elapsed() >= KEEP_WAIT);
+        assert_eq!(counts(home.path()).0, 0);
+    }
+
+    /// U5: what `bad/` holds counts against the bound: oboete never deletes it (Codex on #440).
+    #[test]
+    fn what_bad_holds_counts_against_the_bound() {
+        let home = tempfile::tempdir().unwrap();
+        let bad = home.path().join(DIR).join("bad");
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::File::create(bad.join("set-aside.json"))
+            .unwrap()
+            .set_len(BOUND)
+            .unwrap();
+        assert!(keep(home.path(), &[prompt("one more", 1_000)], "r").is_err());
+        assert_eq!(counts(home.path()).0, 0);
     }
 
     /// U5: a keep waits for the one in progress, so overlapping failed calls cannot each pass the
