@@ -289,6 +289,16 @@ pub struct Op {
     pub batch: i64,
 }
 
+impl Op {
+    /// Milestone 5 D5 (2b): an op a forget rewrote to `{"forgotten": "<job>"}`, which derives
+    /// nothing.
+    pub fn forgotten(&self) -> bool {
+        self.body.as_object().is_some_and(|o| {
+            o.len() == 1 && o.get("forgotten").is_some_and(serde_json::Value::is_string)
+        })
+    }
+}
+
 /// A record hooks wrote, or `replay` wrote in their stead (dev and evaluation homes): what curation
 /// reads and the manifest shows. Any other source is imported (`oboete-v1`, `transcript`,
 /// milestone 4 D6).
@@ -970,6 +980,9 @@ fn open_within_report(
     crate::db::wal_until(&conn, "FULL", deadline)?;
     #[cfg(target_os = "macos")]
     conn.execute_batch("PRAGMA fullfsync=ON;")?;
+    // Milestone 5 D5 (2b): what a write frees is overwritten with zeros, so neither a rewritten op
+    // body nor a deleted row leaves its bytes in the file.
+    conn.execute_batch("PRAGMA secure_delete=ON;")?;
     if crate::db::ensure_schema_until(&conn, &schema_for_file(&conn, &path)?, deadline)
         .context("raw schema")?
     {
@@ -1441,6 +1454,99 @@ impl Raw {
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(uids)
+    }
+
+    /// Milestone 5 D5 (2b): every op of `uid` rewritten to `{"forgotten": job}`, in one write
+    /// transaction taken in registration's order (dispatch, then raw): type, op_seq, ts and batch
+    /// stay. How many it rewrote.
+    pub(crate) fn purge_uid(&mut self, uid: &str, job: &str) -> Result<usize> {
+        let _dispatch = crate::dispatch::exclusive(&self.home)
+            .context("the forgotten uid's ops were not purged")?;
+        self.current()?;
+        let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+        let keys = uid_op_keys(&tx, uid)?;
+        let body = serde_json::json!({ "forgotten": job }).to_string();
+        {
+            let mut st =
+                tx.prepare("UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3")?;
+            for (device, op_seq) in &keys {
+                st.execute(params![body, device, op_seq])?;
+            }
+        }
+        tx.commit()?;
+        Ok(keys.len())
+    }
+
+    /// Whether raw holds an op of `uid` with its body (D5: its purge's step 2 is not done).
+    pub(crate) fn uid_has_ops(&self, uid: &str) -> Result<bool> {
+        Ok(!uid_op_keys(&self.conn, uid)?.is_empty())
+    }
+
+    /// Milestone 5 D5 (2b): the WAL checkpointed and truncated, so no frame from before a purge
+    /// stays in raw.db-wal; tried every 100 ms for `wait`. False when readers kept it from
+    /// truncating.
+    pub(crate) fn truncate_wal(&self, wait: Duration) -> Result<bool> {
+        // Each try returns at once, a busy one too: the sleeps here pace them.
+        let timeout: u32 = self
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
+        self.conn.busy_timeout(Duration::ZERO)?;
+        let until = Instant::now() + wait;
+        let truncated = loop {
+            let tried = self
+                .conn
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                    r.get::<_, i64>(0)
+                });
+            let busy = match tried {
+                Ok(busy) => busy != 0,
+                Err(e)
+                    if matches!(
+                        e.sqlite_error_code(),
+                        Some(
+                            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                        )
+                    ) =>
+                {
+                    true
+                }
+                Err(e) => break Err(e),
+            };
+            if !busy {
+                break Ok(true);
+            }
+            if Instant::now() >= until {
+                break Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        self.conn
+            .busy_timeout(Duration::from_millis(timeout.into()))?;
+        Ok(truncated?)
+    }
+
+    /// Each request raw holds with its step (D5: 1 registered, 2 its ops' bodies purged), oldest
+    /// first.
+    pub(crate) fn forget_jobs(&self) -> Result<Vec<(crate::forget::Request, i64)>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT request, step FROM forget_jobs ORDER BY started, id")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (request, step) = row?;
+            out.push((serde_json::from_str(&request)?, step));
+        }
+        Ok(out)
+    }
+
+    /// Records that `job` has finished `step`; a step it passed already stays.
+    pub(crate) fn finish_forget_step(&self, job: &str, step: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE forget_jobs SET step = MAX(step, ?2) WHERE id = ?1",
+            params![job, step],
+        )?;
+        Ok(())
     }
 
     pub fn device(&self) -> &str {
@@ -3423,6 +3529,33 @@ pub(crate) fn apply_request(
         "INSERT OR IGNORE INTO forget_jobs(id, request, started, step) VALUES(?1, ?2, ?3, 1)",
         params![r.job, serde_json::to_string(r)?, r.started],
     )? == 1)
+}
+
+/// The ops of `uid` that still hold its text (D5): a claim's Claim ops, by its uid as the consumer
+/// computes it, the Correction ops that name it, and a document's Import ops; any device's.
+fn uid_op_keys(conn: &Connection, uid: &str) -> Result<Vec<(String, i64)>> {
+    let mut keys = Vec::new();
+    if uid.len() == 64 && uid.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let mut st = conn.prepare("SELECT device, op_seq, body FROM ops WHERE type = 'claim'")?;
+        let mut rows = st.query([])?;
+        while let Some(row) = rows.next()? {
+            let Ok(body) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(2)?)
+            else {
+                continue;
+            };
+            if crate::claims::op_uid(&body).as_deref() == Some(uid) {
+                keys.push((row.get(0)?, row.get(1)?));
+            }
+        }
+    }
+    let mut st = conn.prepare(
+        "SELECT device, op_seq FROM ops WHERE type IN ('correction', 'import')
+           AND json_extract(body, '$.uid') = ?1",
+    )?;
+    for row in st.query_map([uid], |r| Ok((r.get(0)?, r.get(1)?)))? {
+        keys.push(row?);
+    }
+    Ok(keys)
 }
 
 /// A Claim or Correction op anchored on a record forget denies, by the record's origin (D1 rule

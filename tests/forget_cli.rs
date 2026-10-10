@@ -2787,3 +2787,57 @@ fn a_torn_log_line_and_a_later_forget_both_survive_a_restore() {
     );
     assert!(!String::from_utf8_lossy(&run(home, &["get", &first], "").stdout).contains(CANARY));
 }
+
+/// Milestone 5 D5 (2b-1): `forget --uid --yes` registers a document's uid and rewrites its import
+/// op without the text in the same run; `--continue` with nothing left says nothing; the same
+/// claude-mem database imported again does not bring the document back.
+#[test]
+fn a_forgotten_documents_op_is_rewritten_and_not_imported_again() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("claude-mem.db");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE sdk_sessions(id INTEGER PRIMARY KEY, content_session_id TEXT NOT NULL,
+               memory_session_id TEXT, project TEXT);
+             CREATE TABLE observations(id INTEGER PRIMARY KEY, memory_session_id TEXT,
+               project TEXT, created_at_epoch INTEGER, type TEXT, title TEXT, narrative TEXT,
+               facts TEXT);
+             CREATE TABLE session_summaries(id INTEGER PRIMARY KEY, memory_session_id TEXT,
+               project TEXT, created_at_epoch INTEGER, request TEXT, investigated TEXT,
+               learned TEXT, completed TEXT, next_steps TEXT);
+             CREATE TABLE user_prompts(id INTEGER PRIMARY KEY, content_session_id TEXT,
+               created_at_epoch INTEGER, prompt_text TEXT);
+             INSERT INTO observations VALUES(1, NULL, 'p', 1000, 'change', 'Invented',
+               'An invented body.', '[]');",
+        )
+        .unwrap();
+    let db = db.to_str().unwrap();
+    ok(run(home, &["import", "claude-mem", db], ""));
+    let ops = || -> Vec<(String, String)> {
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let mut st = conn
+            .prepare("SELECT type, body FROM ops WHERE type = 'import' ORDER BY op_seq")
+            .unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let body: serde_json::Value = serde_json::from_str(&ops()[0].1).unwrap();
+    let uid = body["uid"].as_str().unwrap().to_owned();
+    let said = ok(run(home, &["forget", "--uid", &uid, "--yes"], ""));
+    assert!(
+        said.contains("Ops rewritten without their text in raw.db: 1"),
+        "{said}"
+    );
+    let rewritten: serde_json::Value = serde_json::from_str(&ops()[0].1).unwrap();
+    assert_eq!(rewritten.as_object().map(|o| o.len()), Some(1));
+    assert!(rewritten["forgotten"].is_string(), "{rewritten}");
+    assert!(ok(run(home, &["forget", "--continue"], "")).is_empty());
+    ok(run(home, &["import", "claude-mem", db], ""));
+    let held = ops();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert!(!held[0].1.contains("invented"), "{held:?}");
+}

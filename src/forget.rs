@@ -493,6 +493,78 @@ fn status_of(r: &Request) -> Status {
     }
 }
 
+/// How long a purge tries to truncate raw.db-wal past the readers that hold it (D5, 2b).
+#[cfg(not(test))]
+const TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// What a purge did (D5, 2b): how many uid jobs it took and ops it rewrote, and the jobs whose
+/// step it could not finish (raw.db-wal would not truncate).
+#[derive(Debug, Default, PartialEq)]
+pub struct Purged {
+    pub jobs: usize,
+    pub ops: usize,
+    pub unfinished: Vec<String>,
+}
+
+/// D5 (2b): every uid job's ops that still hold its text rewritten without it, then raw.db-wal
+/// truncated, and the jobs' step 2 recorded. Each continuation checks the op log again, whatever
+/// the step says: a restore may have brought the bodies back. Only one runs at a time
+/// (`state/purge.lock`, not waited for: None when another holds it), and under the worker lock, as
+/// `oboete rebuild` takes it.
+pub fn purge(home: &Path) -> Result<Option<Purged>> {
+    let state = home.join("state");
+    std::fs::create_dir_all(&state)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(state.join("purge.lock"))?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+    }
+    let mut purged = Purged::default();
+    if !crate::raw::exists(home) {
+        return Ok(Some(purged));
+    }
+    let due = |raw: &crate::raw::Raw| -> Result<Vec<(String, String, bool)>> {
+        let mut due = Vec::new();
+        for (request, step) in raw.forget_jobs()? {
+            if let Target::Uid { uid } = request.target {
+                let held = raw.uid_has_ops(&uid)?;
+                if held || step < 2 {
+                    due.push((request.job, uid, held));
+                }
+            }
+        }
+        Ok(due)
+    };
+    if due(&crate::raw::open(home)?)?.is_empty() {
+        return Ok(Some(purged));
+    }
+    let _worker = crate::worker::lock_asking(home)?;
+    let mut raw = crate::raw::open(home)?;
+    let due = due(&raw)?;
+    purged.jobs = due.len();
+    for (job, uid, held) in &due {
+        if *held {
+            purged.ops += raw.purge_uid(uid, job)?;
+        }
+    }
+    let truncated = raw.truncate_wal(TRUNCATE_WAIT)?;
+    for (job, uid, _) in due {
+        if truncated && !raw.uid_has_ops(&uid)? {
+            raw.finish_forget_step(&job, 2)?;
+        } else {
+            purged.unfinished.push(job);
+        }
+    }
+    Ok(Some(purged))
+}
+
 /// What a reconcile found: lines skipped, copies it could not read or write. Never a refusal.
 #[derive(Debug, Default)]
 pub struct Report {
@@ -768,8 +840,9 @@ pub(crate) fn logged(home: &Path) -> (Vec<Request>, Report) {
 /// What a uid's forget cannot reach yet (D5), printed before it asks.
 fn uid_limits(kind: &str) -> String {
     let mut out = String::from(
-        "Physical purge is not built yet: its text stays in raw.db's op log, in knowledge.db and \
-         in the backup segments, hidden from every reader and never sent again.\n\
+        "Its ops in raw.db are rewritten without the text right after registration. knowledge.db \
+         and the backup segments keep it until their purge is built, hidden from every reader \
+         and never sent again.\n\
          A packet already handed to an agent and a call already sent are not taken back.\n\
          The request is logged by this uid, without the text.\n",
     );
@@ -829,9 +902,17 @@ pub fn run(
     uid: Option<&str>,
     yes: bool,
     show: bool,
+    resume: bool,
 ) -> Result<()> {
     if crate::raw::exists(home) {
         reconcile_or_say(home, &mut crate::raw::open(home)?)?;
+    }
+    if resume {
+        // Nothing to continue says nothing: the worker starts it when a job waits (D5 item 8).
+        return match purge(home)? {
+            Some(p) if p.jobs > 0 => say_purged(&p),
+            _ => Ok(()),
+        };
     }
     if show {
         for job in status(home)? {
@@ -843,7 +924,7 @@ pub fn run(
         (Some(r), None, None) => Target::parse(r, false)?,
         (None, Some(s), None) => Target::parse(s, true)?,
         (None, None, Some(u)) => Target::parse_uid(u)?,
-        _ => anyhow::bail!("choose --record, --span, --uid or --status"),
+        _ => anyhow::bail!("choose --record, --span, --uid, --status or --continue"),
     };
     let p = preview(home, target)?;
     println!("Target: {}", serde_json::to_string(&p.target)?);
@@ -894,6 +975,32 @@ pub fn run(
             "Not logged: {p}. raw.db holds the request; a restore from the backups alone would not."
         );
     }
+    if p.uid.is_none() {
+        return Ok(());
+    }
+    // D5 (2b): registered, and purged in this process.
+    match purge(home)
+        .context("its ops still hold the text; `oboete forget --continue` purges them")?
+    {
+        Some(p) => say_purged(&p),
+        None => {
+            println!(
+                "Another oboete is purging forgotten uids; `oboete forget --continue` purges this \
+                 one once it ends."
+            );
+            Ok(())
+        }
+    }
+}
+
+fn say_purged(p: &Purged) -> Result<()> {
+    println!("Ops rewritten without their text in raw.db: {}", p.ops);
+    anyhow::ensure!(
+        p.unfinished.is_empty(),
+        "raw.db-wal did not truncate while readers held it: `oboete forget --continue` finishes \
+         jobs {}",
+        p.unfinished.join(", ")
+    );
     Ok(())
 }
 
@@ -1170,6 +1277,312 @@ mod tests {
         assert_eq!(ops(&hex), Some(("document", 1)));
     }
 
+    /// Every op raw.db holds: (device, op_seq, type, body), in key order.
+    fn op_rows(home: &Path) -> Vec<(String, i64, String, String)> {
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let mut st = conn
+            .prepare("SELECT device, op_seq, type, body FROM ops ORDER BY device, op_seq")
+            .unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// Each forget job's (target uid, job id, step).
+    fn uid_jobs(home: &Path) -> Vec<(String, String, i64)> {
+        raw::open(home)
+            .unwrap()
+            .forget_jobs()
+            .unwrap()
+            .into_iter()
+            .filter_map(|(r, step)| match r.target {
+                Target::Uid { uid } => Some((uid, r.job, step)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// D5 (2b-1): a purge rewrites what holds a forgotten uid's text, its claim's Claim op and the
+    /// Correction that names it, or a document's Import op, to `{"forgotten": job}` with its
+    /// type, op_seq and batch kept; every other op stays byte for byte; step 2 is recorded, and the
+    /// next purge finds nothing to do.
+    #[test]
+    fn a_purge_rewrites_the_forgotten_uids_ops_and_no_other() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let older = s.decided("github.com/o/r", 1_000, "Use spaces.", &[]);
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[&older]);
+        let doc = s.imported("o1", "r", 3_000, "Deploy notes", "Notes.");
+        let change = serde_json::json!({"uid": uid, "muted": true});
+        s.raw
+            .append_ops(&[(raw::OpKind::Correction, change)])
+            .unwrap();
+        s.run();
+        let home = s.home.path().to_owned();
+        let before = op_rows(&home);
+        for u in [&uid, &doc] {
+            start(
+                &home,
+                &preview(&home, Target::parse_uid(u).unwrap()).unwrap(),
+            )
+            .unwrap();
+        }
+        let jobs = uid_jobs(&home);
+        let job = |u: &str| jobs.iter().find(|j| j.0 == u).unwrap().1.clone();
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.jobs, purged.ops), (2, 3));
+        assert!(purged.unfinished.is_empty());
+        let after = op_rows(&home);
+        let mut rewritten = 0;
+        for (device, seq, kind, body) in &before {
+            let now = after
+                .iter()
+                .find(|a| (&a.0, a.1) == (device, *seq))
+                .unwrap();
+            assert_eq!(&now.2, kind);
+            let owner = match kind.as_str() {
+                "claim" if body.contains("Use tabs.") => Some(&uid),
+                "correction" => Some(&uid),
+                "import" => Some(&doc),
+                _ => None,
+            };
+            match owner {
+                Some(u) => {
+                    let expected = serde_json::json!({ "forgotten": job(u) });
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&now.3).unwrap(),
+                        expected
+                    );
+                    rewritten += 1;
+                }
+                None => assert_eq!(&now.3, body, "op {seq} changed"),
+            }
+        }
+        assert_eq!(rewritten, 3);
+        assert!(
+            uid_jobs(&home).iter().all(|j| j.2 == 2),
+            "{:?}",
+            uid_jobs(&home)
+        );
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
+    /// D5 (2b-1): ops a purge rewrote derive nothing, read by a pass that had not reached them and
+    /// by a rebuild: the worker goes on, a rewritten correction is passed for good, and after the
+    /// rebuild the uids keep no claim, derivation, correction or imported row and the claim the
+    /// forgotten one superseded is current again.
+    #[test]
+    fn rewritten_ops_derive_nothing_and_what_they_superseded_is_current_again() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let older = s.decided("github.com/o/r", 1_000, "Use spaces.", &[]);
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[&older]);
+        s.run();
+        let home = s.home.path().to_owned();
+        let k = |home: &Path| crate::knowledge::open(home).unwrap();
+        // What supersedes `older`: with the forgotten claim gone, nothing, and it is current again.
+        let superseded = |home: &Path| -> i64 {
+            k(home)
+                .query_row(
+                    "SELECT COUNT(*) FROM edges WHERE to_uid = ?1 AND type = 'supersedes'",
+                    [&older],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(superseded(&home), 1);
+        // Not read by any consumer yet when they are purged.
+        let doc = s.imported("o1", "r", 3_000, "Deploy notes", "Notes.");
+        let change = serde_json::json!({"uid": uid, "muted": true});
+        s.raw
+            .append_ops(&[(raw::OpKind::Correction, change)])
+            .unwrap();
+        for u in [&uid, &doc] {
+            start(
+                &home,
+                &preview(&home, Target::parse_uid(u).unwrap()).unwrap(),
+            )
+            .unwrap();
+        }
+        assert_eq!(purge(&home).unwrap().unwrap().ops, 3);
+        let skips = |home: &Path| -> Vec<String> {
+            k(home)
+                .prepare("SELECT reason FROM claim_skips ORDER BY op_seq")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let held = |home: &Path| -> i64 {
+            k(home)
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM claims WHERE uid = ?1)
+                          + (SELECT COUNT(*) FROM derivations WHERE uid = ?1)
+                          + (SELECT COUNT(*) FROM corrections WHERE uid = ?1)
+                          + (SELECT COUNT(*) FROM imported WHERE uid = ?2)",
+                    [&uid, &doc],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        s.run();
+        assert_eq!(skips(&home), ["forgotten"]);
+        let imported: i64 = k(&home)
+            .query_row("SELECT COUNT(*) FROM imported", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(imported, 0);
+        // A rebuild wants raw.db open nowhere else.
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        crate::worker::rebuild(&home).unwrap();
+        assert_eq!(held(&home), 0);
+        assert_eq!(superseded(&home), 0);
+        assert_eq!(skips(&home), ["forgotten", "forgotten"]);
+    }
+
+    /// D5 (2b-1, item 10): a claim op's text that no record holds leaves no byte in raw.db or
+    /// raw.db-wal once purged: the rewrite runs with secure_delete and the WAL is truncated.
+    #[test]
+    fn a_purge_leaves_no_byte_of_the_claims_own_text_in_raw_db() {
+        const CANARY: &str = "canary-7f3a";
+        let mut s = crate::search::b::fixture::Store::new();
+        let seq = s.said("s", "github.com/o/r", 1_000, "We deploy on Fridays.");
+        let evidence = crate::claims::Evidence {
+            device: s.raw.device().to_owned(),
+            seq,
+            offset: 0,
+            length: "We deploy on Fridays.".len() as i64,
+            sentence: 0,
+            quote: "We deploy on Fridays.".into(),
+            claim_at: None,
+        };
+        let uid = crate::claims::uid("decision", &evidence);
+        let op = crate::claims::ClaimOp {
+            id: "c1".into(),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: format!("Deploys happen on Friday, {CANARY}."),
+            evidence: vec![evidence],
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier: 1,
+            why: String::new(),
+            tainted: false,
+        };
+        s.raw
+            .append_ops(&[(raw::OpKind::Claim, serde_json::to_value(op).unwrap())])
+            .unwrap();
+        s.run();
+        let home = s.home.path().to_owned();
+        let hits = |home: &Path| -> usize {
+            ["raw.db", "raw.db-wal"]
+                .iter()
+                .filter_map(|f| std::fs::read(home.join(f)).ok())
+                .map(|bytes| {
+                    bytes
+                        .windows(CANARY.len())
+                        .filter(|w| *w == CANARY.as_bytes())
+                        .count()
+                })
+                .sum()
+        };
+        assert!(hits(&home) > 0);
+        start(
+            &home,
+            &preview(&home, Target::parse_uid(&uid).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(purge(&home).unwrap().unwrap().ops, 1);
+        assert_eq!(hits(&home), 0);
+    }
+
+    /// D5 (2b-1): a purged Import op no longer names its source id, so the import's own check
+    /// would take the document for a new one: the forgotten uid is what keeps it out.
+    #[test]
+    fn a_purged_document_is_not_imported_again() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let doc = s.imported("o1", "r", 3_000, "Deploy notes", "Notes.");
+        let home = s.home.path().to_owned();
+        start(
+            &home,
+            &preview(&home, Target::parse_uid(&doc).unwrap()).unwrap(),
+        )
+        .unwrap();
+        purge(&home).unwrap().unwrap();
+        assert!(s.raw.import_repos("claude-mem:test").unwrap().is_empty());
+        let again = raw::ImportDoc {
+            uid: doc.clone(),
+            source: "claude-mem:test".into(),
+            source_id: "o1".into(),
+            kind: "decision".into(),
+            repo: crate::import::repo("r"),
+            session: "cm".into(),
+            ts: 3_000,
+            title: "Deploy notes".into(),
+            body: "Notes.".into(),
+        };
+        assert_eq!(s.raw.append_imports(vec![again]).unwrap(), 0);
+        assert!(!op_rows(&home).iter().any(|o| o.3.contains("Deploy notes")));
+    }
+
+    /// D5 (2b-1): while a reader holds raw.db-wal, the purge rewrites the ops but cannot truncate
+    /// the WAL, which may still hold their old pages: step 2 is not recorded, and the next purge,
+    /// with the reader gone, records it.
+    #[test]
+    fn a_wal_a_reader_holds_keeps_the_step() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        s.run();
+        let home = s.home.path().to_owned();
+        start(
+            &home,
+            &preview(&home, Target::parse_uid(&uid).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let reader = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM ops", [], |r| r.get(0))
+            .unwrap();
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.ops, purged.unfinished.len()), (1, 1));
+        assert_eq!(uid_jobs(&home)[0].2, 1);
+        reader.execute_batch("COMMIT").unwrap();
+        drop(reader);
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.jobs, purged.ops), (1, 0));
+        assert!(purged.unfinished.is_empty());
+        assert_eq!(uid_jobs(&home)[0].2, 2);
+    }
+
+    /// D5 (2b-1): one purge at a time: while another holds `state/purge.lock`, a purge does
+    /// nothing and says so.
+    #[test]
+    fn one_purge_at_a_time() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        let home = s.home.path().to_owned();
+        start(
+            &home,
+            &preview(&home, Target::parse_uid(&uid).unwrap()).unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(home.join("state/purge.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        assert_eq!(purge(&home).unwrap(), None);
+        assert_eq!(uid_jobs(&home)[0].2, 1);
+        drop(held);
+        assert_eq!(purge(&home).unwrap().unwrap().ops, 1);
+    }
+
     /// D5: from the commit of its request, version 2 in both logs, a uid is passed over by every
     /// reader though knowledge.db still holds it: search, get, the viewer's claim, cite and the
     /// timeline.
@@ -1378,7 +1791,7 @@ mod tests {
                 std::fs::remove_dir(&config).unwrap();
             }
             std::fs::write(&config, "[backup]\ndir = 'repaired-backups'\n").unwrap();
-            run(h, None, None, None, false, true).unwrap();
+            run(h, None, None, None, false, true, false).unwrap();
             let second = h.join("repaired-backups").join(LOG);
             assert_eq!(std::fs::read_to_string(second).unwrap(), log);
             assert_eq!(std::fs::read_to_string(primary).unwrap(), log);
