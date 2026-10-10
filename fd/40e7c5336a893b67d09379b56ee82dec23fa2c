@@ -1,0 +1,27 @@
+src/consumer/claims.rs
+  s_234f6f365da547::t_e3c068434668e9 186,188,271-274
+src/forget.rs
+  s_234f6f365da547::t_4f67d93aef3eaf 496-567,843-845,905,910-916,927,978-1003,1280-1585,1794
+src/main.rs
+  s_234f6f365da547::t_782de15156c214 114-116,701,709
+src/raw.rs
+  s_234f6f365da547::t_d176d2047b0927 292-301,983-985,1459-1551,3534-3560
+tests/forget_cli.rs
+  s_234f6f365da547::t_a9c27cbdabd72a 2790-2843
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fd40e7c5336a893b67d09379b56ee82dec23fa2c",
+  "prompts": {},
+  "sessions": {
+    "s_234f6f365da547": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3206e10e-7912-46d9-b070-aa879bc5ad93",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
