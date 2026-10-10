@@ -3282,13 +3282,21 @@ mod tests {
         );
     }
 
-    /// One poll's call, waited for, then what the next poll says.
+    /// Settle the current call (starting one if needed), then return the next poll's step.
     fn call(s: &Store, k: &Connection, phase: &mut Phase) -> Step {
-        assert!(matches!(
-            phase.poll(&s.raw, k).unwrap(),
-            Step::Waiting { .. }
-        ));
+        if phase.flight.is_none() {
+            assert!(matches!(
+                phase.poll(&s.raw, k).unwrap(),
+                Step::Waiting { .. }
+            ));
+        }
+        assert!(phase.flight.is_some(), "embedding call did not start");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !phase.done() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "embedding call did not finish"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(phase.poll(&s.raw, k).unwrap(), Step::Covered);

@@ -4457,7 +4457,14 @@ mod tests {
         );
         assert!(REBUILD_STATUS_BLOCKED.with(|hook| hook.borrow().is_none()));
         assert!(p.join("knowledge.db").exists());
-        std::fs::File::open(path).unwrap().try_lock().unwrap();
+        let released = std::fs::File::open(path).unwrap();
+        until("the rebuild status lock is released", || {
+            match released.try_lock() {
+                Ok(()) => true,
+                Err(std::fs::TryLockError::WouldBlock) => false,
+                Err(error) => panic!("rebuild status lock: {error}"),
+            }
+        });
     }
 
     /// A waiting worker wakes for a new op of its device as for a record (an owner's correction
