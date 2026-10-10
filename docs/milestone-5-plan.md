@@ -208,11 +208,11 @@ uid（`<source>:<key>`）だけを受ける。raw の record は 1 件も消さ�
   印を付けて飛ばす（保留のままだと、印のない文書が列の先頭に残り続ける）。knowledge.db に行が残って
   いる間（step 3 の前）もこれで隠れる。忘れた claim の訂正と mute は、claim が無いものとして断る。
 - **再導出の拒否。** 同じ span を curate し直すと同じ uid が導かれる（uid は kind と最初の引用の文で
-  決まる）。curation は denied uid の claim を append の前に落とし、window op の `dropped` に
-  `forgotten` と数える。import は denied uid の文書を数えて飛ばす。`append_ops` は denied uid の
+  決まる）。curation は忘れた uid の claim を append の前に落とし、window op の `dropped` に
+  `its uid is forgotten` として載せる。import は忘れた uid の文書を飛ばす。`append_ops` は忘れた uid の
   Claim・Correction・Import op を含む batch を拒否する（最後の砦。ここで拒否されると window や
   500 件の import batch が止まるので、前段で落とすのが本来の経路）。D1 規則 12 の fence の件数に
-  `denied_uids` も数える: curation の呼出し中の uid の forget は、どの window もいったん切り直させる
+  forget op も数える: curation の呼出し中の uid の forget は、どの window もいったん切り直させる
   （uid の forget は稀なので、広すぎる fence を受け入れる）。
 - **raw の op 本文を消す（2b）。** 見つけた Claim op（同じ uid の再導出と recuration を全部）、その
   uid の Correction op、Import op の body を、本文を持たない `{"forgotten": "<job>"}` に書き換える。
@@ -253,12 +253,13 @@ PR は 3 つに分ける。2a: target・登録・要求ログ・restore と reco
    返さない（knowledge.db に行が残っている間も）。
 3. 登録の後、embedding phase とその window の recuration を回しても、stub の provider はその本文の
    どの byte も受け取らない（claim と document の両方）。
-4. 同じ window の recuration が同じ uid を導いても claim op は書かれず、`dropped` に `forgotten` と
-   数えられる。同じ claude-mem DB の再 import はその文書を戻さない。denied uid の op を含む batch を
+4. 同じ window の recuration が同じ uid を導いても claim op は書かれず、`dropped` に
+   `its uid is forgotten` と載る。同じ claude-mem DB の再 import はその文書を戻さない。忘れた uid の op を含む batch を
    `append_ops` は拒否する。curation の呼出し中に登録された uid の forget は、その答えを何も書かせない。
 5. 要求ログ 2 部に版 2 の行が書かれ、版 1 の行と混ざったログを読める。raw.db を失った restore の後も
-   denied uid が戻り、reconcile を何度回しても forget op は 1 つ。
-6. forget op は ops segment に入り、restore した raw.db で `denied_uids` が作り直される。
+   忘れた uid が戻り、reconcile を何度回しても forget op は 1 つ。
+6. forget op は ops segment に入り、restore した raw.db はその op だけで uid を忘れている（別の表は
+   作らない）。記録の segment が壊れて切り詰められても forget op は付け直される。
 
 ## 実装順序と完了条件
 

@@ -3263,7 +3263,7 @@ impl Rebuild {
         }
         self.conn.execute_batch("COMMIT")?;
         self.conn.close().map_err(|(_, e)| e)?;
-        // A forget op appended again was not lost: its denial stands.
+        // No forget op among them is lost: each is appended again, or its uid is forgotten already.
         Ok(dropped - forgets.len())
     }
 }

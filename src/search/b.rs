@@ -493,9 +493,6 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                 Err(_) => (Vector::Skipped(VectorSkip::Error), None),
             },
         };
-        // Read again after the call: a forget registered while it was out holds here too (D5;
-        // Codex's adversarial review of slice 2a), as a tombstone does in the raw leg.
-        let forgotten = raw.forgotten_uids()?;
         let rules = redact::Rules::load(home)?;
         let (mut hits, mut lowered, mut imports, mut records) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -552,6 +549,14 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             _ => hits.extend(imports.into_iter().chain(records)),
         }
         hits.extend(lowered);
+        // Read again as the answer leaves: a forget registered while the call was out or the legs
+        // read holds here too (D5; Codex's adversarial review of slice 2a, CodeRabbit on #435).
+        // Cards, summaries and records go with their records (slice 3).
+        let forgotten = raw.forgotten_uids()?;
+        hits.retain(|h| {
+            matches!(h.class, Class::Card | Class::Summary | Class::Raw)
+                || !forgotten.contains(&h.key)
+        });
         if let Some(filter) = &q.types {
             hits.retain(|h| filter.matches(h));
         }
