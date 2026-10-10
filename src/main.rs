@@ -111,6 +111,9 @@ enum Cmd {
         /// The requests raw.db holds, after the request logs are reconciled with it
         #[arg(long)]
         status: bool,
+        /// Purge what forgotten uids' requests left unpurged (the worker runs it when one waits)
+        #[arg(long = "continue", conflicts_with_all = ["record", "span", "uid", "status", "yes"])]
+        resume: bool,
     },
     /// Curate again what was curated before: the spans queued since (a quote a new rule masked
     /// or a forget removed), the windows every provider skipped, the imported records of a
@@ -695,6 +698,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             uid,
             yes,
             status,
+            resume,
         } => forget::run(
             &home,
             record.as_deref(),
@@ -702,6 +706,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             uid.as_deref(),
             yes,
             status,
+            resume,
         ),
         Cmd::Claims => {
             let settings = capture::Settings::load(&home)?;

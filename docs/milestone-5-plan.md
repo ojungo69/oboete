@@ -261,6 +261,110 @@ PR は 3 つに分ける。2a: target・登録・要求ログ・restore と reco
 6. forget op は ops segment に入り、restore した raw.db はその op だけで uid を忘れている（別の表は
    作らない）。記録の segment が壊れて切り詰められても forget op は付け直される。
 
+#### 2b の決定（2026-10-11。D5 の 3 か所を改める）
+
+上の D5 のうち、uid の op の探し方（knowledge.db を索引にしない）、carry の規則（どの鍵も指さない
+vector も持ち越さない）、進み方と再開（step の数字ではなく状態で判定し、purge は `oboete forget`
+の process だけが worker の lock の下で走らせる）を、次のとおり改める。残りは D5 のまま。
+
+1. **op は op log を走査して探す。** knowledge.db は worker が読むまで遅れる（import の直後、worker の
+   停止中、rebuild の途中）。2a の preview はすでに `Raw::uid_ops` で op log を数えている。purge も同じ
+   走査で op を選ぶ: Claim op はすべての本文から consumer と同じ導出（`claims::op_uid`）で uid を
+   計算し、Correction と Import は本文の `uid` で選ぶ。登録の後は `append_ops` がその uid の op を拒否
+   するので、選ぶ op は登録の時点から増えない（restore で古い本文が戻ったときは 7 の確認でやり直す）。
+   knowledge.db は 7 の完了の確認にだけ使う。走査の費用は Claim op の数に比例する（評価用の home の
+   写しの 242 件で数 ms）。Import と Correction は SQL の一回の走査（raw.rs の `ops_windows` の注記の
+   とおり、178,370 件の import op の走査で 136 ms）。
+2. **本文の書換え。** 選んだ op の body を `{"forgotten":"<job>"}` に書き換え、type・op_seq・ts・batch
+   は変えない。transaction は登録と同じ順で取る（`dispatch::exclusive` の後に raw の書込
+   transaction）。raw.db の書込接続は開くときに `secure_delete` を有効にする: この UPDATE で空く領域
+   だけでなく、restore の op の切り詰めなど以後の削除で空く領域も 0 で埋まるので、古い断片を消す
+   ための VACUUM は要らない（この変更より前に書かれた store、つまり dogfood と評価の写しは対象外）。
+   commit の後、transaction を持たない接続で `wal_checkpoint(TRUNCATE)` をし、結果の行の busy が 0 に
+   なるまで 100 ms おきに 5 秒までやり直す。truncate できなければ step を進めない（WAL に書換え前の
+   page が残るため。次の継続でやり直す）。`secure_delete` は raw.db の接続の pragma を置く一か所
+   （`raw::open`）で設定し、`Restore::finish` を含むすべての書込に効かせる。
+3. **読み手。** 本文が `{"forgotten": ...}` だけの op は何も導かない。判定は一つの helper
+   （`raw::Op::forgotten`）。読み手は次のとおりで、2b の試験でそれぞれ一度は書き換えた op を通す:
+   `op_rows_in`（すべての op consumer）、`ops_of`（`Pending::read` と claim の訂正）、
+   `previous_window_ops`（前の window から持ち込む claim）、`window_of`、`source_ids` と
+   `import_repos`（import の重複の判定。書き換えた Import op は `source_id` を失うので、同じ文書の
+   再 import を止めるのは 2a の忘れた uid の判定だけになる）、`uid_ops` と `forgotten_op`（forget
+   自身）、`Restore::finish`（op の切り詰め）。backup の ops segment は 2c。
+4. **knowledge.db は 1 回の rebuild で作り直す。** step 2 を終えた job が何件あっても rebuild は 1 回に
+   まとめる（forget を続けて登録しても rebuild は増えない）。既存の no-AI rebuild（set aside →
+   consumers → 古いファイルの削除）を使う。作り直しの間に始まる session は記憶の一部しか、または何も
+   受け取らない。評価用の home の写し（記録 71,063 件、op 15,736 件、埋め込みなし）で、release の
+   build の rebuild は 83 秒、最大 RSS 90 MB だった（vector の carry はこの home に vector がない
+   ので含まない）。preview はそのことを言い、`oboete forget --yes` はその間待つ。
+5. **carry の規則（D5 の carry を改める）。** carry は、古いファイルの `vector_keys` で忘れていない鍵が
+   指す `(embedder, src_sha)` の vector だけを持ち越す。どの鍵も指さない vector（変わる前の本文の
+   vector）も持ち越さない: 忘れた claim の前の版の vector がその中にあっても見分けられないため（その
+   分、rewind で古い本文が戻ると埋め込み直す）。`vector_keys` のない古いファイルからは何も持ち越さ
+   ない。`src_sha` が空の行（埋め込みを飛ばした印）は何も指さない。worker の起動時に quarantined と
+   rebuilding のファイルから持ち越す `carry_set_aside` も同じ規則で、raw の忘れた uid の集合を渡す。
+   rebuild の後に `knowledge.db.rebuilding-*` と `knowledge.db.quarantined-*` を消す。この規則は
+   forget のない `oboete rebuild` と restore の carry も変える（持ち越す数が減る）。
+6. **hook の状態。** hookstate の値で本文を持つのは `shown` だけ（見せた claim の `{uid: {fp, body}}`
+   を 7 日。OpenCode の受領も同じ値）。ほかの値は本文を持たない: `compacted`・`injected`・
+   `checkpoint-*`・`step-*` は空、`failed` は seq、`file-*` は card の id、`turn` は uid の並び。
+   purge は各 session の `shown` からその uid の項目を `hookstate::update` で消す（ファイルは消さず、
+   hook と同じ lock の約束で書く）。
+7. **完了は状態で判定する（D5 の「進み方と再開」を改める）。** `forget_jobs.step` は進んだところの
+   記録で、完了の証拠にしない。継続のたびに step 2 から確かめ直し、確認に通らない step をやり直す。
+   step 2 の完了: その uid の op に本文が一つもなく、その後の checkpoint が truncate できた。step 3 の
+   確認は二つに分け、やり直す作業も分ける: knowledge.db にその uid の `claims`・`derivations`・
+   `corrections`・`imported`・`vector_keys` の行が残れば rebuild。knowledge.db に残らず aside の
+   ファイルだけが持つ（rebuild の後、消す前に止まった）なら、rebuild はせず、そのファイルの vector を
+   まだ持ち越していなければ（`carried` の時刻がファイルより前）5 の規則で持ち越してから消す。
+   `shown` に残れば 6 の掃除だけ。rebuild の後にも knowledge.db に行が残るときは、op を取りこぼした
+   として job を止め、done と報告しない（status と doctor が言う）。restore が古い本文を戻しても、
+   次の継続で step 2 からやり直す。
+   #439 との関係: 登録の前に manifest を読んだ hook が、掃除の後に `shown` を書くと本文が戻る。
+   step 5 の完了（2c）でも `shown` の確認をもう一度通し、#439 の読取りの柵でこの窓を閉じる。
+8. **purge を走らせるのは `oboete forget` の process だけ。** `oboete forget --yes` は登録の後、同じ
+   process で purge を続ける。purge は `state/purge.lock` を待たずに取り（取れなければ「purge は
+   実行中」と言って終わる）、step 2 の前に `oboete rebuild` と同じ形（`lock_asking`）で worker の
+   lock を取る。worker は自分の lock の中で rebuild を呼べない（同じ process でも lock は二重に
+   取れない）ので、自分では purge しない: pass の始めに未完了の uid の job があり purge.lock が空いて
+   いれば、hook が worker を起動するのと同じ helper（`hook::spawn_detached`: 切り離し、stdin なし。
+   worker は viewer と同じくその子を回収する）で `oboete forget --continue` を起動する。起動した
+   時刻は `state/` のファイルに置き、10 分に 1 回まで。`--continue` は続ける job がなければ何も
+   言わずに 0 で終わる。worker の lock は `lock_asking` の
+   待ち時間までしか待たず、provider の呼出し中の worker が譲らなければ purge は失敗して、次の起動で
+   やり直す。同じ job を 2 つの actor が同時に進めない。
+9. **status。** `local` は step 3 の前は「hidden; physical purge pending」、step 3 を終えると
+   「purged here; backups pending」（2c まで）、step 5 で「done」。
+10. **2c の canary を先に決める。** byte grep で探す文字列は、claim op にだけある文字列にする: 試験の
+    claim の draft の本文を record の文と違えて（record は "We deploy on Fridays."、draft は
+    "Deploys happen on Friday, canary-7f3a."）、stub の curator は summary と card に canary を入れ
+    ない。uid と record の本文は意図して残る（forget op は uid を持ち、claim の引用元の record は D5 で
+    消さない）。2b の試験も raw.db・raw.db-wal・knowledge.db とその WAL・`state/` をこの文字列で
+    探す（backup は 2c）。
+
+2b は PR を 2 つに分ける。2b-1: 1・2・3（op 本文と読み手）、8 のうち purge の process と lock
+（`--yes` の後の継続と `--continue`）、step 2 までの status。2b-2: 4〜7（rebuild・carry・hook の状態・
+完了の判定）と 8 の worker からの起動。下の試験は 1・3・4・8 が 2b-1、2・5・6・7 が 2b-2。
+
+試験（2b の分）:
+
+1. claim の uid の forget の後に purge を回すと、その uid の Claim op（再導出と recuration を含む）と
+   Correction op の本文は `{"forgotten": "<job>"}` になり、type・op_seq・batch は変わらない。document
+   の uid では Import op。他の op は 1 byte も変わらない。
+2. purge の後、raw.db・raw.db-wal・knowledge.db とその WAL・`state/` のどのファイルにも canary が
+   ない。
+3. 書き換えた op を含む op log から rebuild しても worker は止まらず、その uid の claim・derivation・
+   correction・imported・vector_keys の行はできない。消した claim が supersede していた claim は
+   current に戻る。3 の読み手を一つずつ、書き換えた op が通る。
+4. 同じ claude-mem DB の再 import は書き換えた文書を戻さない。
+5. forget を 2 件続けて登録しても rebuild は 1 回。
+6. rebuild の途中で止めた purge を続けると、`knowledge.db.rebuilding-*` から忘れた uid の vector が
+   戻らない。rebuild の後、aside を消す前に止めた purge は、続けても rebuild せずに aside を消す。
+   step 3 と記録された job でも、restore で本文が戻れば step 2 からやり直す。
+7. purge が 2 つ同時に始まっても（`--yes` と、worker が起動した `--continue`）、進めるのは一つで、
+   rebuild は 1 回。worker は未完了の job があると `--continue` を起動し、10 分のうちに二度は起動しない。
+8. checkpoint が truncate できない（読み手が古い snapshot を持つ）とき、step は 2 のまま進まない。
+
 ## 実装順序と完了条件
 
 | Slice | 対象と再利用する処理 | 完了条件 |

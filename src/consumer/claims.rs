@@ -183,7 +183,9 @@ fn whole_batches(raw: &Raw, device: &str, after: i64) -> Result<Vec<Op>> {
 /// A correction op kept in `corrections`, with its uid; otherwise its reason goes to
 /// `claim_skips`.
 fn correction(k: &Connection, op: &Op) -> Result<Option<String>> {
+    // Milestone 5 D5 (2b): one a forget rewrote is passed for good, never read again by `retry`.
     let fault = match serde_json::from_value::<CorrectionOp>(op.body.clone()) {
+        _ if op.forgotten() => "forgotten",
         Ok(c) => match c.fault() {
             None => {
                 k.execute(
@@ -266,6 +268,10 @@ fn derive(raw: &Raw, k: &Connection, op: &Op) -> Result<Option<Derived>> {
         )?;
         Ok(None)
     };
+    // Milestone 5 D5 (2b): a forget rewrote it.
+    if op.forgotten() {
+        return skip("forgotten");
+    }
     // Part 3b's observation shape, written only where curation was on before Task 7, has none.
     let Ok(c) = serde_json::from_value::<ClaimOp>(op.body.clone()) else {
         return skip("not a claim");
