@@ -1,0 +1,21 @@
+docs/unwritten.md
+  s_234f6f365da547::t_a20110ed6c2f64 14-19,37,41-43
+src/unwritten.rs
+  s_234f6f365da547::t_3dc7920c7453cc 39-46,50,54,69-71,73-76,205-228,230,359-417
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "52c1a05e2796e2beed4cfdce445f09fc993131e7",
+  "prompts": {},
+  "sessions": {
+    "s_234f6f365da547": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3206e10e-7912-46d9-b070-aa879bc5ad93",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
