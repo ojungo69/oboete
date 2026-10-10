@@ -3,6 +3,10 @@
 //! and the job row. Two bodyless request logs, in the home and beside the backups, are its
 //! redundancy: reconciled in both directions, never compared, and never a reason to refuse an open.
 //! Physical purge is a later slice.
+//!
+//! Slice 2 (D5) adds a claim's or an imported document's uid as a target: one raw transaction
+//! appends a bodyless `forget` op naming it and the job row, and from that commit every reader,
+//! sender and writer of claims and documents passes it over (`raw::Raw::forgotten`).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -20,8 +24,19 @@ const LOG: &str = "forget.log";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Target {
-    Record { device: String, seq: i64 },
-    Span { device: String, from: i64, to: i64 },
+    Record {
+        device: String,
+        seq: i64,
+    },
+    Span {
+        device: String,
+        from: i64,
+        to: i64,
+    },
+    /// D5: a claim's uid, or an imported document's.
+    Uid {
+        uid: String,
+    },
 }
 
 impl Target {
@@ -29,6 +44,7 @@ impl Target {
         let (device, from, to) = match self {
             Self::Record { device, seq } => (device.as_str(), *seq, *seq),
             Self::Span { device, from, to } => (device.as_str(), *from, *to),
+            Self::Uid { .. } => anyhow::bail!("a uid names no record span"),
         };
         anyhow::ensure!(
             !device.is_empty()
@@ -44,10 +60,9 @@ impl Target {
     }
 
     pub fn parse(text: &str, span: bool) -> Result<Self> {
-        let (device, range) = text.split_once(':').context(
-            "expected <device>:<seq> or <device>:<from>-<to>; uid and document forget is not \
-             available yet",
-        )?;
+        let (device, range) = text
+            .split_once(':')
+            .context("expected <device>:<seq> or <device>:<from>-<to>")?;
         let target = if span {
             let (from, to) = range
                 .split_once('-')
@@ -66,6 +81,52 @@ impl Target {
         target.bounds()?;
         Ok(target)
     }
+
+    /// D5: a claim's uid or an imported document's, as `--uid` takes it. A record's id from
+    /// search names a record, which `--record` forgets; a card's or a summary's goes with the
+    /// records it was made from (slice 3).
+    pub fn parse_uid(text: &str) -> Result<Self> {
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        if let Some((device, seq)) = text.split_once(':')
+            && !device.is_empty()
+            && device.bytes().all(|b| b.is_ascii_alphanumeric())
+            && digits(seq)
+        {
+            anyhow::bail!("{text} is a raw record's id: forget it with --record");
+        }
+        anyhow::ensure!(
+            crate::cards::id_parts(text, "").is_none()
+                && crate::turns::id_parts(text, "").is_none(),
+            "{text} is a card's or a session summary's id: they go with the records they were \
+             made from (forget those with --record or --span)"
+        );
+        check_uid(text)?;
+        Ok(Self::Uid { uid: text.into() })
+    }
+}
+
+/// A uid as a request carries it (D5): a claim's (64 hex digits) or an imported document's
+/// (`<source>:<key>`), printable ASCII with no space, bounded.
+pub(crate) fn check_uid(uid: &str) -> Result<()> {
+    anyhow::ensure!(
+        (1..=256).contains(&uid.len()) && uid.bytes().all(|b| b.is_ascii_graphic()),
+        "invalid uid"
+    );
+    Ok(())
+}
+
+/// What forgetting a uid takes (D5), read from knowledge.db, the index of its ops.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UidPreview {
+    /// `claim` or `document`.
+    pub kind: &'static str,
+    /// Its ops in raw: a claim's derivations and corrections, a document's import ops.
+    pub ops: usize,
+    /// Its vectors in knowledge.db.
+    pub vectors: usize,
+    /// The first line of each claim it supersedes: with it gone, none of them is superseded by
+    /// it any more, so each is current again unless another claim supersedes it.
+    pub again: Vec<String>,
 }
 
 /// One record a request forgets, bodyless (rule 3): where it was, its import origin (the one
@@ -91,10 +152,20 @@ pub struct Preview {
     /// The sources of the records, for the limits forget prints.
     pub(crate) sources: Vec<String>,
     pub sample: Option<String>,
+    /// A uid target's (D5).
+    pub uid: Option<UidPreview>,
 }
 
 impl Preview {
     pub(crate) fn validate(&self) -> Result<()> {
+        if let Target::Uid { uid } = &self.target {
+            check_uid(uid)?;
+            anyhow::ensure!(
+                self.records.is_empty() && self.uid.is_some(),
+                "forget selection differs from its preview"
+            );
+            return Ok(());
+        }
         let (device, from, to) = self.target.bounds()?;
         anyhow::ensure!(
             !self.records.is_empty(),
@@ -171,11 +242,20 @@ pub(crate) fn previous_transcript_request(
 
 impl Request {
     pub(crate) fn check(&self) -> Result<()> {
-        anyhow::ensure!(self.v == 1, "unknown request version {}", self.v);
         anyhow::ensure!(
             self.job.len() == 32 && self.job.bytes().all(|b| b.is_ascii_hexdigit()),
             "invalid job id"
         );
+        // Version 2 is a uid's (D5); an older binary skips its line as of an unknown version.
+        match (&self.target, self.v) {
+            (Target::Uid { uid }, 2) => {
+                check_uid(uid)?;
+                anyhow::ensure!(self.records.is_empty(), "invalid record count");
+                return Ok(());
+            }
+            (Target::Record { .. } | Target::Span { .. }, 1) => {}
+            _ => anyhow::bail!("unknown request version {}", self.v),
+        }
         let (device, from, to) = self.target.bounds()?;
         anyhow::ensure!(
             !self.records.is_empty() && self.records.len() <= MAX_RECORDS,
@@ -235,7 +315,125 @@ pub struct Status {
 
 pub fn preview(home: &Path, target: Target) -> Result<Preview> {
     anyhow::ensure!(crate::raw::exists(home), "no raw store to forget from");
-    crate::raw::open(home)?.forget_preview(target)
+    let raw = crate::raw::open(home)?;
+    match target {
+        Target::Uid { uid } => uid_preview(home, &raw, uid),
+        target => raw.forget_preview(target),
+    }
+}
+
+/// D5: what forgetting `uid` takes. knowledge.db is its index: a claim's derivations and
+/// corrections, or a document's import ops; a uid it holds neither of is refused. Nothing is
+/// written to either store.
+fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Preview> {
+    use rusqlite::OptionalExtension;
+    check_uid(&uid)?;
+    anyhow::ensure!(
+        raw.home_id_proven()?,
+        "this store has no verified home identity: forget was not registered"
+    );
+    anyhow::ensure!(!raw.forgotten(&uid)?, "{uid} is forgotten already");
+    let path = home.join("knowledge.db");
+    anyhow::ensure!(
+        path.exists(),
+        "{uid} is neither a claim's nor a document's uid here"
+    );
+    let k =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let has = |table: &str| -> Result<bool> {
+        Ok(k.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1)",
+            [table],
+            |r| r.get(0),
+        )?)
+    };
+    let count = |sql: &str| -> Result<usize> {
+        Ok(k.query_row(sql, [&uid], |r| r.get::<_, i64>(0))? as usize)
+    };
+    let line = |s: &str| {
+        s.lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(120)
+            .collect::<String>()
+    };
+    let mut shown = None;
+    if uid.len() == 64 && uid.bytes().all(|b| b.is_ascii_hexdigit()) && has("derivations")? {
+        let ops = count(
+            "SELECT (SELECT COUNT(*) FROM derivations WHERE uid = ?1)
+                  + (SELECT COUNT(*) FROM corrections WHERE uid = ?1)",
+        )?;
+        if ops > 0 {
+            // Its active derivation's body, else its newest.
+            let body: Option<String> = k
+                .query_row(
+                    "SELECT body FROM derivations WHERE uid = ?1
+                     ORDER BY EXISTS(SELECT 1 FROM claims c WHERE c.op_device = derivations.op_device
+                       AND c.op_seq = derivations.op_seq) DESC, op_seq DESC LIMIT 1",
+                    [&uid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let mut again = Vec::new();
+            let mut st = k.prepare(
+                "SELECT DISTINCT d2.body FROM edges e
+                 JOIN derivations d ON d.op_device = e.op_device AND d.op_seq = e.op_seq
+                 JOIN claims c ON c.uid = e.to_uid
+                 JOIN derivations d2 ON d2.op_device = c.op_device AND d2.op_seq = c.op_seq
+                 WHERE d.uid = ?1 AND e.type = 'supersedes'",
+            )?;
+            for b in st.query_map([&uid], |r| r.get::<_, String>(0))? {
+                again.push(line(&b?));
+            }
+            shown = Some((
+                UidPreview {
+                    kind: "claim",
+                    ops,
+                    vectors: 0,
+                    again,
+                },
+                body,
+            ));
+        }
+    }
+    if shown.is_none() && has("imported")? {
+        let ops = count("SELECT COUNT(*) FROM imported WHERE uid = ?1")?;
+        if ops > 0 {
+            let title: Option<String> = k
+                .query_row(
+                    "SELECT title FROM imported WHERE uid = ?1 LIMIT 1",
+                    [&uid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            shown = Some((
+                UidPreview {
+                    kind: "document",
+                    ops,
+                    vectors: 0,
+                    again: Vec::new(),
+                },
+                title,
+            ));
+        }
+    }
+    let (mut uid_preview, sample) =
+        shown.with_context(|| format!("{uid} is neither a claim's nor a document's uid here"))?;
+    if has("vector_keys")? {
+        uid_preview.vectors = count(
+            "SELECT COUNT(*) FROM vector_keys
+             WHERE key = ?1 AND kind IN ('c', 'k', 'p') AND skipped IS NULL",
+        )?;
+    }
+    Ok(Preview {
+        target: Target::Uid { uid },
+        records: Vec::new(),
+        denied: raw.denied_count()?,
+        sources: Vec::new(),
+        sample: sample.map(|s| line(&s)),
+        uid: Some(uid_preview),
+    })
 }
 
 /// Registers `preview` in one raw transaction (rule 1), then writes it to both logs, after the
@@ -547,6 +745,23 @@ pub(crate) fn logged(home: &Path) -> (Vec<Request>, Report) {
     (out, report)
 }
 
+/// What a uid's forget cannot reach yet (D5), printed before it asks.
+fn uid_limits(kind: &str) -> String {
+    let mut out = String::from(
+        "Physical purge is not built yet: its text stays in raw.db's op log, in knowledge.db and \
+         in the backup segments, hidden from every reader and never sent again.\n\
+         A packet already handed to an agent and a call already sent are not taken back.\n\
+         The request is logged by this uid, without the text.\n",
+    );
+    out.push_str(if kind == "claim" {
+        "The raw records it was curated from stay, and search still finds them: forget their \
+         span with --record or --span when the text itself must go.\n"
+    } else {
+        "The place it was imported from keeps it: delete it there too.\n"
+    });
+    out
+}
+
 /// What forget cannot reach, printed before it asks (docs/milestone-5-plan.md, Limits).
 fn limits(sources: &[String]) -> String {
     let mut out = String::from(
@@ -591,6 +806,7 @@ pub fn run(
     home: &Path,
     record: Option<&str>,
     span: Option<&str>,
+    uid: Option<&str>,
     yes: bool,
     show: bool,
 ) -> Result<()> {
@@ -603,10 +819,11 @@ pub fn run(
         }
         return Ok(());
     }
-    let target = match (record, span) {
-        (Some(r), None) => Target::parse(r, false)?,
-        (None, Some(s)) => Target::parse(s, true)?,
-        _ => anyhow::bail!("choose --record, --span or --status"),
+    let target = match (record, span, uid) {
+        (Some(r), None, None) => Target::parse(r, false)?,
+        (None, Some(s), None) => Target::parse(s, true)?,
+        (None, None, Some(u)) => Target::parse_uid(u)?,
+        _ => anyhow::bail!("choose --record, --span, --uid or --status"),
     };
     let p = preview(home, target)?;
     println!("Target: {}", serde_json::to_string(&p.target)?);
@@ -614,8 +831,24 @@ pub fn run(
     if let Some(sample) = &p.sample {
         println!("Sample: {}", crate::redact::outbound(sample));
     }
+    if let Some(u) = &p.uid {
+        println!(
+            "A {}: its ops in raw.db: {}; its vectors: {}",
+            u.kind, u.ops, u.vectors
+        );
+        for again in &u.again {
+            println!(
+                "It supersedes, and with it gone this is current again unless another claim \
+                 supersedes it (mute or forget it too if it should not be): {}",
+                crate::redact::outbound(again)
+            );
+        }
+    }
     p.validate()?;
-    print!("{}", limits(&p.sources));
+    match &p.uid {
+        Some(u) => print!("{}", uid_limits(u.kind)),
+        None => print!("{}", limits(&p.sources)),
+    }
     if !yes {
         // A pipe cannot answer for the owner: `--yes` says it on the command line.
         anyhow::ensure!(
@@ -783,6 +1016,179 @@ mod tests {
         assert!(!log.contains("canary"), "{log}");
     }
 
+    /// D5: a uid's preview is read from knowledge.db: a claim's ops and the claims it supersedes,
+    /// a document's ops and title, no raw record. What names no claim or document here, and a
+    /// record's, a card's or a summary's id, is refused before anything is registered.
+    #[test]
+    fn a_uid_preview_counts_its_ops_and_refuses_what_names_no_uid() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let older = s.decided("github.com/o/r", 1_000, "Use spaces.", &[]);
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[&older]);
+        let doc = s.imported("o1", "r", 3_000, "Deploy notes", "Notes.");
+        s.run();
+        let home = s.home.path();
+        let p = preview(home, Target::parse_uid(&uid).unwrap()).unwrap();
+        assert_eq!((p.count(), p.sample.as_deref()), (0, Some("Use tabs.")));
+        let again = vec!["Use spaces.".to_owned()];
+        let shown = UidPreview {
+            kind: "claim",
+            ops: 1,
+            vectors: 0,
+            again,
+        };
+        assert_eq!(p.uid, Some(shown));
+        p.validate().unwrap();
+        let p = preview(home, Target::parse_uid(&doc).unwrap()).unwrap();
+        let u = p.uid.as_ref().unwrap();
+        assert_eq!(
+            (u.kind, u.ops, p.sample.as_deref()),
+            ("document", 1, Some("Deploy notes"))
+        );
+        let device = s.raw.device();
+        let e = Target::parse_uid(&format!("{device}:1")).unwrap_err();
+        assert!(e.to_string().contains("--record"), "{e}");
+        for id in [
+            format!("{device}.4.0"),
+            "4.0".into(),
+            format!("S{device}.4"),
+        ] {
+            let e = Target::parse_uid(&id).unwrap_err();
+            assert!(e.to_string().contains("card"), "{id}: {e}");
+        }
+        let e = preview(home, Target::parse_uid(&"a".repeat(64)).unwrap()).unwrap_err();
+        assert!(e.to_string().contains("neither"), "{e}");
+        assert!(Target::parse_uid("a b").is_err());
+        assert!(
+            raw::open(home)
+                .unwrap()
+                .forget_requests()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// D5: from the commit of its request, version 2 in both logs, a uid is passed over by every
+    /// reader though knowledge.db still holds it: search, get, the viewer's claim, cite and the
+    /// timeline.
+    #[test]
+    fn a_forgotten_uid_is_hidden_from_every_reader_at_once() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs for the parser.", &[]);
+        let doc = s.imported(
+            "o1",
+            "r",
+            3_000,
+            "Deploy notes",
+            "Deploy with the parser script.",
+        );
+        s.run();
+        let home = s.home.path().to_owned();
+        let found = |s: &crate::search::b::fixture::Store| -> Vec<String> {
+            let q = crate::search::b::Query {
+                text: "parser".into(),
+                all: true,
+                limit: 20,
+                ..Default::default()
+            };
+            s.query(&q).hits.into_iter().map(|h| h.key).collect()
+        };
+        let before = found(&s);
+        assert!(before.contains(&uid) && before.contains(&doc), "{before:?}");
+        for u in [&uid, &doc] {
+            let p = preview(&home, Target::parse_uid(u).unwrap()).unwrap();
+            let (status, report) = start(&home, &p).unwrap();
+            assert_eq!(status.records, 0);
+            assert!(report.problems.is_empty(), "{:?}", report.problems);
+        }
+        let k = crate::knowledge::open(&home).unwrap();
+        let held: i64 = k
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM claims WHERE uid = ?1)
+                      + (SELECT COUNT(*) FROM imported WHERE uid = ?2)",
+                [&uid, &doc],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(held, 2, "knowledge.db keeps both until the purge");
+        let after = found(&s);
+        assert!(!after.contains(&uid) && !after.contains(&doc), "{after:?}");
+        for u in [&uid, &doc] {
+            assert_eq!(crate::search::b::get(&home, u).unwrap(), None);
+        }
+        assert!(crate::search::b::claim(&home, &uid).unwrap().is_none());
+        let cited = crate::search::b::cite(&home, std::slice::from_ref(&uid)).unwrap();
+        assert_eq!(cited[0]["error"], "not a claim");
+        let line = crate::search::b::timeline(&home, None, None, None, 10).unwrap();
+        assert!(
+            line.iter().all(|i| i.key != uid && i.key != doc),
+            "{line:?}"
+        );
+        for log in [home.join(LOG), crate::backup::dir(&home).unwrap().join(LOG)] {
+            let text = std::fs::read_to_string(&log).unwrap();
+            assert_eq!(text.lines().filter(|l| l.contains("\"v\":2")).count(), 2);
+            assert!(!text.contains("parser"), "{text}");
+        }
+    }
+
+    /// D5: a forgotten uid comes back with a lost raw.db: from the request logs, which hold a
+    /// record's request (version 1) beside it, when the backup segments predate it; then from the
+    /// ops segment that holds its forget op when the logs are gone too. A reconcile adds no second
+    /// op.
+    #[test]
+    fn a_forgotten_uid_survives_a_lost_raw_db() {
+        // Imported records and documents only: a record's forget refuses a home with hook records
+        // (D2).
+        let mut s = crate::search::b::fixture::Store::new();
+        let seq = native(&mut s.raw, "a", r#"{"prompt":"a synthetic canary"}"#);
+        let uid = s.imported(
+            "o1",
+            "r",
+            3_000,
+            "Deploy notes",
+            "Deploy with the parser script.",
+        );
+        s.run();
+        let crate::search::b::fixture::Store { home: dir, raw } = s;
+        let home = dir.path().to_owned();
+        crate::backup::export(&home).unwrap();
+        start(&home, &raw.forget_preview(record(&raw, seq)).unwrap()).unwrap();
+        let p = preview(&home, Target::parse_uid(&uid).unwrap()).unwrap();
+        start(&home, &p).unwrap();
+        let logged = std::fs::read_to_string(home.join(LOG)).unwrap();
+        assert!(
+            logged.contains("\"v\":1") && logged.contains("\"v\":2"),
+            "{logged}"
+        );
+        drop(raw);
+        let lose = |home: &Path| {
+            std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
+            for f in ["raw.db-wal", "raw.db-shm"] {
+                let _ = std::fs::remove_file(home.join(f));
+            }
+        };
+        let forgets = |raw: &raw::Raw| {
+            raw.ops_after(raw.device(), 0, 1_000)
+                .unwrap()
+                .iter()
+                .filter(|o| o.kind == raw::OpKind::Forget)
+                .count()
+        };
+        lose(&home);
+        let mut raw = crate::backup::open_raw(&home).unwrap();
+        assert!(raw.forgotten(&uid).unwrap() && !shown(&raw, seq));
+        reconcile(&home, &mut raw).unwrap();
+        assert_eq!(forgets(&raw), 1);
+        crate::backup::export(&home).unwrap();
+        drop(raw);
+        for log in [home.join(LOG), crate::backup::dir(&home).unwrap().join(LOG)] {
+            std::fs::remove_file(log).unwrap();
+        }
+        lose(&home);
+        let raw = crate::backup::open_raw(&home).unwrap();
+        assert!(raw.forgotten(&uid).unwrap());
+        assert_eq!(forgets(&raw), 1);
+    }
+
     /// Existing request-log copies keep their hashes private even if earlier permissions were
     /// broad; the public registration path restricts the opened files before appending.
     #[cfg(unix)]
@@ -869,7 +1275,7 @@ mod tests {
                 std::fs::remove_dir(&config).unwrap();
             }
             std::fs::write(&config, "[backup]\ndir = 'repaired-backups'\n").unwrap();
-            run(h, None, None, false, true).unwrap();
+            run(h, None, None, None, false, true).unwrap();
             let second = h.join("repaired-backups").join(LOG);
             assert_eq!(std::fs::read_to_string(second).unwrap(), log);
             assert_eq!(std::fs::read_to_string(primary).unwrap(), log);

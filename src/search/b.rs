@@ -466,9 +466,11 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                 Err(_) => Err(VectorSkip::Error),
             })
         });
+        // A forgotten document (milestone 5 D5) takes no place: each list reads past them.
+        let forgotten = raw.forgotten_uids()?;
         let imported = match q.raw {
             RawArm::Only => None,
-            _ => Some(imported_fts(&k, q, depth)),
+            _ => Some(imported_fts(&k, q, depth + forgotten.len())),
         };
         let rows = match q.raw {
             RawArm::Off => Ok(Vec::new()),
@@ -496,7 +498,8 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         if let Some(fts) = imported {
             (hits, lowered) = claims_leg(&raw, &k, q, depth, &terms, near.as_ref())?;
-            imports = imported_leg(&k, q, depth, &terms, fts?, near.as_ref(), &rules)?;
+            let found = (fts?, &forgotten);
+            imports = imported_leg(&k, q, depth, &terms, found, near.as_ref(), &rules)?;
             let cards = curated_leg(&raw, &k, q, depth, &terms, &rules, false, near.as_ref())?;
             let summaries = curated_leg(&raw, &k, q, depth, &terms, &rules, true, near.as_ref())?;
             let lists = [&cards, &summaries, &imports];
@@ -1535,15 +1538,18 @@ fn imported_leg(
     q: &Query,
     depth: usize,
     terms: &[String],
-    mut uids: Vec<String>,
+    (mut uids, forgotten): (Vec<String>, &std::collections::HashSet<String>),
     near: Option<&Near>,
     rules: &redact::Rules,
 ) -> Result<Vec<Hit>> {
     let mut out = Vec::new();
+    uids.retain(|u| !forgotten.contains(u));
     if let Some(near) = near {
-        uids = rrf(&uids, &near.query_knn(k, q, "i", depth)?);
-        uids.truncate(depth);
+        let mut by_meaning = near.query_knn(k, q, "i", depth + forgotten.len())?;
+        by_meaning.retain(|u| !forgotten.contains(u));
+        uids = rrf(&uids, &by_meaning);
     }
+    uids.truncate(depth);
     for uid in uids {
         out.extend(imported_hit(k, &uid, terms, rules)?);
     }
@@ -1948,7 +1954,10 @@ fn named(raw: &Raw, k: &Connection, id: &str) -> Result<Option<Named>> {
             |r| r.get(0),
         )
         .optional()?;
-    if let Some(uid) = imported {
+    // A forgotten document (milestone 5 D5) is no document.
+    if let Some(uid) = imported
+        && !raw.forgotten(&uid)?
+    {
         return Ok(Some(Named::Imported(uid)));
     }
     let Some((device, Ok(seq))) = id.split_once(':').map(|(d, s)| (d, s.parse::<i64>())) else {
@@ -2326,6 +2335,10 @@ pub fn cite(home: &Path, uids: &[String]) -> Result<Vec<serde_json::Value>> {
     let _snapshot = k.unchecked_transaction()?;
     uids.iter()
         .map(|uid| {
+            // A forgotten claim (milestone 5 D5) is no claim.
+            if raw.forgotten(uid)? {
+                return Ok(not_a_claim(uid));
+            }
             let Some(c) = claims::active_one(&k, uid)? else {
                 return Ok(not_a_claim(uid));
             };

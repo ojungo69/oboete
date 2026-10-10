@@ -1673,6 +1673,14 @@ fn answered(
                         over.push((d.id, "its claim op is over the op cap"));
                         continue;
                     }
+                    // A forgotten uid derived again (milestone 5 D5): `append_ops` would refuse
+                    // the window's whole batch.
+                    if let Some(uid) = crate::claims::op_uid(&op)
+                        && raw.forgotten(&uid)?
+                    {
+                        over.push((d.id, "its uid is forgotten"));
+                        continue;
+                    }
                     claims.push(op);
                 }
                 let dropped: Vec<(String, &str)> = lost
@@ -3132,7 +3140,8 @@ fn recurate_window_checked(
     // shown to the curator whole, which says nothing of it (D13, Codex on #304).
     let mut anchored = Vec::new();
     for (uid, c) in anchored_in(k, w)? {
-        if !quotes_excluded(raw, k, &w.reading.excluded, &uid)? {
+        // Nor is a forgotten one restated or retracted (milestone 5 D5): its op would be refused.
+        if !quotes_excluded(raw, k, &w.reading.excluded, &uid)? && !raw.forgotten(&uid)? {
             anchored.push((uid, c));
         }
     }
@@ -4192,7 +4201,8 @@ fn carried(
     let (mut decided, mut items) = (Vec::new(), Vec::new());
     for repo in repos {
         for c in crate::claims::current_before(k, repo, w)? {
-            if quotes_excluded(raw, k, &w.reading.excluded, &c.uid)? {
+            // A forgotten claim is sent nowhere (milestone 5 D5).
+            if quotes_excluded(raw, k, &w.reading.excluded, &c.uid)? || raw.forgotten(&c.uid)? {
                 continue;
             }
             let list = if c.kind == "open item" {
@@ -4267,6 +4277,7 @@ fn carried(
                     && !uids.iter().any(|(_, _, u)| u.uid == uid)
                     && !proposals.iter().any(|(.., u)| u.uid == uid)
                     && !quotes_excluded(raw, k, &w.reading.excluded, &uid)?
+                    && !raw.forgotten(&uid)?
                 {
                     let place = repo
                         .as_deref()
@@ -10775,10 +10786,145 @@ curate = false
         }
     }
 
-    /// Milestone 5 D1 rule 12: a forget while a recuration's call is out (here a deny row written
-    /// during the call) cuts the answer again: nothing of it is written.
+    /// Milestone 5 D5: a forgotten uid is neither carried into a later window's prompt nor derived
+    /// again: a recuration whose answer derives it drops it as forgotten, and writes no op of it
+    /// or of a forgotten proposal it leaves out, which it would otherwise retract.
+    #[test]
+    fn a_forgotten_uid_is_not_carried_nor_derived_again() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let mut decided = kept(&mut raw, "s", "r", "We use tabs.");
+        decided.1["body"] = "Secret claim body.".into();
+        let mut proposed = kept(&mut raw, "s", "r", "Maybe spaces in YAML.");
+        proposed.1["status"] = "proposed".into();
+        raw.append_ops(&[decided.clone(), proposed.clone()])
+            .unwrap();
+        let uid = crate::claims::op_uid(&decided.1).unwrap();
+        let later = raw
+            .append(&Event {
+                session: "s".into(),
+                repo: Some("r".into()),
+                ..prompt("And spaces in YAML.")
+            })
+            .unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let (dev, rules) = (raw.device().to_owned(), Rules::default());
+        let carried_text = |raw: &Raw, k: &Connection| {
+            let w = window_at(
+                raw,
+                &dev,
+                (later - 1, None),
+                None,
+                100_000.into(),
+                &rules,
+                &Reading::default(),
+            )
+            .unwrap()
+            .unwrap();
+            carried(raw, k, &rules, &w).unwrap().0
+        };
+        assert!(carried_text(&raw, &k).contains("Secret claim body."));
+        for u in [uid.clone(), crate::claims::op_uid(&proposed.1).unwrap()] {
+            let target = crate::forget::Target::parse_uid(&u).unwrap();
+            let p = crate::forget::preview(home.path(), target).unwrap();
+            crate::forget::start(home.path(), &p).unwrap();
+        }
+        let text = carried_text(&raw, &k);
+        assert!(
+            !text.contains("Secret claim body.") && !text.contains(&uid),
+            "{text}"
+        );
+        let summary = curating(WINDOW_TOKENS);
+        let reading = Reading::now(&raw, Reads::Live).unwrap();
+        let ws = span_windows(&raw, &Span::records(1, 2), WINDOW_TOKENS, &rules, &reading).unwrap();
+        let mut chain =
+            |_: &str, _: &str, _: &AnswerCheck, _: &Gate| Ok(claimed("L1", "We use tabs"));
+        let done = recurate_window(
+            &mut raw, &k, &db, &rules, &summary, &mut chain, &ws[0], None,
+        );
+        assert_eq!(done.unwrap(), Ok((0, 0)));
+        let claims = raw.ops_after(&dev, 0, 100).unwrap();
+        assert_eq!(claims.iter().filter(|o| o.kind == OpKind::Claim).count(), 2);
+        assert_eq!(
+            windows(&raw).last().unwrap()["dropped"],
+            json!([["c1", "its uid is forgotten"]])
+        );
+    }
+
+    /// Milestone 5 D5: a proposal of the session's previous window is not carried into the next
+    /// once its uid is forgotten.
+    #[test]
+    fn a_forgotten_proposal_is_not_carried() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&prompt("Build the importer.")).unwrap();
+        raw.append(&event(
+            "reply",
+            json!({"assistant": "Maybe cache the parsed files?"}),
+        ))
+        .unwrap();
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+            let claims = json!([{"id": "c1", "kind": "decision", "status": "proposed",
+                "speaker": "assistant proposal", "scope": "repo", "body": "Secret proposal.",
+                "quote": "cache the parsed files", "line": "L2", "supersedes": []}]);
+            Ok(ChainResult {
+                output: json!({"claims": claims, "summary": "s"}),
+                ..answered("fake")
+            })
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
+        let ops = raw.ops_after(raw.device(), 0, 20).unwrap();
+        let claim = ops.iter().find(|o| o.kind == OpKind::Claim).unwrap();
+        let uid = crate::claims::op_uid(&claim.body).unwrap();
+        let next = raw.append(&prompt("Yes.")).unwrap();
+        let dev = raw.device().to_owned();
+        let w = window_at(
+            &raw,
+            &dev,
+            (next - 1, None),
+            None,
+            100_000.into(),
+            &rules,
+            &Reading::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            carried(&raw, &k, &rules, &w)
+                .unwrap()
+                .0
+                .contains("Secret proposal.")
+        );
+        let target = crate::forget::Target::parse_uid(&uid).unwrap();
+        let p = crate::forget::preview(home.path(), target).unwrap();
+        crate::forget::start(home.path(), &p).unwrap();
+        let text = carried(&raw, &k, &rules, &w).unwrap().0;
+        assert!(
+            !text.contains("Secret proposal.") && !text.contains(&uid),
+            "{text}"
+        );
+    }
+
+    /// Milestone 5 D1 rule 12: a forget while a recuration's call is out (here a deny row, or a
+    /// uid's forget op (D5), written during the call) cuts the answer again: nothing of it is
+    /// written.
     #[test]
     fn a_forget_while_a_recuration_is_out_writes_nothing_of_its_answer() {
+        for deny in [
+            "INSERT INTO denied_records(origin, device, seq, ts, session, job)
+             VALUES('v1:x', 'd', 1, NULL, 'v1:y', 'j')",
+            r#"INSERT INTO ops(device, op_seq, type, ts, body, batch)
+               VALUES('d', 1, 'forget', 0, '{"uid":"x","job":"j"}', 1)"#,
+        ] {
+            forget_while_a_recuration_is_out(deny);
+        }
+    }
+
+    fn forget_while_a_recuration_is_out(deny: &str) {
         let home = tempfile::tempdir().unwrap();
         let (mut raw, db) = open(home.path());
         raw.append(&said(
@@ -10799,11 +10945,7 @@ curate = false
         let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| {
             rusqlite::Connection::open(&path)
                 .unwrap()
-                .execute(
-                    "INSERT INTO denied_records(origin, device, seq, ts, session, job)
-                     VALUES('v1:x', 'd', 1, NULL, 'v1:y', 'j')",
-                    [],
-                )
+                .execute(deny, [])
                 .unwrap();
             Ok(answered("fake"))
         };
