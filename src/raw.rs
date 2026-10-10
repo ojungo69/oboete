@@ -75,6 +75,13 @@ CREATE INDEX IF NOT EXISTS ops_exclusions ON ops(device, op_seq) WHERE type = 'e
 -- The curation checkpoint, which SessionStart reads (Task 8, MUST-M9): the last window op without
 -- a scan of the ops after it (178,370 imports took 136 ms).
 CREATE INDEX IF NOT EXISTS ops_windows ON ops(device, op_seq) WHERE type = 'window';
+-- G22: the window ops a skipped span is made of (skipped, refused, a recuration), which a session's
+-- start reads: through this index, those alone and not every window's body. `instr`, never a JSON
+-- function: a malformed body cannot fail the open that builds it. serde_json writes these keys
+-- without spaces. `SKIP_WINDOWS` repeats the condition, for the planner to take the index.
+CREATE INDEX IF NOT EXISTS ops_window_skips ON ops(device, op_seq)
+  WHERE type = 'window' AND (instr(body, '\"outcome\":\"skipped\"') > 0
+    OR instr(body, '\"refused\":true') > 0 OR instr(body, '\"recurate\":true') > 0);
 -- docs/work-state.md L4: the agents' work state, read at each session start from its own ops.
 CREATE INDEX IF NOT EXISTS ops_work_state ON ops(device, op_seq) WHERE type = 'work_state';
 -- Milestone 5 D5: a forgotten uid, by the forget op that names it, any device's. The op is the
@@ -715,6 +722,52 @@ pub(crate) fn ops_after_in(
             })
         })
         .collect()
+}
+
+/// The window ops a skipped span is made of, through `ops_window_skips` (its condition, word for
+/// word), then each body read as JSON.
+const SKIP_WINDOWS: &str = "SELECT op_seq, ts, body, batch FROM ops
+     WHERE device = ?1 AND op_seq > ?2
+       AND type = 'window' AND (instr(body, '\"outcome\":\"skipped\"') > 0
+         OR instr(body, '\"refused\":true') > 0 OR instr(body, '\"recurate\":true') > 0)
+       AND (json_extract(body, '$.outcome') = 'skipped' OR json_extract(body, '$.refused') = 1
+            OR json_extract(body, '$.recurate') = 1)
+     ORDER BY op_seq LIMIT ?3";
+
+/// `device`'s window ops after `op_seq` that a skipped span is made of (`curate::spans_skipped`):
+/// one every provider skipped or refused, and a recuration. A session's start reads them (G22): on
+/// a copy of a store with 15,492 windows (66 of them these), reading every window's body made a
+/// session's start take 70 ms against 33 ms before G22 (debug build); through the index, 37 ms.
+pub(crate) fn skip_window_ops_after_in(
+    conn: &Connection,
+    device: &str,
+    op_seq: i64,
+    limit: usize,
+) -> Result<Vec<Op>> {
+    let mut st = conn.prepare_cached(SKIP_WINDOWS)?;
+    let rows = st.query_map(
+        params![device, op_seq, i64::try_from(limit).unwrap_or(i64::MAX)],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get(1)?,
+                r.get::<_, String>(2)?,
+                r.get(3)?,
+            ))
+        },
+    )?;
+    rows.map(|row| {
+        let (op_seq, ts, body, batch) = row?;
+        Ok(Op {
+            device: device.to_owned(),
+            op_seq,
+            kind: OpKind::Window,
+            ts,
+            body: serde_json::from_str(&body).with_context(|| format!("op {op_seq}: body"))?,
+            batch,
+        })
+    })
+    .collect()
 }
 
 fn op_rows_in(conn: &Connection, device: &str, op_seq: i64, limit: usize) -> Result<Vec<OpRow>> {
@@ -2518,6 +2571,15 @@ impl Raw {
         ops_after_in(&self.conn, device, op_seq, limit)
     }
 
+    pub fn skip_window_ops_after(
+        &self,
+        device: &str,
+        op_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<Op>> {
+        skip_window_ops_after_in(&self.conn, device, op_seq, limit)
+    }
+
     fn op_rows(&self, device: &str, op_seq: i64, limit: usize) -> Result<Vec<OpRow>> {
         op_rows_in(&self.conn, device, op_seq, limit)
     }
@@ -3801,6 +3863,50 @@ pub fn test_event(body: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G22: a session's start reads the skipped windows through `ops_window_skips`, whose
+    /// condition `SKIP_WINDOWS` repeats, and finds the ones curation writes.
+    #[test]
+    fn skipped_windows_are_read_through_their_index() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let plan: Vec<String> = raw
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {SKIP_WINDOWS}"))
+            .unwrap()
+            .query_map(params!["d", 0, 10], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|p| p.contains("USING INDEX ops_window_skips")),
+            "{plan:?}"
+        );
+        let window = |more: serde_json::Value| {
+            let mut op = serde_json::json!({"from_seq": 1, "to_seq": 1, "outcome": "curated"});
+            op.as_object_mut()
+                .unwrap()
+                .extend(more.as_object().unwrap().clone());
+            (OpKind::Window, op)
+        };
+        raw.append_ops(&[
+            window(serde_json::json!({})),
+            window(serde_json::json!({"outcome": "skipped", "reason": "x"})),
+            window(serde_json::json!({"refused": true})),
+            window(serde_json::json!({"recurate": true})),
+            window(serde_json::json!({"refused": false, "recurate": false, "reason": "skipped"})),
+        ])
+        .unwrap();
+        let device = raw.device().to_owned();
+        let seqs: Vec<i64> = raw
+            .skip_window_ops_after(&device, 0, 10)
+            .unwrap()
+            .iter()
+            .map(|o| o.op_seq)
+            .collect();
+        assert_eq!(seqs, [2, 3, 4]);
+    }
 
     #[test]
     fn at_reads_the_records_named_in_seq_order_as_after_returns_them() {

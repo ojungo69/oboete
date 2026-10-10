@@ -2541,6 +2541,26 @@ pub fn doctor(home: &Path) -> Result<()> {
         println!("  {e:#}; `oboete rebuild` builds it again from raw.db");
         unhealthy.push("knowledge.db is damaged (see above)");
     }
+    // G22: the spans every provider skipped, and the command that curates them again, from raw.db
+    // alone: knowledge.db may be gone or set aside (Codex on #438).
+    if crate::raw::exists(home) {
+        section(
+            &mut unhealthy,
+            "raw.db",
+            (|| -> Result<()> {
+                let raw = crate::raw::open(home)?;
+                let skipped = crate::curate::failed_spans(&raw).context("raw.db's windows")?;
+                if skipped > 0 {
+                    let s = crate::curate::Stopped {
+                        waits: None,
+                        skipped,
+                    };
+                    println!("  {}", s.line());
+                }
+                Ok(())
+            })(),
+        );
+    }
     // Milestone 4 Task 10: `local`'s files, with or without a store.
     if config::load(home).is_ok_and(|c| c.embedding.provider == "local") {
         let (ready, line) = crate::embed::local_state(home);
