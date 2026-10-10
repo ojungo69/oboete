@@ -2994,8 +2994,10 @@ pub fn stopped(home: &std::path::Path, raw: &Raw, now: i64) -> Result<Option<Sto
         Some(db) => providers_db::pending_of(&db, device)?,
         None => None,
     }
-    // One the checkpoint has passed (a restore moved it) waits for nothing.
-    .filter(|p| (p.from_seq, p.from_offset.unwrap_or(0)) >= next)
+    // Only the window that waits now: a device's records are one sequence, so it starts where
+    // the checkpoint ends. One before or after it (a restore moved the checkpoint) waits for
+    // nothing, and the next pass replaces it (CodeRabbit on #438).
+    .filter(|p| (p.from_seq, p.from_offset.unwrap_or(0)) == next)
     // One due now is tried at the next pass, which this session's start begins (Codex on #438).
     .filter(|p| match p.hold.as_str() {
         "owner" => true,
@@ -3031,7 +3033,8 @@ impl Stopped {
                 ),
                 "budget" => format!(
                     "oboete: curation has waited on a spending cap since {since}, until {next}. \
-                     Raise the cap on the settings page (`oboete view --open`) or wait."
+                     Raise the cap on the settings page (`oboete view --open`) or wait; \
+                     `oboete doctor` names each cap."
                 ),
                 _ => format!(
                     "oboete: curation has failed since {since}; it is tried again at {next}, by \
@@ -7825,6 +7828,14 @@ mod tests {
             (due("owner"), true),
             (due("budget"), false),
             (due("time"), false),
+            // Not the window after the checkpoint.
+            (
+                Pending {
+                    from_seq: 2,
+                    ..pending("owner", now)
+                },
+                false,
+            ),
         ] {
             let hold = p.hold.clone();
             providers_db::set_pending(&db, &p).unwrap();
@@ -7833,6 +7844,9 @@ mod tests {
                 s.as_ref().map(|s| &s.waits.as_ref().unwrap().hold[..]),
                 shown.then_some(&hold[..])
             );
+            if let Some(s) = s {
+                assert!(s.line().contains("`oboete doctor`"), "{}", s.line());
+            }
         }
         providers_db::set_pending(&db, &pending("owner", now - 2 * 60 * 60 * 1000)).unwrap();
         let s = stopped(h, &raw, now).unwrap().unwrap();

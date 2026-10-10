@@ -1378,17 +1378,21 @@ fn shown_set(home: &Path, agent: &str, session: &str) -> serde_json::Map<String,
 fn injection_packet(home: &Path, cwd: &Path, session: Option<&str>) -> (String, Option<Start>) {
     // The failure line does not wait on the settings or raw.db: one that cannot be read may be
     // the failure it reports.
-    let manifest = (|| -> Result<Option<Start>> {
+    let (store, manifest) = (|| -> Result<(crate::raw::Raw, Option<Start>)> {
         let settings = crate::capture::Settings::load(home)?;
         let store = crate::raw::open_within(home, Duration::from_secs(2))?;
         let labels = json!({"session_id": session.unwrap_or("unknown"), "cwd": cwd});
-        checkout_manifest(home, &store, &labels, &settings, true)
+        let manifest = checkout_manifest(home, &store, &labels, &settings, true)?;
+        Ok((store, manifest))
     })()
-    .unwrap_or_else(|e| {
-        eprintln!("oboete: manifest not read: {e:#}");
-        None
-    });
-    let text = joined(home, manifest.as_ref());
+    .map_or_else(
+        |e| {
+            eprintln!("oboete: manifest not read: {e:#}");
+            (None, None)
+        },
+        |(store, manifest)| (Some(store), manifest),
+    );
+    let text = joined(home, store.as_ref(), manifest.as_ref());
     (text, manifest)
 }
 
@@ -1431,13 +1435,20 @@ pub fn inject_json(home: &Path, cwd: &Path, session: Option<&str>) -> Value {
     response
 }
 
-/// The recording-failure line, the work state's rule and its open lines in their fence, then
-/// the manifest in its own: what SessionStart shows, as `oboete inject` prints it and the viewer's
-/// Context page shows it.
-pub fn joined(home: &Path, start: Option<&Start>) -> String {
+/// The recording-failure line, why curation stopped (G22), the work state's rule and its open
+/// lines in their fence, then the manifest in its own: what SessionStart shows, as `oboete inject`
+/// prints it (OpenCode's context: CodeRabbit on #438) and the viewer's Context page shows it.
+pub fn joined(home: &Path, raw: Option<&crate::raw::Raw>, start: Option<&Start>) -> String {
     let work = start.and_then(|s| s.work.as_ref());
+    let stopped = raw.and_then(|raw| {
+        crate::curate::stopped(home, raw, crate::db::now_ms()).unwrap_or_else(|e| {
+            eprintln!("oboete: curation's state not read: {e:#}");
+            None
+        })
+    });
     let parts: Vec<String> = [
         crate::failure::since(home).map(crate::failure::line),
+        stopped.as_ref().map(crate::curate::Stopped::line),
         work.map(|w| w.rule.clone()),
         work.and_then(|w| w.open.as_deref())
             .map(|o| crate::manifest::fence(crate::work_state::OPEN, o)),
@@ -4420,6 +4431,13 @@ mod tests {
             "{context}"
         );
         assert!(!out.contains("stopped until the owner acts"), "{out}");
+        // OpenCode reads `oboete inject`, not the hook's output.
+        let packet = inject_text(home, Path::new(&p.c), Some("stopped-inject"));
+        assert!(
+            packet.starts_with("oboete: curation has waited for you since ")
+                && packet.contains("Parser errors go to stderr."),
+            "{packet}"
+        );
     }
 
     #[test]

@@ -1809,7 +1809,7 @@ impl Viewer {
             &settings,
             true,
         )?;
-        let text = crate::hook::joined(&self.home, manifest.as_ref());
+        let text = crate::hook::joined(&self.home, raw.as_ref(), manifest.as_ref());
         Ok(json!({
             "repo": redact::outbound(&repo),
             "branch": redact::outbound(&branch),
