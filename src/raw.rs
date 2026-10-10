@@ -140,7 +140,7 @@ const PROMPT_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_prompts
     ON records(ts DESC, device DESC, seq DESC) WHERE type = 'event' AND kind = 'prompt'";
 
 /// One agent event as captured, after redaction.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     pub agent: String,
     pub session: String,
@@ -1648,6 +1648,23 @@ impl Raw {
         let seq = insert_event(&tx, &self.device, e, ledger, ruleset)?;
         tx.commit()?;
         Ok(seq)
+    }
+
+    /// The events one hook call kept when its write failed (docs/unwritten.md U3), with their
+    /// ledger rows, in one transaction: all of them or none.
+    pub fn append_kept(
+        &mut self,
+        events: &[crate::capture::Captured],
+        ruleset: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        for c in events {
+            insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Imported records (`oboete-v1`, `transcript`; D6) with their ledger rows and, when given,

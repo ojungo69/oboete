@@ -572,7 +572,7 @@ pub fn redact(text: &str) -> String {
 /// the stored (masked) text, and the secret's own length as stored (with any JSON escapes in it),
 /// both in bytes. Never the value. Two
 /// rules on one token share one mask, so they give two findings at the same offset.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Finding {
     pub rule: String,
     pub offset: usize,

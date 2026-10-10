@@ -160,7 +160,17 @@ fn run_io(
             took_compaction = Some(session_label(&labels).to_owned());
         }
         let settings = crate::capture::Settings::load(home)?;
-        let mut store = crate::raw::open_within(home, Duration::from_secs(2))?;
+        let mut store = match crate::raw::open_within(home, Duration::from_secs(2)) {
+            Ok(store) => store,
+            Err(e) => {
+                // docs/unwritten.md U2: what this call would have written, built without it.
+                match built(home, None, agent, event, &payload, db::now_ms(), &settings) {
+                    Ok((built, _)) => keep(home, agent, &built, &settings),
+                    Err(b) => eprintln!("oboete: events not kept: {b:#}"),
+                }
+                return Err(e);
+            }
+        };
         let recorded = record(
             home,
             &mut store,
@@ -293,7 +303,7 @@ fn run_io(
         let reads_start = event == "SessionStart" && !matches!(agent, "grok" | "agy" | "cursor");
         let failure = failed
             .filter(|_| injecting || reads_start)
-            .map(crate::failure::line);
+            .map(|f| crate::failure::line(f, crate::unwritten::counts(home).0));
         // docs/work-state.md L7: the work state's rule beside the failure line, outside every
         // fence, and its open lines in a fence of their own before the manifest's.
         let work = manifest.as_ref().and_then(|m| m.work.as_ref());
@@ -675,40 +685,86 @@ pub fn record(
     } else {
         None
     };
+    // docs/unwritten.md U3: what earlier calls kept goes first, so the seqs follow their times.
+    if let Err(e) = crate::unwritten::write_back(home, raw) {
+        eprintln!("oboete: kept events not written back yet: {e:#}");
+    }
+    let (built, prompt) = built(home, Some(raw), agent, event, payload, ts, settings)?;
     let mut appended = Vec::new();
-    let mut prompt = None;
-    for (event, payload) in adapt(home, raw, agent, event, payload, settings)? {
-        if event == "UserPromptSubmit" {
-            prompt = str_field(&payload, &["prompt"]).map(str::to_owned);
-        }
-        for mut c in crate::capture::events(agent, &event, &payload, ts, settings) {
-            c.event.session = own_session(std::mem::take(&mut c.event.session), raw);
-            let seq = match raw.append_with_ledger(&c.event, &c.ledger, settings.rules.version()) {
-                Ok(seq) => seq,
-                Err(e) => {
-                    // The claim precedes capture; a failed append must let a later hook retry this
-                    // step.
-                    if agent == "agy"
-                        && event == "UserPromptSubmit"
-                        && let Some(step) = payload["step_index"].as_i64()
-                    {
-                        crate::hookstate::take(
-                            home,
-                            agent,
-                            payload["session_id"].as_str().unwrap_or("unknown"),
-                            &format!("step-{step}"),
-                        );
-                    }
-                    return Err(e);
-                }
-            };
-            appended.push((seq, c.event));
+    for (n, b) in built.iter().enumerate() {
+        match raw.append_with_ledger(
+            &b.captured.event,
+            &b.captured.ledger,
+            settings.rules.version(),
+        ) {
+            Ok(seq) => appended.push((seq, b.captured.event.clone())),
+            Err(e) => {
+                keep(home, agent, &built[n..], settings);
+                return Err(e);
+            }
         }
     }
     Ok(Recorded {
         events: appended,
         prompt,
     })
+}
+
+/// One event a hook call builds, and the agy step it claimed (`adapt`).
+struct Built {
+    step: Option<(String, i64)>,
+    captured: crate::capture::Captured,
+}
+
+/// A hook call's events as they would be appended: adapted, through the gate, an event that names
+/// no session named for the store's device; and the prompt as the agent sent it. Without a store
+/// (docs/unwritten.md U2) the session is named when the event is written back, and Cursor's
+/// SessionEnd recovers no turn.
+fn built(
+    home: &Path,
+    raw: Option<&crate::raw::Raw>,
+    agent: &str,
+    event: &str,
+    payload: &Value,
+    ts: i64,
+    settings: &crate::capture::Settings,
+) -> Result<(Vec<Built>, Option<String>)> {
+    let mut built = Vec::new();
+    let mut prompt = None;
+    for (event, payload) in adapt(home, raw, agent, event, payload, settings)? {
+        if event == "UserPromptSubmit" {
+            prompt = str_field(&payload, &["prompt"]).map(str::to_owned);
+        }
+        let step = (agent == "agy" && event == "UserPromptSubmit")
+            .then(|| payload["step_index"].as_i64())
+            .flatten()
+            .map(|step| {
+                let session = payload["session_id"].as_str().unwrap_or("unknown");
+                (session.to_owned(), step)
+            });
+        for mut c in crate::capture::events(agent, &event, &payload, ts, settings) {
+            if let Some(raw) = raw {
+                c.event.session = own_session(std::mem::take(&mut c.event.session), raw);
+            }
+            built.push(Built {
+                step: step.clone(),
+                captured: c,
+            });
+        }
+    }
+    Ok((built, prompt))
+}
+
+/// docs/unwritten.md U1: the events a failed write did not append, kept for a later write. When
+/// they cannot be, an agy step claimed for them is given back, so a later hook records it.
+fn keep(home: &Path, agent: &str, unwritten: &[Built], settings: &crate::capture::Settings) {
+    let events: Vec<_> = unwritten.iter().map(|b| b.captured.clone()).collect();
+    if let Err(e) = crate::unwritten::keep(home, &events, settings.rules.version()) {
+        eprintln!("oboete: events not kept: {e:#}");
+        for (session, step) in unwritten.iter().filter_map(|b| b.step.as_ref()) {
+            crate::hookstate::take(home, agent, session, &format!("step-{step}"));
+        }
+    }
 }
 
 /// What SessionStart shows for the checkout `labels` names (Claude Code's fields), for the agent's
@@ -1549,7 +1605,8 @@ pub fn joined(home: &Path, raw: Option<&crate::raw::Raw>, start: Option<&Start>)
         })
     });
     let parts: Vec<String> = [
-        crate::failure::since(home).map(crate::failure::line),
+        crate::failure::since(home)
+            .map(|f| crate::failure::line(f, crate::unwritten::counts(home).0)),
         stopped.as_ref().map(crate::curate::Stopped::line),
         work.map(|w| w.rule.clone()),
         work.and_then(|w| w.open.as_deref())
@@ -1608,7 +1665,7 @@ fn agent_labels(agent: &str, payload: &Value) -> Value {
 /// Translate agent fields before capture's one privacy and redaction gate.
 fn adapt(
     home: &Path,
-    raw: &crate::raw::Raw,
+    raw: Option<&crate::raw::Raw>,
     agent: &str,
     event: &str,
     payload: &Value,
@@ -1724,6 +1781,7 @@ fn adapt(
     if agent == "cursor"
         && event == "SessionEnd"
         && let Some(path) = str_field(payload, &["transcript_path"])
+        && let Some(raw) = raw
     {
         let (session, _, _) = crate::capture::checkout(&p, settings);
         let session = own_session(session, raw);
@@ -2378,9 +2436,11 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(text.contains("recording has failed since"), "{text}");
+        // Both calls' events are kept for a later write (docs/unwritten.md), and the line says so.
+        assert_eq!(crate::unwritten::counts(home), (2, 0));
         assert_eq!(
             text,
-            crate::failure::line(crate::failure::since(home).unwrap())
+            crate::failure::line(crate::failure::since(home).unwrap(), 2)
         );
         assert!(v.get("systemMessage").is_none());
         assert_eq!(crate::failure::since(home).map(|f| f.1), Some(first));
@@ -5771,7 +5831,7 @@ mod tests {
         );
         let failed = crate::failure::since(home.path()).expect("marked");
         let text = inject_text(home.path(), cwd.path(), Some("s"));
-        assert_eq!(text, crate::failure::line(failed));
+        assert_eq!(text, crate::failure::line(failed, 1));
     }
 
     #[test]
@@ -6011,12 +6071,13 @@ mod tests {
             ),
             "{}"
         );
+        // The prompt the trigger refused was kept, and a later call wrote it (docs/unwritten.md).
         assert_eq!(
             recorded(&dir, "cursor", "cursor-session")
                 .iter()
                 .filter(|e| e.kind == "prompt")
                 .count(),
-            6
+            7
         );
         // A second compaction permits exactly one more injection, scoped to its session.
         assert_eq!(
@@ -6382,70 +6443,121 @@ mod tests {
 
     #[test]
     fn agy_prompt_is_captured_once_even_after_worker_processes_raw_events() {
-        let dir = tmp("agy-prompt");
-        let mut payloads = agy_fixture(&dir);
-        let id = payloads["PreInvocation"]["conversationId"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        drop(crate::raw::open(&dir).unwrap());
-        let conn = Connection::open(dir.join("raw.db")).unwrap();
-        // A failed append must release the step claim so the next hook can capture the prompt.
-        conn.execute_batch(
-            "CREATE TRIGGER refuse_prompt BEFORE INSERT ON records WHEN NEW.kind='prompt'
-            BEGIN SELECT RAISE(ABORT, 'test insert failure'); END;",
-        )
-        .unwrap();
-        let mut output = Vec::new();
-        assert!(
-            run_io(
-                &dir,
-                "agy",
-                "PreInvocation",
-                payloads["PreInvocation"].to_string().as_bytes(),
-                &mut output
-            )
-            .is_err()
-        );
-        // Its injection point: the failure is shown there, in agy's shape.
-        let shown: Value = serde_json::from_slice(&output).unwrap();
-        assert!(
-            shown["injectSteps"][0]["ephemeralMessage"]
+        // A failed append keeps the prompt for the next hook (docs/unwritten.md), or, when it
+        // cannot be kept, gives back the step claim so the next hook captures it: once either way.
+        for keeps in [true, false] {
+            let dir = tmp(if keeps {
+                "agy-prompt-kept"
+            } else {
+                "agy-prompt"
+            });
+            let mut payloads = agy_fixture(&dir);
+            let id = payloads["PreInvocation"]["conversationId"]
                 .as_str()
                 .unwrap()
-                .contains("recording has failed since")
-        );
-        assert!(recorded(&dir, "agy", &id).is_empty());
-        conn.execute_batch("DROP TRIGGER refuse_prompt;").unwrap();
-        for invocation in 0..3 {
-            payloads["PreInvocation"]["invocationNum"] = json!(invocation);
+                .to_owned();
+            drop(crate::raw::open(&dir).unwrap());
+            let conn = Connection::open(dir.join("raw.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER refuse_prompt BEFORE INSERT ON records WHEN NEW.kind='prompt'
+                BEGIN SELECT RAISE(ABORT, 'test insert failure'); END;",
+            )
+            .unwrap();
+            // A file where the kept events' directory goes: nothing can be kept.
+            if !keeps {
+                std::fs::write(dir.join("unwritten"), "").unwrap();
+            }
+            let mut output = Vec::new();
+            assert!(
+                run_io(
+                    &dir,
+                    "agy",
+                    "PreInvocation",
+                    payloads["PreInvocation"].to_string().as_bytes(),
+                    &mut output
+                )
+                .is_err()
+            );
+            // Its injection point: the failure is shown there, in agy's shape.
+            let shown: Value = serde_json::from_slice(&output).unwrap();
+            assert!(
+                shown["injectSteps"][0]["ephemeralMessage"]
+                    .as_str()
+                    .unwrap()
+                    .contains("recording has failed since")
+            );
+            assert!(recorded(&dir, "agy", &id).is_empty());
+            assert_eq!(crate::unwritten::counts(&dir).0, usize::from(keeps));
+            if !keeps {
+                std::fs::remove_file(dir.join("unwritten")).unwrap();
+            }
+            conn.execute_batch("DROP TRIGGER refuse_prompt;").unwrap();
+            for invocation in 0..3 {
+                payloads["PreInvocation"]["invocationNum"] = json!(invocation);
+                assert_eq!(
+                    hook(&dir, "agy", "PreInvocation", &payloads["PreInvocation"]),
+                    "{}"
+                );
+            }
+            assert_eq!(hook(&dir, "agy", "Stop", &payloads["Stop"]), "{}");
+            let expected = "Read the file hello.txt with your file viewing tool, then run the shell command 'ls /nonexistent-dir' and tell me the secret word and the error.";
+            let events = recorded(&dir, "agy", &id);
+            let prompts: Vec<_> = events.iter().filter(|e| e.kind == "prompt").collect();
+            assert_eq!(prompts.len(), 1);
+            assert_eq!(
+                serde_json::from_str::<Value>(&prompts[0].body).unwrap(),
+                json!({"prompt":expected})
+            );
+            crate::worker::run_once(&dir).unwrap();
+            drop(conn);
             assert_eq!(
                 hook(&dir, "agy", "PreInvocation", &payloads["PreInvocation"]),
                 "{}"
             );
+            assert_eq!(hook(&dir, "agy", "Stop", &payloads["Stop"]), "{}");
+            let count = recorded(&dir, "agy", &id)
+                .iter()
+                .filter(|e| e.kind == "prompt")
+                .count();
+            assert_eq!(count, 1);
+            std::fs::remove_dir_all(dir).unwrap();
         }
-        assert_eq!(hook(&dir, "agy", "Stop", &payloads["Stop"]), "{}");
-        let expected = "Read the file hello.txt with your file viewing tool, then run the shell command 'ls /nonexistent-dir' and tell me the secret word and the error.";
-        let events = recorded(&dir, "agy", &id);
-        let prompts: Vec<_> = events.iter().filter(|e| e.kind == "prompt").collect();
-        assert_eq!(prompts.len(), 1);
-        assert_eq!(
-            serde_json::from_str::<Value>(&prompts[0].body).unwrap(),
-            json!({"prompt":expected})
-        );
-        crate::worker::run_once(&dir).unwrap();
-        drop(conn);
-        assert_eq!(
-            hook(&dir, "agy", "PreInvocation", &payloads["PreInvocation"]),
-            "{}"
-        );
-        assert_eq!(hook(&dir, "agy", "Stop", &payloads["Stop"]), "{}");
-        let count = recorded(&dir, "agy", &id)
-            .iter()
+    }
+
+    /// docs/unwritten.md U2, U3: a prompt whose store is held is kept, and the next hook call
+    /// writes it back before its own, so the prompts keep their order.
+    #[test]
+    fn a_prompt_the_store_did_not_take_is_written_by_the_next_call() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let call = |prompt: &str| {
+            let _contending = crate::worker::contending();
+            let _worker = crate::worker::lock(h).unwrap();
+            let payload = json!({"session_id": "s", "cwd": h, "prompt": prompt});
+            run_io(
+                h,
+                "claude",
+                "UserPromptSubmit",
+                payload.to_string().as_bytes(),
+                &mut Vec::new(),
+            )
+        };
+        call("first prompt").unwrap();
+        let held = crate::raw::lock_for_swap(h).unwrap();
+        assert!(call("second prompt").is_err());
+        assert_eq!(crate::unwritten::counts(h), (1, 0));
+        drop(held);
+        call("third prompt").unwrap();
+        assert_eq!(crate::unwritten::counts(h), (0, 0));
+        let prompts: Vec<String> = recorded(h, "claude", "s")
+            .into_iter()
             .filter(|e| e.kind == "prompt")
-            .count();
-        assert_eq!(count, 1);
-        std::fs::remove_dir_all(dir).unwrap();
+            .map(|e| e.body)
+            .collect();
+        assert_eq!(prompts.len(), 3);
+        for (body, word) in prompts.iter().zip(["first", "second", "third"]) {
+            assert!(body.contains(word), "{body}");
+        }
     }
 
     #[test]
