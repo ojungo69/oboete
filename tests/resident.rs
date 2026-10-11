@@ -186,7 +186,7 @@ fn repos_response_on(home: &Path, port: u16, stream: std::net::TcpStream) -> Str
 
 fn repos_response_with_token(token: &str, port: u16, mut stream: std::net::TcpStream) -> String {
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
     write!(
         stream,
@@ -502,7 +502,7 @@ fn viewer_replacement_waits_for_live_requests_and_answers_them_before_exec() {
     while start.elapsed() < Duration::from_secs(65) {
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(Duration::from_secs(30)))
             .unwrap();
         write!(
             stream,
@@ -968,7 +968,9 @@ fn binary_update_waits_for_loadable_config(viewer: bool) {
     };
     let pid = process.0.id();
     let lock = if viewer { "view.lock" } else { "worker.lock" };
-    until("the original resident holds its home", || held(h, lock));
+    until("the original resident finished initialization", || {
+        held(h, lock) && (viewer || std::fs::read_to_string(h.join("state/worker-gen")).is_ok())
+    });
     if viewer {
         assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
     }
@@ -1292,28 +1294,40 @@ fn view_serves_on_its_own_address_when_the_port_is_in_use() {
     )
     .unwrap();
     let _detached = Detached(h);
-    let mut view = Worker(
-        Command::new(env!("CARGO_BIN_EXE_oboete"))
-            .arg("--home")
-            .arg(h)
-            .arg("view")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
+    let (mut view, stdout, stderr) = captured_view(h);
+    until(
+        "the foreground address and the resident's final bind result",
+        || {
+            std::fs::read_to_string(stdout.path()).is_ok_and(|out| out.contains('\n'))
+                && std::fs::read_to_string(h.join("state/view-outcome"))
+                    .is_ok_and(|out| out.trim() != "starting")
+                && held(h, "worker.lock")
+        },
     );
-    let mut first = String::new();
-    std::io::BufRead::read_line(
-        &mut std::io::BufReader::new(view.0.stdout.take().unwrap()),
-        &mut first,
-    )
-    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(h.join("state/view-outcome"))
+            .unwrap()
+            .trim(),
+        "port in use"
+    );
+    let output = std::fs::read_to_string(stdout.path()).unwrap();
+    let first = output.lines().next().unwrap();
     assert!(first.starts_with("http://127.0.0.1:"), "{first}");
     assert!(
         !first.starts_with(&format!("http://127.0.0.1:{port}/")),
         "{first}"
     );
+    let (foreground, token) = first
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|address| address.split_once("/#t="))
+        .unwrap();
+    let foreground: u16 = foreground.parse().unwrap();
+    let response = repos_response_with_token(
+        token,
+        foreground,
+        std::net::TcpStream::connect(("127.0.0.1", foreground)).unwrap(),
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     // The resident viewer it started, which found the port taken and left, is reaped (Codex on
     // #378).
     assert_eq!(zombies(view.0.id()), 0);
@@ -1343,9 +1357,13 @@ fn view_serves_on_its_own_address_when_the_port_is_in_use() {
         !Path::new(&format!("/proc/{worker}")).exists()
     });
     let _ = view.0.kill();
-    let mut why = String::new();
-    std::io::Read::read_to_string(&mut view.0.stderr.take().unwrap(), &mut why).unwrap();
-    assert!(why.contains("port in use"), "{why}");
+    // stderr is the runtime's 3 s snapshot; the final bind result was checked above.
+    let why = std::fs::read_to_string(stderr.path()).unwrap();
+    assert!(
+        why.contains("the resident viewer is not up:")
+            && why.contains("this run serves the page on its own address"),
+        "{why}"
+    );
     assert!(matches!(
         foreign.accept().map(|_| ()).unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock

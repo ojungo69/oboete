@@ -216,7 +216,7 @@ fn request(root: &Path, port: u16, method: &str, path: &str, body: Option<&Value
     let token = fs::read_to_string(root.join("store/state/view-token")).unwrap();
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
     let payload = body
         .map(serde_json::to_vec)

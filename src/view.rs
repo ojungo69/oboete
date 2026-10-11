@@ -6447,7 +6447,7 @@ curate = false
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
         std::fs::create_dir_all(p.join("state")).unwrap();
-        let (started, mut starter) = sleeper(Duration::ZERO, Duration::from_millis(800));
+        let (started, mut starter) = sleeper(Duration::ZERO, Duration::from_secs(5));
         starter.due(p);
         assert_eq!(started.load(Ordering::SeqCst), 1);
         say(p, PORT_IN_USE).unwrap();
@@ -6455,15 +6455,28 @@ curate = false
         starter.due(p);
         assert_eq!(started.load(Ordering::SeqCst), 1, "tried again at once");
         // A worker started anew waits too: the wait is the outcome's (Codex on #378).
-        let (anew, mut fresh) = sleeper(Duration::ZERO, Duration::from_millis(800));
+        let (anew, mut fresh) = sleeper(Duration::ZERO, Duration::from_secs(5));
         fresh.due(p);
         assert_eq!(
             anew.load(Ordering::SeqCst),
             0,
             "a new starter tried at once"
         );
-        std::thread::sleep(Duration::from_millis(500));
-        starter.due(p);
+        // Past the wait it tries again. The outcome is aged instead of waited for, so a busy
+        // machine cannot run the wait out before the checks above (#447).
+        std::fs::File::options()
+            .write(true)
+            .open(p.join("state").join("view-outcome"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(6))
+            .unwrap();
+        // The first child may still be alive on a busy machine (Greptile on #445): looked at
+        // again for a moment, well inside the outcome's own wait of five seconds.
+        let t = Instant::now();
+        while started.load(Ordering::SeqCst) < 2 && t.elapsed() < Duration::from_secs(2) {
+            starter.due(p);
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert_eq!(started.load(Ordering::SeqCst), 2);
         // Between two looks, its minute.
         let (started, mut starter) = sleeper(Duration::from_secs(60), Duration::ZERO);

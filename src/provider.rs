@@ -4386,7 +4386,9 @@ mod tests {
         // ready; starting an interpreter is a separately bounded setup operation.
         let timeout = Duration::from_secs(if cfg!(windows) { 10 } else { 1 });
         let startup = Duration::from_secs(20);
-        let watchdog = (startup.as_secs() + timeout.as_secs() + 7).to_string();
+        // The reader outlives every wait after the fixture's start and the run: the run's 2 s, the
+        // lock's 2 s and the receive's 5 s (Codex on #445).
+        let watchdog = (startup.as_secs() + timeout.as_secs() + 9).to_string();
         for mode in ["timeout", "failure"] {
             let home = tempfile::tempdir().unwrap();
             let admission = crate::dispatch::Admission::shared(home.path()).unwrap();
@@ -4487,7 +4489,13 @@ child.wait()
                 .write(true)
                 .open(home.path().join("dispatch.lock"))
                 .unwrap();
-            let unlocked = registration.try_lock().is_ok();
+            // A concurrent fork may retain the lock until exec; keep the reader paused meanwhile.
+            let until = Instant::now() + Duration::from_secs(2);
+            let mut unlocked = registration.try_lock().is_ok();
+            while !unlocked && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(1));
+                unlocked = registration.try_lock().is_ok();
+            }
             // Give the escaped reader a chance to drain bytes already handed off. A detached
             // blocking feeder would resume and write the rest only after run_cli returned.
             std::fs::write(home.path().join("read-now"), "go").unwrap();

@@ -645,8 +645,16 @@ mod tests {
         crate::model_fetch::verify(&dir, &files).unwrap();
         assert!(state().0 && state().1.contains("ready"), "{:?}", state());
         // Written again, same size: the marker no longer matches, and nothing was hashed to say so.
-        std::fs::remove_file(dir.join("a.json")).unwrap();
-        std::fs::write(dir.join("a.json"), "x").unwrap();
+        let file = dir.join("a.json");
+        let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::fs::write(&file, "x").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(modified + Duration::from_secs(10))
+            .unwrap();
         assert!(
             !state().0 && state().1.contains("not verified"),
             "{:?}",
