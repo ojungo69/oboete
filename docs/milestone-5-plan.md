@@ -378,7 +378,7 @@ vector も持ち越さない）、進み方と再開（step の数字ではな�
 4. 同じ claude-mem DB の再 import は書き換えた文書を戻さない。
 5. forget を 2 件続けて登録しても rebuild は 1 回。
 6. rebuild の途中で止めた purge を続けると、`knowledge.db.rebuilding-*` から忘れた uid の vector が
-   戻らない。rebuild の後、aside を消す前に止めた purge は、続けても rebuild せずに aside を消す。
+   戻らない。rebuild の後、aside を消す前に止めた purge は、続けるともう一度 rebuild してから aside を消す（決定 7: rebuild が終わったことはどこにも記録されない）。
    step 3 と記録された job でも、restore で本文が戻れば step 2 からやり直す。
 7. purge が 2 つ同時に始まっても（`--yes` と、worker が起動した `--continue`）、進めるのは一つで、
    rebuild は 1 回。worker は未完了の job があると `--continue` を起動し、10 分のうちに二度は起動しない。
