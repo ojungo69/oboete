@@ -4491,16 +4491,11 @@ child.wait()
                 .unwrap();
             // A concurrent fork may retain the lock until exec; keep the reader paused meanwhile.
             let until = Instant::now() + Duration::from_secs(2);
-            let unlocked = loop {
-                match registration.try_lock() {
-                    Ok(()) => break true,
-                    Err(std::fs::TryLockError::WouldBlock) if Instant::now() < until => {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    Err(std::fs::TryLockError::WouldBlock) => break false,
-                    Err(error) => panic!("dispatch fixture lock: {error}"),
-                }
-            };
+            let mut unlocked = registration.try_lock().is_ok();
+            while !unlocked && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(1));
+                unlocked = registration.try_lock().is_ok();
+            }
             // Give the escaped reader a chance to drain bytes already handed off. A detached
             // blocking feeder would resume and write the rest only after run_cli returned.
             std::fs::write(home.path().join("read-now"), "go").unwrap();

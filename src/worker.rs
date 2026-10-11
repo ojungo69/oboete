@@ -4459,11 +4459,7 @@ mod tests {
         assert!(p.join("knowledge.db").exists());
         let released = std::fs::File::open(path).unwrap();
         until("the rebuild status lock is released", || {
-            match released.try_lock() {
-                Ok(()) => true,
-                Err(std::fs::TryLockError::WouldBlock) => false,
-                Err(error) => panic!("rebuild status lock: {error}"),
-            }
+            released.try_lock().is_ok()
         });
     }
 
