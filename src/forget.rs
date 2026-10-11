@@ -2687,8 +2687,13 @@ mod tests {
             zstd::bulk::compress(damaged.join("\n").as_bytes(), 3).unwrap(),
         )
         .unwrap();
-        let notes = dir.join("notes.ops.zst.quarantined-old");
-        std::fs::write(&notes, "the owner's notes").unwrap();
+        let notes = [
+            dir.join("notes.ops.zst.quarantined-old"),
+            dir.join("notes!-000000000001-000000000002.ops.zst"),
+        ];
+        for file in &notes {
+            std::fs::write(file, "the owner's notes").unwrap();
+        }
         forget(&home, &uid);
         let job = uid_jobs(&home)[0].1.clone();
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
@@ -2700,10 +2705,9 @@ mod tests {
             assert!(!part.exists(), "{part:?}");
         }
         assert_eq!(backup_canaries(&home), Vec::<String>::new());
-        assert_eq!(
-            std::fs::read_to_string(&notes).unwrap(),
-            "the owner's notes"
-        );
+        for file in &notes {
+            assert_eq!(std::fs::read_to_string(file).unwrap(), "the owner's notes");
+        }
         let after = segment_text(&first);
         assert_eq!(after.lines().count(), before.lines().count());
         let mut changed = 0;

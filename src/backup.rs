@@ -1004,11 +1004,8 @@ pub(crate) fn purge_ops(
             if leftover(name) {
                 std::fs::remove_file(&path)?;
             }
-        } else if path
-            .file_name()
-            .and_then(segment_name)
-            .is_some_and(|(ops, ..)| ops)
-        {
+        } else if ops_segment(name) {
+            // Under the names oboete gives only, as for the set-aside ones (Codex on #453).
             live.push(path);
         } else if set_aside(name) {
             aside.push(path);
