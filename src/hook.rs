@@ -910,7 +910,8 @@ fn apply_changes(
 /// Milestone 5 D5 (2b): a session's shown value without the entries of `uids`, in either form
 /// (OpenCode's receipts hold bodies in their changes and replacements too), or None when it holds
 /// none of them. A value that does not parse, or parses as neither form, becomes an empty set: it
-/// could hold anything, and losing it costs a body shown again (Codex on #444).
+/// could hold anything, and losing it costs a body shown again (Codex on #444). OpenCode's form is
+/// written again from what parsed, so a field it does not know goes too (Codex on #444).
 pub(crate) fn without_uids(
     value: &str,
     uids: &std::collections::HashSet<String>,
@@ -921,29 +922,17 @@ pub(crate) fn without_uids(
     let before = v.clone();
     let strip = |m: &mut serde_json::Map<String, Value>| m.retain(|uid, _| !uids.contains(uid));
     if v.get("entries").is_some() || v.get("pending").is_some() {
-        if serde_json::from_value::<OpencodeShown>(v.clone()).is_err() {
+        let Ok(mut shown) = serde_json::from_value::<OpencodeShown>(v.clone()) else {
             return Some("{}".into());
-        }
-        if let Some(m) = v.get_mut("entries").and_then(Value::as_object_mut) {
-            strip(m);
-        }
-        for receipt in v
-            .get_mut("pending")
-            .and_then(Value::as_array_mut)
-            .into_iter()
-            .flatten()
-        {
-            if let Some(changes) = receipt.get_mut("changes").and_then(Value::as_array_mut) {
-                changes.retain(|c| {
-                    !c.get("uid")
-                        .and_then(Value::as_str)
-                        .is_some_and(|u| uids.contains(u))
-                });
-            }
-            if let Some(m) = receipt.get_mut("replace").and_then(Value::as_object_mut) {
+        };
+        strip(&mut shown.entries);
+        for receipt in &mut shown.pending {
+            receipt.changes.retain(|c| !uids.contains(&c.uid));
+            if let Some(m) = &mut receipt.replace {
                 strip(m);
             }
         }
+        v = serde_json::to_value(shown).unwrap_or_default();
     } else if let Some(m) = v.as_object_mut() {
         strip(m);
     } else {
@@ -6495,7 +6484,8 @@ mod tests {
 
     /// Milestone 5 D5 (2b): a shown value loses a forgotten uid's entries in either form, OpenCode's
     /// receipts' changes and replacements too, and keeps the rest; one that holds none is left
-    /// alone, and one that does not parse becomes an empty set.
+    /// alone, one that does not parse becomes an empty set, and a field OpenCode's form does not
+    /// know goes.
     #[test]
     fn a_shown_value_loses_a_forgotten_uids_entries() {
         let gone = std::collections::HashSet::from(["g".to_owned()]);
@@ -6522,6 +6512,22 @@ mod tests {
         assert_eq!(state.pending[0].changes.len(), 1);
         assert_eq!(without_uids(&out, &gone), None);
         assert_eq!(without_uids("not json", &gone).as_deref(), Some("{}"));
+        // A field the form does not know could hold a body too (Codex on #444).
+        let extra = json!({
+            "entries": {"k": entry("Kept.")},
+            "pending": [{
+                "id": "0".repeat(32),
+                "at": 1,
+                "changes": [{"uid": "k", "before": null, "after": entry("Kept."), "note": "Gone."}],
+                "replace": null,
+                "draft": "Gone.",
+            }],
+            "cache": "Gone.",
+        })
+        .to_string();
+        let out = without_uids(&extra, &gone).unwrap();
+        assert!(!out.contains("Gone.") && out.contains("Kept."), "{out}");
+        assert_eq!(without_uids(&out, &gone), None);
         // JSON of neither form could hold a body where neither strip looks (Codex on #444).
         for odd in [
             r#"["Gone."]"#,

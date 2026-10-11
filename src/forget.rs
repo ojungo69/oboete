@@ -741,17 +741,17 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     // rebuild finished (Codex on #444).
     crate::worker::rebuild(home).context("knowledge.db was not rebuilt")?;
     purged.rebuilt = true;
-    #[cfg(test)]
-    if let Some(after) = AFTER_REBUILD.with(|hook| hook.borrow_mut().take()) {
-        after();
-    }
-    let holding = knowledge_holding(home, &uids)?;
     purged.shown =
         crate::hookstate::update_all(home, "shown", |v| crate::hook::without_uids(v, &uids))?;
-    // The copies set aside, then step 3, under the worker lock as a restore takes it: a restore
-    // that put the bodies back since step 2 leaves the job to the next continuation (Codex on
-    // #444).
+    #[cfg(test)]
+    if let Some(before) = BEFORE_STEP_3.with(|hook| hook.borrow_mut().take()) {
+        before();
+    }
+    // What knowledge.db holds, the copies set aside, then step 3, under the worker lock as a
+    // restore takes it: a restore that put the bodies back since step 2 leaves the job to the next
+    // continuation (Codex on #444).
     let _worker = crate::worker::lock_asking(home)?;
+    let holding = knowledge_holding(home, &uids)?;
     let raw = crate::raw::open(home)?;
     if !aside_files(home)?.is_empty() {
         crate::embed_phase::carry_set_aside(home, &crate::knowledge::open(home)?, &raw)?;
@@ -782,8 +782,9 @@ const CONTINUE_EVERY_MS: i64 = 10 * 60 * 1000;
 thread_local! {
     /// The `oboete forget --continue` a worker on this thread would have started.
     pub(crate) static CONTINUED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// What happens to knowledge.db right after a purge's rebuild on this thread.
-    static AFTER_REBUILD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+    /// What happens to the home after a purge's rebuild on this thread, before its step 3 takes
+    /// the worker lock.
+    static BEFORE_STEP_3: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -2374,7 +2375,7 @@ mod tests {
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
         drop(raw);
         let at = home.clone();
-        AFTER_REBUILD.with(|hook| {
+        BEFORE_STEP_3.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
                 let conn = rusqlite::Connection::open(at.join("raw.db")).unwrap();
                 for (device, seq, _, body) in &before {
@@ -2449,7 +2450,7 @@ mod tests {
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
         drop(raw);
         let (at, left) = (home.clone(), uid.clone());
-        AFTER_REBUILD.with(|hook| {
+        BEFORE_STEP_3.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
                 crate::knowledge::open(&at)
                     .unwrap()

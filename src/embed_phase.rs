@@ -1119,21 +1119,21 @@ pub fn carry(k: &Connection, from: &Path, forgotten: &HashSet<String>) -> Result
 pub(crate) fn carry_set_aside(home: &Path, k: &Connection, raw: &Raw) -> Result<()> {
     use crate::knowledge::checkpoint;
     let done = checkpoint::get(k, "carried", "")?;
-    let aside: Vec<(i64, String)> = std::fs::read_dir(home)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            let at = ["knowledge.db.quarantined-", "knowledge.db.rebuilding-"]
-                .iter()
-                .find_map(|p| name.strip_prefix(p))?
-                .parse()
-                .ok()?;
-            Some((at, name))
-        })
-        .filter(|(at, _)| *at > done)
-        .collect();
+    // A listing or an entry that cannot be read is an error, not a copy passed over: the purge
+    // removes every copy after this (Codex on #444).
+    let mut aside: Vec<(i64, String)> = Vec::new();
+    for entry in std::fs::read_dir(home)? {
+        let Ok(name) = entry?.file_name().into_string() else {
+            continue;
+        };
+        let at = ["knowledge.db.quarantined-", "knowledge.db.rebuilding-"]
+            .iter()
+            .find_map(|p| name.strip_prefix(p))
+            .and_then(|at| at.parse().ok());
+        if let Some(at) = at.filter(|at| *at > done) {
+            aside.push((at, name));
+        }
+    }
     let forgotten = if aside.is_empty() {
         HashSet::new()
     } else {
