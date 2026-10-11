@@ -2692,6 +2692,8 @@ mod tests {
         let notes = [
             dir.join("notes.ops.zst.quarantined-old"),
             dir.join("notes!-000000000001-000000000002.ops.zst"),
+            dir.join("d-000000000000-000000000000.ops.zst"),
+            dir.join("d-000000000002-000000000001.ops.zst"),
         ];
         for file in &notes {
             std::fs::write(file, "the owner's notes").unwrap();

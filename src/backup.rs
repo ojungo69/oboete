@@ -1090,6 +1090,9 @@ fn ops_segment(name: &str) -> bool {
     segment_name(std::ffi::OsStr::new(name)).is_some_and(|(ops, device, first, last)| {
         ops && !device.is_empty()
             && device.chars().all(|c| c.is_ascii_alphanumeric())
+            // An export's op range starts at 1 and never runs backwards (Codex on #453).
+            && first >= 1
+            && last >= first
             && self::name(&device, first, last, Kind::Ops) == name
     })
 }
