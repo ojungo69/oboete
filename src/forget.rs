@@ -316,6 +316,14 @@ pub struct Status {
 pub fn preview(home: &Path, target: Target) -> Result<Preview> {
     anyhow::ensure!(crate::raw::exists(home), "no raw store to forget from");
     let raw = crate::raw::open(home)?;
+    // Milestone 5 D5 (#439): every target's sample is read under the read fence, so a forget by
+    // another process cannot commit between its checks and its sample (a record's or a span's too:
+    // Codex on #446). Dropped before any registration: `start` takes the lock alone.
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+    #[cfg(test)]
+    if let Some(between) = SAMPLING.take() {
+        between();
+    }
     match target {
         Target::Uid { uid } => uid_preview(home, &raw, uid),
         target => raw.forget_preview(target),
@@ -454,6 +462,44 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
         sample: sample.map(|s| line(&s)),
         uid: Some(uid_preview),
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Run in a uid's preview between its check and its sample (#439).
+    static SAMPLING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Tests (#439): a forget of `uid` registering on another thread, until it waits on the fence: a
+/// read that holds the fence keeps it waiting, so the uid is not forgotten yet. Join it once the
+/// read is done.
+#[cfg(test)]
+pub(crate) fn registering(home: &Path, uid: &str) -> std::thread::JoinHandle<()> {
+    let t = registering_target(home, Target::parse_uid(uid).unwrap());
+    assert!(!crate::raw::open(home).unwrap().forgotten(uid).unwrap());
+    t
+}
+
+/// `registering` for any target.
+#[cfg(test)]
+fn registering_target(home: &Path, target: Target) -> std::thread::JoinHandle<()> {
+    let h = home.to_owned();
+    crate::dispatch::blocked(home); // an earlier registration's wait is not this one's
+    let t = std::thread::spawn(move || {
+        let p = preview(&h, target).unwrap();
+        start(&h, &p).unwrap();
+    });
+    // Until the registration has met the read's fence: a thread that has not reached it yet
+    // would pass without one (Greptile on #446).
+    let started = std::time::Instant::now();
+    while !crate::dispatch::blocked(home) {
+        assert!(!t.is_finished(), "the forget did not wait for the read");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(!t.is_finished(), "the forget did not wait for the read");
+    t
 }
 
 /// Registers `preview` in one raw transaction (rule 1), then writes it to both logs, after the
@@ -1037,6 +1083,39 @@ pub(crate) fn check_identity(s: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::raw::{self, Item};
+
+    /// D5 (#439): a forget registered by another process while a preview reads waits for the
+    /// preview: its sample is the one read before the commit.
+    #[test]
+    fn a_forget_registered_inside_a_preview_waits_for_it() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        s.run();
+        let home = s.home.path().to_owned();
+        let (h, u) = (home.clone(), uid.clone());
+        let (sent, started) = std::sync::mpsc::channel();
+        SAMPLING.set(Some(Box::new(move || {
+            sent.send(registering(&h, &u)).unwrap();
+        })));
+        let p = preview(&home, Target::parse_uid(&uid).unwrap()).unwrap();
+        assert!(p.sample.as_deref().is_some_and(|s| s.contains("Use tabs.")));
+        started.recv().unwrap().join().unwrap();
+        assert!(preview(&home, Target::parse_uid(&uid).unwrap()).is_err());
+        // A record's preview holds it too (Codex on #446).
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let seq = native(&mut raw, "a", r#"{"prompt":"a synthetic canary"}"#);
+        let (h, target) = (home.path().to_owned(), record(&raw, seq));
+        let (sent, started) = std::sync::mpsc::channel();
+        let registered = target.clone();
+        SAMPLING.set(Some(Box::new(move || {
+            sent.send(registering_target(&h, registered)).unwrap();
+        })));
+        let p = preview(home.path(), target).unwrap();
+        assert!(p.sample.as_deref().is_some_and(|s| s.contains("canary")));
+        started.recv().unwrap().join().unwrap();
+        assert!(!shown(&raw, seq));
+    }
 
     #[test]
     fn bounded_log_lines_keep_crlf_the_cap_and_a_final_request() {
