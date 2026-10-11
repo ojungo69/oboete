@@ -490,6 +490,7 @@ mod tests {
         assert_eq!(counts(h).unwrap(), (0, 0));
         let later = prompt("third", 2_000);
         raw.append_with_ledger(&later.event, &later.ledger, &ruleset)
+            .unwrap()
             .unwrap();
         let events = events(&raw);
         assert_eq!(events.len(), 3);

@@ -95,8 +95,8 @@ enum Cmd {
     /// with no AI call
     Rebuild,
     /// Register an irreversible forget: raw records, with their sessions' records from other
-    /// sources, or a claim's or an imported document's uid (a record's physical purge is not built
-    /// yet)
+    /// sources, a whole session, or a claim's or an imported document's uid (a record's physical
+    /// purge is not built yet)
     Forget {
         /// Raw id from search: <device>:<seq>
         #[arg(long, conflicts_with_all = ["span", "status"])]
@@ -108,6 +108,10 @@ enum Cmd {
         /// A claim's uid, or an imported document's, from search or get
         #[arg(long, conflicts_with_all = ["record", "span", "status"])]
         uid: Option<String>,
+        /// The session a raw record was recorded in, by the record's id from search: every
+        /// source's records of it, and later records of it from before the forget
+        #[arg(long, conflicts_with_all = ["record", "span", "uid", "status"])]
+        session: Option<String>,
         /// Print the preview and skip its confirmation
         #[arg(long, conflicts_with = "status")]
         yes: bool,
@@ -115,7 +119,7 @@ enum Cmd {
         #[arg(long)]
         status: bool,
         /// Purge what forgotten uids' requests left unpurged (the worker runs it when one waits)
-        #[arg(long = "continue", conflicts_with_all = ["record", "span", "uid", "status", "yes"])]
+        #[arg(long = "continue", conflicts_with_all = ["record", "span", "uid", "session", "status", "yes"])]
         resume: bool,
     },
     /// Curate again what was curated before: the spans queued since (a quote a new rule masked
@@ -733,6 +737,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             record,
             span,
             uid,
+            session,
             yes,
             status,
             resume,
@@ -741,6 +746,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             record.as_deref(),
             span.as_deref(),
             uid.as_deref(),
+            session.as_deref(),
             yes,
             status,
             resume,

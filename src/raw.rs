@@ -112,6 +112,13 @@ CREATE TABLE IF NOT EXISTS forget_jobs(
 -- transaction that wrote its events: a file a call left behind after that commit is removed, never
 -- written again. Not a name: they start again from 0 once the directory is empty.
 CREATE TABLE IF NOT EXISTS unwritten_written(hash TEXT PRIMARY KEY, at INTEGER NOT NULL);
+-- Milestone 5 slice 3b (D3): each page of a scope's forget, by its kind (`session`), its key (the
+-- session's hash) and when it was registered: a record of that scope from before then, arriving
+-- later, is not recorded. A row a page, so read whole: no index on the key (spec 1.6, a label is
+-- no index root).
+CREATE TABLE IF NOT EXISTS denied_scopes(
+  job TEXT PRIMARY KEY, kind TEXT NOT NULL, key TEXT NOT NULL, before INTEGER NOT NULL
+);
 ";
 
 /// Only a fresh schema needs an identity. The replacements are OS-random hex and the native
@@ -1326,6 +1333,9 @@ impl Raw {
         &self,
         target: crate::forget::Target,
     ) -> Result<crate::forget::Preview> {
+        if let crate::forget::Target::Session { agent, session } = &target {
+            return self.session_preview(agent, session);
+        }
         let (device, from, to) = target.bounds()?;
         let device = device.to_owned();
         let device = device.as_str();
@@ -1395,7 +1405,235 @@ impl Raw {
             denied: self.denied_count()?,
             sources,
             uid: None,
+            session: None,
         })
+    }
+
+    /// Slice 3b: what forgetting the session `session` of `agent` (its hash of the session's id)
+    /// would register: every record of it with text or a v1 touch, whichever source's and device's
+    /// in this store
+    /// (no copies to add: every source is picked), an import's by the session its importer hashed,
+    /// a live one's by its label when that is the agent's own id; a forgotten one left out. Its
+    /// ambiguous transcript records are taken: the session's denial refuses its records from before
+    /// it that arrive later (D3), so a re-import cannot bring one back under another identity.
+    /// The records alone, as `forget_start` reads them again: `session_summary` adds the rest.
+    fn session_preview(&self, agent: &str, session: &str) -> Result<crate::forget::Preview> {
+        anyhow::ensure!(
+            self.home_id_proven()?,
+            "this store has no verified home identity: forget was not registered"
+        );
+        let found = self.session_records(agent, session)?;
+        let mut sources = Vec::<String>::new();
+        for (n, _, _) in &found {
+            if !sources.contains(&n.source) {
+                sources.push(n.source.clone());
+            }
+        }
+        Ok(crate::forget::Preview {
+            target: crate::forget::Target::Session {
+                agent: agent.into(),
+                session: session.into(),
+            },
+            records: found
+                .iter()
+                .map(|(n, _, _)| crate::forget::Record {
+                    device: n.device.clone(),
+                    seq: n.seq,
+                    origin: n.origin.clone(),
+                    session: session.into(),
+                    ts: n.ts,
+                })
+                .collect(),
+            copies: Vec::new(),
+            passed: 0,
+            denied: self.denied_count()?,
+            sources,
+            sample: None,
+            uid: None,
+            session: None,
+        })
+    }
+
+    /// The session's records `session_preview` takes, each with its time and kind, in (device,
+    /// seq) order.
+    fn session_records(&self, agent: &str, session: &str) -> Result<Vec<(Named, i64, String)>> {
+        let mut found: Vec<(Named, i64, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut st = self.conn.prepare(
+            "SELECT o.device, o.seq, o.origin, o.ambiguous, r.source, r.kind, r.ts
+             FROM import_origins o JOIN records r ON r.device = o.device AND r.seq = o.seq
+             WHERE o.native_session = ?1 AND r.type = 'event'",
+        )?;
+        let rows = st
+            .query_map([session], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, bool>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (device, seq, origin, ambiguous, source, kind, ts) in rows {
+            let Some(family) = Family::of(&source) else {
+                continue;
+            };
+            if denied(&self.conn, Some(&origin), "")? || !seen.insert((device.clone(), seq)) {
+                continue;
+            }
+            found.push((
+                Named {
+                    device,
+                    seq,
+                    // Rule 10: only a record the transcript cut counts keeps its time.
+                    ts: (family != Family::Transcript && kind != "touch").then_some(ts),
+                    origin,
+                    session: Some(session.into()),
+                    family,
+                    agent: Some(agent.into()),
+                    ambiguous,
+                    source,
+                    sample: None,
+                },
+                ts,
+                kind,
+            ));
+        }
+        let live = LIVE.map(|s| format!("'{s}'")).join(",");
+        let labels: Vec<String> = self
+            .conn
+            .prepare(&format!(
+                "SELECT DISTINCT session FROM records WHERE type = 'event' AND agent = ?1
+                   AND source IN ({live}) AND session IS NOT NULL"
+            ))?
+            .query_map([agent], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut st = self.conn.prepare(&format!(
+            "SELECT device, seq, ts, source, kind FROM records WHERE type = 'event' AND agent = ?1
+               AND session = ?2 AND source IN ({live})"
+        ))?;
+        for label in labels.iter().filter(|l| {
+            *l != "unknown"
+                && !l.starts_with("unknown-")
+                && crate::forget::session(agent, l) == session
+        }) {
+            let rows = st
+                .query_map(params![agent, label], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            // A masked label hashes to another session, and live capture records no touch.
+            for (device, seq, ts, source, kind) in rows {
+                let origin = crate::forget::live_origin(&device, seq, ts);
+                if denied(&self.conn, Some(&origin), "")? || !seen.insert((device.clone(), seq)) {
+                    continue;
+                }
+                found.push((
+                    Named {
+                        device,
+                        seq,
+                        ts: Some(ts),
+                        origin,
+                        session: Some(session.into()),
+                        family: Family::Live,
+                        agent: Some(agent.into()),
+                        ambiguous: false,
+                        source,
+                        sample: None,
+                    },
+                    ts,
+                    kind,
+                ));
+            }
+        }
+        found.sort_by(|a, b| (&a.0.device, a.0.seq).cmp(&(&b.0.device, b.0.seq)));
+        Ok(found)
+    }
+
+    /// Slice 3b: a session preview's lines (spec 6.2): its agent, its first record's time, its
+    /// records by source and device, its first prompt's first characters, and how many live records
+    /// of its agent name no session (no copy among them can be found).
+    pub(crate) fn session_summary(&self, preview: &mut crate::forget::Preview) -> Result<()> {
+        let crate::forget::Target::Session { agent, session } = &preview.target else {
+            return Ok(());
+        };
+        let found = self.session_records(agent, session)?;
+        let mut sources = std::collections::BTreeMap::<String, usize>::new();
+        let mut devices = std::collections::HashSet::new();
+        for (n, _, _) in &found {
+            *sources.entry(n.source.clone()).or_default() += 1;
+            devices.insert(n.device.clone());
+        }
+        if let Some((n, _, _)) = found
+            .iter()
+            .filter(|(_, _, kind)| kind == "prompt")
+            .min_by_key(|(_, ts, _)| *ts)
+        {
+            preview.sample = self
+                .after(&n.device, n.seq - 1, 1)?
+                .into_iter()
+                .find_map(|r| match r.item {
+                    Item::Event(e) if r.seq == n.seq => Some(e.body.chars().take(120).collect()),
+                    _ => None,
+                });
+        }
+        let live = LIVE.map(|s| format!("'{s}'")).join(",");
+        let idless: i64 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM records r WHERE r.type = 'event' AND r.agent = ?1
+                   AND r.source IN ({live}) AND (r.session IS NULL OR r.session = 'unknown'
+                   OR r.session LIKE 'unknown-%' OR EXISTS(SELECT 1 FROM ledger l
+                     WHERE l.device = r.device AND l.seq = r.seq AND l.field = 'session'))"
+            ),
+            [agent],
+            |r| r.get(0),
+        )?;
+        preview.session = Some(crate::forget::SessionPreview {
+            agent: agent.clone(),
+            first: found.iter().map(|(_, ts, _)| *ts).min(),
+            sources: sources.into_iter().collect(),
+            devices: devices.len(),
+            idless: usize::try_from(idless).unwrap_or(0),
+        });
+        Ok(())
+    }
+
+    /// Slice 3b: the session a record was recorded in, by its agent and its hash: an import's as
+    /// its importer kept it, a live record's from its label when that is its agent's own id.
+    pub(crate) fn session_of(&self, device: &str, seq: i64) -> Result<(String, String)> {
+        use rusqlite::OptionalExtension;
+        let row: Option<(Option<String>, Option<String>, String)> = self
+            .conn
+            .query_row(
+                "SELECT agent, session, source FROM records WHERE device = ?1 AND seq = ?2
+                   AND type = 'event'",
+                params![device, seq],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((Some(agent), label, source)) = row else {
+            anyhow::bail!("no record {device}:{seq} of an agent to name a session by");
+        };
+        let session = match self.origin_of(device, seq)? {
+            Some((_, session, _)) if !is_live(&source) => session,
+            _ => match label {
+                Some(label) => self.verified_session(device, seq, &agent, &label)?,
+                None => None,
+            },
+        };
+        let session = session.with_context(|| {
+            format!("record {device}:{seq} names no session its agent sent: nothing was registered")
+        })?;
+        Ok((agent, session))
     }
 
     /// The record at `device`:`seq` as forget names it: an import's identity as its importer kept
@@ -1712,9 +1950,9 @@ impl Raw {
     pub(crate) fn forget_start(
         &mut self,
         preview: &crate::forget::Preview,
-        job: &str,
+        job: &mut dyn FnMut() -> Result<String>,
         started: i64,
-    ) -> Result<crate::forget::Request> {
+    ) -> Result<Vec<crate::forget::Request>> {
         preview.validate()?;
         let _dispatch =
             crate::dispatch::exclusive(&self.home).context("forget was not registered")?;
@@ -1736,27 +1974,47 @@ impl Raw {
             again.token()? == preview.token()?,
             "forget preview is stale; preview again"
         );
-        let uid = matches!(preview.target, crate::forget::Target::Uid { .. });
         // A binary before slice 3a cannot compute a live record's identity: it would hold a
         // version 1 request of one as applied, the record still shown. Version 3 it skips as
         // unknown (rule 9; Codex on #460).
         let live = preview.sources.iter().any(|s| is_live(s));
-        let request = crate::forget::Request {
-            v: match (uid, preview.copies.is_empty() && !live) {
-                (true, _) => 2,
-                (false, true) => 1,
-                (false, false) => 3,
-            },
-            home: self.home_id.clone(),
-            job: job.into(),
-            started,
-            target: preview.target.clone(),
-            records: [preview.records.as_slice(), &preview.copies].concat(),
+        // Slice 3b: a session's records go in pages of at most MAX_RECORDS, one request and job
+        // each, all in this transaction (rule 9).
+        let (v, pages) = match &preview.target {
+            crate::forget::Target::Uid { .. } => (2, vec![Vec::new()]),
+            crate::forget::Target::Session { .. } => (
+                4,
+                preview
+                    .records
+                    .chunks(crate::forget::MAX_RECORDS)
+                    .map(<[_]>::to_vec)
+                    .collect(),
+            ),
+            _ => (
+                if preview.copies.is_empty() && !live {
+                    1
+                } else {
+                    3
+                },
+                vec![[preview.records.as_slice(), &preview.copies].concat()],
+            ),
         };
-        request.check()?;
-        apply_request(&tx, &self.device, &request)?;
+        let mut requests = Vec::with_capacity(pages.len());
+        for records in pages {
+            let request = crate::forget::Request {
+                v,
+                home: self.home_id.clone(),
+                job: job()?,
+                started,
+                target: preview.target.clone(),
+                records,
+            };
+            request.check()?;
+            apply_request(&tx, &self.device, &request)?;
+            requests.push(request);
+        }
         tx.commit()?;
-        Ok(request)
+        Ok(requests)
     }
 
     /// Applies each of `requests` that raw does not hold, by identity (rule 5), in one
@@ -1985,23 +2243,29 @@ impl Raw {
     /// Append one event as this device's next seq. The write lock taken by `BEGIN IMMEDIATE`
     /// makes reading the last seq and inserting the next one atomic across processes.
     pub fn append(&mut self, e: &Event) -> Result<i64> {
-        self.append_with_ledger(e, &[], "")
+        self.append_with_ledger(e, &[], "")?
+            .context("a record of a forgotten session from before its forget: not recorded")
     }
 
     /// `append`, with the event's redaction ledger rows in the same transaction; `ruleset` is the
-    /// version of the rules that found them (`redact::Rules::version`).
+    /// version of the rules that found them (`redact::Rules::version`). None, and nothing recorded,
+    /// for a record of a forgotten session from before its forget (slice 3b, D3): a hook call that
+    /// took its time before the registration and waited for this lock behind it.
     pub fn append_with_ledger(
         &mut self,
         e: &Event,
         ledger: &[(String, crate::redact::Finding)],
         ruleset: &str,
-    ) -> Result<i64> {
+    ) -> Result<Option<i64>> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if session_tombstoned(&tx, &crate::forget::session(&e.agent, &e.session), e.ts)? {
+            return Ok(None);
+        }
         let seq = insert_event(&tx, &self.device, e, ledger, ruleset)?;
         tx.commit()?;
-        Ok(seq)
+        Ok(Some(seq))
     }
 
     /// The events one hook call kept when its write failed (docs/unwritten.md U3), with their
@@ -2026,7 +2290,11 @@ impl Raw {
             return Ok(false);
         }
         for c in events {
-            insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
+            // Slice 3b (D3): a forgotten session's record from before its forget is not recorded.
+            let session = crate::forget::session(&c.event.agent, &c.event.session);
+            if !session_tombstoned(&tx, &session, c.event.ts)? {
+                insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
+            }
         }
         tx.commit()?;
         Ok(true)
@@ -2113,15 +2381,16 @@ impl Raw {
             if denied(&tx, origin, &c.event.body)? {
                 continue;
             }
+            let session = identity.map_or_else(
+                || crate::forget::session(&c.event.agent, &c.event.session),
+                |i| i.session.clone(),
+            );
+            // Slice 3b (D3): a forgotten session's record from before its forget is not imported.
+            if session_tombstoned(&tx, &session, c.event.ts)? {
+                continue;
+            }
             if c.event.kind != "touch" {
-                check_cross_source_forget(
-                    &tx,
-                    &identity.map_or_else(
-                        || crate::forget::session(&c.event.agent, &c.event.session),
-                        |i| i.session.clone(),
-                    ),
-                    &c.event.source,
-                )?;
+                check_cross_source_forget(&tx, &session, &c.event.source)?;
             }
             let seq = insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
             if let Some(identity) = identity {
@@ -3944,6 +4213,15 @@ pub(crate) fn apply_request(
         let body = serde_json::json!({"uid": uid, "job": r.job}).to_string();
         insert_ops(conn, device, &[(OpKind::Forget.name(), body)])?;
     }
+    // Slice 3b (D3): the session's records from before the registration that arrive later are
+    // refused, by every request and log line that brings a page of it.
+    if let crate::forget::Target::Session { session, .. } = &r.target {
+        conn.execute(
+            "INSERT OR IGNORE INTO denied_scopes(job, kind, key, before)
+             VALUES(?1, 'session', ?2, ?3)",
+            params![r.job, session, r.started],
+        )?;
+    }
     for rec in &r.records {
         conn.execute(
             "INSERT OR IGNORE INTO denied_records(origin, device, seq, ts, session, job)
@@ -4004,6 +4282,17 @@ pub(crate) fn apply_request(
         "INSERT OR IGNORE INTO forget_jobs(id, request, started, step) VALUES(?1, ?2, ?3, 1)",
         params![r.job, serde_json::to_string(r)?, r.started],
     )? == 1)
+}
+
+/// Slice 3b (D3): whether a record of `session` (its agent's hash of the session's id) recorded at
+/// `ts` comes from before a registered forget of that session.
+fn session_tombstoned(conn: &Connection, session: &str, ts: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM denied_scopes
+           WHERE kind = 'session' AND key = ?1 AND before >= ?2)",
+        params![session, ts],
+        |r| r.get(0),
+    )?)
 }
 
 /// Milestone 5 D5 (2c, decision 5): each copy of raw.db set aside (`raw.db.quarantined-*`,

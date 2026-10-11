@@ -998,7 +998,9 @@ pub fn record(
             &b.captured.ledger,
             settings.rules.version(),
         ) {
-            Ok(seq) => appended.push((seq, b.captured.event.clone())),
+            Ok(Some(seq)) => appended.push((seq, b.captured.event.clone())),
+            // Slice 3b (D3): a forgotten session's event from before its forget, not recorded.
+            Ok(None) => {}
             Err(e) => {
                 *failed = crate::failure::now();
                 keep(home, agent, &built[n..], settings, true);

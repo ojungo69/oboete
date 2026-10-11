@@ -623,6 +623,7 @@ pub(crate) fn pref_add_recorded(
     let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
     let seq = raw
         .append_with_ledger(&c.event, &c.ledger, settings.rules.version())
+        .and_then(|seq| anyhow::Context::context(seq, "its session is forgotten: not recorded"))
         .map_err(OwnerRefusal::unavailable)?;
     let evidence = Evidence {
         device: raw.device().to_owned(),
