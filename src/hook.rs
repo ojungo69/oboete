@@ -744,7 +744,8 @@ fn shell_read_paths(command: &str, cwd: &Path) -> Vec<String> {
 /// with whether it is an operator: a run of `|`, `&`, `;`, `<`, `>`, or a `(` or `)`, outside
 /// quotes, which the shell reads as one even with no space around it, and a newline outside
 /// quotes; a quoted one is a word (Greptile on #456). A comment, from a `#` that starts a word to
-/// the end of its line, is no word. None when a quote is left open.
+/// the end of its line, is no word, and nor is a here-document's body. None when a quote is left
+/// open.
 fn shell_tokens(command: &str) -> Option<Vec<(String, bool)>> {
     let mut tokens = Vec::new();
     let mut word: Option<String> = None;
@@ -781,10 +782,46 @@ fn shell_tokens(command: &str) -> Option<Vec<(String, bool)>> {
                 Some('\n') => {}
                 e => word.get_or_insert_with(String::new).push(e.unwrap_or('\\')),
             },
-            // An unquoted newline ends a command as `;` does (Codex on #456).
+            // An unquoted newline ends a command as `;` does (Codex on #456). The bodies of the
+            // line's here-documents follow it, each to the line that is its delimiter (`<<-`: after
+            // its tabs): text, never commands (Greptile and Codex on #456).
             '\n' => {
                 tokens.extend(word.take().map(|w| (w, false)));
+                let line = tokens
+                    .iter()
+                    .rposition(|(t, op)| *op && t == "\n")
+                    .map_or(0, |i| i + 1);
+                let bodies: Vec<(String, bool)> = tokens[line..]
+                    .windows(2)
+                    .filter_map(|w| match (&w[0], &w[1]) {
+                        ((op, true), (delimiter, false)) if op == "<<" || op == "<<-" => {
+                            Some((delimiter.clone(), op == "<<-"))
+                        }
+                        _ => None,
+                    })
+                    .collect();
                 tokens.push(("\n".into(), true));
+                for (delimiter, tabs) in bodies {
+                    loop {
+                        let mut text = String::new();
+                        let mut ended = true;
+                        for b in chars.by_ref() {
+                            if b == '\n' {
+                                ended = false;
+                                break;
+                            }
+                            text.push(b);
+                        }
+                        let text = if tabs {
+                            text.trim_start_matches('\t')
+                        } else {
+                            &text
+                        };
+                        if ended || text == delimiter {
+                            break;
+                        }
+                    }
+                }
             }
             // A `#` that starts a word starts a comment, to the end of its line (Greptile and
             // CodeRabbit on #456).
@@ -798,6 +835,9 @@ fn shell_tokens(command: &str) -> Option<Vec<(String, bool)>> {
                 {
                     op.push(n);
                     chars.next();
+                }
+                if op == "<<" && chars.next_if_eq(&'-').is_some() {
+                    op.push('-');
                 }
                 tokens.push((op, true));
             }
@@ -3118,6 +3158,22 @@ mod tests {
         assert_eq!(paths("cat a#b.rs '#' a.rs"), ["a.rs"]);
         assert_eq!(paths("printf x\ncat a.rs"), ["a.rs"]);
         assert_eq!(paths("cat 'a.rs\n' c\\ d.rs"), ["c d.rs"]);
+        // #456's third round: a here-document's body is text, to its delimiter's line; a
+        // here-string is the text it names.
+        assert_eq!(paths("cat > out.txt <<'EOF'\ncat a.rs\nEOF"), none);
+        assert_eq!(
+            paths("cat <<EOF >x\ncat a.rs\nEOF\nnl c\\ d.rs"),
+            ["c d.rs"]
+        );
+        assert_eq!(
+            paths("cat <<-EOF\n\tcat a.rs\n\tEOF\ncat c\\ d.rs"),
+            ["c d.rs"]
+        );
+        assert_eq!(
+            paths("cat <<A <<B\ncat a.rs\nA\ncat a.rs\nB\nnl c\\ d.rs"),
+            ["c d.rs"]
+        );
+        assert_eq!(paths("cat <<< a.rs"), none);
     }
 
     /// G25: the hook takes for an MCP read what Codex's matcher sends it (`setup::CODEX_READS`).
