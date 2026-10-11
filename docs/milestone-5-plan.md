@@ -684,7 +684,9 @@ Slice 3 は 5 つの PR に分け、この順に作る。後の PR はこの節�
   拒否する。
 - **要求の形**: 写しを加えた要求は version 3 とし、record は target の範囲の外にもある（各 record を
   identity で拒否する。範囲は表示用）。古い binary はその行を未知の version として飛ばして報告する
-  （rule 9）。preview は範囲の record と写しを分けて持ち、token は両方を含む。
+  （rule 9）。preview は範囲の record と写しを分けて持ち、token は両方を含む。live の record を含む要求も
+  写しがなくても version 3: 3a より前の binary は live の identity を計算できず、version 1 なら適用済みと
+  して record を見せたままにする（Codex on #460）。import の record だけの要求は version 1 のまま。
 - 500 件の上限は 3b まで第一 slice のまま。写しを加えた後の件数で数える。
 - 受入テスト（3a の PR）:
   1. hook の record を forget でき、ログから restore・古い raw.db への置換・segment だけの restore の

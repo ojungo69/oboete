@@ -3853,6 +3853,8 @@ mod tests {
         let p = raw.forget_preview(record(&raw, seq)).unwrap();
         let (_, _) = start(first.path(), &p).unwrap();
         let request = raw.forget_requests().unwrap().remove(0);
+        // An imported record alone keeps version 1, which an older binary applies as this one does.
+        assert_eq!(request.v, 1);
         // Another store of the same device where the seq holds another record, and the origin
         // came in later at another seq.
         let second = tempfile::tempdir().unwrap();
@@ -3891,7 +3893,8 @@ mod tests {
         start(first.path(), &p).unwrap();
         assert!(!shown(&raw, seq));
         let request = raw.forget_requests().unwrap().remove(0);
-        assert_eq!(request.v, 1);
+        // A binary before slice 3a skips it as of an unknown version (Codex on #460).
+        assert_eq!(request.v, 3);
         assert_eq!(
             request.records[0].origin,
             live_origin(raw.device(), seq, 1_000)

@@ -1730,8 +1730,12 @@ impl Raw {
             "forget preview is stale; preview again"
         );
         let uid = matches!(preview.target, crate::forget::Target::Uid { .. });
+        // A binary before slice 3a cannot compute a live record's identity: it would hold a
+        // version 1 request of one as applied, the record still shown. Version 3 it skips as
+        // unknown (rule 9; Codex on #460).
+        let live = preview.sources.iter().any(|s| is_live(s));
         let request = crate::forget::Request {
-            v: match (uid, preview.copies.is_empty()) {
+            v: match (uid, preview.copies.is_empty() && !live) {
                 (true, _) => 2,
                 (false, true) => 1,
                 (false, false) => 3,
