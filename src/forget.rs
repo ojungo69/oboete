@@ -740,7 +740,9 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
                     rebuild.push((job, uid));
                 }
             } else if truncated && !raw.uid_has_ops(&uid)? {
-                raw.finish_forget_step(&job, 2)?;
+                // Step 2 exactly, for a job past it whose text came back too: its rebuild and the
+                // steps after it stay owed if this purge stops before them (Codex on #453).
+                raw.restart_forget_step(&job, 2)?;
                 rebuild.push((job, uid));
             } else {
                 purged.unfinished.push(job);
@@ -2816,6 +2818,44 @@ mod tests {
         for p in &mine {
             assert!(p.exists(), "{p:?} was set aside");
         }
+    }
+
+    /// D5 (Codex on #453): a job at step 4 whose ops hold its text again (as a restore can bring
+    /// the bodies back) is purged from step 2 again, and its step goes back to 2, so a rebuild
+    /// that stops leaves it due; the next purge rebuilds and finishes it.
+    #[test]
+    fn a_job_whose_text_came_back_stays_due_until_its_rebuild_finishes() {
+        let (s, uid, _) = backed_up_canary();
+        let home = s.home.path().to_owned();
+        let bodies: Vec<(String, i64, String)> = op_rows(&home)
+            .into_iter()
+            .filter(|o| o.3.contains(CANARY))
+            .map(|o| (o.0, o.1, o.3))
+            .collect();
+        assert!(!bodies.is_empty());
+        forget(&home, &uid);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        assert_eq!(uid_jobs(&home)[0].2, 4);
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        for (device, seq, body) in &bodies {
+            conn.execute(
+                "UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3",
+                rusqlite::params![body, device, seq],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        crate::backup::FAIL_AFTER.set(Some("vectors_carried"));
+        assert!(purge(&home).is_err());
+        crate::backup::FAIL_AFTER.set(None);
+        assert_eq!(uid_jobs(&home)[0].2, 2);
+        assert_eq!(due(&raw::open(&home).unwrap()).unwrap().len(), 1);
+        let purged = purge(&home).unwrap().unwrap();
+        assert!(purged.rebuilt);
+        assert_eq!(uid_jobs(&home)[0].2, 4);
+        assert!(!op_rows(&home).iter().any(|o| o.3.contains(CANARY)));
     }
 
     /// D5 (2c, CodeRabbit on #453): two jobs of one uid (the logs brought a request back beside

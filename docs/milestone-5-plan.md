@@ -535,7 +535,10 @@ preview。下の試験は 1（segment の分）・2・3・5・6 が 2c-1、1（r
   sync する（unix。Greptile on #453）。
 - backup の場所を 2 つのホームが共有するとき（設定で同じ場所を指したときだけ）、purge は他方のホームの
   segment も書き換え、書く途中の他方のファイルを消しうる。範囲を系統の device に絞る件は #455。
-- 生きている segment も、export がつける名前（device は英数字だけ）だけを取る（Codex on #453）。
+- 生きている segment も、export がつける名前（device は英数字だけ、op の範囲は 0 で埋めた 12 桁以上。
+  `name` で作り直して同じになるもの）だけを取る（Codex on #453）。
+- 本文が戻った job（step 3 以上で op が本文を持つ。restore が戻しうる）は step 2 からやり直し、step を
+  正確に 2 に戻す。rebuild が途中で止まっても、次の継続がその job を拾う（Codex on #453）。
 - purge が書いた本文と数えるのは `{"forgotten":"<job>"}` だけの本文（`raw::forgotten_body`、
   `raw::Op::forgotten` と同じ判定）。`forgotten` の欄があるだけの本文は判定できない行（Codex on #453）。
 - 同じ uid の job が 2 件あるとき（ログが別の job id の要求を戻したとき）、本文に書く job id は 1 件

@@ -1083,11 +1083,15 @@ pub(crate) fn leftover(name: &str) -> bool {
         .is_some_and(|n| ops_segment(n) || set_aside(n))
 }
 
-/// Whether `name` is an ops segment's under a device id of letters and digits, as oboete names
-/// them: `segment_name` takes any device, a hidden name's too.
+/// Whether `name` is an ops segment's exactly as export names one (`name`: a device of letters and
+/// digits, the op range zero-padded): `segment_name` takes any device, an empty or a hidden one's
+/// too, and any number (Codex on #453).
 fn ops_segment(name: &str) -> bool {
-    segment_name(std::ffi::OsStr::new(name))
-        .is_some_and(|(ops, device, ..)| ops && device.chars().all(|c| c.is_ascii_alphanumeric()))
+    segment_name(std::ffi::OsStr::new(name)).is_some_and(|(ops, device, first, last)| {
+        ops && !device.is_empty()
+            && device.chars().all(|c| c.is_ascii_alphanumeric())
+            && self::name(&device, first, last, Kind::Ops) == name
+    })
 }
 
 /// Whether `name` is an ops segment's set aside as an export names it (`<segment>.quarantined-
@@ -2023,6 +2027,16 @@ pub(crate) mod tests {
         }
 
         let seg = "d0-000000000001-000000000002.ops.zst";
+        assert!(ops_segment(seg) && !ops_segment(&format!(".{seg}")));
+        for name in [
+            "d-1-2.ops.zst",
+            "-000000000001-000000000002.ops.zst",
+            "d0-0000000000001-000000000002.ops.zst",
+            "d0-000000000001-000000000002.records.zst",
+            "d.0-000000000001-000000000002.ops.zst",
+        ] {
+            assert!(!ops_segment(name), "{name}");
+        }
         assert!(set_aside(&format!("{seg}.quarantined-1700000000000")));
         for name in [
             "notes.ops.zst.quarantined-old".to_owned(),

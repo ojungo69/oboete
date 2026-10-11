@@ -1620,6 +1620,16 @@ impl Raw {
     }
 
     /// Records that `job` has finished `step`; a step it passed already stays.
+    /// A job's step set to `step` exactly, down too: a purge that does step 2 again for a job
+    /// whose ops hold its text again owes the steps after it again (Codex on #453).
+    pub(crate) fn restart_forget_step(&self, job: &str, step: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE forget_jobs SET step = ?2 WHERE id = ?1",
+            params![job, step],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn finish_forget_step(&self, job: &str, step: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE forget_jobs SET step = MAX(step, ?2) WHERE id = ?1",
