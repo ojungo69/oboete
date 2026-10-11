@@ -5994,13 +5994,26 @@ curate = false
         Viewer::new(home, None, port, Token::File)
     }
 
-    /// A port nothing listens on now.
+    /// A port nothing listens on now, for a test to bind later. Not one `bind(0)` gave and let
+    /// go: a test running alongside can be given that port again before it is bound (#459). One
+    /// below 32,768, the first port Linux gives `bind(0)` (macOS and Windows start higher), each
+    /// the first of a block of 16, so the next free ports a move takes (`rotate`) stay in its
+    /// block; blocks in turn from where this process's id starts them, so test processes running
+    /// together seldom meet.
     fn free_port() -> u16 {
-        TcpListener::bind(("127.0.0.1", 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        const FIRST: u32 = 20_000;
+        const BLOCK: u32 = 16;
+        const BLOCKS: u32 = 750;
+        static NEXT: AtomicU16 = AtomicU16::new(0);
+        let start = std::process::id() % BLOCKS;
+        for _ in 0..BLOCKS {
+            let n = u32::from(NEXT.fetch_add(1, Ordering::Relaxed));
+            let port = u16::try_from(FIRST + (start + n) % BLOCKS * BLOCK).unwrap();
+            if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return port;
+            }
+        }
+        panic!("no free port from {FIRST} on");
     }
 
     /// A resident viewer listening in a new home, on a port `free_port` gave: a test running

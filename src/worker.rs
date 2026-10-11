@@ -5019,9 +5019,13 @@ mod tests {
         assert_eq!(rounds.load(Ordering::SeqCst), 1, "a round with nothing new");
         let changed = "[worker]\nresident = true\n[summary]\ncurate = false\n";
         std::fs::write(p.join("config.toml"), changed).unwrap();
+        // A worker that left says why (#462).
         until("a round after the change", || {
-            rounds.load(Ordering::SeqCst) > 1
+            rounds.load(Ordering::SeqCst) > 1 || worker.is_finished()
         });
+        if worker.is_finished() && rounds.load(Ordering::SeqCst) < 2 {
+            panic!("the worker left before the change: {:?}", worker.join());
+        }
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(
             rounds.load(Ordering::SeqCst),
