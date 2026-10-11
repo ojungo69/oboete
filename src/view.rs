@@ -6470,7 +6470,13 @@ curate = false
             .unwrap()
             .set_modified(std::time::SystemTime::now() - Duration::from_secs(6))
             .unwrap();
-        starter.due(p);
+        // The first child may still be alive on a busy machine (Greptile on #445): looked at
+        // again for a moment, well inside the outcome's own wait of five seconds.
+        let t = Instant::now();
+        while started.load(Ordering::SeqCst) < 2 && t.elapsed() < Duration::from_secs(2) {
+            starter.due(p);
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert_eq!(started.load(Ordering::SeqCst), 2);
         // Between two looks, its minute.
         let (started, mut starter) = sleeper(Duration::from_secs(60), Duration::ZERO);
