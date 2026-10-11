@@ -838,7 +838,8 @@ mod tests {
 
     /// Test 5 (T3): a record anchor of another kind than a prompt gives the entries around its
     /// time, none marked, the entries of its own time before it; a query whose first hit it is
-    /// names it; an anchor of nothing is an error.
+    /// names it; so does a card of another repository than the one asked; an anchor of nothing is
+    /// an error.
     #[test]
     fn a_record_anchor_that_is_no_prompt_splits_at_its_time() {
         let mut d = days();
@@ -885,6 +886,25 @@ mod tests {
         assert!(
             got.contains(&format!("**🎯 {}** Quartz progress", d.summary)),
             "{got}"
+        );
+        let elsewhere = d.s.said("other", "github.com/o/other", DAY, "Elsewhere.");
+        let card = d.s.cards(
+            elsewhere,
+            elsewhere,
+            json!([{"type": "change", "title": "Other repository"}]),
+            false,
+        )[0]
+        .clone();
+        d.s.run();
+        let other = text(&d.s, Around::Anchor(card.clone()), (1, 1)).unwrap();
+        assert!(
+            !other.contains("Other repository") && !other.contains("ANCHOR"),
+            "{other}"
+        );
+        assert_eq!(
+            window(&other, 1),
+            window(&got, 1),
+            "the same entries around the same time"
         );
         let err = text(&d.s, Around::Anchor("o9".into()), (1, 1)).unwrap_err();
         assert_eq!(err.to_string(), "no document o9 to anchor on");

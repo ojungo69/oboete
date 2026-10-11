@@ -104,7 +104,8 @@ documents and session starts, then cards, then summaries (as the session start s
 the cards of its time), then by their stored order (card 10 of a window after card 9). The anchor's entry, then the `depth_before` entries
 before it and the `depth_after` after it; a side with fewer has fewer (claude-mem's
 `filterByDepth`). An anchor that is a record of another kind than a prompt has no entry of its own:
-the entries around its time, those of its own time before it. An anchor whose item is hidden or gone is an error, as `get` reports it.
+the entries around its time, those of its own time before it. So has an anchor of another
+repository than the one asked (claude-mem's anchor is not filtered by project either). An anchor whose item is hidden or gone is an error, as `get` reports it.
 
 T4. **The answer**, claude-mem's text, with oboete's ids:
 - `# Timeline around anchor: <id>`, or `# Timeline for query: "<query>"` and then
