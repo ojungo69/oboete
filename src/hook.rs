@@ -909,8 +909,8 @@ fn apply_changes(
 
 /// Milestone 5 D5 (2b): a session's shown value without the entries of `uids`, in either form
 /// (OpenCode's receipts hold bodies in their changes and replacements too), or None when it holds
-/// none of them. A value that does not parse becomes an empty set: it could hold anything, and
-/// losing it costs a body shown again.
+/// none of them. A value that does not parse, or parses as neither form, becomes an empty set: it
+/// could hold anything, and losing it costs a body shown again (Codex on #444).
 pub(crate) fn without_uids(
     value: &str,
     uids: &std::collections::HashSet<String>,
@@ -920,7 +920,10 @@ pub(crate) fn without_uids(
     };
     let before = v.clone();
     let strip = |m: &mut serde_json::Map<String, Value>| m.retain(|uid, _| !uids.contains(uid));
-    if v.get("entries").is_some() && v.get("pending").is_some() {
+    if v.get("entries").is_some() || v.get("pending").is_some() {
+        if serde_json::from_value::<OpencodeShown>(v.clone()).is_err() {
+            return Some("{}".into());
+        }
         if let Some(m) = v.get_mut("entries").and_then(Value::as_object_mut) {
             strip(m);
         }
@@ -943,6 +946,8 @@ pub(crate) fn without_uids(
         }
     } else if let Some(m) = v.as_object_mut() {
         strip(m);
+    } else {
+        return Some("{}".into());
     }
     (v != before).then(|| v.to_string())
 }
@@ -6517,6 +6522,16 @@ mod tests {
         assert_eq!(state.pending[0].changes.len(), 1);
         assert_eq!(without_uids(&out, &gone), None);
         assert_eq!(without_uids("not json", &gone).as_deref(), Some("{}"));
+        // JSON of neither form could hold a body where neither strip looks (Codex on #444).
+        for odd in [
+            r#"["Gone."]"#,
+            r#""Gone.""#,
+            r#"{"entries": ["Gone."], "pending": []}"#,
+            r#"{"entries": {}, "pending": {"g": "Gone."}}"#,
+            r#"{"entries": {"g": {"fp": "f", "body": "Gone."}}}"#,
+        ] {
+            assert_eq!(without_uids(odd, &gone).as_deref(), Some("{}"), "{odd}");
+        }
     }
 
     #[test]
