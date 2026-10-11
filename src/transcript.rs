@@ -2602,6 +2602,8 @@ mod tests {
                 &e["payload"],
                 0,
                 &Default::default(),
+                &mut 0,
+                &mut 0,
             )
             .unwrap();
         }
@@ -2634,6 +2636,8 @@ mod tests {
                 &e["payload"],
                 0,
                 &Default::default(),
+                &mut 0,
+                &mut 0,
             )
             .unwrap();
         }

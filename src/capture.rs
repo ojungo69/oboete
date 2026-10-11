@@ -79,7 +79,7 @@ impl Settings {
 }
 
 /// One event as captured, with the ledger rows of what its redaction masked: (field, finding).
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Captured {
     pub event: Event,
     pub ledger: Vec<(String, redact::Finding)>,

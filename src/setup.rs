@@ -2467,9 +2467,20 @@ pub fn doctor(home: &Path) -> Result<()> {
     println!("home {} (db {} KB)", home.display(), size / 1024);
     // First, before anything that needs the disk: MUST-M16 is about a disk that is full.
     let mut unhealthy = Vec::new();
+    let (kept, refused) = crate::unwritten::counts(home);
     if let Some(failed) = crate::failure::since(home) {
-        println!("  {}", crate::failure::line(failed));
+        println!("  {}", crate::failure::line(failed, kept));
         unhealthy.push("recording has failed");
+    } else if kept > 0 {
+        println!("  {kept} hook call(s) kept after a failed write: the next hook calls write them");
+    }
+    // docs/unwritten.md U4: kept events raw refused, set aside and never deleted.
+    if refused > 0 {
+        println!(
+            "  {refused} kept hook call(s) could not be written and wait in {}",
+            home.join("unwritten").join("bad").display()
+        );
+        unhealthy.push("kept events could not be written");
     }
     if let Some(free) = crate::failure::free_bytes(home)
         && free < LOW_FREE_BYTES
@@ -3702,6 +3713,24 @@ fn launcher_files(dir: &Path, bin: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/unwritten.md U5: a hook whose store does not open waits for it, then for a keep in
+    /// progress, and still has time for its file and its marker within the shortest deadline it
+    /// is given (Codex on #440).
+    #[test]
+    fn a_failed_write_and_its_keep_fit_the_shortest_hook_deadline() {
+        let shortest = CLAUDE_EVENTS
+            .iter()
+            .map(|e| e.1)
+            .chain(CODEX_EVENTS.iter().map(|e| e.2))
+            .chain(GROK_EVENTS.iter().map(|e| e.1))
+            .min()
+            .unwrap();
+        let needed = crate::hook::STORE_WAIT
+            + crate::unwritten::KEEP_WAIT
+            + std::time::Duration::from_millis(500);
+        assert!(needed <= std::time::Duration::from_secs(shortest.into()));
+    }
 
     #[test]
     fn w6_windows_namespace_paths_never_reach_metadata() {
