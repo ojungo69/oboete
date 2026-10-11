@@ -3688,6 +3688,13 @@ pub(crate) fn purge_copies(
 /// a restore's partial build last.
 pub(crate) fn copies_set_aside(home: &Path) -> Result<Vec<std::path::PathBuf>> {
     let live = path(home);
+    // A link, or another name of raw.db itself, is no copy: opened, it is the live store under a
+    // name whose -wal is not its own (Codex on #458). Off Unix no identity is read.
+    let live_id = crate::worker::file_id(std::fs::metadata(&live));
+    let alias = |copy: &Path| -> Result<bool> {
+        Ok(std::fs::symlink_metadata(copy)?.file_type().is_symlink()
+            || live_id.is_some() && crate::worker::file_id(std::fs::metadata(copy)) == live_id)
+    };
     let mut copies = Vec::new();
     for entry in std::fs::read_dir(home)? {
         let copy = entry?.path();
@@ -3703,12 +3710,12 @@ pub(crate) fn copies_set_aside(home: &Path) -> Result<Vec<std::path::PathBuf>> {
         let set_aside = stamped("raw.db.quarantined-")
             || stamped("raw.db.restored.quarantined-")
             || name == "raw.db.restored";
-        if set_aside && copy != live {
+        if set_aside && copy != live && !alias(&copy)? {
             copies.push(copy);
         }
     }
     let partial = home.join("raw.db.restoring");
-    if partial.exists() {
+    if partial.exists() && !alias(&partial)? {
         copies.push(partial);
     }
     Ok(copies)

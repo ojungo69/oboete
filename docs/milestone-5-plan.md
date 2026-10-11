@@ -571,6 +571,8 @@ preview。下の試験は 1（segment の分）・2・3・5・6 が 2c-1、1（r
 - 写しを消すときは -wal・-shm・-journal を先に、写し自体を最後に消す: 途中で止まっても写しが残り、
   次の purge がそれを見つけて続ける（Greptile と Codex on #458）。sidecar の名前は写しの path の byte に
   接尾辞を足して作る（UTF-8 でない path でも同じファイルを指す。Codex on #458）。
+- 隔離の名前でも、link であるものと raw.db 自体の別名（同じ file identity。unix だけが読める）は写しでは
+  ない: 開けば別の名前の本物の store で、-wal がそれのものではない（Codex on #458）。preview も数えない。
 
 試験（2c の分）:
 

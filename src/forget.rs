@@ -3256,6 +3256,49 @@ mod tests {
         assert!(!journal.exists());
     }
 
+    /// D5 (2c, Codex on #458): a name a quarantine gives that is a link, or another name of raw.db
+    /// itself, is no copy: the purge neither opens nor removes it, and the preview counts none.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_or_another_name_of_raw_db_is_no_copy() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = canary_claim(&mut s);
+        s.run();
+        let home = s.home.path().to_owned();
+        let named = |prefix: &str| home.join(crate::backup::fresh_name(&home, prefix).unwrap());
+        let hard = named("raw.db.quarantined-");
+        std::fs::hard_link(home.join("raw.db"), &hard).unwrap();
+        // A link to a file of the owner's elsewhere, here a copy of raw.db: not opened through it.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let theirs = elsewhere.path().join("theirs.db");
+        std::fs::copy(home.join("raw.db"), &theirs).unwrap();
+        if home.join("raw.db-wal").exists() {
+            std::fs::copy(
+                home.join("raw.db-wal"),
+                elsewhere.path().join("theirs.db-wal"),
+            )
+            .unwrap();
+        }
+        let ops = copy_ops(&theirs);
+        let soft = named("raw.db.restored.quarantined-");
+        std::os::unix::fs::symlink(&theirs, &soft).unwrap();
+        let shown = preview(&home, Target::parse_uid(&uid).unwrap()).unwrap();
+        assert_eq!(shown.uid.unwrap().copies, 0);
+        forget(&home, &uid);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.copies, purged.copies_removed), (0, 0));
+        assert!(hard.exists());
+        assert!(
+            std::fs::symlink_metadata(&soft)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(copy_ops(&theirs), ops);
+    }
+
     /// D5 (2c, decision 5): a copy of raw.db another connection reads cannot have its WAL truncated
     /// (the old page, the text in it, would stay in the file): it is removed instead.
     #[cfg(unix)]
