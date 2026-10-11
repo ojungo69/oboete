@@ -1233,8 +1233,9 @@ fn purged_line(line: &str, jobs: &std::collections::HashMap<String, String>) -> 
         return Line::Unknown;
     };
     let Some(uid) = raw::op_uid(kind, &body) else {
-        // A body a purge wrote, or an op of a kind whose ops hold no uid's text.
-        let none = body.get("forgotten").is_some()
+        // A body a purge wrote, exactly (Codex on #453), or an op of a kind whose ops hold no
+        // uid's text.
+        let none = raw::forgotten_body(&body)
             || !matches!(
                 kind,
                 raw::OpKind::Claim | raw::OpKind::Correction | raw::OpKind::Import
@@ -2007,6 +2008,14 @@ pub(crate) mod tests {
         }
         for unknown in [
             line("claim", serde_json::json!({"quote": "secret"})),
+            line(
+                "claim",
+                serde_json::json!({"forgotten": "j0", "quote": "secret"}),
+            ),
+            line(
+                "correction",
+                serde_json::json!({"forgotten": null, "body": "secret"}),
+            ),
             line("future", serde_json::json!({"uid": "u1"})),
             secret[..40].to_owned(),
         ] {

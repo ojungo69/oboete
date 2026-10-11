@@ -300,10 +300,15 @@ impl Op {
     /// Milestone 5 D5 (2b): an op a forget rewrote to `{"forgotten": "<job>"}`, which derives
     /// nothing.
     pub fn forgotten(&self) -> bool {
-        self.body.as_object().is_some_and(|o| {
-            o.len() == 1 && o.get("forgotten").is_some_and(serde_json::Value::is_string)
-        })
+        forgotten_body(&self.body)
     }
+}
+
+/// Whether `body` is the one a forget writes, `{"forgotten": "<job>"}` and nothing else (D5).
+pub(crate) fn forgotten_body(body: &serde_json::Value) -> bool {
+    body.as_object().is_some_and(|o| {
+        o.len() == 1 && o.get("forgotten").is_some_and(serde_json::Value::is_string)
+    })
 }
 
 /// A record hooks wrote, or `replay` wrote in their stead (dev and evaluation homes): what curation
