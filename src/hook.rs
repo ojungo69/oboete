@@ -23,6 +23,8 @@ pub const SKIP_ENV: &str = "OBOETE_SKIP";
 /// Milestone 5 D5 (#439): how long an injection waits for the read fence; past it, it injects
 /// nothing (MUST-M16: a hook never holds the agent up).
 const READ_WAIT: Duration = Duration::from_secs(1);
+/// How long a hook waits for the store before it keeps its events (docs/unwritten.md U2).
+pub(crate) const STORE_WAIT: Duration = Duration::from_secs(2);
 /// Blocks that are not part of what was asked or read, removed before anything is stored, in this
 /// order: context an IDE or another memory tool puts in front of the text (it may quote
 /// `<private>`), claude-mem's copy of the past that it writes into instruction files an agent
@@ -160,9 +162,12 @@ fn run_io(
             took_compaction = Some(session_label(&labels).to_owned());
         }
         let settings = crate::capture::Settings::load(home)?;
-        let mut store = match crate::raw::open_within(home, Duration::from_secs(2)) {
+        let mut store = match crate::raw::open_within(home, STORE_WAIT) {
             Ok(store) => store,
             Err(e) => {
+                // The store failed now: the keep after may wait and sync, and overlapping hooks
+                // order the marker by this time (Codex on #440).
+                ended = crate::failure::now();
                 // docs/unwritten.md U2: what this call would have written, built without it.
                 match built(home, None, agent, event, &payload, db::now_ms(), &settings) {
                     Ok((built, _)) => {
@@ -181,6 +186,7 @@ fn run_io(
             &payload,
             db::now_ms(),
             &settings,
+            &mut ended,
         )?;
         let events = &recorded.events;
         // A call that only wrote back what earlier ones kept wrote too: the worker starts and the
@@ -667,6 +673,7 @@ pub struct Recorded {
 
 /// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db` with the
 /// event's time (`now` in a hook; the fixture's in a replay).
+#[allow(clippy::too_many_arguments)] // `failed`: the time a failure gets, which `run_io` keeps
 pub fn record(
     home: &Path,
     raw: &mut crate::raw::Raw,
@@ -675,6 +682,7 @@ pub fn record(
     payload: &Value,
     ts: i64,
     settings: &crate::capture::Settings,
+    failed: &mut i64,
 ) -> Result<Recorded> {
     // Count and append together so overlapping SessionEnd hooks cannot recover the same turn.
     // ponytail: one recovery lock per home; use per-session locks if end hooks contend.
@@ -699,6 +707,7 @@ pub fn record(
         // A damaged raw.db goes on to `run_io`, which asks the worker to restore it; this call's
         // events wait behind the kept files (Codex on #440).
         Err(e) if crate::backup::corrupt(&e) => {
+            *failed = crate::failure::now();
             keep(home, agent, &built, settings);
             return Err(e);
         }
@@ -728,6 +737,7 @@ pub fn record(
         ) {
             Ok(seq) => appended.push((seq, b.captured.event.clone())),
             Err(e) => {
+                *failed = crate::failure::now();
                 keep(home, agent, &built[n..], settings);
                 return Err(e);
             }
@@ -5826,6 +5836,7 @@ mod tests {
                             &end,
                             0,
                             &Default::default(),
+                            &mut 0,
                         )
                         .unwrap();
                     })
@@ -6228,6 +6239,7 @@ mod tests {
             &json!({"prompt": "hi"}),
             0,
             &Default::default(),
+            &mut 0,
         )
         .unwrap();
         let recs = raw.after(raw.device(), 0, 10).unwrap();
@@ -6670,6 +6682,63 @@ mod tests {
             .filter(|e| e.kind == "prompt")
             .count();
         assert_eq!(prompts, 2);
+    }
+
+    /// docs/unwritten.md U6: a failed append's time is taken before its keep, which may wait for
+    /// another keep and sync: overlapping hooks order the marker by when the store failed (Codex
+    /// on #440). The keep has begun once it made `unwritten/` the owner's alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_appends_time_is_taken_before_its_keep() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path().to_owned();
+        drop(crate::raw::open(&h).unwrap());
+        rusqlite::Connection::open(h.join("raw.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON records BEGIN SELECT RAISE(ABORT, 'test'); END;",
+            )
+            .unwrap();
+        let dir = h.join("unwritten");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("keep.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        let p = h.clone();
+        let t = std::thread::spawn(move || {
+            let mut raw = crate::raw::open(&p).unwrap();
+            let mut failed = 0;
+            let payload = json!({"prompt": "hi"});
+            let r = record(
+                &p,
+                &mut raw,
+                "claude",
+                "UserPromptSubmit",
+                &payload,
+                0,
+                &Default::default(),
+                &mut failed,
+            );
+            (r.is_err(), failed)
+        });
+        let mode = || dir.metadata().unwrap().permissions().mode() & 0o777;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while mode() != 0o700 {
+            assert!(std::time::Instant::now() < until, "no keep began");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let released = crate::failure::now();
+        drop(held);
+        let (refused, failed) = t.join().unwrap();
+        assert!(refused && failed > 0 && failed < released);
+        assert_eq!(crate::unwritten::counts(&h).0, 1);
     }
 
     /// docs/unwritten.md U3: a write-back that finds raw.db damaged keeps the call's events behind
@@ -7280,6 +7349,7 @@ mod tests {
                     &grok,
                     0,
                     &Default::default(),
+                    &mut 0,
                 )
                 .unwrap();
             }

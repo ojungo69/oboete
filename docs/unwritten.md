@@ -39,9 +39,11 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   counted (oboete never deletes what it set aside): the marker alone says the write failed, as
   before. One keep at a time checks the bound, names its file and renames it (a lock beside the
   files), so overlapping failed calls cannot each pass it, and a move to `bad/` takes the same lock,
-  so the bound counts each file once; a keep waits a second at most for the lock, so the hook still
-  sets its marker before the agent's deadline. A full disk usually refuses the file too; then likewise.
-- **U6. What is said.** The marker and its line stay: the write did fail. While files wait, the
+  so the bound counts each file once; a keep waits half a second at most for the lock, so the hook
+  still keeps its events and sets its marker before the agent's deadline (a SessionEnd hook has 3 s,
+  and the store's wait takes 2 of them). A full disk usually refuses the file too; then likewise.
+- **U6. What is said.** The marker and its line stay: the write did fail. Its time is when the store
+  failed, taken before the keep, which may wait and sync: overlapping hooks order the marker by it. While files wait, the
   line says how many hook calls are kept and that they are written when a write succeeds; doctor
   says the same, and counts `bad/`.
 - **U7. Settings changed between the two.** A kept event keeps its gate's masks and ruleset

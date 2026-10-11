@@ -3714,6 +3714,24 @@ fn launcher_files(dir: &Path, bin: &str) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
+    /// docs/unwritten.md U5: a hook whose store does not open waits for it, then for a keep in
+    /// progress, and still has time for its file and its marker within the shortest deadline it
+    /// is given (Codex on #440).
+    #[test]
+    fn a_failed_write_and_its_keep_fit_the_shortest_hook_deadline() {
+        let shortest = CLAUDE_EVENTS
+            .iter()
+            .map(|e| e.1)
+            .chain(CODEX_EVENTS.iter().map(|e| e.2))
+            .chain(GROK_EVENTS.iter().map(|e| e.1))
+            .min()
+            .unwrap();
+        let needed = crate::hook::STORE_WAIT
+            + crate::unwritten::KEEP_WAIT
+            + std::time::Duration::from_millis(500);
+        assert!(needed <= std::time::Duration::from_secs(shortest.into()));
+    }
+
     #[test]
     fn w6_windows_namespace_paths_never_reach_metadata() {
         use std::cell::Cell;
