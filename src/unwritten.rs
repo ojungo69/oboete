@@ -13,8 +13,9 @@ const DIR: &str = "unwritten";
 const BOUND: u64 = 64 << 20;
 /// U3: the files one hook call writes back, the oldest first.
 const PER_CALL: usize = 16;
-/// U5: how long a keep waits for the one in progress: a hook has seconds in all.
-const KEEP_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+/// U5: how long a keep waits for the one in progress: a SessionEnd hook has 3 s in all, and the
+/// store's wait takes 2 of them (Codex on #440).
+pub(crate) const KEEP_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 const VERSION: u64 = 1;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -203,8 +204,8 @@ fn files(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// U5: `unwritten/keep.lock`, held by a keep from its look at the files to its rename and by a move
-/// to `bad/`, so the bound sees each file once (Codex on #440). Waited for a second at most, so the
-/// hook still sets its marker before the agent's deadline.
+/// to `bad/`, so the bound sees each file once (Codex on #440). Waited for `KEEP_WAIT` at most, so
+/// the hook still keeps its events and sets its marker before the agent's deadline.
 fn keep_lock(dir: &Path) -> Result<std::fs::File> {
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -219,7 +220,7 @@ fn keep_lock(dir: &Path) -> Result<std::fs::File> {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(std::fs::TryLockError::WouldBlock) => {
-                anyhow::bail!("another keep held {DIR}/ for {} s", KEEP_WAIT.as_secs())
+                anyhow::bail!("another keep held {DIR}/ for {} ms", KEEP_WAIT.as_millis())
             }
             Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
         }
@@ -289,7 +290,7 @@ mod tests {
         assert!(left[0].contains("prompt 11") && left[1].contains("later"));
     }
 
-    /// U5: a keep waits a second at most for one that holds the lock, so the hook still sets its
+    /// U5: a keep waits `KEEP_WAIT` at most for one that holds the lock, so the hook still sets its
     /// marker before the agent's deadline (Codex on #440).
     #[test]
     fn a_keep_gives_up_on_a_keep_that_holds_the_lock() {
@@ -345,7 +346,7 @@ mod tests {
             done.send(()).unwrap();
         });
         assert!(
-            kept.recv_timeout(std::time::Duration::from_millis(300))
+            kept.recv_timeout(std::time::Duration::from_millis(100))
                 .is_err(),
             "kept beside a keep in progress"
         );

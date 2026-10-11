@@ -89,6 +89,7 @@ pub fn run(
             &v["payload"],
             ts,
             &settings,
+            &mut 0,
         )?;
         micros.push(started.elapsed().as_micros());
     }
