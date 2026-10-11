@@ -799,18 +799,22 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     // Step 4 (2c, decisions 2-4): the backup's ops segments, for every uid job past step 3 whose
     // ops hold no text, stopped ones too (decision 8), in one pass for all their uids.
     let mut jobs = std::collections::HashMap::new();
+    let mut past = Vec::new();
     for (request, step) in raw.forget_jobs()? {
         if let Target::Uid { uid } = request.target
             && step >= 3
             && !raw.uid_has_ops(&uid)?
         {
-            jobs.insert(uid, request.job);
+            // One job's id per uid for the bodies, and every job of it recorded: the logs can
+            // bring back a second (CodeRabbit on #453).
+            jobs.entry(uid).or_insert_with(|| request.job.clone());
+            past.push(request.job);
         }
     }
     if !jobs.is_empty() {
         let ops = crate::backup::purge_ops(home, &jobs)?;
         (purged.segments, purged.segments_removed) = (ops.rewritten, ops.removed);
-        for job in jobs.values() {
+        for job in &past {
             raw.finish_forget_step(job, 4)?;
         }
     }
@@ -2808,6 +2812,28 @@ mod tests {
         for p in &mine {
             assert!(p.exists(), "{p:?} was set aside");
         }
+    }
+
+    /// D5 (2c, CodeRabbit on #453): two jobs of one uid (the logs brought a request back beside
+    /// the one raw.db holds, under another job id) both reach step 4.
+    #[test]
+    fn every_job_of_a_uid_reaches_step_4() {
+        let (s, uid, _) = backed_up_canary();
+        let home = s.home.path().to_owned();
+        forget(&home, &uid);
+        let crate::search::b::fixture::Store {
+            home: _kept,
+            mut raw,
+        } = s;
+        let mut again = raw.forget_requests().unwrap().remove(0);
+        again.job = "b2000000000000000000000000000002".into();
+        assert_eq!(raw.forget_apply(&[again]).unwrap(), 1);
+        drop(raw);
+        assert_eq!(uid_jobs(&home).len(), 2);
+        purge(&home).unwrap().unwrap();
+        let jobs = uid_jobs(&home);
+        assert!(jobs.iter().all(|j| j.0 == uid && j.2 == 4), "{jobs:?}");
+        assert_eq!(backup_canaries(&home), Vec::<String>::new());
     }
 
     /// D5 (2c, Greptile on #453): a purge stopped inside a write, after the data and before its
