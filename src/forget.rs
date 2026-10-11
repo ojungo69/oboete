@@ -4853,6 +4853,47 @@ mod tests {
         }
     }
 
+    /// Slice 3b-2 (Codex on #468): a repository's or a time range's target read with another device
+    /// than the store's (a raw.db restored or put back since) is refused, and so are masked
+    /// repository labels that read as the repository's key.
+    #[test]
+    fn a_scope_target_of_another_device_or_a_masked_repository_label_is_not_taken() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut raw = raw::open(h).unwrap();
+        let mut e = raw::test_event(r#"{"prompt":"masked"}"#);
+        e.repo = Some("[REDACTED]".into());
+        let masked = raw.append(&e).unwrap();
+        rusqlite::Connection::open(h.join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+                 VALUES(?1, ?2, 'repo', 'r', 0, 9, 0, 'v')",
+                rusqlite::params![raw.device(), masked],
+            )
+            .unwrap();
+        let mut plain = raw::test_event(r#"{"prompt":"plain"}"#);
+        plain.repo = Some("[REDACTED]".into());
+        let kept = raw.append(&plain).unwrap();
+        let target = repo_target(h, "[REDACTED]").unwrap();
+        assert_eq!(seqs(&preview(h, target).unwrap().records), [kept]);
+        let other = "0".repeat(32);
+        for target in [
+            Target::Repo {
+                repo: repo("[REDACTED]"),
+                device: other.clone(),
+            },
+            Target::Range {
+                device: other.clone(),
+                since: 0,
+                until: i64::MAX,
+            },
+        ] {
+            let e = preview(h, target).unwrap_err();
+            assert!(e.to_string().contains("raw.db changed"), "{e:#}");
+        }
+    }
+
     /// Slice 3b: a registration's pages are one status line while they are in one state, and apart
     /// once their states differ; another registration's job is its own line.
     #[test]

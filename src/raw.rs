@@ -1360,7 +1360,14 @@ impl Raw {
             crate::forget::Target::Session { agent, session } => {
                 return self.session_preview(agent, session);
             }
-            crate::forget::Target::Repo { .. } | crate::forget::Target::Range { .. } => {
+            crate::forget::Target::Repo { device, .. }
+            | crate::forget::Target::Range { device, .. } => {
+                // The device the target was read with is this store's: a raw.db restored or put
+                // back since would bind its tombstone to another device (Codex on #468).
+                anyhow::ensure!(
+                    *device == self.device,
+                    "raw.db changed since this forget's target was read: run the forget again"
+                );
                 return self.scope_preview(target);
             }
             _ => {}
@@ -1640,8 +1647,11 @@ impl Raw {
     fn scope_records(&self, target: &crate::forget::Target) -> Result<(Found, usize)> {
         use rusqlite::types::Value;
         let (clause, args): (&str, Vec<Value>) = match target {
+            // A label the ledger masks is not the repository's, whatever it reads as: the preview
+            // counts such records, not taken (Greptile, Codex on #468).
             crate::forget::Target::Repo { repo, .. } => (
-                "r.repo IN (SELECT value FROM json_each(?1))",
+                "r.repo IN (SELECT value FROM json_each(?1)) AND NOT EXISTS (SELECT 1 FROM ledger l
+                   WHERE l.device = r.device AND l.seq = r.seq AND l.field = 'repo')",
                 vec![serde_json::to_string(&self.repo_labels(repo)?)?.into()],
             ),
             crate::forget::Target::Range {
