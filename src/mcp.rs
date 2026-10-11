@@ -132,8 +132,6 @@ pub struct WorkStateReadArgs {
 
 /// A model can ask for any `limit`; the store is not dumped into one reply.
 const MAX_LIMIT: usize = 100;
-/// The most entries `timeline` shows on a side of its anchor (docs/tools.md T1).
-const MAX_DEPTH: usize = 50;
 
 /// Every answer passes the egress gate, then its fence (spec 6.5): it goes into the agent's
 /// context, and so to its model's provider, the user's rules as they are now apply (spec 6.4),
@@ -287,13 +285,12 @@ impl Oboete {
                 all: repo.is_none(),
                 repo: repo.clone(),
                 raw: search::RawArm::Below,
-                limit: 1,
                 ..Default::default()
             }),
-            (None, None) => search::Around::Newest(a.limit.unwrap_or(20).min(MAX_LIMIT)),
+            (None, None) => search::Around::Newest(a.limit.unwrap_or(20)),
         };
         let anchored = !matches!(around, search::Around::Newest(_));
-        let depth = |d: Option<usize>| d.unwrap_or(3).min(MAX_DEPTH);
+        let depth = |d: Option<usize>| d.unwrap_or(3);
         let depths = (depth(a.depth_before), depth(a.depth_after));
         let out = match search::timeline_text(
             &self.home,

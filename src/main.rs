@@ -567,7 +567,6 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                     all,
                     repo: repo.clone(),
                     raw: search::b::RawArm::Below,
-                    limit: 1,
                     ..Default::default()
                 }),
                 (None, None) => search::b::Around::Newest(limit),

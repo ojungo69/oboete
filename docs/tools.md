@@ -86,7 +86,8 @@ its worker's `SearchManager.timeline` and `renderTimeline` (`src/services/worker
 
 T1. **Arguments.** `anchor`, any id `get` takes (a claim's, a card's `<op seq>.<n>`, a summary's
 `S<op seq>`, an imported document's, a record's `<device>:<seq>`), or `query`, whose anchor is the
-first hit `search` gives for it in Q2's order, with the same repository; not both (an error naming
+first hit `search` gives for it in Q2's order (of its ten, so a pair it keeps together is not
+dropped for want of a second place), with the same repository; not both (an error naming
 the two). A query with no hit says so. Neither: the newest entries, `limit` of them (default 20, at
 most 100), as now. With an anchor or a query, `depth_before` and `depth_after` (default 3 each, as
 claude-mem's tool describes them; at most 50): how many entries before and after the anchor;
@@ -123,7 +124,9 @@ T4. **The answer**, claude-mem's text, with oboete's ids:
   Tokens |` and its rule, a row `| <id> | <h:mm AM, or " for the minute before> | <icon> | <title,
   else Untitled> | ~<N> |` (the session start's icon of the card's type, Q7's `~N`); a new table when
   the file changes, and after any other entry;
-- the anchor's line ends ` <- **ANCHOR**` (on a card's row, after its title).
+- the anchor's line ends ` <- **ANCHOR**` (on a card's row, after its title);
+- with every repository (`all`), each line and each table's file ends with ` [<repository>]`, as
+  the list did; a `|` in a card's title is written `\|`, so it stays in its cell.
 Every line gated, the answer fenced (spec 6.5), as every tool's.
 
 T5. **Where.** The MCP tool and `oboete timeline` (`--anchor`, `--query`, `--before`, `--after`,

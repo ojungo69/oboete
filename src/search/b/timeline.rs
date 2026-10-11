@@ -5,6 +5,14 @@ use super::*;
 use crate::cards::Card;
 use crate::turns::TurnSummary;
 
+/// The most entries a side of an anchor shows, and the most of the newest (T1).
+const MAX_DEPTH: usize = 50;
+const MAX_NEWEST: usize = 100;
+/// The hits a query's search keeps before its first is the anchor: the search tool's own default,
+/// so that a pair search keeps together is not dropped for want of a second place (Greptile on
+/// #450).
+const QUERY_HITS: usize = 10;
+
 /// What the timeline is around (T1).
 pub enum Around {
     /// Any id `get` takes.
@@ -27,8 +35,8 @@ struct Entry {
 enum What {
     Card(Box<Card>),
     Summary(Box<TurnSummary>),
-    /// A prompt's text from its start, gated.
-    Prompt(String),
+    /// A prompt's text from its start, gated, and its repository.
+    Prompt(String, Option<String>),
     /// A claim, an imported document or a session start.
     Other(Item),
 }
@@ -38,10 +46,19 @@ impl What {
     /// its time as the session start shows them.
     fn rank(&self) -> u8 {
         match self {
-            What::Prompt(_) => 0,
+            What::Prompt(..) => 0,
             What::Other(_) => 1,
             What::Card(_) => 2,
             What::Summary(_) => 3,
+        }
+    }
+
+    fn repo(&self) -> Option<&str> {
+        match self {
+            What::Card(c) => c.repo.as_deref(),
+            What::Summary(s) => s.repo.as_deref(),
+            What::Prompt(_, repo) => repo.as_deref(),
+            What::Other(i) => i.repo.as_deref(),
         }
     }
 }
@@ -59,17 +76,22 @@ pub fn timeline_text<Tz: chrono::TimeZone>(
 where
     Tz::Offset: std::fmt::Display,
 {
+    let (before, after) = (before.min(MAX_DEPTH), after.min(MAX_DEPTH));
     // A query's anchor is found first, under search's own fence: a reader opens raw.db before it
     // takes the fence (#439).
     let (anchor, query, limit) = match around {
         Around::Query(q) => {
+            let q = Query {
+                limit: QUERY_HITS,
+                ..q
+            };
             let Some(hit) = super::query(home, &q)?.hits.into_iter().next() else {
                 anyhow::bail!("nothing matches {:?} to anchor on", q.text);
             };
             (Some(hit.key), Some(q.text), 0)
         }
         Around::Anchor(id) => (Some(id), None, 0),
-        Around::Newest(limit) => (None, None, limit),
+        Around::Newest(limit) => (None, None, limit.min(MAX_NEWEST)),
     };
     let Some((raw, k)) = stores(home)? else {
         if let Some(id) = anchor {
@@ -85,10 +107,12 @@ where
         Some(id) => anchored(&raw, &k, id, &rules)?,
         None => (i64::MAX, None),
     };
-    let around_at = anchor.as_ref().map(|_| at);
-    let window = |read: &dyn Fn(bool, usize) -> Result<Vec<Entry>>| {
-        gather(read, around_at, (before, after), limit)
+    // Without an anchor, the newest `limit` are the ones before the end of time.
+    let depths = match anchor {
+        Some(_) => (before, after),
+        None => (limit, 0),
     };
+    let window = |read: &dyn Fn(bool, usize) -> Result<Vec<Entry>>| gather(read, at, depths);
     let mut entries = window(&|older, n| {
         Ok(others(&raw, &k, repo, older, at, "", n)?
             .into_iter()
@@ -149,58 +173,46 @@ where
             None => String::new(),
         });
     }
-    let mut out = Vec::new();
-    match (&anchor, query) {
-        (Some(id), Some(q)) => {
-            let anchor = shown
-                .iter()
-                .find(|e| Some(&e.id) == marked.as_ref())
-                .map_or_else(|| "Unknown".to_owned(), title);
-            out.push(format!(
-                "# Timeline for query: \"{}\"",
-                redact::outbound(&q)
-            ));
-            let id = shown
-                .iter()
-                .find(|e| Some(&e.id) == marked.as_ref())
-                .map_or_else(|| redact::outbound(id), shown_id);
-            out.push(format!("**Anchor:** {id} - {anchor}"));
-        }
-        (Some(id), None) => out.push(format!(
-            "# Timeline around anchor: {}",
-            redact::outbound(id)
-        )),
-        (None, _) => out.push(format!("# Timeline: the newest {}", shown.len())),
-    }
-    if anchor.is_some() {
-        out.push(format!(
-            "**Window:** {before} records before -> {after} records after | **Items:** {}",
-            shown.len()
-        ));
-    }
-    out.push(String::new());
-    render(&mut out, &shown, marked.as_deref(), cwd, &local, tz);
+    let marked_entry = shown.iter().find(|e| Some(&e.id) == marked.as_ref());
+    let mut out = header(
+        anchor.as_deref(),
+        query.as_deref(),
+        marked_entry,
+        shown.len(),
+        (before, after),
+    );
+    render(
+        &mut out,
+        &shown,
+        marked.as_deref(),
+        cwd,
+        (&local, repo.is_none()),
+        tz,
+    );
     Ok(out.join("\n"))
 }
 
 /// One kind's entries (T2) for the window, read by `read(older, n)` (at most `n` on that side of
-/// the anchor's time): with an anchor at `at`, all of its time, which may sit on either side of it
-/// in the order (T3), and `before` older ones, reading on while that time fills what is read, then
-/// `after` newer ones; without one, the newest `limit`.
+/// `at`, the nearest first): all of the anchor's time, which may sit on either side of it in the
+/// order (T3), and `before` older ones, then `after` newer ones. The oldest time read may hold
+/// more entries than were read, and in another order than the timeline's (claims of one time come
+/// by key, the older side too), so the older ones count only from the times before it, reading on
+/// until they are enough or the kind has no more (Greptile on #450).
 fn gather(
     read: &dyn Fn(bool, usize) -> Result<Vec<Entry>>,
-    at: Option<i64>,
+    at: i64,
     (before, after): (usize, usize),
-    limit: usize,
 ) -> Result<Vec<Entry>> {
-    let Some(at) = at else {
-        return read(true, limit);
-    };
+    if at == i64::MAX && before == 0 {
+        return Ok(Vec::new());
+    }
     let mut n = before + after + 1;
     let mut out = loop {
         let got = read(true, n)?;
+        let oldest = got.iter().map(|e| e.ts).min();
+        let whole = got.iter().filter(|e| e.ts < at && Some(e.ts) != oldest);
         // One older at least, so that the anchor's time is read whole.
-        if got.len() < n || got.iter().filter(|e| e.ts < at).count() >= before.max(1) {
+        if got.len() < n || whole.count() >= before.max(1) {
             break got;
         }
         n = n.saturating_mul(2);
@@ -209,6 +221,40 @@ fn gather(
         out.extend(read(false, after)?);
     }
     Ok(out)
+}
+
+/// The answer's first lines (T4): what it is around, the query's anchor (its entry, when it has
+/// one), and the window; then a blank line.
+fn header(
+    anchor: Option<&str>,
+    query: Option<&str>,
+    marked: Option<&Entry>,
+    items: usize,
+    (before, after): (usize, usize),
+) -> Vec<String> {
+    let mut out = Vec::new();
+    match (anchor, query) {
+        (Some(id), Some(q)) => {
+            out.push(format!("# Timeline for query: \"{}\"", redact::outbound(q)));
+            let (id, name) = match marked {
+                Some(e) => (shown_id(e), title(e)),
+                None => (redact::outbound(id), "Unknown".to_owned()),
+            };
+            out.push(format!("**Anchor:** {id} - {name}"));
+        }
+        (Some(id), None) => out.push(format!(
+            "# Timeline around anchor: {}",
+            redact::outbound(id)
+        )),
+        (None, _) => out.push(format!("# Timeline: the newest {items}")),
+    }
+    if anchor.is_some() {
+        out.push(format!(
+            "**Window:** {before} records before -> {after} records after | **Items:** {items}"
+        ));
+    }
+    out.push(String::new());
+    out
 }
 
 /// The anchor's time and, when it is an entry (T2), that entry's id as the timeline gives it; a
@@ -291,7 +337,7 @@ fn prompts(
                 ts: h.ts,
                 id: format!("{}:{}", h.device, h.seq),
                 order: (h.device, h.seq, 0),
-                what: What::Prompt(h.snippet),
+                what: What::Prompt(h.snippet, h.repo),
             });
         }
         if keys.len() < limit || out.len() >= limit {
@@ -315,7 +361,7 @@ fn title(e: &Entry) -> String {
     match &e.what {
         What::Card(c) => untitled(&c.row_title).to_owned(),
         What::Summary(s) => request(s).to_owned(),
-        What::Prompt(text) => first(text),
+        What::Prompt(text, _) => first(text),
         What::Other(i) => i.text.clone(),
     }
 }
@@ -356,17 +402,23 @@ fn first_file(c: &Card, cwd: &Path) -> String {
 }
 
 /// `shown`, by day in `tz` (claude-mem's `renderTimeline`): cards in tables by file, a new table
-/// when the file changes and after any other entry; the anchor's line marked.
+/// when the file changes and after any other entry; the anchor's line marked. With every
+/// repository (`all`), each line and table names its repository, as the list did (Greptile on
+/// #450).
 fn render<Tz: chrono::TimeZone>(
     out: &mut Vec<String>,
     shown: &[Entry],
     marked: Option<&str>,
     cwd: &Path,
-    local: &str,
+    (local, all): (&str, bool),
     tz: &Tz,
 ) where
     Tz::Offset: std::fmt::Display,
 {
+    let place = |e: &Entry| match (all, e.what.repo()) {
+        (true, Some(repo)) => format!(" [{}]", redact::outbound(repo)),
+        _ => String::new(),
+    };
     let mark = |e: &Entry| {
         if Some(e.id.as_str()) == marked {
             " <- **ANCHOR**"
@@ -392,12 +444,12 @@ fn render<Tz: chrono::TimeZone>(
         }
         let when = t.format("%b %-d, %-I:%M %p");
         if let What::Card(c) = &e.what {
-            let file = first_file(c, cwd);
+            let file = format!("**{}**{}", redact::outbound(&first_file(c, cwd)), place(e));
             if table.as_ref() != Some(&file) {
                 if table.is_some() {
                     out.push(String::new());
                 }
-                out.push(format!("**{}**", redact::outbound(&file)));
+                out.push(file.clone());
                 out.push("| ID | Time | T | Title | Tokens |".into());
                 out.push("|----|------|---|-------|--------|".into());
                 table = Some(file);
@@ -414,7 +466,8 @@ fn render<Tz: chrono::TimeZone>(
                 "| {} | {shown_time} | {} | {}{} | ~{} |",
                 c.id(local),
                 crate::cards::icon(c.kind.as_deref()),
-                untitled(&c.row_title),
+                // A `|` in a title would end its cell (Codex and Greptile on #450).
+                untitled(&c.row_title).replace('|', "\\|"),
                 mark(e),
                 card_text(c, local).chars().count().div_ceil(4)
             ));
@@ -425,20 +478,27 @@ fn render<Tz: chrono::TimeZone>(
         }
         match &e.what {
             What::Summary(s) => out.push(format!(
-                "**🎯 {}** {} ({when}){}",
+                "**🎯 {}** {} ({when}){}{}",
                 s.id(local),
                 request(s),
+                place(e),
                 mark(e)
             )),
-            What::Prompt(text) => {
-                out.push(format!("**💬 Prompt {}** ({when}){}", e.id, mark(e)));
+            What::Prompt(text, _) => {
+                out.push(format!(
+                    "**💬 Prompt {}** ({when}){}{}",
+                    e.id,
+                    place(e),
+                    mark(e)
+                ));
                 out.push(format!("> {}", first(text)));
             }
             What::Other(i) => out.push(format!(
-                "**{}** {} {} ({when}){}",
+                "**{}** {} {} ({when}){}{}",
                 shown_id(e),
                 i.kind,
                 i.text,
+                place(e),
                 mark(e)
             )),
             What::Card(_) => {}
@@ -666,6 +726,126 @@ mod tests {
         );
     }
 
+    /// T1: depths past 50 are cut to it, however large (Codex and Greptile on #450).
+    #[test]
+    fn depths_past_their_cap_are_cut_to_it() {
+        let d = days();
+        let got = text(
+            &d.s,
+            Around::Anchor(d.cards[0].clone()),
+            (1_000, usize::MAX),
+        )
+        .unwrap();
+        assert_eq!(
+            got.lines().nth(1),
+            Some("**Window:** 50 records before -> 50 records after | **Items:** 11")
+        );
+    }
+
+    /// T3 (Greptile on #450): of more entries of one time than are asked for, the timeline keeps
+    /// the nearest: claims of one time come from their reader by key, the other way round.
+    #[test]
+    fn of_one_times_entries_the_nearest_are_kept() {
+        let mut s = Store::new();
+        let mut uids: Vec<String> = ["Alpha rule.", "Bravo rule.", "Charlie rule."]
+            .iter()
+            .map(|text| decided(&mut s, DAY, text).1)
+            .collect();
+        let seq = s.said("work", R, DAY + 1_000, "Later prompt.");
+        s.run();
+        uids.sort();
+        let last = &uids[2][..12];
+        let newest = text(&s, Around::Newest(2), (3, 3)).unwrap();
+        assert!(
+            newest.contains(last) && !newest.contains(&uids[0][..12]),
+            "{newest}"
+        );
+        let got = text(&s, Around::Anchor(s.key(seq)), (1, 0)).unwrap();
+        assert!(got.contains(last) && !got.contains(&uids[1][..12]), "{got}");
+    }
+
+    /// T1 (Greptile on #450): a query's anchor is search's first hit when that hit is one of a
+    /// pair search keeps together (D2), which one place would drop.
+    #[test]
+    fn a_query_anchors_on_the_first_of_a_pair() {
+        let mut s = Store::new();
+        let quote = "Indent widgets with tabs.";
+        let source = s.said("work", R, DAY, quote);
+        let earlier = s.claim(source, quote, ("preference", "decided", "user"), &[]);
+        let later = s.decided(
+            R,
+            DAY + 1_000,
+            "Indent widgets with spaces, never tabs.",
+            &[&earlier],
+        );
+        s.run();
+        let q = Query {
+            text: "indent widgets".into(),
+            caller: Some(R.into()),
+            raw: RawArm::Off,
+            ..Default::default()
+        };
+        let got = text(&s, Around::Query(q), (1, 1)).unwrap();
+        assert!(
+            got.contains(&format!("**Anchor:** {} - ", &later[..12])),
+            "{got}"
+        );
+    }
+
+    /// T4 (Codex and Greptile on #450): a `|` in a card's title stays in its cell.
+    #[test]
+    fn a_pipe_in_a_title_stays_in_its_cell() {
+        let mut s = Store::new();
+        let seq = s.said("work", R, DAY, "Pipes.");
+        let card = s.cards(
+            seq,
+            seq,
+            json!([{"type": "change", "title": "Support A | B"}]),
+            false,
+        )[0]
+        .clone();
+        s.run();
+        let got = text(&s, Around::Anchor(card.clone()), (0, 0)).unwrap();
+        assert!(
+            got.contains(&format!(
+                "| {card} | 10:13 PM | ✓ | Support A \\| B <- **ANCHOR** | ~"
+            )),
+            "{got}"
+        );
+    }
+
+    /// T4 (Greptile on #450): with every repository, each line and table names its repository.
+    #[test]
+    fn every_repository_names_each_entrys_repository() {
+        let d = days();
+        let got = timeline_text(
+            d.s.home.path(),
+            None,
+            Path::new("/w"),
+            Around::Anchor(d.cards[0].clone()),
+            (2, 3),
+            &chrono::Utc,
+        )
+        .unwrap();
+        let named = format!(" [{R}]");
+        for line in [
+            format!(
+                "**{}** decision decided Use the trigram tokenizer. (Nov 13, 10:13 PM){named}",
+                &d.older.1[..12]
+            ),
+            format!("**💬 Prompt {}** (Nov 14, 10:13 PM){named}", d.prompt),
+            format!("**src/reader.rs**{named}"),
+            format!(
+                "**🎯 {}** Quartz progress (Nov 14, 10:13 PM){named}",
+                d.summary
+            ),
+        ] {
+            assert!(got.lines().any(|l| l == line), "{line}: {got}");
+        }
+        let one = text(&d.s, Around::Anchor(d.cards[0].clone()), (2, 3)).unwrap();
+        assert!(!one.contains(&named), "{one}");
+    }
+
     /// Test 2 (T1): a query's anchor is search's first hit, named in the header.
     #[test]
     fn a_query_anchors_on_searchs_first_hit() {
@@ -805,7 +985,7 @@ mod tests {
         )
         .unwrap();
         let name = "search::b::timeline::tests::a_rule_added_after_masks_every_line";
-        let out = std::process::Command::new(std::env::args_os().next().unwrap())
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", name])
             .env(HOME, s.home.path())
             .output()
