@@ -667,19 +667,19 @@ fn knowledge_holding(home: &Path, uids: &HashSet<String>) -> Result<HashSet<Stri
 
 /// The files of knowledge.db copies set aside, sidecars too: a rebuild's that stopped and the
 /// quarantined (spec 1.7).
-fn aside_files(home: &Path) -> Vec<PathBuf> {
-    std::fs::read_dir(home)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| {
-            e.file_name().to_str().is_some_and(|n| {
-                n.starts_with("knowledge.db.quarantined-")
-                    || n.starts_with("knowledge.db.rebuilding-")
-            })
-        })
-        .map(|e| e.path())
-        .collect()
+fn aside_files(home: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    // A listing or an entry that cannot be read may hide one: an error then, so step 3 waits
+    // (Codex on #444).
+    for entry in std::fs::read_dir(home)? {
+        let entry = entry?;
+        if entry.file_name().to_str().is_some_and(|n| {
+            n.starts_with("knowledge.db.quarantined-") || n.starts_with("knowledge.db.rebuilding-")
+        }) {
+            files.push(entry.path());
+        }
+    }
+    Ok(files)
 }
 
 /// D5 (2b): each uid job purged by the state it finds (item 7). Step 2: its ops that hold its text
@@ -749,9 +749,9 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     // #444).
     let _worker = crate::worker::lock_asking(home)?;
     let raw = crate::raw::open(home)?;
-    if !aside_files(home).is_empty() {
+    if !aside_files(home)?.is_empty() {
         crate::embed_phase::carry_set_aside(home, &crate::knowledge::open(home)?, &raw)?;
-        for file in aside_files(home) {
+        for file in aside_files(home)? {
             std::fs::remove_file(&file)
                 .with_context(|| format!("{} was not removed", file.display()))?;
             purged.aside += 1;
@@ -2048,7 +2048,7 @@ mod tests {
         drop(raw);
         let purged = purge(&home).unwrap().unwrap();
         assert!(purged.rebuilt && purged.aside > 0);
-        assert!(aside_files(&home).is_empty());
+        assert!(aside_files(&home).unwrap().is_empty());
         let k = crate::knowledge::open(&home).unwrap();
         let has = |sha: &str| -> bool {
             k.query_row(
@@ -2086,7 +2086,7 @@ mod tests {
         let purged = purge(&home).unwrap().unwrap();
         assert_eq!((purged.jobs, purged.ops, purged.rebuilt), (1, 0, false));
         assert!(purged.aside > 0);
-        assert!(aside_files(&home).is_empty());
+        assert!(aside_files(&home).unwrap().is_empty());
         assert_eq!(uid_jobs(&home)[0].2, 3);
     }
 
@@ -2118,6 +2118,24 @@ mod tests {
         assert_eq!((purged.jobs, purged.ops), (1, 1));
         assert_eq!(uid_jobs(&home)[0].2, 3);
         assert!(!op_rows(&home).iter().any(|o| o.3.contains("Use tabs.")));
+    }
+
+    /// D5 (2b, item 5): a listing that fails is an error, never a home without copies set aside
+    /// (Codex on #444). Root lists every directory: checked only where the listing fails.
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_that_fails_is_no_home_without_copies() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let shut = home.path().join("shut");
+        std::fs::create_dir(&shut).unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = std::fs::read_dir(&shut).is_err();
+        let listed = aside_files(&shut);
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if refused {
+            assert!(listed.is_err());
+        }
     }
 
     /// D5 (2b, item 7): bodies a restore puts back while the purge runs, after its step 2, keep the

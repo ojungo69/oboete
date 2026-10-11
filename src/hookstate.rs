@@ -130,7 +130,8 @@ pub fn update_all(
         for s in sessions {
             let dir = s?.path();
             let part = dir.join(format!(".{name}.part"));
-            if !dir.join(name).exists() && !part.exists() {
+            // `exists` says no when it cannot look (Codex on #444).
+            if !dir.join(name).try_exists()? && !part.try_exists()? {
                 continue;
             }
             // `prune` may be removing it: the lock's file cannot be made then.
@@ -188,8 +189,9 @@ pub fn prune(home: &Path, keep: Duration) {
 mod tests {
     use super::*;
 
-    /// Milestone 5 D5 (2b): a directory the sweep cannot read fails it, since a value in it may
-    /// hold what must go (Codex on #444); a value that is not text is offered empty and replaced.
+    /// Milestone 5 D5 (2b): a directory the sweep cannot list or search fails it, since a value in
+    /// it may hold what must go (Codex on #444); a value that is not text is offered empty and
+    /// replaced. Root reads every directory: the failures are checked only where they happen.
     #[cfg(unix)]
     #[test]
     fn a_sweep_fails_on_a_directory_it_cannot_read() {
@@ -197,10 +199,17 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         update(home.path(), "claude", "s", "shown", |_| Some("{}".into())).unwrap();
         let agent = root(home.path()).join("claude");
-        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let swept = update_all(home.path(), "shown", |_| None);
-        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(swept.is_err());
+        let shown = dir(home.path(), "claude", "s").join("shown");
+        // Not listed, then listed but not searched.
+        for mode in [0o000, 0o400] {
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(mode)).unwrap();
+            let refused = std::fs::read_dir(&agent).is_err() || std::fs::metadata(&shown).is_err();
+            let swept = update_all(home.path(), "shown", |_| None);
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
+            if refused {
+                assert!(swept.is_err(), "mode {mode:o}");
+            }
+        }
         std::fs::write(dir(home.path(), "claude", "s").join("shown"), [0xff, 0xfe]).unwrap();
         let swept = update_all(home.path(), "shown", |v| v.is_empty().then(|| "{}".into()));
         assert_eq!(swept.unwrap(), 1);
