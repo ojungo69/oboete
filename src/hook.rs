@@ -322,7 +322,7 @@ fn run_io(
         let reads_start = event == "SessionStart" && !matches!(agent, "grok" | "agy" | "cursor");
         let failure = failed
             .filter(|_| injecting || reads_start)
-            .map(|f| crate::failure::line(f, crate::unwritten::counts(home).0));
+            .map(|f| crate::failure::line(f, kept_count(home)));
         // docs/work-state.md L7: the work state's rule beside the failure line, outside every
         // fence, and its open lines in a fence of their own before the manifest's.
         let work = manifest.as_ref().and_then(|m| m.work.as_ref());
@@ -727,9 +727,11 @@ pub fn record(
         Err(e) => eprintln!("oboete: kept events not written back yet: {e:#}"),
     }
     // docs/unwritten.md U3: older kept files a later call writes back keep this call's events
-    // behind them, so the seqs follow the events' order (Codex on #440).
+    // behind them, so the seqs follow the events' order (Codex on #440). A spool that cannot be
+    // listed takes no file either (U1 names each file from the list): the events are appended,
+    // and doctor says the spool cannot be listed.
     if !built.is_empty()
-        && crate::unwritten::counts(home).0 > 0
+        && crate::unwritten::counts(home).is_ok_and(|(kept, _)| kept > 0)
         && keep(home, agent, &built, settings, false)
     {
         return Ok(Recorded {
@@ -806,6 +808,12 @@ fn built(
 /// docs/unwritten.md U1: the events a failed write did not append, kept for a later write. When
 /// they cannot be and this was their `last` chance, an agy step claimed for them is given back, so
 /// a later hook records it.
+/// The failure line's count of kept hook calls: none said when the spool cannot be listed, which
+/// doctor reports.
+fn kept_count(home: &Path) -> usize {
+    crate::unwritten::counts(home).map_or(0, |(kept, _)| kept)
+}
+
 fn keep(
     home: &Path,
     agent: &str,
@@ -1700,8 +1708,7 @@ pub fn joined(home: &Path, raw: Option<&crate::raw::Raw>, start: Option<&Start>)
         })
     });
     let parts: Vec<String> = [
-        crate::failure::since(home)
-            .map(|f| crate::failure::line(f, crate::unwritten::counts(home).0)),
+        crate::failure::since(home).map(|f| crate::failure::line(f, kept_count(home))),
         stopped.as_ref().map(crate::curate::Stopped::line),
         work.map(|w| w.rule.clone()),
         work.and_then(|w| w.open.as_deref())
@@ -2540,7 +2547,7 @@ mod tests {
             .unwrap();
         assert!(text.contains("recording has failed since"), "{text}");
         // Both calls' events are kept for a later write (docs/unwritten.md), and the line says so.
-        assert_eq!(crate::unwritten::counts(home), (2, 0));
+        assert_eq!(crate::unwritten::counts(home).unwrap(), (2, 0));
         assert_eq!(
             text,
             crate::failure::line(crate::failure::since(home).unwrap(), 2)
@@ -6594,7 +6601,12 @@ mod tests {
                     .contains("recording has failed since")
             );
             assert!(recorded(&dir, "agy", &id).is_empty());
-            assert_eq!(crate::unwritten::counts(&dir).0, usize::from(keeps));
+            let counted = crate::unwritten::counts(&dir);
+            if keeps {
+                assert_eq!(counted.unwrap().0, 1);
+            } else {
+                assert!(counted.is_err(), "a file in the spool's place is listed");
+            }
             if !keeps {
                 std::fs::remove_file(dir.join("unwritten")).unwrap();
             }
@@ -6652,10 +6664,10 @@ mod tests {
         call("first prompt").unwrap();
         let held = crate::raw::lock_for_swap(h).unwrap();
         assert!(call("second prompt").is_err());
-        assert_eq!(crate::unwritten::counts(h), (1, 0));
+        assert_eq!(crate::unwritten::counts(h).unwrap(), (1, 0));
         drop(held);
         call("third prompt").unwrap();
-        assert_eq!(crate::unwritten::counts(h), (0, 0));
+        assert_eq!(crate::unwritten::counts(h).unwrap(), (0, 0));
         let prompts: Vec<String> = recorded(h, "claude", "s")
             .into_iter()
             .filter(|e| e.kind == "prompt")
@@ -6752,9 +6764,9 @@ mod tests {
             )
         };
         call("prompt 18").unwrap();
-        assert_eq!(crate::unwritten::counts(h), (2, 0));
+        assert_eq!(crate::unwritten::counts(h).unwrap(), (2, 0));
         call("prompt 19").unwrap();
-        assert_eq!(crate::unwritten::counts(h), (0, 0));
+        assert_eq!(crate::unwritten::counts(h).unwrap(), (0, 0));
         let prompts: Vec<String> = recorded(h, "claude", "s")
             .into_iter()
             .filter(|e| e.kind == "prompt")
@@ -6791,7 +6803,7 @@ mod tests {
         drop(held);
         // All private: no event of its own.
         call("<private>nothing to record</private>").unwrap();
-        assert_eq!(crate::unwritten::counts(h), (0, 0));
+        assert_eq!(crate::unwritten::counts(h).unwrap(), (0, 0));
         assert!(crate::failure::since(h).is_none());
         let prompts = recorded(h, "claude", "s")
             .into_iter()
@@ -6855,7 +6867,7 @@ mod tests {
         drop(held);
         let (refused, failed) = t.join().unwrap();
         assert!(refused && failed > 0 && failed < released);
-        assert_eq!(crate::unwritten::counts(&h).0, 1);
+        assert_eq!(crate::unwritten::counts(&h).unwrap().0, 1);
     }
 
     /// docs/unwritten.md U3: a write-back that finds raw.db damaged keeps the call's events behind
@@ -6880,13 +6892,13 @@ mod tests {
         let held = crate::raw::lock_for_swap(h).unwrap();
         assert!(call("second prompt").is_err());
         drop(held);
-        assert_eq!(crate::unwritten::counts(h), (1, 0));
+        assert_eq!(crate::unwritten::counts(h).unwrap(), (1, 0));
         crate::unwritten::FAILS.set(Some((0, rusqlite::ffi::SQLITE_CORRUPT)));
         assert!(call("third prompt").is_err());
         assert!(crate::backup::restore_requested(h));
-        assert_eq!(crate::unwritten::counts(h), (2, 0));
+        assert_eq!(crate::unwritten::counts(h).unwrap(), (2, 0));
         call("fourth prompt").unwrap();
-        assert_eq!(crate::unwritten::counts(h), (0, 0));
+        assert_eq!(crate::unwritten::counts(h).unwrap(), (0, 0));
         let prompts: Vec<String> = recorded(h, "claude", "s")
             .into_iter()
             .filter(|e| e.kind == "prompt")
@@ -6921,12 +6933,12 @@ mod tests {
         assert!(call("second prompt").is_err());
         assert!(call("third prompt").is_err());
         drop(held);
-        assert_eq!(crate::unwritten::counts(h), (2, 0));
+        assert_eq!(crate::unwritten::counts(h).unwrap(), (2, 0));
         assert!(crate::failure::since(h).is_some());
         crate::unwritten::FAILS.set(Some((1, rusqlite::ffi::SQLITE_FULL)));
         call("fourth prompt").unwrap();
         // One written back; the other, and the fourth behind it, kept.
-        assert_eq!(crate::unwritten::counts(h), (2, 0));
+        assert_eq!(crate::unwritten::counts(h).unwrap(), (2, 0));
         assert!(crate::failure::since(h).is_none());
     }
 
@@ -6963,7 +6975,7 @@ mod tests {
         assert!(call("a refused prompt").is_err());
         assert_eq!(WORKER_ASKED.get(), asked + 1);
         assert!(crate::failure::since(h).is_some());
-        assert_eq!(crate::unwritten::counts(h), (1, 0));
+        assert_eq!(crate::unwritten::counts(h).unwrap(), (1, 0));
     }
 
     /// docs/unwritten.md U3: a call that cannot keep its events behind older kept files appends

@@ -188,11 +188,11 @@ fn write_back_counting(home: &Path, raw: &mut crate::raw::Raw, written: &mut usi
     Ok(())
 }
 
-/// U6: the hook calls kept, and the files set aside in `bad/`.
-pub fn counts(home: &Path) -> (usize, usize) {
+/// U6: the hook calls kept, and the files set aside in `bad/`; an error when either cannot be
+/// listed, which may hide some (Codex on #440).
+pub fn counts(home: &Path) -> Result<(usize, usize)> {
     let dir = home.join(DIR);
-    let n = |d: &Path| files(d).map_or(0, |f| f.len());
-    (n(&dir), n(&dir.join("bad")))
+    Ok((files(&dir)?.len(), files(&dir.join("bad"))?.len()))
 }
 
 /// The kept files in `dir`, the oldest first (their names start with the time).
@@ -271,7 +271,7 @@ mod tests {
         let (n, back) = write_back(h, &mut raw);
         assert_eq!(n, 1);
         assert!(back.is_err());
-        assert_eq!(counts(h), (1, 0));
+        assert_eq!(counts(h).unwrap(), (1, 0));
     }
 
     fn prompt(text: &str, ts: i64) -> Captured {
@@ -291,6 +291,15 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Codex on #440: a spool that cannot be listed is an error, not an empty one: it may hide
+    /// kept files.
+    #[test]
+    fn a_spool_that_cannot_be_listed_is_an_error() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(DIR), "not a directory").unwrap();
+        assert!(counts(home.path()).is_err());
     }
 
     /// U1: each file is named one past the newest, under the keep lock, so the files sort as they
@@ -339,7 +348,7 @@ mod tests {
         let start = std::time::Instant::now();
         assert!(keep(home.path(), &[prompt("waits", 1_000)], "r").is_err());
         assert!(start.elapsed() >= KEEP_WAIT);
-        assert_eq!(counts(home.path()).0, 0);
+        assert_eq!(counts(home.path()).unwrap().0, 0);
     }
 
     /// U5: what `bad/` holds counts against the bound: oboete never deletes it (Codex on #440).
@@ -353,7 +362,7 @@ mod tests {
             .set_len(BOUND)
             .unwrap();
         assert!(keep(home.path(), &[prompt("one more", 1_000)], "r").is_err());
-        assert_eq!(counts(home.path()).0, 0);
+        assert_eq!(counts(home.path()).unwrap().0, 0);
     }
 
     /// U5: a keep waits for the one in progress, so overlapping failed calls cannot each pass the
@@ -386,7 +395,7 @@ mod tests {
         kept.recv_timeout(std::time::Duration::from_secs(30))
             .unwrap();
         t.join().unwrap();
-        assert_eq!(counts(&h).0, 1);
+        assert_eq!(counts(&h).unwrap().0, 1);
     }
 
     /// U1: a temporary file that a keep killed before its rename left is removed by the next keep,
@@ -400,7 +409,7 @@ mod tests {
         std::fs::write(&left, "half").unwrap();
         keep(home.path(), &[prompt("after the kill", 1_000)], "r").unwrap();
         assert!(!left.exists());
-        assert_eq!(counts(home.path()).0, 1);
+        assert_eq!(counts(home.path()).unwrap().0, 1);
     }
 
     /// U1, U4: names are unique across the files kept and those set aside, so a file set aside
@@ -442,10 +451,10 @@ mod tests {
         held.lock().unwrap();
         let mut raw = crate::raw::open(h).unwrap();
         assert!(write_back(h, &mut raw).1.is_err());
-        assert_eq!(counts(h), (1, 0));
+        assert_eq!(counts(h).unwrap(), (1, 0));
         drop(held);
         assert_eq!(written(write_back(h, &mut raw)), 0);
-        assert_eq!(counts(h), (0, 1));
+        assert_eq!(counts(h).unwrap(), (0, 1));
     }
 
     /// U1, U3: a kept file holds the masked text, never the secret, and is the owner's alone; it
@@ -473,7 +482,7 @@ mod tests {
         }
         let mut raw = crate::raw::open(h).unwrap();
         assert_eq!(written(write_back(h, &mut raw)), 1);
-        assert_eq!(counts(h), (0, 0));
+        assert_eq!(counts(h).unwrap(), (0, 0));
         let later = prompt("third", 2_000);
         raw.append_with_ledger(&later.event, &later.ledger, &ruleset)
             .unwrap();
@@ -500,10 +509,10 @@ mod tests {
             .unwrap();
         held.lock().unwrap();
         assert_eq!(written(write_back(h, &mut raw)), 0);
-        assert_eq!(counts(h), (1, 0));
+        assert_eq!(counts(h).unwrap(), (1, 0));
         drop(held);
         assert_eq!(written(write_back(h, &mut raw)), 1);
-        assert_eq!(counts(h), (0, 0));
+        assert_eq!(counts(h).unwrap(), (0, 0));
     }
 
     /// U4: a file that cannot be read back goes to `bad/` and stays; U5: nothing is kept past the
@@ -517,7 +526,7 @@ mod tests {
         std::fs::write(dir.join("1-1.json"), "not json").unwrap();
         let mut raw = crate::raw::open(h).unwrap();
         assert_eq!(written(write_back(h, &mut raw)), 0);
-        assert_eq!(counts(h), (0, 1));
+        assert_eq!(counts(h).unwrap(), (0, 1));
         assert!(events(&raw).is_empty());
         // A store that fails the write keeps the file for a later call: it is no bad file.
         keep(h, &[prompt("kept", 5)], "r").unwrap();
@@ -527,7 +536,7 @@ mod tests {
         )
         .unwrap();
         assert!(write_back(h, &mut raw).1.is_err());
-        assert_eq!(counts(h), (1, 1));
+        assert_eq!(counts(h).unwrap(), (1, 1));
         conn.execute_batch("DROP TRIGGER refuse;").unwrap();
         assert_eq!(written(write_back(h, &mut raw)), 1);
         // A file that would take it past the bound is not kept either.
@@ -537,6 +546,6 @@ mod tests {
             .unwrap();
         let e = keep(h, &[prompt("one", 1)], "r").unwrap_err();
         assert!(e.to_string().contains("holds"), "{e}");
-        assert_eq!(counts(h), (1, 1));
+        assert_eq!(counts(h).unwrap(), (1, 1));
     }
 }

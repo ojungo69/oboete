@@ -49,7 +49,9 @@ says recording failed, and nothing brings them back. This keeps them and writes 
 - **U6. What is said.** The marker and its line stay: the write did fail. Its time is when the store
   failed, taken before the keep, which may wait and sync: overlapping hooks order the marker by it. While files wait, the
   line says how many hook calls are kept and that they are written when a write succeeds; doctor
-  says the same, and counts `bad/`.
+  says the same, and counts `bad/`. A `unwritten/` that cannot be listed may hide kept files:
+  doctor says so and fails, and `oboete replay` refuses the home; a hook call appends its events
+  then, since a keep names its file from the list (U1) and could not keep them either.
 - **U7. Settings changed between the two.** A kept event keeps its gate's masks and ruleset
   version: a rule added since reaches it as it reaches every record stored before the rule
   (rescan). It was shaped by the capture settings of its time (`store_prompts`, `tool_output`).

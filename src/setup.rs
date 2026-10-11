@@ -2467,7 +2467,14 @@ pub fn doctor(home: &Path) -> Result<()> {
     println!("home {} (db {} KB)", home.display(), size / 1024);
     // First, before anything that needs the disk: MUST-M16 is about a disk that is full.
     let mut unhealthy = Vec::new();
-    let (kept, refused) = crate::unwritten::counts(home);
+    let (kept, refused) = crate::unwritten::counts(home).unwrap_or_else(|e| {
+        println!(
+            "  the hook calls kept after failed writes cannot be listed in {}: {e:#}",
+            home.join("unwritten").display()
+        );
+        unhealthy.push("kept hook calls cannot be listed");
+        (0, 0)
+    });
     if let Some(failed) = crate::failure::since(home) {
         println!("  {}", crate::failure::line(failed, kept));
         unhealthy.push("recording has failed");

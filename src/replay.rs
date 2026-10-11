@@ -32,8 +32,10 @@ pub fn run(
     // docs/unwritten.md: the events failed hook calls kept are a live hook's to write back, with
     // the marker and the worker; a replay's first event would write them back without either
     // (Codex on #440).
+    let (kept, _) =
+        crate::unwritten::counts(home).context("the kept hook calls cannot be listed")?;
     anyhow::ensure!(
-        crate::unwritten::counts(home).0 == 0,
+        kept == 0,
         "this home holds events that failed hook calls kept: replay into another home (--home)"
     );
     let root = match repo_root {
@@ -750,7 +752,12 @@ mod tests {
             format!("{err:#}").contains("failed hook calls kept"),
             "{err:#}"
         );
-        assert_eq!(crate::unwritten::counts(home.path()), (1, 0));
+        assert_eq!(crate::unwritten::counts(home.path()).unwrap(), (1, 0));
+        // A spool that cannot be listed may hold some (Codex on #440).
+        let odd = tempfile::tempdir().unwrap();
+        std::fs::write(odd.path().join("unwritten"), "").unwrap();
+        let err = run(odd.path(), &fixture, None, 0, &[1], "claude", 0, 0).unwrap_err();
+        assert!(format!("{err:#}").contains("cannot be listed"), "{err:#}");
     }
 
     /// cubic on #301: Grok and agy inject at other points, with other payloads.
