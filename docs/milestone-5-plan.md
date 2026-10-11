@@ -732,7 +732,10 @@ Slice 3 は 6 つの PR に分け、この順に作る（3b は 2026-10-12 に 3
 - **session tombstone（D3）。** 登録の後に届く、自身の ts が登録時刻以前のその session の record は
   書かない。hook の記録は SQLite の書込 lock だけを取り、時刻を取ってから登録の transaction を待ちうるので、
   確かめは raw の append の transaction の中で行う（`unwritten/` の書き戻しも同じ）。transcript と v1 の
-  取込みは record ごとに確かめる（登録後に始まった turn は記録する）。表は `denied_scopes(job, kind,
+  取込みは record ごとに確かめる（登録後に始まった turn は記録する）。tombstone が覆う deny（その session の
+  ページの deny と、登録より前の時刻の deny）は 3a の `check_cross_source_forget` の batch 拒否に数えない
+  （CodeRabbit・Greptile on #465）。覆わない deny（登録より後の record の forget、時刻のない別の要求の deny）は
+  従来どおり batch を拒否する。表は `denied_scopes(job, kind,
   key, before)`（kind は `session`、key は session hash。3b-2 が repo と時間範囲の列を足す）で、要求の適用
   （`apply_request`）が書くので、ログからの restore と古い raw.db への置換の後も戻る。登録より後の ts の
   event は記録する（将来の記録を止めるのは capture exclusion）。live の event は伏せ字の後の label で

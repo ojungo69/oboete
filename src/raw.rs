@@ -420,9 +420,15 @@ const DENIED_COUNT: &str = "SELECT (SELECT COUNT(*) FROM denied_records)
 /// Opposite import sources do not share event identifiers. Keep exact-origin denials, but
 /// refuse an import that could reintroduce their copy from the other source.
 fn check_cross_source_forget(conn: &Connection, session: &str, source: &str) -> Result<()> {
+    // Slice 3b: a denial a forget of the whole session covers (its own page's, or one from before
+    // its registration) refuses no batch: the session's tombstone refuses each record from before
+    // the registration and takes those from after it (CodeRabbit and Greptile on #465).
     let unverified: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM denied_records
-         WHERE session=?1 AND (?2 <> 'transcript' OR ts IS NOT NULL))",
+        "SELECT EXISTS(SELECT 1 FROM denied_records d
+         WHERE d.session=?1 AND (?2 <> 'transcript' OR d.ts IS NOT NULL)
+           AND NOT EXISTS(SELECT 1 FROM denied_scopes s
+             WHERE s.kind = 'session' AND s.key = d.session
+               AND (s.job = d.job OR d.ts <= s.before)))",
         params![session, source],
         |r| r.get(0),
     )?;

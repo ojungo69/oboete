@@ -4414,6 +4414,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let h = home.path();
         let mut raw = raw::open(h).unwrap();
+        let l0 = live(&mut raw, "s", 500, r#"{"prompt":"zero"}"#);
         let l1 = live(&mut raw, "s", 1_000, r#"{"prompt":"one"}"#);
         let t1 = imported(
             &mut raw,
@@ -4424,6 +4425,12 @@ mod tests {
             r#"{"prompt":"x"}"#,
         );
         let device = raw.device().to_owned();
+        // One of the session's records forgotten alone first: the session's tombstone covers its
+        // denial too. Another session's record forgotten alone: no tombstone covers it.
+        let u0 = live(&mut raw, "u", 600, r#"{"prompt":"u"}"#);
+        for seq in [l0, u0] {
+            start(h, &preview(h, record(&raw, seq)).unwrap()).unwrap();
+        }
         for seq in [l1, t1] {
             let target = session_target(h, &format!("{device}:{seq}")).unwrap();
             start(h, &preview(h, target).unwrap()).unwrap();
@@ -4488,6 +4495,53 @@ mod tests {
                 .len(),
             1
         );
+        // The live session's later records too, from a transcript and from v1: its tombstone
+        // decides each, and its live record's denial refuses no batch (CodeRabbit and Greptile on
+        // #465). A record forget's denial outside the tombstone still refuses the batch.
+        assert_eq!(raw.transcript_cut("claude", "s", Some(7)).unwrap(), Some(7));
+        let in_s = |id: &str| raw::ImportIdentity {
+            origin: origin("synthetic", id),
+            session: super::session("claude", "s"),
+            ambiguous: None,
+            unverified: false,
+        };
+        for source in ["transcript", "oboete-v1"] {
+            let mut e = turn.clone();
+            e.source = source.into();
+            e.session = "s".into();
+            e.ts = started - 1;
+            let early = format!("{source}-early");
+            assert_eq!(
+                raw.append_imported_origins(&[captured(&e)], &[in_s(&early)], "", None)
+                    .unwrap(),
+                Vec::<i64>::new(),
+                "{source}"
+            );
+            e.ts = last + 1;
+            let later = format!("{source}-later");
+            assert_eq!(
+                raw.append_imported_origins(&[captured(&e)], &[in_s(&later)], "", None)
+                    .unwrap()
+                    .len(),
+                1,
+                "{source}"
+            );
+        }
+        // The transcript-only session's denials (no time kept) are its own pages': a v1 record of
+        // it from after the registration is recorded.
+        let mut v1 = turn.clone();
+        v1.source = "oboete-v1".into();
+        v1.ts = last + 1;
+        assert_eq!(
+            raw.append_imported_origins(&[captured(&v1)], &[identity("v1-later")], "", None)
+                .unwrap()
+                .len(),
+            1
+        );
+        let l2 = live(&mut raw, "s", last + 2, r#"{"prompt":"after"}"#);
+        start(h, &preview(h, record(&raw, l2)).unwrap()).unwrap();
+        assert!(raw.transcript_cut("claude", "s", None).is_err());
+        assert!(raw.transcript_cut("claude", "u", None).is_err());
         // The denial comes back with the request from its log.
         let conn = rusqlite::Connection::open(h.join("raw.db")).unwrap();
         conn.execute_batch("DELETE FROM denied_scopes").unwrap();
