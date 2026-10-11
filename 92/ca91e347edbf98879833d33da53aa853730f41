@@ -1,0 +1,21 @@
+docs/milestone-5-plan.md
+  s_234f6f365da547::t_013b6f009725c1 320-326
+src/forget.rs
+  s_234f6f365da547::t_433ad960eb447c 643,675,692-700,2021-2022,2024,2043,2162-2164,2166-2172,2202-2209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "92ca91e347edbf98879833d33da53aa853730f41",
+  "prompts": {},
+  "sessions": {
+    "s_234f6f365da547": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3206e10e-7912-46d9-b070-aa879bc5ad93",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
