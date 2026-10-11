@@ -96,7 +96,7 @@ enum Cmd {
     Rebuild,
     /// Register an irreversible forget: raw records, with their sessions' records from other
     /// sources, a whole session, a repository, a time range, or a claim's or an imported
-    /// document's uid (a record's physical purge is not built yet)
+    /// document's uid (what was made from a record, and its backups, are purged by a later version)
     Forget {
         /// Raw id from search: <device>:<seq>
         #[arg(long, conflicts_with_all = ["span", "status"])]

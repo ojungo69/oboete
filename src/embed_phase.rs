@@ -12,7 +12,6 @@ use crate::resident::{Busy, Resident};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1057,7 +1056,7 @@ pub fn doctor_lines(home: &Path, k: &Connection) -> Result<Vec<String>> {
 // ponytail: within one knowledge.db the cache keeps every text ever embedded, the old texts of
 // changed documents too (a rewind maps them back for free), and a rebuild or a quarantine drops
 // those; sweep unreferenced rows if the live cache grows past what that is worth.
-pub fn carry(k: &Connection, from: &Path, forgotten: &HashSet<String>) -> Result<usize> {
+pub fn carry(k: &Connection, from: &Path, forgotten: &crate::forget::Forgotten) -> Result<usize> {
     let old = Connection::open_with_flags(from, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let has: bool = old.query_row(
         "SELECT COUNT(*) = 2 FROM sqlite_master
@@ -1069,11 +1068,19 @@ pub fn carry(k: &Connection, from: &Path, forgotten: &HashSet<String>) -> Result
         return Ok(0);
     }
     // Beside the old file's keys: a read-only connection still writes its temp tables.
-    old.execute_batch("CREATE TEMP TABLE forgotten(uid TEXT PRIMARY KEY)")?;
+    old.execute_batch(
+        "CREATE TEMP TABLE forgotten(uid TEXT PRIMARY KEY);
+         CREATE TEMP TABLE forgotten_records(key TEXT PRIMARY KEY);",
+    )?;
     {
         let mut add = old.prepare("INSERT OR IGNORE INTO temp.forgotten(uid) VALUES (?1)")?;
-        for uid in forgotten {
+        for uid in &forgotten.uids {
             add.execute([uid])?;
+        }
+        let mut add =
+            old.prepare("INSERT OR IGNORE INTO temp.forgotten_records(key) VALUES (?1)")?;
+        for key in &forgotten.records {
+            add.execute([key])?;
         }
     }
     let tx = k.unchecked_transaction()?;
@@ -1085,7 +1092,8 @@ pub fn carry(k: &Connection, from: &Path, forgotten: &HashSet<String>) -> Result
             "SELECT v.embedder, v.src_sha, v.vec FROM vector_keys k
              JOIN vectors v ON v.embedder = k.embedder AND v.src_sha = k.src_sha
              WHERE k.src_sha <> ''
-               AND NOT (k.kind IN ('c', 'k', 'p') AND k.key IN (SELECT uid FROM temp.forgotten))",
+               AND NOT (k.kind IN ('c', 'k', 'p') AND k.key IN (SELECT uid FROM temp.forgotten))
+               AND NOT (k.kind = 'r' AND k.key IN (SELECT key FROM temp.forgotten_records))",
         )?;
         let mut rows = read.query([])?;
         let mut write = tx
@@ -1135,9 +1143,13 @@ pub(crate) fn carry_set_aside(home: &Path, k: &Connection, raw: &Raw) -> Result<
         }
     }
     let forgotten = if aside.is_empty() {
-        HashSet::new()
+        crate::forget::Forgotten::default()
     } else {
-        crate::forget::with_logged(home, raw.forgotten_set()?, Some(raw.home_id()))?
+        let forgotten = crate::forget::Forgotten {
+            uids: raw.forgotten_set()?,
+            records: raw.forgotten_record_keys()?,
+        };
+        crate::forget::with_logged(home, forgotten, Some(raw.home_id()))?
     };
     for (_, name) in &aside {
         if let Err(e) = carry(k, &home.join(name), &forgotten) {
@@ -3898,8 +3910,8 @@ mod tests {
     }
 
     /// Milestone 5 D5 (2b): carry takes only the vectors a key of the old file maps, and none that
-    /// only a forgotten claim's or document's key maps; a key that kept no vector maps none, and a
-    /// file from before the keys carries nothing.
+    /// only a forgotten claim's or document's key maps, nor (slice 3c) a forgotten record's; a key
+    /// that kept no vector maps none, and a file from before the keys carries nothing.
     #[test]
     fn carry_takes_only_what_a_kept_key_maps() {
         let home = tempfile::tempdir().unwrap();
@@ -3933,17 +3945,27 @@ mod tests {
             .unwrap();
         }
         drop(old);
+        let shas = |k: &Connection| -> Vec<String> {
+            k.prepare("SELECT src_sha FROM vectors ORDER BY src_sha")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let mut gone = crate::forget::Forgotten {
+            uids: std::collections::HashSet::from(["g".to_owned()]),
+            ..Default::default()
+        };
         let k = crate::knowledge::open(home.path()).unwrap();
-        let gone = HashSet::from(["g".to_owned()]);
         assert_eq!(carry(&k, &from, &gone).unwrap(), 3);
-        let shas: Vec<String> = k
-            .prepare("SELECT src_sha FROM vectors ORDER BY src_sha")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(shas, ["kept", "record", "shared"]);
+        assert_eq!(shas(&k), ["kept", "record", "shared"]);
+        // A forgotten record's key maps no vector carried.
+        let other = tempfile::tempdir().unwrap();
+        let fresh = crate::knowledge::open(other.path()).unwrap();
+        gone.records.insert("d:1".to_owned());
+        assert_eq!(carry(&fresh, &from, &gone).unwrap(), 2);
+        assert_eq!(shas(&fresh), ["kept", "shared"]);
         let older = home.path().join("older");
         Connection::open(&older)
             .unwrap()

@@ -84,6 +84,10 @@ fn schema(k: &Connection) -> Result<()> {
          -- A failure and the success of the same call (a seek, not a scan of later successes).
          CREATE INDEX IF NOT EXISTS manifest_facts_label
            ON manifest_facts(device, repo, branch, fact, label, seq);
+         -- A tombstone's record, a seek that covers what its reads take: a large forget's
+         -- tombstones each scanned the device's facts (slice 3c, measured).
+         CREATE INDEX IF NOT EXISTS manifest_facts_record
+           ON manifest_facts(device, seq, repo, branch);
          CREATE TABLE IF NOT EXISTS manifests(
            repo TEXT NOT NULL, branch TEXT NOT NULL, device TEXT NOT NULL,
            built_at INTEGER NOT NULL, text TEXT NOT NULL,
