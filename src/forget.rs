@@ -3209,6 +3209,53 @@ mod tests {
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
     }
 
+    /// D5 (2c, Greptile on #458): a copy holding an op whose holding a uid's text cannot be told (a
+    /// claim cut short, a claim whose body names no uid, an op of a kind no name gives) may hold
+    /// the text: it is removed, as a segment with such a line is. A removal stopped at a sidecar
+    /// leaves the copy, which the next purge removes with what is left (Greptile, Codex on #458).
+    #[test]
+    fn a_copy_with_an_op_that_cannot_be_judged_is_removed_even_after_a_stopped_removal() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = canary_claim(&mut s);
+        s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        s.run();
+        let home = s.home.path().to_owned();
+        let damaged = [
+            "UPDATE ops SET body = substr(body, 1, 10) WHERE type = 'claim' AND body LIKE '%Use tabs.%'",
+            "UPDATE ops SET body = '{}' WHERE type = 'claim' AND body LIKE '%Use tabs.%'",
+            "UPDATE ops SET type = 'a kind no name gives' WHERE type = 'claim' AND body LIKE '%Use tabs.%'",
+        ]
+        .map(|sql| {
+            let copy = copy_raw(
+                &home,
+                &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+            );
+            let c = rusqlite::Connection::open(&copy).unwrap();
+            assert_eq!(c.execute(sql, []).unwrap(), 1, "{sql}");
+            copy
+        });
+        // A sidecar that cannot be removed: the removal stops there.
+        let journal = PathBuf::from(format!("{}-journal", damaged[0].display()));
+        std::fs::create_dir(&journal).unwrap();
+        std::fs::write(journal.join("held"), "x").unwrap();
+        forget(&home, &uid);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        assert!(purge(&home).is_err());
+        assert!(damaged[0].exists(), "the copy went before its sidecar");
+        std::fs::remove_file(journal.join("held")).unwrap();
+        std::fs::remove_dir(&journal).unwrap();
+        // The stopped purge may have removed the others already, in the directory's order.
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!(purged.copies, 0);
+        assert!(purged.copies_removed >= 1);
+        for copy in &damaged {
+            assert!(!copy.exists(), "{copy:?}");
+            assert!(!PathBuf::from(format!("{}-wal", copy.display())).exists());
+        }
+        assert!(!journal.exists());
+    }
+
     /// D5 (2c, decision 5): a copy of raw.db another connection reads cannot have its WAL truncated
     /// (the old page, the text in it, would stay in the file): it is removed instead.
     #[cfg(unix)]

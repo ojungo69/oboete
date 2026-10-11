@@ -3718,22 +3718,45 @@ pub(crate) fn copies_set_aside(home: &Path) -> Result<Vec<std::path::PathBuf>> {
 const SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 /// One copy's ops of the uids in `jobs` rewritten, in one transaction under secure_delete, and its
-/// WAL truncated: how many.
+/// WAL truncated: how many. Each op is judged as a backup line is (`backup::purged_line`): one
+/// whose holding a uid's text cannot be told (a kind it cannot name, a body that does not parse,
+/// or a claim, correction or import whose body names no uid and is not a purge's) fails it, and
+/// the copy is removed (Greptile on #458).
 fn rewrite_copy(copy: &Path, jobs: &std::collections::HashMap<String, String>) -> Result<usize> {
     let mut conn = Connection::open_with_flags(copy, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     // No one reads a copy: one in use is removed rather than waited for.
     conn.busy_timeout(Duration::ZERO)?;
     conn.execute_batch("PRAGMA secure_delete = ON")?;
     let tx = conn.transaction()?;
-    let mut rewritten = 0;
-    for (uid, job) in jobs {
-        let body = serde_json::json!({ "forgotten": job }).to_string();
-        for (device, op_seq) in uid_op_keys(&tx, uid)? {
-            rewritten += tx.execute(
-                "UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3",
-                params![body, device, op_seq],
-            )?;
+    let mut keys = Vec::new();
+    {
+        let mut st = tx.prepare("SELECT device, op_seq, type, body FROM ops")?;
+        let mut rows = st.query([])?;
+        while let Some(row) = rows.next()? {
+            let kind = OpKind::from_name(&row.get::<_, String>(2)?)
+                .context("an op of a kind that cannot be named")?;
+            if !matches!(kind, OpKind::Claim | OpKind::Correction | OpKind::Import) {
+                continue;
+            }
+            let body: serde_json::Value = serde_json::from_str(&row.get::<_, String>(3)?)
+                .context("an op whose body does not parse")?;
+            match op_uid(kind, &body) {
+                Some(uid) => {
+                    if let Some(job) = jobs.get(&uid) {
+                        keys.push((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, job));
+                    }
+                }
+                None => anyhow::ensure!(forgotten_body(&body), "an op that names no uid"),
+            }
         }
+    }
+    let mut rewritten = 0;
+    for (device, op_seq, job) in keys {
+        let body = serde_json::json!({ "forgotten": job }).to_string();
+        rewritten += tx.execute(
+            "UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3",
+            params![body, device, op_seq],
+        )?;
     }
     tx.commit()?;
     let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
@@ -3741,9 +3764,14 @@ fn rewrite_copy(copy: &Path, jobs: &std::collections::HashMap<String, String>) -
     Ok(rewritten)
 }
 
+/// `db`'s sidecars, then `db`: a removal that stops between them leaves `db`, which the next
+/// purge finds again (Greptile, Codex on #458). Each name is `db`'s own bytes and the suffix: a
+/// path need not be UTF-8 (Codex on #458).
 fn remove_with_sidecars(db: &Path) -> Result<()> {
-    for suffix in std::iter::once("").chain(SIDECARS) {
-        let file = std::path::PathBuf::from(format!("{}{suffix}", db.display()));
+    for suffix in SIDECARS.into_iter().chain(std::iter::once("")) {
+        let mut name = db.as_os_str().to_owned();
+        name.push(suffix);
+        let file = std::path::PathBuf::from(name);
         match std::fs::remove_file(&file) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -4028,6 +4056,31 @@ pub fn test_event(body: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Codex on #458: a copy's sidecars are named on its path's own bytes, which need not be
+    /// UTF-8.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_copy_under_a_path_that_is_not_utf8_goes_with_its_sidecars() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join(std::ffi::OsStr::from_bytes(b"home-\xff"));
+        std::fs::create_dir(&home).unwrap();
+        let files = [
+            "raw.db.quarantined-1",
+            "raw.db.quarantined-1-wal",
+            "raw.db.quarantined-1-shm",
+            "raw.db.quarantined-1-journal",
+        ]
+        .map(|name| home.join(name));
+        for f in &files {
+            std::fs::write(f, "x").unwrap();
+        }
+        remove_with_sidecars(&files[0]).unwrap();
+        for f in &files {
+            assert!(!f.exists(), "{f:?}");
+        }
+    }
 
     /// G22: a session's start reads the skipped windows through `ops_window_skips`, whose
     /// condition `SKIP_WINDOWS` repeats, and finds the ones curation writes.

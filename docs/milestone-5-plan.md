@@ -564,6 +564,13 @@ preview。下の試験は 1（segment の分）・2・3・5・6 が 2c-1、1（r
   `<ms>` は数字だけ）と `raw.db.restored` だけ。ほかの名前のファイルは書き換えも削除もしない（segment と
   同じ。Codex on #453）。写しを消したら、step 4 を記録する前にホームの directory を sync する（unix。
   Greptile on #453 の backup の場所と同じ）。
+- 写しの op は backup の行と同じく 1 つずつ判定する: 種類の名前が分からない op、本文が parse できない
+  claim・correction・import、uid を言わず purge の本文でもない claim・correction・import のどれかを持つ
+  写しは、その uid の本文を持ちうるので消す（隔離される写しは壊れた store であることが多い。Greptile on
+  #458）。
+- 写しを消すときは -wal・-shm・-journal を先に、写し自体を最後に消す: 途中で止まっても写しが残り、
+  次の purge がそれを見つけて続ける（Greptile と Codex on #458）。sidecar の名前は写しの path の byte に
+  接尾辞を足して作る（UTF-8 でない path でも同じファイルを指す。Codex on #458）。
 
 試験（2c の分）:
 
