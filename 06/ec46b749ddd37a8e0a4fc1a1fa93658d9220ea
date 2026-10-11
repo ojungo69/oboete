@@ -1,0 +1,27 @@
+docs/milestone-5-plan.md
+  s_234f6f365da547::t_0f27c3a77c0b3e 417-418
+src/dispatch.rs
+  s_234f6f365da547::t_c164fe1a8eef6d 92-95,112-123
+src/forget.rs
+  s_234f6f365da547::t_bc050d440a6317 474-476,480,485-492
+src/hook.rs
+  s_234f6f365da547::t_8178a958dfda22 456-458,3333-3334,3361-3372
+src/search/b.rs
+  s_234f6f365da547::t_5b1eafd055d55f 797,859-860
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "06ec46b749ddd37a8e0a4fc1a1fa93658d9220ea",
+  "prompts": {},
+  "sessions": {
+    "s_234f6f365da547": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3206e10e-7912-46d9-b070-aa879bc5ad93",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
