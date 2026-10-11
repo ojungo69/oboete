@@ -4386,7 +4386,9 @@ mod tests {
         // ready; starting an interpreter is a separately bounded setup operation.
         let timeout = Duration::from_secs(if cfg!(windows) { 10 } else { 1 });
         let startup = Duration::from_secs(20);
-        let watchdog = (startup.as_secs() + timeout.as_secs() + 7).to_string();
+        // The reader outlives every wait after the fixture's start and the run: the run's 2 s, the
+        // lock's 2 s and the receive's 5 s (Codex on #445).
+        let watchdog = (startup.as_secs() + timeout.as_secs() + 9).to_string();
         for mode in ["timeout", "failure"] {
             let home = tempfile::tempdir().unwrap();
             let admission = crate::dispatch::Admission::shared(home.path()).unwrap();
