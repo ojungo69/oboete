@@ -1844,7 +1844,12 @@ impl Raw {
                 });
         }
         let mut scope = crate::forget::ScopePreview {
-            first: found.iter().map(|(_, ts, _)| *ts).min(),
+            // Rule 10: a v1 touch keeps no time of the session (CodeRabbit on #465).
+            first: found
+                .iter()
+                .filter(|(_, _, kind)| kind != "touch")
+                .map(|(_, ts, _)| *ts)
+                .min(),
             sources: sources.into_iter().collect(),
             devices: devices.len(),
             idless: found.iter().filter(|(n, _, _)| n.session.is_none()).count(),
@@ -2577,6 +2582,7 @@ impl Raw {
             &self.device,
             &crate::forget::session(&e.agent, &e.session),
             e,
+            ledger,
         )? {
             return Ok(None);
         }
@@ -2609,7 +2615,7 @@ impl Raw {
         for c in events {
             // Slice 3b (D3): a forgotten session's record from before its forget is not recorded.
             let session = crate::forget::session(&c.event.agent, &c.event.session);
-            if !scope_tombstoned(&tx, &self.device, &session, &c.event)? {
+            if !scope_tombstoned(&tx, &self.device, &session, &c.event, &c.ledger)? {
                 insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
             }
         }
@@ -2688,7 +2694,7 @@ impl Raw {
             // Slice 3b (D3): a record of a forgotten scope from before its forget is not imported,
             // before an ambiguous group or a denial can refuse the batch for it: a later turn of the
             // session in the same batch is still recorded (Greptile on #465).
-            if scope_tombstoned(&tx, &self.device, &session, &c.event)? {
+            if scope_tombstoned(&tx, &self.device, &session, &c.event, &c.ledger)? {
                 continue;
             }
             if let Some(group) = identity.and_then(|i| i.ambiguous.as_ref()) {
@@ -4631,9 +4637,21 @@ fn readable_request(request: &str) -> Option<crate::forget::Request> {
 
 /// Slice 3b (D3): whether `e`, recorded on `device`, comes from before a registered forget of its
 /// scope: its session (`session`, its agent's hash of the session's id), its repository on the
-/// device that registered that forget, or a time range of its device it falls in.
-fn scope_tombstoned(conn: &Connection, device: &str, session: &str, e: &Event) -> Result<bool> {
-    let repo = e.repo.as_deref().map(crate::forget::repo);
+/// device that registered that forget, or a time range of its device it falls in. A repository
+/// label its `ledger` masks is no repository's, as the preview takes none (Greptile on #468).
+fn scope_tombstoned(
+    conn: &Connection,
+    device: &str,
+    session: &str,
+    e: &Event,
+    ledger: &[(String, crate::redact::Finding)],
+) -> Result<bool> {
+    let masked = ledger.iter().any(|(field, _)| field == "repo");
+    let repo = e
+        .repo
+        .as_deref()
+        .filter(|_| !masked)
+        .map(crate::forget::repo);
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM denied_scopes WHERE before >= ?1 AND (
            (kind = 'session' AND key = ?2)

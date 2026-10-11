@@ -4331,6 +4331,11 @@ mod tests {
         );
         let v = imported(&mut raw, "oboete-v1", "s", "v1", false, r#"{"prompt":"v"}"#);
         let touch = v1_touch(&mut raw, "s", "v-touch");
+        // A touch older than every record of the session is not its first record's time.
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute("UPDATE records SET ts = -1 WHERE seq = ?1", [touch])
+            .unwrap();
         let other = imported(
             &mut raw,
             "transcript",
@@ -5257,6 +5262,20 @@ mod tests {
             raw.append_imported_origins(&[captured], &[identity], "", None)
                 .unwrap()
                 .is_empty()
+        );
+        // A repository label its ledger masks is no repository's, whatever it reads as.
+        let masked = [(
+            "repo".to_owned(),
+            crate::redact::Finding {
+                rule: "r".into(),
+                offset: 0,
+                length: 4,
+            },
+        )];
+        assert!(
+            raw.append_with_ledger(&event(Some(R), 5_000), &masked, "")
+                .unwrap()
+                .is_some()
         );
         // Another repository, outside the range, or after the registration: recorded.
         for e in [
