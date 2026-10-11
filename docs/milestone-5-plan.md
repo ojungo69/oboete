@@ -395,8 +395,12 @@ packet）で、忘れた uid を返さないようにした。#439 は、別の 
    前に読んだ hook が掃除の後に `shown` を書く窓（2b の 7 の注記）も閉じる。待つのは 1 秒まで。取れ
    なければその呼出しは注入せず、stderr にそう書く（記録は済んでいる。MUST-M16: hook は agent を止め
    ない）。2a の確かめ直しに戻して注入する道は取らない: 排他が 1 秒を超えるのは restore の入替え
-   （knowledge.db も入れ替わる）ぐらいで、そのときの注入は元から空に近い。Claude Code の PreToolUse の
-   file note も同じ。
+   （knowledge.db も入れ替わる）ぐらいで、そのときの注入は元から空に近い。一回限りの注入点（Grok の
+   最初の tool call と圧縮の後の最初、agy の PreInvocation、Cursor の SessionStart と圧縮の後の最初の
+   prompt）で柵が取れなければ、その呼出しを注入点にした hook の状態（立てた `injected`、取った
+   `compacted`）を戻し、次の呼出しが注入する（Codex on #446）。Claude Code の PreToolUse の file note も
+   同じ: raw を開いた後に柵を取り、見たカードの記録（`file-*`）を書き終えるまで持つ。取れなければ
+   note はなく、read は進む。
 4. **出口の確かめ直しは外す。** 柵の下では何も変えないので、2a が出口に足した確かめ直し（`get` の
    文書と claim の一覧、`claim`、`cite`、`timeline`、search の埋め込みの後、hook の
    `forgotten_now`）は外す。読み始めの `Pending::read` と `forgotten_set` は残す（commit の後に
@@ -415,7 +419,8 @@ packet）で、忘れた uid を返さないようにした。#439 は、別の 
    2a の試験で同じ thread の seam から登録していたもの（`get`・`cite`・`timeline` と hook の packet）は
    この形に書き直す: 同じ thread では自分の柵に阻まれて登録できない。
 2. hook: 注入の読取りの後、`shown` を書く前に登録を始めても、hook が `shown` を書き終えるまで
-   commit しない。柵が取れないとき（排他を持ったまま）、hook は記録して注入しない。
+   commit しない。file note も、`file-*` を書き終えるまで commit しない。柵が取れないとき（排他を
+   持ったまま）、hook は記録して注入しない。一回限りの注入点なら次の呼出しが注入する。
 3. `oboete forget <uid> --yes` は preview の後に登録できる（自分の柵で止まらない）。
 
 ## 実装順序と完了条件

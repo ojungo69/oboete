@@ -92,6 +92,7 @@ fn run_io(
     // Milestone 5 D5 (#439): the read fence, from the injection's first read until what it shows
     // is recorded (the shown set, OpenCode's receipt), so no forget commits in between.
     let mut fence: Option<std::fs::File> = None;
+    let mut took = Took::default();
     let result: Result<()> = (|| {
         if std::env::var_os(SKIP_ENV).is_some() {
             return Ok(());
@@ -122,7 +123,7 @@ fn run_io(
         // X5 (docs/file-note.md): Claude Code's read gets the note on its files. Nothing is
         // recorded here (the read's PostToolUse is), and a failure is no note: the read goes on.
         if (agent, event) == ("claude", "PreToolUse") {
-            noted = file_notes(home, &payload).unwrap_or_else(|e| {
+            noted = file_notes(home, &payload, &mut fence).unwrap_or_else(|e| {
                 eprintln!("oboete: no note on the file: {e:#}");
                 None
             });
@@ -154,7 +155,7 @@ fn run_io(
         // Before the write too: when this call is the agent's injection point and its own
         // write fails, the point still carries the recording-failure line. Grok's and agy's
         // points stay taken then (the line is shown once per session, not at every call).
-        injecting = injects(home, agent, event, &labels);
+        injecting = injects(home, agent, event, &labels, &mut took);
         if injecting && (agent, event) == ("cursor", "UserPromptSubmit") {
             took_compaction = Some(session_label(&labels).to_owned());
         }
@@ -191,6 +192,7 @@ fn run_io(
         if (agent, event) == ("agy", "PreInvocation")
             && crate::hookstate::take(home, agent, &session, "compacted")
         {
+            took.compacted = true;
             injecting = true;
         }
         // The prompt point (Step 6), after the record, as SessionStart's manifest: nothing read
@@ -206,6 +208,9 @@ fn run_io(
             fence = crate::dispatch::reading(home, READ_WAIT)
                 .inspect_err(|e| eprintln!("oboete: nothing injected: {e:#}"))
                 .ok();
+            if fence.is_none() {
+                took.give_back(home, agent, &session);
+            }
         }
         // A manifest that cannot be read is no recording failure: the row is written.
         if injecting {
@@ -412,20 +417,47 @@ fn run_io(
 /// and, after its compaction marker, the next prompt. A point is claimed before the manifest is
 /// read, so a session whose checkout has none yet gets none later either, as at SessionStart
 /// (Claude; overrulable).
-fn injects(home: &Path, agent: &str, event: &str, payload: &Value) -> bool {
+fn injects(home: &Path, agent: &str, event: &str, payload: &Value, took: &mut Took) -> bool {
     let session = session_label(payload);
     match (agent, event) {
         ("grok", "PreToolUse") => {
-            crate::hookstate::claim(home, agent, session, "injected")
-                || crate::hookstate::take(home, agent, session, "compacted")
+            took.injected = crate::hookstate::claim(home, agent, session, "injected");
+            took.compacted =
+                !took.injected && crate::hookstate::take(home, agent, session, "compacted");
+            took.injected || took.compacted
         }
         ("agy", "PreInvocation") | ("cursor", "SessionStart") => {
-            crate::hookstate::claim(home, agent, session, "injected")
+            took.injected = crate::hookstate::claim(home, agent, session, "injected");
+            took.injected
         }
-        ("cursor", "UserPromptSubmit") => crate::hookstate::take(home, agent, session, "compacted"),
+        ("cursor", "UserPromptSubmit") => {
+            took.compacted = crate::hookstate::take(home, agent, session, "compacted");
+            took.compacted
+        }
         ("grok" | "agy" | "cursor", _) => false,
         (_, "SessionStart") => str_field(payload, &["source"]) != Some("resume"),
         _ => false,
+    }
+}
+
+/// The one-shot hook state a call took to be its session's injection point (`injects`), given back
+/// when the call cannot have its read fence, so a later call injects instead (Codex on #446).
+#[derive(Default)]
+struct Took {
+    injected: bool,
+    compacted: bool,
+}
+
+impl Took {
+    fn give_back(&self, home: &Path, agent: &str, session: &str) {
+        if self.injected {
+            crate::hookstate::take(home, agent, session, "injected");
+        }
+        if self.compacted
+            && let Err(e) = crate::hookstate::set(home, agent, session, "compacted")
+        {
+            eprintln!("oboete: compaction not noted again: {e}");
+        }
     }
 }
 
@@ -451,7 +483,11 @@ const FILE_NOTE: &str = "Recorded from earlier sessions about the file being rea
 /// X5 (docs/file-note.md F1, F2, F5, F8): the notes on the files of a Claude Code read, inside the
 /// memory fence, or none. It reads the stores and writes only the session's hook state (F5): which
 /// cards each note considered, so a read of the same file gets it again only for a new one.
-fn file_notes(home: &Path, payload: &Value) -> Result<Option<String>> {
+fn file_notes(
+    home: &Path,
+    payload: &Value,
+    fence: &mut Option<std::fs::File>,
+) -> Result<Option<String>> {
     // F8: a subagent's read gets none, as in claude-mem.
     if payload.get("agent_id").is_some() || payload["tool_name"] != "Read" {
         return Ok(None);
@@ -472,6 +508,8 @@ fn file_notes(home: &Path, payload: &Value) -> Result<Option<String>> {
     let session = session_label(payload);
     let (_, repo, _) = crate::capture::checkout(payload, &settings);
     let store = crate::raw::open_within(home, Duration::from_secs(2))?;
+    // #439: held until what the notes considered is recorded and they are written (Codex on #446).
+    *fence = Some(crate::dispatch::reading(home, READ_WAIT)?);
     let k = rusqlite::Connection::open_with_flags(
         &knowledge,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -2552,6 +2590,30 @@ mod tests {
         assert!(recorded(r.s.home.path(), "claude", "s9").is_empty());
     }
 
+    /// Milestone 5 D5 (#439; Codex on #446): a forget registered while a read's notes are read
+    /// waits until the call has recorded what they considered: the note is the one read before the
+    /// commit.
+    #[test]
+    fn a_forget_registered_while_a_file_note_is_read_waits_for_it() {
+        let mut r = Reads::new();
+        r.cards(
+            2,
+            json!([Reads::card("The parser was fixed", &["src/a.rs"])]),
+        );
+        let uid =
+            r.s.decided(&r.repo, 1_000, "Parser errors go to stderr.", &[]);
+        r.s.run();
+        let (h, u) = (r.s.home.path().to_owned(), uid.clone());
+        let (sent, started) = std::sync::mpsc::channel();
+        BEFORE_EDGE.set(Some(Box::new(move || {
+            sent.send(crate::forget::registering(&h, &u)).unwrap();
+        })));
+        assert!(r.read("s9", "src/a.rs").contains("The parser was fixed"));
+        started.recv().unwrap().join().unwrap();
+        let raw = crate::raw::open(r.s.home.path()).unwrap();
+        assert!(raw.forgotten(&uid).unwrap());
+    }
+
     /// X5 F2, F8: no note for a file under 1,500 bytes, a file no card names, a missing file, or
     /// a subagent's read.
     #[test]
@@ -3263,6 +3325,72 @@ mod tests {
             p.hook("SessionStart", "b", json!({}))
                 .contains("Parser errors")
         );
+    }
+
+    /// Codex on #446: a one-shot injection point (Grok's first tool call, and its first after a
+    /// compaction) that cannot have the read fence gives back what made it the point, so the next
+    /// call injects.
+    #[test]
+    fn a_one_shot_point_without_the_read_fence_is_given_back() {
+        let mut p = Prompts::new(true);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let c = p.c.clone();
+        let tool = || {
+            let payload = json!({"sessionId": "g", "workspaceRoot": c,
+                                 "hookEventName": "PreToolUse", "toolName": "Read"});
+            injected("grok", &hook(&home, "grok", "PreToolUse", &payload))
+        };
+        let fenced_out = || {
+            let held = crate::dispatch::exclusive(&home).unwrap();
+            let out = tool();
+            drop(held);
+            out
+        };
+        assert!(!fenced_out().contains("Parser errors"));
+        assert!(tool().contains("Parser errors"));
+        assert_eq!(tool(), "");
+        let compact = json!({"sessionId": "g", "workspaceRoot": c,
+                             "hookEventName": "PostCompact", "compact_summary": "earlier"});
+        assert_eq!(hook(&home, "grok", "PostCompact", &compact), "");
+        assert!(!fenced_out().contains("Parser errors"));
+        assert!(tool().contains("Parser errors"));
+    }
+
+    /// Codex on #446: agy's point after a checkpoint, taken by a call without the read fence, is
+    /// given back too.
+    #[test]
+    fn agys_point_after_a_checkpoint_without_the_read_fence_is_given_back() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let transcript = home.join("agy.jsonl");
+        let steps = [
+            json!({"type": "USER_INPUT", "step_index": 0, "source": "USER_EXPLICIT",
+                   "content": "<USER_REQUEST>hello</USER_REQUEST>"}),
+            json!({"type": "PLANNER_RESPONSE", "step_index": 1, "content": "hi"}),
+            json!({"type": "CHECKPOINT", "step_index": 2, "content": "{{ CHECKPOINT 1 }}"}),
+        ];
+        let write = |n: usize| {
+            let text: String = steps[..n].iter().map(|s| format!("{s}\n")).collect();
+            std::fs::write(&transcript, text).unwrap();
+        };
+        let c = p.c.clone();
+        let call = || {
+            let payload = json!({"conversationId": "agy-c", "workspacePaths": [c],
+                                 "transcriptPath": transcript, "invocationNum": 0});
+            injected("agy", &hook(&home, "agy", "PreInvocation", &payload))
+        };
+        write(1);
+        assert!(call().contains(crate::manifest::MEMORY));
+        write(3);
+        let held = crate::dispatch::exclusive(&home).unwrap();
+        assert!(!call().contains(crate::manifest::MEMORY));
+        drop(held);
+        assert!(call().contains(crate::manifest::MEMORY));
+        assert_eq!(call(), "");
     }
 
     /// #295 row 2 (D2): an earlier decision the prompt matches comes with the later one that ended
@@ -5210,6 +5338,9 @@ mod tests {
     fn each_agent_injects_at_its_own_point_once_per_session() {
         let home = tempfile::tempdir().unwrap();
         let h = home.path();
+        let injects = |h: &Path, agent: &str, event: &str, payload: &Value| {
+            super::injects(h, agent, event, payload, &mut Took::default())
+        };
         let s = |id: &str| json!({"session_id": id, "source": "startup"});
         for agent in ["claude", "codex", "pi", "opencode", "cursor"] {
             assert!(injects(h, agent, "SessionStart", &s("x")), "{agent}");
