@@ -317,14 +317,13 @@ vector も持ち越さない）、進み方と再開（step の数字ではな�
 7. **完了は状態で判定する（D5 の「進み方と再開」を改める）。** `forget_jobs.step` は進んだところの
    記録で、完了の証拠にしない。継続のたびに step 2 から確かめ直し、確認に通らない step をやり直す。
    step 2 の完了: その uid の op に本文が一つもなく、その後の checkpoint が truncate できた。step 3 の
-   確認は二つに分け、やり直す作業も分ける: knowledge.db にその uid の `claims`・`derivations`・
-   `corrections`・`imported`・`vector_keys` の行が残れば rebuild。その継続が step 2 を進めた job が
-   あれば、行が残っていなくても rebuild する: rewind（古い写しに戻した raw.db）が行だけを消しても、
-   その本文は vector の cache と全文索引の segment に残り、新しいファイルだけがそれを残さない
-   （Greptile on #444）。knowledge.db に残らず aside の
-   ファイルだけが持つ（rebuild の後、消す前に止まった）なら、rebuild はせず、そのファイルの vector を
-   まだ持ち越していなければ（`carried` の時刻がファイルより前）5 の規則で持ち越してから消す。
-   `shown` に残れば 6 の掃除だけ。rebuild の後にも knowledge.db に行が残るときは、op を取りこぼした
+   前の job があれば、継続のたびに rebuild する。knowledge.db にその uid の行が残っていなくても:
+   rewind（古い写しに戻した raw.db）が行だけを消しても、その本文は vector の cache と全文索引の
+   segment に残り、新しいファイルだけがそれを残さない（Greptile on #444）。rebuild が終わったことは
+   どこにも記録されないので、rebuild の後、step 3 の前に止まった purge も、続けるときにもう一度
+   rebuild する（止まったときだけの費用。Codex on #444）。aside のファイルは、その vector をまだ
+   持ち越していなければ（`carried` の時刻がファイルより前）5 の規則で持ち越してから消す。
+   `shown` に残れば 6 の掃除。rebuild の後にも knowledge.db に行が残るときは、op を取りこぼした
    として job を止め、done と報告しない（status と doctor が言う）。restore が古い本文を戻しても、
    次の継続で step 2 からやり直す。
    #439 との関係: 登録の前に manifest を読んだ hook が、掃除の後に `shown` を書くと本文が戻る。

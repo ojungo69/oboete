@@ -686,7 +686,7 @@ fn aside_files(home: &Path) -> Result<Vec<PathBuf>> {
 
 /// D5 (2b): each uid job purged by the state it finds (item 7). Step 2: its ops that hold its text
 /// rewritten without it and raw.db-wal truncated, under the worker lock as `oboete rebuild` takes
-/// it. Step 3: knowledge.db rebuilt from raw.db once for every job that it still holds (item 4),
+/// it. Step 3: knowledge.db rebuilt from raw.db once for every job not past step 3 (item 4),
 /// the copies of knowledge.db set aside carried from by the same rule and removed (item 5), and
 /// the uids taken out of every session's shown value (item 6). A uid knowledge.db holds after the
 /// rebuild came from an op the purge did not find: its job is stopped, reported and not done.
@@ -710,10 +710,6 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     }
     let due = due(&crate::raw::open(home)?)?;
     purged.jobs = due.len();
-    // Whether this purge takes a job through step 2: knowledge.db is rebuilt for it then, though
-    // it holds no row of its uid, since rows a rewind took out (a raw.db put back from an older
-    // copy) leave the text in the vector cache and the full-text segments (Greptile on #444).
-    let mut stepped = false;
     let ready = if due.iter().any(|(_, _, step, held)| *step < 2 || *held) {
         let _worker = crate::worker::lock_asking(home)?;
         let mut raw = crate::raw::open(home)?;
@@ -722,10 +718,9 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         }
         let truncated = raw.truncate_wal(TRUNCATE_WAIT)?;
         let mut ready = Vec::new();
-        for (job, uid, step, held) in due {
+        for (job, uid, ..) in due {
             if truncated && !raw.uid_has_ops(&uid)? {
                 raw.finish_forget_step(&job, 2)?;
-                stepped |= step < 2 || held;
                 ready.push((job, uid));
             } else {
                 purged.unfinished.push(job);
@@ -740,13 +735,15 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         return Ok(Some(purged));
     }
     let uids: HashSet<String> = ready.iter().map(|(_, uid)| uid.clone()).collect();
-    if stepped || !knowledge_holding(home, &uids)?.is_empty() {
-        crate::worker::rebuild(home).context("knowledge.db was not rebuilt")?;
-        purged.rebuilt = true;
-        #[cfg(test)]
-        if let Some(after) = AFTER_REBUILD.with(|hook| hook.borrow_mut().take()) {
-            after();
-        }
+    // Rebuilt for every job not past step 3, though knowledge.db holds no row of its uid: rows a
+    // rewind took out (a raw.db put back from an older copy) leave the text in the vector cache and
+    // the full-text segments (Greptile on #444), and nothing records that an earlier continuation's
+    // rebuild finished (Codex on #444).
+    crate::worker::rebuild(home).context("knowledge.db was not rebuilt")?;
+    purged.rebuilt = true;
+    #[cfg(test)]
+    if let Some(after) = AFTER_REBUILD.with(|hook| hook.borrow_mut().take()) {
+        after();
     }
     let holding = knowledge_holding(home, &uids)?;
     purged.shown =
@@ -2100,9 +2097,10 @@ mod tests {
     }
 
     /// D5 (2b, item 7, test 6): a purge stopped after its rebuild, before it removed the copy set
-    /// aside, goes on without a second rebuild: the copy is removed and step 3 recorded.
+    /// aside, rebuilds again when it goes on (nothing records that the first rebuild finished,
+    /// Codex on #444): the copy is removed and step 3 recorded.
     #[test]
-    fn a_purge_stopped_after_its_rebuild_removes_the_copy_without_rebuilding_again() {
+    fn a_purge_stopped_after_its_rebuild_rebuilds_again_and_removes_the_copy() {
         let mut s = crate::search::b::fixture::Store::new();
         let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
         s.run();
@@ -2121,7 +2119,7 @@ mod tests {
             .execute("UPDATE forget_jobs SET step = 2", [])
             .unwrap();
         let purged = purge(&home).unwrap().unwrap();
-        assert_eq!((purged.jobs, purged.ops, purged.rebuilt), (1, 0, false));
+        assert_eq!((purged.jobs, purged.ops, purged.rebuilt), (1, 0, true));
         assert!(purged.aside > 0);
         assert!(aside_files(&home).unwrap().is_empty());
         assert_eq!(uid_jobs(&home)[0].2, 3);
@@ -2240,11 +2238,17 @@ mod tests {
         assert!(!holds_vector(&home, &sha));
     }
 
-    /// D5 (2b, item 7): a purge that takes a job through step 2 rebuilds knowledge.db though it
-    /// holds no row of the uid: rows a rewind took out leave the vector cached, and only the
-    /// rebuild's carry leaves it behind (Greptile on #444).
+    /// D5 (2b, item 7): a purge of a job not past step 3 rebuilds knowledge.db though it holds no
+    /// row of the uid: rows a rewind took out leave the vector cached, and only the rebuild's carry
+    /// leaves it behind (Greptile on #444), also when an earlier purge recorded step 2 and stopped.
     #[test]
-    fn a_purge_that_takes_a_job_through_step_2_rebuilds_without_its_rows() {
+    fn a_purge_before_step_3_rebuilds_without_its_rows() {
+        for stopped in [false, true] {
+            rebuilds_without_its_rows(stopped);
+        }
+    }
+
+    fn rebuilds_without_its_rows(stopped: bool) {
         let mut s = crate::search::b::fixture::Store::new();
         let said = "Parser caches stay in Redis, the team said.";
         let seq = s.said("s", "github.com/o/r", 1_000, said);
@@ -2274,6 +2278,14 @@ mod tests {
         forget(&home, &gone);
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
         drop(raw);
+        if stopped {
+            // Stopped after step 2 was recorded, before the rebuild (Codex on #444).
+            let mut raw = raw::open(&home).unwrap();
+            let job = uid_jobs(&home)[0].1.clone();
+            raw.purge_uid(&gone, &job).unwrap();
+            assert!(raw.truncate_wal(TRUNCATE_WAIT).unwrap());
+            raw.finish_forget_step(&job, 2).unwrap();
+        }
         assert!(purge(&home).unwrap().unwrap().rebuilt);
         assert!(!holds_vector(&home, &sha));
     }
