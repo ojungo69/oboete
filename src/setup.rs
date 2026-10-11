@@ -40,11 +40,16 @@ const CLAUDE_EVENTS: &[(&str, u32)] = &[
 const CODEX_EVENTS: &[(&str, Option<&str>, u32, bool)] = &[
     ("SessionStart", Some("startup|clear|compact"), 10, true),
     ("UserPromptSubmit", None, 5, true),
+    // Its reads only: the note on a file (docs/file-note.md F1).
+    ("PreToolUse", Some(CODEX_READS), 5, true),
     ("PostToolUse", None, 5, false),
     ("Stop", None, 5, false),
     ("PostCompact", None, 5, false),
     ("SessionEnd", None, 3, false),
 ];
+/// The tools a Codex read goes through, as claude-mem's Codex hooks match them (13.35.0): its
+/// shell, and an MCP server's read tools (`hook::read_paths` takes the files).
+pub(crate) const CODEX_READS: &str = r"^Bash$|^mcp__.+__(read|view|cat)(_file|_files)?$";
 /// Grok ignores SessionStart stdout, so PreToolUse is wired too: that is where context goes in.
 const GROK_EVENTS: &[(&str, u32)] = &[
     ("SessionStart", 5),
@@ -4968,6 +4973,36 @@ mod tests {
                 .iter()
                 .all(|(e, g)| e == "PreToolUse" || g.get("matcher").is_none())
         );
+    }
+
+    /// X5 F1 (G25): Codex's reads get oboete's `PreToolUse` hook, its shell and MCP read tools
+    /// matched as claude-mem matches them, after the user's own, with the row that trusts it.
+    #[test]
+    fn codex_gets_a_pre_tool_use_hook_for_its_reads_beside_the_users() {
+        let cmd = HookCommand {
+            exe: "/x/oboete".into(),
+            home: None,
+        };
+        let user =
+            json!({"matcher": "^Bash$", "hooks": [{"type": "command", "command": "echo hi"}]});
+        let mut root = json!({"hooks": {"PreToolUse": [user.clone()]}});
+        let file = Path::new("/h/hooks.json");
+        let before = codex_trust_keys(file, &root);
+        merge_groups(&mut root, codex_groups(&cmd));
+        let pre = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!((pre.len(), &pre[0]), (2, &user));
+        assert_eq!(pre[1]["matcher"], CODEX_READS);
+        let handler = &pre[1]["hooks"][0];
+        let command = handler["command"].as_str().unwrap();
+        assert!(command.ends_with("hook codex PreToolUse"), "{command}");
+        assert_eq!(handler["additionalContextLimit"], 0);
+        let delta = codex_trust_delta(&before, &codex_trust_keys(file, &root));
+        assert!(delta.moved.is_empty(), "{delta:?}");
+        let row = (
+            "/h/hooks.json:pre_tool_use:1:0".to_owned(),
+            codex_trust_hash("PreToolUse", Some(CODEX_READS), handler),
+        );
+        assert!(delta.fresh.contains(&row), "{delta:?}");
     }
 
     #[test]
