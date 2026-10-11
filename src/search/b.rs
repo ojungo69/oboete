@@ -794,7 +794,7 @@ pub fn trec_run(
     anyhow::ensure!(!arms.is_empty(), "no arm to run");
     let raw = crate::raw::open(home)?;
     // Milestone 5 D5 (#439): one fence for every query and the sidecar read after them.
-    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+    let read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let k = crate::knowledge::open(home)?;
     claims::schema(&k)?;
     let claims: bool = k.query_row("SELECT EXISTS (SELECT 1 FROM active)", [], |r| r.get(0))?;
@@ -856,6 +856,8 @@ pub fn trec_run(
         between();
     }
     let docs = sidecar(&raw, &k, &printed)?;
+    // The files are written outside it, as every answer is (Greptile on #446).
+    drop(read);
     std::fs::create_dir_all(out)?;
     for (arm, run) in arms.iter().zip(&runs) {
         std::fs::write(out.join(format!("b-{}.trec", arm.name())), run)?;

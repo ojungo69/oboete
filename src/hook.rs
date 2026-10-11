@@ -453,7 +453,9 @@ impl Took {
         if self.injected {
             crate::hookstate::take(home, agent, session, "injected");
         }
-        if self.compacted
+        // Cursor starts a session once: its next prompt injects instead, as after a compaction
+        // (Codex on #446).
+        if ((self.injected && agent == "cursor") || self.compacted)
             && let Err(e) = crate::hookstate::set(home, agent, session, "compacted")
         {
             eprintln!("oboete: compaction not noted again: {e}");
@@ -3328,8 +3330,8 @@ mod tests {
     }
 
     /// Codex on #446: a one-shot injection point (Grok's first tool call, and its first after a
-    /// compaction) that cannot have the read fence gives back what made it the point, so the next
-    /// call injects.
+    /// compaction; Cursor's session start) that cannot have the read fence gives back what made it
+    /// the point, so the next call injects.
     #[test]
     fn a_one_shot_point_without_the_read_fence_is_given_back() {
         let mut p = Prompts::new(true);
@@ -3356,6 +3358,18 @@ mod tests {
         assert_eq!(hook(&home, "grok", "PostCompact", &compact), "");
         assert!(!fenced_out().contains("Parser errors"));
         assert!(tool().contains("Parser errors"));
+        // Cursor starts a session once: a start without the fence leaves the manifest to the next
+        // prompt, as a compaction does (Codex on #446).
+        let start = json!({"conversation_id": "cs", "workspace_roots": [c],
+                           "hook_event_name": "sessionStart"});
+        let held = crate::dispatch::exclusive(&home).unwrap();
+        let out = hook(&home, "cursor", "SessionStart", &start);
+        drop(held);
+        assert!(!injected("cursor", &out).contains("Parser errors"));
+        let prompt = json!({"conversation_id": "cs", "workspace_roots": [c],
+                            "hook_event_name": "beforeSubmitPrompt", "prompt": "tidy the readme"});
+        let out = hook(&home, "cursor", "UserPromptSubmit", &prompt);
+        assert!(injected("cursor", &out).contains("Parser errors"), "{out}");
     }
 
     /// Codex on #446: agy's point after a checkpoint, taken by a call without the read fence, is

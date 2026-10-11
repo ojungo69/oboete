@@ -471,16 +471,25 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Tests (#439): a forget of `uid` registering on another thread, given a moment: a read that holds
-/// the fence keeps it waiting, so the uid is not forgotten yet. Join it once the read is done.
+/// Tests (#439): a forget of `uid` registering on another thread, until it waits on the fence: a
+/// read that holds the fence keeps it waiting, so the uid is not forgotten yet. Join it once the
+/// read is done.
 #[cfg(test)]
 pub(crate) fn registering(home: &Path, uid: &str) -> std::thread::JoinHandle<()> {
     let (h, u) = (home.to_owned(), uid.to_owned());
+    crate::dispatch::blocked(home); // an earlier registration's wait is not this one's
     let t = std::thread::spawn(move || {
         let p = preview(&h, Target::parse_uid(&u).unwrap()).unwrap();
         start(&h, &p).unwrap();
     });
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Until the registration has met the read's fence: a thread that has not reached it yet
+    // would pass without one (Greptile on #446).
+    let started = std::time::Instant::now();
+    while !crate::dispatch::blocked(home) {
+        assert!(!t.is_finished(), "the forget did not wait for the read");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     assert!(!t.is_finished(), "the forget did not wait for the read");
     assert!(!crate::raw::open(home).unwrap().forgotten(uid).unwrap());
     t

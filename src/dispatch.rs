@@ -89,6 +89,10 @@ fn lock(home: &Path, exclusive: bool, wait: Duration) -> Result<File> {
         match result {
             Ok(()) => return Ok(file),
             Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                #[cfg(test)]
+                if exclusive {
+                    BLOCKED.lock().unwrap().insert(path.clone());
+                }
                 std::thread::sleep(Duration::from_millis(1));
             }
             Err(std::fs::TryLockError::WouldBlock) => {
@@ -103,6 +107,18 @@ fn lock(home: &Path, exclusive: bool, wait: Duration) -> Result<File> {
             }
         }
     }
+}
+
+/// Tests (#439): the lock files an exclusive hold has waited on, so a test knows a registration
+/// has met a reader's fence before it checks that the registration waits (Greptile on #446).
+#[cfg(test)]
+static BLOCKED: std::sync::Mutex<std::collections::BTreeSet<std::path::PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Tests: whether an exclusive hold has waited on `home`'s lock since the last time this asked.
+#[cfg(test)]
+pub(crate) fn blocked(home: &Path) -> bool {
+    BLOCKED.lock().unwrap().remove(&home.join("dispatch.lock"))
 }
 
 struct TrackedBody {
