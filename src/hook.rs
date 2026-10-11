@@ -171,7 +171,7 @@ fn run_io(
                 // docs/unwritten.md U2: what this call would have written, built without it.
                 match built(home, None, agent, event, &payload, db::now_ms(), &settings) {
                     Ok((built, _)) => {
-                        keep(home, agent, &built, &settings);
+                        keep(home, agent, &built, &settings, true);
                     }
                     Err(b) => eprintln!("oboete: events not kept: {b:#}"),
                 }
@@ -700,27 +700,26 @@ pub fn record(
         None
     };
     // docs/unwritten.md U3: what earlier calls kept goes first, so the seqs follow their times.
-    let back = crate::unwritten::write_back(home, raw);
+    let (written_back, back) = crate::unwritten::write_back(home, raw);
     let (built, prompt) = built(home, Some(raw), agent, event, payload, ts, settings)?;
-    let written_back = match back {
-        Ok(n) => n,
+    match back {
+        Ok(()) => {}
         // A damaged raw.db goes on to `run_io`, which asks the worker to restore it; this call's
         // events wait behind the kept files (Codex on #440).
         Err(e) if crate::backup::corrupt(&e) => {
             *failed = crate::failure::now();
-            keep(home, agent, &built, settings);
+            keep(home, agent, &built, settings, true);
             return Err(e);
         }
-        Err(e) => {
-            eprintln!("oboete: kept events not written back yet: {e:#}");
-            0
-        }
-    };
+        // The files written back before the error still count as this call's write (Greptile and
+        // Codex on #440).
+        Err(e) => eprintln!("oboete: kept events not written back yet: {e:#}"),
+    }
     // docs/unwritten.md U3: older kept files a later call writes back keep this call's events
     // behind them, so the seqs follow the events' order (Codex on #440).
     if !built.is_empty()
         && crate::unwritten::counts(home).0 > 0
-        && keep(home, agent, &built, settings)
+        && keep(home, agent, &built, settings, false)
     {
         return Ok(Recorded {
             events: Vec::new(),
@@ -738,7 +737,7 @@ pub fn record(
             Ok(seq) => appended.push((seq, b.captured.event.clone())),
             Err(e) => {
                 *failed = crate::failure::now();
-                keep(home, agent, &built[n..], settings);
+                keep(home, agent, &built[n..], settings, true);
                 return Err(e);
             }
         }
@@ -796,19 +795,25 @@ fn built(
 }
 
 /// docs/unwritten.md U1: the events a failed write did not append, kept for a later write. When
-/// they cannot be, an agy step claimed for them is given back, so a later hook records it.
+/// they cannot be and this was their `last` chance, an agy step claimed for them is given back, so
+/// a later hook records it.
 fn keep(
     home: &Path,
     agent: &str,
     unwritten: &[Built],
     settings: &crate::capture::Settings,
+    last: bool,
 ) -> bool {
     let events: Vec<_> = unwritten.iter().map(|b| b.captured.clone()).collect();
     let kept = crate::unwritten::keep(home, &events, settings.rules.version());
     if let Err(e) = &kept {
         eprintln!("oboete: events not kept: {e:#}");
-        for (session, step) in unwritten.iter().filter_map(|b| b.step.as_ref()) {
-            crate::hookstate::take(home, agent, session, &format!("step-{step}"));
+        // Only events this was the last chance for are lost: a keep that fails before an append
+        // that may still write them keeps their agy steps claimed (Greptile on #440).
+        if last {
+            for (session, step) in unwritten.iter().filter_map(|b| b.step.as_ref()) {
+                crate::hookstate::take(home, agent, session, &format!("step-{step}"));
+            }
         }
     }
     kept.is_ok()
@@ -6764,7 +6769,7 @@ mod tests {
         assert!(call("second prompt").is_err());
         drop(held);
         assert_eq!(crate::unwritten::counts(h), (1, 0));
-        crate::unwritten::FAILS.set(Some(rusqlite::ffi::SQLITE_CORRUPT));
+        crate::unwritten::FAILS.set(Some((0, rusqlite::ffi::SQLITE_CORRUPT)));
         assert!(call("third prompt").is_err());
         assert!(crate::backup::restore_requested(h));
         assert_eq!(crate::unwritten::counts(h), (2, 0));
@@ -6779,6 +6784,83 @@ mod tests {
         for (body, word) in prompts.iter().zip(["first", "second", "third", "fourth"]) {
             assert!(body.contains(word), "{body}");
         }
+    }
+
+    /// docs/unwritten.md U3: files the write-back commits before a later file's store error still
+    /// count as the call's write, which clears the failure marker (Greptile and Codex on #440).
+    #[test]
+    fn files_written_back_before_a_store_error_still_count_as_a_write() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let call = |prompt: &str| {
+            let _contending = crate::worker::contending();
+            let _worker = crate::worker::lock(h).unwrap();
+            let payload = json!({"session_id": "s", "cwd": h, "prompt": prompt});
+            run_io(
+                h,
+                "claude",
+                "UserPromptSubmit",
+                payload.to_string().as_bytes(),
+                &mut Vec::new(),
+            )
+        };
+        call("first prompt").unwrap();
+        let held = crate::raw::lock_for_swap(h).unwrap();
+        assert!(call("second prompt").is_err());
+        assert!(call("third prompt").is_err());
+        drop(held);
+        assert_eq!(crate::unwritten::counts(h), (2, 0));
+        assert!(crate::failure::since(h).is_some());
+        crate::unwritten::FAILS.set(Some((1, rusqlite::ffi::SQLITE_FULL)));
+        call("fourth prompt").unwrap();
+        // One written back; the other, and the fourth behind it, kept.
+        assert_eq!(crate::unwritten::counts(h), (2, 0));
+        assert!(crate::failure::since(h).is_none());
+    }
+
+    /// docs/unwritten.md U3: a call that cannot keep its events behind older kept files appends
+    /// them, and the agy step it claimed stays claimed: the next call does not record the prompt
+    /// again (Greptile on #440).
+    #[test]
+    fn an_agy_prompt_appended_after_a_failed_keep_is_recorded_once() {
+        let dir = tmp("agy-keep-fails");
+        let payloads = agy_fixture(&dir);
+        let id = payloads["PreInvocation"]["conversationId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // A file an earlier call kept.
+        let held = crate::raw::lock_for_swap(&dir).unwrap();
+        let earlier = json!({"session_id": "c", "cwd": *dir, "prompt": "an earlier prompt"});
+        let out = &mut Vec::new();
+        let kept = run_io(
+            &dir,
+            "claude",
+            "UserPromptSubmit",
+            earlier.to_string().as_bytes(),
+            out,
+        );
+        assert!(kept.is_err());
+        drop(held);
+        let lock = |name: &str| {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(dir.join("unwritten").join(name))
+                .unwrap();
+            f.lock().unwrap();
+            f
+        };
+        let (writing, keeping) = (lock("write-back.lock"), lock("keep.lock"));
+        hook(&dir, "agy", "PreInvocation", &payloads["PreInvocation"]);
+        drop((writing, keeping));
+        hook(&dir, "agy", "PreInvocation", &payloads["PreInvocation"]);
+        let prompts = recorded(&dir, "agy", &id)
+            .into_iter()
+            .filter(|e| e.kind == "prompt")
+            .count();
+        assert_eq!(prompts, 1);
     }
 
     #[test]

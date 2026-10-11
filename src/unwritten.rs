@@ -112,19 +112,27 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
 
 #[cfg(test)]
 thread_local! {
-    /// The store error the next write-back meets, as a damaged raw.db gives it.
-    pub(crate) static FAILS: std::cell::Cell<Option<std::os::raw::c_int>> =
+    /// The store error a write-back meets, as a damaged or full raw.db gives it, after that many
+    /// files written back.
+    pub(crate) static FAILS: std::cell::Cell<Option<(usize, std::os::raw::c_int)>> =
         const { std::cell::Cell::new(None) };
 }
 
 /// U3, U4: the oldest kept files, `PER_CALL` at most, each appended in one transaction (an event
 /// that names no session named for this device) and removed after its commit. One that cannot be
 /// read, or that raw refuses, goes to `bad/`; a busy or failing store stops it, the files kept.
-/// How many were written back.
-pub fn write_back(home: &Path, raw: &mut crate::raw::Raw) -> Result<usize> {
+/// How many were written back, also beside the error that stopped it (Greptile and Codex on
+/// #440).
+pub fn write_back(home: &Path, raw: &mut crate::raw::Raw) -> (usize, Result<()>) {
+    let mut written = 0;
+    let back = write_back_counting(home, raw, &mut written);
+    (written, back)
+}
+
+fn write_back_counting(home: &Path, raw: &mut crate::raw::Raw, written: &mut usize) -> Result<()> {
     let dir = home.join(DIR);
     if !dir.is_dir() {
-        return Ok(0);
+        return Ok(());
     }
     // One call at a time: two calls at once would append a file twice. The other's own events
     // go first then, the kept ones at its next call.
@@ -135,10 +143,9 @@ pub fn write_back(home: &Path, raw: &mut crate::raw::Raw) -> Result<usize> {
         .open(dir.join("write-back.lock"))?;
     match lock.try_lock() {
         Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => return Ok(0),
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
         Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
     }
-    let mut written = 0;
     for path in files(&dir)?.into_iter().take(PER_CALL) {
         let kept = std::fs::read(&path)
             .ok()
@@ -152,7 +159,10 @@ pub fn write_back(home: &Path, raw: &mut crate::raw::Raw) -> Result<usize> {
             c.event.session = crate::hook::own_session(std::mem::take(&mut c.event.session), raw);
         }
         #[cfg(test)]
-        if let Some(code) = FAILS.take() {
+        if let Some((after, code)) = FAILS.get()
+            && after == *written
+        {
+            FAILS.set(None);
             let e = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
             return Err(e.into());
         }
@@ -161,7 +171,7 @@ pub fn write_back(home: &Path, raw: &mut crate::raw::Raw) -> Result<usize> {
                 // shortcut: a crash before this removal writes the file again later, a duplicate
                 // and never a loss; a seen-files table in raw.db would make it exact.
                 std::fs::remove_file(&path)?;
-                written += 1;
+                *written += 1;
             }
             // Not the store failing (busy, full, damaged): raw refused these events.
             Err(e)
@@ -175,7 +185,7 @@ pub fn write_back(home: &Path, raw: &mut crate::raw::Raw) -> Result<usize> {
             Err(e) => return Err(e),
         }
     }
-    Ok(written)
+    Ok(())
 }
 
 /// U6: the hook calls kept, and the files set aside in `bad/`.
@@ -241,6 +251,28 @@ fn set_aside(dir: &Path, path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A write-back's count, the write-back having gone through.
+    fn written((n, back): (usize, Result<()>)) -> usize {
+        back.unwrap();
+        n
+    }
+
+    /// U3: the files a write-back commits before a later file's store error still count beside
+    /// the error (Greptile and Codex on #440).
+    #[test]
+    fn a_later_files_error_keeps_the_count_of_those_written() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        keep(h, &[prompt("first", 1)], "r").unwrap();
+        keep(h, &[prompt("second", 2)], "r").unwrap();
+        let mut raw = crate::raw::open(h).unwrap();
+        FAILS.set(Some((1, rusqlite::ffi::SQLITE_FULL)));
+        let (n, back) = write_back(h, &mut raw);
+        assert_eq!(n, 1);
+        assert!(back.is_err());
+        assert_eq!(counts(h), (1, 0));
+    }
 
     fn prompt(text: &str, ts: i64) -> Captured {
         let payload = json!({"session_id": "s", "cwd": "/w", "prompt": text});
@@ -382,7 +414,7 @@ mod tests {
             keep(h, &[prompt(&format!("kept {n}"), 1_000 + n)], "r").unwrap();
             let file = files(&h.join(DIR)).unwrap().pop().unwrap();
             std::fs::write(&file, format!("damaged {n}")).unwrap();
-            assert_eq!(write_back(h, &mut raw).unwrap(), 0);
+            assert_eq!(written(write_back(h, &mut raw)), 0);
         }
         let bad: Vec<String> = files(&h.join(DIR).join("bad"))
             .unwrap()
@@ -409,10 +441,10 @@ mod tests {
             .unwrap();
         held.lock().unwrap();
         let mut raw = crate::raw::open(h).unwrap();
-        assert!(write_back(h, &mut raw).is_err());
+        assert!(write_back(h, &mut raw).1.is_err());
         assert_eq!(counts(h), (1, 0));
         drop(held);
-        assert_eq!(write_back(h, &mut raw).unwrap(), 0);
+        assert_eq!(written(write_back(h, &mut raw)), 0);
         assert_eq!(counts(h), (0, 1));
     }
 
@@ -440,7 +472,7 @@ mod tests {
             assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
         }
         let mut raw = crate::raw::open(h).unwrap();
-        assert_eq!(write_back(h, &mut raw).unwrap(), 1);
+        assert_eq!(written(write_back(h, &mut raw)), 1);
         assert_eq!(counts(h), (0, 0));
         let later = prompt("third", 2_000);
         raw.append_with_ledger(&later.event, &later.ledger, &ruleset)
@@ -467,10 +499,10 @@ mod tests {
             .open(h.join(DIR).join("write-back.lock"))
             .unwrap();
         held.lock().unwrap();
-        assert_eq!(write_back(h, &mut raw).unwrap(), 0);
+        assert_eq!(written(write_back(h, &mut raw)), 0);
         assert_eq!(counts(h), (1, 0));
         drop(held);
-        assert_eq!(write_back(h, &mut raw).unwrap(), 1);
+        assert_eq!(written(write_back(h, &mut raw)), 1);
         assert_eq!(counts(h), (0, 0));
     }
 
@@ -484,7 +516,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("1-1.json"), "not json").unwrap();
         let mut raw = crate::raw::open(h).unwrap();
-        assert_eq!(write_back(h, &mut raw).unwrap(), 0);
+        assert_eq!(written(write_back(h, &mut raw)), 0);
         assert_eq!(counts(h), (0, 1));
         assert!(events(&raw).is_empty());
         // A store that fails the write keeps the file for a later call: it is no bad file.
@@ -494,10 +526,10 @@ mod tests {
             "CREATE TRIGGER refuse BEFORE INSERT ON records BEGIN SELECT RAISE(ABORT, 'test'); END;",
         )
         .unwrap();
-        assert!(write_back(h, &mut raw).is_err());
+        assert!(write_back(h, &mut raw).1.is_err());
         assert_eq!(counts(h), (1, 1));
         conn.execute_batch("DROP TRIGGER refuse;").unwrap();
-        assert_eq!(write_back(h, &mut raw).unwrap(), 1);
+        assert_eq!(written(write_back(h, &mut raw)), 1);
         // A file that would take it past the bound is not kept either.
         std::fs::File::create(dir.join("2-1.json"))
             .unwrap()

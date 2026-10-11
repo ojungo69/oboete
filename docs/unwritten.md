@@ -29,10 +29,12 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   two at once would append a file twice. While older files remain after a call's write-back (more
   than 16 queued, or another call writing them back), the call keeps its own events behind them
   instead of appending them, so the seqs keep the events' order; it appends them only when they
-  cannot be kept. A crash between the commit and the removal writes the file again later: a
+  cannot be kept, and an agy step they claimed stays claimed then (the append may still write it;
+  only events whose last chance failed give their step back). A crash between the commit and the removal writes the file again later: a
   duplicate, never a loss. A write-back that finds raw.db damaged keeps the call's events behind
   the files and fails, so the marker is set and the worker is asked to restore the store; any
-  other store error stops the write-back and the call goes on.
+  other store error stops the write-back and the call goes on, the files written back before it
+  counted as the call's write (the marker is cleared, the worker started).
 - **U4. What cannot be written back** (an unknown version, unreadable JSON, an event raw refuses)
   moves to `unwritten/bad/` under the keep lock (U5), never deleted by oboete; doctor counts it.
 - **U5. Bound.** Nothing more is kept while `unwritten/` holds 64 MiB, the new file and `bad/`
@@ -61,4 +63,5 @@ says recording failed, and nothing brings them back. This keeps them and writes 
 2. A file that cannot be written back moves to `bad/`; doctor names both counts.
 3. Past the bound nothing is kept; `tests/disk_full.rs` still passes (nothing kept, the marker).
 4. An agy prompt whose append fails is recorded once: kept and written back, or, when it cannot
-   be kept, captured by the next hook through the step claim given back.
+   be kept, captured by the next hook through the step claim given back. One that cannot be kept
+   behind older files and is appended is recorded once too.
