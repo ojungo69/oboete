@@ -55,6 +55,12 @@ const ICONS: [&str; 9] = ["●", "◆", "↻", "✓", "○", "⚖", "⚠", "⚷"
 /// claude-mem's icon for a type it does not know: here a card without one (K1).
 const NO_TYPE: &str = "📝";
 
+/// The session start's icon of a card's type (S3), `NO_TYPE` for none or one it does not know.
+pub(crate) fn icon(kind: Option<&str>) -> &'static str {
+    kind.and_then(|k| TYPES.iter().position(|t| *t == k))
+        .map_or(NO_TYPE, |i| ICONS[i])
+}
+
 impl Card {
     pub fn position(&self) -> Position {
         (self.ts, self.device.clone(), self.op_seq, self.n)
@@ -326,11 +332,7 @@ where
             m.clone()
         };
         minute = m;
-        let icon = c
-            .kind
-            .as_deref()
-            .and_then(|k| TYPES.iter().position(|t| *t == k))
-            .map_or(NO_TYPE, |i| ICONS[i]);
+        let icon = icon(c.kind.as_deref());
         let title = match c.row_title.trim() {
             "" => "Untitled",
             t => t,
@@ -488,6 +490,40 @@ pub fn page(
         }
     }
     Ok((out, false))
+}
+
+/// docs/tools.md T2, T3: a repository's (or all repositories') current cards on one side of `at`,
+/// those at or before it the newest first (`older`), else those after it the oldest first, at most
+/// `limit`; a row the one reader hides takes no slot.
+pub fn around(
+    k: &Connection,
+    raw: &Raw,
+    repo: Option<&str>,
+    at: i64,
+    older: bool,
+    limit: usize,
+    rules: &Rules,
+) -> Result<Vec<Card>> {
+    if !crate::consumer::manifest::exists(k, "table", "cards")? {
+        return Ok(Vec::new());
+    }
+    let side = if older {
+        "ts <= ?2 ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
+    } else {
+        "ts > ?2 ORDER BY ts, device, op_seq, n"
+    };
+    let mut st = k.prepare(&format!(
+        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL AND (?1 IS NULL OR repo = ?1)
+           AND {side}"
+    ))?;
+    let mut rows = st.query(rusqlite::params![repo, at])?;
+    let mut out = Vec::new();
+    while out.len() < limit
+        && let Some(r) = rows.next()?
+    {
+        out.extend(read(r, raw, rules)?);
+    }
+    Ok(out)
 }
 
 /// A card with the span of its window and the goals that window was shown.

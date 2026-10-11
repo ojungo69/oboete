@@ -80,10 +80,54 @@ several ids, with the MCP tools' answers.
 
 ## Slice 2: timeline
 
-`timeline` around an anchor (any id `get` takes) or the newest, in claude-mem's shape: by day
-(`### <date>`), a summary as `**S<op seq>** <request> (<time>)`, a prompt as its key, time and first
-100 characters, the cards as rows of `| ID | Time | T | Title |` grouped by their first modified
-file, the anchor marked, claims in their place by time. Designed and built after slice 1.
+The behaviour of record is claude-mem 13.35.0's `timeline` tool (`src/servers/mcp-server.ts`) and
+its worker's `SearchManager.timeline` and `renderTimeline` (`src/services/worker/SearchManager.ts`,
+`src/shared/timeline-formatting.ts`, at fa8ab09). Built after #439's read fence (#446).
+
+T1. **Arguments.** `anchor`, any id `get` takes (a claim's, a card's `<op seq>.<n>`, a summary's
+`S<op seq>`, an imported document's, a record's `<device>:<seq>`), or `query`, whose anchor is the
+first hit `search` gives for it in Q2's order, with the same repository; not both (an error naming
+the two). A query with no hit says so. Neither: the newest entries, `limit` of them (default 20, at
+most 100), as now. With an anchor or a query, `depth_before` and `depth_after` (default 3 each, as
+claude-mem's tool describes them; at most 50): how many entries before and after the anchor;
+`limit` is not used then.
+
+T2. **What it lists.** Today's entries (current claims, imported documents, session starts) and
+claude-mem's: current cards (`cards::read`: K3, K4, K6), session summaries that were not skipped
+(`turns::read_row`: T7, T8) and prompts (prompt records, read and gated as search's record leg reads
+them). Each through its table's one reader (Q3): a hidden item is no entry and takes no place. The
+repository, `all` and the read fence as now.
+
+T3. **Order and depth.** Every entry by its time (a card's window time, a summary's turn end, a
+claim's validity, a record's time); entries of one time a prompt first, then claims, imported
+documents and session starts, then cards, then summaries (as the session start shows a summary after
+the cards of its time), then by their stored order (card 10 of a window after card 9). The anchor's entry, then the `depth_before` entries
+before it and the `depth_after` after it; a side with fewer has fewer (claude-mem's
+`filterByDepth`). An anchor that is a record of another kind than a prompt has no entry of its own:
+the entries around its time, those of its own time before it. An anchor whose item is hidden or gone is an error, as `get` reports it.
+
+T4. **The answer**, claude-mem's text, with oboete's ids:
+- `# Timeline around anchor: <id>`, or `# Timeline for query: "<query>"` and then
+  `**Anchor:** <id> - <title>`; `# Timeline: the newest <k>` without either; then
+  `**Window:** <n> records before -> <m> records after | **Items:** <k>` (without an anchor, the
+  window line is left out);
+- by day in the local time zone, oldest first: `### <Mon D, YYYY>`;
+- a summary: `**🎯 S<op seq>** <request, else Session summary> (<Mon D, h:mm AM>)`;
+- a prompt: `**💬 Prompt <device>:<seq>** (<Mon D, h:mm AM>)`, then `> ` and its first 100
+  characters, `...` after a longer one;
+- a claim, an imported document and a session start: `**<id>** <kind and standing> <one line>
+  (<Mon D, h:mm AM>)`, the claim's id its first 12 characters, as search's lines show them;
+- cards grouped by their first modified file, else their first read file, else `General`, as paths
+  from the working directory where they are under it: `**<file>**`, then `| ID | Time | T | Title |
+  Tokens |` and its rule, a row `| <id> | <h:mm AM, or " for the minute before> | <icon> | <title,
+  else Untitled> | ~<N> |` (the session start's icon of the card's type, Q7's `~N`); a new table when
+  the file changes, and after any other entry;
+- the anchor's line ends ` <- **ANCHOR**` (on a card's row, after its title).
+Every line gated, the answer fenced (spec 6.5), as every tool's.
+
+T5. **Where.** The MCP tool and `oboete timeline` (`--anchor`, `--query`, `--before`, `--after`,
+`--limit`) give this text. The viewer's pages keep their JSON list of today's entries (its own
+slice), and `search::b::timeline` stays as it is for them.
 
 ## Slice 3: vectors
 
@@ -167,6 +211,22 @@ list, count the cards and the summaries beside the claims, imported documents an
 | `get_tool_uses` (raw tool input and output) | `get` of a record's key | a record is the raw event, gated |
 | Advertised default limit 20, actual 50 / 50 / 20 per kind | default 10, at most 100 | as now |
 | Code-structure tools, corpora | none | left out by decision 37 |
+| `timeline`: anchor or query required; an observation id, `S<id>`, or a time | anchor or query, else the newest entries; any id `get` takes | oboete's newest list stays (the viewer's and the CLI's habit); a record anchors by its time |
+| `timeline`'s depths: described as 3, 10 when left out | 3 when left out | the tool's description is what an agent reads, and three entries a side cost less context |
+| Timeline token estimate: an observation's narrative / 4 | Q7's `~N`: what `get` returns / 4 | one estimate across search and timeline |
+| Timeline lists observations, summaries and prompts | also claims, imported documents and session starts | oboete's claims are what it knows best (owner decision 37's superset) |
+
+## Tests of slice 2 (through the MCP tool and the CLI)
+
+1. Around a card: the cards, the summary and the prompt of its window and the claims of that time,
+   by day and by file, the anchor marked, the depths kept (fewer on a short side).
+2. `query`: the anchor is search's first hit, named in the header; `anchor` and `query` together is
+   an error, and a query with no hit says so.
+3. A hidden card (K4), a skipped summary and a forgotten claim are no entries and take no place; a
+   rule added after they were written masks their lines.
+4. Without an anchor: the newest entries, as now; the viewer's list is unchanged.
+5. A record anchor that is no prompt gives the entries around its time, none marked; an anchor of
+   nothing is an error.
 
 ## Tests of slice 1 (through the MCP tools and the CLI)
 

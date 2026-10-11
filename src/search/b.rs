@@ -2506,9 +2506,44 @@ pub fn timeline(
     // Milestone 5 D5 (#439): no forget commits until the answer is built.
     let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let at = anchor.map(|a| time_of(&raw, &k, a)).transpose()?;
-    let pending = claims::Pending::read(&raw, &k)?;
+    let (from, key) = match (at, before) {
+        (Some(at), _) => (at, String::new()),
+        (None, Some(page)) => page,
+        (None, None) => (i64::MAX, String::new()),
+    };
+    let mut before = others(&raw, &k, repo, true, from, &key, limit)?;
+    #[cfg(test)]
+    if let Some(between) = BETWEEN.take() {
+        between();
+    }
+    let Some(at) = at else {
+        before.truncate(limit);
+        return Ok(before);
+    };
+    let mut after = others(&raw, &k, repo, false, at, "", limit)?;
+    // Half on each side, and what one side cannot fill to the other (Codex on #306).
+    let later = after.len().min(limit - before.len().min(limit - limit / 2));
+    before.truncate(limit - later);
+    after.truncate(later);
+    after.reverse();
+    after.append(&mut before);
+    Ok(after)
+}
+
+/// [`timeline`]'s entries strictly past (`at`, `key`) in its order: the older the newest first
+/// (`older`, then by key), else the newer the oldest first; an empty `key` keeps every entry of
+/// `at` on the older side. At most `limit`.
+fn others(
+    raw: &Raw,
+    k: &Connection,
+    repo: Option<&str>,
+    older: bool,
+    at: i64,
+    key: &str,
+    limit: usize,
+) -> Result<Vec<Item>> {
+    let pending = claims::Pending::read(raw, k)?;
     let [own, named] = repo.map(imported_repos).unwrap_or_default();
-    let repo = repo.map(str::to_owned);
     let items = "SELECT key, ts, kind, repo, text, class FROM (
            SELECT a.uid AS key, a.valid_from AS ts, a.kind || ' ' || a.status AS kind,
                   a.repo AS repo, a.body AS text, 'claim' AS class
@@ -2522,112 +2557,70 @@ pub fn timeline(
            SELECT d.device || ':' || d.seq, d.ts, 'session start', d.repo,
                   COALESCE(d.session, ''), 'start'
            FROM raw_docs d WHERE d.kind = 'start' AND (?1 IS NULL OR d.repo = ?1))";
+    let sql = if older {
+        format!(
+            "{items} WHERE ts < ?4 OR (ts = ?4 AND key > ?7)
+             ORDER BY ts DESC, key LIMIT ?5 OFFSET ?6"
+        )
+    } else {
+        format!(
+            "{items} WHERE ts > ?4 OR (ts = ?4 AND key < ?7) ORDER BY ts, key LIMIT ?5 OFFSET ?6"
+        )
+    };
     // Each key once (a document several devices imported is its newest row, as `imported_leg`
     // reads it). A claim with an owner's change still to apply is only hidden: the entries after
     // it fill its place (Codex on #306), read on in pages of `limit`.
-    // Entries strictly past (`at`, `key`) in the listing's order, the newest first and then by
-    // key: `key` is empty for an anchor, which keeps every entry of its time.
-    let read = |sql: &str, at: i64, key: &str| -> Result<Vec<Item>> {
-        let mut st = k.prepare(sql)?;
-        let mut out: Vec<Item> = Vec::new();
-        for page in 0.. {
-            let rows = st.query_map(
-                params![
-                    repo,
-                    own,
-                    named,
-                    at,
-                    super::sql_limit(limit),
-                    super::sql_limit(limit.saturating_mul(page)),
-                    key
-                ],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                        r.get::<_, String>(4)?,
-                        r.get::<_, String>(5)?,
-                    ))
-                },
-            )?;
-            let mut read = 0;
-            for row in rows {
-                read += 1;
-                let (key, when, kind, repo, text, class) = row?;
-                // A start raw no longer holds is left out before the index has caught up, as
-                // `get` leaves it out (Codex on #306).
-                if pending.touches(&k, &key)? || (kind == "session start" && !held(&raw, &key)?) {
-                    continue;
-                }
-                out.push(Item {
-                    key,
-                    when,
-                    kind,
-                    repo,
-                    text: one_line(&redact::outbound(&text), 120),
-                    class,
-                });
+    let mut st = k.prepare(&sql)?;
+    let mut out: Vec<Item> = Vec::new();
+    for page in 0.. {
+        let rows = st.query_map(
+            params![
+                repo,
+                own,
+                named,
+                at,
+                super::sql_limit(limit),
+                super::sql_limit(limit.saturating_mul(page)),
+                key
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            },
+        )?;
+        let mut read = 0;
+        for row in rows {
+            read += 1;
+            let (key, when, kind, repo, text, class) = row?;
+            // A start raw no longer holds is left out before the index has caught up, as `get`
+            // leaves it out (Codex on #306).
+            if pending.touches(k, &key)? || (kind == "session start" && !held(raw, &key)?) {
+                continue;
             }
-            if read < limit || out.len() >= limit {
-                break;
-            }
+            out.push(Item {
+                key,
+                when,
+                kind,
+                repo,
+                text: one_line(&redact::outbound(&text), 120),
+                class,
+            });
         }
-        Ok(out)
-    };
-    let (from, key) = match (at, before) {
-        (Some(at), _) => (at, String::new()),
-        (None, Some(page)) => page,
-        (None, None) => (i64::MAX, String::new()),
-    };
-    let mut before = read(
-        &format!(
-            "{items} WHERE ts < ?4 OR (ts = ?4 AND key > ?7)
-             ORDER BY ts DESC, key LIMIT ?5 OFFSET ?6"
-        ),
-        from,
-        &key,
-    )?;
-    #[cfg(test)]
-    if let Some(between) = BETWEEN.take() {
-        between();
+        if read < limit || out.len() >= limit {
+            break;
+        }
     }
-    let Some(at) = at else {
-        before.truncate(limit);
-        return Ok(before);
-    };
-    let mut after = read(
-        &format!(
-            "{items} WHERE ts > ?4 OR (ts = ?4 AND key < ?7) ORDER BY ts, key LIMIT ?5 OFFSET ?6"
-        ),
-        at,
-        "",
-    )?;
-    // Half on each side, and what one side cannot fill to the other (Codex on #306).
-    let later = after.len().min(limit - before.len().min(limit - limit / 2));
-    before.truncate(limit - later);
-    after.truncate(later);
-    after.reverse();
-    after.append(&mut before);
-    Ok(after)
+    Ok(out)
 }
 
-/// A timeline entry on one line, as the CLI prints it and MCP returns it, with its repository when
-/// every one is listed.
-pub fn item_line(i: &Item, all: bool) -> String {
-    let repo = match (&i.repo, all) {
-        (Some(r), true) => format!(" [{}]", redact::outbound(r)),
-        _ => String::new(),
-    };
-    format!(
-        "{} {} {}{repo} — {}\n",
-        redact::outbound(&i.key),
-        crate::db::utc(i.when),
-        i.kind,
-        i.text
-    )
-}
+mod timeline;
+pub use timeline::{Around, timeline_text};
 
 /// Whether `repo` is one the stores know: a claim's, an imported document's or a record's.
 pub fn known(home: &Path, repo: &str) -> Result<bool> {

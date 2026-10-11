@@ -742,6 +742,38 @@ pub fn page(
     Ok((out, false))
 }
 
+/// docs/tools.md T2, T3: a repository's (or all repositories') summaries on one side of `at`, as
+/// `cards::around` reads cards; a skip and a row T7 hides take no slot.
+pub fn around(
+    k: &Connection,
+    raw: &Raw,
+    repo: Option<&str>,
+    at: i64,
+    older: bool,
+    limit: usize,
+    rules: &Rules,
+) -> Result<Vec<TurnSummary>> {
+    if !crate::consumer::manifest::exists(k, "table", "turns")? {
+        return Ok(Vec::new());
+    }
+    let side = if older {
+        "ts <= ?2 ORDER BY ts DESC, device DESC, op_seq DESC"
+    } else {
+        "ts > ?2 ORDER BY ts, device, op_seq"
+    };
+    let mut st = k.prepare(&format!(
+        "SELECT {COLUMNS} FROM turns WHERE skipped = 0 AND (?1 IS NULL OR repo = ?1) AND {side}"
+    ))?;
+    let mut rows = st.query(params![repo, at])?;
+    let mut out = Vec::new();
+    while out.len() < limit
+        && let Some(r) = rows.next()?
+    {
+        out.extend(read_row(r, raw, rules)?);
+    }
+    Ok(out)
+}
+
 /// A summary's ID as `get` takes it, `S<device>.<op seq>` or `S<op seq>` of `local`, in parts.
 pub(crate) fn id_parts<'a>(id: &'a str, local: &'a str) -> Option<(&'a str, i64)> {
     let rest = id.trim().strip_prefix('S')?;

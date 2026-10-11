@@ -235,9 +235,19 @@ enum Cmd {
     Timeline {
         #[arg(long)]
         all: bool,
-        /// An id `get` takes: what is around its time, instead of the newest
-        #[arg(long)]
+        /// An id `get` takes: what is around it, instead of the newest
+        #[arg(long, conflicts_with = "query")]
         anchor: Option<String>,
+        /// Search words whose first hit is the anchor
+        #[arg(long)]
+        query: Option<String>,
+        /// Entries before the anchor
+        #[arg(long, default_value_t = 3)]
+        before: usize,
+        /// Entries after the anchor
+        #[arg(long, default_value_t = 3)]
+        after: usize,
+        /// Without an anchor or query: how many of the newest entries
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
@@ -539,13 +549,38 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 emit(&search::b::get_many(&home, &ids)?)
             }
         }
-        Cmd::Timeline { all, anchor, limit } => {
-            let mut out = String::new();
+        Cmd::Timeline {
+            all,
+            anchor,
+            query,
+            before,
+            after,
+            limit,
+        } => {
             let repo = repo_filter(all)?;
-            for i in search::b::timeline(&home, repo.as_deref(), anchor.as_deref(), None, limit)? {
-                out.push_str(&search::b::item_line(&i, all));
-            }
-            emit(&out)
+            let cwd = std::env::current_dir()?;
+            let around = match (anchor, query) {
+                (Some(anchor), _) => search::b::Around::Anchor(anchor),
+                (None, Some(text)) => search::b::Around::Query(search::b::Query {
+                    text,
+                    caller: Some(repo::key(&cwd)),
+                    all,
+                    repo: repo.clone(),
+                    raw: search::b::RawArm::Below,
+                    limit: 1,
+                    ..Default::default()
+                }),
+                (None, None) => search::b::Around::Newest(limit),
+            };
+            let depths = (before, after);
+            emit(&search::b::timeline_text(
+                &home,
+                repo.as_deref(),
+                &cwd,
+                around,
+                depths,
+                &chrono::Local,
+            )?)
         }
         Cmd::Setup {
             embeddings: Some(choice),

@@ -49,6 +49,50 @@ fn raw_hits_stay_found_after_timeline() {
     assert!(oboete(h, c, &["search", "zebra"], "").contains("zebra crossing"));
 }
 
+/// docs/tools.md slice 2 (T5): `oboete timeline` anchors on a query's first hit with the depths
+/// asked, and refuses `--anchor` with `--query`.
+#[test]
+fn timeline_takes_a_query_and_depths() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let (h, c) = (home.path(), cwd.path());
+    for prompt in ["zebra crossing notes", "lion feeding plan"] {
+        let payload = serde_json::json!({"session_id": "s", "prompt": prompt, "cwd": c});
+        oboete(
+            h,
+            c,
+            &["hook", "claude", "UserPromptSubmit"],
+            &payload.to_string(),
+        );
+    }
+    oboete(h, c, &["worker", "--idle-ms", "0"], "");
+    let args = [
+        "timeline", "--query", "zebra", "--before", "0", "--after", "1",
+    ];
+    let got = oboete(h, c, &args, "");
+    assert!(
+        got.starts_with("# Timeline for query: \"zebra\"\n**Anchor:** "),
+        "{got}"
+    );
+    assert!(
+        got.contains("**Window:** 0 records before -> 1 records after | **Items:** 2"),
+        "{got}"
+    );
+    assert!(
+        got.contains("> zebra crossing notes") && got.contains("> lion feeding plan"),
+        "{got}"
+    );
+    let refused = Command::new(env!("CARGO_BIN_EXE_oboete"))
+        .arg("--home")
+        .arg(h)
+        .args(["timeline", "--anchor", "x", "--query", "zebra"])
+        .current_dir(c)
+        .env("OBOETE_NO_SPAWN", "1")
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+}
+
 #[test]
 fn a_raw_hit_id_from_search_opens_with_get() {
     let home = tempfile::tempdir().unwrap();
