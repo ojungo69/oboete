@@ -1203,14 +1203,19 @@ thread_local! {
 }
 
 /// The failure line, then each block inside the memory fence after what it holds. Cursor drops a
-/// field over 10,000 UTF-16 units (`cursor_injection`): there each block is cut at its last line
-/// that fits 9,500 with what comes before it, so no fence is cut (D9), and one cut to its heading
-/// is left out. Also returns how many source bytes of each block survived that cut.
+/// field over 10,000 UTF-16 units (`cursor_injection`), and Grok clips a context at 10,000
+/// characters (CodeRabbit on #456): there each block is cut at its last line that fits 9,500 with
+/// what comes before it, so no fence is cut (D9), and one cut to its heading is left out. Also
+/// returns how many source bytes of each block survived that cut.
 fn assembled(agent: &str, line: Option<String>, blocks: &[(&str, &str)]) -> (String, Vec<usize>) {
     use crate::manifest::fence;
     let units = |s: &str| s.encode_utf16().count() + 1; // with the newline that joins it
     let mut parts: Vec<String> = line.into_iter().collect();
-    let cap = if agent == "cursor" { 9_500 } else { usize::MAX };
+    let cap = if matches!(agent, "cursor" | "grok") {
+        9_500
+    } else {
+        usize::MAX
+    };
     let mut left = cap.saturating_sub(parts.iter().map(|p| units(p)).sum());
     let mut kept = Vec::with_capacity(blocks.len());
     for (what, text) in blocks {
@@ -5128,6 +5133,34 @@ mod tests {
         // A session whose transcript holds one already gets one injection for both.
         assert!(call("agy-d", "PreInvocation").contains(crate::manifest::MEMORY));
         assert_eq!(call("agy-d", "PreInvocation"), "");
+    }
+
+    /// CodeRabbit on #456: Grok clips a context at 10,000 characters, so its first tool call cuts
+    /// each block at a line within 9,500 UTF-16 units, as Cursor's start does, its fence closed,
+    /// and the claims whose lines were cut are not shown.
+    #[test]
+    fn grok_injects_within_its_cap() {
+        let mut p = Prompts::new(false);
+        for i in 0..30 {
+            p.decided(
+                1 + i,
+                &format!("Rule {i} {}", "🚀🚀🚀🚀🚀🚀🚀 ".repeat(60)),
+                &[],
+            );
+        }
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let payload = json!({"sessionId": "g", "workspaceRoot": p.c,
+                             "hookEventName": "PreToolUse", "toolName": "Read"});
+        let text = injected("grok", &hook(&home, "grok", "PreToolUse", &payload));
+        assert!(text.encode_utf16().count() <= 9_500, "{}", text.len());
+        assert!(text.trim_end().ends_with("</oboete-memory>"), "{text}");
+        let shown: serde_json::Map<String, Value> =
+            serde_json::from_str(&crate::hookstate::value(&home, "grok", "g", "shown").unwrap())
+                .unwrap();
+        let lines = text.lines().filter(|l| l.contains(" decision")).count();
+        assert!((1..30).contains(&shown.len()), "{}", shown.len());
+        assert_eq!(shown.len(), lines);
     }
 
     /// D9, Step 7: Cursor's SessionStart injects once per conversation. Cursor drops a field over

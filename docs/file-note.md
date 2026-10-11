@@ -56,6 +56,8 @@ whose path is `target_file` (the probe in the `oboete-dogfood` user, Grok 1.0.40
 hook's `additionalContext` reached the model with the tool's result). The note comes after what
 else that call shows (the session's first packet, the prompt's picks), whole, while the answer
 stays within the 9,500 UTF-16 units Claude Code's does: Grok clips a context at 10,000 characters.
+What else that call shows is cut to fit them first, each block at a line, as Cursor's start is
+(CodeRabbit on #456).
 Codex: its `PreToolUse`, with claude-mem's matcher for its shell and MCP read tools
 (`^Bash$|^mcp__.+__(read|view|cat)(_file|_files)?$`), for the shell commands and MCP tools
 claude-mem's adapter takes (the probe, Codex 0.160.0, same day: the context reached the model as a
