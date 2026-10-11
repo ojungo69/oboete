@@ -1082,6 +1082,20 @@ pub(crate) fn reconcile_or_say(home: &Path, raw: &mut crate::raw::Raw) -> Result
     Ok(())
 }
 
+/// D5 (2b, item 5): `forgotten`, raw.db's forgotten uids, with those whose forget only the logs hold
+/// yet (a raw.db put back from an older copy, which the next pass reconciles): a carry passes all
+/// of them over (Codex on #444).
+pub(crate) fn with_logged(
+    home: &Path,
+    mut forgotten: std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    forgotten.extend(logged(home).0.into_iter().filter_map(|r| match r.target {
+        Target::Uid { uid } => Some(uid),
+        _ => None,
+    }));
+    forgotten
+}
+
 /// Both log copies' requests, of any home, read before a restore takes raw's swap lock (no log I/O
 /// under it); the restore keeps those of its device.
 pub(crate) fn logged(home: &Path) -> (Vec<Request>, Report) {
@@ -2136,6 +2150,67 @@ mod tests {
         if refused {
             assert!(listed.is_err());
         }
+    }
+
+    /// A claim with its vector, forgotten, then a raw.db that lacks the forget the logs hold (put
+    /// back from an older copy: no forget op and no job): the home, its uid and its vector's sha.
+    fn forgotten_in_the_logs_only() -> (tempfile::TempDir, std::path::PathBuf, String, String) {
+        let mut s = crate::search::b::fixture::Store::new();
+        let said = "Parser caches stay in Redis, the team said.";
+        let seq = s.said("s", "github.com/o/r", 1_000, said);
+        let quote = "Parser caches stay in Redis";
+        let gone = s.claim(seq, quote, ("decision", "decided", "user"), &[]);
+        s.run();
+        crate::embed_phase::fixture::vectors(&s);
+        let home = s.home.path().to_owned();
+        let sha: String = crate::knowledge::open(&home)
+            .unwrap()
+            .query_row(
+                "SELECT src_sha FROM vector_keys WHERE kind = 'c' AND key = ?1",
+                [&gone],
+                |r| r.get(0),
+            )
+            .unwrap();
+        forget(&home, &gone);
+        let crate::search::b::fixture::Store { home: kept, raw } = s;
+        drop(raw);
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        conn.execute_batch("DELETE FROM ops WHERE type = 'forget'; DELETE FROM forget_jobs;")
+            .unwrap();
+        (kept, home, gone, sha)
+    }
+
+    fn holds_vector(home: &Path, sha: &str) -> bool {
+        crate::knowledge::open(home)
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM vectors WHERE src_sha = ?1)",
+                [sha],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// D5 (2b, item 5): a forget only the logs hold carries no vector of its uid into a rebuild,
+    /// nor from a copy set aside: the carries read the logs too, since the pass after them is what
+    /// reconciles the logs into raw.db (Codex on #444).
+    #[test]
+    fn a_forget_only_the_logs_hold_carries_no_vector() {
+        let (_kept, home, gone, sha) = forgotten_in_the_logs_only();
+        crate::worker::rebuild(&home).unwrap();
+        assert!(!holds_vector(&home, &sha));
+        assert!(crate::raw::open(&home).unwrap().forgotten(&gone).unwrap());
+        let (_kept, home, _, sha) = forgotten_in_the_logs_only();
+        set_aside_copy(
+            &home,
+            &home.join(format!("knowledge.db.rebuilding-{}", crate::db::now_ms())),
+        );
+        let k = crate::knowledge::open(&home).unwrap();
+        k.execute("DELETE FROM vectors WHERE src_sha = ?1", [&sha])
+            .unwrap();
+        let raw = crate::raw::open(&home).unwrap();
+        crate::embed_phase::carry_set_aside(&home, &k, &raw).unwrap();
+        assert!(!holds_vector(&home, &sha));
     }
 
     /// D5 (2b, item 7): bodies a restore puts back while the purge runs, after its step 2, keep the
