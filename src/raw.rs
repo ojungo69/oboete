@@ -266,7 +266,7 @@ impl OpKind {
             OpKind::Forget => "forget",
         }
     }
-    fn from_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
         [
             Self::Window,
             Self::Claim,
@@ -3641,16 +3641,21 @@ fn uid_op_keys(conn: &Connection, uid: &str) -> Result<Vec<(String, i64)>> {
     Ok(keys)
 }
 
+/// The uid whose text an op of `kind` holds (D5): a Claim's as the consumer derives it, a
+/// Correction's or an Import's from its body; none for the other kinds.
+pub(crate) fn op_uid(kind: OpKind, body: &serde_json::Value) -> Option<String> {
+    match kind {
+        OpKind::Claim => crate::claims::op_uid(body),
+        OpKind::Correction | OpKind::Import => body["uid"].as_str().map(str::to_owned),
+        _ => None,
+    }
+}
+
 /// A Claim or Correction op anchored on a record forget denies, by the record's origin (D1 rule
 /// 5), or a Claim, Correction or Import op of a forgotten uid (D5): never recorded. Window and
 /// turn ops are fenced by `Reading` (rule 12).
 fn forgotten_op(conn: &Connection, kind: OpKind, body: &serde_json::Value) -> Result<bool> {
-    let uid = match kind {
-        OpKind::Claim => crate::claims::op_uid(body),
-        OpKind::Correction | OpKind::Import => body["uid"].as_str().map(str::to_owned),
-        _ => None,
-    };
-    if let Some(uid) = uid
+    if let Some(uid) = op_uid(kind, body)
         && forgotten_uid(conn, &uid)?
     {
         return Ok(true);

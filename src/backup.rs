@@ -945,8 +945,230 @@ fn damage(seg: &Path) -> Option<String> {
     (!checksum_matches(&sum, &hex(&Sha256::digest(&data)))).then(|| "checksum mismatch".into())
 }
 
+/// Whether a seal vouches for a segment of hash `sha256`: any of its lines (a purge's replacement
+/// gives it two while it runs, milestone 5 D5 2c), by the first word, as `sha256sum` writes one.
 pub(crate) fn checksum_matches(text: &str, sha256: &str) -> bool {
-    text.split_whitespace().next() == Some(sha256)
+    text.lines()
+        .any(|line| line.split_whitespace().next() == Some(sha256))
+}
+
+/// What a purge of the ops segments did (milestone 5 D5, 2c).
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct OpsPurge {
+    /// Segments whose ops of a forgotten uid were rewritten without their text.
+    pub rewritten: usize,
+    /// Segments removed: no seal vouched for them, and they could not be read whole.
+    pub removed: usize,
+}
+
+/// Milestone 5 D5 (2c, decisions 2-4): every ops segment of the backup location, of any device,
+/// live or set aside, with each line of an op of a uid in `jobs` given the body
+/// `{"forgotten":"<job>"}` and every other line byte for byte. A segment its seal vouches for is
+/// replaced so that no moment leaves it without a seal line it matches (`select` would drop it and
+/// every ops segment after it); one no seal vouches for, a damaged one or one set aside, which no
+/// restore reads, is rewritten in place, or removed when it cannot be read whole; what a write that
+/// stopped left under a hidden name is removed (`leftover`). Run under the worker lock, as export
+/// and restore are, so no one reads or writes a segment meanwhile.
+pub(crate) fn purge_ops(
+    home: &Path,
+    jobs: &std::collections::HashMap<String, String>,
+) -> Result<OpsPurge> {
+    let dir = dir(home)?;
+    let mut done = OpsPurge::default();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(done),
+        Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
+    };
+    let (mut live, mut aside) = (Vec::new(), Vec::new());
+    for entry in entries {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') {
+            if leftover(name) {
+                std::fs::remove_file(&path)?;
+            }
+        } else if path
+            .file_name()
+            .and_then(segment_name)
+            .is_some_and(|(ops, ..)| ops)
+        {
+            live.push(path);
+        } else if name.contains(".ops.zst.quarantined-") && !name.contains(".sha256") {
+            aside.push(path);
+        }
+    }
+    for path in &live {
+        let seal_path = PathBuf::from(format!("{}.sha256", path.display()));
+        let seal = match std::fs::read_to_string(&seal_path) {
+            Ok(seal) => Some(seal),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).with_context(|| format!("read {}", seal_path.display())),
+        };
+        let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        let sha = hex(&Sha256::digest(&data));
+        match seal.filter(|seal| checksum_matches(seal, &sha)) {
+            Some(seal) => {
+                let name = path.file_name().and_then(|n| n.to_str()).context("name")?;
+                // Stopped after its rename: the seal's second line is this content's (d).
+                if seal.lines().count() > 1 {
+                    write_synced(
+                        &dir,
+                        &format!("{name}.sha256"),
+                        seal_line(&sha, name).as_bytes(),
+                    )?;
+                }
+                if let Some(text) = purge_lines(&read_whole(&data)?, jobs) {
+                    replace(&dir, name, &sha, text.as_bytes())?;
+                    done.rewritten += 1;
+                }
+            }
+            None => match untrusted(path, &data, jobs)? {
+                Untrusted::Rewritten => done.rewritten += 1,
+                Untrusted::Removed => {
+                    if seal_path.exists() {
+                        std::fs::remove_file(&seal_path)?;
+                    }
+                    done.removed += 1;
+                }
+                Untrusted::Kept => {}
+            },
+        }
+    }
+    for path in &aside {
+        let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        match untrusted(path, &data, jobs)? {
+            Untrusted::Rewritten => done.rewritten += 1,
+            Untrusted::Removed => done.removed += 1,
+            Untrusted::Kept => {}
+        }
+    }
+    Ok(done)
+}
+
+/// The suffix of a replacement's temporary name, `.<segment>.purge` (2c, decision 3): the segment
+/// grammar never matches it.
+const PURGE_PART: &str = ".purge";
+
+/// A name an ops segment's write left when it stopped before its rename: a purge's replacement
+/// (`.<segment>.purge`, written again from what the segment holds now) or an export's segment
+/// (`write_synced`'s `.<segment>.tmp`, which may hold the text). No reader takes either, and under
+/// the worker lock no write is under way.
+fn leftover(name: &str) -> bool {
+    name.strip_prefix('.')
+        .and_then(|n| {
+            n.strip_suffix(".tmp")
+                .or_else(|| n.strip_suffix(PURGE_PART))
+        })
+        .and_then(|n| segment_name(std::ffi::OsStr::new(n)))
+        .is_some_and(|(ops, device, ..)| ops && device.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+fn seal_line(sha: &str, name: &str) -> String {
+    format!("{sha}  {name}\n")
+}
+
+/// 2c, decision 3: segment `name` (of hash `old`) replaced by `text` in four steps, each synced
+/// with its directory before the next: (a) the new content written under a name no reader takes;
+/// (b) the seal given a second line, the new hash; (c) the new content renamed over the segment;
+/// (d) the seal left with the new hash alone. A stop between any two leaves a segment its seal
+/// vouches for, and the next purge goes on from what it finds.
+fn replace(dir: &Path, name: &str, old: &str, text: &[u8]) -> Result<()> {
+    let z = zstd::bulk::compress(text, 3)?;
+    let new = hex(&Sha256::digest(&z));
+    let part = format!(".{name}{PURGE_PART}");
+    write_synced(dir, &part, &z)?;
+    fail_after("purge_segment_written")?;
+    let doubled = format!("{}{}", seal_line(old, name), seal_line(&new, name));
+    write_synced(dir, &format!("{name}.sha256"), doubled.as_bytes())?;
+    fail_after("purge_seal_doubled")?;
+    std::fs::rename(dir.join(&part), dir.join(name))?;
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
+    fail_after("purge_segment_renamed")?;
+    write_synced(
+        dir,
+        &format!("{name}.sha256"),
+        seal_line(&new, name).as_bytes(),
+    )?;
+    fail_after("purge_seal_single")
+}
+
+enum Untrusted {
+    Rewritten,
+    Removed,
+    Kept,
+}
+
+/// 2c, decision 4: a segment no seal vouches for, rewritten in place when it is read whole and
+/// holds an op of a uid in `jobs`, else removed: it may hold that text, and no reader of oboete
+/// uses it.
+fn untrusted(
+    path: &Path,
+    data: &[u8],
+    jobs: &std::collections::HashMap<String, String>,
+) -> Result<Untrusted> {
+    let Ok(text) = read_whole(data) else {
+        std::fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
+        return Ok(Untrusted::Removed);
+    };
+    let Some(text) = purge_lines(&text, jobs) else {
+        return Ok(Untrusted::Kept);
+    };
+    let dir = path.parent().context("segment directory")?;
+    let name = path.file_name().and_then(|n| n.to_str()).context("name")?;
+    write_synced(dir, name, &zstd::bulk::compress(text.as_bytes(), 3)?)?;
+    Ok(Untrusted::Rewritten)
+}
+
+/// A segment's whole text, or an error when it does not decompress to text within the size a
+/// segment can have (`read_segment` would cut it there).
+fn read_whole(data: &[u8]) -> Result<String> {
+    let mut text = String::new();
+    zstd::Decoder::new(data)?
+        .take(MAX_SEGMENT_BYTES + 1)
+        .read_to_string(&mut text)?;
+    anyhow::ensure!(
+        text.len() as u64 <= MAX_SEGMENT_BYTES,
+        "a segment past its size"
+    );
+    Ok(text)
+}
+
+/// `text`'s lines with each op of a uid in `jobs` given the body `{"forgotten":"<job>"}` that
+/// raw.db's purge gives it (2c, decision 2), every other line byte for byte; None when no line
+/// changes.
+fn purge_lines(text: &str, jobs: &std::collections::HashMap<String, String>) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut changed = false;
+    for piece in text.split_inclusive('\n') {
+        let (line, end) = piece
+            .strip_suffix('\n')
+            .map_or((piece, ""), |line| (line, "\n"));
+        match purged_line(line, jobs) {
+            Some(new) => {
+                out.push_str(&new);
+                changed = true;
+            }
+            None => out.push_str(line),
+        }
+        out.push_str(end);
+    }
+    changed.then_some(out)
+}
+
+/// One backup line (`Raw::export_op_lines`) with its body rewritten, when its op holds the text of
+/// a uid in `jobs` (`raw::op_uid`, the judgment raw.db's purge makes). The line's other fields keep
+/// their values, in serde_json's key order: every reader parses the line.
+fn purged_line(line: &str, jobs: &std::collections::HashMap<String, String>) -> Option<String> {
+    let mut v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let kind = raw::OpKind::from_name(v["type"].as_str()?)?;
+    let body: serde_json::Value = serde_json::from_str(v["body"].as_str()?).ok()?;
+    let job = jobs.get(&raw::op_uid(kind, &body)?)?;
+    v["body"] = serde_json::json!({ "forgotten": job }).to_string().into();
+    Some(v.to_string())
 }
 
 /// `<name>` (and its -wal and -shm, which SQLite binds to the name) moved aside as

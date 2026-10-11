@@ -522,6 +522,8 @@ pub fn start(home: &Path, preview: &Preview) -> Result<(Status, Report)> {
 const PENDING: &str = "hidden; physical purge pending";
 /// D5 item 7: past its rebuild, knowledge.db still holds the uid.
 const STOPPED: &str = "stopped: knowledge.db still holds it after its rebuild";
+/// 2c: past step 4, no backup segment holds its text; the copies of raw.db set aside still may.
+const SEGMENTS_PURGED: &str = "purged here and in the backup segments; raw.db copies pending";
 
 /// Each job, its local state read from the stores (D5 item 9): a uid job past step 3 whose ops
 /// hold no text is purged here, or stopped while knowledge.db still holds its uid.
@@ -536,11 +538,11 @@ pub fn status(home: &Path) -> Result<Vec<Status>> {
             Target::Uid { uid } => step >= 3 && !raw.uid_has_ops(uid)?,
             _ => false,
         };
-        past.push((request, purged));
+        past.push((request, step, purged));
     }
     let uids: HashSet<String> = past
         .iter()
-        .filter_map(|(r, purged)| match &r.target {
+        .filter_map(|(r, _, purged)| match &r.target {
             Target::Uid { uid } if *purged => Some(uid.clone()),
             _ => None,
         })
@@ -548,9 +550,10 @@ pub fn status(home: &Path) -> Result<Vec<Status>> {
     let holding = knowledge_holding(home, &uids)?;
     Ok(past
         .iter()
-        .map(|(r, purged)| {
+        .map(|(r, step, purged)| {
             let local = match &r.target {
                 Target::Uid { uid } if *purged && holding.contains(uid) => STOPPED,
+                _ if *purged && *step >= 4 => SEGMENTS_PURGED,
                 _ if *purged => "purged here; backups pending",
                 _ => PENDING,
             };
@@ -610,9 +613,13 @@ pub struct Purged {
     pub shown: usize,
     /// Jobs whose uid knowledge.db still holds after the rebuild: an op it came from was missed.
     pub stopped: Vec<String>,
+    /// Backup segments whose ops of a forgotten uid were rewritten without their text (2c).
+    pub segments: usize,
+    /// Backup segments removed: no seal vouched for them and they could not be read whole (2c).
+    pub segments_removed: usize,
 }
 
-/// Each uid job a purge goes on with, by state rather than step (D5 item 7): one not past step 3,
+/// Each uid job a purge goes on with, by state rather than step (D5 item 7): one not past step 4,
 /// or whose ops hold text again (a restore can bring the bodies back): its job, uid and step, and
 /// whether its ops hold text.
 fn due(raw: &crate::raw::Raw) -> Result<Vec<(String, String, i64, bool)>> {
@@ -620,7 +627,7 @@ fn due(raw: &crate::raw::Raw) -> Result<Vec<(String, String, i64, bool)>> {
     for (request, step) in raw.forget_jobs()? {
         if let Target::Uid { uid } = request.target {
             let held = raw.uid_has_ops(&uid)?;
-            if held || step < 3 {
+            if held || step < 4 {
                 due.push((request.job, uid, step, held));
             }
         }
@@ -710,66 +717,101 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     }
     let due = due(&crate::raw::open(home)?)?;
     purged.jobs = due.len();
-    let ready = if due.iter().any(|(_, _, step, held)| *step < 2 || *held) {
+    if due.is_empty() {
+        return Ok(Some(purged));
+    }
+    // Step 2 for the jobs whose ops hold text, or that never took it; the rebuild for those and
+    // the ones stopped after step 2. A job past step 3 does not go back to the rebuild (2c,
+    // decision 8): a stopped one would rebuild at every continuation.
+    let mut rebuild = Vec::new();
+    let step_2 = |step: i64, held: bool| step < 2 || held;
+    if due.iter().any(|(_, _, step, held)| step_2(*step, *held)) {
         let _worker = crate::worker::lock_asking(home)?;
         let mut raw = crate::raw::open(home)?;
-        for (job, uid, ..) in &due {
-            purged.ops += raw.purge_uid(uid, job)?;
+        for (job, uid, step, held) in &due {
+            if step_2(*step, *held) {
+                purged.ops += raw.purge_uid(uid, job)?;
+            }
         }
         let truncated = raw.truncate_wal(TRUNCATE_WAIT)?;
-        let mut ready = Vec::new();
-        for (job, uid, ..) in due {
-            if truncated && !raw.uid_has_ops(&uid)? {
+        for (job, uid, step, held) in due {
+            if !step_2(step, held) {
+                if step == 2 {
+                    rebuild.push((job, uid));
+                }
+            } else if truncated && !raw.uid_has_ops(&uid)? {
                 raw.finish_forget_step(&job, 2)?;
-                ready.push((job, uid));
+                rebuild.push((job, uid));
             } else {
                 purged.unfinished.push(job);
             }
         }
-        ready
     } else {
-        due.into_iter().map(|(job, uid, ..)| (job, uid)).collect()
-    };
-    // The worker lock and raw are let go: the rebuild takes them itself.
-    if ready.is_empty() {
-        return Ok(Some(purged));
+        rebuild = due
+            .into_iter()
+            .filter(|(_, _, step, _)| *step == 2)
+            .map(|(job, uid, ..)| (job, uid))
+            .collect();
     }
-    let uids: HashSet<String> = ready.iter().map(|(_, uid)| uid.clone()).collect();
-    // Rebuilt for every job not past step 3, though knowledge.db holds no row of its uid: rows a
-    // rewind took out (a raw.db put back from an older copy) leave the text in the vector cache and
-    // the full-text segments (Greptile on #444), and nothing records that an earlier continuation's
-    // rebuild finished (Codex on #444).
-    crate::worker::rebuild(home).context("knowledge.db was not rebuilt")?;
-    purged.rebuilt = true;
-    purged.shown =
-        crate::hookstate::update_all(home, "shown", |v| crate::hook::without_uids(v, &uids))?;
+    // The worker lock and raw are let go: the rebuild takes them itself.
+    let uids: HashSet<String> = rebuild.iter().map(|(_, uid)| uid.clone()).collect();
+    if !rebuild.is_empty() {
+        // Rebuilt for every job not past step 3, though knowledge.db holds no row of its uid: rows
+        // a rewind took out (a raw.db put back from an older copy) leave the text in the vector
+        // cache and the full-text segments (Greptile on #444), and nothing records that an earlier
+        // continuation's rebuild finished (Codex on #444).
+        crate::worker::rebuild(home).context("knowledge.db was not rebuilt")?;
+        purged.rebuilt = true;
+        purged.shown =
+            crate::hookstate::update_all(home, "shown", |v| crate::hook::without_uids(v, &uids))?;
+    }
     #[cfg(test)]
     if let Some(before) = BEFORE_STEP_3.with(|hook| hook.borrow_mut().take()) {
         before();
     }
     // What knowledge.db holds, the copies set aside, then step 3, under the worker lock as a
     // restore takes it: a restore that put the bodies back since step 2 leaves the job to the next
-    // continuation (Codex on #444).
+    // continuation (Codex on #444). Step 4 under the same lock (2c, decision 1).
     let _worker = crate::worker::lock_asking(home)?;
-    let holding = knowledge_holding(home, &uids)?;
     let raw = crate::raw::open(home)?;
-    if !aside_files(home)?.is_empty() {
-        crate::embed_phase::carry_set_aside(home, &crate::knowledge::open(home)?, &raw)?;
-        for file in aside_files(home)? {
-            std::fs::remove_file(&file)
-                .with_context(|| format!("{} was not removed", file.display()))?;
-            purged.aside += 1;
+    if !rebuild.is_empty() {
+        let holding = knowledge_holding(home, &uids)?;
+        if !aside_files(home)?.is_empty() {
+            crate::embed_phase::carry_set_aside(home, &crate::knowledge::open(home)?, &raw)?;
+            for file in aside_files(home)? {
+                std::fs::remove_file(&file)
+                    .with_context(|| format!("{} was not removed", file.display()))?;
+                purged.aside += 1;
+            }
+        }
+        for (job, uid) in rebuild {
+            if raw.uid_has_ops(&uid)? {
+                purged.unfinished.push(job);
+                continue;
+            }
+            // Recorded for a stopped job too: it is not tried again, and `status` says it stopped.
+            raw.finish_forget_step(&job, 3)?;
+            if holding.contains(&uid) {
+                purged.stopped.push(job);
+            }
         }
     }
-    for (job, uid) in ready {
-        if raw.uid_has_ops(&uid)? {
-            purged.unfinished.push(job);
-            continue;
+    // Step 4 (2c, decisions 2-4): the backup's ops segments, for every uid job past step 3 whose
+    // ops hold no text, stopped ones too (decision 8), in one pass for all their uids.
+    let mut jobs = std::collections::HashMap::new();
+    for (request, step) in raw.forget_jobs()? {
+        if let Target::Uid { uid } = request.target
+            && step >= 3
+            && !raw.uid_has_ops(&uid)?
+        {
+            jobs.insert(uid, request.job);
         }
-        // Recorded for a stopped job too: it is not tried again, and `status` says it stopped.
-        raw.finish_forget_step(&job, 3)?;
-        if holding.contains(&uid) {
-            purged.stopped.push(job);
+    }
+    if !jobs.is_empty() {
+        let ops = crate::backup::purge_ops(home, &jobs)?;
+        (purged.segments, purged.segments_removed) = (ops.rewritten, ops.removed);
+        for job in jobs.values() {
+            raw.finish_forget_step(job, 4)?;
         }
     }
     Ok(Some(purged))
@@ -1134,9 +1176,11 @@ fn uid_limits(kind: &str) -> String {
         "Its ops in raw.db are rewritten without the text right after registration, then \
          knowledge.db is rebuilt from raw.db without it. That takes minutes on a large store \
          (a minute and a half for 70,000 records), and a session that starts meanwhile gets part \
-         of its memory or none; two forgets one after the other rebuild twice. The backup \
-         segments keep it until their purge is built, hidden from every reader and never sent \
-         again.\n\
+         of its memory or none; two forgets one after the other rebuild twice. Then the \
+         backup segments are rewritten without it, those set aside too; copies of raw.db set \
+         aside keep it until their purge is built, hidden from every reader and never sent again. \
+         A backup location in a cloud folder may keep earlier versions of a segment in its \
+         history, which forget does not reach.\n\
          A packet already handed to an agent and a call already sent are not taken back.\n\
          The request is logged by this uid, without the text.\n",
     );
@@ -1300,6 +1344,15 @@ fn say_purged(p: &Purged) -> Result<()> {
     }
     if p.shown > 0 {
         println!("Sessions whose shown memory lost it: {}", p.shown);
+    }
+    if p.segments > 0 {
+        println!("Backup segments rewritten without it: {}", p.segments);
+    }
+    if p.segments_removed > 0 {
+        println!(
+            "Damaged backup segments that could not be read, removed: {}",
+            p.segments_removed
+        );
     }
     anyhow::ensure!(
         p.unfinished.is_empty(),
@@ -1707,7 +1760,7 @@ mod tests {
             }
         }
         assert_eq!(rewritten, 3);
-        assert!(uid_jobs(&home).iter().all(|j| j.2 == 3));
+        assert!(uid_jobs(&home).iter().all(|j| j.2 == 4));
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
     }
 
@@ -1789,14 +1842,11 @@ mod tests {
         assert_eq!(skips(&home), ["forgotten", "forgotten"]);
     }
 
-    /// D5 (2b, item 10, test 2): a claim op's text that no record holds leaves no byte in raw.db,
-    /// knowledge.db, their WALs or any file under `state/` once purged: the ops are rewritten with
-    /// secure_delete and the WAL truncated, knowledge.db is rebuilt without the claim, and every
-    /// session's shown value (OpenCode's receipts too, and a part a crashed change left) loses it.
-    #[test]
-    fn a_purge_leaves_no_byte_of_the_claims_own_text_in_the_stores_or_the_hook_state() {
-        const CANARY: &str = "canary-7f3a";
-        let mut s = crate::search::b::fixture::Store::new();
+    /// A text that only a claim op holds, none of its records (2b, decision 10).
+    const CANARY: &str = "canary-7f3a";
+
+    /// A decided decision whose claim op's body holds `CANARY` and whose record does not: its uid.
+    fn canary_claim(s: &mut crate::search::b::fixture::Store) -> String {
         let seq = s.said("s", "github.com/o/r", 1_000, "We deploy on Fridays.");
         let evidence = crate::claims::Evidence {
             device: s.raw.device().to_owned(),
@@ -1825,6 +1875,17 @@ mod tests {
         s.raw
             .append_ops(&[(raw::OpKind::Claim, serde_json::to_value(op).unwrap())])
             .unwrap();
+        uid
+    }
+
+    /// D5 (2b, item 10, test 2): a claim op's text that no record holds leaves no byte in raw.db,
+    /// knowledge.db, their WALs or any file under `state/` once purged: the ops are rewritten with
+    /// secure_delete and the WAL truncated, knowledge.db is rebuilt without the claim, and every
+    /// session's shown value (OpenCode's receipts too, and a part a crashed change left) loses it.
+    #[test]
+    fn a_purge_leaves_no_byte_of_the_claims_own_text_in_the_stores_or_the_hook_state() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = canary_claim(&mut s);
         s.run();
         let home = s.home.path().to_owned();
         // What sessions were shown: Claude Code's form, OpenCode's with a receipt not yet taken,
@@ -1969,7 +2030,7 @@ mod tests {
         let purged = purge(&home).unwrap().unwrap();
         assert_eq!((purged.jobs, purged.ops, purged.rebuilt), (1, 0, true));
         assert!(purged.unfinished.is_empty());
-        assert_eq!(uid_jobs(&home)[0].2, 3);
+        assert_eq!(uid_jobs(&home)[0].2, 4);
     }
 
     /// D5 (2b-1): one purge at a time: while another holds `state/purge.lock`, a purge does
@@ -2035,10 +2096,10 @@ mod tests {
         assert!(purged.stopped.is_empty());
         let uids = HashSet::from([tabs, doc]);
         assert!(knowledge_holding(&home, &uids).unwrap().is_empty());
-        assert!(uid_jobs(&home).iter().all(|j| j.2 == 3));
+        assert!(uid_jobs(&home).iter().all(|j| j.2 == 4));
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
         let local: Vec<&str> = status(&home).unwrap().iter().map(|s| s.local).collect();
-        assert_eq!(local, ["purged here; backups pending"; 2]);
+        assert_eq!(local, [SEGMENTS_PURGED; 2]);
     }
 
     /// D5 (2b, item 5, test 6): no forgotten uid's vector comes back, neither from the knowledge.db
@@ -2125,7 +2186,7 @@ mod tests {
         assert_eq!((purged.jobs, purged.ops, purged.rebuilt), (1, 0, true));
         assert!(purged.aside > 0);
         assert!(aside_files(&home).unwrap().is_empty());
-        assert_eq!(uid_jobs(&home)[0].2, 3);
+        assert_eq!(uid_jobs(&home)[0].2, 4);
     }
 
     /// D5 (2b, item 7, test 6): a restore that brings a purged op's text back is purged again,
@@ -2140,7 +2201,7 @@ mod tests {
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
         drop(raw);
         assert_eq!(purge(&home).unwrap().unwrap().ops, 1);
-        assert_eq!(uid_jobs(&home)[0].2, 3);
+        assert_eq!(uid_jobs(&home)[0].2, 4);
         // The bodies an older raw.db held, back in place.
         let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
         for (device, seq, _, body) in &before {
@@ -2158,7 +2219,7 @@ mod tests {
         assert_eq!(CONTINUED.get(), 1);
         let purged = purge(&home).unwrap().unwrap();
         assert_eq!((purged.jobs, purged.ops), (1, 1));
-        assert_eq!(uid_jobs(&home)[0].2, 3);
+        assert_eq!(uid_jobs(&home)[0].2, 4);
         assert!(!op_rows(&home).iter().any(|o| o.3.contains("Use tabs.")));
     }
 
@@ -2395,7 +2456,7 @@ mod tests {
         let purged = purge(&home).unwrap().unwrap();
         assert_eq!(purged.ops, 1);
         assert!(purged.unfinished.is_empty());
-        assert_eq!(uid_jobs(&home)[0].2, 3);
+        assert_eq!(uid_jobs(&home)[0].2, 4);
     }
 
     /// D5 (2b, item 8, test 7): a worker that finds a uid job its purge left starts `oboete forget
@@ -2449,18 +2510,7 @@ mod tests {
         forget(&home, &uid);
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
         drop(raw);
-        let (at, left) = (home.clone(), uid.clone());
-        BEFORE_STEP_3.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || {
-                crate::knowledge::open(&at)
-                    .unwrap()
-                    .execute(
-                        "INSERT INTO claims(uid, op_device, op_seq) VALUES (?1, 'd', 1)",
-                        [&left],
-                    )
-                    .unwrap();
-            }))
-        });
+        left_after_the_rebuild(&home, &uid);
         let purged = purge(&home).unwrap().unwrap();
         let job = uid_jobs(&home)[0].1.clone();
         assert_eq!(purged.stopped, std::slice::from_ref(&job));
@@ -2472,6 +2522,348 @@ mod tests {
         continue_due(&home, &raw::open(&home).unwrap());
         assert_eq!(CONTINUED.get(), 0);
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
+    /// A purge's rebuild on this thread leaves `uid` in knowledge.db, as an op the purge did not
+    /// find would: its job stops (D5 item 7).
+    fn left_after_the_rebuild(home: &Path, uid: &str) {
+        let (at, left) = (home.to_owned(), uid.to_owned());
+        BEFORE_STEP_3.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                crate::knowledge::open(&at)
+                    .unwrap()
+                    .execute(
+                        "INSERT INTO claims(uid, op_device, op_seq) VALUES (?1, 'd', 1)",
+                        [&left],
+                    )
+                    .unwrap();
+            }))
+        });
+    }
+
+    /// The live ops segments of the backup location, of every device, by name: in op order for
+    /// each.
+    fn ops_segments(home: &Path) -> Vec<PathBuf> {
+        let dir = crate::backup::dir(home).unwrap();
+        let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(crate::backup::segment_name)
+                    .is_some_and(|(ops, ..)| ops)
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    fn segment_text(path: &Path) -> String {
+        let bytes = std::fs::read(path).unwrap();
+        String::from_utf8(zstd::stream::decode_all(&bytes[..]).unwrap()).unwrap()
+    }
+
+    /// The hash a seal names for the file at `path`.
+    fn file_sha(path: &Path) -> String {
+        Sha256::digest(std::fs::read(path).unwrap())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    /// The names of the files in the backup location that hold `CANARY`, each segment's text read
+    /// decompressed.
+    fn backup_canaries(home: &Path) -> Vec<String> {
+        let holds = |b: &[u8]| b.windows(CANARY.len()).any(|w| w == CANARY.as_bytes());
+        let mut found = Vec::new();
+        for e in std::fs::read_dir(crate::backup::dir(home).unwrap())
+            .unwrap()
+            .flatten()
+        {
+            let bytes = std::fs::read(e.path()).unwrap();
+            if holds(&bytes) || holds(&zstd::stream::decode_all(&bytes[..]).unwrap_or_default()) {
+                found.push(e.file_name().to_string_lossy().into_owned());
+            }
+        }
+        found
+    }
+
+    /// `canary_claim`'s claim and a kept one, backed up in two ops segments or more, the first
+    /// holding the canary's op and the later ones only ops of the kept claim: the store, the
+    /// canary's uid and the kept claim's.
+    fn backed_up_canary() -> (crate::search::b::fixture::Store, String, String) {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = canary_claim(&mut s);
+        let kept = s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        s.run();
+        crate::backup::export(s.home.path()).unwrap();
+        let change = serde_json::json!({"uid": kept, "muted": true});
+        s.raw
+            .append_ops(&[(raw::OpKind::Correction, change)])
+            .unwrap();
+        crate::backup::export(s.home.path()).unwrap();
+        let ops = ops_segments(s.home.path());
+        assert!(ops.len() >= 2, "{ops:?}");
+        assert!(segment_text(&ops[0]).contains(CANARY));
+        assert!(!ops[1..].iter().any(|p| segment_text(p).contains(CANARY)));
+        (s, uid, kept)
+    }
+
+    /// D5 (2c, decisions 2-4, tests 1 and 3): a purge rewrites every ops segment of the backup
+    /// location that holds an op of the forgotten uid, of any device, live or set aside, changing
+    /// only that op's body; a set-aside one that does not decompress is removed, and so is an
+    /// export's segment left before its rename. No file there holds the text then. A restore from
+    /// the rewritten segments keeps the uid forgotten and every op the segments hold, and the
+    /// export after it writes only new ops (test 5).
+    #[test]
+    fn a_purge_rewrites_the_backup_segments_without_the_uids_text() {
+        let (s, uid, _) = backed_up_canary();
+        let home = s.home.path().to_owned();
+        let dir = crate::backup::dir(&home).unwrap();
+        let device = s.raw.device().to_owned();
+        let first = ops_segments(&home)[0].clone();
+        let name = first.file_name().unwrap().to_str().unwrap().to_owned();
+        let before = segment_text(&first);
+        // Another device's, as a home copied from another machine leaves them (decision 2):
+        // sealed, and with no seal.
+        let tail = name.strip_prefix(&format!("{device}-")).unwrap().to_owned();
+        let (sealed, unsealed) = (
+            dir.join(format!("0ther0-{tail}")),
+            dir.join(format!("0ther1-{tail}")),
+        );
+        for other in [&sealed, &unsealed] {
+            std::fs::copy(&first, other).unwrap();
+        }
+        std::fs::copy(
+            dir.join(format!("{name}.sha256")),
+            format!("{}.sha256", sealed.display()),
+        )
+        .unwrap();
+        // Set aside, under the name an export sets a segment past raw's end aside with
+        // (MUST-M14): whole, and one that does not decompress.
+        let aside = |dir: &Path| {
+            dir.join(crate::backup::fresh_name(dir, &format!("{name}.quarantined-")).unwrap())
+        };
+        let whole = aside(&dir);
+        std::fs::copy(&first, &whole).unwrap();
+        let broken = aside(&dir);
+        std::fs::write(&broken, format!("not zstd: {CANARY}")).unwrap();
+        // An export's segment, left before its rename.
+        let left = dir.join(format!(".{name}.tmp"));
+        std::fs::copy(&first, &left).unwrap();
+        forget(&home, &uid);
+        let job = uid_jobs(&home)[0].1.clone();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.segments, purged.segments_removed), (4, 1));
+        assert!(!broken.exists() && !left.exists());
+        assert_eq!(backup_canaries(&home), Vec::<String>::new());
+        let after = segment_text(&first);
+        assert_eq!(after.lines().count(), before.lines().count());
+        let mut changed = 0;
+        for (was, now) in before.lines().zip(after.lines()) {
+            if !was.contains(CANARY) {
+                assert_eq!(now, was);
+                continue;
+            }
+            let (was, now): (serde_json::Value, serde_json::Value) = (
+                serde_json::from_str(was).unwrap(),
+                serde_json::from_str(now).unwrap(),
+            );
+            for key in ["device", "op_seq", "type", "ts", "batch"] {
+                assert_eq!(now[key], was[key], "{key}");
+            }
+            assert_eq!(
+                now["body"],
+                serde_json::json!({ "forgotten": job }).to_string()
+            );
+            changed += 1;
+        }
+        assert_eq!(changed, 1);
+        for copy in [&sealed, &unsealed, &whole] {
+            assert_eq!(segment_text(copy), after);
+        }
+        for segment in [&first, &sealed] {
+            let seal = std::fs::read_to_string(format!("{}.sha256", segment.display())).unwrap();
+            assert_eq!(seal.lines().count(), 1, "{seal}");
+            assert!(seal.starts_with(&file_sha(segment)), "{seal}");
+        }
+        assert!(!PathBuf::from(format!("{}.sha256", unsealed.display())).exists());
+        assert_eq!(uid_jobs(&home)[0].2, 4);
+        assert_eq!(status(&home).unwrap()[0].local, SEGMENTS_PURGED);
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+
+        // Test 5: raw.db lost, restored from the rewritten segments.
+        let mine: Vec<PathBuf> = ops_segments(&home)
+            .into_iter()
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&device)
+            })
+            .collect();
+        let backed_up: Vec<(i64, String)> = mine
+            .iter()
+            .flat_map(|p| {
+                segment_text(p)
+                    .lines()
+                    .map(|l| {
+                        let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                        (
+                            v["op_seq"].as_i64().unwrap(),
+                            v["body"].as_str().unwrap().to_owned(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
+        for f in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(f));
+        }
+        let mut raw = crate::backup::open_raw(&home).unwrap();
+        assert!(raw.forgotten(&uid).unwrap());
+        let restored = op_rows(&home);
+        for (seq, body) in &backed_up {
+            assert!(
+                restored
+                    .iter()
+                    .any(|o| (&o.0, o.1, &o.3) == (&device, *seq, body)),
+                "op {seq} not restored"
+            );
+        }
+        assert!(!restored.iter().any(|o| o.3.contains(CANARY)));
+        let end = mine
+            .iter()
+            .filter_map(|p| p.file_name().and_then(crate::backup::segment_name))
+            .map(|(.., last)| last)
+            .max()
+            .unwrap();
+        let change = serde_json::json!({"uid": "kept-uid", "muted": true});
+        raw.append_ops(&[(raw::OpKind::Correction, change)])
+            .unwrap();
+        drop(raw);
+        crate::backup::export(&home).unwrap();
+        let new: Vec<PathBuf> = ops_segments(&home)
+            .into_iter()
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&device)
+            })
+            .filter(|p| !mine.contains(p))
+            .collect();
+        let firsts: Vec<i64> = new
+            .iter()
+            .filter_map(|p| p.file_name().and_then(crate::backup::segment_name))
+            .map(|(_, _, first, _)| first)
+            .collect();
+        assert_eq!(firsts.iter().min(), Some(&(end + 1)), "{new:?}");
+        for p in &mine {
+            assert!(p.exists(), "{p:?} was set aside");
+        }
+    }
+
+    /// D5 (2c, decision 3, test 2): a purge stopped after each step of a segment's replacement
+    /// leaves segments a restore takes whole, the one replaced and those after it; the next purge
+    /// finishes the replacement, a one-line seal and no text, without rebuilding knowledge.db
+    /// again.
+    #[test]
+    fn a_purge_stopped_inside_a_segments_replacement_leaves_every_op_restorable() {
+        for stage in [
+            "purge_segment_written",
+            "purge_seal_doubled",
+            "purge_segment_renamed",
+            "purge_seal_single",
+        ] {
+            let (s, uid, _) = backed_up_canary();
+            let home = s.home.path().to_owned();
+            forget(&home, &uid);
+            let crate::search::b::fixture::Store { home: _kept, raw } = s;
+            drop(raw);
+            // What a restore takes before step 4: the purge's rebuild backed up what was new.
+            let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let (at, keep) = (home.clone(), seen.clone());
+            BEFORE_STEP_3.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    *keep.borrow_mut() = crate::backup::preview_restore(&at).unwrap().backup;
+                }))
+            });
+            crate::backup::FAIL_AFTER.set(Some(stage));
+            assert!(purge(&home).is_err(), "{stage}");
+            let full = seen.borrow_mut().take().unwrap();
+            let now = crate::backup::preview_restore(&home)
+                .unwrap()
+                .backup
+                .unwrap();
+            assert_eq!(now.skipped_op_segments, 0, "{stage}");
+            assert_eq!(
+                (now.op_segments, now.op_lines, now.op_prefix_through),
+                (full.op_segments, full.op_lines, full.op_prefix_through),
+                "{stage}"
+            );
+            assert_eq!(
+                status(&home).unwrap()[0].local,
+                "purged here; backups pending"
+            );
+            let purged = purge(&home).unwrap().unwrap();
+            assert!(!purged.rebuilt, "{stage}");
+            let first = &ops_segments(&home)[0];
+            let seal = std::fs::read_to_string(format!("{}.sha256", first.display())).unwrap();
+            assert_eq!(seal.lines().count(), 1, "{stage}: {seal}");
+            assert!(seal.starts_with(&file_sha(first)), "{stage}: {seal}");
+            assert_eq!(backup_canaries(&home), Vec::<String>::new(), "{stage}");
+            let hidden: Vec<String> = std::fs::read_dir(crate::backup::dir(&home).unwrap())
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with('.'))
+                .collect();
+            assert_eq!(hidden, Vec::<String>::new(), "{stage}");
+            assert_eq!(uid_jobs(&home)[0].2, 4, "{stage}");
+        }
+    }
+
+    /// D5 (2c, decision 8, test 6): a stopped job whose backup was not rewritten yet is not
+    /// rebuilt again, alone or beside a new forget whose rebuild still leaves its uid: the next
+    /// purge rewrites its backup, and `status` goes on saying it stopped.
+    #[test]
+    fn a_stopped_job_is_not_rebuilt_again_but_its_backup_is_rewritten() {
+        for another in [false, true] {
+            let (s, uid, kept) = backed_up_canary();
+            let home = s.home.path().to_owned();
+            forget(&home, &uid);
+            let crate::search::b::fixture::Store { home: _kept, raw } = s;
+            drop(raw);
+            left_after_the_rebuild(&home, &uid);
+            crate::backup::FAIL_AFTER.set(Some("purge_segment_written"));
+            assert!(purge(&home).is_err());
+            assert_eq!(uid_jobs(&home)[0].2, 3);
+            assert_eq!(status(&home).unwrap()[0].local, STOPPED);
+            if another {
+                forget(&home, &kept);
+                left_after_the_rebuild(&home, &uid);
+            }
+            let purged = purge(&home).unwrap().unwrap();
+            assert_eq!(purged.rebuilt, another);
+            assert!(purged.stopped.is_empty(), "{another}: {:?}", purged.stopped);
+            assert_eq!(purged.segments, if another { 2 } else { 1 });
+            assert!(uid_jobs(&home).iter().all(|j| j.2 == 4));
+            let local: Vec<&str> = status(&home).unwrap().iter().map(|s| s.local).collect();
+            let expected: &[&str] = if another {
+                &[STOPPED, SEGMENTS_PURGED]
+            } else {
+                &[STOPPED]
+            };
+            assert_eq!(local, expected);
+            assert_eq!(backup_canaries(&home), Vec::<String>::new());
+        }
     }
 
     /// D5: from the commit of its request, version 2 in both logs, a uid is passed over by every
