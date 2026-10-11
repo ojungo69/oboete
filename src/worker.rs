@@ -1092,6 +1092,10 @@ fn serve(
                 viewer.reap();
             }
         }
+        // Milestone 5 D5 item 8: a uid job its purge left; never from a rebuild's or a restore's run.
+        if report.is_none() {
+            crate::forget::continue_due(home, raw);
+        }
         false
     };
     let mut config = config_stamp(home);
@@ -1657,8 +1661,16 @@ fn carry_rebuild_vectors(
 ) -> Result<()> {
     let kept = home.join(name);
     if kept.exists() {
-        let carried =
-            crate::knowledge::open(home).and_then(|k| crate::embed_phase::carry(&k, &kept));
+        let carried = crate::knowledge::open(home).and_then(|k| {
+            // Milestone 5 D5: no forgotten claim's or document's vector comes back, nor one whose
+            // forget only the logs hold yet: the pass after this reconciles them.
+            let (forgotten, home_id) = match crate::raw::read_only(home)? {
+                Some(raw) => (raw.forgotten_set()?, raw.home_id()?),
+                None => Default::default(),
+            };
+            let forgotten = crate::forget::with_logged(home, forgotten, home_id.as_deref())?;
+            crate::embed_phase::carry(&k, &kept, &forgotten)
+        });
         #[cfg(test)]
         if let Some(after) = AFTER_CARRY.with(|hook| hook.borrow_mut().take()) {
             after();
@@ -1685,7 +1697,7 @@ fn carry_rebuild_vectors(
                     }
                 }
                 return Err(error).context(
-                    "rebuild: the vectors of knowledge.db could not be read; nothing was changed",
+                    "rebuild: the vectors of knowledge.db could not be carried; nothing was changed",
                 );
             }
         }

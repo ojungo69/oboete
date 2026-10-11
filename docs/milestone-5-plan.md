@@ -303,6 +303,11 @@ vector も持ち越さない）、進み方と再開（step の数字ではな�
    分、rewind で古い本文が戻ると埋め込み直す）。`vector_keys` のない古いファイルからは何も持ち越さ
    ない。`src_sha` が空の行（埋め込みを飛ばした印）は何も指さない。worker の起動時に quarantined と
    rebuilding のファイルから持ち越す `carry_set_aside` も同じ規則で、raw の忘れた uid の集合を渡す。
+   どちらの carry も、要求ログにだけある忘れた uid を足す（raw.db を古い写しに戻すと、ログを raw.db に
+   戻すのは rebuild の後の pass。Codex on #444）。足すのはそのホームの要求だけで、backup の置き場を
+   共有する別のホームの要求は数えない（Codex on #444）。ログの写しが読めない、または場所が分からないときは
+   carry を止め、vector が読めない写しのときと同じく rebuild は何も変えずに止まる（CodeRabbit on
+   #444）。
    rebuild の後に `knowledge.db.rebuilding-*` と `knowledge.db.quarantined-*` を消す。この規則は
    forget のない `oboete rebuild` と restore の carry も変える（持ち越す数が減る）。
 6. **hook の状態。** hookstate の値で本文を持つのは `shown` だけ（見せた claim の `{uid: {fp, body}}`
@@ -313,11 +318,13 @@ vector も持ち越さない）、進み方と再開（step の数字ではな�
 7. **完了は状態で判定する（D5 の「進み方と再開」を改める）。** `forget_jobs.step` は進んだところの
    記録で、完了の証拠にしない。継続のたびに step 2 から確かめ直し、確認に通らない step をやり直す。
    step 2 の完了: その uid の op に本文が一つもなく、その後の checkpoint が truncate できた。step 3 の
-   確認は二つに分け、やり直す作業も分ける: knowledge.db にその uid の `claims`・`derivations`・
-   `corrections`・`imported`・`vector_keys` の行が残れば rebuild。knowledge.db に残らず aside の
-   ファイルだけが持つ（rebuild の後、消す前に止まった）なら、rebuild はせず、そのファイルの vector を
-   まだ持ち越していなければ（`carried` の時刻がファイルより前）5 の規則で持ち越してから消す。
-   `shown` に残れば 6 の掃除だけ。rebuild の後にも knowledge.db に行が残るときは、op を取りこぼした
+   前の job があれば、継続のたびに rebuild する。knowledge.db にその uid の行が残っていなくても:
+   rewind（古い写しに戻した raw.db）が行だけを消しても、その本文は vector の cache と全文索引の
+   segment に残り、新しいファイルだけがそれを残さない（Greptile on #444）。rebuild が終わったことは
+   どこにも記録されないので、rebuild の後、step 3 の前に止まった purge も、続けるときにもう一度
+   rebuild する（止まったときだけの費用。Codex on #444）。aside のファイルは、その vector をまだ
+   持ち越していなければ（`carried` の時刻がファイルより前）5 の規則で持ち越してから消す。
+   `shown` に残れば 6 の掃除。rebuild の後にも knowledge.db に行が残るときは、op を取りこぼした
    として job を止め、done と報告しない（status と doctor が言う）。restore が古い本文を戻しても、
    次の継続で step 2 からやり直す。
    #439 との関係: 登録の前に manifest を読んだ hook が、掃除の後に `shown` を書くと本文が戻る。
@@ -346,6 +353,18 @@ vector も持ち越さない）、進み方と再開（step の数字ではな�
 （`--yes` の後の継続と `--continue`）、step 2 までの status。2b-2: 4〜7（rebuild・carry・hook の状態・
 完了の判定）と 8 の worker からの起動。下の試験は 1・3・4・8 が 2b-1、2・5・6・7 が 2b-2。
 
+2b-2 の実装で決めたこと（2026-10-11）:
+
+- 止めた job（7）は列を足さず状態で判定する。rebuild の後は行が残っても step 3 を記録し、op に本文が
+  なく knowledge.db がその uid を持つ job を status は「stopped: knowledge.db still holds it after its
+  rebuild」と言い、doctor は不健全とする。worker も `--continue` も、step 3 で本文のない job は続けない
+  ので、rebuild を繰り返さない。
+- worker が未完了の job を見るのは 10 分に 1 回まで（8）。見た時刻を見る前に `state/forget-continue`
+  に書き、起動しなかった回も書く。rebuild と restore の中の pass からは見ない。
+- aside の写し（5）は、purge が step 3 に進む回に、5 の規則で持ち越してから sidecar ごと全部消す。
+- `raw.db.quarantined-*` と `raw.db.restored.quarantined-*` も書き換える前の op の本文を持つ。backup の
+  segment と同じく 2c で扱う。
+
 試験（2b の分）:
 
 1. claim の uid の forget の後に purge を回すと、その uid の Claim op（再導出と recuration を含む）と
@@ -359,7 +378,7 @@ vector も持ち越さない）、進み方と再開（step の数字ではな�
 4. 同じ claude-mem DB の再 import は書き換えた文書を戻さない。
 5. forget を 2 件続けて登録しても rebuild は 1 回。
 6. rebuild の途中で止めた purge を続けると、`knowledge.db.rebuilding-*` から忘れた uid の vector が
-   戻らない。rebuild の後、aside を消す前に止めた purge は、続けても rebuild せずに aside を消す。
+   戻らない。rebuild の後、aside を消す前に止めた purge は、続けるともう一度 rebuild してから aside を消す（決定 7: rebuild が終わったことはどこにも記録されない）。
    step 3 と記録された job でも、restore で本文が戻れば step 2 からやり直す。
 7. purge が 2 つ同時に始まっても（`--yes` と、worker が起動した `--continue`）、進めるのは一つで、
    rebuild は 1 回。worker は未完了の job があると `--continue` を起動し、10 分のうちに二度は起動しない。

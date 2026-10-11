@@ -12,6 +12,7 @@ use crate::resident::{Busy, Resident};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -461,7 +462,7 @@ impl Phase {
     fn batch(&mut self, raw: &Raw, k: &Connection) -> Result<Step> {
         // First: a knowledge.db the worker has just started takes its vectors before anything is
         // written to it, a call's answer included.
-        carry_set_aside(&self.home, k)?;
+        carry_set_aside(&self.home, k, raw)?;
         if let Some(f) = &self.flight {
             if !f.thread.is_finished() {
                 // A thread past its call's timeout is asked again each second, never at once.
@@ -1048,25 +1049,44 @@ pub fn doctor_lines(home: &Path, k: &Connection) -> Result<Vec<String>> {
 }
 
 /// Spec 1.7: the vectors of `from`, a knowledge.db set aside by a rebuild or quarantined, copied
-/// into `k`'s cache, so the documents they were made for are mapped again with no call. Only
-/// blobs of one unit vector each; a file from before the cache carries nothing. One
-/// transaction: a read that fails carries nothing.
-// ponytail: the cache keeps every text ever embedded, the old texts of changed documents too (a
-// rewind maps them back for free); sweep unreferenced rows if it grows past what that is worth.
-pub fn carry(k: &Connection, from: &Path) -> Result<usize> {
+/// into `k`'s cache, so the documents they were made for are mapped again with no call. Only the
+/// vectors a key of `from` maps (milestone 5 D5): none a `forgotten` claim's or document's key
+/// maps, nor one no key maps any more (an earlier text's: a forgotten claim's earlier text cannot
+/// be told from the rest). Only blobs of one unit vector each; a file from before the keys carries
+/// nothing. One transaction: a read that fails carries nothing.
+// ponytail: within one knowledge.db the cache keeps every text ever embedded, the old texts of
+// changed documents too (a rewind maps them back for free), and a rebuild or a quarantine drops
+// those; sweep unreferenced rows if the live cache grows past what that is worth.
+pub fn carry(k: &Connection, from: &Path, forgotten: &HashSet<String>) -> Result<usize> {
     let old = Connection::open_with_flags(from, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let has: bool = old.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vectors')",
+        "SELECT COUNT(*) = 2 FROM sqlite_master
+         WHERE type = 'table' AND name IN ('vectors', 'vector_keys')",
         [],
         |r| r.get(0),
     )?;
     if !has {
         return Ok(0);
     }
+    // Beside the old file's keys: a read-only connection still writes its temp tables.
+    old.execute_batch("CREATE TEMP TABLE forgotten(uid TEXT PRIMARY KEY)")?;
+    {
+        let mut add = old.prepare("INSERT OR IGNORE INTO temp.forgotten(uid) VALUES (?1)")?;
+        for uid in forgotten {
+            add.execute([uid])?;
+        }
+    }
     let tx = k.unchecked_transaction()?;
     let mut carried = 0;
     {
-        let mut read = old.prepare("SELECT embedder, src_sha, vec FROM vectors")?;
+        // A vector several keys map is read for each and inserted once. A key that kept no
+        // vector (`src_sha` empty or null) maps none.
+        let mut read = old.prepare(
+            "SELECT v.embedder, v.src_sha, v.vec FROM vector_keys k
+             JOIN vectors v ON v.embedder = k.embedder AND v.src_sha = k.src_sha
+             WHERE k.src_sha <> ''
+               AND NOT (k.kind IN ('c', 'k', 'p') AND k.key IN (SELECT uid FROM temp.forgotten))",
+        )?;
         let mut rows = read.query([])?;
         let mut write = tx
             .prepare("INSERT OR IGNORE INTO vectors(embedder, src_sha, vec) VALUES (?1, ?2, ?3)")?;
@@ -1095,8 +1115,8 @@ pub fn carry(k: &Connection, from: &Path) -> Result<usize> {
 /// every knowledge.db set aside since the one open now last took them, carried once, whose
 /// checkpoint `carried` holds the time of the newest file it took them from. Every one, not the
 /// newest only: a rebuild stopped twice leaves its vectors in the older file. One whose vectors
-/// cannot be read carries nothing, and says so once.
-fn carry_set_aside(home: &Path, k: &Connection) -> Result<()> {
+/// cannot be read carries nothing, and says so once. No forgotten uid's vector comes back (D5).
+pub(crate) fn carry_set_aside(home: &Path, k: &Connection, raw: &Raw) -> Result<()> {
     use crate::knowledge::checkpoint;
     let done = checkpoint::get(k, "carried", "")?;
     let aside: Vec<(i64, String)> = std::fs::read_dir(home)
@@ -1114,8 +1134,13 @@ fn carry_set_aside(home: &Path, k: &Connection) -> Result<()> {
         })
         .filter(|(at, _)| *at > done)
         .collect();
+    let forgotten = if aside.is_empty() {
+        HashSet::new()
+    } else {
+        crate::forget::with_logged(home, raw.forgotten_set()?, Some(raw.home_id()))?
+    };
     for (_, name) in &aside {
-        if let Err(e) = carry(k, &home.join(name)) {
+        if let Err(e) = carry(k, &home.join(name), &forgotten) {
             eprintln!("oboete: no vectors carried from {name}: {e:#}");
         }
     }
@@ -2556,7 +2581,8 @@ mod tests {
     /// Tools slice 3 (V1, V3): cards and summaries are embedded after the claims, a skipped summary
     /// is not, and each vector follows its row: a recuration's replaced card loses its vector and
     /// the new card gets one, a rewind takes them off and maps the card it brings back with no
-    /// call, and a rebuild sends nothing.
+    /// call, and a rebuild sends only the texts whose vectors no key of the old file mapped any more
+    /// (milestone 5 D5).
     #[test]
     fn a_cards_and_a_summarys_vectors_follow_their_rows() {
         use crate::consumer::{cards::Cards, turns::Turns};
@@ -2625,7 +2651,8 @@ mod tests {
         assert_eq!(kept(&s, "o"), [format!("{device}.{}", first[0])]);
         assert_eq!(stub.requests(), sent);
         // A rebuild, with no store open as `oboete rebuild` runs, makes the rows again from the op
-        // log, and their vectors from the ones kept.
+        // log, which still holds the recuration and the summary: their vectors, which no key of the
+        // old file mapped after the rewind, are not carried and are made again.
         drop(k);
         let Store { home, raw } = s;
         drop(raw);
@@ -2637,7 +2664,13 @@ mod tests {
         embed_all(&s);
         assert_eq!(kept(&s, "o"), [format!("{device}.{}", second[0])]);
         assert_eq!(kept(&s, "s"), [summary_key]);
-        assert_eq!(stub.requests(), sent);
+        let again = stub.texts()[sent..].concat();
+        assert_eq!(again.len(), 2, "{again:?}");
+        assert!(again.iter().any(|t| t.starts_with("Nebula")), "{again:?}");
+        assert!(
+            again.iter().any(|t| t.contains("Fix the parser.")),
+            "{again:?}"
+        );
     }
 
     /// Tools slice 3 (V2, D13): an excluded repository's card and summary, those of a session
@@ -3864,6 +3897,61 @@ mod tests {
         assert_eq!(stub.requests(), 0);
     }
 
+    /// Milestone 5 D5 (2b): carry takes only the vectors a key of the old file maps, and none that
+    /// only a forgotten claim's or document's key maps; a key that kept no vector maps none, and a
+    /// file from before the keys carries nothing.
+    #[test]
+    fn carry_takes_only_what_a_kept_key_maps() {
+        let home = tempfile::tempdir().unwrap();
+        let from = home.path().join("old");
+        let unit = |i: usize| -> Vec<u8> {
+            (0..crate::embed::DIM)
+                .flat_map(|d| if d == i { 1.0f32 } else { 0.0 }.to_le_bytes())
+                .collect()
+        };
+        let old = Connection::open(&from).unwrap();
+        old.execute_batch(
+            "CREATE TABLE vectors(embedder TEXT NOT NULL, src_sha TEXT NOT NULL, vec BLOB NOT NULL,
+               PRIMARY KEY (embedder, src_sha)) WITHOUT ROWID;
+             CREATE TABLE vector_keys(id INTEGER PRIMARY KEY, embedder TEXT NOT NULL,
+               kind TEXT NOT NULL, key TEXT NOT NULL, src_sha TEXT, skipped TEXT,
+               UNIQUE (kind, key, embedder));
+             INSERT INTO vector_keys(embedder, kind, key, src_sha, skipped) VALUES
+               ('e', 'c', 'g', 'gone', NULL), ('e', 'c', 'k', 'kept', NULL),
+               ('e', 'r', 'd:1', 'record', NULL), ('e', 'k', 'g', 'shared', NULL),
+               ('e', 'p', 'k2', 'shared', NULL), ('e', 'c', 'skipped', NULL, 'too long');",
+        )
+        .unwrap();
+        for (i, sha) in ["gone", "kept", "loose", "record", "shared"]
+            .iter()
+            .enumerate()
+        {
+            old.execute(
+                "INSERT INTO vectors VALUES ('e', ?1, ?2)",
+                params![sha, unit(i)],
+            )
+            .unwrap();
+        }
+        drop(old);
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let gone = HashSet::from(["g".to_owned()]);
+        assert_eq!(carry(&k, &from, &gone).unwrap(), 3);
+        let shas: Vec<String> = k
+            .prepare("SELECT src_sha FROM vectors ORDER BY src_sha")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(shas, ["kept", "record", "shared"]);
+        let older = home.path().join("older");
+        Connection::open(&older)
+            .unwrap()
+            .execute_batch("CREATE TABLE vectors(embedder TEXT, src_sha TEXT, vec BLOB)")
+            .unwrap();
+        assert_eq!(carry(&k, &older, &gone).unwrap(), 0);
+    }
+
     /// Spec 1.7 (Steps 6 and 9): a rebuild makes no embedding call: the vectors of the
     /// knowledge.db it sets aside are carried, and the next polls map them though the day's
     /// requests are spent. A quarantined knowledge.db's vectors are carried too, and one whose
@@ -3900,6 +3988,13 @@ mod tests {
                 vec![0u8; crate::embed::DIM * 4],
                 ones
             ],
+        )
+        .unwrap();
+        // Each mapped by a key, so only the blob's check keeps it back.
+        k.execute_batch(
+            "INSERT INTO vector_keys(embedder, kind, key, src_sha) VALUES
+               ('bge-m3', 'r', 'bad:1', 'short'), ('bge-m3', 'r', 'bad:2', 'nan'),
+               ('bge-m3', 'r', 'bad:3', 'zero'), ('bge-m3', 'r', 'bad:4', 'long')",
         )
         .unwrap();
         drop(k);
