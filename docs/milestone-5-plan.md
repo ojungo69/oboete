@@ -573,6 +573,10 @@ preview。下の試験は 1（segment の分）・2・3・5・6 が 2c-1、1（r
   接尾辞を足して作る（UTF-8 でない path でも同じファイルを指す。Codex on #458）。
 - 隔離の名前でも、link であるものと raw.db 自体の別名（同じ file identity。unix だけが読める）は写しでは
   ない: 開けば別の名前の本物の store で、-wal がそれのものではない（Codex on #458）。preview も数えない。
+- sidecar だけが残った写しも消す: 隔離は -wal を写し自体より先に動かし、restore の掃除は `.restoring` を
+  journal より先に消すので、その間で止まると -wal か journal だけが残り、本文を持ちうる（Codex on #458）。
+  sidecar の名前から写しの名前を求め、写し自体がなくても同じ規則で取る。op log の表（`ops`）のない写し
+  （op log より前の schema）はその uid の op を持たないのでそのまま（CodeRabbit on #458）。
 
 試験（2c の分）:
 

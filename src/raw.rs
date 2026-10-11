@@ -3692,15 +3692,31 @@ pub(crate) fn copies_set_aside(home: &Path) -> Result<Vec<std::path::PathBuf>> {
     // name whose -wal is not its own (Codex on #458). Off Unix no identity is read.
     let live_id = crate::worker::file_id(std::fs::metadata(&live));
     let alias = |copy: &Path| -> Result<bool> {
-        Ok(std::fs::symlink_metadata(copy)?.file_type().is_symlink()
-            || live_id.is_some() && crate::worker::file_id(std::fs::metadata(copy)) == live_id)
+        Ok(match std::fs::symlink_metadata(copy) {
+            Ok(meta) => {
+                meta.file_type().is_symlink()
+                    || live_id.is_some()
+                        && crate::worker::file_id(std::fs::metadata(copy)) == live_id
+            }
+            // Only its sidecars are left.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e.into()),
+        })
     };
     let mut copies = Vec::new();
     for entry in std::fs::read_dir(home)? {
-        let copy = entry?.path();
-        let Some(name) = copy.file_name().and_then(|n| n.to_str()) else {
+        let file = entry?.path();
+        let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
+        // A sidecar names its copy, which goes even when only its sidecars are left: a quarantine
+        // moves `-wal` before the database, and a restore's cleanup removes the database before
+        // its journal; either may stop between them (Codex on #458).
+        let name = SIDECARS
+            .iter()
+            .find_map(|s| name.strip_suffix(s))
+            .unwrap_or(name);
+        let copy = home.join(name);
         // Only the names a quarantine gives (`backup::fresh_name`'s stamp): a file of another
         // name is not oboete's to rewrite or remove (Codex on #453, for the segments).
         let stamped = |prefix: &str| {
@@ -3710,12 +3726,17 @@ pub(crate) fn copies_set_aside(home: &Path) -> Result<Vec<std::path::PathBuf>> {
         let set_aside = stamped("raw.db.quarantined-")
             || stamped("raw.db.restored.quarantined-")
             || name == "raw.db.restored";
-        if set_aside && copy != live && !alias(&copy)? {
+        if set_aside && copy != live && !copies.contains(&copy) && !alias(&copy)? {
             copies.push(copy);
         }
     }
     let partial = home.join("raw.db.restoring");
-    if partial.exists() && !alias(&partial)? {
+    let left = std::iter::once("").chain(SIDECARS).any(|suffix| {
+        let mut name = partial.as_os_str().to_owned();
+        name.push(suffix);
+        std::path::Path::new(&name).exists()
+    });
+    if left && !alias(&partial)? {
         copies.push(partial);
     }
     Ok(copies)
@@ -3735,6 +3756,15 @@ fn rewrite_copy(copy: &Path, jobs: &std::collections::HashMap<String, String>) -
     conn.busy_timeout(Duration::ZERO)?;
     conn.execute_batch("PRAGMA secure_delete = ON")?;
     let tx = conn.transaction()?;
+    // A copy from before the op log holds no uid's op: it stays (CodeRabbit on #458).
+    let has_ops: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ops')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_ops {
+        return Ok(0);
+    }
     let mut keys = Vec::new();
     {
         let mut st = tx.prepare("SELECT device, op_seq, type, body FROM ops")?;

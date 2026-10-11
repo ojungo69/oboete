@@ -1329,8 +1329,8 @@ pub fn run(
         }
         match &u.segments {
             Some(s) if s.live + s.aside + s.removed > 0 => println!(
-                "Backup segments rewritten without it: {} live, {} set aside; damaged ones that \
-                 cannot be read, removed: {}",
+                "Backup segments rewritten without it: {} live, {} set aside; unsealed ones that \
+                 cannot be read whole or hold a line that cannot be judged, removed: {}",
                 s.live, s.aside, s.removed
             ),
             Some(_) => {}
@@ -3297,6 +3297,39 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(copy_ops(&theirs), ops);
+    }
+
+    /// D5 (2c, Codex and CodeRabbit on #458): sidecars left without their copy (a quarantine moves
+    /// `-wal` before the database; a restore's cleanup removes the database before its journal)
+    /// may hold the text: they go. A copy from before the op log holds no uid's op: it stays.
+    #[test]
+    fn sidecars_left_without_their_copy_go_and_a_copy_without_ops_stays() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = canary_claim(&mut s);
+        s.run();
+        let home = s.home.path().to_owned();
+        let named = |prefix: &str| home.join(crate::backup::fresh_name(&home, prefix).unwrap());
+        let orphan = PathBuf::from(format!("{}-wal", named("raw.db.quarantined-").display()));
+        std::fs::write(&orphan, CANARY).unwrap();
+        let journal = home.join("raw.db.restoring-journal");
+        std::fs::write(&journal, CANARY).unwrap();
+        let old = named("raw.db.restored.quarantined-");
+        rusqlite::Connection::open(&old)
+            .unwrap()
+            .execute_batch("CREATE TABLE records(body TEXT); INSERT INTO records VALUES('kept')")
+            .unwrap();
+        forget(&home, &uid);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.copies, purged.copies_removed), (0, 2));
+        assert!(!orphan.exists());
+        assert!(!journal.exists());
+        let body: String = rusqlite::Connection::open(&old)
+            .unwrap()
+            .query_row("SELECT body FROM records", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(body, "kept");
     }
 
     /// D5 (2c, decision 5): a copy of raw.db another connection reads cannot have its WAL truncated
