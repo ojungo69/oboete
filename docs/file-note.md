@@ -51,10 +51,16 @@ Read in the installed plugin, 13.29.0 (`hooks/hooks.json`, and the bundled handl
 
 F1. **Where.** Claude Code: `PreToolUse` with the matcher `Read`, which `oboete setup` adds beside
 the user's own hooks. It is a read hook: it records nothing (the read's `PostToolUse` does).
-Grok: its `PreToolUse`, already wired for context, when the tool is its file read. Codex: its
-`PreToolUse`, for the shell commands and MCP tools claude-mem's adapter takes, once a probe in the
-`oboete-dogfood` user shows that the installed Codex shows a `PreToolUse` hook's context to the
-model; until then Codex has no note and the doctor says so (Claude; overrulable).
+Grok: its `PreToolUse`, already wired for context, when the tool is its file read, `read_file`,
+whose path is `target_file` (the probe in the `oboete-dogfood` user, Grok 1.0.40, 2026-10-11: the
+hook's `additionalContext` reached the model with the tool's result). The note comes after what
+else that call shows (the session's first packet, the prompt's picks), whole, while the answer
+stays within the 9,500 UTF-16 units Claude Code's does: Grok clips a context at 10,000 characters.
+Codex: its `PreToolUse`, with claude-mem's matcher for its shell and MCP read tools
+(`^Bash$|^mcp__.+__(read|view|cat)(_file|_files)?$`), for the shell commands and MCP tools
+claude-mem's adapter takes (the probe, Codex 0.160.0, same day: the context reached the model as a
+developer message). Like Claude Code's, it records nothing. Codex runs a hook only once its hash
+is trusted in `config.toml`; `oboete setup` writes that row for this group as for its others.
 
 F2. **Which files.** As claude-mem: the tool's paths, at most 10, each a regular file of at least
 1,500 bytes, resolved against the payload's `cwd`.
@@ -112,7 +118,8 @@ later run.
 1. **The index and the lookup**: `card_files` in the cards consumer (with its backfill, as
    `cards_fts` has), and `cards::by_file`, which gives the rows and the text (F3, F4, F6, F7).
 2. **Claude Code**: the hook (F1, F2, F5, F8), `oboete setup`'s matcher, and the measurement (F9).
-3. **Grok, then Codex**, each after its probe in the dogfood user.
+3. **Grok, then Codex**, each after its probe in the dogfood user (G25; both probes passed on
+   2026-10-11).
 
 ## Tests
 
@@ -133,3 +140,12 @@ later run.
 10. The answer has no `permissionDecision`, and the hook writes no raw record.
 11. `oboete setup` adds the `PreToolUse` `Read` matcher for Claude Code and keeps the user's own
     `PreToolUse` hooks.
+12. Grok's `read_file` gets the note after the session's first packet, once a session; a note with
+    no room left waits, unclaimed, for a later read; another tool gets none.
+13. Codex's shell reads get the note (`cat`, `head -n 5` with two files, a reader after a pipe and
+    `--`, a quoted path, a reader by its full path, a command given as words), and so do an MCP
+    read tool's `path` and `paths`; `ls`, an option's value, a redirection's target, a command
+    with an open quote, an MCP write tool and another tool get none. The hook takes for an MCP
+    read what Codex's matcher sends it.
+14. `oboete setup` adds Codex's `PreToolUse` group with that matcher after the user's own, and the
+    row that trusts it.
