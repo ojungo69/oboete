@@ -728,7 +728,9 @@ Slice 3 は 6 つの PR に分け、この順に作る（3b は 2026-10-12 に 3
   transaction で全部を登録する（全部か無し）。token は全体で 1 つ。status は同じ target と started の job を
   1 行にまとめてページ数を示す（要求に欄は足さない）。総数の上限は置かない: 評価用 home の写しで登録の
   所要時間を測る（受入テスト 5）。
-- **要求の版 4**（target `Session`）。古い binary は未知の版として飛ばす（rule 9）。
+- **要求の版 4**（target `Session`）。古い binary は未知の版として飛ばす（rule 9）。この PR からの binary は
+  raw.db の `forget_jobs` の読めない要求（後の oboete の target や版）も飛ばし、reconcile が問題として言う
+  （status・purge・worker は止まらない。Greptile on #465）。それより前の binary は公開していない。
 - **session tombstone（D3）。** 登録の後に届く、自身の ts が登録時刻以前のその session の record は
   書かない。hook の記録は SQLite の書込 lock だけを取り、時刻を取ってから登録の transaction を待ちうるので、
   確かめは raw の append の transaction の中で行う（`unwritten/` の書き戻しも同じ）。transcript と v1 の

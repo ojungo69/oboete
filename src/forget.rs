@@ -1278,8 +1278,13 @@ pub(crate) fn reconcile_report(
             (p, read)
         })
         .collect();
-    let held: std::collections::HashSet<String> =
-        raw.forget_requests()?.into_iter().map(|r| r.job).collect();
+    let (requests, unreadable) = raw.forget_requests_read()?;
+    for job in unreadable {
+        report.problems.push(format!(
+            "forget job {job} holds a request this oboete cannot read (a later oboete's), passed over"
+        ));
+    }
+    let held: std::collections::HashSet<String> = requests.into_iter().map(|r| r.job).collect();
     let mut missing: Vec<Request> = Vec::new();
     for r in copies.iter().filter_map(|(_, c)| c.as_ref()).flatten() {
         if !held.contains(&r.job) && !missing.iter().any(|m| m.job == r.job) {
@@ -4550,6 +4555,123 @@ mod tests {
         raw.forget_apply(&requests).unwrap();
         late.ts = started - 2;
         assert_eq!(raw.append_with_ledger(&late, &[], "").unwrap(), None);
+    }
+
+    /// Slice 3b (Greptile on #465): a batch that holds a forgotten session's repeated transcript
+    /// record from before the forget, whose ambiguous group names a forgotten occurrence, and a
+    /// later turn of the session: the old record is passed over and the turn recorded.
+    #[test]
+    fn a_forgotten_sessions_repeated_record_does_not_refuse_its_later_turn() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut raw = raw::open(h).unwrap();
+        let zero = imported(
+            &mut raw,
+            "transcript",
+            "t",
+            "x:0",
+            false,
+            r#"{"prompt":"x"}"#,
+        );
+        imported(&mut raw, "transcript", "t", "x", true, r#"{"prompt":"x"}"#);
+        let device = raw.device().to_owned();
+        let target = session_target(h, &format!("{device}:{zero}")).unwrap();
+        start(h, &preview(h, target).unwrap()).unwrap();
+        let started = raw.forget_requests().unwrap()[0].started;
+        let event = |ts: i64, body: &str| {
+            let mut e = raw::test_event(body);
+            e.source = "transcript".into();
+            e.session = "t".into();
+            e.ts = ts;
+            crate::capture::Captured {
+                event: e,
+                ledger: Vec::new(),
+            }
+        };
+        let identity = |id: &str, ambiguous: Option<&str>| raw::ImportIdentity {
+            origin: origin("synthetic", id),
+            session: super::session("claude", "t"),
+            ambiguous: ambiguous.map(|g| origin("synthetic", g)),
+            unverified: false,
+        };
+        let seqs = raw
+            .append_imported_origins(
+                &[
+                    event(started - 1, r#"{"prompt":"x"}"#),
+                    event(started + 1, r#"{"prompt":"new"}"#),
+                ],
+                &[identity("x", Some("x:0")), identity("new", None)],
+                "",
+                None,
+            )
+            .unwrap();
+        assert_eq!(seqs.len(), 1);
+    }
+
+    /// Slice 3b (Codex on #465): an import with no identity its importer kept names no session (one
+    /// from before import identities), and a live record whose label the ledger masks is never the
+    /// session's, though its label reads as the session's id.
+    #[test]
+    fn only_a_kept_identity_or_an_unmasked_label_names_a_session() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut raw = raw::open(h).unwrap();
+        let mut legacy = raw::test_event(r#"{"prompt":"old"}"#);
+        legacy.source = "transcript".into();
+        legacy.session = "s".into();
+        let old = raw.append(&legacy).unwrap();
+        let device = raw.device().to_owned();
+        let e = session_target(h, &format!("{device}:{old}")).unwrap_err();
+        assert!(e.to_string().contains("names no session"), "{e:#}");
+        let named = imported(
+            &mut raw,
+            "transcript",
+            "s",
+            "s1",
+            false,
+            r#"{"prompt":"a"}"#,
+        );
+        let masked = live(&mut raw, "s", 2_000, r#"{"prompt":"masked"}"#);
+        mask_session(h, &raw, masked);
+        let p = preview(h, session_target(h, &format!("{device}:{named}")).unwrap()).unwrap();
+        assert_eq!(seqs(&p.records), [named]);
+    }
+
+    /// Slice 3b (Greptile on #465): a job a later oboete wrote, of a target or a version this one
+    /// does not know, is passed over by status, the purge and the reconcile, which says so.
+    #[test]
+    fn a_job_a_later_oboete_wrote_is_passed_over_and_said() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut raw = raw::open(h).unwrap();
+        let seq = native(&mut raw, "n", r#"{"prompt":"n"}"#);
+        start(h, &preview(h, record(&raw, seq)).unwrap()).unwrap();
+        let request = serde_json::to_value(&raw.forget_requests().unwrap()[0]).unwrap();
+        let mut future = request.clone();
+        future["target"]["kind"] = serde_json::json!("future");
+        let mut later = request;
+        later["v"] = serde_json::json!(99);
+        let conn = rusqlite::Connection::open(h.join("raw.db")).unwrap();
+        for (id, r) in [("future", future), ("later", later)] {
+            conn.execute(
+                "INSERT INTO forget_jobs(id, request, started, step) VALUES(?1, ?2, 0, 1)",
+                rusqlite::params![id, r.to_string()],
+            )
+            .unwrap();
+        }
+        assert_eq!(raw.forget_jobs().unwrap().len(), 1);
+        assert_eq!(status(h).unwrap().len(), 1);
+        let report = reconcile(h, &mut raw).unwrap();
+        for id in ["future", "later"] {
+            assert!(
+                report
+                    .problems
+                    .iter()
+                    .any(|p| p.contains(&format!("forget job {id} "))),
+                "{:?}",
+                report.problems
+            );
+        }
     }
 
     /// Slice 3b: a registration's pages are one status line while they are in one state, and apart

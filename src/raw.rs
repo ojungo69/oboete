@@ -1517,9 +1517,13 @@ impl Raw {
             ))?
             .query_map([agent], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
+        // A label the ledger masks is not the agent's id, whatever it reads as (`verified_session`;
+        // Codex on #465).
         let mut st = self.conn.prepare(&format!(
             "SELECT device, seq, ts, source, kind FROM records WHERE type = 'event' AND agent = ?1
-               AND session = ?2 AND source IN ({live})"
+               AND session = ?2 AND source IN ({live})
+               AND NOT EXISTS (SELECT 1 FROM ledger l WHERE l.device = records.device
+                 AND l.seq = records.seq AND l.field = 'session')"
         ))?;
         for label in labels.iter().filter(|l| {
             *l != "unknown"
@@ -1629,12 +1633,17 @@ impl Raw {
         let Some((Some(agent), label, source)) = row else {
             anyhow::bail!("no record {device}:{seq} of an agent to name a session by");
         };
-        let session = match self.origin_of(device, seq)? {
-            Some((_, session, _)) if !is_live(&source) => session,
-            _ => match label {
+        // An import names its session only by the identity its importer kept: the session's other
+        // imports are found by it, and one from before import identities would be left out of its
+        // own session's forget (Codex on #465).
+        let session = if is_live(&source) {
+            match label {
                 Some(label) => self.verified_session(device, seq, &agent, &label)?,
                 None => None,
-            },
+            }
+        } else {
+            self.origin_of(device, seq)?
+                .and_then(|(_, session, _)| session)
         };
         let session = session.with_context(|| {
             format!("record {device}:{seq} names no session its agent sent: nothing was registered")
@@ -2043,15 +2052,28 @@ impl Raw {
 
     /// Every request raw holds, oldest first (rule 4).
     pub(crate) fn forget_requests(&self) -> Result<Vec<crate::forget::Request>> {
+        Ok(self.forget_requests_read()?.0)
+    }
+
+    /// The registered requests this oboete reads, and the jobs whose request it cannot: one a
+    /// later oboete wrote (a target or a version this one does not know) is passed over, as its
+    /// log line is, and the reconcile says so (D1 rule 9; Greptile on #465).
+    pub(crate) fn forget_requests_read(
+        &self,
+    ) -> Result<(Vec<crate::forget::Request>, Vec<String>)> {
         let mut st = self
             .conn
-            .prepare("SELECT request FROM forget_jobs ORDER BY started, id")?;
-        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
-        let mut out = Vec::new();
+            .prepare("SELECT id, request FROM forget_jobs ORDER BY started, id")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let (mut out, mut unreadable) = (Vec::new(), Vec::new());
         for row in rows {
-            out.push(serde_json::from_str(&row?)?);
+            let (id, request) = row?;
+            match readable_request(&request) {
+                Some(r) => out.push(r),
+                None => unreadable.push(id),
+            }
         }
-        Ok(out)
+        Ok((out, unreadable))
     }
 
     /// How many records forget denies: the derived writers' fence (rule 12).
@@ -2196,7 +2218,9 @@ impl Raw {
         let mut out = Vec::new();
         for row in rows {
             let (request, step) = row?;
-            out.push((serde_json::from_str(&request)?, step));
+            if let Some(r) = readable_request(&request) {
+                out.push((r, step));
+            }
         }
         Ok(out)
     }
@@ -2370,6 +2394,16 @@ impl Raw {
         for (index, c) in batch.iter().enumerate() {
             let identity = origins.get(index);
             let origin = identity.map(|i| i.origin.as_str());
+            let session = identity.map_or_else(
+                || crate::forget::session(&c.event.agent, &c.event.session),
+                |i| i.session.clone(),
+            );
+            // Slice 3b (D3): a forgotten session's record from before its forget is not imported,
+            // before an ambiguous group or a denial can refuse the batch for it: a later turn of the
+            // session in the same batch is still recorded (Greptile on #465).
+            if session_tombstoned(&tx, &session, c.event.ts)? {
+                continue;
+            }
             if let Some(group) = identity.and_then(|i| i.ambiguous.as_ref()) {
                 anyhow::ensure!(
                     !denied(&tx, Some(group), "")?,
@@ -2385,14 +2419,6 @@ impl Raw {
             // A batch prepared before request replay must also prove its correspondence under
             // the write transaction. A timestamp cut cannot identify a native event's copy.
             if denied(&tx, origin, &c.event.body)? {
-                continue;
-            }
-            let session = identity.map_or_else(
-                || crate::forget::session(&c.event.agent, &c.event.session),
-                |i| i.session.clone(),
-            );
-            // Slice 3b (D3): a forgotten session's record from before its forget is not imported.
-            if session_tombstoned(&tx, &session, c.event.ts)? {
                 continue;
             }
             if c.event.kind != "touch" {
@@ -4288,6 +4314,13 @@ pub(crate) fn apply_request(
         "INSERT OR IGNORE INTO forget_jobs(id, request, started, step) VALUES(?1, ?2, ?3, 1)",
         params![r.job, serde_json::to_string(r)?, r.started],
     )? == 1)
+}
+
+/// A job's request as this oboete reads it, or None when it cannot (`forget_requests_read`).
+fn readable_request(request: &str) -> Option<crate::forget::Request> {
+    let r: crate::forget::Request = serde_json::from_str(request).ok()?;
+    r.check().ok()?;
+    Some(r)
 }
 
 /// Slice 3b (D3): whether a record of `session` (its agent's hash of the session's id) recorded at
