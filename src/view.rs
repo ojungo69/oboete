@@ -6006,14 +6006,13 @@ curate = false
         const BLOCKS: u32 = 750;
         static NEXT: AtomicU16 = AtomicU16::new(0);
         let start = std::process::id() % BLOCKS;
-        for _ in 0..BLOCKS {
-            let n = u32::from(NEXT.fetch_add(1, Ordering::Relaxed));
-            let port = u16::try_from(FIRST + (start + n) % BLOCKS * BLOCK).unwrap();
-            if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-                return port;
-            }
-        }
-        panic!("no free port from {FIRST} on");
+        (0..BLOCKS)
+            .map(|_| {
+                let n = u32::from(NEXT.fetch_add(1, Ordering::Relaxed));
+                u16::try_from(FIRST + (start + n) % BLOCKS * BLOCK).unwrap()
+            })
+            .find(|&port| TcpListener::bind(("127.0.0.1", port)).is_ok())
+            .expect("a free port from 20,000 on")
     }
 
     /// A resident viewer listening in a new home, on a port `free_port` gave: a test running

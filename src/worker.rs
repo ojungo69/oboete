@@ -5023,9 +5023,11 @@ mod tests {
         until("a round after the change", || {
             rounds.load(Ordering::SeqCst) > 1 || worker.is_finished()
         });
-        if worker.is_finished() && rounds.load(Ordering::SeqCst) < 2 {
-            panic!("the worker left before the change: {:?}", worker.join());
-        }
+        assert!(
+            !worker.is_finished() || rounds.load(Ordering::SeqCst) > 1,
+            "the worker left before the change: {:?}",
+            worker.join()
+        );
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(
             rounds.load(Ordering::SeqCst),
