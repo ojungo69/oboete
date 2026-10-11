@@ -233,7 +233,7 @@ uid（`<source>:<key>`）だけを受ける。raw の record は 1 件も消さ�
   `knowledge.db.rebuilding-*`、`*.quarantined-*` は rebuild の後に消す。
 - **backup（2c）。** 書き換えた op を含む ops segment を書き直す（新しい segment と seal を横に書いて
   から入れ替え、中断しても restore がその segment の他の op を失わない。既存の seal を上書きしない）。
-  record segment は触らない。
+  record segment は触らない。（下の「2c の決定」で改める）
 - **進み方と再開。** `forget_jobs.step` は 1 登録・2 op 本文・3 knowledge.db・4 backup・5 完了。
   各 step は冪等で、終わるごとに step を進める。worker の起動時と forget command が未完了の job を
   続ける。`local` は step 5 まで「hidden; physical purge pending」、5 で「done」。
@@ -442,6 +442,126 @@ packet）で、忘れた uid を返さないようにした。#439 は、別の 
    commit しない。file note も、`file-*` を書き終えるまで commit しない。柵が取れないとき（排他を
    持ったまま）、hook は記録して注入しない。一回限りの注入点なら次の呼出しが注入する。
 3. `oboete forget <uid> --yes` は preview の後に登録できる（自分の柵で止まらない）。
+
+#### 2c の決定（2026-10-11。D5 の backup と進み方を改める）
+
+上の D5 の「backup（2c）」と 2b の決定 7〜9 の step 4・5 を、次のとおり決める。2c は #444（2b-2）と
+#446（#439 の読取りの柵）の後に作る。
+
+1. **step 4 は purge の中で、worker の lock の下で走る。** step 3 の後、同じ `oboete forget` の process が
+   `worker::lock_asking` を取り直してから backup を書き直す。worker の export と restore（CLI の restore は
+   `worker::restore` が、worker の自動 restore は `backup::open_raw` を呼ぶ worker が lock を持つ）はこの
+   lock の下で走るので、書直しの途中の segment を読む者も、途中で新しい segment を書く者もいない（lock の
+   外で `open_raw` を呼ぶのは測定用の `replay` の `worker::backlog` だけ）。
+2. **書き直す行は op の中身で選ぶ。** op_seq では選ばない: raw の op_seq は、別の device の segment
+   （home を写した後の古い device id の segment）と、raw の終わりより先に退けられた segment
+   （MUST-M14）の op を指さない。backup の場所（`backup::dir`）の ops segment をすべて（device を問わず、
+   生きている名前のものも、`*.ops.zst.quarantined-*` に退けられたものも）展開し、各行（`{"device",
+   "op_seq","type","ts","body","batch"}`）の op がその uid のものなら（Claim は `claims::op_uid`、
+   Correction と Import は本文の `uid`。`uid_op_keys` と同じ判定で、`raw::op_uid` の一か所にまとめる）、
+   body を `{"forgotten":"<job>"}` にする。raw.db の purge が書くのと同じ byte なので、書き直した segment
+   から restore した raw.db の op は purge の後の raw.db と同じになる。ほかの行は 1 byte も変えない。
+   record segment は触らない（D5: uid の forget は record を消さない）。step 4 を待つ job が何件あっても、
+   走査は 1 回で全部の uid を見る。ops segment は小さい（評価用の home の写しで op 15,736 件、展開して
+   数 MB）。
+3. **生きている segment の入れ替え（古い hash を新しい中身が置かれる前に seal から外さない）。** checksum が
+   合う segment は次の順で入れ替える。各段の後で dir を sync する。
+   (a) 新しい中身を `.<name>.purge` に書いて sync する（`segment_name` の文法に合わないので誰も読まない）。
+   (b) seal を 2 行にする: 1 行目に今の hash、2 行目に新しい hash（一時名に書いて rename）。
+   (c) `.<name>.purge` を `<name>` に rename する。
+   (d) seal を新しい hash の 1 行にする。
+   `checksum_matches`（`damage` と doctor の backup の確認が使う）は seal のどの行の hash にも合えば合格と
+   する。どの段で止まっても、そこにある segment は seal のどれかの行に合う。合わなくなると `select` は
+   その segment から後の ops segment を全部捨てる（`bad_ops` が空でなくなると後のものも入らない）ので、
+   ここで一つでも合わない瞬間を作ると restore は op log の残りを失う。古い binary は 1 行目しか読まない
+   ので、(c) と (d) の間で止まったときだけその segment を壊れたと見る。止まった後の継続は、そこにある
+   segment の hash が seal のどの行に合うかで決める: 2 行の seal はまず今の中身の hash の 1 行にし、
+   中身に対象の行が残っていれば (a) からやり直す。残った `.<name>.purge` は step 4 の始めに消す。
+   中断した export が rename の前に残した `.<name>.tmp`（本文を持ちうる）も同じく消す: worker の lock の
+   下では書きかけの export はない。
+4. **信頼されない segment。** checksum が合わない segment、seal のない segment と退けられた segment は
+   restore が読まない。そこに seal は作らない: 全体を展開できれば対象の行を書き換え（一時名に書いて
+   rename。seal はそのままなので合わないまま）、展開できなければ消す（その uid の本文を持つかもしれず、
+   oboete のどの読み手も使わない）。生きている名前のものは seal も一緒に消す。消した数は報告する。
+5. **raw.db の写し（2c-2）。** `raw.db.quarantined-*`、`raw.db.restored.quarantined-*`、`raw.db.restored`
+   （止まった restore が残した build。次の restore が退けるか、raw.db がなければ raw.db にする）を、purge が
+   開いた raw.db とは別のファイルであるときだけ（`raw::path` は raw.db がないと `raw.db.restored` を指し、
+   そのときそれが生きている store。step 4 は `raw::open` が通った後にだけ走る）、それぞれ `secure_delete`
+   を有効にした SQLite の接続で開き、step 2 と同じ判定（`uid_op_keys`）と書換えをして、WAL を truncate
+   する。開けない、書き換えられない、truncate できない写しは、-wal と -shm と一緒に消す。
+   `raw.db.restoring`（途中の build。restore は毎回作り直す）は消す。knowledge.db の写しは 2b の決定 5 の
+   とおり step 3 で消えている。
+6. **完了は状態で判定する（2c-2）。** backup の場所のどの ops segment にも対象の行がなく、2 行の seal が
+   なく、raw.db の写しのどれにも本文のある対象の op がないこと。継続のたびに確かめ直す。
+7. **step 5（2c-2）。** 各 session の `shown` からその uid をもう一度消し（2b の決定 6 と同じ掃除。#439 の
+   柵で登録の前に読んだ hook は登録の前に `shown` を書き終えているので、ふつうは何も見つからない）、
+   step 5 を記録する。`local` は「done」。
+8. **どの job を進めるか。** `due` は step 5 の前か（2c-1 では step 4 の前）、op が本文をまた持つ job。
+   rebuild（step 3）に進むのは、今回 step 2 をやった job と step 2 で止まっている job だけ: step 3 を記録
+   した job は rebuild に戻らない（knowledge.db がまだ uid を持つ止まった job で、10 分ごとに rebuild
+   しないため）。止まった job も backup は書き直す（本文は消えるべき）が、`status` と doctor は止まった
+   と言い続ける。
+9. **preview と limits。** preview は書き直す ops segment の数（生きているものと退けられたもの）、消す
+   segment の数、書き直す raw.db の写しの数を言う（2c-2。写しの数と一緒に足す）。`uid_limits` の
+   「backup segments keep it until their purge is built」を、step 4 の説明と、backup の場所を雲のフォルダに
+   置いたときの版の履歴（spec 6.3）に替える（2c-1）。
+
+2c は PR を 2 つに分ける。2c-1: 1〜4 と 8（segment の書直しと進め方）、9 の limits。2c-2: 5〜7 と 9 の
+preview。下の試験は 1（segment の分）・2・3・5・6 が 2c-1、1（raw.db の写しの分）・4・7 が 2c-2。
+
+2c-1 の実装で決めたこと（2026-10-11）:
+
+- step 4 は segment の書直しだけで記録する。2c-2 は `due` を step 5 の前に広げ、step 4 の job にも raw.db の
+  写しの書換えと step 5 を通す。`local` は step 4 の後「purged here and in the backup segments; raw.db
+  copies pending」。
+- backup の場所が読めない（`[backup] dir` の設定の誤りなど）、segment が読めないときは step 4 を記録
+  しない: job は step 3 のまま、`oboete forget` はその誤りで失敗し、worker は 10 分に 1 回 `--continue`
+  を起動してやり直す（決定 8 の rebuild はしない）。backup に本文が残るのに step 4 と記録するより、
+  やり直し続けるほうを取る。doctor の backup の行がすでにその設定の誤りを言う。
+- restore した raw.db の job は step 1 から始まる（2b からの動き。`Rebuild::finish` が要求を step 1 で
+  書く）。その後の purge は op に本文がなくても rebuild を 1 回する。restore の後の rebuild と重なる費用で、
+  2c では変えない。
+- seal が保証しない segment（決定 4）は、判定できない行を 1 行でも持てば消す: op の行でない、または
+  uid の本文を持つ種類（claim・correction・import）の op で本文から uid が出ない行。その行が本文を持つか
+  分からず、読む者もいない（Codex on #453）。seal が保証する segment のその行はそのまま残す: export が
+  書いた行で（新しい版の種類など）、raw.db の purge も同じ判定でその op を残す。purge が書いた本文
+  `{"forgotten":…}`、uid の本文を持たない種類の op、空の行は判定できる行に数える。
+- 書く途中で止まった名前として消すのは、export と書直しの `.<segment>.tmp`（退けた segment の
+  `.<segment>.quarantined-<ms>.tmp` も）、入れ替えの `.<segment>.purge` と、それを書く `write_synced` の
+  `..<segment>.purge.tmp`（Greptile on #453）。seal の `.<segment>.sha256.tmp` は hash だけなので残す。
+- 退けた segment として取るのは、export がつける名前（`<segment>.quarantined-<ms>`、`<segment>` は ops の
+  segment の名前）だけ。ほかの名前のファイルは書き換えも削除もしない（Codex on #453）。
+- 消したファイルが電源断で戻らないよう、歩き終えたら step 4 を記録する前に backup の場所の directory を
+  sync する（unix。Greptile on #453）。
+- backup の場所を 2 つのホームが共有するとき（設定で同じ場所を指したときだけ）、purge は他方のホームの
+  segment も書き換え、書く途中の他方のファイルを消しうる。範囲を系統の device に絞る件は #455。
+- 生きている segment も、export がつける名前（device は英数字だけ、op の範囲は 0 で埋めた 12 桁以上。
+  `name` で作り直して同じになるもの。範囲は 1 から始まり、逆に進まない）だけを取る（Codex on #453）。
+- 本文が戻った job（step 3 以上で op が本文を持つ。restore が戻しうる）は step 2 からやり直し、step を
+  正確に 2 に戻す。rebuild が途中で止まっても、次の継続がその job を拾う（Codex on #453）。
+- purge が書いた本文と数えるのは `{"forgotten":"<job>"}` だけの本文（`raw::forgotten_body`、
+  `raw::Op::forgotten` と同じ判定）。`forgotten` の欄があるだけの本文は判定できない行（Codex on #453）。
+- 同じ uid の job が 2 件あるとき（ログが別の job id の要求を戻したとき）、本文に書く job id は 1 件
+  （先のもの）、step 4 はすべての job に記録する（CodeRabbit on #453）。
+- 設定した backup の場所が無いとき（外付けの drive やクラウドのフォルダが mount されていない）、purge は
+  空とみなして step 4 を記録し、export はその場所を作り直す。両方を 1 つの設計で直す件は #457。
+
+試験（2c の分）:
+
+1. purge の後、raw.db・raw.db-wal・knowledge.db とその WAL・`state/`・backup の場所のどのファイルにも、
+   展開した segment にも、raw.db の写しにも canary がない（2b の決定 10 の canary）。他の op の行は 1 byte も
+   変わらない。
+2. (a)〜(d) の各段の後で止めた purge（`backup::fail_after` の段の名前を足す）について、その時点の segment
+   から restore すると op の総数が止める前と同じで（その segment より後の segment の op も戻る）、継続すると
+   入れ替えが終わる（seal は 1 行、本文なし）。
+3. 古い device id の segment と、raw の終わりより先に退けられた segment の対象の行も書き換わる。展開でき
+   ない退けられた segment は消える。
+4. raw.db の写しは書き換わり、壊れた写しは消える。`raw.db.restoring` は消える。
+5. 書き直した後の segment からの restore は、uid を忘れたまま、ほかの op をすべて戻す。その後の export は
+   新しい op だけを書く。
+6. step 3 を記録した止まった job は rebuild に戻らず（別の forget の rebuild と同じ purge でも）、backup は
+   書き直され、status は止まったと言う。
+7. status は step 4 の前は「purged here; backups pending」、step 5 の後は「done」。
 
 ## 実装順序と完了条件
 

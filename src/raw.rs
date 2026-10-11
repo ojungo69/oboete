@@ -266,7 +266,7 @@ impl OpKind {
             OpKind::Forget => "forget",
         }
     }
-    fn from_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
         [
             Self::Window,
             Self::Claim,
@@ -300,10 +300,15 @@ impl Op {
     /// Milestone 5 D5 (2b): an op a forget rewrote to `{"forgotten": "<job>"}`, which derives
     /// nothing.
     pub fn forgotten(&self) -> bool {
-        self.body.as_object().is_some_and(|o| {
-            o.len() == 1 && o.get("forgotten").is_some_and(serde_json::Value::is_string)
-        })
+        forgotten_body(&self.body)
     }
+}
+
+/// Whether `body` is the one a forget writes, `{"forgotten": "<job>"}` and nothing else (D5).
+pub(crate) fn forgotten_body(body: &serde_json::Value) -> bool {
+    body.as_object().is_some_and(|o| {
+        o.len() == 1 && o.get("forgotten").is_some_and(serde_json::Value::is_string)
+    })
 }
 
 /// A record hooks wrote, or `replay` wrote in their stead (dev and evaluation homes): what curation
@@ -1615,6 +1620,16 @@ impl Raw {
     }
 
     /// Records that `job` has finished `step`; a step it passed already stays.
+    /// A job's step set to `step` exactly, down too: a purge that does step 2 again for a job
+    /// whose ops hold its text again owes the steps after it again (Codex on #453).
+    pub(crate) fn restart_forget_step(&self, job: &str, step: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE forget_jobs SET step = ?2 WHERE id = ?1",
+            params![job, step],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn finish_forget_step(&self, job: &str, step: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE forget_jobs SET step = MAX(step, ?2) WHERE id = ?1",
@@ -3658,16 +3673,21 @@ fn uid_op_keys(conn: &Connection, uid: &str) -> Result<Vec<(String, i64)>> {
     Ok(keys)
 }
 
+/// The uid whose text an op of `kind` holds (D5): a Claim's as the consumer derives it, a
+/// Correction's or an Import's from its body; none for the other kinds.
+pub(crate) fn op_uid(kind: OpKind, body: &serde_json::Value) -> Option<String> {
+    match kind {
+        OpKind::Claim => crate::claims::op_uid(body),
+        OpKind::Correction | OpKind::Import => body["uid"].as_str().map(str::to_owned),
+        _ => None,
+    }
+}
+
 /// A Claim or Correction op anchored on a record forget denies, by the record's origin (D1 rule
 /// 5), or a Claim, Correction or Import op of a forgotten uid (D5): never recorded. Window and
 /// turn ops are fenced by `Reading` (rule 12).
 fn forgotten_op(conn: &Connection, kind: OpKind, body: &serde_json::Value) -> Result<bool> {
-    let uid = match kind {
-        OpKind::Claim => crate::claims::op_uid(body),
-        OpKind::Correction | OpKind::Import => body["uid"].as_str().map(str::to_owned),
-        _ => None,
-    };
-    if let Some(uid) = uid
+    if let Some(uid) = op_uid(kind, body)
         && forgotten_uid(conn, &uid)?
     {
         return Ok(true);
