@@ -996,7 +996,7 @@ pub(crate) fn purge_ops(
             .is_some_and(|(ops, ..)| ops)
         {
             live.push(path);
-        } else if name.contains(".ops.zst.quarantined-") && !name.contains(".sha256") {
+        } else if set_aside(name) {
             aside.push(path);
         }
     }
@@ -1020,7 +1020,7 @@ pub(crate) fn purge_ops(
                         seal_line(&sha, name).as_bytes(),
                     )?;
                 }
-                if let Some(text) = purge_lines(&read_whole(&data)?, jobs) {
+                if let (Some(text), _) = purge_lines(&read_whole(&data)?, jobs) {
                     replace(&dir, name, &sha, text.as_bytes())?;
                     done.rewritten += 1;
                 }
@@ -1045,6 +1045,10 @@ pub(crate) fn purge_ops(
             Untrusted::Kept => {}
         }
     }
+    // What was removed stays removed past a power loss before step 4 is recorded, though no
+    // rename after it synced the directory (Greptile on #453).
+    #[cfg(unix)]
+    std::fs::File::open(&dir)?.sync_all()?;
     Ok(done)
 }
 
@@ -1052,18 +1056,37 @@ pub(crate) fn purge_ops(
 /// grammar never matches it.
 const PURGE_PART: &str = ".purge";
 
-/// A name an ops segment's write left when it stopped before its rename: a purge's replacement
-/// (`.<segment>.purge`, written again from what the segment holds now) or an export's segment
-/// (`write_synced`'s `.<segment>.tmp`, which may hold the text). No reader takes either, and under
-/// the worker lock no write is under way.
+/// A name an ops segment's write left when it stopped before its rename, which may hold the text:
+/// an export's segment or a purge's rewrite in place (`write_synced`'s `.<segment>.tmp`, of a live
+/// segment or a set-aside one), a purge's replacement (`.<segment>.purge`, written again from what
+/// the segment holds now) or `write_synced`'s file for it (`..<segment>.purge.tmp`, Greptile on
+/// #453). No reader takes any, and under the worker lock no write is under way.
 fn leftover(name: &str) -> bool {
-    name.strip_prefix('.')
-        .and_then(|n| {
-            n.strip_suffix(".tmp")
-                .or_else(|| n.strip_suffix(PURGE_PART))
-        })
-        .and_then(|n| segment_name(std::ffi::OsStr::new(n)))
+    let Some(n) = name.strip_prefix('.') else {
+        return false;
+    };
+    n.strip_prefix('.')
+        .and_then(|n| n.strip_suffix(".tmp")?.strip_suffix(PURGE_PART))
+        .or_else(|| n.strip_suffix(".tmp"))
+        .or_else(|| n.strip_suffix(PURGE_PART))
+        .is_some_and(|n| ops_segment(n) || set_aside(n))
+}
+
+/// Whether `name` is an ops segment's under a device id of letters and digits, as oboete names
+/// them: `segment_name` takes any device, a hidden name's too.
+fn ops_segment(name: &str) -> bool {
+    segment_name(std::ffi::OsStr::new(name))
         .is_some_and(|(ops, device, ..)| ops && device.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+/// Whether `name` is an ops segment's set aside as an export names it (`<segment>.quarantined-
+/// <ms>`, `fresh_name`): a file of another name is not oboete's to rewrite or remove (Codex on
+/// #453).
+fn set_aside(name: &str) -> bool {
+    name.rsplit_once(".quarantined-")
+        .is_some_and(|(segment, stamp)| {
+            !stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit()) && ops_segment(segment)
+        })
 }
 
 fn seal_line(sha: &str, name: &str) -> String {
@@ -1103,19 +1126,21 @@ enum Untrusted {
 }
 
 /// 2c, decision 4: a segment no seal vouches for, rewritten in place when it is read whole and
-/// holds an op of a uid in `jobs`, else removed: it may hold that text, and no reader of oboete
+/// holds an op of a uid in `jobs`; removed when it is not read whole, or holds a line of which it
+/// cannot be told (`Line::Unknown`, Codex on #453): it may hold that text, and no reader of oboete
 /// uses it.
 fn untrusted(
     path: &Path,
     data: &[u8],
     jobs: &std::collections::HashMap<String, String>,
 ) -> Result<Untrusted> {
-    let Ok(text) = read_whole(data) else {
-        std::fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
-        return Ok(Untrusted::Removed);
-    };
-    let Some(text) = purge_lines(&text, jobs) else {
-        return Ok(Untrusted::Kept);
+    let text = match read_whole(data).map(|text| purge_lines(&text, jobs)) {
+        Ok((None, false)) => return Ok(Untrusted::Kept),
+        Ok((Some(text), false)) => text,
+        Err(_) | Ok((_, true)) => {
+            std::fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
+            return Ok(Untrusted::Removed);
+        }
     };
     let dir = path.parent().context("segment directory")?;
     let name = path.file_name().and_then(|n| n.to_str()).context("name")?;
@@ -1138,37 +1163,76 @@ fn read_whole(data: &[u8]) -> Result<String> {
 }
 
 /// `text`'s lines with each op of a uid in `jobs` given the body `{"forgotten":"<job>"}` that
-/// raw.db's purge gives it (2c, decision 2), every other line byte for byte; None when no line
-/// changes.
-fn purge_lines(text: &str, jobs: &std::collections::HashMap<String, String>) -> Option<String> {
+/// raw.db's purge gives it (2c, decision 2), every other line byte for byte (None when no line
+/// changes), and whether a line was kept of which it cannot be told (`Line::Unknown`).
+fn purge_lines(
+    text: &str,
+    jobs: &std::collections::HashMap<String, String>,
+) -> (Option<String>, bool) {
     let mut out = String::with_capacity(text.len());
-    let mut changed = false;
+    let (mut changed, mut unknown) = (false, false);
     for piece in text.split_inclusive('\n') {
         let (line, end) = piece
             .strip_suffix('\n')
             .map_or((piece, ""), |line| (line, "\n"));
         match purged_line(line, jobs) {
-            Some(new) => {
+            Line::Purged(new) => {
                 out.push_str(&new);
                 changed = true;
             }
-            None => out.push_str(line),
+            Line::Kept => out.push_str(line),
+            Line::Unknown => {
+                out.push_str(line);
+                unknown = true;
+            }
         }
         out.push_str(end);
     }
-    changed.then_some(out)
+    (changed.then_some(out), unknown)
 }
 
-/// One backup line (`Raw::export_op_lines`) with its body rewritten, when its op holds the text of
-/// a uid in `jobs` (`raw::op_uid`, the judgment raw.db's purge makes). The line's other fields keep
-/// their values, in serde_json's key order: every reader parses the line.
-fn purged_line(line: &str, jobs: &std::collections::HashMap<String, String>) -> Option<String> {
-    let mut v: serde_json::Value = serde_json::from_str(line).ok()?;
-    let kind = raw::OpKind::from_name(v["type"].as_str()?)?;
-    let body: serde_json::Value = serde_json::from_str(v["body"].as_str()?).ok()?;
-    let job = jobs.get(&raw::op_uid(kind, &body)?)?;
-    v["body"] = serde_json::json!({ "forgotten": job }).to_string().into();
-    Some(v.to_string())
+/// What a purge makes of one backup line (`Raw::export_op_lines`).
+enum Line {
+    /// Its op holds the text of a uid in the jobs: the line with its body rewritten.
+    Purged(String),
+    /// Its op holds no such text.
+    Kept,
+    /// Whether it holds such text cannot be told: not an op line, or an op of a kind that holds a
+    /// uid's text (`raw::op_uid`) whose body names none.
+    Unknown,
+}
+
+/// One backup line, judged as raw.db's purge judges its op (`raw::op_uid`); a line rewritten keeps
+/// its other fields' values, in serde_json's key order: every reader parses the line.
+fn purged_line(line: &str, jobs: &std::collections::HashMap<String, String>) -> Line {
+    if line.trim().is_empty() {
+        return Line::Kept;
+    }
+    let parsed = || -> Option<_> {
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        let kind = raw::OpKind::from_name(v["type"].as_str()?)?;
+        let body: serde_json::Value = serde_json::from_str(v["body"].as_str()?).ok()?;
+        Some((v, kind, body))
+    };
+    let Some((mut v, kind, body)) = parsed() else {
+        return Line::Unknown;
+    };
+    let Some(uid) = raw::op_uid(kind, &body) else {
+        // A body a purge wrote, or an op of a kind whose ops hold no uid's text.
+        let none = body.get("forgotten").is_some()
+            || !matches!(
+                kind,
+                raw::OpKind::Claim | raw::OpKind::Correction | raw::OpKind::Import
+            );
+        return if none { Line::Kept } else { Line::Unknown };
+    };
+    match jobs.get(&uid) {
+        Some(job) => {
+            v["body"] = serde_json::json!({ "forgotten": job }).to_string().into();
+            Line::Purged(v.to_string())
+        }
+        None => Line::Kept,
+    }
 }
 
 /// `<name>` (and its -wal and -shm, which SQLite binds to the name) moved aside as
@@ -1891,6 +1955,81 @@ pub fn doctor(home: &Path) -> (Vec<String>, bool) {
 pub(crate) mod tests {
     use super::*;
     use crate::raw::{Item, Target};
+
+    /// D5 (2c, Codex and Greptile on #453): a backup line is purged when its op holds the text of
+    /// a uid a job forgets, kept when it holds none (a body a purge wrote, a kind whose ops hold no
+    /// uid's text, a blank line) and unknown when that cannot be told; a purge takes for oboete's
+    /// only the names an export or a purge gives.
+    #[test]
+    fn a_purge_judges_each_backup_line_and_name() {
+        let line = |kind: &str, body: serde_json::Value| {
+            serde_json::json!({"device": "d0", "op_seq": 7, "type": kind, "ts": 1,
+                "body": body.to_string(), "batch": 3})
+            .to_string()
+        };
+        let jobs = std::collections::HashMap::from([("u1".to_owned(), "j1".to_owned())]);
+        let secret = line(
+            "correction",
+            serde_json::json!({"uid": "u1", "body": "secret"}),
+        );
+        let Line::Purged(new) = purged_line(&secret, &jobs) else {
+            panic!("{secret}");
+        };
+        assert_eq!(
+            new,
+            line("correction", serde_json::json!({"forgotten": "j1"}))
+        );
+        for kept in [
+            line(
+                "correction",
+                serde_json::json!({"uid": "u2", "body": "kept"}),
+            ),
+            line("claim", serde_json::json!({"forgotten": "j0"})),
+            line("window", serde_json::json!({"note": "u1"})),
+            " ".to_owned(),
+        ] {
+            assert!(matches!(purged_line(&kept, &jobs), Line::Kept), "{kept}");
+        }
+        for unknown in [
+            line("claim", serde_json::json!({"quote": "secret"})),
+            line("future", serde_json::json!({"uid": "u1"})),
+            secret[..40].to_owned(),
+        ] {
+            assert!(
+                matches!(purged_line(&unknown, &jobs), Line::Unknown),
+                "{unknown}"
+            );
+        }
+
+        let seg = "d0-000000000001-000000000002.ops.zst";
+        assert!(set_aside(&format!("{seg}.quarantined-1700000000000")));
+        for name in [
+            "notes.ops.zst.quarantined-old".to_owned(),
+            format!("{seg}.quarantined-"),
+            format!("{seg}.quarantined-1.sha256"),
+            format!("{seg}.sha256.quarantined-1"),
+            "d0-000000000001-000000000002.records.zst.quarantined-1".to_owned(),
+        ] {
+            assert!(!set_aside(&name), "{name}");
+        }
+        for name in [
+            format!(".{seg}.tmp"),
+            format!(".{seg}.purge"),
+            format!("..{seg}.purge.tmp"),
+            format!(".{seg}.quarantined-1.tmp"),
+        ] {
+            assert!(leftover(&name), "{name}");
+        }
+        for name in [
+            format!("{seg}.tmp"),
+            format!(".{seg}.sha256.tmp"),
+            format!("...{seg}.purge.tmp"),
+            format!(".{seg}.purge.purge"),
+            ".notes.tmp".to_owned(),
+        ] {
+            assert!(!leftover(&name), "{name}");
+        }
+    }
 
     pub(crate) fn w5b_files(root: &Path) -> Vec<(PathBuf, String)> {
         fn walk(root: &Path, path: &Path, files: &mut Vec<(PathBuf, String)>) {

@@ -521,6 +521,20 @@ preview。下の試験は 1（segment の分）・2・3・5・6 が 2c-1、1（r
 - restore した raw.db の job は step 1 から始まる（2b からの動き。`Rebuild::finish` が要求を step 1 で
   書く）。その後の purge は op に本文がなくても rebuild を 1 回する。restore の後の rebuild と重なる費用で、
   2c では変えない。
+- seal が保証しない segment（決定 4）は、判定できない行を 1 行でも持てば消す: op の行でない、または
+  uid の本文を持つ種類（claim・correction・import）の op で本文から uid が出ない行。その行が本文を持つか
+  分からず、読む者もいない（Codex on #453）。seal が保証する segment のその行はそのまま残す: export が
+  書いた行で（新しい版の種類など）、raw.db の purge も同じ判定でその op を残す。purge が書いた本文
+  `{"forgotten":…}`、uid の本文を持たない種類の op、空の行は判定できる行に数える。
+- 書く途中で止まった名前として消すのは、export と書直しの `.<segment>.tmp`（退けた segment の
+  `.<segment>.quarantined-<ms>.tmp` も）、入れ替えの `.<segment>.purge` と、それを書く `write_synced` の
+  `..<segment>.purge.tmp`（Greptile on #453）。seal の `.<segment>.sha256.tmp` は hash だけなので残す。
+- 退けた segment として取るのは、export がつける名前（`<segment>.quarantined-<ms>`、`<segment>` は ops の
+  segment の名前）だけ。ほかの名前のファイルは書き換えも削除もしない（Codex on #453）。
+- 消したファイルが電源断で戻らないよう、歩き終えたら step 4 を記録する前に backup の場所の directory を
+  sync する（unix。Greptile on #453）。
+- backup の場所を 2 つのホームが共有するとき（設定で同じ場所を指したときだけ）、purge は他方のホームの
+  segment も書き換え、書く途中の他方のファイルを消しうる。範囲を系統の device に絞る件は #455。
 
 試験（2c の分）:
 

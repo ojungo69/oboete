@@ -2612,17 +2612,21 @@ mod tests {
 
     /// D5 (2c, decisions 2-4, tests 1 and 3): a purge rewrites every ops segment of the backup
     /// location that holds an op of the forgotten uid, of any device, live or set aside, changing
-    /// only that op's body; a set-aside one that does not decompress is removed, and so is an
-    /// export's segment left before its rename. No file there holds the text then. A restore from
-    /// the rewritten segments keeps the uid forgotten and every op the segments hold, and the
-    /// export after it writes only new ops (test 5).
+    /// only that op's body; a set-aside one that does not decompress is removed, and so are a
+    /// damaged one with a line it cannot judge and the files a write left before its rename (an
+    /// export's, a purge's). No file there holds the text then; a file of another name is not
+    /// touched. A restore from the rewritten segments keeps the uid forgotten and every op the
+    /// segments hold, and the export after it writes only new ops (test 5).
     #[test]
     fn a_purge_rewrites_the_backup_segments_without_the_uids_text() {
         let (s, uid, _) = backed_up_canary();
         let home = s.home.path().to_owned();
         let dir = crate::backup::dir(&home).unwrap();
         let device = s.raw.device().to_owned();
-        let first = ops_segments(&home)[0].clone();
+        let (first, second) = match &ops_segments(&home)[..] {
+            [first, second, ..] => (first.clone(), second.clone()),
+            other => panic!("{other:?}"),
+        };
         let name = first.file_name().unwrap().to_str().unwrap().to_owned();
         let before = segment_text(&first);
         // Another device's, as a home copied from another machine leaves them (decision 2):
@@ -2649,17 +2653,53 @@ mod tests {
         std::fs::copy(&first, &whole).unwrap();
         let broken = aside(&dir);
         std::fs::write(&broken, format!("not zstd: {CANARY}")).unwrap();
-        // An export's segment, left before its rename.
-        let left = dir.join(format!(".{name}.tmp"));
-        std::fs::copy(&first, &left).unwrap();
+        // An export's segment, left before its rename; what a purge's writes left before theirs
+        // (Greptile on #453), of a segment this purge does not rewrite: its replacement's file and
+        // a set-aside segment's rewrite in place.
+        let other = second.file_name().unwrap().to_str().unwrap();
+        let left = [
+            dir.join(format!(".{name}.tmp")),
+            dir.join(format!("..{other}.purge.tmp")),
+            dir.join(format!(".{other}.quarantined-1.tmp")),
+        ];
+        for part in &left {
+            std::fs::copy(&first, part).unwrap();
+        }
+        // A damaged segment that decompresses, the canary's line cut short (Codex on #453), and a
+        // file of the owner's under a name like a set-aside segment's.
+        let cut = dir.join(format!("0ther2-{tail}"));
+        let damaged: Vec<&str> = before
+            .lines()
+            .map(|l| {
+                if l.contains(CANARY) {
+                    &l[..l.len() - 2]
+                } else {
+                    l
+                }
+            })
+            .collect();
+        std::fs::write(
+            &cut,
+            zstd::bulk::compress(damaged.join("\n").as_bytes(), 3).unwrap(),
+        )
+        .unwrap();
+        let notes = dir.join("notes.ops.zst.quarantined-old");
+        std::fs::write(&notes, "the owner's notes").unwrap();
         forget(&home, &uid);
         let job = uid_jobs(&home)[0].1.clone();
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
         drop(raw);
         let purged = purge(&home).unwrap().unwrap();
-        assert_eq!((purged.segments, purged.segments_removed), (4, 1));
-        assert!(!broken.exists() && !left.exists());
+        assert_eq!((purged.segments, purged.segments_removed), (4, 2));
+        assert!(!broken.exists() && !cut.exists());
+        for part in &left {
+            assert!(!part.exists(), "{part:?}");
+        }
         assert_eq!(backup_canaries(&home), Vec::<String>::new());
+        assert_eq!(
+            std::fs::read_to_string(&notes).unwrap(),
+            "the owner's notes"
+        );
         let after = segment_text(&first);
         assert_eq!(after.lines().count(), before.lines().count());
         let mut changed = 0;
