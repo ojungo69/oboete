@@ -2810,6 +2810,46 @@ mod tests {
         }
     }
 
+    /// D5 (2c, Greptile on #453): a purge stopped inside a write, after the data and before its
+    /// rename (a replacement's file, a set-aside segment's rewrite in place), leaves only hidden
+    /// files the next purge takes for leftovers (`backup::leftover`); that purge leaves none, and
+    /// no file holds the text.
+    #[test]
+    fn a_purge_stopped_inside_a_write_leaves_only_what_the_next_one_removes() {
+        for stage in ["purge_part_unrenamed", "purge_rewrite_unrenamed"] {
+            let (s, uid, _) = backed_up_canary();
+            let home = s.home.path().to_owned();
+            let dir = crate::backup::dir(&home).unwrap();
+            let first = ops_segments(&home)[0].clone();
+            let name = first.file_name().unwrap().to_str().unwrap().to_owned();
+            let aside = crate::backup::fresh_name(&dir, &format!("{name}.quarantined-")).unwrap();
+            std::fs::copy(&first, dir.join(aside)).unwrap();
+            forget(&home, &uid);
+            let crate::search::b::fixture::Store { home: _kept, raw } = s;
+            drop(raw);
+            let hidden = || -> Vec<String> {
+                std::fs::read_dir(&dir)
+                    .unwrap()
+                    .flatten()
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .filter(|n| n.starts_with('.'))
+                    .collect()
+            };
+            crate::backup::FAIL_AFTER.set(Some(stage));
+            assert!(purge(&home).is_err(), "{stage}");
+            let left = hidden();
+            assert!(!left.is_empty(), "{stage}");
+            assert!(
+                left.iter().all(|n| crate::backup::leftover(n)),
+                "{stage}: {left:?}"
+            );
+            purge(&home).unwrap().unwrap();
+            assert_eq!(hidden(), Vec::<String>::new(), "{stage}");
+            assert_eq!(backup_canaries(&home), Vec::<String>::new(), "{stage}");
+            assert_eq!(uid_jobs(&home)[0].2, 4, "{stage}");
+        }
+    }
+
     /// D5 (2c, decision 3, test 2): a purge stopped after each step of a segment's replacement
     /// leaves segments a restore takes whole, the one replaced and those after it; the next purge
     /// finishes the replacement, a one-line seal and no text, without rebuilding knowledge.db

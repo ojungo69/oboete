@@ -897,11 +897,25 @@ fn seal_report(
 }
 
 fn write_synced(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf> {
+    write_synced_at(dir, name, data, None)
+}
+
+/// `write_synced`, which a test can stop at `stage` after the write and before the rename: what
+/// such a stop of a purge's write leaves is `leftover`'s (2c, Greptile on #453).
+fn write_synced_at(
+    dir: &Path,
+    name: &str,
+    data: &[u8],
+    stage: Option<&'static str>,
+) -> Result<PathBuf> {
     let tmp = dir.join(format!(".{name}.tmp"));
     let mut f = std::fs::File::create(&tmp)?;
     crate::db::private(&tmp, 0o600);
     f.write_all(data)?;
     f.sync_all()?;
+    if let Some(stage) = stage {
+        fail_after(stage)?;
+    }
     let path = dir.join(name);
     std::fs::rename(&tmp, &path)?;
     #[cfg(unix)]
@@ -1061,7 +1075,7 @@ const PURGE_PART: &str = ".purge";
 /// segment or a set-aside one), a purge's replacement (`.<segment>.purge`, written again from what
 /// the segment holds now) or `write_synced`'s file for it (`..<segment>.purge.tmp`, Greptile on
 /// #453). No reader takes any, and under the worker lock no write is under way.
-fn leftover(name: &str) -> bool {
+pub(crate) fn leftover(name: &str) -> bool {
     let Some(n) = name.strip_prefix('.') else {
         return false;
     };
@@ -1102,7 +1116,7 @@ fn replace(dir: &Path, name: &str, old: &str, text: &[u8]) -> Result<()> {
     let z = zstd::bulk::compress(text, 3)?;
     let new = hex(&Sha256::digest(&z));
     let part = format!(".{name}{PURGE_PART}");
-    write_synced(dir, &part, &z)?;
+    write_synced_at(dir, &part, &z, Some("purge_part_unrenamed"))?;
     fail_after("purge_segment_written")?;
     let doubled = format!("{}{}", seal_line(old, name), seal_line(&new, name));
     write_synced(dir, &format!("{name}.sha256"), doubled.as_bytes())?;
@@ -1144,7 +1158,8 @@ fn untrusted(
     };
     let dir = path.parent().context("segment directory")?;
     let name = path.file_name().and_then(|n| n.to_str()).context("name")?;
-    write_synced(dir, name, &zstd::bulk::compress(text.as_bytes(), 3)?)?;
+    let z = zstd::bulk::compress(text.as_bytes(), 3)?;
+    write_synced_at(dir, name, &z, Some("purge_rewrite_unrenamed"))?;
     Ok(Untrusted::Rewritten)
 }
 
