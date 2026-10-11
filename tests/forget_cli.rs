@@ -131,6 +131,63 @@ fn a_session_is_forgotten_by_one_of_its_records() {
     assert_eq!(status.lines().count(), 1, "{status}");
 }
 
+/// Slice 3b-2: `--repo` takes a directory as capture reads it and forgets its records; `--since`
+/// with `--until` forgets this device's records of that time. Another repository's record stays
+/// through the first, and the log holds neither the repository's path nor the text.
+#[test]
+fn a_repository_and_a_time_range_are_forgotten() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let here = hook_record(home, CANARY);
+    let elsewhere = tempfile::tempdir().unwrap();
+    let other = serde_json::json!(
+        {"session_id":"other-session", "cwd":elsewhere.path(), "prompt":"kept epsilon-552"}
+    );
+    ok(run(
+        home,
+        &["hook", "claude", "UserPromptSubmit"],
+        &other.to_string(),
+    ));
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    let dir = home.to_string_lossy().into_owned();
+    let out = ok(run(home, &["forget", "--repo", &dir, "--yes"], ""));
+    assert!(out.contains("Raw records: 1"), "{out}");
+    assert!(out.contains("A repository, "), "{out}");
+    assert!(out.contains("\"kind\":\"repo\""), "{out}");
+    assert!(!String::from_utf8_lossy(&run(home, &["get", &here], "").stdout).contains("prompt"));
+    let search = || {
+        ok(run(
+            home,
+            &["search", "--all", "--raw", "only", "--", "epsilon-552"],
+            "",
+        ))
+    };
+    assert!(!search().contains("no hits"));
+    let log = std::fs::read_to_string(home.join("forget.log")).unwrap();
+    assert!(!log.contains(&dir) && !log.contains(CANARY), "{log}");
+    assert!(
+        !run(home, &["forget", "--since", "2000-01-01"], "")
+            .status
+            .success()
+    );
+    let out = ok(run(
+        home,
+        &[
+            "forget",
+            "--since",
+            "2000-01-01",
+            "--until",
+            "2999-01-01",
+            "--yes",
+        ],
+        "",
+    ));
+    assert!(out.contains("This device's records from "), "{out}");
+    assert!(out.contains("\"kind\":\"range\""), "{out}");
+    assert!(search().contains("no hits"));
+}
+
 /// A pre-M5 copied store cannot prove its home lineage, even for a record the current
 /// importer adds. Refuse before registration, while recording and searching still work.
 #[test]

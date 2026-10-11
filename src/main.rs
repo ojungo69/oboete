@@ -95,8 +95,8 @@ enum Cmd {
     /// with no AI call
     Rebuild,
     /// Register an irreversible forget: raw records, with their sessions' records from other
-    /// sources, a whole session, or a claim's or an imported document's uid (a record's physical
-    /// purge is not built yet)
+    /// sources, a whole session, a repository, a time range, or a claim's or an imported
+    /// document's uid (a record's physical purge is not built yet)
     Forget {
         /// Raw id from search: <device>:<seq>
         #[arg(long, conflicts_with_all = ["span", "status"])]
@@ -112,6 +112,18 @@ enum Cmd {
         /// source's records of it, and later records of it from before the forget
         #[arg(long, conflicts_with_all = ["record", "span", "uid", "status"])]
         session: Option<String>,
+        /// A repository, by a directory in it or by its key as search shows it: every source's
+        /// and device's records of it, and later records of it from before the forget on this
+        /// device
+        #[arg(long, conflicts_with_all = ["record", "span", "uid", "session", "status"])]
+        repo: Option<String>,
+        /// With --until: this device's records from this time (as search reads --since), and later
+        /// records of that time
+        #[arg(long, requires = "until", conflicts_with_all = ["record", "span", "uid", "session", "repo", "status"])]
+        since: Option<String>,
+        /// With --since: to this time, not that time itself (as search reads --until)
+        #[arg(long, requires = "since")]
+        until: Option<String>,
         /// Print the preview and skip its confirmation
         #[arg(long, conflicts_with = "status")]
         yes: bool,
@@ -119,7 +131,7 @@ enum Cmd {
         #[arg(long)]
         status: bool,
         /// Purge what forgotten uids' requests left unpurged (the worker runs it when one waits)
-        #[arg(long = "continue", conflicts_with_all = ["record", "span", "uid", "session", "status", "yes"])]
+        #[arg(long = "continue", conflicts_with_all = ["record", "span", "uid", "session", "repo", "since", "status", "yes"])]
         resume: bool,
     },
     /// Curate again what was curated before: the spans queued since (a quote a new rule masked
@@ -738,6 +750,9 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             span,
             uid,
             session,
+            repo,
+            since,
+            until,
             yes,
             status,
             resume,
@@ -747,6 +762,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             span.as_deref(),
             uid.as_deref(),
             session.as_deref(),
+            repo.as_deref(),
+            since.as_deref().zip(until.as_deref()),
             yes,
             status,
             resume,
