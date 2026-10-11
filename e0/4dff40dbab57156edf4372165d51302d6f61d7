@@ -1,0 +1,21 @@
+src/forget.rs
+  s_234f6f365da547::t_5465d520a52541 670-682,752,754,2051,2089,2123-2140
+src/hookstate.rs
+  s_234f6f365da547::t_4e5cbf8ebe1653 133-134,192-194,202-212
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e04dff40dbab57156edf4372165d51302d6f61d7",
+  "prompts": {},
+  "sessions": {
+    "s_234f6f365da547": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3206e10e-7912-46d9-b070-aa879bc5ad93",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
