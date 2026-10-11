@@ -90,6 +90,7 @@ pub fn run(
             ts,
             &settings,
             &mut 0,
+            &mut 0,
         )?;
         micros.push(started.elapsed().as_micros());
     }

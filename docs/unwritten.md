@@ -34,7 +34,9 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   duplicate, never a loss. A write-back that finds raw.db damaged keeps the call's events behind
   the files and fails, so the marker is set and the worker is asked to restore the store; any
   other store error stops the write-back and the call goes on, the files written back before it
-  counted as the call's write (the marker is cleared, the worker started).
+  counted as the call's write (the marker is cleared, the worker started). When the call's own
+  append fails after the write-back, the marker is set and the worker is started all the same,
+  for the rows written back.
 - **U4. What cannot be written back** (an unknown version, unreadable JSON, an event raw refuses)
   moves to `unwritten/bad/` under the keep lock (U5), never deleted by oboete; doctor counts it.
 - **U5. Bound.** Nothing more is kept while `unwritten/` holds 64 MiB, the new file and `bad/`

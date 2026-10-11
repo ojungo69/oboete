@@ -178,6 +178,7 @@ fn run_io(
                 return Err(e);
             }
         };
+        let mut written_back = 0;
         let recorded = record(
             home,
             &mut store,
@@ -187,11 +188,14 @@ fn run_io(
             db::now_ms(),
             &settings,
             &mut ended,
-        )?;
-        let events = &recorded.events;
+            &mut written_back,
+        );
         // A call that only wrote back what earlier ones kept wrote too: the worker starts and the
-        // marker clears (Codex on #440).
-        wrote = !events.is_empty() || recorded.written_back > 0;
+        // marker clears (Codex on #440); the worker starts also when its own events then fail.
+        wrote = written_back > 0;
+        let recorded = recorded?;
+        let events = &recorded.events;
+        wrote |= !events.is_empty();
         session = session_label(&labels).to_owned();
         ended = crate::failure::now();
         // MUST-M21 (D9): the session's last failed call, which its next prompt is matched against.
@@ -291,11 +295,16 @@ fn run_io(
                 // Task 8: the worker restores a damaged raw.db, and no hook starts one otherwise
                 // (they start it after a written row). A worker already running opened raw.db
                 // before the damage: the request makes it open the stores again.
-                if crate::backup::corrupt(e) {
+                let corrupt = crate::backup::corrupt(e);
+                if corrupt {
                     crate::backup::request_restore(home);
-                    if let Err(e) = start_worker(home) {
-                        eprintln!("oboete: worker not started: {e:#}");
-                    }
+                }
+                // Rows written back before this call's own events failed are written (Codex on
+                // #440).
+                if (corrupt || wrote)
+                    && let Err(e) = start_worker(home)
+                {
+                    eprintln!("oboete: worker not started: {e:#}");
                 }
             }
         }
@@ -667,13 +676,13 @@ fn session_start_note(japanese: bool, handed: Handed) -> String {
 pub struct Recorded {
     pub events: Vec<(i64, crate::raw::Event)>,
     pub prompt: Option<String>,
-    /// The kept files this call wrote back (docs/unwritten.md U3): a write too.
-    pub written_back: usize,
 }
 
 /// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db` with the
 /// event's time (`now` in a hook; the fixture's in a replay).
-#[allow(clippy::too_many_arguments)] // `failed`: the time a failure gets, which `run_io` keeps
+// `failed`, the time a failure gets, and `written_back`, the kept files this call wrote back
+// (docs/unwritten.md U3, a write too): `run_io` keeps both from an error as well.
+#[allow(clippy::too_many_arguments)]
 pub fn record(
     home: &Path,
     raw: &mut crate::raw::Raw,
@@ -683,6 +692,7 @@ pub fn record(
     ts: i64,
     settings: &crate::capture::Settings,
     failed: &mut i64,
+    written_back: &mut usize,
 ) -> Result<Recorded> {
     // Count and append together so overlapping SessionEnd hooks cannot recover the same turn.
     // ponytail: one recovery lock per home; use per-session locks if end hooks contend.
@@ -700,7 +710,8 @@ pub fn record(
         None
     };
     // docs/unwritten.md U3: what earlier calls kept goes first, so the seqs follow their times.
-    let (written_back, back) = crate::unwritten::write_back(home, raw);
+    let back;
+    (*written_back, back) = crate::unwritten::write_back(home, raw);
     let (built, prompt) = built(home, Some(raw), agent, event, payload, ts, settings)?;
     match back {
         Ok(()) => {}
@@ -724,7 +735,6 @@ pub fn record(
         return Ok(Recorded {
             events: Vec::new(),
             prompt,
-            written_back,
         });
     }
     let mut appended = Vec::new();
@@ -745,7 +755,6 @@ pub fn record(
     Ok(Recorded {
         events: appended,
         prompt,
-        written_back,
     })
 }
 
@@ -2314,10 +2323,18 @@ pub(crate) fn last_assistant_in_transcript(path: &Path) -> String {
     last
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread asked for a worker: a test's look at `start_worker`.
+    static WORKER_ASKED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// After every append (D6): start a worker when none holds the lock, the child for a caller that
 /// outlives it to reap. The lock is dropped before the spawn; while a worker runs, this costs one
 /// open and one failed `flock`.
 pub(crate) fn start_worker(home: &Path) -> Result<Option<std::process::Child>> {
+    #[cfg(test)]
+    WORKER_ASKED.set(WORKER_ASKED.get() + 1);
     if std::env::var_os("OBOETE_NO_SPAWN").is_some() {
         return Ok(None);
     }
@@ -5842,6 +5859,7 @@ mod tests {
                             0,
                             &Default::default(),
                             &mut 0,
+                            &mut 0,
                         )
                         .unwrap();
                     })
@@ -6244,6 +6262,7 @@ mod tests {
             &json!({"prompt": "hi"}),
             0,
             &Default::default(),
+            &mut 0,
             &mut 0,
         )
         .unwrap();
@@ -6729,6 +6748,7 @@ mod tests {
                 0,
                 &Default::default(),
                 &mut failed,
+                &mut 0,
             );
             (r.is_err(), failed)
         });
@@ -6816,6 +6836,42 @@ mod tests {
         // One written back; the other, and the fourth behind it, kept.
         assert_eq!(crate::unwritten::counts(h), (2, 0));
         assert!(crate::failure::since(h).is_none());
+    }
+
+    /// docs/unwritten.md U3: rows written back before the call's own append fails start the
+    /// worker; the marker says the append failed, and the call's event is kept (Codex on #440).
+    #[test]
+    fn rows_written_back_before_an_append_error_start_the_worker() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let _contending = crate::worker::contending();
+        let _worker = crate::worker::lock(h).unwrap();
+        let call = |prompt: &str| {
+            let payload = json!({"session_id": "s", "cwd": h, "prompt": prompt});
+            run_io(
+                h,
+                "claude",
+                "UserPromptSubmit",
+                payload.to_string().as_bytes(),
+                &mut Vec::new(),
+            )
+        };
+        call("first prompt").unwrap();
+        let held = crate::raw::lock_for_swap(h).unwrap();
+        assert!(call("a kept prompt").is_err());
+        drop(held);
+        rusqlite::Connection::open(h.join("raw.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON records WHEN instr(NEW.body, 'refused') \
+                 BEGIN SELECT RAISE(ABORT, 'test'); END;",
+            )
+            .unwrap();
+        let asked = WORKER_ASKED.get();
+        assert!(call("a refused prompt").is_err());
+        assert_eq!(WORKER_ASKED.get(), asked + 1);
+        assert!(crate::failure::since(h).is_some());
+        assert_eq!(crate::unwritten::counts(h), (1, 0));
     }
 
     /// docs/unwritten.md U3: a call that cannot keep its events behind older kept files appends
@@ -7431,6 +7487,7 @@ mod tests {
                     &grok,
                     0,
                     &Default::default(),
+                    &mut 0,
                     &mut 0,
                 )
                 .unwrap();
