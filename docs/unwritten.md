@@ -31,7 +31,15 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   than 16 queued, or another call writing them back), the call keeps its own events behind them
   instead of appending them, so the seqs keep the events' order; it appends them only when they
   cannot be kept, and an agy step they claimed stays claimed then (the append may still write it;
-  only events whose last chance failed give their step back). A crash between the commit and the removal writes the file again later: a
+  only events whose last chance failed give their step back). The file's content hash is kept in
+  raw.db (`unwritten_written`) in the transaction that writes its events, so a file left behind
+  by a call stopped between the commit and the removal is removed by the next write-back, not
+  written again (#454; not its name, which starts again from 0 once the directory empties). Each
+  keep puts a random id in its file, so the hash names that keep alone: two calls in one
+  millisecond with one payload keep the same events, and both are written. A file kept before
+  the id has none, and two of them can hold the same bytes: its hash is not kept, so it is
+  written, and if left behind, written again (#460). A
+  raw.db put back from an older copy lost those hashes too, and may write such a file again: a
   duplicate, never a loss. A write-back that finds raw.db damaged keeps the call's events behind
   the files and fails, so the marker is set and the worker is asked to restore the store; any
   other store error stops the write-back and the call goes on, the files written back before it
@@ -58,7 +66,9 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   (rescan). It was shaped by the capture settings of its time (`store_prompts`, `tool_output`).
 - **U8. Forget and the deletion canary.** A kept event is no record yet: no forget can name it
   until it is written. Its file holds record text, so the canary's file list (spec, M4 deletion
-  canary) covers `unwritten/`.
+  canary) covers `unwritten/`. Once written back it is a live record, which a forget names by
+  where and when it was recorded (milestone 5 slice 3a), and U3's hash keeps a file left behind
+  from writing it again.
 
 ## Tests
 

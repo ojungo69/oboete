@@ -87,7 +87,7 @@ open が失敗して記録が止まり、戻すには手でファイルを消す
   新しい shortlist query の embedding も knowledge.db の追随を待つ。送信済みの結果の回収と
   本文検索は続ける。
 - **第一 slice で忘れられるのは import origin のある record だけ。** live と回復した record に
-  native identity を与えるのは slice 3a。
+  native identity を与えるのは slice 3a（「Slice 3 の決定」の 3a: 保存せず device・seq・ts から計算する）。
 
 障害の範囲（実装前に決めた打ち切り基準）: 第一 slice は F0（障害なし、通常の並行）、F1（raw.db の
 喪失・破損、backup と片方のログは残る）、F2（raw.db だけが古いコピーに置き換わる）で正しい。F3
@@ -102,7 +102,8 @@ spec 6.3 に書く限界とする。forget が表示する限界は次のとお�
 - ログの行が 1 つも残らない segment からの restore は deny 行を再構築するが job 行は戻らない。
 - ログと backup ディレクトリは origin と session の hash を持つ（本文はない）。v1 と transcript
   から取り込んだ record の origin は保存された payload の hash を含むので、ログを持つ人は保存された
-  文面の推測を確かめられる。別の identity は slice 3a の課題。
+  文面の推測を確かめられる。slice 3a の live record の origin は device・seq・ts だけから作り、本文を
+  含まない。v1 と transcript の origin はそのまま（本文を含まない native id が保存済み provenance にない）。
 - 第一 slice は物理 purge をしない。古い backup segment には本文が残り、replay のときに tombstone
   で隠れる。エージェント自身の transcript も本文を持ち、forget はそのパスを表示する。
 
@@ -152,6 +153,10 @@ deny にしない。
 最終 M5 には live hook の source identity と legacy の対応付けを含める。保存済み provenance
 から確実に対応付けられないものを「再 import 安全」と呼ばず、無関係な session 全体の deny
 で隠さない。この bridge の完成前はオーナー切替をしない。
+（2026-10-11、「Slice 3 の決定」の 3a で改訂）bridge は session 単位で作る。live hook の identity は
+device・seq・ts から計算し、v1 と transcript とは agent と native session id で対応付け、同じ session の
+別の出所の record を写しとして選択に加える。record 単位の対応は保存済み provenance にないので作らない。
+オーナー切替の条件はこの session 単位の bridge とする。
 
 ### D3. preview と確認
 
@@ -595,6 +600,133 @@ preview。下の試験は 1（segment の分）・2・3・5・6 が 2c-1、1（r
    書き直され、status は止まったと言う。
 7. status は step 4 の前は「purged here; backups pending」、step 5 の後は「done」。
 
+### Slice 3 の決定（2026-10-11。D1・D2 の第一 slice の制限を改める）
+
+Slice 3 は 5 つの PR に分け、この順に作る。後の PR はこの節に「3x の決定」を足す。
+
+| 分割 | 対象 | 完了条件 |
+|---|---|---|
+| 3a identity と出所の橋 | live record の identity、同じ session の別の出所の写し、v1 の forget、#454 | 下記 3a |
+| 3b target とページ | session・repo・時間範囲の target、500 件を超える選択 | 第一 slice の 500 件制限の解消、D3 の端末ごとの上限 |
+| 3c record の物理 purge | raw の record 本文、FTS、backup の record segment、raw.db のコピー | 管理対象の物理 byte に 0 hit、transcript の切れ目の保持 |
+| 3d 派生物 | 証拠を持つ claim、重なる window の recurate、card・summary、#167、#186、#366 | 表の Slice 3 の完了条件の残り |
+| 3e rescan と retention | rescan の範囲 target、保存期間の失効 | 3c の書換えの再利用（spec 6.2） |
+
+#### 3a: live record の identity と出所の橋
+
+- **live record（source `hook`・`replay`）の identity は保存せず計算する**:
+  `forget::origin("live", "<device>:<seq>:<ts>")`。ts は capture の時刻（ミリ秒）。raw.db が古い
+  コピーに戻って seq が再利用されても、新しい record は ts が違うので古い要求で隠れない（rule 5 の
+  目的）。backup segment・raw.db のコピー・restore はこの 3 つを運ぶので、どこでも同じ identity に
+  なる。本文の hash を含まないので、ログを持つ人が文面の推測を確かめることはできない（D1 の限界は
+  v1 と transcript の origin にだけ残る）。capture 時のランダムな id は採らない: 3a より前の record・
+  コピー・segment は id を持たず、開くたびに別の id が付くと、ログの要求が古いコピーの同じ record に
+  当たらない。
+- **登録した live record の identity は `import_origins` に置く。** 要求の適用（`apply_request`）は、
+  要求の record の `(device, seq)` にある live record の ts から identity を計算し直し、要求の origin と
+  一致したときだけその行を書く（seq は手がかり、一致を決めるのは identity）。以後の適用・backup の
+  `import_identity`・deny の運搬・anchor の拒否（`forgotten_op`）は import の record と同じ経路を通る。
+  表の意味は「record の identity」になる（列は増やさない）。
+- **Removed 行は元の source・kind・ts を出所によらず運ぶ。** 現在は v1 と transcript だけ。whole-record
+  tombstone の後に初めて backup された live record も、restore 後に identity を計算でき、ログの要求が
+  当たる。元の metadata のない古い Removed 行（kind なし）は identity を持たず、本文もないので選択から
+  外して数える。restore 後の Removed 行は label を持たないので、session を要する写しの判定にも使わない
+  （本文がないので写しの置き場所でもない）。
+- **live の session label を照合に使うのは、label が native id のままのときだけ**（D2「live の表示用
+  session label を照合キーにしない」の具体化）: その record の ledger に `session` の行がなく、label が
+  `unknown` で始まらない（session id のない event は `unknown-<device>`、`hook::own_session`）。agent は
+  gate を通らない hook の引数なので、そのまま比べる。v1 の agent も同じ名前（`claude`・`codex`・
+  `grok`）。session hash は出所によらず `forget::session(agent, native session)`。
+- **出所の橋（D2 最終段落の改訂）。** 同じ出来事を 2 つの出所が持つことがある: transcript の切れ目の
+  直前の event（hook の時刻は transcript の時刻より後）と、v1 の hook 時刻の遅れ。record 単位の共通 id
+  は保存済み provenance にないので、本文照合や時刻のずらしで推測しない。共通なのは agent と native
+  session id。そこで、選択が触れる各 session について、その session の**別の出所**の record（live・
+  transcript・v1 のうち選んだ record と違う出所のもの。この store にあればどの device の record も:
+  コピーした raw.db は後の record を別の device で記録する。本文のない行（touch、restore で本文を
+  持たない Removed 行）は除き、rescan の tombstone で隠れただけの行は本文が残るので含む）を「写しを
+  持ちうる record」として選択に加え、preview に別に数えて見せる。session 単位で漏れがなく、推測はしない。
+  同じ出所の選ばなかった record は加えない（session 全体を消さない）。session を target にすれば全出所を
+  一度に選ぶ（3b）。
+  - **session の分からない live record**（上の条件を満たさない label）は、どの session の写しかを示せない。
+    そのような record を選ぶ forget、および同じ agent のそのような record がある home での transcript・
+    v1 の record の forget は、登録前に理由付きで拒否する（第一 slice の「unverified native copies」の
+    拒否を、この場合だけに狭める）。
+  - **v1 の record も forget できる**（第一 slice の拒否を外す）。写しは同じ session の transcript の
+    record として加わる。
+  - **再 import**: `check_cross_source_forget` を保つ。cut に数える deny（live・v1）がある session の
+    transcript batch と、deny がある session の v1 batch は取り込まない。transcript の record の deny は
+    origin で再 import を止める（従来どおり）。
+  - 限界（spec 6.3 に足す）: 同じ出来事が別の session id で記録された場合（agent が resume で id を
+    変えた等）は写しに加わらない。
+- **#454: 書き戻しの重複をなくす。** `unwritten::write_back` は書き戻したファイルの内容の hash を、
+  その record と同じ raw の transaction で `unwritten_written` に書き、次の書き戻しは記録済みの hash の
+  ファイルを追記せずに消す（commit と削除の間で止まった call の重複がなくなる）。名前は使わない:
+  `unwritten/` が空になると番号は 0 からやり直す（U1）ので、名前で比べると新しいファイルを捨てる。
+  内容の hash だけでも足りない: 同じ payload の 2 つの call が同じミリ秒に同じ event を残しうる。そこで
+  keep ごとにランダムな id をファイルに入れ、hash がその keep だけを指すようにする。id のない以前の
+  ファイルは同じ内容の別の keep がありうるので hash を記録せず、従来どおり書く（残れば重複しうる。
+  Greptile・Codex・CodeRabbit on #460）。forget に限らない。
+  raw.db が古いコピーに戻った場合は記録も戻るので、そのファイルが残っていれば従来どおり重複しうる
+  （U3 の限界のまま）。
+- **live record を取り直す経路を閉じる。** live の forget を受け付けると、hook が同じ出来事をもう一度
+  記録する経路が復活の道になる。#454 の書き戻し（上）と、Cursor の SessionEnd の取りこぼし回復
+  （`hook::adapt` の cursor 分岐。transcript の turn を本文の出現回数で raw と比べ、足りない turn を
+  記録する）。後者は忘れた prompt を「足りない」と数えて記録し直すので、deny のある session では回復
+  しない（回復は transcript からの取込みであり、`check_cross_source_forget` と同じ扱い）。hook は raw.db
+  の `denied_records` を読むだけで、読めなければ回復を飛ばして SessionEnd 自体は記録する（制御状態が
+  記録を止めない、D1）。確かめと数えは reader の hold（`dispatch::reading`）の中で行い、forget はその
+  前か後に commit する（登録が hold を持つ間は回復しない）。session は agent が送った id で名指す: 後から
+  label を伏せる規則が足されても同じ hash になる（Greptile・Codex on #460）。
+- **曖昧な transcript の identity**（同じ session に同じ fingerprint が複数ある、native session id が
+  先頭にない）: 第一 slice は再 import で identity が変わりうるので拒否した。同じ要求が同じ session の
+  live か v1 の record（cut に数える deny）を含むときは、その session の transcript batch がすべて
+  拒否されるので、曖昧な record も写しとして・選択として加えてよい。そうでない session では従来どおり
+  拒否する。
+- **要求の形**: 写しを加えた要求は version 3 とし、record は target の範囲の外にもある（各 record を
+  identity で拒否する。範囲は表示用）。古い binary はその行を未知の version として飛ばして報告する
+  （rule 9）。preview は範囲の record と写しを分けて持ち、token は両方を含む。live の record を含む要求も
+  写しがなくても version 3: 3a より前の binary は live の identity を計算できず、version 1 なら適用済みと
+  して record を見せたままにする（Codex on #460）。import の record だけの要求は version 1 のまま。
+- 500 件の上限は 3b まで第一 slice のまま。写しを加えた後の件数で数える。
+- 受入テスト（3a の PR）:
+  1. hook の record を forget でき、ログから restore・古い raw.db への置換・segment だけの restore の
+     どれでも戻らない。古い raw.db で同じ seq を再利用した新しい record は隠れない。
+  2. whole-record tombstone の後に初めて backup された live record も、segment からの restore 後に
+     ログの要求で隠れる（Removed 行の metadata）。
+  3. 同じ session の transcript の record がある live record の preview は、その transcript の record を
+     写しとして加えて数える。逆向き（transcript の record の選択に同じ session の live record）と、v1 と
+     transcript の組も同じ。同じ出所の選ばない record は加わらない。
+  4. session label が伏せ字になった live record、`unknown-<device>` の record は選べず、同じ agent の
+     そのような record がある home では transcript と v1 の record も選べない（理由付きの拒否）。
+  5. live の deny がある session の transcript の再 import は拒否される（既存の経路）。
+  6. #454 の受入テスト: 書き戻して commit した後に残ったファイルは、次の書き戻しで追記されずに消え、
+     他のファイルの event は書かれる。その間に forget した record の文面は戻らない。
+  7. Cursor の session の prompt を forget した後の SessionEnd は、その prompt を回復しない。deny のない
+     session の回復は従来どおり。
+  8. 同じ session の live の record を含む要求では、曖昧な transcript の record も加わる。live も v1 も
+     含まない要求の曖昧な record は拒否される。
+
+#### 3b〜3e（各 PR で詳細を決める）
+
+- **3b**: session（agent と native session。全出所）、repo、時間範囲。選択は record の集合に解決し、
+  500 件ごとの要求（job）に分け、1 つの raw transaction で全部を登録する（全部か無し）。preview token は
+  全体で 1 つ、status は target の job をまとめて表示する。repo と時間範囲は D3 のとおり確認した端末
+  ごとの上限まで。session の target は、登録時刻より前の ts を持つ遅れて届く event（書き戻し、M6 の
+  同期）も拒否する（D3 の session tombstone）。登録後の新しい event は記録する。
+- **3c**: 忘れた record の行を Removed に書き換える（device・seq・ts・source・kind は identity と切れ目の
+  ために残す）。`raw_fts` の optimize と VACUUM、backup の record segment の書換え（2c-1 の ops と同じ
+  手順と停止点）、raw.db のコピー（2c-2）。transcript の切れ目（`earliest_by_session`）は
+  `denied_records.ts` と Removed 行の元の ts も数える（rule 10。書換え後も切れ目が後ろへずれない）。
+- **3d**: 忘れた record に証拠を持つ claim を uid で forget する（Slice 2 の pipeline。部分的な anchor も
+  信用しない、spec 6.2 step 3）。重なる window を残りの record から recurate する（`Span::minus`、
+  recurate queue。AI の tier がなければ待ち）。card と summary は K4・T7 で隠れる。#167（status の
+  支えの anchor）、#186（伏せ字になった directive の再導出）、#366（claim を言い換えた派生文、restore で
+  失われた tombstone）。実行中の curator・digest・embed の答えは既存の fence（`denied_records` の件数）で
+  commit しない。
+- **3e**: rescan の hit を範囲 target（device、seq、offset、length）として 3c の書換えに通す（preview
+  なし）。retention は同じ書換えで tombstone を作らず、未 curate の raw は残し、claim は `raw expired`
+  と表示する（spec 6.2）。
+
 ## 実装順序と完了条件
 
 | Slice | 対象と再利用する処理 | 完了条件 |
@@ -655,7 +787,7 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
 ## 実装状況
 
 - [x] Slice 1: 削除要求と raw record/span の安全な受理（#389）
-- [ ] Slice 2: uid の物理 purge（D5。2a 登録と隠す・送らない、2b op 本文と knowledge.db、2c backup）
+- [x] Slice 2: uid の物理 purge（D5。2a 登録と隠す・送らない、2b op 本文と knowledge.db、2c backup）（#435、#442、#444、#453、#458）
 - [ ] Slice 3: raw scope、rescan、retention
 - [ ] Slice 4: 可逆な管理と訂正
 - [ ] Slice 5: WebUI
