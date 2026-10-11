@@ -2151,7 +2151,9 @@ fn adapt(
         // The check and the counts under a reader's hold, so a forget commits before both or after
         // both (Greptile, Codex on #460); none while a registration keeps it. The session is named
         // by the id the agent sent, which a rule that masks its label since does not change
-        // (Greptile on #460).
+        // (Greptile on #460). A forget that commits after the hold and before the append names no
+        // turn this recovers, which raw did not hold when counted: the same as one after the
+        // append (CodeRabbit on #460).
         let Ok(_read) = crate::dispatch::reading(home, READ_WAIT) else {
             return Ok(vec![(event.into(), p)]);
         };

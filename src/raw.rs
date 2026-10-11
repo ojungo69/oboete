@@ -1365,6 +1365,13 @@ impl Raw {
             at = last;
         }
         let copies = self.copies(&picked)?;
+        // The cap `Preview::validate` holds a request to, said before the selection is shown
+        // (Codex on #460).
+        anyhow::ensure!(
+            picked.len() + copies.len() <= crate::forget::MAX_RECORDS,
+            "split this selection into spans of at most {} records, their copies counted",
+            crate::forget::MAX_RECORDS
+        );
         self.check_named(device, &picked, &copies)?;
         let mut sources = Vec::<String>::new();
         for n in picked.iter().chain(&copies) {

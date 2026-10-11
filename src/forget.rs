@@ -4062,6 +4062,44 @@ mod tests {
         );
     }
 
+    /// Slice 3a: a selection whose copies take it past the cap is refused at its preview, before
+    /// it is shown and confirmed, as its registration would refuse it (Codex on #460).
+    #[test]
+    fn a_selection_whose_copies_pass_the_cap_is_refused_at_its_preview() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let l = live(&mut raw, "s", 5_000, r#"{"prompt":"one"}"#);
+        let copies = |raw: &mut raw::Raw, ids: std::ops::Range<usize>| {
+            let (mut events, mut identities) = (Vec::new(), Vec::new());
+            for n in ids {
+                let mut event = raw::test_event(r#"{"prompt":"t"}"#);
+                event.source = "transcript".into();
+                event.session = "s".into();
+                identities.push(raw::ImportIdentity {
+                    origin: origin("synthetic", &format!("t{n}")),
+                    session: super::session(&event.agent, "s"),
+                    ambiguous: None,
+                    unverified: false,
+                });
+                events.push(crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                });
+            }
+            raw.append_imported_origins(&events, &identities, "", None)
+                .unwrap();
+        };
+        copies(&mut raw, 0..MAX_RECORDS - 1);
+        let p = raw.forget_preview(record(&raw, l)).unwrap();
+        assert_eq!((p.records.len(), p.copies.len()), (1, MAX_RECORDS - 1));
+        copies(&mut raw, MAX_RECORDS - 1..MAX_RECORDS);
+        let err = raw.forget_preview(record(&raw, l)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("their copies counted"),
+            "{err:#}"
+        );
+    }
+
     /// Slice 3a: a copy is taken whichever device's it is in this store: a copied raw.db records
     /// its later records under another device, and its earlier imports keep the first.
     #[test]
