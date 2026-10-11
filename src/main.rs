@@ -100,7 +100,8 @@ enum Cmd {
         /// Raw id from search: <device>:<seq>
         #[arg(long, conflicts_with_all = ["span", "status"])]
         record: Option<String>,
-        /// This device's raw span: <device>:<from>-<to> (at most 500 records)
+        /// This device's raw span: <device>:<from>-<to> (at most 500 records, with the records of
+        /// their sessions from other sources, which may hold copies of them)
         #[arg(long, conflicts_with_all = ["record", "status"])]
         span: Option<String>,
         /// A claim's uid, or an imported document's, from search or get

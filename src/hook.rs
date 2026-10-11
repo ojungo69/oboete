@@ -2144,6 +2144,13 @@ fn adapt(
     {
         let (session, _, _) = crate::capture::checkout(&p, settings);
         let session = own_session(session, raw);
+        // Milestone 5 slice 3a: the recovery records the turns the transcript holds and raw does
+        // not, and a forgotten prompt is no longer held, so a session with a forget recovers none
+        // (as a transcript import of it is refused). A read that fails recovers none either; the
+        // SessionEnd itself is still recorded.
+        if raw.session_forgotten(agent, &session).unwrap_or(true) {
+            return Ok(vec![(event.into(), p)]);
+        }
         let counts = raw.prompt_counts(agent, &session)?;
         let mut nth = std::collections::HashMap::new();
         let mut events = Vec::new();
@@ -6222,6 +6229,64 @@ mod tests {
             stored.iter().filter(|(kind, _)| kind == "prompt").count(),
             4
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Milestone 5 slice 3a: a Cursor session with a forget recovers no turn at its SessionEnd: a
+    /// forgotten prompt is no longer held, and recovering it would record it again.
+    #[test]
+    fn a_cursor_session_with_a_forget_recovers_no_turn() {
+        let dir = tmp("cursor-forget");
+        let payloads = cursor_fixture(&dir);
+        let transcript = dir.join("transcript.jsonl");
+        let lines = [
+            json!({"role":"user","message":{"content":[{"type":"text","text":"Read hello.txt and explain the result."}]}}),
+            json!({"role":"assistant","message":{"content":[{"type":"text","text":"Seen."}]}}),
+            json!({"role":"user","message":{"content":[{"type":"text","text":"Say hi."}]}}),
+        ];
+        let body: Vec<String> = lines.iter().map(Value::to_string).collect();
+        std::fs::write(&transcript, body.join("\n") + "\n").unwrap();
+        assert_eq!(
+            hook(
+                &dir,
+                "cursor",
+                "UserPromptSubmit",
+                &payloads["UserPromptSubmit"]
+            ),
+            "{}"
+        );
+        let prompts = || -> i64 {
+            rusqlite::Connection::open(dir.join("raw.db"))
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM records WHERE type = 'event' AND kind = 'prompt'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let raw = crate::raw::open(&dir).unwrap();
+        let seq: i64 = rusqlite::Connection::open(dir.join("raw.db"))
+            .unwrap()
+            .query_row("SELECT seq FROM records WHERE kind = 'prompt'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let target = crate::forget::Target::Record {
+            device: raw.device().into(),
+            seq,
+        };
+        crate::forget::start(&dir, &crate::forget::preview(&dir, target).unwrap()).unwrap();
+        drop(raw);
+        let mut end = payloads["SessionEnd"].clone();
+        end["transcript_path"] = json!(transcript);
+        assert_eq!(hook(&dir, "cursor", "SessionEnd", &end), "{}");
+        let kinds: Vec<String> = recorded(&dir, "cursor", "cursor-session")
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(kinds, ["end"]);
+        assert_eq!(prompts(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

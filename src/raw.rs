@@ -95,7 +95,9 @@ CREATE TABLE IF NOT EXISTS denied_records(
   origin TEXT PRIMARY KEY, device TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER,
   session TEXT NOT NULL, job TEXT NOT NULL
 );
--- An imported record's native identity, hashed (forget::origin): no original id or text.
+-- A record's identity, hashed: an import's native one as its importer kept it (forget::origin), and
+-- a forgotten live record's from its device, seq and time (forget::live_origin, M5 slice 3a). No
+-- original id or text.
 CREATE TABLE IF NOT EXISTS import_origins(
   device TEXT NOT NULL, seq INTEGER NOT NULL, origin TEXT NOT NULL, native_session TEXT,
   ambiguous INTEGER NOT NULL DEFAULT 1,
@@ -106,6 +108,10 @@ CREATE INDEX IF NOT EXISTS import_origins_origin ON import_origins(origin);
 CREATE TABLE IF NOT EXISTS forget_jobs(
   id TEXT PRIMARY KEY, request TEXT NOT NULL, started INTEGER NOT NULL, step INTEGER NOT NULL
 );
+-- docs/unwritten.md U3 (#454): each kept file written back, by its content's hash, in the
+-- transaction that wrote its events: a file a call left behind after that commit is removed, never
+-- written again. Not a name: they start again from 0 once the directory is empty.
+CREATE TABLE IF NOT EXISTS unwritten_written(hash TEXT PRIMARY KEY, at INTEGER NOT NULL);
 ";
 
 /// Only a fresh schema needs an identity. The replacements are OS-random hex and the native
@@ -495,6 +501,42 @@ pub struct ImportIdentity {
     pub ambiguous: Option<String>,
     /// The parsed import namespace has no verified native session.
     pub unverified: bool,
+}
+
+/// Which source wrote a record, for the copies a forget takes with it (slice 3a): no record-level
+/// identity is shared between them, so a record's copies may be in its session's records of another.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Family {
+    Live,
+    Transcript,
+    V1,
+}
+
+impl Family {
+    fn of(source: &str) -> Option<Self> {
+        match source {
+            "transcript" => Some(Self::Transcript),
+            "oboete-v1" => Some(Self::V1),
+            s if is_live(s) => Some(Self::Live),
+            _ => None,
+        }
+    }
+}
+
+/// A record as forget names it (D1 rule 5, slice 3a): its identity, its session's hash when its
+/// labels prove it, its source, whether an import's identity is ambiguous, its time when the
+/// transcript cut counts it (rule 10), and its first characters for the preview's sample.
+struct Named {
+    device: String,
+    seq: i64,
+    origin: String,
+    session: Option<String>,
+    family: Family,
+    agent: Option<String>,
+    ambiguous: bool,
+    ts: Option<i64>,
+    source: String,
+    sample: Option<String>,
 }
 
 pub struct Raw {
@@ -1275,24 +1317,27 @@ impl Raw {
         Ok(())
     }
 
-    /// What forget would register for `target` (D1): each imported record's origin, session hash
-    /// and cut time, read on this connection, so `forget_start` reads it again inside its
-    /// transaction. A record with no import origin is refused: it cannot be told from a record
-    /// that reuses its seq (slice 3a gives live records one).
+    /// What forget would register for `target` (D1): each record's identity (an import's origin,
+    /// or a live record's computed from where and when it was recorded, slice 3a), session hash and
+    /// cut time, and the records of the same sessions from another source, which may hold copies of
+    /// them (no record-level identity is shared between sources). Read on this connection, so
+    /// `forget_start` reads it again inside its transaction.
     pub(crate) fn forget_preview(
         &self,
         target: crate::forget::Target,
     ) -> Result<crate::forget::Preview> {
         let (device, from, to) = target.bounds()?;
+        let device = device.to_owned();
+        let device = device.as_str();
         anyhow::ensure!(
             device == self.device,
-            "this first forget slice accepts only this device's raw records"
+            "this forget slice accepts only this device's raw records"
         );
         anyhow::ensure!(
             self.home_id_proven()?,
-            "this store has no verified home identity: first-slice forget was not registered"
+            "this store has no verified home identity: forget was not registered"
         );
-        let (mut records, mut sources, mut sample) = (Vec::new(), Vec::<String>::new(), None);
+        let (mut picked, mut passed) = (Vec::<Named>::new(), 0);
         let mut at = from - 1;
         while at < to {
             let take = usize::try_from(to - at)
@@ -1306,94 +1351,352 @@ impl Raw {
                 if !matches!(r.item, Item::Event(_) | Item::Removed) {
                     continue;
                 }
-                let identity = self.origin_of(device, r.seq)?;
-                let (origin, session, ambiguous) = identity.with_context(|| {
-                    format!(
-                        "record {device}:{} has no import identity: this slice forgets imported \
-                         records only; nothing was registered",
-                        r.seq
-                    )
-                })?;
-                if denied(&self.conn, Some(&origin), "")? {
-                    continue;
+                match self.named(device, &r)? {
+                    Some(n) if !denied(&self.conn, Some(&n.origin), "")? => picked.push(n),
+                    Some(_) => {}
+                    None => passed += 1,
                 }
                 anyhow::ensure!(
-                    !ambiguous,
-                    "record {device}:{} has an ambiguous or unverified import identity: nothing was registered",
-                    r.seq
-                );
-                let session = session.with_context(|| {
-                    format!(
-                        "record {device}:{} has no native session identity: nothing was registered",
-                        r.seq
-                    )
-                })?;
-                let (source, kind, ts) = match r.item {
-                    Item::Event(e) => {
-                        if sample.is_none() {
-                            sample = Some(e.body.chars().take(120).collect());
-                        }
-                        (e.source, e.kind, e.ts)
-                    }
-                    Item::Removed => self
-                        .original_import_metadata(device, r.seq)?
-                        .with_context(|| format!("record {device}:{} has no original import metadata: nothing was registered", r.seq))?,
-                    _ => continue,
-                };
-                anyhow::ensure!(
-                    source != "oboete-v1",
-                    "record {device}:{} has no verified cross-source event identity: first-slice v1 forget was not registered; nothing was registered",
-                    r.seq
-                );
-                if !sources.contains(&source) {
-                    sources.push(source.clone());
-                }
-                records.push(crate::forget::Record {
-                    device: device.into(),
-                    seq: r.seq,
-                    origin,
-                    session,
-                    // Rule 10: only a record the transcript cut counts keeps its time.
-                    ts: (source != "transcript" && kind != "touch").then_some(ts),
-                });
-                anyhow::ensure!(
-                    records.len() <= crate::forget::MAX_RECORDS,
+                    picked.len() <= crate::forget::MAX_RECORDS,
                     "split this selection into spans of at most {} records",
                     crate::forget::MAX_RECORDS
                 );
             }
             at = last;
         }
-        if !records.is_empty() {
-            // Native records without provenance cannot be proved to belong to another
-            // namespace. Never infer identity from a redacted live session label.
-            let placeholders = vec!["?"; records.len()].join(",");
-            let sql = format!(
-                "SELECT EXISTS(SELECT 1 FROM records r LEFT JOIN import_origins o
-                   ON o.device=r.device AND o.seq=r.seq
-                 WHERE r.type IN ('event','removed')
-                   AND (r.source IS NULL OR r.source <> 'transcript')
-                   AND COALESCE(r.kind,'') <> 'touch'
-                   AND (o.native_session IS NULL OR o.native_session IN ({placeholders})))"
-            );
-            let unverified: bool = self.conn.query_row(
-                &sql,
-                rusqlite::params_from_iter(records.iter().map(|r| &r.session)),
-                |r| r.get(0),
-            )?;
-            anyhow::ensure!(
-                !unverified,
-                "this selection may have unverified native copies: first-slice forget was not registered; nothing was registered"
-            );
+        let copies = self.copies(&picked)?;
+        self.check_named(device, &picked, &copies)?;
+        let mut sources = Vec::<String>::new();
+        for n in picked.iter().chain(&copies) {
+            if !sources.contains(&n.source) {
+                sources.push(n.source.clone());
+            }
         }
+        let record = |n: &Named| crate::forget::Record {
+            device: n.device.clone(),
+            seq: n.seq,
+            origin: n.origin.clone(),
+            session: n.session.clone().unwrap_or_default(),
+            ts: n.ts,
+        };
         Ok(crate::forget::Preview {
             target,
-            records,
+            sample: picked.iter().find_map(|n| n.sample.clone()),
+            records: picked.iter().map(record).collect(),
+            copies: copies.iter().map(record).collect(),
+            passed,
             denied: self.denied_count()?,
             sources,
-            sample,
             uid: None,
         })
+    }
+
+    /// The record at `device`:`seq` as forget names it: an import's identity as its importer kept
+    /// it, or a live record's computed (slice 3a); none for a record with neither text nor an
+    /// identity (restored without its body, and with no metadata or labels to name it by).
+    fn named(&self, device: &str, r: &Record) -> Result<Option<Named>> {
+        use rusqlite::OptionalExtension;
+        let seq = r.seq;
+        let sample = match &r.item {
+            Item::Event(e) => Some(e.body.chars().take(120).collect()),
+            _ => None,
+        };
+        if let Some((origin, session, ambiguous)) = self.origin_of(device, seq)? {
+            let (source, kind, ts) = match &r.item {
+                Item::Event(e) => (e.source.clone(), e.kind.clone(), e.ts),
+                _ => self.original_metadata(device, seq)?.with_context(|| {
+                    format!(
+                        "record {device}:{seq} has no original import metadata: nothing was registered"
+                    )
+                })?,
+            };
+            let family = Family::of(&source).with_context(|| {
+                format!("record {device}:{seq} has an unknown source: nothing was registered")
+            })?;
+            let session = session.with_context(|| {
+                format!(
+                    "record {device}:{seq} has no native session identity: nothing was registered"
+                )
+            })?;
+            let agent = self
+                .conn
+                .query_row(
+                    "SELECT agent FROM records WHERE device = ?1 AND seq = ?2",
+                    params![device, seq],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            return Ok(Some(Named {
+                device: device.into(),
+                seq,
+                // Rule 10: only a record the transcript cut counts keeps its time.
+                ts: (family != Family::Transcript && kind != "touch").then_some(ts),
+                origin,
+                session: Some(session),
+                family,
+                agent,
+                ambiguous,
+                source,
+                sample,
+            }));
+        }
+        let row = self
+            .conn
+            .query_row(
+                "SELECT type, ts, source, agent, session FROM records WHERE device = ?1 AND seq = ?2",
+                params![device, seq],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((kind, ts, source, agent, label)) = row else {
+            return Ok(None);
+        };
+        match (kind.as_str(), is_live(&source), agent, label) {
+            ("event", true, Some(agent), Some(label)) => Ok(Some(Named {
+                device: device.into(),
+                seq,
+                origin: crate::forget::live_origin(device, seq, ts),
+                session: self.verified_session(device, seq, &agent, &label)?,
+                family: Family::Live,
+                agent: Some(agent),
+                ambiguous: false,
+                ts: Some(ts),
+                source,
+                sample,
+            })),
+            ("event", ..) => anyhow::bail!(
+                "record {device}:{seq} has no import identity: nothing was registered"
+            ),
+            // A live record restored without its body keeps no labels; a legacy stub, no metadata.
+            _ => Ok(None),
+        }
+    }
+
+    /// The indexes slice 3a's copies are read through. Unindexed, finding a session's live records
+    /// reads every record (2.9 s for 325,577 on an evaluation home of 2.3 GB), and a start reads
+    /// them again under raw's write lock, past a hook's 2 s store wait. Made by a forget's first
+    /// preview, outside that transaction; never by `open` or a hook.
+    pub(crate) fn session_indexes(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS records_sessions ON records(agent, session, source)
+               WHERE type = 'event';
+             CREATE INDEX IF NOT EXISTS import_origins_session ON import_origins(native_session);",
+        )?;
+        Ok(())
+    }
+
+    /// A live record's session hash, when its label is the agent's own id (D2 keeps a masked live
+    /// label from being matched): neither `unknown` (an event with no id is named for its device,
+    /// `hook::own_session`) nor masked by the gate (a ledger row for it).
+    fn verified_session(
+        &self,
+        device: &str,
+        seq: i64,
+        agent: &str,
+        label: &str,
+    ) -> Result<Option<String>> {
+        if label == "unknown" || label.starts_with("unknown-") {
+            return Ok(None);
+        }
+        let masked: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ledger WHERE device = ?1 AND seq = ?2 AND field = 'session')",
+            params![device, seq],
+            |r| r.get(0),
+        )?;
+        Ok((!masked).then(|| crate::forget::session(agent, label)))
+    }
+
+    /// Slice 3a: the records that may hold a copy of `picked`'s: the records with text of the same
+    /// sessions from another source, whichever device's in this store (a copied raw.db records its
+    /// later ones under another). One source picked in a session takes its other two; two or more
+    /// take every source's.
+    fn copies(&self, picked: &[Named]) -> Result<Vec<Named>> {
+        let mut families =
+            std::collections::HashMap::<&str, std::collections::HashSet<Family>>::new();
+        for n in picked {
+            if let Some(session) = &n.session {
+                families.entry(session).or_default().insert(n.family);
+            }
+        }
+        let chosen: std::collections::HashSet<(&str, i64)> =
+            picked.iter().map(|n| (n.device.as_str(), n.seq)).collect();
+        let takes = |session: &str, family: Family| {
+            families
+                .get(session)
+                .is_some_and(|f| f.len() > 1 || !f.contains(&family))
+        };
+        let mut out = Vec::new();
+        // Imported records, by the session their importer hashed: a rescan's tombstone hides one but
+        // leaves its text, which a restored Removed row no longer has.
+        let mut st = self.conn.prepare(
+            "SELECT o.device, o.seq, o.origin, o.ambiguous, r.source, r.kind, r.ts, r.agent
+             FROM import_origins o JOIN records r ON r.device = o.device AND r.seq = o.seq
+             WHERE o.native_session = ?1 AND r.type = 'event'",
+        )?;
+        for &session in families.keys() {
+            let rows = st.query_map([session], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, bool>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                ))
+            })?;
+            for row in rows {
+                let (device, seq, origin, ambiguous, source, kind, ts, agent) = row?;
+                let Some(family) = Family::of(&source) else {
+                    continue;
+                };
+                if chosen.contains(&(device.as_str(), seq))
+                    || kind == "touch"
+                    || !takes(session, family)
+                    || denied(&self.conn, Some(&origin), "")?
+                {
+                    continue;
+                }
+                out.push(Named {
+                    device,
+                    seq,
+                    ts: (family != Family::Transcript).then_some(ts),
+                    origin,
+                    session: Some(session.to_owned()),
+                    family,
+                    agent,
+                    ambiguous,
+                    source,
+                    sample: None,
+                });
+            }
+        }
+        // Live records, by their labels' hash: a label equal to the agent's own id is unmasked.
+        // Both reads go through `records_sessions` (`session_indexes`).
+        let live = LIVE.map(|s| format!("'{s}'")).join(",");
+        let labels: Vec<(String, String)> = self
+            .conn
+            .prepare(&format!(
+                "SELECT DISTINCT agent, session FROM records WHERE type = 'event'
+                   AND source IN ({live}) AND agent IS NOT NULL AND session IS NOT NULL"
+            ))?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut st = self.conn.prepare(&format!(
+            "SELECT device, seq, ts, source FROM records WHERE type = 'event' AND agent = ?1
+               AND session = ?2 AND source IN ({live})"
+        ))?;
+        for (agent, label) in labels {
+            let session = crate::forget::session(&agent, &label);
+            if !takes(&session, Family::Live) || label == "unknown" || label.starts_with("unknown-")
+            {
+                continue;
+            }
+            let rows = st.query_map(params![agent, label], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (device, seq, ts, source) = row?;
+                let origin = crate::forget::live_origin(&device, seq, ts);
+                if chosen.contains(&(device.as_str(), seq))
+                    || denied(&self.conn, Some(&origin), "")?
+                {
+                    continue;
+                }
+                out.push(Named {
+                    device,
+                    seq,
+                    origin,
+                    session: Some(session.clone()),
+                    family: Family::Live,
+                    agent: Some(agent.clone()),
+                    ambiguous: false,
+                    ts: Some(ts),
+                    source,
+                    sample: None,
+                });
+            }
+        }
+        out.sort_by(|a, b| (&a.device, a.seq).cmp(&(&b.device, b.seq)));
+        Ok(out)
+    }
+
+    /// What slice 3a still refuses before anything is registered: a picked record whose copies
+    /// cannot be found (a live record whose session is not its agent's own id, or an import while
+    /// such a live record of its agent exists), and an ambiguous import identity in a session no
+    /// live or v1 record of the request closes to every later transcript batch
+    /// (`check_cross_source_forget`).
+    fn check_named(&self, device: &str, picked: &[Named], copies: &[Named]) -> Result<()> {
+        for n in picked {
+            anyhow::ensure!(
+                n.session.is_some(),
+                "record {device}:{} names no session of its agent's own (masked, or none sent): \
+                 the copies another source may hold cannot be found; nothing was registered",
+                n.seq
+            );
+        }
+        let all: Vec<&Named> = picked.iter().chain(copies).collect();
+        let live = LIVE.map(|s| format!("'{s}'")).join(",");
+        // Named for its device (`hook::own_session`), through `records_sessions`; or masked, from
+        // the ledger's few rows. Any device's: a copied store keeps the old device's records.
+        let unknown = |agent: Option<&str>| -> Result<bool> {
+            let (a, ra) = match agent {
+                Some(_) => ("AND agent = ?1", "AND r.agent = ?1"),
+                None => ("", ""),
+            };
+            let sql = format!(
+                "SELECT EXISTS(SELECT 1 FROM records WHERE type = 'event' {a}
+                   AND (session = 'unknown' OR (session >= 'unknown-' AND session < 'unknown.'))
+                   AND source IN ({live}))
+                 OR EXISTS(SELECT 1 FROM ledger l JOIN records r
+                   ON r.device = l.device AND r.seq = l.seq
+                   WHERE l.field = 'session' AND r.type = 'event' AND r.source IN ({live}) {ra})"
+            );
+            let mut st = self.conn.prepare_cached(&sql)?;
+            Ok(match agent {
+                Some(agent) => st.query_row([agent], |r| r.get(0))?,
+                None => st.query_row([], |r| r.get(0))?,
+            })
+        };
+        // Only a picked import's: a copy goes for the picked record it may copy, and its own copies
+        // elsewhere hold none of that record's text.
+        let mut asked = std::collections::HashSet::new();
+        for n in picked.iter().filter(|n| n.family != Family::Live) {
+            if asked.insert(n.agent.clone()) {
+                let found = unknown(n.agent.as_deref())?;
+                anyhow::ensure!(
+                    !found,
+                    "this selection may have unverified native copies: live records whose session \
+                     is not known may hold them; nothing was registered"
+                );
+            }
+        }
+        for n in all.iter().filter(|n| n.ambiguous) {
+            let closed = all
+                .iter()
+                .any(|o| o.family != Family::Transcript && o.session == n.session);
+            anyhow::ensure!(
+                closed,
+                "record {device}:{} has an ambiguous or unverified import identity: nothing was registered",
+                n.seq
+            );
+        }
+        Ok(())
     }
 
     /// Registers `preview` as job `job` in one raw write transaction (D1 rule 1): read again and
@@ -1428,12 +1731,16 @@ impl Raw {
         );
         let uid = matches!(preview.target, crate::forget::Target::Uid { .. });
         let request = crate::forget::Request {
-            v: if uid { 2 } else { 1 },
+            v: match (uid, preview.copies.is_empty()) {
+                (true, _) => 2,
+                (false, true) => 1,
+                (false, false) => 3,
+            },
             home: self.home_id.clone(),
             job: job.into(),
             started,
             target: preview.target.clone(),
-            records: preview.records.clone(),
+            records: [preview.records.as_slice(), &preview.copies].concat(),
         };
         request.check()?;
         apply_request(&tx, &self.device, &request)?;
@@ -1687,20 +1994,30 @@ impl Raw {
     }
 
     /// The events one hook call kept when its write failed (docs/unwritten.md U3), with their
-    /// ledger rows, in one transaction: all of them or none.
+    /// ledger rows and the kept file's `hash`, in one transaction: all of them or none. False, and
+    /// nothing appended, when that file was written back before (#454: a call stopped between
+    /// that commit and the file's removal left it behind).
     pub fn append_kept(
         &mut self,
         events: &[crate::capture::Captured],
         ruleset: &str,
-    ) -> Result<()> {
+        hash: &str,
+    ) -> Result<bool> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if tx.execute(
+            "INSERT OR IGNORE INTO unwritten_written(hash, at) VALUES(?1, ?2)",
+            params![hash, crate::db::now_ms()],
+        )? == 0
+        {
+            return Ok(false);
+        }
         for c in events {
             insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     /// Imported records (`oboete-v1`, `transcript`; D6) with their ledger rows and, when given,
@@ -2312,6 +2629,16 @@ impl Raw {
     /// Cursor's SessionEnd backfill counts stored prompt bodies by labels, never a session
     /// index (spec 1.6). Read through `after` so compressed and tombstoned records agree with
     /// every other reader; a copied home's earlier device counts too.
+    /// Milestone 5 slice 3a: whether a forget denied a record of `agent`'s `session`, by its
+    /// labels' hash.
+    pub fn session_forgotten(&self, agent: &str, session: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM denied_records WHERE session = ?1)",
+            [crate::forget::session(agent, session)],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn prompt_counts(
         &self,
         agent: &str,
@@ -2480,10 +2807,10 @@ impl Raw {
                 }
                 let mut v: serde_json::Value = serde_json::from_str(&line(r, rows))?;
                 // A rescan removes the body, not eligibility to deny its native origin. Keep
-                // only the original metadata the forget preview needs for its session cutoff.
+                // only the original metadata the forget preview needs for its session cutoff, and a
+                // live record's identity (its time, slice 3a).
                 if matches!(r.item, Item::Removed)
-                    && let Some((source, kind, ts)) =
-                        self.original_import_metadata(&r.device, r.seq)?
+                    && let Some((source, kind, ts)) = self.original_metadata(&r.device, r.seq)?
                 {
                     v["source"] = serde_json::json!(source);
                     v["kind"] = serde_json::json!(kind);
@@ -2521,19 +2848,17 @@ impl Raw {
         }
     }
 
-    /// An import's original metadata, without any body or labels. Older Removed stubs lack
-    /// kind; their restore timestamp and source must never be guessed into a transcript cut.
-    fn original_import_metadata(
-        &self,
-        device: &str,
-        seq: i64,
-    ) -> Result<Option<(String, String, i64)>> {
+    /// A record's original metadata, without any body or labels: an import's, and since slice 3a a
+    /// live record's too, whose identity its time is part of. Older Removed stubs lack kind; their
+    /// restore timestamp and source must never be guessed into a transcript cut.
+    fn original_metadata(&self, device: &str, seq: i64) -> Result<Option<(String, String, i64)>> {
         use rusqlite::OptionalExtension;
         Ok(self
             .conn
             .query_row(
                 "SELECT source, kind, ts FROM records WHERE device=?1 AND seq=?2
-             AND type IN ('event', 'removed') AND source IN ('oboete-v1', 'transcript')
+             AND type IN ('event', 'removed')
+             AND source IN ('oboete-v1', 'transcript', 'hook', 'replay')
              AND kind IS NOT NULL AND kind <> ''",
                 params![device, seq],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -3599,6 +3924,7 @@ pub(crate) fn apply_request(
     device: &str,
     r: &crate::forget::Request,
 ) -> Result<bool> {
+    use rusqlite::OptionalExtension;
     // D5: one forget op per uid, whichever request or log line brings it first.
     if let crate::forget::Target::Uid { uid } = &r.target
         && !forgotten_uid(conn, uid)?
@@ -3612,6 +3938,28 @@ pub(crate) fn apply_request(
              VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
             params![rec.origin, rec.device, rec.seq, rec.ts, rec.session, r.job],
         )?;
+        // Slice 3a: a live record's identity is computed from where and when it was recorded. The
+        // request names where; the record there is the one only when its time gives the same
+        // identity, and from then on its identity is kept as an import's is.
+        let live = LIVE.map(|s| format!("'{s}'")).join(",");
+        let ts: Option<i64> = conn
+            .query_row(
+                &format!(
+                    "SELECT ts FROM records WHERE device = ?1 AND seq = ?2
+                       AND type IN ('event', 'removed') AND source IN ({live})
+                       AND kind IS NOT NULL AND kind <> ''"
+                ),
+                params![rec.device, rec.seq],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if ts.is_some_and(|ts| crate::forget::live_origin(&rec.device, rec.seq, ts) == rec.origin) {
+            conn.execute(
+                "INSERT OR IGNORE INTO import_origins(device, seq, origin, native_session, ambiguous)
+                 VALUES(?1, ?2, ?3, ?4, 0)",
+                params![rec.device, rec.seq, rec.origin, rec.session],
+            )?;
+        }
         let targets: Vec<(String, i64)> = conn
             .prepare(
                 "SELECT o.device, o.seq FROM import_origins o

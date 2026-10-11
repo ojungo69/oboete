@@ -47,12 +47,7 @@ impl Target {
             Self::Span { device, from, to } => (device.as_str(), *from, *to),
             Self::Uid { .. } => anyhow::bail!("a uid names no record span"),
         };
-        anyhow::ensure!(
-            !device.is_empty()
-                && device.len() <= 128
-                && device.bytes().all(|b| b.is_ascii_alphanumeric()),
-            "invalid device identity"
-        );
+        anyhow::ensure!(device_like(device), "invalid device identity");
         anyhow::ensure!(
             from > 0 && to >= from && to < i64::MAX,
             "invalid record span"
@@ -106,6 +101,11 @@ impl Target {
     }
 }
 
+/// A device's id as a target and a request name it: ASCII letters and digits, bounded.
+fn device_like(device: &str) -> bool {
+    !device.is_empty() && device.len() <= 128 && device.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
 /// A uid as a request carries it (D5): a claim's (64 hex digits) or an imported document's
 /// (`<source>:<key>`), printable ASCII with no space, bounded.
 pub(crate) fn well_formed(uid: &str) -> Result<()> {
@@ -154,6 +154,12 @@ pub(crate) struct Record {
 pub struct Preview {
     pub(crate) target: Target,
     pub(crate) records: Vec<Record>,
+    /// Slice 3a: the records of the same sessions from another source, which may hold a copy of
+    /// the target's: forgotten with it.
+    pub(crate) copies: Vec<Record>,
+    /// The target's records with neither text nor an identity, passed over: a restore kept no
+    /// body of them, nor the labels their session would be read from.
+    pub passed: usize,
     /// How many deny rows raw held when it was read: the fence's count (rule 12).
     pub(crate) denied: i64,
     /// The sources of the records, for the limits forget prints.
@@ -168,7 +174,7 @@ impl Preview {
         if let Target::Uid { uid } = &self.target {
             well_formed(uid)?;
             anyhow::ensure!(
-                self.records.is_empty() && self.uid.is_some(),
+                self.records.is_empty() && self.copies.is_empty() && self.uid.is_some(),
                 "forget selection differs from its preview"
             );
             return Ok(());
@@ -179,14 +185,17 @@ impl Preview {
             "no raw records matched; nothing was registered"
         );
         anyhow::ensure!(
-            self.records.len() <= MAX_RECORDS,
-            "split this selection into spans of at most {MAX_RECORDS} records"
+            self.records.len() + self.copies.len() <= MAX_RECORDS,
+            "split this selection into spans of at most {MAX_RECORDS} records, their copies counted"
         );
         for r in &self.records {
             anyhow::ensure!(
                 r.device == device && (from..=to).contains(&r.seq),
                 "forget selection differs from its preview"
             );
+        }
+        for r in self.records.iter().chain(&self.copies) {
+            anyhow::ensure!(device_like(&r.device), "invalid device identity");
             check_identity(&r.origin)?;
             check_identity(&r.session)?;
         }
@@ -197,11 +206,17 @@ impl Preview {
         self.records.len()
     }
 
+    /// Slice 3a: how many records of other sources it takes as copies.
+    pub fn copies(&self) -> usize {
+        self.copies.len()
+    }
+
     /// The same records, under the same deny-list: a start that reads another is stale.
     pub(crate) fn token(&self) -> Result<String> {
         Ok(hash(&serde_json::to_vec(&(
             &self.target,
             &self.records,
+            &self.copies,
             self.denied,
         ))?))
     }
@@ -253,24 +268,28 @@ impl Request {
             self.job.len() == 32 && self.job.bytes().all(|b| b.is_ascii_hexdigit()),
             "invalid job id"
         );
-        // Version 2 is a uid's (D5); an older binary skips its line as of an unknown version.
-        match (&self.target, self.v) {
+        // Version 2 is a uid's (D5), version 3 a span's with the copies of other sources outside it
+        // (slice 3a); an older binary skips its line as of an unknown version.
+        let copies = match (&self.target, self.v) {
             (Target::Uid { uid }, 2) => {
                 well_formed(uid)?;
                 anyhow::ensure!(self.records.is_empty(), "invalid record count");
                 return Ok(());
             }
-            (Target::Record { .. } | Target::Span { .. }, 1) => {}
+            (Target::Record { .. } | Target::Span { .. }, 1) => false,
+            (Target::Record { .. } | Target::Span { .. }, 3) => true,
             _ => anyhow::bail!("unknown request version {}", self.v),
-        }
+        };
         let (device, from, to) = self.target.bounds()?;
         anyhow::ensure!(
             !self.records.is_empty() && self.records.len() <= MAX_RECORDS,
             "invalid record count"
         );
         for r in &self.records {
+            // Version 3's copies are of any device whose records this store holds.
             anyhow::ensure!(
-                r.device == device && (from..=to).contains(&r.seq),
+                device_like(&r.device)
+                    && (copies || (r.device == device && (from..=to).contains(&r.seq))),
                 "a record outside its target"
             );
             check_identity(&r.origin)?;
@@ -333,7 +352,10 @@ pub fn preview(home: &Path, target: Target) -> Result<Preview> {
     }
     match target {
         Target::Uid { uid } => uid_preview(home, &raw, uid),
-        target => raw.forget_preview(target),
+        target => {
+            raw.session_indexes()?;
+            raw.forget_preview(target)
+        }
     }
 }
 
@@ -475,6 +497,8 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
     Ok(Preview {
         target: Target::Uid { uid },
         records: Vec::new(),
+        copies: Vec::new(),
+        passed: 0,
         denied: raw.denied_count()?,
         sources: Vec::new(),
         sample: sample.map(|s| line(&s)),
@@ -1245,8 +1269,6 @@ fn limits(sources: &[String]) -> String {
          segments still hold its text, hidden again when they are restored.\n\
          A packet already handed to an agent and a curation call already sent are not taken \
          back.\n\
-         The request is logged without the text, by hashes; someone who holds a log or the \
-         backups can check a guess of the exact stored text against them.\n\
          If raw.db and both request logs are lost, the request is lost and the text can come \
          back from older backups.\n\
          After an older file replaces raw.db, SessionStart may show a forgotten record until \
@@ -1256,11 +1278,19 @@ fn limits(sources: &[String]) -> String {
          Restoring segments with no surviving request log recovers denials but not the \
          request's progress rows.\n",
     );
+    // Slice 3a: a live record's identity hashes where and when it was recorded, not its text.
+    if sources.iter().any(|s| !crate::raw::is_live(s)) {
+        out.push_str(
+            "The request is logged without the text, by hashes; for an imported record, someone \
+             who holds a log or the backups can check a guess of the exact stored text against \
+             them.\n",
+        );
+    }
     let mut outside: Vec<&str> = Vec::new();
     for s in sources {
         let what = match s.as_str() {
             "oboete-v1" => "the old oboete v1 store it was moved from",
-            "transcript" => "the agent's own transcript files",
+            "transcript" | "hook" | "replay" => "the agent's own transcript files",
             _ => "the place it was imported from",
         };
         if !outside.contains(&what) {
@@ -1312,6 +1342,19 @@ pub fn run(
     let p = preview(home, target)?;
     println!("Target: {}", serde_json::to_string(&p.target)?);
     println!("Raw records: {}", p.count());
+    if p.copies() > 0 {
+        println!(
+            "Records of the same sessions from another source, which may hold a copy of them \
+             (forgotten with them): {}",
+            p.copies()
+        );
+    }
+    if p.passed > 0 {
+        println!(
+            "Records with no text left and no identity, passed over: {}",
+            p.passed
+        );
+    }
     if let Some(sample) = &p.sample {
         println!("Sample: {}", crate::redact::outbound(sample));
     }
@@ -1465,6 +1508,12 @@ pub(crate) fn session(agent: &str, session: &str) -> String {
     origin(agent, session)
 }
 
+/// Slice 3a: a live record's identity, from where and when it was recorded and never its text: a
+/// seq that a raw.db put back from an older copy gives again holds a record of another time.
+pub(crate) fn live_origin(device: &str, seq: i64, ts: i64) -> String {
+    origin("live", &format!("{device}:{seq}:{ts}"))
+}
+
 pub(crate) fn check_identity(s: &str) -> Result<()> {
     anyhow::ensure!(
         s.strip_prefix("v1:")
@@ -1576,6 +1625,49 @@ mod tests {
         .first()
         .copied()
         .unwrap_or(0)
+    }
+
+    /// A hook's record of `body` at `ts` in `session` (slice 3a).
+    fn live(raw: &mut raw::Raw, session: &str, ts: i64, body: &str) -> i64 {
+        let mut event = raw::test_event(body);
+        event.session = session.into();
+        event.ts = ts;
+        raw.append(&event).unwrap()
+    }
+
+    /// A record of `source` (`transcript` or `oboete-v1`) and origin `id` in `session`, as its
+    /// importer appends it; `ambiguous` as a repeated transcript event is.
+    fn imported(
+        raw: &mut raw::Raw,
+        source: &str,
+        session: &str,
+        id: &str,
+        ambiguous: bool,
+        body: &str,
+    ) -> i64 {
+        let mut event = raw::test_event(body);
+        event.source = source.into();
+        event.session = session.into();
+        let identity = raw::ImportIdentity {
+            origin: origin("synthetic", id),
+            session: super::session(&event.agent, session),
+            ambiguous: ambiguous.then(|| origin("synthetic", &format!("{id}:0"))),
+            unverified: false,
+        };
+        raw.append_imported_origins(
+            &[crate::capture::Captured {
+                event,
+                ledger: Vec::new(),
+            }],
+            &[identity],
+            "",
+            None,
+        )
+        .unwrap()[0]
+    }
+
+    fn seqs(records: &[Record]) -> Vec<i64> {
+        records.iter().map(|r| r.seq).collect()
     }
 
     fn record(raw: &raw::Raw, seq: i64) -> Target {
@@ -3492,8 +3584,7 @@ mod tests {
     /// op.
     #[test]
     fn a_forgotten_uid_survives_a_lost_raw_db() {
-        // Imported records and documents only: a record's forget refuses a home with hook records
-        // (D2).
+        // Imported records and documents only.
         let mut s = crate::search::b::fixture::Store::new();
         let seq = native(&mut s.raw, "a", r#"{"prompt":"a synthetic canary"}"#);
         let uid = s.imported(
@@ -3784,6 +3875,302 @@ mod tests {
         assert!(!shown(&other, moved));
         // Applied once.
         assert_eq!(other.forget_apply(&[request]).unwrap(), 0);
+    }
+
+    /// Slice 3a: a live record is forgotten by where and when it was recorded, never its text; a
+    /// seq that a store put back from an older copy gives again holds a later record, which stays.
+    #[test]
+    fn a_live_record_is_forgotten_by_where_and_when_it_was_recorded() {
+        const CANARY: &str = "live-forget-canary-5121";
+        let first = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(first.path()).unwrap();
+        let body = format!(r#"{{"prompt":"{CANARY}"}}"#);
+        let seq = live(&mut raw, "s", 1_000, &body);
+        let p = raw.forget_preview(record(&raw, seq)).unwrap();
+        assert_eq!((p.count(), p.copies(), p.passed), (1, 0, 0));
+        start(first.path(), &p).unwrap();
+        assert!(!shown(&raw, seq));
+        let request = raw.forget_requests().unwrap().remove(0);
+        assert_eq!(request.v, 1);
+        assert_eq!(
+            request.records[0].origin,
+            live_origin(raw.device(), seq, 1_000)
+        );
+        let log = std::fs::read_to_string(first.path().join(LOG)).unwrap();
+        assert!(!log.contains(CANARY), "{log}");
+        // Its session's transcript is not imported again: the denial counts toward the cut.
+        let e = raw.transcript_cut("claude", "s", None).unwrap_err();
+        assert!(e.to_string().contains("not imported"), "{e:#}");
+        assert!(raw.transcript_cut("claude", "other", None).is_ok());
+        let other = |name: &str, ts: i64, text: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            for f in ["raw.db", "raw.db-wal"] {
+                if first.path().join(f).exists() {
+                    std::fs::copy(first.path().join(f), dir.path().join(f)).unwrap();
+                }
+            }
+            let conn = rusqlite::Connection::open(dir.path().join("raw.db")).unwrap();
+            conn.execute_batch(
+                "DELETE FROM records; DELETE FROM import_origins; DELETE FROM denied_records;
+                 DELETE FROM forget_jobs;",
+            )
+            .unwrap();
+            // The same device's older copy put back in place: its file keeps the device id.
+            conn.execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'store_file'",
+                [crate::db::store_file(&dir.path().join("raw.db"))],
+            )
+            .unwrap();
+            drop(conn);
+            let mut store = raw::open(dir.path()).unwrap();
+            assert_eq!(store.device(), raw.device(), "{name}");
+            assert_eq!(live(&mut store, "s", ts, text), seq, "{name}");
+            assert_eq!(
+                store.forget_apply(std::slice::from_ref(&request)).unwrap(),
+                1
+            );
+            (dir, shown(&store, seq))
+        };
+        // A later record at the same seq stays; the record itself, put back at its seq, goes.
+        assert!(other("reused", 2_000, r#"{"prompt":"took the seq"}"#).1);
+        assert!(!other("restored", 1_000, &body).1);
+    }
+
+    /// Slice 3a: a live record hidden by a rescan before its first backup is backed up without
+    /// its body but with its time, so once raw.db is lost the request the logs hold still names
+    /// it, and its identity is kept again for every later backup to carry.
+    #[test]
+    fn a_live_record_backed_up_without_its_body_is_named_again_after_a_restore() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut raw = raw::open(h).unwrap();
+        let seq = live(&mut raw, "s", 7_000, r#"{"prompt":"rescanned away"}"#);
+        let device = raw.device().to_owned();
+        raw.append_tombstone(raw::Target::Record {
+            device: device.clone(),
+            seq,
+        })
+        .unwrap();
+        crate::backup::export(h).unwrap();
+        start(h, &raw.forget_preview(record(&raw, seq)).unwrap()).unwrap();
+        drop(raw);
+        std::fs::write(h.join("raw.db"), b"not a database at all").unwrap();
+        for f in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(h.join(f));
+        }
+        let raw = crate::backup::open_raw(h).unwrap();
+        assert_eq!(raw.forget_requests().unwrap().len(), 1);
+        let kept: String = rusqlite::Connection::open(h.join("raw.db"))
+            .unwrap()
+            .query_row(
+                "SELECT origin FROM import_origins WHERE device = ?1 AND seq = ?2",
+                rusqlite::params![device, seq],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, live_origin(&device, seq, 7_000));
+    }
+
+    /// Slice 3a: a record's copies are the records of its session from another source, which
+    /// share no record-level identity with it; two sources picked in a session take every record
+    /// of it. Another session, and the same source's other records, stay.
+    #[test]
+    fn a_records_copies_are_its_sessions_records_from_another_source() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let t1 = imported(
+            &mut raw,
+            "transcript",
+            "s",
+            "t1",
+            false,
+            r#"{"prompt":"one"}"#,
+        );
+        let t2 = imported(
+            &mut raw,
+            "transcript",
+            "s",
+            "t2",
+            false,
+            r#"{"prompt":"two"}"#,
+        );
+        let elsewhere = imported(
+            &mut raw,
+            "transcript",
+            "s2",
+            "t3",
+            false,
+            r#"{"prompt":"x"}"#,
+        );
+        let l1 = live(&mut raw, "s", 5_000, r#"{"prompt":"one"}"#);
+        let l2 = live(&mut raw, "s", 6_000, r#"{"prompt":"four"}"#);
+        let device = raw.device().to_owned();
+        assert_eq!(
+            seqs(&raw.forget_preview(record(&raw, l1)).unwrap().copies),
+            [t1, t2]
+        );
+        assert_eq!(
+            seqs(&raw.forget_preview(record(&raw, t1)).unwrap().copies),
+            [l1, l2]
+        );
+        let both = raw
+            .forget_preview(Target::Span {
+                device: device.clone(),
+                from: t2,
+                to: l1,
+            })
+            .unwrap();
+        assert_eq!(seqs(&both.records), [t2, elsewhere, l1]);
+        assert_eq!(seqs(&both.copies), [t1, l2]);
+        let p = raw.forget_preview(record(&raw, l1)).unwrap();
+        start(home.path(), &p).unwrap();
+        let request = raw.forget_requests().unwrap().remove(0);
+        assert_eq!((request.v, seqs(&request.records)), (3, vec![l1, t1, t2]));
+        for (seq, kept) in [
+            (l1, false),
+            (t1, false),
+            (t2, false),
+            (l2, true),
+            (elsewhere, true),
+        ] {
+            assert_eq!(shown(&raw, seq), kept, "{seq}");
+        }
+        // A v1 record takes its session's transcript and live records.
+        let v = imported(
+            &mut raw,
+            "oboete-v1",
+            "s3",
+            "v",
+            false,
+            r#"{"prompt":"v1"}"#,
+        );
+        let t = imported(
+            &mut raw,
+            "transcript",
+            "s3",
+            "t4",
+            false,
+            r#"{"prompt":"v1"}"#,
+        );
+        let l = live(&mut raw, "s3", 9_000, r#"{"prompt":"later"}"#);
+        assert_eq!(
+            seqs(&raw.forget_preview(record(&raw, v)).unwrap().copies),
+            [t, l]
+        );
+    }
+
+    /// Slice 3a: a copy is taken whichever device's it is in this store: a copied raw.db records
+    /// its later records under another device, and its earlier imports keep the first.
+    #[test]
+    fn a_copy_of_another_device_in_the_store_is_taken() {
+        let first = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(first.path()).unwrap();
+        let t = imported(
+            &mut raw,
+            "transcript",
+            "s",
+            "t",
+            false,
+            r#"{"prompt":"one"}"#,
+        );
+        let before = raw.device().to_owned();
+        drop(raw);
+        let second = tempfile::tempdir().unwrap();
+        for f in ["raw.db", "raw.db-wal"] {
+            if first.path().join(f).exists() {
+                std::fs::copy(first.path().join(f), second.path().join(f)).unwrap();
+            }
+        }
+        let mut raw = raw::open(second.path()).unwrap();
+        assert_ne!(raw.device(), before);
+        let l = live(&mut raw, "s", 5_000, r#"{"prompt":"one"}"#);
+        let p = raw.forget_preview(record(&raw, l)).unwrap();
+        let copies: Vec<(String, i64)> =
+            p.copies.iter().map(|r| (r.device.clone(), r.seq)).collect();
+        assert_eq!(copies, [(before.clone(), t)]);
+        start(second.path(), &p).unwrap();
+        let hidden = raw.after(&before, t - 1, 1).unwrap();
+        assert!(matches!(hidden[0].item, Item::Removed));
+        assert!(!shown(&raw, l));
+    }
+
+    /// Slice 3a: a live record whose session is not its agent's own id (none sent, or masked)
+    /// cannot have its copies found: it is refused, and so is an import of its agent while it is
+    /// there. Nothing is registered.
+    #[test]
+    fn a_live_record_of_no_known_session_is_refused_and_so_is_an_import_beside_it() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let t = imported(
+            &mut raw,
+            "transcript",
+            "s",
+            "t",
+            false,
+            r#"{"prompt":"one"}"#,
+        );
+        let idless = live(&mut raw, "unknown-d", 1_000, r#"{"prompt":"two"}"#);
+        let e = raw.forget_preview(record(&raw, idless)).unwrap_err();
+        assert!(e.to_string().contains("names no session"), "{e:#}");
+        let e = raw.forget_preview(record(&raw, t)).unwrap_err();
+        assert!(e.to_string().contains("unverified native copies"), "{e:#}");
+        // A live record of a known session takes that transcript record as its copy: the idless
+        // record may copy the transcript record, not the live one.
+        let known = live(&mut raw, "s", 2_000, r#"{"prompt":"three"}"#);
+        assert_eq!(
+            seqs(&raw.forget_preview(record(&raw, known)).unwrap().copies),
+            [t]
+        );
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let masked = live(&mut raw, "s-masked", 1_000, r#"{"prompt":"four"}"#);
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+                 VALUES(?1, ?2, 'session', 'r', 0, 1, 0, '')",
+                rusqlite::params![raw.device(), masked],
+            )
+            .unwrap();
+        let e = raw.forget_preview(record(&raw, masked)).unwrap_err();
+        assert!(e.to_string().contains("names no session"), "{e:#}");
+        assert!(raw.forget_requests().unwrap().is_empty());
+    }
+
+    /// Slice 3a: an ambiguous transcript identity may change on a later import, so alone it is
+    /// refused; beside a live or v1 record of its session, whose denial refuses every later
+    /// transcript batch of that session, it is forgotten with it.
+    #[test]
+    fn an_ambiguous_transcript_record_goes_only_with_a_live_or_v1_record_of_its_session() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let alone = imported(
+            &mut raw,
+            "transcript",
+            "a",
+            "x",
+            true,
+            r#"{"prompt":"yes"}"#,
+        );
+        let e = raw.forget_preview(record(&raw, alone)).unwrap_err();
+        assert!(e.to_string().contains("ambiguous"), "{e:#}");
+        let twin = imported(
+            &mut raw,
+            "transcript",
+            "s",
+            "y",
+            true,
+            r#"{"prompt":"yes"}"#,
+        );
+        let l = live(&mut raw, "s", 1_000, r#"{"prompt":"go"}"#);
+        assert_eq!(
+            seqs(&raw.forget_preview(record(&raw, l)).unwrap().copies),
+            [twin]
+        );
+        assert_eq!(
+            seqs(&raw.forget_preview(record(&raw, twin)).unwrap().copies),
+            [l]
+        );
     }
 
     /// Rule 12's count is in the preview: a forget between a preview and its start makes it

@@ -65,17 +65,23 @@ fn hook_record(home: &Path, body: &str) -> String {
         .to_owned()
 }
 
+/// Slice 3a: a hook's record is forgotten by where and when it was recorded; its request logs
+/// hold no text of it.
 #[test]
-fn a_record_without_an_import_identity_is_refused_before_registration() {
+fn a_hook_record_is_forgotten_by_where_and_when_it_was_recorded() {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
     let id = hook_record(home, CANARY);
-    let result = run(home, &["forget", "--record", &id, "--yes"], "");
-    assert!(!result.status.success(), "a hook record was accepted");
-    assert!(String::from_utf8_lossy(&result.stderr).contains("no import identity"));
-    assert!(ok(run(home, &["get", &id], "")).contains(CANARY));
-    assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
+    let out = ok(run(home, &["forget", "--record", &id, "--yes"], ""));
+    assert!(out.contains("Raw records: 1"), "{out}");
+    // Its identity hashes no text; the agent's own transcript holds a copy.
+    assert!(!out.contains("check a guess"), "{out}");
+    assert!(out.contains("the agent's own transcript files"), "{out}");
+    assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
+    assert!(ok(run(home, &["forget", "--status"], "")).contains("physical purge pending"));
+    let log = std::fs::read_to_string(home.join("forget.log")).unwrap();
+    assert!(!log.contains(CANARY), "{log}");
 }
 
 /// A pre-M5 copied store cannot prove its home lineage, even for a record the current
@@ -326,7 +332,7 @@ fn transcript_forget_blocks_cross_source_v1_migration_before_commit_or_checkpoin
 }
 
 #[test]
-fn a_transcript_with_a_same_session_v1_copy_cannot_register_a_cross_source_forget() {
+fn a_transcript_with_a_same_session_v1_copy_forgets_the_copy_too() {
     mixed_v1_copy_registration(false);
 }
 
@@ -346,23 +352,18 @@ fn mixed_v1_copy_registration(distinct: bool) {
         "native-session"
     };
     let transcript = mixed_transcript_record(home, sid, 100, CANARY);
-    let result = run(home, &["forget", "--record", &transcript, "--yes"], "");
-    if distinct {
-        ok(result);
-        assert!(
-            !String::from_utf8_lossy(&run(home, &["get", &transcript], "").stdout).contains(CANARY)
-        );
-    } else {
-        assert!(
-            !result.status.success(),
-            "mixed native copies were accepted: {result:?}"
-        );
-        assert!(String::from_utf8_lossy(&result.stderr).contains("unverified native copies"));
-        assert!(String::from_utf8_lossy(&result.stderr).contains("nothing was registered"));
-        assert!(ok(run(home, &["get", &transcript], "")).contains(CANARY));
-        assert_no_registration(home);
-    }
-    assert!(ok(run(home, &["get", &v1], "")).contains(CANARY));
+    let out = ok(run(home, &["forget", "--record", &transcript, "--yes"], ""));
+    let shown =
+        |id: &str| String::from_utf8_lossy(&run(home, &["get", id], "").stdout).contains(CANARY);
+    assert!(!shown(&transcript));
+    // Slice 3a: the same session's v1 record may hold a copy, and goes with it; another session's
+    // stays.
+    assert_eq!(
+        out.contains("Records of the same sessions from another source"),
+        !distinct,
+        "{out}"
+    );
+    assert_eq!(shown(&v1), distinct);
 }
 
 #[test]
@@ -395,17 +396,20 @@ fn a_transcript_with_a_masked_live_hook_copy_cannot_register_a_cross_source_forg
     assert!(ok(run(home, &["get", &transcript], "")).contains(CANARY));
 }
 
+/// Slice 3a: a v1 record is forgotten like any other; its copies are its session's records from
+/// another source (none here). Without `--yes` and a terminal, the preview is shown and nothing is
+/// registered.
 #[test]
-fn a_v1_record_without_cross_source_identity_is_refused_before_preview_and_registration() {
-    v1_registration_is_refused(false);
+fn a_v1_record_shows_its_preview_and_needs_a_confirmation() {
+    v1_registration(false);
 }
 
 #[test]
-fn a_v1_record_without_cross_source_identity_cannot_start_with_yes() {
-    v1_registration_is_refused(true);
+fn a_v1_record_is_forgotten_with_yes() {
+    v1_registration(true);
 }
 
-fn v1_registration_is_refused(yes: bool) {
+fn v1_registration(yes: bool) {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
@@ -416,32 +420,17 @@ fn v1_registration_is_refused(yes: bool) {
         vec!["forget", "--record", &id]
     };
     let result = run(home, &args, "");
-    assert!(
-        !result.status.success(),
-        "v1 forget was accepted: {result:?}"
-    );
-    assert!(
-        String::from_utf8_lossy(&result.stderr).contains("no verified cross-source event identity"),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(String::from_utf8_lossy(&result.stderr).contains("nothing was registered"));
-    assert!(!String::from_utf8_lossy(&result.stdout).contains("Raw records:"));
-    assert!(!String::from_utf8_lossy(&result.stdout).contains(CANARY));
+    assert!(String::from_utf8_lossy(&result.stdout).contains("Raw records: 1"));
+    if yes {
+        ok(result);
+        assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
+        return;
+    }
+    assert!(!result.status.success(), "{result:?}");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("needs a terminal"));
     assert!(ok(run(home, &["get", &id], "")).contains(CANARY));
     assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
-    assert!(!home.join("forget.log").exists());
-    assert!(!home.join("backups/forget.log").exists());
-    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
-    let writes: i64 = db
-        .query_row(
-            "SELECT (SELECT COUNT(*) FROM forget_jobs)+(SELECT COUNT(*) FROM denied_records)+
-             (SELECT COUNT(*) FROM records WHERE type='tombstone')",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(writes, 0, "v1 refusal wrote partial state");
+    assert_no_registration(home);
 }
 
 /// A historical v1 denial has no common event ID in transcripts. A 1ms earlier alias must
@@ -1436,8 +1425,10 @@ fn a_fresh_homes_backup_keeps_its_authority_to_register_a_forget() {
     );
 }
 
+/// The first opens of eight hooks at once keep every record; slice 3a: a transcript record's
+/// forget takes none of them, since each is of another session.
 #[test]
-fn concurrent_first_hooks_keep_records_and_refuse_unverified_forget() {
+fn concurrent_first_hooks_keep_records_and_another_sessions_forget_takes_none() {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
@@ -1474,11 +1465,18 @@ fn concurrent_first_hooks_keep_records_and_refuse_unverified_forget() {
             "a concurrent hook's record was lost: {found}"
         );
     }
-    let rejected = run(home, &["forget", "--record", &id, "--yes"], "");
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("unverified native copies"));
-    assert!(ok(run(home, &["get", &id], "")).contains(CANARY));
-    assert_no_registration(home);
+    let out = ok(run(home, &["forget", "--record", &id, "--yes"], ""));
+    assert!(!out.contains("Records of the same sessions"), "{out}");
+    assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
+    for n in 0..8 {
+        let prompt = format!("concurrent-first-open-record-{n}-661");
+        let found = ok(run(
+            home,
+            &["search", "--all", "--raw", "only", "--", &prompt],
+            "",
+        ));
+        assert!(found.contains(&prompt), "{found}");
+    }
 }
 
 #[test]
