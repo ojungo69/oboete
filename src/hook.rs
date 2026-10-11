@@ -742,8 +742,9 @@ fn shell_read_paths(command: &str, cwd: &Path) -> Vec<String> {
 
 /// A shell command's words as a POSIX shell splits them, its quotes and backslashes taken off, each
 /// with whether it is an operator: a run of `|`, `&`, `;`, `<`, `>`, or a `(` or `)`, outside
-/// quotes, which the shell reads as one even with no space around it; a quoted one is a word
-/// (Greptile on #456). None when a quote is left open.
+/// quotes, which the shell reads as one even with no space around it, and a newline outside
+/// quotes; a quoted one is a word (Greptile on #456). A comment, from a `#` that starts a word to
+/// the end of its line, is no word. None when a quote is left open.
 fn shell_tokens(command: &str) -> Option<Vec<(String, bool)>> {
     let mut tokens = Vec::new();
     let mut word: Option<String> = None;
@@ -780,6 +781,14 @@ fn shell_tokens(command: &str) -> Option<Vec<(String, bool)>> {
                 Some('\n') => {}
                 e => word.get_or_insert_with(String::new).push(e.unwrap_or('\\')),
             },
+            // An unquoted newline ends a command as `;` does (Codex on #456).
+            '\n' => {
+                tokens.extend(word.take().map(|w| (w, false)));
+                tokens.push(("\n".into(), true));
+            }
+            // A `#` that starts a word starts a comment, to the end of its line (Greptile and
+            // CodeRabbit on #456).
+            '#' if word.is_none() => while chars.next_if(|n| *n != '\n').is_some() {},
             c if c.is_whitespace() => tokens.extend(word.take().map(|w| (w, false))),
             '|' | '&' | ';' | '<' | '>' | '(' | ')' => {
                 tokens.extend(word.take().map(|w| (w, false)));
@@ -3102,6 +3111,13 @@ mod tests {
         assert_eq!(paths("echo '|' cat a.rs"), none);
         assert_eq!(paths("echo \"a;\" cat a.rs"), none);
         assert_eq!(paths("ls;cat \"c d.rs\"&&nl a.rs"), ["c d.rs", "a.rs"]);
+        // #456's second round: a comment holds no command and no path; a newline ends a command.
+        assert_eq!(paths("echo ok # x; cat a.rs"), none);
+        assert_eq!(paths("cat a.rs # c\\ d.rs"), ["a.rs"]);
+        assert_eq!(paths("ls # cat a.rs\nnl c\\ d.rs"), ["c d.rs"]);
+        assert_eq!(paths("cat a#b.rs '#' a.rs"), ["a.rs"]);
+        assert_eq!(paths("printf x\ncat a.rs"), ["a.rs"]);
+        assert_eq!(paths("cat 'a.rs\n' c\\ d.rs"), ["c d.rs"]);
     }
 
     /// G25: the hook takes for an MCP read what Codex's matcher sends it (`setup::CODEX_READS`).

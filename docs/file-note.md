@@ -62,7 +62,8 @@ claude-mem's adapter takes (the probe, Codex 0.160.0, same day: the context reac
 developer message). The command splits as a POSIX shell splits it, where claude-mem's adapter
 differs in two ways: a redirection and its target stay out of a command's words without ending
 it (`cat a > out b` reads `a` and `b`), and a quoted operator is a word (`echo '|' cat a` reads
-nothing). Like Claude Code's, it records nothing. Codex runs a hook only once its hash
+nothing); a newline ends a command, and a comment names nothing. Like Claude Code's, it records
+nothing. Codex runs a hook only once its hash
 is trusted in `config.toml`; `oboete setup` writes that row for this group as for its others.
 
 F2. **Which files.** As claude-mem: the tool's paths, at most 10, each a regular file of at least
@@ -149,7 +150,8 @@ later run.
     `--`, a quoted path, a reader by its full path, a command given as words), and so do an MCP
     read tool's `path` and `paths`; `ls`, an option's value, a redirection's target, a command
     with an open quote, an MCP write tool and another tool get none. The files after a
-    redirection are read; a quoted operator splits nothing; an operator needs no space around it.
+    redirection are read; a quoted operator splits nothing; an operator needs no space around it;
+    a newline splits as `;` does; a comment names no command or file.
     The hook takes for an MCP read what Codex's matcher sends it.
 14. `oboete setup` adds Codex's `PreToolUse` group with that matcher after the user's own, and the
     row that trusts it.
