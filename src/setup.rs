@@ -2543,6 +2543,7 @@ pub fn doctor(home: &Path) -> Result<()> {
     }
     // G22: the spans every provider skipped, and the command that curates them again, from raw.db
     // alone: knowledge.db may be gone or set aside (Codex on #438).
+    let mut forget_stopped = false;
     if crate::raw::exists(home) {
         section(
             &mut unhealthy,
@@ -2557,9 +2558,18 @@ pub fn doctor(home: &Path) -> Result<()> {
                     };
                     println!("  {}", s.line());
                 }
+                // Milestone 5 D5 item 7: a forget whose rebuild left its uid in knowledge.db.
+                let (lines, stopped) = crate::forget::doctor_lines(home)?;
+                for line in lines {
+                    println!("  {line}");
+                }
+                forget_stopped = stopped;
                 Ok(())
             })(),
         );
+    }
+    if forget_stopped {
+        unhealthy.push("a forget stopped (see above)");
     }
     // Milestone 4 Task 10: `local`'s files, with or without a store.
     if config::load(home).is_ok_and(|c| c.embedding.provider == "local") {

@@ -78,25 +78,85 @@ pub fn update(
 ) -> std::io::Result<()> {
     let dir = dir(home, agent, session);
     std::fs::create_dir_all(&dir)?;
+    let _lock = locked(&dir)?;
+    let path = dir.join(name);
+    match f(std::fs::read_to_string(&path).ok()) {
+        Some(v) => replace(&dir, name, &v),
+        None => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+    }
+}
+
+/// The session directory's lock, which every change of its values holds.
+fn locked(dir: &Path) -> std::io::Result<std::fs::File> {
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(dir.join(".lock"))?;
     lock.lock()?;
-    let path = dir.join(name);
-    match f(std::fs::read_to_string(&path).ok()) {
-        Some(v) => {
-            // Renamed into place, so a reader without the lock sees the old value or the new.
+    Ok(lock)
+}
+
+/// Renamed into place, so a reader without the lock sees the old value or the new.
+fn replace(dir: &Path, name: &str, v: &str) -> std::io::Result<()> {
+    let part = dir.join(format!(".{name}.part"));
+    std::fs::write(&part, v)?;
+    std::fs::rename(&part, dir.join(name))
+}
+
+/// Milestone 5 D5 (2b): every session's value `name` that `f` changes, replaced under that
+/// session's lock as `update` does, and a part a crashed change left beside it removed. A session
+/// gone meanwhile is passed over; a directory or a value that cannot be read is an error, since it
+/// may hold what must go (Codex on #444). How many values changed.
+pub fn update_all(
+    home: &Path,
+    name: &str,
+    mut f: impl FnMut(&str) -> Option<String>,
+) -> std::io::Result<usize> {
+    let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    let mut changed = 0;
+    let agents = match std::fs::read_dir(root(home)) {
+        Err(e) if gone(&e) => return Ok(0),
+        agents => agents?,
+    };
+    for agent in agents {
+        let sessions = match std::fs::read_dir(agent?.path()) {
+            Err(e) if gone(&e) => continue,
+            sessions => sessions?,
+        };
+        for s in sessions {
+            let dir = s?.path();
             let part = dir.join(format!(".{name}.part"));
-            std::fs::write(&part, v)?;
-            std::fs::rename(&part, &path)
+            // `exists` says no when it cannot look (Codex on #444).
+            if !dir.join(name).try_exists()? && !part.try_exists()? {
+                continue;
+            }
+            // `prune` may be removing it: the lock's file cannot be made then.
+            let _lock = match locked(&dir) {
+                Err(e) if gone(&e) => continue,
+                held => held?,
+            };
+            if let Err(e) = std::fs::remove_file(&part)
+                && !gone(&e)
+            {
+                return Err(e);
+            }
+            let value = match std::fs::read_to_string(dir.join(name)) {
+                Err(e) if gone(&e) => continue,
+                // Not text: `f` gets it empty, and may replace it.
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => String::new(),
+                value => value?,
+            };
+            if let Some(v) = f(&value) {
+                replace(&dir, name, &v)?;
+                changed += 1;
+            }
         }
-        None => match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        },
     }
+    Ok(changed)
 }
 
 /// The session's value `name`: none when it has none or it cannot be read.
@@ -128,6 +188,36 @@ pub fn prune(home: &Path, keep: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Milestone 5 D5 (2b): a directory the sweep cannot list or search fails it, since a value in
+    /// it may hold what must go (Codex on #444); a value that is not text is offered empty and
+    /// replaced. Root reads every directory: the failures are checked only where they happen.
+    #[cfg(unix)]
+    #[test]
+    fn a_sweep_fails_on_a_directory_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        update(home.path(), "claude", "s", "shown", |_| Some("{}".into())).unwrap();
+        let agent = root(home.path()).join("claude");
+        let shown = dir(home.path(), "claude", "s").join("shown");
+        // Not listed, then listed but not searched.
+        for mode in [0o000, 0o400] {
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(mode)).unwrap();
+            let refused = std::fs::read_dir(&agent).is_err() || std::fs::metadata(&shown).is_err();
+            let swept = update_all(home.path(), "shown", |_| None);
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
+            if refused {
+                assert!(swept.is_err(), "mode {mode:o}");
+            }
+        }
+        std::fs::write(dir(home.path(), "claude", "s").join("shown"), [0xff, 0xfe]).unwrap();
+        let swept = update_all(home.path(), "shown", |v| v.is_empty().then(|| "{}".into()));
+        assert_eq!(swept.unwrap(), 1);
+        assert_eq!(
+            value(home.path(), "claude", "s", "shown").as_deref(),
+            Some("{}")
+        );
+    }
 
     #[test]
     fn a_claim_is_won_once_across_threads_and_a_take_clears_it_once() {
