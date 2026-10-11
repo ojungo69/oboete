@@ -38,6 +38,12 @@ pub enum Target {
     Uid {
         uid: String,
     },
+    /// Slice 3b: a session, by its agent and its hash (`session`), never its id: every source's
+    /// records of it, and later records of it from before its registration (D3).
+    Session {
+        agent: String,
+        session: String,
+    },
 }
 
 impl Target {
@@ -46,6 +52,7 @@ impl Target {
             Self::Record { device, seq } => (device.as_str(), *seq, *seq),
             Self::Span { device, from, to } => (device.as_str(), *from, *to),
             Self::Uid { .. } => anyhow::bail!("a uid names no record span"),
+            Self::Session { .. } => anyhow::bail!("a session names no record span"),
         };
         anyhow::ensure!(device_like(device), "invalid device identity");
         anyhow::ensure!(
@@ -99,6 +106,29 @@ impl Target {
         well_formed(text)?;
         Ok(Self::Uid { uid: text.into() })
     }
+
+    /// Slice 3b: `--session` takes a record's id from search, timeline or get, `<device>:<seq>`:
+    /// no output shows a session's own id.
+    pub fn parse_handle(text: &str) -> Result<(String, i64)> {
+        let (device, seq) = text
+            .split_once(':')
+            .context("expected a record's id, <device>:<seq>")?;
+        anyhow::ensure!(device_like(device), "invalid device identity");
+        let seq: i64 = seq
+            .parse()
+            .context("expected a record's id, <device>:<seq>")?;
+        anyhow::ensure!(seq > 0, "invalid record span");
+        Ok((device.into(), seq))
+    }
+}
+
+/// An agent's name as a session target holds it: the hook's own argument, ASCII, bounded.
+fn agent_like(agent: &str) -> bool {
+    !agent.is_empty()
+        && agent.len() <= 64
+        && agent
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// A device's id as a target and a request name it: ASCII letters and digits, bounded.
@@ -167,6 +197,20 @@ pub struct Preview {
     pub sample: Option<String>,
     /// A uid target's (D5).
     pub uid: Option<UidPreview>,
+    /// A session target's (slice 3b).
+    pub session: Option<SessionPreview>,
+}
+
+/// What a session target resolved to (slice 3b, spec 6.2's preview): its agent, when its first
+/// record was recorded, its records by source and how many devices', and how many records of its
+/// agent name no session (a copy of one of its records among them would stay).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionPreview {
+    pub agent: String,
+    pub first: Option<i64>,
+    pub sources: Vec<(String, usize)>,
+    pub devices: usize,
+    pub idless: usize,
 }
 
 impl Preview {
@@ -177,6 +221,23 @@ impl Preview {
                 self.records.is_empty() && self.copies.is_empty() && self.uid.is_some(),
                 "forget selection differs from its preview"
             );
+            return Ok(());
+        }
+        if let Target::Session { agent, session } = &self.target {
+            anyhow::ensure!(agent_like(agent), "invalid agent");
+            check_identity(session)?;
+            anyhow::ensure!(
+                !self.records.is_empty(),
+                "no raw records matched; nothing was registered"
+            );
+            anyhow::ensure!(
+                self.copies.is_empty() && self.records.iter().all(|r| &r.session == session),
+                "forget selection differs from its preview"
+            );
+            for r in &self.records {
+                anyhow::ensure!(device_like(&r.device), "invalid device identity");
+                check_identity(&r.origin)?;
+            }
             return Ok(());
         }
         let (device, from, to) = self.target.bounds()?;
@@ -278,6 +339,23 @@ impl Request {
             }
             (Target::Record { .. } | Target::Span { .. }, 1) => false,
             (Target::Record { .. } | Target::Span { .. }, 3) => true,
+            // Version 4 is one page of a session's records (slice 3b), of any device.
+            (Target::Session { agent, session }, 4) => {
+                anyhow::ensure!(agent_like(agent), "invalid agent");
+                check_identity(session)?;
+                anyhow::ensure!(
+                    !self.records.is_empty() && self.records.len() <= MAX_RECORDS,
+                    "invalid record count"
+                );
+                for r in &self.records {
+                    anyhow::ensure!(
+                        device_like(&r.device) && &r.session == session,
+                        "a record outside its target"
+                    );
+                    check_identity(&r.origin)?;
+                }
+                return Ok(());
+            }
             _ => anyhow::bail!("unknown request version {}", self.v),
         };
         let (device, from, to) = self.target.bounds()?;
@@ -337,6 +415,13 @@ pub struct Status {
     pub records: usize,
     pub started: i64,
     pub local: &'static str,
+    /// Slice 3b: a session's registration is pages of at most `MAX_RECORDS`, a job each.
+    #[serde(skip_serializing_if = "one")]
+    pub pages: usize,
+}
+
+fn one(n: &usize) -> bool {
+    *n == 1
 }
 
 pub fn preview(home: &Path, target: Target) -> Result<Preview> {
@@ -354,9 +439,20 @@ pub fn preview(home: &Path, target: Target) -> Result<Preview> {
         Target::Uid { uid } => uid_preview(home, &raw, uid),
         target => {
             raw.session_indexes()?;
-            raw.forget_preview(target)
+            let mut preview = raw.forget_preview(target)?;
+            raw.session_summary(&mut preview)?;
+            Ok(preview)
         }
     }
+}
+
+/// Slice 3b: the session the record `handle` (`<device>:<seq>`) was recorded in, by its agent and
+/// its hash. A live record whose label is not its agent's own id names none.
+pub fn session_target(home: &Path, handle: &str) -> Result<Target> {
+    anyhow::ensure!(crate::raw::exists(home), "no raw store to forget from");
+    let (device, seq) = Target::parse_handle(handle)?;
+    let (agent, session) = crate::raw::open(home)?.session_of(&device, seq)?;
+    Ok(Target::Session { agent, session })
 }
 
 /// D5: what forgetting `uid` takes. knowledge.db is its index: a claim's derivations and
@@ -503,6 +599,7 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
         sources: Vec::new(),
         sample: sample.map(|s| line(&s)),
         uid: Some(uid_preview),
+        session: None,
     })
 }
 
@@ -548,16 +645,22 @@ fn registering_target(home: &Path, target: Target) -> std::thread::JoinHandle<()
 /// commit and outside raw's lock (rule 2). What each log copy got is in the report.
 pub fn start(home: &Path, preview: &Preview) -> Result<(Status, Report)> {
     let mut raw = crate::raw::open(home)?;
-    let mut id = [0_u8; 16];
-    getrandom::fill(&mut id)?;
-    let job: String = id.iter().map(|b| format!("{b:02x}")).collect();
-    let request = raw.forget_start(preview, &job, crate::db::now_ms())?;
+    let mut job = || -> Result<String> {
+        let mut id = [0_u8; 16];
+        getrandom::fill(&mut id)?;
+        Ok(id.iter().map(|b| format!("{b:02x}")).collect())
+    };
+    // A session's records are pages of at most MAX_RECORDS, a job each, registered together.
+    let requests = raw.forget_start(preview, &mut job, crate::db::now_ms())?;
     // It is registered already. A later log failure is reported alongside that true status.
     let report = reconcile(home, &mut raw).unwrap_or_else(|e| Report {
         problems: vec![format!("the request logs were not reconciled: {e:#}")],
         ..Report::default()
     });
-    Ok((status_of(&request, PENDING), report))
+    let status = grouped(requests.iter().map(|r| status_of(r, PENDING)))
+        .pop()
+        .context("no request was registered")?;
+    Ok((status, report))
 }
 
 const PENDING: &str = "hidden; physical purge pending";
@@ -592,19 +695,16 @@ pub fn status(home: &Path) -> Result<Vec<Status>> {
         })
         .collect();
     let holding = knowledge_holding(home, &uids)?;
-    Ok(past
-        .iter()
-        .map(|(r, step, purged)| {
-            let local = match &r.target {
-                Target::Uid { uid } if *purged && holding.contains(uid) => STOPPED,
-                _ if *purged && *step >= 5 => DONE,
-                _ if *purged && *step >= 4 => BACKUPS_PURGED,
-                _ if *purged => "purged here; backups pending",
-                _ => PENDING,
-            };
-            status_of(r, local)
-        })
-        .collect())
+    Ok(grouped(past.iter().map(|(r, step, purged)| {
+        let local = match &r.target {
+            Target::Uid { uid } if *purged && holding.contains(uid) => STOPPED,
+            _ if *purged && *step >= 5 => DONE,
+            _ if *purged && *step >= 4 => BACKUPS_PURGED,
+            _ if *purged => "purged here; backups pending",
+            _ => PENDING,
+        };
+        status_of(r, local)
+    })))
 }
 
 fn status_of(r: &Request, local: &'static str) -> Status {
@@ -614,7 +714,28 @@ fn status_of(r: &Request, local: &'static str) -> Status {
         records: r.records.len(),
         started: r.started,
         local,
+        pages: 1,
     }
+}
+
+/// Slice 3b: the pages of one registration (one target, one start), which follow one another in
+/// `forget_jobs`, as one status: the first page's job, every page's records.
+fn grouped(statuses: impl IntoIterator<Item = Status>) -> Vec<Status> {
+    let mut out: Vec<Status> = Vec::new();
+    for s in statuses {
+        match out.last_mut() {
+            Some(last)
+                if last.target == s.target
+                    && last.started == s.started
+                    && last.local == s.local =>
+            {
+                last.records += s.records;
+                last.pages += 1;
+            }
+            _ => out.push(s),
+        }
+    }
+    out
 }
 
 /// Doctor's lines (D5 item 7): each stopped job. True when one is.
@@ -1157,8 +1278,13 @@ pub(crate) fn reconcile_report(
             (p, read)
         })
         .collect();
-    let held: std::collections::HashSet<String> =
-        raw.forget_requests()?.into_iter().map(|r| r.job).collect();
+    let (requests, unreadable) = raw.forget_requests_read()?;
+    for job in unreadable {
+        report.problems.push(format!(
+            "forget job {job} holds a request this oboete cannot read (a later oboete's), passed over"
+        ));
+    }
+    let held: std::collections::HashSet<String> = requests.into_iter().map(|r| r.job).collect();
     let mut missing: Vec<Request> = Vec::new();
     for r in copies.iter().filter_map(|(_, c)| c.as_ref()).flatten() {
         if !held.contains(&r.job) && !missing.iter().any(|m| m.job == r.job) {
@@ -1308,11 +1434,13 @@ fn limits(sources: &[String]) -> String {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     home: &Path,
     record: Option<&str>,
     span: Option<&str>,
     uid: Option<&str>,
+    session: Option<&str>,
     yes: bool,
     show: bool,
     resume: bool,
@@ -1333,11 +1461,12 @@ pub fn run(
         }
         return Ok(());
     }
-    let target = match (record, span, uid) {
-        (Some(r), None, None) => Target::parse(r, false)?,
-        (None, Some(s), None) => Target::parse(s, true)?,
-        (None, None, Some(u)) => Target::parse_uid(u)?,
-        _ => anyhow::bail!("choose --record, --span, --uid, --status or --continue"),
+    let target = match (record, span, uid, session) {
+        (Some(r), None, None, None) => Target::parse(r, false)?,
+        (None, Some(s), None, None) => Target::parse(s, true)?,
+        (None, None, Some(u), None) => Target::parse_uid(u)?,
+        (None, None, None, Some(h)) => session_target(home, h)?,
+        _ => anyhow::bail!("choose --record, --span, --uid, --session, --status or --continue"),
     };
     let p = preview(home, target)?;
     println!("Target: {}", serde_json::to_string(&p.target)?);
@@ -1354,6 +1483,29 @@ pub fn run(
             "Records with no text left and no identity, passed over: {}",
             p.passed
         );
+    }
+    if let Some(s) = &p.session {
+        use chrono::TimeZone;
+        let first = s
+            .first
+            .and_then(|ms| chrono::Local.timestamp_millis_opt(ms).single())
+            .map_or_else(
+                || "at a time no record keeps".into(),
+                |t| t.format("%Y-%m-%d %H:%M (%:z)").to_string(),
+            );
+        let sources: Vec<String> = s.sources.iter().map(|(k, n)| format!("{k} {n}")).collect();
+        println!(
+            "A session of {}, first recorded {first}: its records by source: {}; on {} device(s)",
+            s.agent,
+            sources.join(", "),
+            s.devices
+        );
+        if s.idless > 0 {
+            println!(
+                "Records of {} that name no session, a copy of this session's among them staying: {}",
+                s.agent, s.idless
+            );
+        }
     }
     if let Some(sample) = &p.sample {
         println!("Sample: {}", crate::redact::outbound(sample));
@@ -3722,7 +3874,7 @@ mod tests {
                 std::fs::remove_dir(&config).unwrap();
             }
             std::fs::write(&config, "[backup]\ndir = 'repaired-backups'\n").unwrap();
-            run(h, None, None, None, false, true, false).unwrap();
+            run(h, None, None, None, None, false, true, false).unwrap();
             let second = h.join("repaired-backups").join(LOG);
             assert_eq!(std::fs::read_to_string(second).unwrap(), log);
             assert_eq!(std::fs::read_to_string(primary).unwrap(), log);
@@ -3972,6 +4124,637 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kept, live_origin(&device, seq, 7_000));
+    }
+
+    /// Slice 3b, test 1: a session target, named by any of its records, takes every source's
+    /// records of the session, an ambiguous transcript record among them, and no other session's;
+    /// its preview says its agent, its first record's time, its records by source and device, its
+    /// first prompt, and how many live records of its agent name no session. Its one request is
+    /// version 4, every record goes, and its session is denied from then.
+    #[test]
+    fn a_session_target_takes_every_sources_records_of_the_session() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let t1 = imported(
+            &mut raw,
+            "transcript",
+            "s",
+            "t1",
+            false,
+            r#"{"prompt":"one"}"#,
+        );
+        let t2 = imported(
+            &mut raw,
+            "transcript",
+            "s",
+            "t2",
+            true,
+            r#"{"prompt":"one"}"#,
+        );
+        let v = imported(&mut raw, "oboete-v1", "s", "v1", false, r#"{"prompt":"v"}"#);
+        let touch = v1_touch(&mut raw, "s", "v-touch");
+        let other = imported(
+            &mut raw,
+            "transcript",
+            "s2",
+            "t3",
+            false,
+            r#"{"prompt":"x"}"#,
+        );
+        let l1 = live(&mut raw, "s", 5_000, r#"{"prompt":"first of its own"}"#);
+        let l2 = live(&mut raw, "s", 6_000, r#"{"prompt":"two"}"#);
+        let other_live = live(&mut raw, "s2", 7_000, r#"{"prompt":"y"}"#);
+        let idless = live(&mut raw, "unknown-d", 8_000, r#"{"prompt":"z"}"#);
+        let masked = live(&mut raw, "sk-masked", 8_500, r#"{"prompt":"m"}"#);
+        mask_session(home.path(), &raw, masked);
+        let device = raw.device().to_owned();
+        let target = session_target(home.path(), &format!("{device}:{l2}")).unwrap();
+        assert_eq!(
+            target,
+            Target::Session {
+                agent: "claude".into(),
+                session: super::session("claude", "s"),
+            }
+        );
+        // Any record of it names the same session.
+        assert_eq!(
+            session_target(home.path(), &format!("{device}:{t1}")).unwrap(),
+            target
+        );
+        let p = preview(home.path(), target.clone()).unwrap();
+        assert_eq!(seqs(&p.records), [t1, t2, v, touch, l1, l2]);
+        // A touch keeps no time the transcript cut counts (rule 10).
+        assert_eq!(p.records[3].ts, None);
+        assert!(p.copies.is_empty());
+        assert_eq!(
+            p.session,
+            Some(SessionPreview {
+                agent: "claude".into(),
+                first: Some(0),
+                sources: vec![
+                    ("hook".into(), 2),
+                    ("oboete-v1".into(), 2),
+                    ("transcript".into(), 2)
+                ],
+                devices: 1,
+                idless: 2,
+            })
+        );
+        assert_eq!(p.sample.as_deref(), Some(r#"{"prompt":"one"}"#));
+        // A preview whose record names another session is refused before it is read again.
+        let mut other_session = p.clone();
+        other_session.records[0].session = super::session("claude", "s2");
+        let e = start(home.path(), &other_session).unwrap_err();
+        assert!(e.to_string().contains("differs from its preview"), "{e:#}");
+        start(home.path(), &p).unwrap();
+        let request = raw.forget_requests().unwrap().remove(0);
+        assert_eq!(
+            (request.v, seqs(&request.records)),
+            (4, vec![t1, t2, v, touch, l1, l2])
+        );
+        for (seq, kept) in [
+            (t1, false),
+            (t2, false),
+            (v, false),
+            (touch, false),
+            (l1, false),
+            (l2, false),
+            (other, true),
+            (other_live, true),
+            (idless, true),
+            (masked, true),
+        ] {
+            assert_eq!(shown(&raw, seq), kept, "{seq}");
+        }
+        // A second preview of it has none left to register; another session's has its own.
+        assert!(preview(home.path(), target).unwrap().records.is_empty());
+        let again = preview(home.path(), session_target_of(&raw, other)).unwrap();
+        assert_eq!(seqs(&again.records), [other, other_live]);
+    }
+
+    /// Slice 3b, test 1: a session target takes the session's records of another device in the
+    /// store (a copied raw.db records later records under a new device), live and imported.
+    #[test]
+    fn a_session_target_takes_its_records_of_another_device() {
+        let first = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(first.path()).unwrap();
+        let t = imported(
+            &mut raw,
+            "transcript",
+            "s",
+            "t",
+            false,
+            r#"{"prompt":"one"}"#,
+        );
+        let l1 = live(&mut raw, "s", 5_000, r#"{"prompt":"two"}"#);
+        let before = raw.device().to_owned();
+        drop(raw);
+        let second = tempfile::tempdir().unwrap();
+        for f in ["raw.db", "raw.db-wal"] {
+            if first.path().join(f).exists() {
+                std::fs::copy(first.path().join(f), second.path().join(f)).unwrap();
+            }
+        }
+        let mut raw = raw::open(second.path()).unwrap();
+        let now = raw.device().to_owned();
+        assert_ne!(now, before);
+        let l2 = live(&mut raw, "s", 6_000, r#"{"prompt":"three"}"#);
+        let target = session_target(second.path(), &format!("{now}:{l2}")).unwrap();
+        let p = preview(second.path(), target).unwrap();
+        let picked: Vec<(String, i64)> = p
+            .records
+            .iter()
+            .map(|r| (r.device.clone(), r.seq))
+            .collect();
+        let mut expected = vec![(before.clone(), t), (before.clone(), l1), (now.clone(), l2)];
+        expected.sort();
+        assert_eq!(picked, expected);
+        assert_eq!(p.session.as_ref().map(|s| s.devices), Some(2));
+        start(second.path(), &p).unwrap();
+        for (device, seq) in [(&before, t), (&before, l1), (&now, l2)] {
+            let row = raw.after(device, seq - 1, 1).unwrap();
+            assert!(matches!(row[0].item, Item::Removed), "{device}:{seq}");
+        }
+    }
+
+    /// A ledger row as the gate writes when it masks the session label of `seq`'s record.
+    fn mask_session(home: &Path, raw: &raw::Raw, seq: i64) {
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+                 VALUES(?1, ?2, 'session', 'r', 0, 9, 0, 'v')",
+                rusqlite::params![raw.device(), seq],
+            )
+            .unwrap();
+    }
+
+    /// A v1 touch (its `session_repos` row) of `session`, with origin `id`, as v1's import keeps it.
+    fn v1_touch(raw: &mut raw::Raw, session: &str, id: &str) -> i64 {
+        let mut event = raw::test_event("{}");
+        event.source = "oboete-v1".into();
+        event.kind = "touch".into();
+        event.session = session.into();
+        event.ts = 500;
+        let identity = raw::ImportIdentity {
+            origin: origin("synthetic", id),
+            session: super::session(&event.agent, session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let captured = crate::capture::Captured {
+            event,
+            ledger: Vec::new(),
+        };
+        raw.append_imported_origins(&[captured], &[identity], "", None)
+            .unwrap()[0]
+    }
+
+    /// The session target `seq`'s record names.
+    fn session_target_of(raw: &raw::Raw, seq: i64) -> Target {
+        let (agent, session) = raw.session_of(raw.device(), seq).unwrap();
+        Target::Session { agent, session }
+    }
+
+    /// Slice 3b, test 2: a record that names no session its agent sent (none sent, or a label the
+    /// gate masked) names no session target, and neither does a record that is not there.
+    #[test]
+    fn a_record_of_no_session_names_no_session_target() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let idless = live(&mut raw, "unknown-d", 1_000, r#"{"prompt":"z"}"#);
+        let masked = live(&mut raw, "sk-masked", 2_000, r#"{"prompt":"m"}"#);
+        mask_session(home.path(), &raw, masked);
+        let device = raw.device().to_owned();
+        for seq in [idless, masked, 99] {
+            let e = session_target(home.path(), &format!("{device}:{seq}")).unwrap_err();
+            assert!(
+                e.to_string().contains("names no session") || e.to_string().contains("no record"),
+                "{seq}: {e:#}"
+            );
+        }
+        assert!(session_target(home.path(), "not a record").is_err());
+    }
+
+    /// Slice 3b, test 3: a session of 1,234 records is registered as three requests (500, 500 and
+    /// 234), one job each, in one transaction: a failure on the second page registers none.
+    /// `--status` shows them as one, and a record of the session added since the preview makes it
+    /// stale.
+    #[test]
+    fn a_session_of_many_records_is_registered_in_pages_together() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let first = live(&mut raw, "s", 1, r#"{"prompt":"p0"}"#);
+        for i in 1..1_234 {
+            live(&mut raw, "s", 1 + i, &format!(r#"{{"prompt":"p{i}"}}"#));
+        }
+        let device = raw.device().to_owned();
+        let target = session_target(home.path(), &format!("{device}:{first}")).unwrap();
+        let p = preview(home.path(), target.clone()).unwrap();
+        assert_eq!(p.count(), 1_234);
+        let conn = rusqlite::Connection::open(home.path().join("raw.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER second BEFORE INSERT ON denied_scopes
+               WHEN (SELECT COUNT(*) FROM denied_scopes) >= 1
+             BEGIN SELECT RAISE(ABORT, 'test'); END;",
+        )
+        .unwrap();
+        assert!(start(home.path(), &p).is_err());
+        let count = |table: &str| -> i64 {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(
+            (
+                count("forget_jobs"),
+                count("denied_records"),
+                count("denied_scopes")
+            ),
+            (0, 0, 0)
+        );
+        conn.execute_batch("DROP TRIGGER second").unwrap();
+        let (started, _) = start(home.path(), &p).unwrap();
+        assert_eq!((started.records, started.pages), (1_234, 3));
+        let requests = raw.forget_requests().unwrap();
+        // In the order of their random job ids.
+        let mut pages: Vec<_> = requests.iter().map(|r| (r.v, r.records.len())).collect();
+        pages.sort_unstable();
+        assert_eq!(pages, [(4, 234), (4, 500), (4, 500)]);
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| r.job.clone())
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
+        let shown_status = status(home.path()).unwrap();
+        assert_eq!(shown_status.len(), 1);
+        assert_eq!((shown_status[0].records, shown_status[0].pages), (1_234, 3));
+        assert!(
+            serde_json::to_string(&shown_status[0])
+                .unwrap()
+                .contains("\"pages\":3")
+        );
+        // A record of the session after the preview: stale.
+        let mut more = raw::test_event(r#"{"prompt":"later"}"#);
+        more.ts = crate::db::now_ms() + 60_000;
+        raw.append(&more).unwrap();
+        let p = preview(home.path(), target).unwrap();
+        live(
+            &mut raw,
+            "s",
+            crate::db::now_ms() + 61_000,
+            r#"{"prompt":"later still"}"#,
+        );
+        let e = start(home.path(), &p).unwrap_err();
+        assert!(e.to_string().contains("stale"), "{e:#}");
+    }
+
+    /// Slice 3b, test 4 (D3): a forgotten session's record from before its registration that
+    /// arrives later is not recorded, by a hook's append (a call that took its time before the
+    /// registration), a write-back of a kept call, or a transcript import; one from after it is.
+    #[test]
+    fn a_forgotten_sessions_late_records_from_before_it_are_not_recorded() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut raw = raw::open(h).unwrap();
+        let l0 = live(&mut raw, "s", 500, r#"{"prompt":"zero"}"#);
+        let l1 = live(&mut raw, "s", 1_000, r#"{"prompt":"one"}"#);
+        let t1 = imported(
+            &mut raw,
+            "transcript",
+            "t",
+            "t1",
+            false,
+            r#"{"prompt":"x"}"#,
+        );
+        let device = raw.device().to_owned();
+        // One of the session's records forgotten alone first: the session's tombstone covers its
+        // denial too. Another session's record forgotten alone: no tombstone covers it.
+        let u0 = live(&mut raw, "u", 600, r#"{"prompt":"u"}"#);
+        for seq in [l0, u0] {
+            start(h, &preview(h, record(&raw, seq)).unwrap()).unwrap();
+        }
+        for seq in [l1, t1] {
+            let target = session_target(h, &format!("{device}:{seq}")).unwrap();
+            start(h, &preview(h, target).unwrap()).unwrap();
+        }
+        // Each session's registration has its own time: before the first, after the last.
+        let times: Vec<i64> = raw
+            .forget_requests()
+            .unwrap()
+            .iter()
+            .map(|r| r.started)
+            .collect();
+        let (started, last) = (times[0], times[times.len() - 1]);
+        let records = |raw: &raw::Raw| raw.after(raw.device(), 0, 10_000).unwrap().len();
+        let before = records(&raw);
+        // A hook's append that took its time before the registration, or at its very time.
+        let mut late = raw::test_event(r#"{"prompt":"late"}"#);
+        late.ts = started;
+        assert_eq!(raw.append_with_ledger(&late, &[], "").unwrap(), None);
+        late.ts = started - 1;
+        assert_eq!(raw.append_with_ledger(&late, &[], "").unwrap(), None);
+        assert!(raw.append(&late).is_err());
+        // A kept call written back.
+        crate::unwritten::keep(
+            h,
+            &[crate::capture::Captured {
+                event: late.clone(),
+                ledger: Vec::new(),
+            }],
+            "r",
+        )
+        .unwrap();
+        crate::unwritten::write_back(h, &mut raw).1.unwrap();
+        assert_eq!(crate::unwritten::counts(h).unwrap(), (0, 0));
+        // A transcript import of the transcript-only session's turn from before it.
+        let mut turn = raw::test_event(r#"{"prompt":"turn"}"#);
+        turn.source = "transcript".into();
+        turn.session = "t".into();
+        turn.ts = started - 1;
+        let identity = |id: &str| raw::ImportIdentity {
+            origin: origin("synthetic", id),
+            session: super::session("claude", "t"),
+            ambiguous: None,
+            unverified: false,
+        };
+        let captured = |e: &raw::Event| crate::capture::Captured {
+            event: e.clone(),
+            ledger: Vec::new(),
+        };
+        assert_eq!(
+            raw.append_imported_origins(&[captured(&turn)], &[identity("t2")], "", None)
+                .unwrap(),
+            Vec::<i64>::new()
+        );
+        assert_eq!(records(&raw), before);
+        // From after it, each is recorded.
+        late.ts = last + 1;
+        assert!(raw.append_with_ledger(&late, &[], "").unwrap().is_some());
+        turn.ts = last + 1;
+        assert_eq!(
+            raw.append_imported_origins(&[captured(&turn)], &[identity("t3")], "", None)
+                .unwrap()
+                .len(),
+            1
+        );
+        // The live session's later records too, from a transcript and from v1: its tombstone
+        // decides each, and its live record's denial refuses no batch (CodeRabbit and Greptile on
+        // #465). A record forget's denial outside the tombstone still refuses the batch.
+        assert_eq!(raw.transcript_cut("claude", "s", Some(7)).unwrap(), Some(7));
+        let in_s = |id: &str| raw::ImportIdentity {
+            origin: origin("synthetic", id),
+            session: super::session("claude", "s"),
+            ambiguous: None,
+            unverified: false,
+        };
+        for source in ["transcript", "oboete-v1"] {
+            let mut e = turn.clone();
+            e.source = source.into();
+            e.session = "s".into();
+            e.ts = started - 1;
+            let early = format!("{source}-early");
+            assert_eq!(
+                raw.append_imported_origins(&[captured(&e)], &[in_s(&early)], "", None)
+                    .unwrap(),
+                Vec::<i64>::new(),
+                "{source}"
+            );
+            e.ts = last + 1;
+            let later = format!("{source}-later");
+            assert_eq!(
+                raw.append_imported_origins(&[captured(&e)], &[in_s(&later)], "", None)
+                    .unwrap()
+                    .len(),
+                1,
+                "{source}"
+            );
+        }
+        // The transcript-only session's denials (no time kept) are its own pages': a v1 record of
+        // it from after the registration is recorded.
+        let mut v1 = turn.clone();
+        v1.source = "oboete-v1".into();
+        v1.ts = last + 1;
+        assert_eq!(
+            raw.append_imported_origins(&[captured(&v1)], &[identity("v1-later")], "", None)
+                .unwrap()
+                .len(),
+            1
+        );
+        let l2 = live(&mut raw, "s", last + 2, r#"{"prompt":"after"}"#);
+        start(h, &preview(h, record(&raw, l2)).unwrap()).unwrap();
+        assert!(raw.transcript_cut("claude", "s", None).is_err());
+        assert!(raw.transcript_cut("claude", "u", None).is_err());
+        // The denial comes back with the request from its log.
+        let conn = rusqlite::Connection::open(h.join("raw.db")).unwrap();
+        conn.execute_batch("DELETE FROM denied_scopes").unwrap();
+        let requests = raw.forget_requests().unwrap();
+        conn.execute_batch("DELETE FROM forget_jobs").unwrap();
+        raw.forget_apply(&requests).unwrap();
+        late.ts = started - 2;
+        assert_eq!(raw.append_with_ledger(&late, &[], "").unwrap(), None);
+    }
+
+    /// Slice 3b (Greptile on #465): a batch that holds a forgotten session's repeated transcript
+    /// record from before the forget, whose ambiguous group names a forgotten occurrence, and a
+    /// later turn of the session: the old record is passed over and the turn recorded.
+    #[test]
+    fn a_forgotten_sessions_repeated_record_does_not_refuse_its_later_turn() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut raw = raw::open(h).unwrap();
+        let zero = imported(
+            &mut raw,
+            "transcript",
+            "t",
+            "x:0",
+            false,
+            r#"{"prompt":"x"}"#,
+        );
+        imported(&mut raw, "transcript", "t", "x", true, r#"{"prompt":"x"}"#);
+        let device = raw.device().to_owned();
+        let target = session_target(h, &format!("{device}:{zero}")).unwrap();
+        start(h, &preview(h, target).unwrap()).unwrap();
+        let started = raw.forget_requests().unwrap()[0].started;
+        let event = |ts: i64, body: &str| {
+            let mut e = raw::test_event(body);
+            e.source = "transcript".into();
+            e.session = "t".into();
+            e.ts = ts;
+            crate::capture::Captured {
+                event: e,
+                ledger: Vec::new(),
+            }
+        };
+        let identity = |id: &str, ambiguous: Option<&str>| raw::ImportIdentity {
+            origin: origin("synthetic", id),
+            session: super::session("claude", "t"),
+            ambiguous: ambiguous.map(|g| origin("synthetic", g)),
+            unverified: false,
+        };
+        let seqs = raw
+            .append_imported_origins(
+                &[
+                    event(started - 1, r#"{"prompt":"x"}"#),
+                    event(started + 1, r#"{"prompt":"new"}"#),
+                ],
+                &[identity("x", Some("x:0")), identity("new", None)],
+                "",
+                None,
+            )
+            .unwrap();
+        assert_eq!(seqs.len(), 1);
+    }
+
+    /// Slice 3b (Codex on #465): an import with no identity its importer kept names no session (one
+    /// from before import identities), and a live record whose label the ledger masks is never the
+    /// session's, though its label reads as the session's id.
+    #[test]
+    fn only_a_kept_identity_or_an_unmasked_label_names_a_session() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut raw = raw::open(h).unwrap();
+        let mut legacy = raw::test_event(r#"{"prompt":"old"}"#);
+        legacy.source = "transcript".into();
+        legacy.session = "s".into();
+        let old = raw.append(&legacy).unwrap();
+        let device = raw.device().to_owned();
+        let e = session_target(h, &format!("{device}:{old}")).unwrap_err();
+        assert!(e.to_string().contains("names no session"), "{e:#}");
+        let named = imported(
+            &mut raw,
+            "transcript",
+            "s",
+            "s1",
+            false,
+            r#"{"prompt":"a"}"#,
+        );
+        let masked = live(&mut raw, "s", 2_000, r#"{"prompt":"masked"}"#);
+        mask_session(h, &raw, masked);
+        let p = preview(h, session_target(h, &format!("{device}:{named}")).unwrap()).unwrap();
+        assert_eq!(seqs(&p.records), [named]);
+    }
+
+    /// Slice 3b (Greptile on #465): a job a later oboete wrote, of a target or a version this one
+    /// does not know, is passed over by status, the purge and the reconcile, which says so.
+    #[test]
+    fn a_job_a_later_oboete_wrote_is_passed_over_and_said() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut raw = raw::open(h).unwrap();
+        let seq = native(&mut raw, "n", r#"{"prompt":"n"}"#);
+        start(h, &preview(h, record(&raw, seq)).unwrap()).unwrap();
+        let request = serde_json::to_value(&raw.forget_requests().unwrap()[0]).unwrap();
+        let mut future = request.clone();
+        future["target"]["kind"] = serde_json::json!("future");
+        let mut later = request;
+        later["v"] = serde_json::json!(99);
+        let conn = rusqlite::Connection::open(h.join("raw.db")).unwrap();
+        for (id, r) in [("future", future), ("later", later)] {
+            conn.execute(
+                "INSERT INTO forget_jobs(id, request, started, step) VALUES(?1, ?2, 0, 1)",
+                rusqlite::params![id, r.to_string()],
+            )
+            .unwrap();
+        }
+        assert_eq!(raw.forget_jobs().unwrap().len(), 1);
+        assert_eq!(status(h).unwrap().len(), 1);
+        let report = reconcile(h, &mut raw).unwrap();
+        for id in ["future", "later"] {
+            assert!(
+                report
+                    .problems
+                    .iter()
+                    .any(|p| p.contains(&format!("forget job {id} "))),
+                "{:?}",
+                report.problems
+            );
+        }
+    }
+
+    /// Slice 3b: a registration's pages are one status line while they are in one state, and apart
+    /// once their states differ; another registration's job is its own line.
+    #[test]
+    fn a_registrations_pages_are_one_line_while_in_one_state() {
+        let target = Target::Session {
+            agent: "claude".into(),
+            session: super::session("claude", "s"),
+        };
+        let page = |job: &str, started: i64, local: &'static str| Status {
+            job: job.into(),
+            target: target.clone(),
+            records: 500,
+            started,
+            local,
+            pages: 1,
+        };
+        let shown = grouped([
+            page("a", 1, PENDING),
+            page("b", 1, PENDING),
+            page("c", 1, STOPPED),
+            page("d", 2, STOPPED),
+        ]);
+        let lines: Vec<(&str, usize, usize)> = shown
+            .iter()
+            .map(|s| (s.job.as_str(), s.records, s.pages))
+            .collect();
+        assert_eq!(lines, [("a", 1_000, 2), ("c", 500, 1), ("d", 500, 1)]);
+    }
+
+    /// Slice 3b (rule 9): a session's page read from a log names only that session's records, of
+    /// any device, one to MAX_RECORDS of them; a session target of another version is unknown.
+    #[test]
+    fn a_session_page_names_only_its_session() {
+        let session = super::session("claude", "s");
+        let record = |device: &str, seq: i64, session: &str| Record {
+            device: device.into(),
+            seq,
+            origin: origin("synthetic", &seq.to_string()),
+            session: session.into(),
+            ts: Some(seq),
+        };
+        let page = |v: u32, records: Vec<Record>| Request {
+            v,
+            home: "h".into(),
+            job: "0".repeat(32),
+            started: 1,
+            target: Target::Session {
+                agent: "claude".into(),
+                session: session.clone(),
+            },
+            records,
+        };
+        page(
+            4,
+            vec![record("d1", 1, &session), record("d2", 7, &session)],
+        )
+        .check()
+        .unwrap();
+        let other = super::session("claude", "s2");
+        let full: Vec<Record> = (0..=MAX_RECORDS as i64)
+            .map(|i| record("d1", i, &session))
+            .collect();
+        for (request, why) in [
+            (
+                page(4, vec![record("d1", 1, &session), record("d1", 2, &other)]),
+                "outside its target",
+            ),
+            (page(4, Vec::new()), "record count"),
+            (page(4, full), "record count"),
+            (
+                page(1, vec![record("d1", 1, &session)]),
+                "unknown request version",
+            ),
+            (
+                page(3, vec![record("d1", 1, &session)]),
+                "unknown request version",
+            ),
+        ] {
+            let e = request.check().unwrap_err();
+            assert!(e.to_string().contains(why), "{why}: {e:#}");
+        }
     }
 
     /// Slice 3a: a record's copies are the records of its session from another source, which

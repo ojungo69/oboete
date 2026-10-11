@@ -84,6 +84,53 @@ fn a_hook_record_is_forgotten_by_where_and_when_it_was_recorded() {
     assert!(!log.contains(CANARY), "{log}");
 }
 
+/// Slice 3b: `--session` takes a record's id and forgets its session: the preview names the
+/// agent, the first record's time, the records by source, and the first prompt; every record of
+/// the session goes, and another session's stays.
+#[test]
+fn a_session_is_forgotten_by_one_of_its_records() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    let id = hook_record(home, CANARY);
+    let second = hook_record(home, "the session's second prompt mentions gamma-417");
+    let other =
+        serde_json::json!({"session_id":"another-session", "cwd":home, "prompt":"kept delta-806"});
+    ok(run(
+        home,
+        &["hook", "claude", "UserPromptSubmit"],
+        &other.to_string(),
+    ));
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    let out = ok(run(home, &["forget", "--session", &second, "--yes"], ""));
+    assert!(out.contains("Raw records: 2"), "{out}");
+    assert!(
+        out.contains("A session of claude, first recorded "),
+        "{out}"
+    );
+    assert!(
+        out.contains("its records by source: hook 2; on 1 device(s)"),
+        "{out}"
+    );
+    assert!(out.contains("\"kind\":\"session\""), "{out}");
+    for gone in [&id, &second] {
+        assert!(!String::from_utf8_lossy(&run(home, &["get", gone], "").stdout).contains("prompt"));
+    }
+    let kept = ok(run(
+        home,
+        &["search", "--all", "--raw", "only", "--", "delta-806"],
+        "",
+    ));
+    assert!(!kept.contains("no hits"), "{kept}");
+    let log = std::fs::read_to_string(home.join("forget.log")).unwrap();
+    assert!(
+        !log.contains(CANARY) && !log.contains("forget-session"),
+        "{log}"
+    );
+    let status = ok(run(home, &["forget", "--status"], ""));
+    assert_eq!(status.lines().count(), 1, "{status}");
+}
+
 /// A pre-M5 copied store cannot prove its home lineage, even for a record the current
 /// importer adds. Refuse before registration, while recording and searching still work.
 #[test]

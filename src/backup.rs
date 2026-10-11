@@ -2923,6 +2923,7 @@ pub(crate) mod tests {
                 &[("/prompt".into(), finding)],
                 "test",
             )
+            .unwrap()
             .unwrap();
         let b = raw.append(&raw::test_event("bravo visible")).unwrap();
         let dev = raw.device().to_owned();
@@ -3221,6 +3222,7 @@ pub(crate) mod tests {
                 &[("/trigger/zqx-private-words".into(), finding)],
                 "test",
             )
+            .unwrap()
             .unwrap();
         let at = body.find("zqx").unwrap() as i64;
         raw.append_tombstone(raw::Target::Range {

@@ -602,12 +602,13 @@ preview。下の試験は 1（segment の分）・2・3・5・6 が 2c-1、1（r
 
 ### Slice 3 の決定（2026-10-11。D1・D2 の第一 slice の制限を改める）
 
-Slice 3 は 5 つの PR に分け、この順に作る。後の PR はこの節に「3x の決定」を足す。
+Slice 3 は 6 つの PR に分け、この順に作る（3b は 2026-10-12 に 3b-1 と 3b-2 に分けた）。後の PR はこの節に「3x の決定」を足す。
 
 | 分割 | 対象 | 完了条件 |
 |---|---|---|
 | 3a identity と出所の橋 | live record の identity、同じ session の別の出所の写し、v1 の forget、#454 | 下記 3a |
-| 3b target とページ | session・repo・時間範囲の target、500 件を超える選択 | 第一 slice の 500 件制限の解消、D3 の端末ごとの上限 |
+| 3b-1 session とページ | session の target、500 件を超える選択、要求の版 4、session tombstone | 下記 3b-1 |
+| 3b-2 repo と時間範囲 | repo・時間範囲の target、遅れて届く record、3a の拒否の改訂 | 第一 slice の 500 件制限の解消、D3 の端末ごとの上限 |
 | 3c record の物理 purge | raw の record 本文、FTS、backup の record segment、raw.db のコピー | 管理対象の物理 byte に 0 hit、transcript の切れ目の保持 |
 | 3d 派生物 | 証拠を持つ claim、重なる window の recurate、card・summary、#167、#186、#366 | 表の Slice 3 の完了条件の残り |
 | 3e rescan と retention | rescan の範囲 target、保存期間の失効 | 3c の書換えの再利用（spec 6.2） |
@@ -706,13 +707,62 @@ Slice 3 は 5 つの PR に分け、この順に作る。後の PR はこの節�
   8. 同じ session の live の record を含む要求では、曖昧な transcript の record も加わる。live も v1 も
      含まない要求の曖昧な record は拒否される。
 
-#### 3b〜3e（各 PR で詳細を決める）
+#### 3b-1: session の target、ページ、session tombstone
 
-- **3b**: session（agent と native session。全出所）、repo、時間範囲。選択は record の集合に解決し、
-  500 件ごとの要求（job）に分け、1 つの raw transaction で全部を登録する（全部か無し）。preview token は
-  全体で 1 つ、status は target の job をまとめて表示する。repo と時間範囲は D3 のとおり確認した端末
-  ごとの上限まで。session の target は、登録時刻より前の ts を持つ遅れて届く event（書き戻し、M6 の
-  同期）も拒否する（D3 の session tombstone）。登録後の新しい event は記録する。
+- **target は record の id で session を名指す。** `--session <device>:<seq>`: search・timeline・get が出す
+  record の id の、その session（agent と native session id）を選ぶ。native id はどの出力にも出ないので
+  受けない。import の record は importer が残した session hash で名指す。live の record は 3a の検証
+  （label が native id のまま）を通るときだけ名指す: `unknown-<device>` や伏せ字の label の record は
+  「session を名指さない」と拒否する。要求に残すのは agent と session hash（`Target::Session`）で、label も
+  id の本文も残さない。
+- **選ぶ record**: その session hash を持つ全出所（live・transcript・v1）、store にある全端末の、本文の
+  ある record と v1 の touch（`session_repos` の行。ts は持たない、rule 10）。忘れた record は除く。写しは足さない（全出所を直接選ぶ）。曖昧な transcript の
+  identity も選ぶ: 下の tombstone がその session の後の取込みを止めるので、再 import で identity が
+  変わっても戻らない。
+- **preview**（spec 6.2）: agent、最初の record の時刻（local）、出所ごとの件数、端末の数、最初の prompt
+  の先頭（outbound の伏せ字）。同じ agent の session id のない live record の件数も示す: その中にこの
+  session の写しがあっても見つけられず残る。3a はそのような record がある agent の forget を拒否したが、
+  session の target は拒否しない（この session の record は全部選び、見つけられない写しだけが残る。件数で
+  示す）。
+- **ページ**: 選んだ record を (device, seq) 順に 500 件ずつの要求にし、要求ごとに job を作り、1 つの raw
+  transaction で全部を登録する（全部か無し）。token は全体で 1 つ。status は同じ target と started の job を
+  1 行にまとめてページ数を示す（要求に欄は足さない）。総数の上限は置かない: 評価用 home の写しで登録の
+  所要時間を測る（受入テスト 5）。
+- **要求の版 4**（target `Session`）。古い binary は未知の版として飛ばす（rule 9）。この PR からの binary は
+  raw.db の `forget_jobs` の読めない要求（後の oboete の target や版）も飛ばし、reconcile が問題として言う
+  （status・purge・worker は止まらない。Greptile on #465）。それより前の binary は公開していない。
+- **session tombstone（D3）。** 登録の後に届く、自身の ts が登録時刻以前のその session の record は
+  書かない。hook の記録は SQLite の書込 lock だけを取り、時刻を取ってから登録の transaction を待ちうるので、
+  確かめは raw の append の transaction の中で行う（`unwritten/` の書き戻しも同じ）。transcript と v1 の
+  取込みは record ごとに確かめる（登録後に始まった turn は記録する）。tombstone が覆う deny（その session の
+  ページの deny と、登録より前の時刻の deny）は 3a の `check_cross_source_forget` の batch 拒否に数えない
+  （CodeRabbit・Greptile on #465）。覆わない deny（登録より後の record の forget、時刻のない別の要求の deny）は
+  従来どおり batch を拒否する。表は `denied_scopes(job, kind,
+  key, before)`（kind は `session`、key は session hash。3b-2 が repo と時間範囲の列を足す）で、要求の適用
+  （`apply_request`）が書くので、ログからの restore と古い raw.db への置換の後も戻る。登録より後の ts の
+  event は記録する（将来の記録を止めるのは capture exclusion）。live の event は伏せ字の後の label で
+  照らすので、伏せ字の規則が session label を隠した event は遅れて届くと記録される（session を名指せない
+  record の一つで、preview が数える）。
+- **索引**: 3a の `records_sessions` と `import_origins_session` は forget の preview が初めて作る検索用の
+  索引で、spec 1.6 が禁じる構造上の鍵（必須の親行、索引の根、curation や checkpoint の区切り）ではない。
+  raw.db を開いただけでは作らない（`raw_db_is_full_and_has_no_label_index`）。`denied_scopes` は索引を
+  持たない（行は登録したページの数だけ）。
+- 受入テスト:
+  1. session の target は全出所・全端末のその session の record を選び、他の session の record を選ばない。
+     曖昧な transcript の record も選ぶ。
+  2. session を名指さない record の id は拒否する。
+  3. 1,234 件は 3 つの要求になり、1 つの transaction で登録され、途中の失敗では何も登録されない。status は
+     1 行。件数が変われば token は古い。
+  4. 登録をまたいだ hook の記録（ts が登録以前）と書き戻しは書かれず、登録後の ts の event は書かれる。
+     transcript の取込みは登録以前の turn を書かず、後の turn を書く。ログから適用し直しても同じ。
+  5. 評価用 home の写しで、最大の session と 139,417 件（最大の repo 相当）の登録の所要時間を測る。
+
+#### 3b-2〜3e（各 PR で詳細を決める）
+
+- **3b-2**: repo と時間範囲。選択は 3b-1 と同じく record の集合に解決してページに分ける。D3 のとおり
+  確認した端末ごとの上限まで。遅れて届く、登録時刻以前の ts の record の扱い（repo の label、この端末の
+  範囲）と、3a の拒否の改訂（record と span は拒否のまま。repo と時間は session id のない record の件数を
+  preview と limits に示して登録する）。
 - **3c**: 忘れた record の行を Removed に書き換える（device・seq・ts・source・kind は identity と切れ目の
   ために残す）。`raw_fts` の optimize と VACUUM、backup の record segment の書換え（2c-1 の ops と同じ
   手順と停止点）、raw.db のコピー（2c-2）。transcript の切れ目（`earliest_by_session`）は
