@@ -966,12 +966,15 @@ pub(crate) fn checksum_matches(text: &str, sha256: &str) -> bool {
         .any(|line| line.split_whitespace().next() == Some(sha256))
 }
 
-/// What a purge of the ops segments did (milestone 5 D5, 2c).
-#[derive(Debug, Default, PartialEq)]
+/// What a purge of the ops segments did, or would do (milestone 5 D5, 2c).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct OpsPurge {
-    /// Segments whose ops of a forgotten uid were rewritten without their text.
-    pub rewritten: usize,
-    /// Segments removed: no seal vouched for them, and they could not be read whole.
+    /// Live segments whose ops of a forgotten uid were rewritten without their text.
+    pub live: usize,
+    /// Segments set aside, likewise.
+    pub aside: usize,
+    /// Segments removed: no seal vouched for them, and they could not be read whole or held a line
+    /// of which it cannot be told whether it holds the text (`Line::Unknown`).
     pub removed: usize,
 }
 
@@ -980,12 +983,29 @@ pub(crate) struct OpsPurge {
 /// `{"forgotten":"<job>"}` and every other line byte for byte. A segment its seal vouches for is
 /// replaced so that no moment leaves it without a seal line it matches (`select` would drop it and
 /// every ops segment after it); one no seal vouches for, a damaged one or one set aside, which no
-/// restore reads, is rewritten in place, or removed when it cannot be read whole; what a write that
-/// stopped left under a hidden name is removed (`leftover`). Run under the worker lock, as export
-/// and restore are, so no one reads or writes a segment meanwhile.
+/// restore reads, is rewritten in place, or removed when it cannot be read whole or holds a line
+/// that cannot be judged; what a write that stopped left under a hidden name is removed
+/// (`leftover`). Run under the worker lock, as export and restore are, so no one reads or writes a
+/// segment meanwhile.
 pub(crate) fn purge_ops(
     home: &Path,
     jobs: &std::collections::HashMap<String, String>,
+) -> Result<OpsPurge> {
+    walk_ops(home, jobs, true)
+}
+
+/// What `purge_ops` would do for `jobs`, counted without changing a file (2c, decision 9).
+pub(crate) fn ops_to_purge(
+    home: &Path,
+    jobs: &std::collections::HashMap<String, String>,
+) -> Result<OpsPurge> {
+    walk_ops(home, jobs, false)
+}
+
+fn walk_ops(
+    home: &Path,
+    jobs: &std::collections::HashMap<String, String>,
+    apply: bool,
 ) -> Result<OpsPurge> {
     let dir = dir(home)?;
     let mut done = OpsPurge::default();
@@ -994,72 +1014,86 @@ pub(crate) fn purge_ops(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(done),
         Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
     };
-    let (mut live, mut aside) = (Vec::new(), Vec::new());
+    let mut segments = Vec::new();
     for entry in entries {
         let path = entry?.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
         if name.starts_with('.') {
-            if leftover(name) {
+            if apply && leftover(name) {
                 std::fs::remove_file(&path)?;
             }
         } else if ops_segment(name) {
             // Under the names oboete gives only, as for the set-aside ones (Codex on #453).
-            live.push(path);
+            segments.push((path, false));
         } else if set_aside(name) {
-            aside.push(path);
+            segments.push((path, true));
         }
     }
-    for path in &live {
-        let seal_path = PathBuf::from(format!("{}.sha256", path.display()));
+    for (path, aside) in segments {
+        let name = path.file_name().and_then(|n| n.to_str()).context("name")?;
+        let seal_path = dir.join(format!("{name}.sha256"));
         let seal = match std::fs::read_to_string(&seal_path) {
-            Ok(seal) => Some(seal),
+            Ok(seal) if !aside => Some(seal),
+            Ok(_) => None,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e).with_context(|| format!("read {}", seal_path.display())),
         };
-        let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        let data = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         let sha = hex(&Sha256::digest(&data));
-        match seal.filter(|seal| checksum_matches(seal, &sha)) {
-            Some(seal) => {
-                let name = path.file_name().and_then(|n| n.to_str()).context("name")?;
-                // Stopped after its rename: the seal's second line is this content's (d).
-                if seal.lines().count() > 1 {
-                    write_synced(
-                        &dir,
-                        &format!("{name}.sha256"),
-                        seal_line(&sha, name).as_bytes(),
-                    )?;
-                }
-                if let (Some(text), _) = purge_lines(&read_whole(&data)?, jobs) {
-                    replace(&dir, name, &sha, text.as_bytes())?;
-                    done.rewritten += 1;
-                }
+        let rewritten = if aside {
+            &mut done.aside
+        } else {
+            &mut done.live
+        };
+        if let Some(seal) = seal.filter(|seal| checksum_matches(seal, &sha)) {
+            // Stopped after its rename: the seal's second line is this content's (d).
+            if apply && seal.lines().count() > 1 {
+                write_synced(
+                    &dir,
+                    &format!("{name}.sha256"),
+                    seal_line(&sha, name).as_bytes(),
+                )?;
             }
-            None => match untrusted(path, &data, jobs)? {
-                Untrusted::Rewritten => done.rewritten += 1,
-                Untrusted::Removed => {
-                    if seal_path.exists() {
+            if let (Some(text), _) = purge_lines(&read_whole(&data)?, jobs) {
+                if apply {
+                    replace(&dir, name, &sha, text.as_bytes())?;
+                }
+                *rewritten += 1;
+            }
+            continue;
+        }
+        // 2c, decision 4: no seal vouches for it, and no reader of oboete uses it. It is removed
+        // when it is not read whole, or holds a line of which it cannot be told (`Line::Unknown`,
+        // Codex on #453): it may hold the text.
+        match read_whole(&data).map(|text| purge_lines(&text, jobs)) {
+            Ok((None, false)) => {}
+            Ok((Some(text), false)) => {
+                if apply {
+                    let z = zstd::bulk::compress(text.as_bytes(), 3)?;
+                    write_synced_at(&dir, name, &z, Some("purge_rewrite_unrenamed"))?;
+                }
+                *rewritten += 1;
+            }
+            Err(_) | Ok((_, true)) => {
+                if apply {
+                    std::fs::remove_file(&path)
+                        .with_context(|| format!("remove {}", path.display()))?;
+                    if !aside && seal_path.exists() {
                         std::fs::remove_file(&seal_path)?;
                     }
-                    done.removed += 1;
                 }
-                Untrusted::Kept => {}
-            },
-        }
-    }
-    for path in &aside {
-        let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        match untrusted(path, &data, jobs)? {
-            Untrusted::Rewritten => done.rewritten += 1,
-            Untrusted::Removed => done.removed += 1,
-            Untrusted::Kept => {}
+                done.removed += 1;
+            }
         }
     }
     // What was removed stays removed past a power loss before step 4 is recorded, though no
     // rename after it synced the directory (Greptile on #453).
     #[cfg(unix)]
-    std::fs::File::open(&dir)?.sync_all()?;
+    if apply {
+        std::fs::File::open(&dir)?.sync_all()?;
+    }
     Ok(done)
 }
 
@@ -1135,36 +1169,6 @@ fn replace(dir: &Path, name: &str, old: &str, text: &[u8]) -> Result<()> {
         seal_line(&new, name).as_bytes(),
     )?;
     fail_after("purge_seal_single")
-}
-
-enum Untrusted {
-    Rewritten,
-    Removed,
-    Kept,
-}
-
-/// 2c, decision 4: a segment no seal vouches for, rewritten in place when it is read whole and
-/// holds an op of a uid in `jobs`; removed when it is not read whole, or holds a line of which it
-/// cannot be told (`Line::Unknown`, Codex on #453): it may hold that text, and no reader of oboete
-/// uses it.
-fn untrusted(
-    path: &Path,
-    data: &[u8],
-    jobs: &std::collections::HashMap<String, String>,
-) -> Result<Untrusted> {
-    let text = match read_whole(data).map(|text| purge_lines(&text, jobs)) {
-        Ok((None, false)) => return Ok(Untrusted::Kept),
-        Ok((Some(text), false)) => text,
-        Err(_) | Ok((_, true)) => {
-            std::fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
-            return Ok(Untrusted::Removed);
-        }
-    };
-    let dir = path.parent().context("segment directory")?;
-    let name = path.file_name().and_then(|n| n.to_str()).context("name")?;
-    let z = zstd::bulk::compress(text.as_bytes(), 3)?;
-    write_synced_at(dir, name, &z, Some("purge_rewrite_unrenamed"))?;
-    Ok(Untrusted::Rewritten)
 }
 
 /// A segment's whole text, or an error when it does not decompress to text within the size a

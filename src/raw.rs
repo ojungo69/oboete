@@ -3646,6 +3646,178 @@ pub(crate) fn apply_request(
     )? == 1)
 }
 
+/// Milestone 5 D5 (2c, decision 5): each copy of raw.db set aside (`raw.db.quarantined-*`,
+/// `raw.db.restored.quarantined-*`, and a stopped restore's `raw.db.restored` beside the live
+/// store), with every op of a uid in `jobs` rewritten as `Raw::purge_uid` rewrites it, under
+/// secure_delete, and its WAL truncated; one that does not open, or cannot be rewritten or
+/// truncated, is removed with its sidecars: it may hold the text, and no reader uses it. A
+/// restore's partial build (`raw.db.restoring`, made again by each restore) is removed. How many
+/// copies it rewrote and how many it removed. Run under the worker lock, as a restore is, so no
+/// copy moves meanwhile.
+pub(crate) fn purge_copies(
+    home: &Path,
+    jobs: &std::collections::HashMap<String, String>,
+) -> Result<(usize, usize)> {
+    let (mut rewritten, mut removed) = (0, 0);
+    for copy in copies_set_aside(home)? {
+        // A restore's partial build is made again by each restore: removed, not rewritten.
+        let done = if copy.ends_with("raw.db.restoring") {
+            None
+        } else {
+            rewrite_copy(&copy, jobs).ok()
+        };
+        match done {
+            Some(0) => {}
+            Some(_) => rewritten += 1,
+            None => {
+                remove_with_sidecars(&copy)?;
+                removed += 1;
+            }
+        }
+    }
+    // What was removed stays removed past a power loss before step 4 is recorded, as in the
+    // backup location (Greptile on #453).
+    #[cfg(unix)]
+    if removed > 0 {
+        std::fs::File::open(home)?.sync_all()?;
+    }
+    Ok((rewritten, removed))
+}
+
+/// The copies of raw.db set aside in `home` (2c, decision 5), the live store never among them, and
+/// a restore's partial build last.
+pub(crate) fn copies_set_aside(home: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let live = path(home);
+    // A link, or another name of raw.db itself, is no copy: opened, it is the live store under a
+    // name whose -wal is not its own (Codex on #458). Off Unix no identity is read.
+    let live_id = crate::worker::file_id(std::fs::metadata(&live));
+    let alias = |copy: &Path| -> Result<bool> {
+        Ok(match std::fs::symlink_metadata(copy) {
+            Ok(meta) => {
+                meta.file_type().is_symlink()
+                    || live_id.is_some()
+                        && crate::worker::file_id(std::fs::metadata(copy)) == live_id
+            }
+            // Only its sidecars are left.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e.into()),
+        })
+    };
+    let mut copies = Vec::new();
+    for entry in std::fs::read_dir(home)? {
+        let file = entry?.path();
+        let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // A sidecar names its copy, which goes even when only its sidecars are left: a quarantine
+        // moves `-wal` before the database, and a restore's cleanup removes the database before
+        // its journal; either may stop between them (Codex on #458).
+        let name = SIDECARS
+            .iter()
+            .find_map(|s| name.strip_suffix(s))
+            .unwrap_or(name);
+        let copy = home.join(name);
+        // Only the names a quarantine gives (`backup::fresh_name`'s stamp): a file of another
+        // name is not oboete's to rewrite or remove (Codex on #453, for the segments).
+        let stamped = |prefix: &str| {
+            name.strip_prefix(prefix)
+                .is_some_and(|stamp| !stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit()))
+        };
+        let set_aside = stamped("raw.db.quarantined-")
+            || stamped("raw.db.restored.quarantined-")
+            || name == "raw.db.restored";
+        if set_aside && copy != live && !copies.contains(&copy) && !alias(&copy)? {
+            copies.push(copy);
+        }
+    }
+    let partial = home.join("raw.db.restoring");
+    let left = std::iter::once("").chain(SIDECARS).any(|suffix| {
+        let mut name = partial.as_os_str().to_owned();
+        name.push(suffix);
+        std::path::Path::new(&name).exists()
+    });
+    if left && !alias(&partial)? {
+        copies.push(partial);
+    }
+    Ok(copies)
+}
+
+/// The files SQLite binds to a database's name.
+const SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
+
+/// One copy's ops of the uids in `jobs` rewritten, in one transaction under secure_delete, and its
+/// WAL truncated: how many. Each op is judged as a backup line is (`backup::purged_line`): one
+/// whose holding a uid's text cannot be told (a kind it cannot name, a body that does not parse,
+/// or a claim, correction or import whose body names no uid and is not a purge's) fails it, and
+/// the copy is removed (Greptile on #458).
+fn rewrite_copy(copy: &Path, jobs: &std::collections::HashMap<String, String>) -> Result<usize> {
+    let mut conn = Connection::open_with_flags(copy, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    // No one reads a copy: one in use is removed rather than waited for.
+    conn.busy_timeout(Duration::ZERO)?;
+    conn.execute_batch("PRAGMA secure_delete = ON")?;
+    let tx = conn.transaction()?;
+    // A copy from before the op log holds no uid's op: it stays (CodeRabbit on #458).
+    let has_ops: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ops')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_ops {
+        return Ok(0);
+    }
+    let mut keys = Vec::new();
+    {
+        let mut st = tx.prepare("SELECT device, op_seq, type, body FROM ops")?;
+        let mut rows = st.query([])?;
+        while let Some(row) = rows.next()? {
+            let kind = OpKind::from_name(&row.get::<_, String>(2)?)
+                .context("an op of a kind that cannot be named")?;
+            if !matches!(kind, OpKind::Claim | OpKind::Correction | OpKind::Import) {
+                continue;
+            }
+            let body: serde_json::Value = serde_json::from_str(&row.get::<_, String>(3)?)
+                .context("an op whose body does not parse")?;
+            match op_uid(kind, &body) {
+                Some(uid) => {
+                    if let Some(job) = jobs.get(&uid) {
+                        keys.push((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, job));
+                    }
+                }
+                None => anyhow::ensure!(forgotten_body(&body), "an op that names no uid"),
+            }
+        }
+    }
+    let mut rewritten = 0;
+    for (device, op_seq, job) in keys {
+        let body = serde_json::json!({ "forgotten": job }).to_string();
+        rewritten += tx.execute(
+            "UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3",
+            params![body, device, op_seq],
+        )?;
+    }
+    tx.commit()?;
+    let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+    anyhow::ensure!(busy == 0, "{} is in use", copy.display());
+    Ok(rewritten)
+}
+
+/// `db`'s sidecars, then `db`: a removal that stops between them leaves `db`, which the next
+/// purge finds again (Greptile, Codex on #458). Each name is `db`'s own bytes and the suffix: a
+/// path need not be UTF-8 (Codex on #458).
+fn remove_with_sidecars(db: &Path) -> Result<()> {
+    for suffix in SIDECARS.into_iter().chain(std::iter::once("")) {
+        let mut name = db.as_os_str().to_owned();
+        name.push(suffix);
+        let file = std::path::PathBuf::from(name);
+        match std::fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("remove {}", file.display())),
+        }
+    }
+    Ok(())
+}
+
 /// The ops of `uid` that still hold its text (D5): a claim's Claim ops, by its uid as the consumer
 /// computes it, the Correction ops that name it, and a document's Import ops; any device's.
 fn uid_op_keys(conn: &Connection, uid: &str) -> Result<Vec<(String, i64)>> {
@@ -3921,6 +4093,31 @@ pub fn test_event(body: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Codex on #458: a copy's sidecars are named on its path's own bytes, which need not be
+    /// UTF-8.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_copy_under_a_path_that_is_not_utf8_goes_with_its_sidecars() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join(std::ffi::OsStr::from_bytes(b"home-\xff"));
+        std::fs::create_dir(&home).unwrap();
+        let files = [
+            "raw.db.quarantined-1",
+            "raw.db.quarantined-1-wal",
+            "raw.db.quarantined-1-shm",
+            "raw.db.quarantined-1-journal",
+        ]
+        .map(|name| home.join(name));
+        for f in &files {
+            std::fs::write(f, "x").unwrap();
+        }
+        remove_with_sidecars(&files[0]).unwrap();
+        for f in &files {
+            assert!(!f.exists(), "{f:?}");
+        }
+    }
 
     /// G22: a session's start reads the skipped windows through `ops_window_skips`, whose
     /// condition `SKIP_WINDOWS` repeats, and finds the ones curation writes.
