@@ -1137,7 +1137,7 @@ pub(crate) fn carry_set_aside(home: &Path, k: &Connection, raw: &Raw) -> Result<
     let forgotten = if aside.is_empty() {
         HashSet::new()
     } else {
-        crate::forget::with_logged(home, raw.forgotten_set()?)
+        crate::forget::with_logged(home, raw.forgotten_set()?)?
     };
     for (_, name) in &aside {
         if let Err(e) = carry(k, &home.join(name), &forgotten) {

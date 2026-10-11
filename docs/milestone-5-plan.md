@@ -303,6 +303,10 @@ vector も持ち越さない）、進み方と再開（step の数字ではな�
    分、rewind で古い本文が戻ると埋め込み直す）。`vector_keys` のない古いファイルからは何も持ち越さ
    ない。`src_sha` が空の行（埋め込みを飛ばした印）は何も指さない。worker の起動時に quarantined と
    rebuilding のファイルから持ち越す `carry_set_aside` も同じ規則で、raw の忘れた uid の集合を渡す。
+   どちらの carry も、要求ログにだけある忘れた uid を足す（raw.db を古い写しに戻すと、ログを raw.db に
+   戻すのは rebuild の後の pass。Codex on #444）。ログの写しが読めない、または場所が分からないときは
+   carry を止め、vector が読めない写しのときと同じく rebuild は何も変えずに止まる（CodeRabbit on
+   #444）。
    rebuild の後に `knowledge.db.rebuilding-*` と `knowledge.db.quarantined-*` を消す。この規則は
    forget のない `oboete rebuild` と restore の carry も変える（持ち越す数が減る）。
 6. **hook の状態。** hookstate の値で本文を持つのは `shown` だけ（見せた claim の `{uid: {fp, body}}`
@@ -314,7 +318,10 @@ vector も持ち越さない）、進み方と再開（step の数字ではな�
    記録で、完了の証拠にしない。継続のたびに step 2 から確かめ直し、確認に通らない step をやり直す。
    step 2 の完了: その uid の op に本文が一つもなく、その後の checkpoint が truncate できた。step 3 の
    確認は二つに分け、やり直す作業も分ける: knowledge.db にその uid の `claims`・`derivations`・
-   `corrections`・`imported`・`vector_keys` の行が残れば rebuild。knowledge.db に残らず aside の
+   `corrections`・`imported`・`vector_keys` の行が残れば rebuild。その継続が step 2 を進めた job が
+   あれば、行が残っていなくても rebuild する: rewind（古い写しに戻した raw.db）が行だけを消しても、
+   その本文は vector の cache と全文索引の segment に残り、新しいファイルだけがそれを残さない
+   （Greptile on #444）。knowledge.db に残らず aside の
    ファイルだけが持つ（rebuild の後、消す前に止まった）なら、rebuild はせず、そのファイルの vector を
    まだ持ち越していなければ（`carried` の時刻がファイルより前）5 の規則で持ち越してから消す。
    `shown` に残れば 6 の掃除だけ。rebuild の後にも knowledge.db に行が残るときは、op を取りこぼした

@@ -1670,7 +1670,7 @@ fn carry_rebuild_vectors(
                     Some(raw) => raw.forgotten_set()?,
                     None => Default::default(),
                 },
-            );
+            )?;
             crate::embed_phase::carry(&k, &kept, &forgotten)
         });
         #[cfg(test)]
@@ -1699,7 +1699,7 @@ fn carry_rebuild_vectors(
                     }
                 }
                 return Err(error).context(
-                    "rebuild: the vectors of knowledge.db could not be read; nothing was changed",
+                    "rebuild: the vectors of knowledge.db could not be carried; nothing was changed",
                 );
             }
         }

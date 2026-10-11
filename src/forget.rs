@@ -633,7 +633,9 @@ fn due(raw: &crate::raw::Raw) -> Result<Vec<(String, String, i64, bool)>> {
 fn knowledge_holding(home: &Path, uids: &HashSet<String>) -> Result<HashSet<String>> {
     let path = home.join("knowledge.db");
     let mut holding = HashSet::new();
-    if uids.is_empty() || !path.exists() {
+    // Only a file that is not there is none: one whose metadata cannot be read may hold them
+    // (Codex on #444).
+    if uids.is_empty() || !path.try_exists()? {
         return Ok(holding);
     }
     let k =
@@ -708,6 +710,10 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     }
     let due = due(&crate::raw::open(home)?)?;
     purged.jobs = due.len();
+    // Whether this purge takes a job through step 2: knowledge.db is rebuilt for it then, though
+    // it holds no row of its uid, since rows a rewind took out (a raw.db put back from an older
+    // copy) leave the text in the vector cache and the full-text segments (Greptile on #444).
+    let mut stepped = false;
     let ready = if due.iter().any(|(_, _, step, held)| *step < 2 || *held) {
         let _worker = crate::worker::lock_asking(home)?;
         let mut raw = crate::raw::open(home)?;
@@ -716,9 +722,10 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         }
         let truncated = raw.truncate_wal(TRUNCATE_WAIT)?;
         let mut ready = Vec::new();
-        for (job, uid, ..) in due {
+        for (job, uid, step, held) in due {
             if truncated && !raw.uid_has_ops(&uid)? {
                 raw.finish_forget_step(&job, 2)?;
+                stepped |= step < 2 || held;
                 ready.push((job, uid));
             } else {
                 purged.unfinished.push(job);
@@ -733,7 +740,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         return Ok(Some(purged));
     }
     let uids: HashSet<String> = ready.iter().map(|(_, uid)| uid.clone()).collect();
-    if !knowledge_holding(home, &uids)?.is_empty() {
+    if stepped || !knowledge_holding(home, &uids)?.is_empty() {
         crate::worker::rebuild(home).context("knowledge.db was not rebuilt")?;
         purged.rebuilt = true;
         #[cfg(test)]
@@ -1084,16 +1091,26 @@ pub(crate) fn reconcile_or_say(home: &Path, raw: &mut crate::raw::Raw) -> Result
 
 /// D5 (2b, item 5): `forgotten`, raw.db's forgotten uids, with those whose forget only the logs hold
 /// yet (a raw.db put back from an older copy, which the next pass reconciles): a carry passes all
-/// of them over (Codex on #444).
+/// of them over (Codex on #444). A log copy that cannot be read, or whose place cannot be found,
+/// is an error: the carry stops, as for a copy whose vectors cannot be read (CodeRabbit on #444).
+/// Damaged lines are skipped, as everywhere (rule 9).
 pub(crate) fn with_logged(
     home: &Path,
     mut forgotten: std::collections::HashSet<String>,
-) -> std::collections::HashSet<String> {
-    forgotten.extend(logged(home).0.into_iter().filter_map(|r| match r.target {
-        Target::Uid { uid } => Some(uid),
-        _ => None,
-    }));
-    forgotten
+) -> Result<std::collections::HashSet<String>> {
+    let mut report = Report::default();
+    let copies = logs(home, &mut report);
+    anyhow::ensure!(report.problems.is_empty(), "{}", report.problems.join("; "));
+    for copy in copies {
+        let Some(requests) = read_log(&copy, None, &mut report) else {
+            anyhow::bail!("{}", report.problems.join("; "));
+        };
+        forgotten.extend(requests.into_iter().filter_map(|r| match r.target {
+            Target::Uid { uid } => Some(uid),
+            _ => None,
+        }));
+    }
+    Ok(forgotten)
 }
 
 /// Both log copies' requests, of any home, read before a restore takes raw's swap lock (no log I/O
@@ -1902,8 +1919,12 @@ mod tests {
             &preview(&home, Target::parse_uid(&doc).unwrap()).unwrap(),
         )
         .unwrap();
+        // The purge rebuilds knowledge.db, which takes raw.db from every other handle.
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
         purge(&home).unwrap().unwrap();
-        assert!(s.raw.import_repos("claude-mem:test").unwrap().is_empty());
+        let mut raw = crate::raw::open(&home).unwrap();
+        assert!(raw.import_repos("claude-mem:test").unwrap().is_empty());
         let again = raw::ImportDoc {
             uid: doc.clone(),
             source: "claude-mem:test".into(),
@@ -1915,7 +1936,7 @@ mod tests {
             title: "Deploy notes".into(),
             body: "Notes.".into(),
         };
-        assert_eq!(s.raw.append_imports(vec![again]).unwrap(), 0);
+        assert_eq!(raw.append_imports(vec![again]).unwrap(), 0);
         assert!(!op_rows(&home).iter().any(|o| o.3.contains("Deploy notes")));
     }
 
@@ -1974,6 +1995,8 @@ mod tests {
         assert_eq!(purge(&home).unwrap(), None);
         assert_eq!(uid_jobs(&home)[0].2, 1);
         drop(held);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
         assert_eq!(purge(&home).unwrap().unwrap().ops, 1);
     }
 
@@ -2113,6 +2136,8 @@ mod tests {
         let home = s.home.path().to_owned();
         let before = op_rows(&home);
         forget(&home, &uid);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
         assert_eq!(purge(&home).unwrap().unwrap().ops, 1);
         assert_eq!(uid_jobs(&home)[0].2, 3);
         // The bodies an older raw.db held, back in place.
@@ -2126,7 +2151,9 @@ mod tests {
         }
         drop(conn);
         CONTINUED.set(0);
-        continue_due(&home, &s.raw);
+        let raw = crate::raw::open(&home).unwrap();
+        continue_due(&home, &raw);
+        drop(raw);
         assert_eq!(CONTINUED.get(), 1);
         let purged = purge(&home).unwrap().unwrap();
         assert_eq!((purged.jobs, purged.ops), (1, 1));
@@ -2211,6 +2238,91 @@ mod tests {
         let raw = crate::raw::open(&home).unwrap();
         crate::embed_phase::carry_set_aside(&home, &k, &raw).unwrap();
         assert!(!holds_vector(&home, &sha));
+    }
+
+    /// D5 (2b, item 7): a purge that takes a job through step 2 rebuilds knowledge.db though it
+    /// holds no row of the uid: rows a rewind took out leave the vector cached, and only the
+    /// rebuild's carry leaves it behind (Greptile on #444).
+    #[test]
+    fn a_purge_that_takes_a_job_through_step_2_rebuilds_without_its_rows() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let said = "Parser caches stay in Redis, the team said.";
+        let seq = s.said("s", "github.com/o/r", 1_000, said);
+        let quote = "Parser caches stay in Redis";
+        let gone = s.claim(seq, quote, ("decision", "decided", "user"), &[]);
+        s.run();
+        crate::embed_phase::fixture::vectors(&s);
+        let home = s.home.path().to_owned();
+        let k = crate::knowledge::open(&home).unwrap();
+        let sha: String = k
+            .query_row(
+                "SELECT src_sha FROM vector_keys WHERE kind = 'c' AND key = ?1",
+                [&gone],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // As a rewind leaves it: the rows and the key gone, the vector in the cache.
+        for sql in [
+            "DELETE FROM claims WHERE uid = ?1",
+            "DELETE FROM derivations WHERE uid = ?1",
+            "DELETE FROM vector_keys WHERE key = ?1",
+        ] {
+            k.execute(sql, [&gone]).unwrap();
+        }
+        drop(k);
+        assert!(holds_vector(&home, &sha));
+        forget(&home, &gone);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        assert!(purge(&home).unwrap().unwrap().rebuilt);
+        assert!(!holds_vector(&home, &sha));
+    }
+
+    /// A knowledge.db whose metadata cannot be read is not taken for none (Codex on #444).
+    #[cfg(unix)]
+    #[test]
+    fn a_knowledge_db_that_cannot_be_looked_up_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let locked = home.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::os::unix::fs::symlink(
+            locked.join("knowledge.db"),
+            home.path().join("knowledge.db"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = std::fs::metadata(locked.join("knowledge.db"))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
+        let looked = knowledge_holding(home.path(), &HashSet::from(["u".to_owned()]));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Root looks into every directory: the check applies where the look is refused.
+        if refused {
+            assert!(looked.is_err());
+        }
+    }
+
+    /// A log copy that cannot be read stops a carry rather than passing over the uids it may hold:
+    /// the rebuild puts knowledge.db back and says so (CodeRabbit on #444).
+    #[cfg(unix)]
+    #[test]
+    fn a_log_that_cannot_be_read_stops_the_carry() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_kept, home, _, _) = forgotten_in_the_logs_only();
+        std::fs::remove_file(crate::backup::dir(&home).unwrap().join(LOG)).unwrap();
+        let log = home.join(LOG);
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = std::fs::read(&log).is_err();
+        let rebuilt = crate::worker::rebuild(&home);
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
+        if refused {
+            let said = format!("{:#}", rebuilt.unwrap_err());
+            assert!(said.contains("could not be carried"), "{said}");
+            assert!(said.contains("could not be read"), "{said}");
+        }
+        // Nor can a carry go on without the backup directory's copy when its place is unknown.
+        std::fs::write(home.join("config.toml"), "[backup]\ndir = 42\n").unwrap();
+        assert!(with_logged(&home, HashSet::new()).is_err());
     }
 
     /// D5 (2b, item 7): bodies a restore puts back while the purge runs, after its step 2, keep the
