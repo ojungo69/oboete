@@ -304,7 +304,8 @@ vector も持ち越さない）、進み方と再開（step の数字ではな�
    ない。`src_sha` が空の行（埋め込みを飛ばした印）は何も指さない。worker の起動時に quarantined と
    rebuilding のファイルから持ち越す `carry_set_aside` も同じ規則で、raw の忘れた uid の集合を渡す。
    どちらの carry も、要求ログにだけある忘れた uid を足す（raw.db を古い写しに戻すと、ログを raw.db に
-   戻すのは rebuild の後の pass。Codex on #444）。ログの写しが読めない、または場所が分からないときは
+   戻すのは rebuild の後の pass。Codex on #444）。足すのはそのホームの要求だけで、backup の置き場を
+   共有する別のホームの要求は数えない（Codex on #444）。ログの写しが読めない、または場所が分からないときは
    carry を止め、vector が読めない写しのときと同じく rebuild は何も変えずに止まる（CodeRabbit on
    #444）。
    rebuild の後に `knowledge.db.rebuilding-*` と `knowledge.db.quarantined-*` を消す。この規則は

@@ -1088,18 +1088,20 @@ pub(crate) fn reconcile_or_say(home: &Path, raw: &mut crate::raw::Raw) -> Result
 
 /// D5 (2b, item 5): `forgotten`, raw.db's forgotten uids, with those whose forget only the logs hold
 /// yet (a raw.db put back from an older copy, which the next pass reconciles): a carry passes all
-/// of them over (Codex on #444). A log copy that cannot be read, or whose place cannot be found,
-/// is an error: the carry stops, as for a copy whose vectors cannot be read (CodeRabbit on #444).
-/// Damaged lines are skipped, as everywhere (rule 9).
+/// of them over (Codex on #444). Only the requests of `home_id`, the store's lineage, count: a
+/// backup directory two homes share holds the other's too (Codex on #444). A log copy that cannot
+/// be read, or whose place cannot be found, is an error: the carry stops, as for a copy whose
+/// vectors cannot be read (CodeRabbit on #444). Damaged lines are skipped, as everywhere (rule 9).
 pub(crate) fn with_logged(
     home: &Path,
     mut forgotten: std::collections::HashSet<String>,
+    home_id: Option<&str>,
 ) -> Result<std::collections::HashSet<String>> {
     let mut report = Report::default();
     let copies = logs(home, &mut report);
     anyhow::ensure!(report.problems.is_empty(), "{}", report.problems.join("; "));
     for copy in copies {
-        let Some(requests) = read_log(&copy, None, &mut report) else {
+        let Some(requests) = read_log(&copy, home_id, &mut report) else {
             anyhow::bail!("{}", report.problems.join("; "));
         };
         forgotten.extend(requests.into_iter().filter_map(|r| match r.target {
@@ -2218,24 +2220,46 @@ mod tests {
 
     /// D5 (2b, item 5): a forget only the logs hold carries no vector of its uid into a rebuild,
     /// nor from a copy set aside: the carries read the logs too, since the pass after them is what
-    /// reconciles the logs into raw.db (Codex on #444).
+    /// reconciles the logs into raw.db (Codex on #444). Only this home's requests count: one of
+    /// another home that shares the backup directory leaves the vector to both (Codex on #444).
     #[test]
     fn a_forget_only_the_logs_hold_carries_no_vector() {
-        let (_kept, home, gone, sha) = forgotten_in_the_logs_only();
-        crate::worker::rebuild(&home).unwrap();
-        assert!(!holds_vector(&home, &sha));
-        assert!(crate::raw::open(&home).unwrap().forgotten(&gone).unwrap());
-        let (_kept, home, _, sha) = forgotten_in_the_logs_only();
-        set_aside_copy(
-            &home,
-            &home.join(format!("knowledge.db.rebuilding-{}", crate::db::now_ms())),
-        );
-        let k = crate::knowledge::open(&home).unwrap();
-        k.execute("DELETE FROM vectors WHERE src_sha = ?1", [&sha])
-            .unwrap();
-        let raw = crate::raw::open(&home).unwrap();
-        crate::embed_phase::carry_set_aside(&home, &k, &raw).unwrap();
-        assert!(!holds_vector(&home, &sha));
+        for other in [false, true] {
+            for aside in [false, true] {
+                let (_kept, home, gone, sha) = forgotten_in_the_logs_only();
+                if other {
+                    let mut report = Report::default();
+                    for log in logs(&home, &mut report) {
+                        let lines: Vec<String> = read_log(&log, None, &mut report)
+                            .unwrap()
+                            .into_iter()
+                            .map(|mut r| {
+                                r.home = "another".into();
+                                r.line().unwrap()
+                            })
+                            .collect();
+                        assert_eq!(lines.len(), 1);
+                        std::fs::write(&log, lines.join("\n") + "\n").unwrap();
+                    }
+                }
+                if aside {
+                    set_aside_copy(
+                        &home,
+                        &home.join(format!("knowledge.db.rebuilding-{}", crate::db::now_ms())),
+                    );
+                    let k = crate::knowledge::open(&home).unwrap();
+                    k.execute("DELETE FROM vectors WHERE src_sha = ?1", [&sha])
+                        .unwrap();
+                    let raw = crate::raw::open(&home).unwrap();
+                    crate::embed_phase::carry_set_aside(&home, &k, &raw).unwrap();
+                } else {
+                    crate::worker::rebuild(&home).unwrap();
+                    let raw = crate::raw::open(&home).unwrap();
+                    assert_eq!(raw.forgotten(&gone).unwrap(), !other);
+                }
+                assert_eq!(holds_vector(&home, &sha), other, "{other} {aside}");
+            }
+        }
     }
 
     /// D5 (2b, item 7): a purge of a job not past step 3 rebuilds knowledge.db though it holds no
@@ -2334,7 +2358,7 @@ mod tests {
         }
         // Nor can a carry go on without the backup directory's copy when its place is unknown.
         std::fs::write(home.join("config.toml"), "[backup]\ndir = 42\n").unwrap();
-        assert!(with_logged(&home, HashSet::new()).is_err());
+        assert!(with_logged(&home, HashSet::new(), None).is_err());
     }
 
     /// D5 (2b, item 7): bodies a restore puts back while the purge runs, after its step 2, keep the

@@ -558,6 +558,17 @@ impl ReadOnly {
         forgotten_set(&self.conn)
     }
 
+    /// The store's lineage, which each forget request names; none before a writer seeds it.
+    pub(crate) fn home_id(&self) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key='home_id'", [], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
     /// Windows cannot rename a file with an open SQLite handle. Close that connection, keeping
     /// the original swap hold and identity until `open` owns a hold on the same recovered file.
     pub(crate) fn into_writer(self, home: &Path) -> Result<Raw> {
