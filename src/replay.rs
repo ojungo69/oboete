@@ -29,6 +29,15 @@ pub fn run(
     if read_sample > 0 && !matches!(agent, "claude" | "all") {
         anyhow::bail!("--read-sample times Claude Code's hooks: use --agent claude or all");
     }
+    // docs/unwritten.md: the events failed hook calls kept are a live hook's to write back, with
+    // the marker and the worker; a replay's first event would write them back without either
+    // (Codex on #440).
+    let (kept, _) =
+        crate::unwritten::counts(home).context("the kept hook calls cannot be listed")?;
+    anyhow::ensure!(
+        kept == 0,
+        "this home holds events that failed hook calls kept: replay into another home (--home)"
+    );
     let root = match repo_root {
         Some(r) => r,
         None => {
@@ -89,6 +98,8 @@ pub fn run(
             &v["payload"],
             ts,
             &settings,
+            &mut 0,
+            &mut 0,
         )?;
         micros.push(started.elapsed().as_micros());
     }
@@ -722,6 +733,31 @@ mod tests {
             "{err:#}"
         );
         assert!(!home.path().join("raw.db").exists());
+    }
+
+    /// Codex on #440: the events failed live calls kept are left to a live hook, which clears the
+    /// marker and starts the worker when it writes them back.
+    #[test]
+    fn a_replay_refuses_a_home_with_kept_events() {
+        let home = tempfile::tempdir().unwrap();
+        let fixture = home.path().join("f.jsonl");
+        std::fs::write(&fixture, "").unwrap();
+        let kept = crate::capture::Captured {
+            event: crate::raw::test_event("a kept prompt"),
+            ledger: Vec::new(),
+        };
+        crate::unwritten::keep(home.path(), &[kept], "").unwrap();
+        let err = run(home.path(), &fixture, None, 0, &[1], "claude", 0, 0).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("failed hook calls kept"),
+            "{err:#}"
+        );
+        assert_eq!(crate::unwritten::counts(home.path()).unwrap(), (1, 0));
+        // A spool that cannot be listed may hold some (Codex on #440).
+        let odd = tempfile::tempdir().unwrap();
+        std::fs::write(odd.path().join("unwritten"), "").unwrap();
+        let err = run(odd.path(), &fixture, None, 0, &[1], "claude", 0, 0).unwrap_err();
+        assert!(format!("{err:#}").contains("cannot be listed"), "{err:#}");
     }
 
     /// cubic on #301: Grok and agy inject at other points, with other payloads.

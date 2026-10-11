@@ -228,16 +228,21 @@ pub fn now() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
 }
 
-/// What doctor and SessionStart say while recording fails.
-pub fn line((class, ts): (Class, i64)) -> String {
+/// What doctor and SessionStart say while recording fails; `kept`, the hook calls whose events
+/// wait to be written (docs/unwritten.md U6).
+pub fn line((class, ts): (Class, i64), kept: usize) -> String {
     let what = match class {
         Class::DiskFull => "disk full",
         Class::Io => "I/O error",
         Class::Busy => "store busy",
         Class::Other => "error",
     };
+    let then = match kept {
+        0 => "events from then on are not recorded".to_owned(),
+        n => format!("the events of {n} hook call(s) are kept and written when a write succeeds"),
+    };
     format!(
-        "oboete: recording has failed since {} ({what}); events from then on are not recorded. Run `oboete doctor`.",
+        "oboete: recording has failed since {} ({what}); {then}. Run `oboete doctor`.",
         crate::db::utc(ts / 1_000_000)
     )
 }
@@ -768,7 +773,7 @@ mod tests {
     #[test]
     fn the_line_names_the_time_in_utc_and_the_class() {
         // 2026-09-27 04:05 UTC.
-        let line = line((Class::DiskFull, 1_790_481_900_000_000_000));
+        let line = line((Class::DiskFull, 1_790_481_900_000_000_000), 0);
         assert!(
             line.contains("recording has failed since 2026-09-27 04:05 UTC"),
             "{line}"

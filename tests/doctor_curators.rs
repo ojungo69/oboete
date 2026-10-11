@@ -172,3 +172,22 @@ fn doctor_prints_inject_and_chain_as_they_apply() {
         "{wrong}"
     );
 }
+
+/// Codex on #440: a spool of kept hook calls doctor cannot list is said, and fails the report,
+/// rather than counted as empty.
+#[test]
+fn doctor_says_when_the_kept_hook_calls_cannot_be_listed() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("unwritten"), "not a directory").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_oboete"))
+        .args(["--home", &home.path().to_string_lossy(), "doctor"])
+        .env("OBOETE_NO_SPAWN", "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("the hook calls kept after failed writes cannot be listed"),
+        "{text}"
+    );
+    assert!(!out.status.success());
+}

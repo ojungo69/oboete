@@ -49,6 +49,7 @@ mod setup;
 mod shortlist;
 mod transcript;
 mod turns;
+mod unwritten;
 mod view;
 mod work_state;
 mod worker;
